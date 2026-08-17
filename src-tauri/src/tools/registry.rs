@@ -228,7 +228,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "exec_command",
         "Execute command",
-        "Run a bounded command in the workspace under runtime policy.",
+        "Run a bounded command in the workspace. The result returns canonical command_id and command:<id>:stdout|stderr output refs, plus legacy session aliases; completed output remains readable for a bounded reconnect window.",
         false,
         true,
         true,
@@ -236,15 +236,23 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "write_stdin",
         "Write stdin",
-        "Write characters to a server-managed running command session.",
+        "Write characters to a server-managed running command. Pass command_id; legacy session_id remains accepted.",
         false,
         false,
         false,
     ),
     (
+        "kill_command",
+        "Kill command",
+        "Terminate a server-managed running command by command_id; legacy session_id remains accepted.",
+        false,
+        true,
+        false,
+    ),
+    (
         "kill_session",
-        "Kill session",
-        "Terminate a server-managed running command session.",
+        "Kill session (legacy alias)",
+        "Compatibility alias for kill_command. Prefer command_id and kill_command for new clients.",
         false,
         true,
         false,
@@ -252,7 +260,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "read_output",
         "Read output",
-        "Read retained stdout or stderr by output_ref with per-stream byte offset pagination.",
+        "Read retained stdout or stderr from command:<command_id>:stdout|stderr with per-stream byte-offset pagination; legacy session refs remain accepted.",
         true,
         false,
         false,
@@ -334,6 +342,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "apply_patch",
     "exec_command",
     "write_stdin",
+    "kill_command",
     "kill_session",
     "read_output",
     "git_status",
@@ -388,6 +397,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "patch_check",
     "exec_command",
     "write_stdin",
+    "kill_command",
     "kill_session",
     "read_output",
     "git_status",
@@ -415,6 +425,7 @@ pub const MUTATING_TOOLS: &[&str] = &[
     "apply_patch",
     "exec_command",
     "write_stdin",
+    "kill_command",
     "kill_session",
     "set_default_cwd",
     "start_task",
@@ -767,23 +778,23 @@ pub fn input_schema(name: &str) -> Value {
         "write_stdin" => json!({
             "type": "object",
             "properties": {
-                "session_id": { "type": "string", "minLength": 1 },
+                "command_id": { "type": "string", "minLength": 1, "description": "Canonical command handle returned by exec_command" },
+                "session_id": { "type": "string", "minLength": 1, "description": "Legacy alias for command_id" },
                 "chars": { "type": "string", "default": "" },
                 "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
                 "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536 }
             },
-            "required": ["session_id"],
             "additionalProperties": false
         }),
-        "kill_session" => json!({
+        "kill_command" | "kill_session" => json!({
             "type": "object",
             "properties": {
-                "session_id": { "type": "string", "minLength": 1 },
+                "command_id": { "type": "string", "minLength": 1, "description": "Canonical command handle returned by exec_command" },
+                "session_id": { "type": "string", "minLength": 1, "description": "Legacy alias for command_id" },
                 "signal": { "type": "string", "enum": ["TERM", "KILL", "INT"], "default": "TERM" },
                 "wait_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 5000 },
                 "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536 }
             },
-            "required": ["session_id"],
             "additionalProperties": false
         }),
         "read_output" => json!({
@@ -923,7 +934,7 @@ mod tests {
     use super::{input_schema, list_tools_for_profile};
 
     #[test]
-    fn core_catalog_exposes_26_chatgpt_compatible_tools() {
+    fn core_catalog_exposes_27_chatgpt_compatible_tools() {
         let tools = list_tools_for_profile("core");
         let names: Vec<_> = tools
             .iter()
@@ -931,7 +942,7 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 27);
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_session_bootstrap"));
         assert!(names.contains(&"history_session_checkpoint"));
@@ -939,6 +950,8 @@ mod tests {
         assert!(names.contains(&"history_session_search"));
         assert!(names.contains(&"history_session_read"));
         assert!(names.contains(&"grep_text"));
+        assert!(names.contains(&"kill_command"));
+        assert!(names.contains(&"kill_session"));
         assert!(!names.contains(&"grep"));
 
         for name in names {

@@ -10,7 +10,9 @@ use tokio::process::Command;
 use std::sync::Arc;
 
 use crate::tools::context::ToolContext;
-use crate::tools::session::{ExecSession, SessionStore};
+use crate::tools::session::{
+    ExecSession, SessionStore, COMPLETED_COMMAND_RETENTION_SECONDS,
+};
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -297,7 +299,11 @@ async fn run_command(
         if session.has_exited() {
             session.wait_for_readers().await;
             let snapshot = session.snapshot(max_output);
-            ctx.sessions.remove(&session.session_id);
+            schedule_session_eviction(
+                ctx.sessions.clone(),
+                session.session_id.clone(),
+                Duration::from_secs(COMPLETED_COMMAND_RETENTION_SECONDS),
+            );
             return Ok(merge_exec_result(snapshot, start, cmd, cwd, false));
         }
         if !tty && Instant::now() >= deadline {
@@ -307,7 +313,11 @@ async fn run_command(
             session.wait_for_readers().await;
             let snapshot = session.snapshot(max_output);
             // Snapshot is embedded; schedule eviction so abandoned timeouts do not linger.
-            schedule_session_eviction(ctx.sessions.clone(), session.session_id.clone());
+            schedule_session_eviction(
+                ctx.sessions.clone(),
+                session.session_id.clone(),
+                COMMAND_EVICT_AFTER_TIMEOUT,
+            );
             return Err(WorkspaceError::ToolDetails {
                 code: "TIMEOUT",
                 message: "Command timed out.".into(),
@@ -317,6 +327,7 @@ async fn run_command(
                     "termination_reason": "timeout",
                     "recoverable": true,
                     "suggestion": "读取 output_refs，调整 timeout_ms 后重试",
+                    "command": snapshot.clone(),
                     "session": snapshot
                 }),
             });
@@ -331,7 +342,7 @@ async fn run_command(
 }
 
 /// How long a timed-out / background session stays readable before map eviction.
-const SESSION_EVICT_AFTER_TIMEOUT: Duration = Duration::from_secs(30);
+const COMMAND_EVICT_AFTER_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn spawn_timeout_monitor(
     sessions: Arc<SessionStore>,
@@ -342,21 +353,27 @@ fn spawn_timeout_monitor(
         let remaining = deadline.saturating_duration_since(Instant::now());
         tokio::time::sleep(remaining).await;
         session.refresh_status().await;
-        if !session.has_exited() {
+        let retention = if !session.has_exited() {
             session.mark_termination_reason("timeout");
             session.kill_and_wait().await;
             session.refresh_status().await;
             session.wait_for_readers().await;
-        }
-        // Keep the session briefly so clients can still read_output / probe status.
-        schedule_session_eviction(sessions, session.session_id.clone());
+            COMMAND_EVICT_AFTER_TIMEOUT
+        } else {
+            Duration::from_secs(COMPLETED_COMMAND_RETENTION_SECONDS)
+        };
+        schedule_session_eviction(sessions, session.session_id.clone(), retention);
     });
 }
 
-fn schedule_session_eviction(sessions: Arc<SessionStore>, session_id: String) {
+fn schedule_session_eviction(
+    sessions: Arc<SessionStore>,
+    command_id: String,
+    retention: Duration,
+) {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(SESSION_EVICT_AFTER_TIMEOUT).await;
-        sessions.remove(&session_id);
+        tokio::time::sleep(retention).await;
+        sessions.remove(&command_id);
     });
 }
 
@@ -444,7 +461,11 @@ fn execution_failure_result(error: &WorkspaceError, command: &str, cwd: &Path) -
         .get("details")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let mut result = details.get("session").cloned().unwrap_or_else(|| {
+    let mut result = details
+        .get("command")
+        .or_else(|| details.get("session"))
+        .cloned()
+        .unwrap_or_else(|| {
         json!({
             "status": "spawn_failed",
             "termination_reason": "spawn_failed",
@@ -512,9 +533,9 @@ fn merge_exec_result(
         obj.insert(
             "warnings".into(),
             json!(if keep_session {
-                vec!["session retained for read_output/write_stdin/kill_session"]
+                vec!["command retained for read_output/write_stdin/kill_command; legacy kill_session remains accepted"]
             } else {
-                vec!["direct execution without shell"]
+                vec!["completed command output retained for reconnect-safe read_output"]
             }),
         );
     }

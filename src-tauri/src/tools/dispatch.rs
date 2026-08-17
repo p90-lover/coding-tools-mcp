@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use crate::tools::context::ToolContext;
 use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
 use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
-use crate::tools::{exec, file, git, history, image_tool, patch, session};
+use crate::tools::{exec, file, git, history, image_tool, patch, project_context, session};
 
 fn policy_tool_err(err: PolicyError) -> Value {
     let dangerous = err
@@ -59,25 +59,27 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         &ctx.policy,
         Some(&ctx.workspace),
     ) {
-        return policy_tool_err(e);
+        return attach_project_instructions(ctx, name, &effective_args, policy_tool_err(e));
     }
 
     if crate::harness::tools::TOOL_NAMES.contains(&name) {
-        return match crate::harness::tools::call(ctx, name, args) {
+        let output = match crate::harness::tools::call(ctx, name, args) {
             Ok(value) => value,
             Err(error) => attach_harness_status(ctx, tool_err(error), false),
         };
+        return attach_project_instructions(ctx, name, &effective_args, output);
     }
 
     let task_id = if requires_write_baseline(name, &effective_args) {
         let task = ctx.harness.current_task().ok().flatten();
         if let Some(task) = task {
             if let Err(error) = ctx.harness.check_baseline(&task.id) {
-                return attach_harness_status(
+                let output = attach_harness_status(
                     ctx,
                     tool_err_code(error.code(), error.to_string(), "permission"),
                     false,
                 );
+                return attach_project_instructions(ctx, name, &effective_args, output);
             }
             let _ = ctx.harness.record_event(
                 &task.id,
@@ -130,6 +132,7 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "exec_command" => exec::exec_command(ctx, &effective_args),
         "read_output" => session::read_output(&ctx.sessions, &effective_args),
         "write_stdin" => session::write_stdin(&ctx.sessions, &effective_args),
+        "kill_command" => session::kill_command(&ctx.sessions, &effective_args),
         "kill_session" => session::kill_session(&ctx.sessions, &effective_args),
         "git_status" => git::git_status(ws, &effective_args),
         "git_diff" => git::git_diff(ws, &effective_args),
@@ -171,11 +174,12 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
             }
         }
         _ => {
-            return tool_err_code(
+            let output = tool_err_code(
                 "INVALID_ARGUMENT",
                 format!("Unknown tool: {name}"),
                 "validation",
-            )
+            );
+            return attach_project_instructions(ctx, name, &effective_args, output);
         }
     };
     let mut output = match result {
@@ -225,6 +229,21 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
                 "tool": name,
                 "affected_files": output.get("affected_files")
             }),
+        );
+    }
+    attach_project_instructions(ctx, name, &effective_args, output)
+}
+
+fn attach_project_instructions(
+    ctx: &ToolContext,
+    name: &str,
+    effective_args: &Value,
+    mut output: Value,
+) -> Value {
+    if let Some(object) = output.as_object_mut() {
+        object.insert(
+            "project_instructions".into(),
+            project_context::for_tool(ctx, name, effective_args),
         );
     }
     output
@@ -285,7 +304,7 @@ fn prefix_relative_path(base: &str, path: &str) -> String {
     if path == "." || path.is_empty() {
         return base.to_string();
     }
-    if Path::new(path).is_absolute() || path.starts_with("..") {
+    if Path::new(path).is_absolute() || path.starts_with("..") || path.starts_with('@') {
         return path.to_string();
     }
     format!("{base}/{}", path.trim_start_matches("./"))
@@ -295,9 +314,21 @@ fn prefix_patch_paths(base: &str, patch: &str) -> String {
     patch
         .lines()
         .map(|line| {
-            for marker in ["--- a/", "+++ b/"] {
+            for marker in [
+                "--- a/",
+                "+++ b/",
+                "*** Add File: ",
+                "*** Update File: ",
+                "*** Delete File: ",
+            ] {
                 if let Some(path) = line.strip_prefix(marker) {
-                    return format!("{marker}{base}/{path}");
+                    if Path::new(path).is_absolute()
+                        || path.starts_with("..")
+                        || path.starts_with('@')
+                    {
+                        return line.to_string();
+                    }
+                    return format!("{marker}{base}/{}", path.trim_start_matches("./"));
                 }
             }
             line.to_string()
@@ -399,6 +430,17 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
         "auth_enabled": ctx.auth.auth_enabled(),
         "auth_type": ctx.auth.auth_type,
         "endpoint_path": "/mcp",
+        "upstream_compatibility": {
+            "repository": "xyTom/coding-tools-mcp",
+            "version": "0.3.0",
+            "commit": "66b3f194a0252ec1903a84c4e1be4184eb9f4c47",
+            "canonical_command_handle": "command_id",
+            "legacy_session_aliases": true
+        },
+        "output_retention": {
+            "completed_command_seconds": session::COMPLETED_COMMAND_RETENTION_SECONDS,
+            "buffer_bytes_per_stream": session::COMMAND_BUFFER_BYTES
+        },
         "tools": tools,
         "tool_count": tools.len()
     })))

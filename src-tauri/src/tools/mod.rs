@@ -7,6 +7,7 @@ pub mod history;
 mod image_tool;
 pub mod patch;
 pub mod policy;
+pub mod project_context;
 pub mod registry;
 pub mod session;
 pub mod workspace;

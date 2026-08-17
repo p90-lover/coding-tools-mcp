@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 use serde_json::{json, Value};
 
-const SESSION_BUFFER_BYTES: usize = 1_048_576;
+pub const COMMAND_BUFFER_BYTES: usize = 1_048_576;
+pub const COMPLETED_COMMAND_RETENTION_SECONDS: u64 = 300;
 
 #[derive(Default)]
 pub struct SessionStore {
@@ -144,12 +145,12 @@ impl ExecSession {
                         let mut data = self.stdout.lock().expect("stdout lock");
                         data.extend_from_slice(chunk);
                         *self.stdout_total.lock().expect("stdout_total lock") += n;
-                        trim_buffer(&mut data, SESSION_BUFFER_BYTES);
+                        trim_buffer(&mut data, COMMAND_BUFFER_BYTES);
                     } else {
                         let mut data = self.stderr.lock().expect("stderr lock");
                         data.extend_from_slice(chunk);
                         *self.stderr_total.lock().expect("stderr_total lock") += n;
-                        trim_buffer(&mut data, SESSION_BUFFER_BYTES);
+                        trim_buffer(&mut data, COMMAND_BUFFER_BYTES);
                     }
                 }
                 Err(_) => break,
@@ -240,6 +241,7 @@ impl ExecSession {
             _ => Some(false),
         };
         json!({
+            "command_id": self.session_id,
             "session_id": self.session_id,
             "interactive": self.interactive,
             "stdin_open": *self.stdin_open.lock().expect("stdin_open lock"),
@@ -251,7 +253,7 @@ impl ExecSession {
                 "killed" => "确认终止原因后重新执行命令",
                 "exited" => "检查 exit_code 和 stderr",
                 "crashed" => "检查 stderr 后重试或恢复工作区",
-                _ => "继续读取 session 或等待进程结束",
+                _ => "继续读取 command 或等待进程结束",
             },
             "exit_code": exit_code,
             "transport_ok": true,
@@ -262,9 +264,14 @@ impl ExecSession {
             "stderr_truncated": stderr.truncated,
             "elapsed_ms": self.started_at.elapsed().as_millis(),
             "output_refs": {
+                "stdout": format!("command:{}:stdout", self.session_id),
+                "stderr": format!("command:{}:stderr", self.session_id)
+            },
+            "legacy_output_refs": {
                 "stdout": format!("session:{}:stdout", self.session_id),
                 "stderr": format!("session:{}:stderr", self.session_id)
-            }
+            },
+            "retention_seconds": COMPLETED_COMMAND_RETENTION_SECONDS
         })
     }
 }
@@ -296,19 +303,19 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         .and_then(Value::as_str)
         .ok_or_else(|| WorkspaceError::invalid_argument("output_ref is required"))?;
     let parts: Vec<&str> = output_ref.split(':').collect();
-    if parts.len() != 3 || parts[0] != "session" {
+    if parts.len() != 3 || (parts[0] != "command" && parts[0] != "session") {
         return Err(WorkspaceError::invalid_argument(
-            "output_ref must look like session:<id>:stdout, session:<id>:stderr, or session:<id>:full",
+            "output_ref must look like command:<id>:stdout or command:<id>:stderr; legacy session:<id>:... references remain accepted",
         ));
     }
-    let session_id = parts[1];
+    let command_id = parts[1];
     let ref_stream = parts[2];
     if ref_stream != "stdout" && ref_stream != "stderr" && ref_stream != "full" {
         return Err(WorkspaceError::invalid_argument(
-            "output_ref stream must be stdout, stderr, or full",
+            "output_ref stream must be stdout or stderr",
         ));
     }
-    let session = store.get(session_id)?;
+    let session = store.get(command_id)?;
     tauri::async_runtime::block_on(session.refresh_status());
 
     let requested_stream = args.get("stream").and_then(Value::as_str).unwrap_or("");
@@ -329,15 +336,32 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         .clamp(1, 1_048_576) as usize;
     let buffer_offset = requested_offset.min(data.len());
     let chunk = &data[buffer_offset..data.len().min(buffer_offset + limit)];
-    let next_offset = if buffer_offset + chunk.len() < total_stream_bytes {
+    let next_offset = if buffer_offset + chunk.len() < data.len() {
         Some((buffer_offset + chunk.len()) as u64)
     } else {
         None
     };
 
+    let mut warnings = Vec::<String>::new();
+    if parts[0] == "session" {
+        warnings.push(
+            "Legacy session:<id>:... output_ref accepted; prefer command:<command_id>:stdout|stderr."
+                .into(),
+        );
+    }
+    if ref_stream == "full" {
+        warnings.push(
+            "Legacy full output_ref defaults to stdout; use a per-stream command output_ref."
+                .into(),
+        );
+    }
+
     Ok(tool_ok(json!({
+        "command_id": command_id,
+        "session_id": command_id,
         "output_ref": output_ref,
-        "stream_output_ref": format!("session:{session_id}:{stream}"),
+        "stream_output_ref": format!("command:{command_id}:{stream}"),
+        "legacy_stream_output_ref": format!("session:{command_id}:{stream}"),
         "stream": stream,
         "offset": buffer_offset,
         "requested_offset": requested_offset,
@@ -347,20 +371,32 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         "total_retained_bytes": data.len(),
         "total_stream_bytes": total_stream_bytes,
         "truncated": next_offset.is_some(),
-        "warnings": if ref_stream == "full" {
-            vec!["legacy full output_ref defaults to stdout; use output_refs for stable stream paging"]
-        } else {
-            Vec::<&str>::new()
-        }
+        "retention_seconds": COMPLETED_COMMAND_RETENTION_SECONDS,
+        "warnings": warnings
     })))
 }
 
-pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {
-    let session_id = args
-        .get("session_id")
+fn command_id_argument(args: &Value) -> Result<&str, WorkspaceError> {
+    args.get("command_id")
         .and_then(Value::as_str)
-        .ok_or_else(|| WorkspaceError::invalid_argument("session_id is required"))?;
-    let session = store.get(session_id)?;
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            args.get("session_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| {
+            WorkspaceError::invalid_argument(
+                "command_id is required; legacy session_id remains accepted",
+            )
+        })
+}
+
+pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {
+    let command_id = command_id_argument(args)?;
+    let session = store.get(command_id)?;
     let chars = args.get("chars").and_then(Value::as_str).unwrap_or("");
     let max_output_bytes = args
         .get("max_output_bytes")
@@ -414,11 +450,8 @@ pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, Workspac
 }
 
 pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {
-    let session_id = args
-        .get("session_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| WorkspaceError::invalid_argument("session_id is required"))?;
-    let session = store.get(session_id)?;
+    let command_id = command_id_argument(args)?;
+    let session = store.get(command_id)?;
     let max_output_bytes = args
         .get("max_output_bytes")
         .and_then(Value::as_u64)
@@ -472,16 +505,20 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
         if status == "terminating" {
             obj.insert(
                 "warnings".into(),
-                json!(["Process did not exit after kill; session retained for retry"]),
+                json!(["Process did not exit after kill; command retained for retry"]),
             );
         }
     }
 
     if evicted {
-        store.remove(session_id);
+        store.remove(command_id);
     }
 
     Ok(tool_ok(payload))
+}
+
+pub fn kill_command(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {
+    kill_session(store, args)
 }
 
 #[cfg(unix)]

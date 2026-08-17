@@ -3,7 +3,7 @@
   import { onDestroy } from "svelte";
   import { showToast } from "$lib/stores/toast";
 
-  const sessionPrompt = `请初始化或恢复当前项目会话，先调用 history_session_bootstrap，并把我的首次请求逐字传入 initial_user_input。
+  const sessionPrompt = `如果当前客户端没有传递 openai/session 会话标识，请初始化或恢复当前项目会话：先调用 history_session_bootstrap，并把我的首次请求逐字传入 initial_user_input。
 如果没有历史记录，则创建首个 history-session；如果已有历史记录，先阅读返回的有界 state。
 需要早期精确细节时，先调用 history_session_search，再用 history_session_read 分页读取相关原始 Markdown，并根据 next_cursor 继续直到完成；不要要求 bootstrap 返回全部历史。
 本会话每轮任务完成后调用 history_session_checkpoint，并原样传入 bootstrap 返回的 session_key 和 current_path，以及我本轮请求的逐字 raw_user_input。
@@ -24,7 +24,7 @@
     try {
       await navigator.clipboard.writeText(sessionPrompt);
       copied = true;
-      showToast("新会话启动提示词已复制，可以直接粘贴到 ChatGPT。", {
+      showToast("兼容提示词已复制，可以直接粘贴到旧版或未传递会话标识的客户端。", {
         title: "复制成功",
         kind: "success",
         duration: 2500,
@@ -63,10 +63,10 @@
       </span>
       <div class="min-w-0">
         <h3 id="chatgpt-session-prompt-title" class="text-sm font-semibold text-[var(--color-text)]">
-          ChatGPT 新会话启动提示词
+          ChatGPT 会话自动恢复
         </h3>
         <p class="mt-0.5 text-xs leading-5 text-[var(--color-text-muted)]">
-          首次使用会初始化历史；后续新会话会自动恢复已有进度。
+          连接器提供会话标识时，首次普通工具调用会自动建立或恢复历史；兼容提示词仅用于旧客户端。
         </p>
       </div>
     </div>
@@ -76,7 +76,7 @@
         type="button"
         class="tx-btn-primary min-h-11 shrink-0 px-3 py-2 text-xs active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
         disabled={copying}
-        aria-label="复制 ChatGPT 新会话启动提示词"
+        aria-label="复制 ChatGPT 会话兼容提示词"
         onclick={() => void copyPrompt()}
       >
         {#if copied}
@@ -84,7 +84,7 @@
           <span>已复制</span>
         {:else}
           <Copy size={14} aria-hidden="true" />
-          <span>{copying ? "复制中…" : "复制完整提示词"}</span>
+          <span>{copying ? "复制中…" : "复制兼容提示词"}</span>
         {/if}
       </button>
 
@@ -95,7 +95,7 @@
         aria-controls="chatgpt-session-prompt-content"
         onclick={() => (expanded = !expanded)}
       >
-        <span>{expanded ? "收起提示词" : "查看完整提示词"}</span>
+        <span>{expanded ? "收起兼容提示词" : "查看兼容提示词"}</span>
         <ChevronDown
           size={14}
           class={`transition-transform duration-200 motion-reduce:transition-none ${expanded ? "rotate-180" : ""}`}
@@ -111,7 +111,7 @@
         class="tx-mono whitespace-pre-wrap break-words rounded-[10px] bg-[var(--surface-hover)] p-3 leading-5 text-[var(--color-text-secondary)]"
       >{sessionPrompt}</pre>
       <p class="mt-2 text-[11px] leading-5 text-[var(--color-text-muted)]">
-        复制后粘贴到使用当前工作区 MCP 连接器的 ChatGPT 新会话。
+        仅当客户端没有传递 openai/session，或需要逐字保存首次请求时，才需要粘贴此兼容提示词。
       </p>
     </div>
   {/if}

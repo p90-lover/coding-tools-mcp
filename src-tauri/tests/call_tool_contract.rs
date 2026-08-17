@@ -22,6 +22,12 @@ fn server_info_returns_workspace_and_tools() {
     assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
     assert!(payload["tools"].is_array());
     assert!(payload["tool_count"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(payload["upstream_compatibility"]["version"], "0.3.0");
+    assert_eq!(
+        payload["upstream_compatibility"]["canonical_command_handle"],
+        "command_id"
+    );
+    assert_eq!(payload["output_retention"]["completed_command_seconds"], 300);
 }
 
 #[test]
@@ -32,6 +38,8 @@ fn read_file_happy_path() {
     let payload = assert_ok(&out);
     assert_eq!(payload["path"], "src/math.js");
     assert_eq!(payload["encoding"], "utf-8");
+    assert_eq!(payload["project_instructions"]["scope"], "workspace");
+    assert_eq!(payload["project_instructions"]["target"], "src/math.js");
 }
 
 #[test]
@@ -124,10 +132,15 @@ fn default_cwd_is_used_by_file_and_native_exec_tools() {
     let fx = tiny_js_fixture();
     let ctx = ctx_for(&fx.root);
     assert_ok(&invoke(&ctx, "set_default_cwd", json!({"path": "src"})));
+    fs::write(fx.root.join("src/agent.md"), "nested cwd rule").expect("cwd instructions");
 
     let file_result = invoke(&ctx, "read_file", json!({"path": "math.js"}));
     let file = assert_ok(&file_result);
     assert_eq!(file["path"], "src/math.js");
+    assert!(file["project_instructions"]["instructions"]
+        .as_str()
+        .unwrap_or("")
+        .contains("nested cwd rule"));
 
     let pwd_result = invoke(&ctx, "exec_command", json!({"cmd": "pwd"}));
     let pwd = assert_ok(&pwd_result);
@@ -208,8 +221,10 @@ fn core_profile_keeps_the_default_capabilities_and_adds_history_tools() {
         .copied()
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(names, expected);
-    assert_eq!(names.len(), 26);
+    assert_eq!(names.len(), 27);
     assert!(names.contains("grep_text"));
+    assert!(names.contains("kill_command"));
+    assert!(names.contains("kill_session"));
     assert!(names.contains("history_session_bootstrap"));
     assert!(names.contains("history_session_checkpoint"));
     assert!(names.contains("history_session_validate"));
@@ -289,6 +304,59 @@ fn direct_exec_uses_the_same_result_contract() {
 }
 
 #[test]
+fn completed_command_output_uses_command_id_and_keeps_legacy_aliases() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let result = invoke(
+        &ctx,
+        "exec_command",
+        json!({
+            "cmd": format!("{TEST_PYTHON} -c \"print('retained-output')\""),
+            "filesystem_scope": "workspace",
+            "timeout_ms": 10_000,
+            "yield_time_ms": 10_000
+        }),
+    );
+    let payload = assert_ok(&result);
+    let command_id = payload["command_id"].as_str().expect("command id");
+    assert_eq!(payload["session_id"], command_id);
+    assert_eq!(payload["retention_seconds"], 300);
+
+    let canonical_ref = payload["output_refs"]["stdout"]
+        .as_str()
+        .expect("canonical output ref");
+    assert!(canonical_ref.starts_with("command:"));
+    let canonical = invoke(
+        &ctx,
+        "read_output",
+        json!({"output_ref": canonical_ref, "limit": 4096}),
+    );
+    let canonical = assert_ok(&canonical);
+    assert_eq!(canonical["command_id"], command_id);
+    assert!(canonical["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("retained-output"));
+    assert!(canonical["warnings"].as_array().expect("warnings").is_empty());
+
+    let legacy_ref = payload["legacy_output_refs"]["stdout"]
+        .as_str()
+        .expect("legacy output ref");
+    let legacy = invoke(
+        &ctx,
+        "read_output",
+        json!({"output_ref": legacy_ref, "limit": 4096}),
+    );
+    let legacy = assert_ok(&legacy);
+    assert_eq!(legacy["session_id"], command_id);
+    assert!(legacy["warnings"]
+        .as_array()
+        .expect("legacy warnings")
+        .iter()
+        .any(|warning| warning.as_str().unwrap_or("").contains("Legacy session")));
+}
+
+#[test]
 fn nonzero_command_exit_keeps_transport_ok_but_sets_command_ok_false() {
     let fx = tiny_js_fixture();
     let ctx = ctx_for(&fx.root);
@@ -343,6 +411,37 @@ fn retained_session_timeout_stops_the_process_after_deadline() {
     assert_eq!(after["stdin_open"], false);
     #[cfg(unix)]
     assert_eq!(after["exit_code"], Value::Null);
+}
+
+#[test]
+fn kill_command_accepts_the_canonical_command_id() {
+    let fx = tiny_js_fixture();
+    let ctx = ctx_for(&fx.root);
+    let result = invoke(
+        &ctx,
+        "exec_command",
+        json!({
+            "cmd": format!("{TEST_PYTHON} -c \"import time; time.sleep(2)\""),
+            "filesystem_scope": "workspace",
+            "timeout_ms": 10_000,
+            "yield_time_ms": 0
+        }),
+    );
+    let payload = assert_ok(&result);
+    let command_id = payload["command_id"].as_str().expect("command id");
+    assert_eq!(payload["session_id"], command_id);
+
+    let killed = invoke(
+        &ctx,
+        "kill_command",
+        json!({"command_id": command_id, "wait_ms": 2_000}),
+    );
+    let killed = assert_ok(&killed);
+    assert_eq!(killed["command_id"], command_id);
+    assert_eq!(killed["status"], "killed");
+    assert_eq!(killed["killed"], true);
+    assert_eq!(killed["transport_ok"], true);
+    assert_eq!(killed["command_ok"], false);
 }
 
 #[test]
