@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { RuntimeStatus, WorkspaceProfile } from "$lib/types";
+import type { LinkedProject, RuntimeStatus, WorkspaceProfile } from "$lib/types";
 
 export async function listWorkspaces(): Promise<WorkspaceProfile[]> {
   return invoke<WorkspaceProfile[]>("list_workspaces");
@@ -10,6 +10,18 @@ export async function createWorkspace(
   name?: string,
 ): Promise<WorkspaceProfile> {
   return invoke<WorkspaceProfile>("create_workspace", { path, name });
+}
+
+export async function listLinkedProjects(id: string): Promise<LinkedProject[]> {
+  return invoke<LinkedProject[]>("list_linked_projects", { id });
+}
+
+export async function quickAddLinkedProject(
+  id: string,
+  path: string,
+  name?: string,
+): Promise<LinkedProject> {
+  return invoke<LinkedProject>("quick_add_linked_project", { id, path, name });
 }
 
 export async function updateWorkspace(profile: WorkspaceProfile): Promise<void> {

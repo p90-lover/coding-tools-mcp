@@ -23,8 +23,9 @@ use commands::{
     check_app_update, create_workspace, delete_frp_profile, delete_workspace,
     get_actions_runtime_status, get_app_settings, get_download_config, get_frp_snippet,
     get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret, get_webview_memory_sample,
-    get_workspace_secret, hide_to_tray, install_software, list_frp_profiles, list_software,
-    list_workspaces, open_url, open_workspace_directory, quit_app, read_workspace_logs,
+    get_workspace_secret, hide_to_tray, install_software, list_frp_profiles, list_linked_projects,
+    list_software, list_workspaces, open_url, open_workspace_directory, quick_add_linked_project,
+    quit_app, read_workspace_logs,
     recreate_ui_webview, regenerate_shared_secret, regenerate_workspace_secret,
     restart_actions_runtime, restart_runtime, restart_tunnel, run_health_checks, save_frp_profile,
     set_download_config, set_last_workspace, set_proxy, set_shared_secret, set_workspace_secret,
@@ -170,6 +171,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_workspaces,
+            list_linked_projects,
+            quick_add_linked_project,
             create_workspace,
             update_workspace,
             open_workspace_directory,

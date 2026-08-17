@@ -6,6 +6,9 @@ use crate::app_state::{bootstrap_workspace, teardown_workspace, AppState};
 use crate::error::{AppError, AppResult};
 use crate::platform::open_path_in_file_manager;
 use crate::tunnel::drop_workspace as drop_tunnel_workspace;
+use crate::workspace::linked_projects::{
+    list_linked_projects_for_root, quick_add_linked_project_for_root, LinkedProject,
+};
 use crate::workspace::resources::{
     assign_free_workspace_ports, validate_workspace_resources_update,
 };
@@ -14,6 +17,40 @@ use crate::workspace::WorkspaceProfile;
 #[tauri::command]
 pub fn list_workspaces(state: State<'_, AppState>) -> AppResult<Vec<WorkspaceProfile>> {
     state.with_workspaces(|store| Ok(store.list().to_vec()))
+}
+
+#[tauri::command]
+pub fn list_linked_projects(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<Vec<LinkedProject>> {
+    let profile = state.with_workspaces(|store| {
+        store
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::Message(format!("workspace not found: {id}")))
+    })?;
+    Ok(list_linked_projects_for_root(PathBuf::from(profile.path).as_path()))
+}
+
+#[tauri::command]
+pub fn quick_add_linked_project(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    name: Option<String>,
+) -> AppResult<LinkedProject> {
+    let profile = state.with_workspaces(|store| {
+        store
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::Message(format!("workspace not found: {id}")))
+    })?;
+    quick_add_linked_project_for_root(
+        PathBuf::from(profile.path).as_path(),
+        PathBuf::from(path.trim()).as_path(),
+        name.as_deref(),
+    )
 }
 
 #[tauri::command]

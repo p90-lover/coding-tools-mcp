@@ -226,11 +226,29 @@ pub fn validate_command_for_workspace(
     }
     for key in ["workdir", "cwd"] {
         if let Some(workdir) = arguments.get(key).and_then(Value::as_str) {
-            let path = Path::new(workdir);
-            if path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
-                return Err(PolicyError(
-                    "workdir must stay inside the configured workspace".into(),
-                ));
+            if let Some(workspace) = workspace {
+                let resolved = workspace.resolve_existing(workdir).map_err(|_| {
+                    PolicyError(
+                        "workdir must stay inside the configured workspace or a linked project"
+                            .into(),
+                    )
+                })?;
+                if workspace.is_read_only_path(&resolved.path) {
+                    return Err(PolicyError(
+                        "read-only linked projects cannot be used as exec workdir".into(),
+                    ));
+                }
+            } else {
+                let path = Path::new(workdir);
+                if path.is_absolute()
+                    || path
+                        .components()
+                        .any(|part| part == Component::ParentDir)
+                {
+                    return Err(PolicyError(
+                        "workdir must stay inside the configured workspace".into(),
+                    ));
+                }
             }
         }
     }
@@ -337,7 +355,7 @@ fn workspace_local_entry_exists(
     };
     candidate
         .canonicalize()
-        .map(|path| path.is_file() && path.starts_with(workspace.root()))
+        .map(|path| path.is_file() && workspace.is_safe_existing_path(&path))
         .unwrap_or(false)
 }
 

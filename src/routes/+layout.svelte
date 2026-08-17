@@ -11,10 +11,17 @@
     createWorkspace,
     getActionsRuntimeStatus,
     getRuntimeStatus,
+    listLinkedProjects,
     listWorkspaces,
+    openWorkspaceDirectory,
   } from "$lib/api/workspaces";
   import { getLastWorkspaceId } from "$lib/api/settings";
-  import { actionsRuntimeStates, mcpRuntimeStates, workspaces } from "$lib/stores/app";
+  import {
+    actionsRuntimeStates,
+    linkedProjectsByWorkspace,
+    mcpRuntimeStates,
+    workspaces,
+  } from "$lib/stores/app";
   import { showToast } from "$lib/stores/toast";
   import { startUiMemoryGuard } from "$lib/ui-memory-guard";
   import { startCloseGuard } from "$lib/close-guard";
@@ -27,6 +34,17 @@
   async function refreshWorkspaces() {
     const items = await listWorkspaces();
     workspaces.set(items);
+
+    const linkedEntries = await Promise.all(
+      items.map(async (item) => {
+        try {
+          return [item.id, await listLinkedProjects(item.id)] as const;
+        } catch {
+          return [item.id, []] as const;
+        }
+      }),
+    );
+    linkedProjectsByWorkspace.set(Object.fromEntries(linkedEntries));
 
     const mcpStates: Record<string, RuntimeState> = {};
     const actionsStates: Record<string, RuntimeState> = {};
@@ -67,6 +85,17 @@
 
   function openWorkspace(id: string) {
     goto(`/workspace/${id}`);
+  }
+
+  async function openLinkedProject(path: string) {
+    try {
+      await openWorkspaceDirectory(path);
+    } catch (error) {
+      showToast(String(error), {
+        title: "无法打开 Linked Project",
+        kind: "error",
+      });
+    }
   }
 
   function openFrpSettings() {
@@ -148,7 +177,9 @@
           active={$page.url.pathname === `/workspace/${workspace.id}`}
           mcpState={$mcpRuntimeStates[workspace.id] ?? "stopped"}
           actionsState={$actionsRuntimeStates[workspace.id] ?? "stopped"}
+          linkedProjects={$linkedProjectsByWorkspace[workspace.id] ?? []}
           onClick={() => openWorkspace(workspace.id)}
+          onOpenProject={(path) => void openLinkedProject(path)}
         />
       {/each}
     </div>

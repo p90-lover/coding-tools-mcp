@@ -25,7 +25,9 @@
     deleteWorkspace,
     getActionsRuntimeStatus,
     getRuntimeStatus,
+    listLinkedProjects,
     listWorkspaces,
+    quickAddLinkedProject,
     startActionsRuntime,
     startRuntime,
     restartRuntime,
@@ -40,7 +42,12 @@
   import { runServiceToggle, notifyStartFailure } from "$lib/runtime/service";
   import { showToast } from "$lib/stores/toast";
   import { promptServiceRestart } from "$lib/runtime/restart-hint";
-  import { actionsRuntimeStates, mcpRuntimeStates, workspaces } from "$lib/stores/app";
+  import {
+    actionsRuntimeStates,
+    linkedProjectsByWorkspace,
+    mcpRuntimeStates,
+    workspaces,
+  } from "$lib/stores/app";
   import {
     actionsConfig,
     actionsLocalEndpoint,
@@ -52,6 +59,7 @@
     mcpLocalEndpoint,
     type AuthConfig,
     type ActionsAuthDraft,
+    type LinkedProject,
     type RuntimeState,
     type WorkspaceProfile,
   } from "$lib/types";
@@ -71,6 +79,7 @@
   let actionsLocal = $state("");
   let actionsPublic = $state("");
   let frpProfiles = $state<FrpProfileDto[]>([]);
+  let linkedProjects = $state<LinkedProject[]>([]);
 
   let activeService = $state<ServiceTab>("mcp");
   let mcpSubTab = $state<SubTab>("config");
@@ -170,6 +179,13 @@
       await goto("/");
       return;
     }
+
+    linkedProjects = await listLinkedProjects(id);
+    linkedProjectsByWorkspace.update((current) => ({
+      ...current,
+      [id]: linkedProjects,
+    }));
+    if (generation !== loadGeneration || id !== workspaceId) return;
 
     const [mcpRuntime, actionsRuntime] = await Promise.all([
       getRuntimeStatus(id),
@@ -490,8 +506,23 @@
     await updateWorkspace(next);
     profile = next;
     showToast("工作区目录已更新", { kind: "success" });
+    await load();
     await promptServiceRestart(mcpStatus === "running", "MCP 服务");
     await promptServiceRestart(actionsStatus === "running", "Actions 服务");
+  }
+
+  async function quickAddProject(path: string) {
+    if (!workspaceId) return;
+    const project = await quickAddLinkedProject(workspaceId, path);
+    linkedProjects = await listLinkedProjects(workspaceId);
+    linkedProjectsByWorkspace.update((current) => ({
+      ...current,
+      [workspaceId]: linkedProjects,
+    }));
+    showToast(`已添加 Linked Project：${project.name}`, {
+      kind: "success",
+      duration: 5000,
+    });
   }
 
   async function removeWorkspace() {
@@ -551,8 +582,10 @@
         <WorkspaceMetaForm
           name={profile.name}
           path={profile.path}
+          {linkedProjects}
           onSave={saveWorkspaceName}
           onUpdatePath={saveWorkspacePath}
+          onQuickAddProject={quickAddProject}
         />
       </div>
 
