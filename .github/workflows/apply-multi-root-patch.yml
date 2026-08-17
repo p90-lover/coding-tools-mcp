@@ -1,0 +1,92 @@
+name: Apply multi-root workspace patch
+
+on:
+  push:
+    branches:
+      - feature/multi-root-workspace
+    paths:
+      - "patches/multi-root/**"
+      - "docs/multi-root-workspace-update.md"
+      - ".github/workflows/apply-multi-root-patch.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/multi-root-workspace
+          fetch-depth: 0
+
+      - name: Reconstruct multi-root patch payload
+        shell: bash
+        run: |
+          cat patches/multi-root/payload.b64.part* | base64 --decode > /tmp/multi-root-payload.tar.gz
+          mkdir -p /tmp/multi-root-patch
+          tar -xzf /tmp/multi-root-payload.tar.gz -C /tmp/multi-root-patch
+
+      - name: Apply multi-root patch
+        run: python /tmp/multi-root-patch/apply_private_multi_root_patch.py .
+
+      - name: Install Tauri Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+      - name: Commit verified source changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            src-tauri/src/workspace/mod.rs \
+            src-tauri/src/workspace/linked_projects.rs \
+            src-tauri/src/commands/workspace.rs \
+            src-tauri/src/commands/mod.rs \
+            src-tauri/src/lib.rs \
+            src-tauri/src/tools/workspace.rs \
+            src-tauri/src/tools/context.rs \
+            src-tauri/src/tools/file.rs \
+            src-tauri/src/tools/policy.rs \
+            src-tauri/src/tools/exec.rs \
+            src-tauri/src/tools/dispatch.rs \
+            src/lib/types.ts \
+            src/lib/api/workspaces.ts \
+            src/lib/stores/app.ts \
+            src/lib/components/WorkspaceMetaForm.svelte \
+            src/lib/components/WorkspaceNavItem.svelte \
+            src/routes/+layout.svelte \
+            'src/routes/workspace/[id]/+page.svelte'
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+          git commit -m "feat: add multi-root linked workspaces"
+          git push origin HEAD:feature/multi-root-workspace
