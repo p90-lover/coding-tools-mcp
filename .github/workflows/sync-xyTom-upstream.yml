@@ -140,7 +140,28 @@ jobs:
           git add -f old
           if git diff --cached --quiet; then
             echo "Snapshot already matches ${UPSTREAM_SHA}."
-            exit 0
+          else
+            git commit -m "chore: sync xyTom upstream 0.3.0 snapshot [skip ci]"
+            git push origin HEAD:"${GITHUB_REF_NAME}"
           fi
-          git commit -m "chore: sync xyTom upstream 0.3.0 snapshot [skip ci]"
-          git push origin HEAD:"${GITHUB_REF_NAME}"
+
+      - name: Package integration checkout
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/repository-artifact
+          tar \
+            --exclude=.git \
+            --exclude=aiTemp/repository-artifact \
+            -czf aiTemp/repository-artifact/coding-tools-mcp.tar.gz \
+            .
+
+      - name: Upload integration checkout
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-repository
+          path: aiTemp/repository-artifact/coding-tools-mcp.tar.gz
+          if-no-files-found: error
+          retention-days: 1
