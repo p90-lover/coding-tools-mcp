@@ -1,183 +1,197 @@
 # Remote MCP
 
-This guide exposes `coding-tools-mcp` to remote MCP clients through an HTTPS tunnel.
+`coding-tools-mcp` exposes Streamable HTTP at `/mcp`. Keep it bound to loopback
+and publish it through an HTTPS tunnel. The fixed tool set includes
+`apply_patch` and `exec_command`; there is no reduced read-only catalog, so every
+public deployment must use bearer auth, OAuth, or an external authenticated
+proxy.
 
-The server implements Streamable HTTP at `/mcp`, publishes remote discovery metadata at `/.well-known/mcp.json` and `/.well-known/mcp/server-card.json`, and supports three auth modes on `/mcp`:
-
-- `none` — no authentication; only acceptable for local/testing tunnels with the `read-only` profile.
-- `bearer` — static `Authorization: Bearer <token>` for clients that can send custom headers.
-- `oauth2` — OAuth 2.1 Authorization Code + PKCE for MCP clients that perform the standard discovery + authorization-code flow. Discovery metadata is published at `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource`.
-
-## Profile Choice
-
-Use `--tool-profile read-only` first. It exposes inspection and git read tools plus `set_default_cwd` for navigation, and omits workspace mutation tools such as `apply_patch`, `exec_command`, `write_stdin`, and `kill_session`.
-
-Use `--tool-profile full` only for trusted MCP clients that support write tools and truthful annotations. Avoid `full` and `compat-readonly-all` for anonymous tunnel testing.
-
-## One-Command Tunnel
-
-Install the published package from PyPI, start the local server, and expose a read-only bearer-token tunnel:
+## One-command bearer tunnel
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts/install.sh \
   | bash -s -- --tunnel cloudflared --auto-install-tunnel --workspace /path/to/repo
 ```
 
-The script prints the local MCP URL, the tunnel provider's HTTPS URL, and the bearer header to configure in clients that support custom headers.
-
-## Anonymous Read-Only Tunnel
-
-```bash
-CODING_TOOLS_MCP_AUTH_MODE=noauth \
-CODING_TOOLS_MCP_TOOL_PROFILE=read-only \
-scripts/tunnel.sh cloudflared /path/to/repo
-```
-
-Configure the remote MCP client with the HTTPS tunnel URL:
-
-```text
-https://<tunnel-host>/mcp
-```
-
-The discovery metadata reports auth type `none` in this mode. Anyone who can reach the tunnel URL can use the exposed read-only tools, so avoid sensitive workspaces and stop the tunnel when testing is done.
-
-## MCP Clients With Bearer Auth
-
-For clients that can send custom headers:
-
-```bash
-export CODING_TOOLS_MCP_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-
-CODING_TOOLS_MCP_AUTH_MODE=bearer \
-CODING_TOOLS_MCP_TOOL_PROFILE=read-only \
-scripts/tunnel.sh cloudflared /path/to/repo
-```
-
-Use:
+The script generates a bearer token, starts the server on `127.0.0.1`, and
+prints the HTTPS tunnel URL and header:
 
 ```text
 URL: https://<tunnel-host>/mcp
 Header: Authorization: Bearer <token>
 ```
 
-## MCP Clients With OAuth 2.1
+From a checkout, the equivalent commands are:
 
-For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, run the tunnel script with `CODING_TOOLS_MCP_AUTH_MODE=oauth`. The OAuth authorize password is generated and printed for you on startup; client_id/client_secret are optional:
+```bash
+export CODING_TOOLS_MCP_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+CODING_TOOLS_MCP_AUTH_MODE=bearer scripts/tunnel.sh cloudflared /path/to/repo
+```
+
+The scripts also support `ngrok` and `devtunnel`.
+
+## OAuth 2.1 + dynamic registration
+
+For clients that cannot set a static `Authorization` header but support MCP
+OAuth discovery:
 
 ```bash
 CODING_TOOLS_MCP_AUTH_MODE=oauth \
-CODING_TOOLS_MCP_TOOL_PROFILE=read-only \
 scripts/tunnel.sh cloudflared /path/to/repo
 ```
 
-The script adds `--oauth-mode` to the server and prints the generated password before starting the tunnel. When cloudflared/ngrok/devtunnel prints the HTTPS URL, configure your MCP client with that URL; the server derives its OAuth issuer and metadata URLs from the incoming request host. The same flow works with `scripts/install.sh --tunnel <provider> --auth-mode oauth`.
+The server implements Authorization Code + PKCE S256 and RFC 7591 dynamic
+client registration. A client discovers and registers itself; operators do not
+need to invent a client ID or copy a client secret into the MCP host. The script
+prints the password that the operator enters on the authorization page.
 
-Optional URL pinning:
+Discovery and OAuth endpoints:
 
-- `CODING_TOOLS_MCP_SERVER_URL` — optional public base URL (no trailing `/mcp`). When set, it pins the `issuer`/`aud` claim in issued tokens and discovery metadata. When unset, the server derives the URL from `Host`/`X-Forwarded-*` request headers, which is the easiest mode for one-shot tunnels whose URL is only known after startup.
+- `GET /.well-known/oauth-protected-resource`
+- `GET /.well-known/oauth-authorization-server`
+- `POST /oauth/register`
+- `GET /oauth/authorize`
+- `POST /oauth/authorize`
+- `POST /oauth/token`
 
-Default public client + PKCE:
+Registration rules:
 
-- `CODING_TOOLS_MCP_OAUTH_PASSWORD` — the password an operator types on the `/oauth/authorize` HTML form to grant the authorization code. It is generated and printed when unset.
-- `CODING_TOOLS_MCP_OAUTH_CLIENT_ID` — optional. When unset, any non-empty client_id is accepted. Set it to restrict OAuth to one client_id.
-- `CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` — optional. When unset, `/oauth/token` uses `token_endpoint_auth_method=none` and relies on PKCE. Once set, clients **must** present this secret on `/oauth/token`, otherwise the request is rejected with `invalid_client`. The endpoint accepts `client_secret_post` and HTTP Basic. PKCE remains mandatory; only `code_challenge_method=S256` is accepted.
+- `redirect_uris` are required, unique, and matched exactly.
+- HTTPS redirects are accepted. HTTP is accepted only for `localhost`,
+  `127.0.0.1`, or `::1` loopback callbacks.
+- Supported token authentication methods are `none`, `client_secret_post`, and
+  `client_secret_basic`. A client must use the method it registered.
+- Client secrets are stored as digests. Public clients rely on mandatory PKCE.
+- Registrations and authorization codes are process-local. A restart requires
+  dynamic clients to register again.
 
-Optional token settings:
+Authorization codes are single-use and expire after five minutes. Access tokens
+default to 24 hours and are bound to the registered client and exact MCP
+resource URL.
 
-- `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` — hex-encoded HS256 signing key. Without it, a random key is generated per process and all tokens are invalidated on restart. Generate one with `python3 -c "import secrets; print(secrets.token_bytes(32).hex())"`.
-- `CODING_TOOLS_MCP_OAUTH_TOKEN_TTL` — access-token lifetime in seconds (default `2592000`, i.e. 30 days).
-
-Endpoints exposed when `--oauth-mode` is active:
-
-- `GET /.well-known/oauth-authorization-server` — RFC 8414 authorization-server metadata.
-- `GET /.well-known/oauth-protected-resource` — RFC 9728 protected-resource metadata.
-- `GET /oauth/authorize` — renders an HTML password prompt; only `response_type=code` and `code_challenge_method=S256` are accepted. Authorization codes expire after 5 minutes.
-- `POST /oauth/authorize` — accepts the password, issues a one-time code, and 302s back to `redirect_uri`.
-- `POST /oauth/token` — exchanges `grant_type=authorization_code` + `code_verifier` for a Bearer JWT.
-
-`/mcp` accepts the issued OAuth token as `Authorization: Bearer <token>`. When `--auth-token` is also set alongside `--oauth-mode`, both credentials are accepted concurrently — useful for clients (e.g. Lovable) that only support static bearer tokens while OAuth-aware clients (e.g. Claude desktop) continue to use the PKCE flow. Unauthenticated requests get HTTP `401` with a `WWW-Authenticate` header pointing at the protected-resource metadata.
-
-### Stable Tunnel URLs
-
-When `CODING_TOOLS_MCP_SERVER_URL` is unset, OAuth metadata and issued JWT claims follow the request URL. That supports ephemeral tunnels (e.g. `cloudflared tunnel --url`, default ngrok, default devtunnel) because the public URL can be discovered after the server is already running. If you want tokens to remain valid across tunnel restarts, use a stable URL and set `CODING_TOOLS_MCP_SERVER_URL`:
-
-- **cloudflared named tunnel** — `cloudflared tunnel create <name>` + `cloudflared tunnel route dns <name> mcp.example.com`, then set `CODING_TOOLS_MCP_SERVER_URL=https://mcp.example.com`.
-- **ngrok reserved domain** — claim a domain in the ngrok dashboard and either configure it in `~/.config/ngrok/ngrok.yml`, or run `ngrok` yourself (`ngrok http --domain=<reserved> 8765`) and set `CODING_TOOLS_MCP_SERVER_URL=https://<reserved>`.
-- **devtunnel persistent tunnel** — `devtunnel create <id>` + `devtunnel port create <id> -p 8765 --protocol http`, then `devtunnel host <id>`.
-
-For an on-demand cloud sandbox, `.github/workflows/start-sandbox.yml` can start the Docker image in GitHub Actions and expose it through either a quick Cloudflare tunnel or a named Cloudflare Tunnel. The recommended fixed-hostname setup is: save the named tunnel token as the GitHub secret `CLOUDFLARE_TUNNEL_TOKEN`, save a stable MCP bearer token as `CODING_TOOLS_MCP_AUTH_TOKEN`, run the workflow with `tunnel_type=named`, and connect clients to `https://<stable-hostname>/mcp`. The optional [Cloudflare sandbox control worker](../cloudflare/sandbox-control/README.md) adds a small authenticated API/MCP-style tool that dispatches the workflow through the GitHub API.
-
-## Tunnel Scripts
-
-Each script starts `coding-tools-mcp` on `127.0.0.1` and then starts the selected tunnel provider. If the provider CLI is missing, the script asks before installing it.
+## OAuth configuration
 
 ```bash
-scripts/tunnel.sh cloudflared /path/to/repo
-scripts/tunnel.sh ngrok /path/to/repo
-scripts/tunnel.sh devtunnel /path/to/repo
-```
-
-Optional environment variables:
-
-```bash
-CODING_TOOLS_MCP_AUTO_INSTALL_TUNNEL=1
-CODING_TOOLS_MCP_AUTH_MODE=bearer        # bearer | noauth | oauth
-CODING_TOOLS_MCP_PORT=8765
-CODING_TOOLS_MCP_TOOL_PROFILE=read-only
-CODING_TOOLS_MCP_AUTH_TOKEN=<existing-token>
-CODING_TOOLS_MCP_SERVER_BIN=coding-tools-mcp
-
-# Auto-generated and printed at startup if unset:
+# Generated and printed when omitted:
 CODING_TOOLS_MCP_OAUTH_PASSWORD=<authorize-page-password>
-# Optional (oauth):
-CODING_TOOLS_MCP_SERVER_URL=https://<stable-tunnel-host>
-CODING_TOOLS_MCP_OAUTH_CLIENT_ID=<restrict-to-client-id>
-CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=<require-client-secret>
-CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-encoded-32-bytes>
-CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=2592000
+
+# Optional stable public origin, without /mcp:
+CODING_TOOLS_MCP_SERVER_URL=https://mcp.example.com
+
+# Optional stable HS256 key; hex-encoded bytes:
+CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-key>
+
+# Optional token lifetime in seconds; default 86400:
+CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=86400
 ```
 
-If the selected tunnel CLI is missing, the scripts prompt before installing it. `cloudflared` installs into `~/.local/bin` when Homebrew is unavailable; `ngrok` uses Homebrew or npm; `devtunnel` uses the Microsoft installer script.
+With an ephemeral tunnel, omit `CODING_TOOLS_MCP_SERVER_URL`; the server derives
+the external origin from the request. For a stable hostname, pin it so issuer,
+audience, resource, and discovery URLs remain constant.
 
-## Local Checks
+The server ignores `Forwarded` and `X-Forwarded-*` by default. Set
+`CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` only behind a proxy you control. You can
+also set exact browser origins with the comma-separated
+`CODING_TOOLS_MCP_ALLOWED_ORIGINS` variable.
 
-Replace `BASE_URL` with the tunnel origin, without `/mcp`.
+### Optional pre-registered client
+
+Dynamic registration is the default. An operator may additionally pre-register
+one known client:
 
 ```bash
-curl "$BASE_URL/.well-known/mcp.json"
+CODING_TOOLS_MCP_OAUTH_CLIENT_ID=<client-id>
+CODING_TOOLS_MCP_OAUTH_REDIRECT_URIS=https://client.example/callback,http://127.0.0.1/callback
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=<optional-confidential-secret>
 ```
 
-For bearer mode only:
+If a client ID is configured, its redirect URI list is required operational
+configuration; do not rely on the loopback fallback for a production client.
+
+## HTTP session behavior
+
+There are none. Since 0.3.0 this endpoint is stateless: no response carries an
+`Mcp-Session-Id`, an `Mcp-Session-Id` a client kept from an older server is
+ignored rather than refused, and `DELETE /mcp` returns `405` with `Allow: POST`
+because there is nothing to terminate. Every request is answered by the one
+runtime that owns the workspace, so a client may reconnect, change transport,
+or run beside another client without losing anything. Commands are workspace
+resources with their own timeout, count, output, and retention limits: any
+authenticated client of the workspace can continue one with the `command_id`
+that `exec_command` returned.
+
+A handshake-era client needs no change for this. It still sends `initialize`,
+still gets the same `InitializeResult`, and simply has no session header to
+echo back.
+
+A `2026-07-28` client sends no handshake at all. Each request states its
+version in `params._meta` and mirrors that version and its method in headers
+(`Mcp-Name` as well, for `tools/call`, `resources/read`, and `prompts/get`):
 
 ```bash
 curl "$BASE_URL/mcp" \
-  -H "Authorization: Bearer $CODING_TOOLS_MCP_AUTH_TOKEN"
+  -H "Authorization: Bearer $CODING_TOOLS_MCP_AUTH_TOKEN" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: server/discover" \
+  --data '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
 
 curl "$BASE_URL/mcp" \
   -H "Authorization: Bearer $CODING_TOOLS_MCP_AUTH_TOKEN" \
   -H "Accept: application/json, text/event-stream" \
   -H "Content-Type: application/json" \
-  -H "MCP-Protocol-Version: 2025-06-18" \
-  --data '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}'
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: tools/call" \
+  -H "Mcp-Name: read_file" \
+  --data '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"README.md"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
 ```
 
-Missing or wrong bearer tokens on `/mcp` should return HTTP `401`.
+A header that contradicts the body, or a missing one, is `400` with `-32020`.
+An unknown method in this era is `404` with `-32601`. Handshake-era errors stay
+`200` with the JSON-RPC error, as they always did.
 
-For OAuth mode, the discovery endpoints should respond without auth:
+This implementation returns `405` for `GET /mcp` because it does not provide an
+SSE stream. It rejects JSON-RPC batches and accepts `notifications/cancelled`
+in both eras, answering with nothing; the notification does not terminate the
+command the cancelled request started, which `kill_command` does.
+
+## Local checks
+
+Replace `BASE_URL` with the HTTPS origin, without `/mcp`:
 
 ```bash
-curl "$BASE_URL/.well-known/oauth-authorization-server"
+curl "$BASE_URL/.well-known/mcp.json"
 curl "$BASE_URL/.well-known/oauth-protected-resource"
+curl "$BASE_URL/.well-known/oauth-authorization-server"
 ```
 
-A `401` response from `/mcp` includes:
+For bearer mode, an unauthenticated request must return `401` and a correct token
+must reach MCP initialization:
 
-```text
-WWW-Authenticate: Bearer realm="coding-tools-mcp", resource_metadata="<BASE_URL>/.well-known/oauth-protected-resource"
+```bash
+curl "$BASE_URL/mcp" \
+  -H "Authorization: Bearer $CODING_TOOLS_MCP_AUTH_TOKEN" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
 ```
 
-## Security Notes
+## Security notes
 
-Keep the server bound to `127.0.0.1` and expose only the tunnel URL. Non-loopback binding is rejected unless a bearer token or `--oauth-mode` is configured. Use HTTPS tunnel URLs, rotate bearer tokens and OAuth client secrets if they are shared, set `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` so OAuth tokens survive restarts only when you actually want that, and do not use `full` or `compat-readonly-all` with untrusted clients.
-
-Anonymous remote MCP tunnel testing exposes whatever the selected profile permits to anyone who can reach the tunnel URL. Use `read-only`, avoid sensitive workspaces, and stop the tunnel when testing is done.
+- Never publish `CODING_TOOLS_MCP_AUTH_MODE=noauth`. It is suitable only for a
+  loopback-only local process.
+- Use HTTPS, rotate static bearer tokens, and keep OAuth passwords/signing keys
+  out of committed files.
+- Keep the MCP runtime in `safe` or `trusted`; use `dangerous` only inside an
+  isolated container or VM with a trusted client.
+- An HTTPS tunnel authenticates transport, not code execution. The server's
+  policy and Landlock protections do not replace an external sandbox for
+  untrusted repositories.
+- Avoid `--dangerously-fake-readonly-annotations` on a published endpoint. It
+  reports mutating tools as read-only, so a client on the far side of the tunnel
+  cannot tell from `tools/list` that `apply_patch` and `exec_command` are exposed.
+  The server requires authentication before allowing it over HTTP, but on a shared
+  endpoint the operator who set it and the client who connects may not be the same
+  party. Check `server_info.annotation_override` or the server card's
+  `tools.annotationOverride` to see whether an endpoint is doing this.

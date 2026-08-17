@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts
   | bash -s -- --start --workspace /path/to/repo
 ```
 
-Install and expose a read-only bearer-token tunnel:
+Install and expose an authenticated bearer-token tunnel:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts/install.sh \

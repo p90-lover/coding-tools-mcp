@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 
-PROTOCOL_VERSION = "2025-06-18"
+PROTOCOL_VERSION = "2025-11-25"
 ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_TOOLS = (
@@ -32,10 +32,13 @@ REQUIRED_TOOLS = (
     "apply_patch",
     "exec_command",
     "write_stdin",
-    "kill_session",
+    "kill_command",
     "read_output",
     "git_status",
     "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
     "request_permissions",
     "view_image",
 )
@@ -100,7 +103,6 @@ class MCPClient:
     workspace: Path
     url: str | None = None
     process: subprocess.Popen[str] | None = None
-    session_id: str | None = None
     request_id: int = 0
     initialized: bool = False
 
@@ -121,15 +123,11 @@ class MCPClient:
                 + " ".join(cmd or ["<empty>"])
             )
 
-        env = os.environ.copy()
-        env.update(
-            {
-                "AWS_SECRET_ACCESS_KEY": "COMPLIANCE_SHOULD_NOT_LEAK",
-                "OPENAI_API_KEY": "COMPLIANCE_SHOULD_NOT_LEAK",
-                "CODING_TOOLS_MCP_WORKSPACE": str(self.workspace),
-            }
+        env = safe_server_env(
+            AWS_SECRET_ACCESS_KEY="COMPLIANCE_SHOULD_NOT_LEAK",
+            OPENAI_API_KEY="COMPLIANCE_SHOULD_NOT_LEAK",
+            CODING_TOOLS_MCP_WORKSPACE=str(self.workspace),
         )
-        prepend_repo_pythonpath(env)
         self.process = subprocess.Popen(
             cmd,
             cwd=str(self.workspace),
@@ -137,7 +135,7 @@ class MCPClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,
+            **subprocess_group_kwargs(),
         )
         deadline = time.time() + float(os.environ.get("CODING_TOOLS_MCP_STARTUP_TIMEOUT", "10"))
         last_error: Exception | None = None
@@ -176,14 +174,20 @@ class MCPClient:
             return
         try:
             if self.process.poll() is None:
-                try:
-                    os.killpg(self.process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+                if os.name == "nt":
+                    self.process.terminate()
+                else:
+                    try:
+                        os.killpg(self.process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                 try:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    os.killpg(self.process.pid, signal.SIGKILL)
+                    if os.name == "nt":
+                        self.process.kill()
+                    else:
+                        os.killpg(self.process.pid, signal.SIGKILL)
                     self.process.wait(timeout=2)
         finally:
             for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
@@ -252,15 +256,10 @@ class MCPClient:
         auth_token = os.environ.get("CODING_TOOLS_MCP_AUTH_TOKEN")
         if auth_token:
             headers["Authorization"] = f"Bearer {auth_token}"
-        if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
         request = urllib.request.Request(self.url, data=data, headers=headers, method="POST")
         try:
             request_timeout = float(os.environ.get("CODING_TOOLS_MCP_CLIENT_TIMEOUT", "30"))
             with urllib.request.urlopen(request, timeout=request_timeout) as response:
-                session_id = response.headers.get("Mcp-Session-Id")
-                if session_id:
-                    self.session_id = session_id
                 body = response.read()
                 if response.status in (202, 204) or not body:
                     return {}
@@ -315,6 +314,26 @@ def prepend_repo_pythonpath(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def safe_server_env(**overrides: str) -> dict[str, str]:
+    """Env for compliance server processes: dangerous toggles scrubbed, safe mode forced."""
+    env = os.environ.copy()
+    for name in (
+        "CODING_TOOLS_MCP_DANGEROUSLY_SKIP_ALL_PERMISSIONS",
+        "CODING_TOOLS_MCP_ALLOW_NETWORK",
+    ):
+        env.pop(name, None)
+    env["CODING_TOOLS_MCP_PERMISSION_MODE"] = "safe"
+    env.update(overrides)
+    return prepend_repo_pythonpath(env)
+
+
+def subprocess_group_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        return {"creationflags": creation_flag} if creation_flag else {}
+    return {"start_new_session": True}
+
+
 class StdioMCPClient:
     """Newline-delimited JSON-RPC client around a `coding_tools_mcp --stdio` subprocess."""
 
@@ -328,10 +347,7 @@ class StdioMCPClient:
 
     def __enter__(self) -> StdioMCPClient:
         env = prepend_repo_pythonpath(os.environ.copy())
-        kwargs: dict[str, Any] = {}
-        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        if creation_flag:
-            kwargs["creationflags"] = creation_flag
+        kwargs = subprocess_group_kwargs()
         self.process = subprocess.Popen(
             [
                 sys.executable,

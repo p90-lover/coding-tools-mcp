@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from typing import Any
 
 from tests.compliance.mcp_client import MCPError
@@ -100,7 +101,9 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 +Added by apply_patch golden test.
 *** End Patch
 """
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": add}))
+        add_payload = self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": add}))
+        self.assertEqual(add_payload.get("additions"), 3)
+        self.assertEqual(add_payload.get("removals"), 0)
         self.assertIn("Added by apply_patch", self.tool_text(self.client.call_tool("read_file", {"path": "docs/NOTES.md"})))
         self.assert_tool_error("apply_patch", {"patch": add})
 
@@ -114,7 +117,11 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
             self.assert_tool_error("read_file", {"path": "dry-run/new/NOPE.md"})
             self.assert_tool_error("list_dir", {"path": "dry-run"})
 
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH}))
+        update_result = self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH})
+        update_payload = self.assert_tool_success(update_result)
+        self.assertEqual(update_payload.get("additions"), 1)
+        self.assertEqual(update_payload.get("removals"), 1)
+        self.assertIn("(+1 -1)", self.tool_text(update_result))
         self.assertIn("return a + b", self.tool_text(self.client.call_tool("read_file", {"path": "src/math.js"})))
 
         delete = """*** Begin Patch
@@ -169,7 +176,25 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** End Patch
 """
         payload = self.assert_tool_error("apply_patch", {"patch": ambiguous})
+        self.assertEqual(payload.get("error", {}).get("code"), "PATCH_CONTEXT_AMBIGUOUS")
+        self.assertEqual(payload.get("error", {}).get("details", {}).get("match_count"), 2)
+        self.assertIn("retry_hint", payload.get("error", {}).get("details", {}))
         self.assertIn("matched", json_dump(payload).lower())
+
+    def test_apply_patch_move_preserves_executable_mode(self) -> None:
+        source = self.workspace.root / "scripts" / "run.sh"
+        source.parent.mkdir(parents=True)
+        source.write_text("#!/bin/sh\nprintf 'ok\\n'\n", encoding="utf-8")
+        source.chmod(0o755)
+        move = """*** Begin Patch
+*** Update File: scripts/run.sh
+*** Move to: bin/run.sh
+*** End Patch
+"""
+        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": move}))
+        destination = self.workspace.root / "bin" / "run.sh"
+        self.assertFalse(source.exists())
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
 
     def test_apply_patch_rejects_absolute_traversal_and_symlink_escape(self) -> None:
         absolute = f"""*** Begin Patch
@@ -280,20 +305,20 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             {"cmd": "python -c \"import urllib.request; urllib.request.urlopen('https://example.com')\""},
         )
 
-    def test_write_stdin_kill_session_git_status_and_git_diff(self) -> None:
+    def test_write_stdin_kill_command_git_status_and_git_diff(self) -> None:
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
                 {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
             )
             payload = self.assert_tool_success(started)
-            session_id = payload.get("session_id")
-            self.assertIsInstance(session_id, str, f"long-running command must return session_id: {payload!r}")
+            command_id = payload.get("command_id")
+            self.assertIsInstance(command_id, str, f"long-running command must return command_id: {payload!r}")
             self.assertIn("ready", self.tool_text(started))
-            hello = client.call_tool("write_stdin", {"session_id": session_id, "chars": "hello\n"})
+            hello = client.call_tool("write_stdin", {"command_id": command_id, "chars": "hello\n"})
             self.assertIn("echo:hello", self.tool_text(hello))
-            client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})
-            killed = client.call_tool("kill_session", {"session_id": session_id})
+            client.call_tool("write_stdin", {"command_id": command_id, "chars": "exit\n"})
+            killed = client.call_tool("kill_command", {"command_id": command_id})
             self.assertIn("content", killed)
 
         self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH}))

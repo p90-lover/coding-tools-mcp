@@ -1,42 +1,155 @@
 # Tools And Schemas
 
-The normative schema source is [profile-v0.1.md](profile-v0.1.md). Live schemas are returned by `tools/list` and compared against the profile by `make test-schema-drift`.
+The normative behavior is [runtime-contract-v0.3.md](runtime-contract-v0.3.md).
+Live JSON Schemas come from `tools/list`; CI compares their names, input
+properties, annotations, and error codes with the contract.
 
-## Tool Inventory
+## Fixed inventory
 
-- `read_file`: read UTF-8 text slices inside the workspace.
-- `server_info`: inspect server/version/protocol/workspace/default cwd/profile/auth/runtime policy metadata.
-- `check_exec_environment`: inspect lightweight `exec_command` environment and sandbox state known to the server.
-- `get_default_cwd`: return the current default cwd inside the workspace.
-- `set_default_cwd`: set the default cwd for relative tool paths.
-- `list_dir`: list directory entries under the workspace.
-- `list_files`: glob workspace files.
-- `search_text`: search text or regex matches.
-- `apply_patch`: apply a patch envelope.
-- `exec_command`: run a bounded command under policy, with Landlock confinement when available.
-- `write_stdin`: write to a live server-managed command session.
-- `kill_session`: terminate a server-managed command session.
-- `read_output`: page retained stdout or stderr by stream-specific `output_ref`.
-- `git_status`: inspect git status.
-- `git_diff`: inspect unified diff.
-- `git_log`: inspect recent commits.
-- `git_show`: inspect bounded `git show` output for a revision.
-- `git_blame`: inspect bounded blame metadata for a file.
-- `request_permissions`: return structured permission-request status.
-- `view_image`: return a workspace image as MCP image content.
+The default catalog contains exactly 18 tools:
 
-Every tool returns `content`, `structuredContent`, and `isError`. Tool execution failures use `isError: true` with structured error details.
+- `server_info`: server, workspace, automatic project context, policy, runtime,
+  auth, protocol, and fixed-catalog metadata.
+- `check_exec_environment`: lightweight execution policy and Landlock status.
+- `read_file`: stream a bounded UTF-8 range without loading the whole file.
+- `list_dir`: list immediate or bounded-recursive directory entries.
+- `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
+  controls.
+- `search_text`: literal or regex search; ripgrep stops after the result cap.
+- `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
+- `exec_command`: run a bounded command and wait up to 10 seconds by default.
+- `write_stdin`: poll or interact with a running command.
+- `kill_command`: terminate one runtime-owned command.
+- `read_output`: page retained stdout or stderr using absolute byte offsets.
+- `git_status`: structured working-tree status.
+- `git_diff`: bounded unified staged/unstaged diff.
+- `git_log`: structured bounded commit history.
+- `git_show`: bounded revision metadata/content/diff.
+- `git_blame`: structured bounded line attribution.
+- `request_permissions`: report elicitation status without silently granting.
+- `view_image`: one MCP image content block plus structured metadata.
 
-`exec_command` results preserve raw `stdout`, `stderr`, and `exit_code` by default. Callers may request compact `summary` or `preview` verbosity and retrieve retained stdout/stderr independently with `read_output` using `output_refs`. Results may also include `diagnostics`, a lightweight machine-readable list of common failure attributions such as `DEV_NULL_DENIED`, `DNS_RESOLUTION_FAILED`, `NETWORK_PERMISSION_REQUIRED`, `SHELL_EXPANSION_PERMISSION_REQUIRED`, `INLINE_SCRIPT_PERMISSION_REQUIRED`, `COMMAND_TIMED_OUT`, and `OUTPUT_TRUNCATED`.
+`view_image` may be disabled when an installation cannot accept binary image
+content. That capability gate is not a tool profile. The other 17 tools are
+always advertised, and `listChanged` is `false`.
 
-## Tool Profiles
+## Result envelope
 
-- `full`: exposes all tools with truthful annotations.
-- `read-only`: exposes inspection-oriented tools and omits local mutation tools.
-- `compat-readonly-all`: exposes all tools but advertises them as read-only for compatibility. This does not change behavior; mutation-capable tools can still mutate local state.
+Every successful tool call has:
 
-## Permission Modes
+```json
+{
+  "content": [{"type": "text", "text": "Agent-readable summary or bounded preview"}],
+  "structuredContent": {"ok": true},
+  "isError": false
+}
+```
 
-- `safe`: default mode. Commands run with workspace writes, system toolchain read roots, external server-owned `HOME`/`TMPDIR`/`cache_dir`, no network, blocked shell expansion, blocked inline scripts, filtered secrets, and Landlock when available.
-- `trusted`: local development mode. It allows network-looking commands, shell expansion, and inline scripts while still filtering secrets and blocking destructive commands. Runtime writes remain scoped to the exact external runtime directory, not the whole Git worktree or global `/tmp`.
-- `dangerous`: disables `exec_command` permission gates and Landlock. Use only in an isolated container or VM. Direct file tools still enforce workspace paths.
+`content` is not a JSON mirror. `structuredContent` is the complete machine
+interface and retains existing fields where possible. Model-facing text is
+bounded at 16 KiB; if it is shortened, the full structured value is still
+present. Errors use the same envelope with readable recovery guidance and
+`isError: true`.
+
+`view_image` is the exception to text-only content: its base64 appears exactly
+once in one `image` block. `structuredContent` contains path, media type, byte
+count, dimensions, resize metadata, and warnings, but no base64 or data URL.
+
+## Patch behavior
+
+`apply_patch` accepts the standard envelope:
+
+```text
+*** Begin Patch
+*** Add File: path/to/new.py
++content
+*** Update File: path/to/existing.py
+@@
+ old
+-before
++after
+*** Move to: path/to/moved.py
+*** Delete File: path/to/old.py
+*** End Patch
+```
+
+All operations are parsed and matched before writes. Context must be unique.
+Files are prepared in their destination directories, fsynced, baseline-checked,
+and installed with atomic replacement. Multi-file failure restores prior files.
+Mode bits, BOM, and newline style are preserved; moves inherit source mode.
+Lines are split on `\n` only, so a line containing another Unicode line
+boundary (`\x0c`, `\u2028`, `\x85`, …) is one line to both the file and the
+patch. A file's final newline is an ordinary line the hunk can add or remove.
+
+## Model-ready examples
+
+Every relative path resolves against the workspace root; there is no
+session-scoped working directory. Use explicit paths for multi-call workflows:
+
+```json
+{"cmd":"pytest -q","workdir":".","yield_time_ms":30000}
+```
+
+If the result is still running, copy its `command_id` exactly:
+
+```json
+{"command_id":"abc","chars":"","yield_time_ms":10000}
+```
+
+Terminate that command when needed:
+
+```json
+{"command_id":"abc","signal":"KILL"}
+```
+
+Page a truncated stream using the returned reference:
+
+```json
+{"output_ref":"command:abc:stdout","offset":0,"limit":4096}
+```
+
+`exec_command.workdir` and each file/Git tool's `path` argument are how a call
+targets a subdirectory; both are still confined to the workspace.
+
+## Command and output behavior
+
+`exec_command` and `write_stdin` default `yield_time_ms` to `10000`. Short
+commands ordinarily return `status: "exited"` in one call. A still-running
+command returns a `command_id` and a machine-readable `next_action` for
+`write_stdin` with empty `chars`.
+
+Only truncated terminal output returns a `read_output` next action by default.
+`output_ref` values are `command:<id>:stdout` or `command:<id>:stderr`; offsets
+are stream-specific absolute byte positions. Runtime limits bound active
+commands, retained completed commands, per-command output, total output, and
+retention time.
+
+Each stream retains the earliest output (a frozen head segment, one eighth of
+the per-stream budget) plus the most recent output (a rolling tail). When a
+command produces more output than the budget, bytes between the head and the
+tail are evicted permanently; `read_output` reports the loss via
+`evicted_gap_bytes` and `omitted_bytes`. For output expected to exceed the
+budget, redirect it to a file (`cmd > out.log 2>&1`) and page it with
+`read_file` or `search_text` instead of relying on retained output.
+
+Use `tty: true` only when a program requires a terminal. POSIX receives a real
+PTY (`isatty()` is true). This build returns `TTY_UNSUPPORTED` on Windows rather
+than labeling pipes as a TTY.
+
+## Permission modes
+
+- `safe`: blocks network-looking commands, shell expansion, inline scripts,
+  destructive commands, outside-workspace arguments, and secret/loader env.
+- `trusted`: enables normal local-development network, expansion, and inline
+  snippets while retaining secret and destructive-command checks.
+- `dangerous`: disables command permission gates and Landlock; use only inside
+  an isolated container or VM.
+
+These modes do not change the tool list. Direct path tools retain workspace
+confinement in every mode.
+
+`--dangerously-fake-readonly-annotations` advertises every tool as read-only in
+`tools/list` for clients that gate on annotations. It does not change the tool list
+either, and it does not stop mutation or execution. `server_info` and the server
+card keep reporting the real annotations. See
+[permission-modes.md](permission-modes.md).

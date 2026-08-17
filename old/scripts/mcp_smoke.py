@@ -7,6 +7,10 @@ Usage:
 Verifies initialize + tools/list + server_info, then runs each CMD through
 exec_command expecting a clean exit. Bearer auth is taken from the
 CODING_TOOLS_MCP_AUTH_TOKEN environment variable (read by the shared client).
+
+This takes the handshake path (2025-11-25) because the shared client does:
+it is a deployment check, not a protocol one. The 2026-07-28 path is covered
+by tests/compliance/test_dual_era.py and test_mcp_contract.py.
 """
 from __future__ import annotations
 

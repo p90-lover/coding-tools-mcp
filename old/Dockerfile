@@ -51,9 +51,8 @@ ENV PATH=/usr/local/go/bin:/usr/local/cargo/bin:$PATH \
 WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY coding_tools_mcp ./coding_tools_mcp
-COPY coding_tools_actions ./coding_tools_actions
-RUN python -m pip install --no-cache-dir ".[actions]" \
+RUN python -m pip install --no-cache-dir . \
     && mkdir -p /workspace
 
-EXPOSE 8765 8787
+EXPOSE 8765
 ENTRYPOINT ["coding-tools-mcp"]

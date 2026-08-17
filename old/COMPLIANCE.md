@@ -6,7 +6,7 @@ The one-command acceptance gate is:
 make compliance
 ```
 
-It runs protocol, golden tool, security, E2E, runtime-semantics, dogfood, compliance-report, required docs/evidence/workflow, and schema-drift checks. Report files:
+It runs protocol, dual-era, golden tool, security, E2E, runtime-semantics, dogfood, compliance-report, required docs/evidence/workflow, and schema-drift checks. Report files:
 
 - [reports/compliance/latest.json](reports/compliance/latest.json)
 - [reports/compliance/latest.md](reports/compliance/latest.md)
@@ -23,10 +23,12 @@ It adds lint, typecheck, unittest discovery, required docs checks, schema-drift 
 
 ## Coverage
 
-- MCP initialize, `tools/list`, `tools/call`, schemas, annotations, structured success/failure output, unknown tool behavior, protocol errors, trace redaction, and stdout cleanliness.
+- Protocol versions: full support for MCP `2026-07-28` — every implemented method, its `params._meta` validation, the SEP-2243 mirror headers, `server/discover`, result shaping, and the HTTP status each error maps to — alongside the handshake era `2025-11-25` and `2025-06-18`. `tools` with `listChanged: false` is the only advertised capability in either era.
+- MCP `initialize`, `tools/list`, `tools/call`, schemas, annotations, structured success/failure output, unknown tool behavior, protocol errors, trace redaction, and stdout cleanliness.
+- Interoperability with a client we did not write: the official MCP python SDK drives the server over stdio and HTTP, and CI fails rather than skips if it is not installed.
 - Tool golden cases for read/list/search/patch/exec/stdin/kill/git status/git diff/image.
-- Security cases for traversal, absolute paths, symlink escape, command workdir escape, direct and interpreter-mediated outside reads, direct syscall outside reads and writes where Landlock is available, destructive command policy, shell-expansion gating, obfuscated network access, risky env rejection, Linux Landlock fallback warnings, session timeout enforcement, watchdog cleanup, bounded output buffers, request-permission non-grants, and concurrent read-only calls.
-- Deterministic E2E loops for JavaScript bugfix, Python function add, long-running stdin, session close behavior, workspace escape denial, and image viewing.
+- Security cases for traversal, absolute paths, symlink escape, command workdir escape, direct and interpreter-mediated outside reads, direct syscall outside reads and writes where Landlock is available, destructive command policy, shell-expansion gating, obfuscated network access, risky env rejection, Linux Landlock fallback warnings, command timeout enforcement, watchdog cleanup, bounded output buffers, request-permission non-grants, and concurrent read-only calls.
+- Deterministic E2E loops for JavaScript bugfix, Python function add, long-running stdin, command termination, workspace escape denial, and image viewing.
 - MCP-only dogfood without direct filesystem or shell bypass during task execution.
 - Compliance report generation semantics, including non-overclaiming partial-suite tool coverage.
 
@@ -34,6 +36,7 @@ It adds lint, typecheck, unittest discovery, required docs checks, schema-drift 
 
 ```bash
 make test-mcp-contract
+make test-dual-era
 make test-tool-golden
 make test-security
 make test-e2e
