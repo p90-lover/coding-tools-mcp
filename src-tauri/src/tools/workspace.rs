@@ -3,8 +3,11 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+use crate::workspace::linked_projects::{list_linked_projects_for_root, LinkedProject};
+
 pub const DEFAULT_EXCLUDED_NAMES: &[&str] = &[
     ".git",
+    ".mcp-paths",
     ".reference",
     "node_modules",
     "target",
@@ -165,6 +168,109 @@ impl Workspace {
         self.root.to_string_lossy().into_owned()
     }
 
+    pub fn linked_projects(&self) -> Vec<LinkedProject> {
+        list_linked_projects_for_root(&self.root)
+    }
+
+    fn linked_project_by_alias(&self, alias: &str) -> Option<LinkedProject> {
+        self.linked_projects()
+            .into_iter()
+            .find(|project| project.alias.eq_ignore_ascii_case(alias))
+    }
+
+    fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
+        let mut cursor = path;
+        loop {
+            if cursor.exists() || cursor.is_symlink() {
+                return cursor.canonicalize().ok();
+            }
+            cursor = cursor.parent()?;
+        }
+    }
+
+    fn linked_project_containing_path(&self, path: &Path) -> Option<LinkedProject> {
+        let probe = Self::canonical_existing_ancestor(path)
+            .unwrap_or_else(|| path.to_path_buf());
+        self.linked_projects().into_iter().find(|project| {
+            project
+                .root_path()
+                .canonicalize()
+                .map(|root| probe.starts_with(root))
+                .unwrap_or(false)
+        })
+    }
+
+    fn allowed_root_for_path(&self, path: &Path) -> Option<PathBuf> {
+        let probe = Self::canonical_existing_ancestor(path)
+            .unwrap_or_else(|| path.to_path_buf());
+        if probe.starts_with(&self.root) {
+            return Some(self.root.clone());
+        }
+        self.linked_project_containing_path(path)
+            .and_then(|project| project.root_path().canonicalize().ok())
+    }
+
+    fn candidate_from_raw(
+        &self,
+        base: &Path,
+        raw_path: &str,
+    ) -> WorkspaceResult<(PathBuf, Option<LinkedProject>)> {
+        let normalized = raw_path.replace('\\', "/");
+        if let Some(alias_path) = normalized.strip_prefix('@') {
+            let (alias, rest) = alias_path
+                .split_once('/')
+                .map(|(alias, rest)| (alias, rest))
+                .unwrap_or((alias_path, ""));
+            if alias.trim().is_empty() {
+                return Err(WorkspaceError::invalid_argument(
+                    "Linked project alias cannot be empty",
+                ));
+            }
+            let project = self.linked_project_by_alias(alias).ok_or_else(|| {
+                WorkspaceError::not_found(format!("Linked project not found: @{alias}"))
+            })?;
+            let candidate = if rest.is_empty() {
+                project.root_path()
+            } else {
+                project
+                    .root_path()
+                    .join(rest.replace('/', std::path::MAIN_SEPARATOR_STR))
+            };
+            return Ok((candidate, Some(project)));
+        }
+
+        let input = Path::new(raw_path);
+        if input.is_absolute() {
+            return Ok((
+                input.to_path_buf(),
+                self.linked_project_containing_path(input),
+            ));
+        }
+
+        Ok((
+            base.join(raw_path.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            None,
+        ))
+    }
+
+    pub fn display_path(&self, path: &Path) -> String {
+        if path.starts_with(&self.root) {
+            return relative_display(&self.root, path);
+        }
+        if let Some(project) = self.linked_project_containing_path(path) {
+            let root = project.root_path();
+            let suffix = path
+                .strip_prefix(&root)
+                .map(|value| value.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if suffix.is_empty() {
+                return format!("@{}", project.alias);
+            }
+            return format!("@{}/{}", project.alias, suffix);
+        }
+        relative_display(&self.root, path)
+    }
+
     pub fn reject_unsafe_text(&self, raw_path: &str) -> WorkspaceResult<()> {
         if raw_path.is_empty() {
             return Err(WorkspaceError::invalid_argument(
@@ -173,15 +279,6 @@ impl Workspace {
         }
         if raw_path.contains('\0') {
             return Err(WorkspaceError::invalid_argument("Path contains a NUL byte"));
-        }
-        if raw_path.starts_with('/') || raw_path.starts_with('\\') {
-            return Err(WorkspaceError::absolute_path_denied());
-        }
-        if raw_path.len() >= 2 {
-            let bytes = raw_path.as_bytes();
-            if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-                return Err(WorkspaceError::absolute_path_denied());
-            }
         }
         for part in Path::new(raw_path).components() {
             if matches!(part, Component::ParentDir) {
@@ -195,13 +292,16 @@ impl Workspace {
         self.resolve_existing_at(&self.root, raw_path)
     }
 
-    /// 解析只读路径。显式的绝对路径和 `..` 路径允许指向 Workspace 外部，
-    /// 但不会被任何写入工具复用。
+    /// Read paths retain the existing explicit-absolute-path behavior.
+    /// `@alias/...` is additionally resolved through `.mcp-paths`.
     pub fn resolve_read_path(&self, raw_path: &str) -> WorkspaceResult<ResolvedPath> {
         let raw = if raw_path.is_empty() { "." } else { raw_path };
         self.validate_read_text(raw)?;
+        let alias_address = raw.replace('\\', "/").starts_with('@');
         let input = Path::new(raw);
-        let candidate = if input.is_absolute() {
+        let candidate = if alias_address {
+            self.candidate_from_raw(&self.root, raw)?.0
+        } else if input.is_absolute() {
             input.to_path_buf()
         } else {
             self.root
@@ -214,11 +314,11 @@ impl Workspace {
             || input
                 .components()
                 .any(|part| matches!(part, Component::ParentDir));
-        if !explicit_external && candidate.starts_with(&self.root) {
+        if alias_address || (!explicit_external && candidate.starts_with(&self.root)) {
             self.ensure_inside_workspace(&candidate, &resolved)?;
         }
         Ok(ResolvedPath {
-            display: relative_display(&self.root, &resolved),
+            display: self.display_path(&resolved),
             path: resolved,
             existed: true,
         })
@@ -232,13 +332,13 @@ impl Workspace {
         let raw = if raw_path.is_empty() { "." } else { raw_path };
         self.reject_unsafe_text(raw)?;
         let base = self.validate_base(base)?;
-        let candidate = base.join(raw.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let (candidate, _) = self.candidate_from_raw(&base, raw)?;
         let resolved = candidate
             .canonicalize()
             .map_err(|_| WorkspaceError::not_found(format!("Path not found: {raw}")))?;
         self.ensure_inside_workspace(&candidate, &resolved)?;
         Ok(ResolvedPath {
-            display: relative_display(&self.root, &resolved),
+            display: self.display_path(&resolved),
             path: resolved,
             existed: true,
         })
@@ -251,21 +351,36 @@ impl Workspace {
         if pure.file_name().is_none() || raw_path == "." || raw_path == ".." {
             return Err(WorkspaceError::invalid_argument("Invalid write target"));
         }
-        let candidate = self
-            .root
-            .join(raw_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+        let (candidate, project) = self.candidate_from_raw(&self.root, raw_path)?;
+        if project.as_ref().is_some_and(LinkedProject::read_only)
+            || self
+                .linked_project_containing_path(&candidate)
+                .is_some_and(|value| value.read_only())
+        {
+            return Err(WorkspaceError::Tool {
+                code: "READ_ONLY_LINKED_PROJECT",
+                message: format!("Linked project is read-only: {raw_path}"),
+                category: "permission",
+                retryable: false,
+            });
+        }
+
         if candidate.exists() || candidate.is_symlink() {
             let resolved = candidate
                 .canonicalize()
                 .map_err(|_| WorkspaceError::not_found(format!("Path not found: {raw_path}")))?;
             self.ensure_inside_workspace(&candidate, &resolved)?;
             return Ok(ResolvedPath {
-                display: relative_display(&self.root, &resolved),
+                display: self.display_path(&resolved),
                 path: resolved,
                 existed: true,
             });
         }
-        let parent = candidate.parent().unwrap_or(&self.root);
+
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| WorkspaceError::invalid_argument("Invalid write target"))?;
         let resolved_parent = if parent.exists() {
             parent
                 .canonicalize()
@@ -274,11 +389,11 @@ impl Workspace {
             self.ensure_parent_chain(parent)?;
             parent.to_path_buf()
         };
-        if !resolved_parent.starts_with(&self.root) {
+        if self.allowed_root_for_path(&resolved_parent).is_none() {
             return Err(WorkspaceError::path_outside_workspace());
         }
         Ok(ResolvedPath {
-            display: raw_path.replace('\\', "/"),
+            display: self.display_path(&candidate),
             path: candidate,
             existed: false,
         })
@@ -287,7 +402,7 @@ impl Workspace {
     fn ensure_parent_chain(&self, parent: &Path) -> WorkspaceResult<()> {
         let mut cursor = parent;
         while !cursor.exists() {
-            if cursor == self.root || cursor.parent() == Some(cursor) {
+            if cursor.parent() == Some(cursor) {
                 break;
             }
             cursor = cursor.parent().unwrap_or(cursor);
@@ -296,7 +411,7 @@ impl Workspace {
             let resolved = cursor
                 .canonicalize()
                 .map_err(|_| WorkspaceError::not_found("Parent directory not found"))?;
-            if !resolved.starts_with(&self.root) {
+            if self.allowed_root_for_path(&resolved).is_none() {
                 return Err(WorkspaceError::path_outside_workspace());
             }
         }
@@ -310,14 +425,14 @@ impl Workspace {
         if !resolved.is_dir() {
             return Err(WorkspaceError::not_a_directory("Base is not a directory"));
         }
-        if !resolved.starts_with(&self.root) {
+        if self.allowed_root_for_path(&resolved).is_none() {
             return Err(WorkspaceError::path_outside_workspace());
         }
         Ok(resolved)
     }
 
     fn ensure_inside_workspace(&self, candidate: &Path, resolved: &Path) -> WorkspaceResult<()> {
-        if !resolved.starts_with(&self.root) {
+        if self.allowed_root_for_path(resolved).is_none() {
             if candidate.is_symlink() {
                 return Err(WorkspaceError::symlink_escape());
             }
@@ -328,9 +443,19 @@ impl Workspace {
 
     pub fn reject_write_symlink(&self, raw_path: &str) -> WorkspaceResult<()> {
         self.reject_unsafe_text(raw_path)?;
-        let candidate = self
-            .root
-            .join(raw_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let (candidate, project) = self.candidate_from_raw(&self.root, raw_path)?;
+        if project.as_ref().is_some_and(LinkedProject::read_only)
+            || self
+                .linked_project_containing_path(&candidate)
+                .is_some_and(|value| value.read_only())
+        {
+            return Err(WorkspaceError::Tool {
+                code: "READ_ONLY_LINKED_PROJECT",
+                message: format!("Linked project is read-only: {raw_path}"),
+                category: "permission",
+                retryable: false,
+            });
+        }
         if candidate.is_symlink() {
             return Err(WorkspaceError::symlink_escape());
         }
@@ -338,9 +463,34 @@ impl Workspace {
     }
 
     pub fn reject_protected_write_path(&self, raw_path: &str) -> WorkspaceResult<()> {
-        let normalized = raw_path.replace('\\', "/");
-        let first = normalized.split('/').next().unwrap_or("");
-        if matches!(first, ".git" | ".github") {
+        self.reject_unsafe_text(raw_path)?;
+        let (candidate, project) = self.candidate_from_raw(&self.root, raw_path)?;
+        if project.as_ref().is_some_and(LinkedProject::read_only)
+            || self
+                .linked_project_containing_path(&candidate)
+                .is_some_and(|value| value.read_only())
+        {
+            return Err(WorkspaceError::Tool {
+                code: "READ_ONLY_LINKED_PROJECT",
+                message: format!("Linked project is read-only: {raw_path}"),
+                category: "permission",
+                retryable: false,
+            });
+        }
+        let root = self
+            .allowed_root_for_path(&candidate)
+            .ok_or_else(WorkspaceError::path_outside_workspace)?;
+        let relative = candidate
+            .strip_prefix(root)
+            .map_err(|_| WorkspaceError::path_outside_workspace())?;
+        let first = relative.components().find_map(|part| match part {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        });
+        if first
+            .as_deref()
+            .is_some_and(|value| matches!(value, ".git" | ".github" | ".mcp-paths"))
+        {
             return Err(WorkspaceError::Tool {
                 code: "PROTECTED_PATH",
                 message: format!("禁止普通文件操作写入受保护目录: {raw_path}"),
@@ -364,9 +514,11 @@ impl Workspace {
         include_hidden: bool,
         include_ignored: bool,
     ) -> bool {
-        let Ok(scan_path) = path.strip_prefix(&self.root) else {
-            // Workspace 外的读取路径不套用 Workspace 内部的隐藏/构建目录过滤，
-            // 否则 Windows 临时目录等路径会被误判为隐藏目录而无法读取。
+        let Some(scan_root) = self.allowed_root_for_path(path) else {
+            // Explicit external read paths keep the prior behavior.
+            return false;
+        };
+        let Ok(scan_path) = path.strip_prefix(scan_root) else {
             return false;
         };
         let parts: Vec<String> = scan_path
@@ -395,12 +547,87 @@ impl Workspace {
 
     pub fn is_safe_existing_path(&self, path: &Path) -> bool {
         path.canonicalize()
-            .map(|p| p.starts_with(&self.root))
+            .map(|resolved| self.allowed_root_for_path(&resolved).is_some())
             .unwrap_or(false)
+    }
+
+    pub fn is_read_only_path(&self, path: &Path) -> bool {
+        path.canonicalize()
+            .ok()
+            .and_then(|resolved| self.linked_project_containing_path(&resolved))
+            .is_some_and(|project| project.read_only())
     }
 
     pub fn is_safe_read_path(&self, path: &Path) -> bool {
         path.exists() || path.is_symlink()
+    }
+}
+
+#[cfg(test)]
+mod linked_root_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn add_mapping(workspace: &Path, alias: &str, external: &Path, mode: &str) {
+        let mappings = workspace.join(".mcp-paths");
+        fs::create_dir_all(&mappings).expect("mappings");
+        fs::write(
+            mappings.join(format!("{alias}.txt")),
+            format!(
+                "name={alias}\npath={}\nmode={mode}\n",
+                external.display()
+            ),
+        )
+        .expect("mapping");
+    }
+
+    #[test]
+    fn linked_root_accepts_alias_and_approved_absolute_write_targets() {
+        let workspace = tempdir().expect("workspace");
+        let external = tempdir().expect("external");
+        let outside = tempdir().expect("outside");
+        add_mapping(workspace.path(), "coc-macro", external.path(), "read-write");
+        fs::write(external.path().join("existing.txt"), "ok").expect("existing");
+
+        let ws = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        assert!(ws.resolve_existing("@coc-macro/existing.txt").is_ok());
+        assert!(ws
+            .resolve_for_write(
+                external
+                    .path()
+                    .join("new.txt")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+            .is_ok());
+
+        let denied = ws
+            .resolve_for_write(
+                outside
+                    .path()
+                    .join("blocked.txt")
+                    .to_string_lossy()
+                    .as_ref(),
+            )
+            .expect_err("outside path must be blocked");
+        assert_eq!(denied.to_error_value()["code"], "PATH_OUTSIDE_WORKSPACE");
+    }
+
+    #[test]
+    fn read_only_linked_root_rejects_writes() {
+        let workspace = tempdir().expect("workspace");
+        let external = tempdir().expect("external");
+        add_mapping(workspace.path(), "reference", external.path(), "read-only");
+
+        let ws = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
+        let denied = ws
+            .resolve_for_write("@reference/new.txt")
+            .expect_err("read-only mapping must reject writes");
+        assert_eq!(
+            denied.to_error_value()["code"],
+            "READ_ONLY_LINKED_PROJECT"
+        );
     }
 }
 

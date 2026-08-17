@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::harness::Harness;
 use crate::tools::policy::PolicySettings;
 use crate::tools::session::SessionStore;
-use crate::tools::workspace::{relative_display, Workspace};
+use crate::tools::workspace::Workspace;
 use crate::workspace::AuthConfig;
 
 pub struct ToolContext {
@@ -96,7 +96,7 @@ impl ToolContext {
 
     pub fn default_cwd_display(&self) -> String {
         let cwd = self.default_cwd.lock().expect("cwd lock");
-        relative_display(self.workspace.root(), &cwd)
+        self.workspace.display_path(&cwd)
     }
 
     pub fn set_default_cwd(&self, path: PathBuf) {

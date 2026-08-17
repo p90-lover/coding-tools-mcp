@@ -8,7 +8,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
-use crate::tools::workspace::{relative_display, tool_ok, Workspace, WorkspaceError};
+use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 /// Default per-file cap for `search_text` to avoid loading multi-GB assets.
 const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -180,7 +180,7 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
         if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
             continue;
         }
-        let rel = relative_display(ws.root(), p);
+        let rel = ws.display_path(p);
         if !patterns.iter().any(|pat| glob_match(pat, &rel)) {
             continue;
         }
@@ -258,7 +258,7 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
         if ws.is_ignored_path(p, false, false) {
             return true;
         }
-        let rel = relative_display(ws.root(), p);
+        let rel = ws.display_path(p);
         if !passes_glob_filters(&rel, &include_globs, &exclude_globs) {
             return true;
         }

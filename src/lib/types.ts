@@ -61,6 +61,13 @@ export interface WorkspaceProfile {
   actions?: ActionsConfig;
 }
 
+export interface LinkedProject {
+  alias: string;
+  name: string;
+  path: string;
+  mode: "read-write" | "read-only" | string;
+}
+
 export interface RuntimeStatus {
   state: RuntimeState;
   pid: number | null;

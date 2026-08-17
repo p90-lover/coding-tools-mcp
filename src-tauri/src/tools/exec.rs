@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::tools::context::ToolContext;
 use crate::tools::session::{ExecSession, SessionStore};
-use crate::tools::workspace::{tool_ok, WorkspaceError};
+use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let cmd = args
@@ -233,7 +233,7 @@ async fn run_command(
     tty: bool,
     stdin_text: &str,
 ) -> Result<Value, WorkspaceError> {
-    let (program, args) = parse_and_resolve(cmd, cwd, ctx.workspace.root(), &ctx.policy)?;
+    let (program, args) = parse_and_resolve(cmd, cwd, &ctx.workspace, &ctx.policy)?;
     let start = Instant::now();
 
     let mut command = command_for_program(&program, &args);
@@ -524,7 +524,7 @@ fn merge_exec_result(
 fn parse_and_resolve(
     cmd: &str,
     cwd: &Path,
-    workspace_root: &Path,
+    workspace: &Workspace,
     policy: &crate::tools::policy::PolicySettings,
 ) -> Result<(String, Vec<String>), WorkspaceError> {
     let parts = shell_words::split(cmd)
@@ -533,14 +533,14 @@ fn parse_and_resolve(
         return Err(WorkspaceError::invalid_argument("Empty command"));
     }
 
-    let program = resolve_program(&parts[0], cwd, workspace_root, policy)?;
+    let program = resolve_program(&parts[0], cwd, workspace, policy)?;
     Ok((program, parts[1..].to_vec()))
 }
 
 fn resolve_program(
     raw: &str,
     cwd: &Path,
-    workspace_root: &Path,
+    workspace: &Workspace,
     policy: &crate::tools::policy::PolicySettings,
 ) -> Result<String, WorkspaceError> {
     let trimmed = raw.trim();
@@ -561,19 +561,10 @@ fn resolve_program(
             category: "runtime",
             retryable: false,
         })?;
-        let canonical_workspace =
-            workspace_root
-                .canonicalize()
-                .map_err(|_| WorkspaceError::Tool {
-                    code: "COMMAND_REJECTED",
-                    message: "Workspace root is unavailable".into(),
-                    category: "runtime",
-                    retryable: true,
-                })?;
-        if !resolved.starts_with(&canonical_workspace) {
+        if !workspace.is_safe_existing_path(&resolved) {
             return Err(WorkspaceError::Tool {
                 code: "EXECUTABLE_OUTSIDE_WORKSPACE",
-                message: format!("Workspace 外可执行文件被拒绝: {trimmed}"),
+                message: format!("Workspace/linked project 外可执行文件被拒绝: {trimmed}"),
                 category: "security",
                 retryable: false,
             });
@@ -666,10 +657,12 @@ mod tests {
         let entry = workspace.path().join("scripts").join("anything.cmd");
         std::fs::create_dir_all(entry.parent().expect("parent")).expect("scripts");
         std::fs::write(&entry, "echo test").expect("entry");
+        let workspace_model =
+            Workspace::new(workspace.path().to_path_buf()).expect("workspace model");
         let resolved = resolve_program(
             "scripts/anything.cmd",
             workspace.path(),
-            workspace.path(),
+            &workspace_model,
             &crate::tools::policy::PolicySettings::default(),
         )
         .expect("workspace entry resolves");

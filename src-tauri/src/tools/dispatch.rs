@@ -391,6 +391,7 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol_version": "2025-06-18",
         "workspace": ctx.workspace.root_display(),
+        "linked_projects": ctx.workspace.linked_projects(),
         "permission_mode": ctx.permission_mode,
         "default_cwd": ctx.default_cwd_display(),
         "network_allowed": ctx.policy.network_allowed(),
@@ -406,6 +407,7 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
 pub fn check_exec_environment(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
     Ok(tool_ok(json!({
         "workspace": ctx.workspace.root_display(),
+        "linked_projects": ctx.workspace.linked_projects(),
         "permission_mode": ctx.permission_mode,
         "network_allowed": ctx.policy.network_allowed(),
         "landlock_enabled": false,
@@ -434,6 +436,7 @@ pub fn check_exec_environment(ctx: &ToolContext) -> Result<Value, WorkspaceError
 pub fn get_default_cwd(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
     Ok(tool_ok(json!({
         "workspace": ctx.workspace.root_display(),
+        "linked_projects": ctx.workspace.linked_projects(),
         "default_cwd": ctx.default_cwd_display(),
         "resolved_cwd": ctx.default_cwd_path().display().to_string()
     })))
