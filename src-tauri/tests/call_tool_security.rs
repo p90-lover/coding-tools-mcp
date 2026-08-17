@@ -335,17 +335,42 @@ fn apply_patch_allows_deleting_a_normal_file() {
 }
 
 #[test]
-fn apply_patch_rejects_absolute_path_target() {
-    let fx = tiny_js_fixture();
+fn apply_patch_rejects_unapproved_absolute_path_target() {
+    let fx = malicious_fixture();
     let ctx = ctx_for(&fx.root);
-    let out = invoke(
-        &ctx,
-        "apply_patch",
-        json!({
-            "patch": "--- a/C:/outside-secret.txt\n+++ b/C:/outside-secret.txt\n@@\n-TOP_SECRET_DO_NOT_READ\n+unsafe\n"
-        }),
+    let target = fx.outside_secret.to_string_lossy().replace('\\', "/");
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {target}\n@@\n-TOP_SECRET_DO_NOT_READ\n+unsafe\n*** End Patch\n"
     );
+    let out = invoke(&ctx, "apply_patch", json!({"patch": patch}));
     assert_security_or_policy_err(&out);
+}
+
+#[test]
+fn apply_patch_allows_approved_linked_absolute_path_target() {
+    let fx = malicious_fixture();
+    let linked_root = fx.outside_secret.parent().expect("linked root");
+    let mappings = fx.root.join(".mcp-paths");
+    fs::create_dir_all(&mappings).expect("create mappings");
+    fs::write(
+        mappings.join("outside.txt"),
+        format!(
+            "name=Outside\npath={}\nmode=read-write\n",
+            linked_root.display()
+        ),
+    )
+    .expect("write mapping");
+
+    let ctx = ctx_for(&fx.root);
+    let target = fx.outside_secret.to_string_lossy().replace('\\', "/");
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {target}\n@@\n-TOP_SECRET_DO_NOT_READ\n+linked-safe\n*** End Patch\n"
+    );
+    let out = invoke(&ctx, "apply_patch", json!({"patch": patch}));
+    assert_ok(&out);
+    assert!(fs::read_to_string(&fx.outside_secret)
+        .expect("read linked file")
+        .contains("linked-safe"));
 }
 
 #[test]
