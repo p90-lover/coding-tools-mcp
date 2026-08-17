@@ -1,0 +1,146 @@
+name: Sync xyTom upstream snapshot
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - integration/xyTom-v0.3.0
+    paths:
+      - .github/workflows/sync-xyTom-upstream.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-xytom-upstream-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync-upstream:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPOSITORY: xyTom/coding-tools-mcp
+      UPSTREAM_SHA: 66b3f194a0252ec1903a84c4e1be4184eb9f4c47
+      SNAPSHOT_ROOT: old
+      TEMP_ROOT: aiTemp/upstream-sync
+      TRASH_ROOT: old/Trash/upstream-0.1.7-to-0.3.0
+    steps:
+      - name: Check out integration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch pinned upstream source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TEMP_ROOT"
+          git clone --filter=blob:none --no-checkout "https://github.com/${UPSTREAM_REPOSITORY}.git" "$TEMP_ROOT/source"
+          git -C "$TEMP_ROOT/source" checkout --detach "$UPSTREAM_SHA"
+          test "$(git -C "$TEMP_ROOT/source" rev-parse HEAD)" = "$UPSTREAM_SHA"
+
+      - name: Update old/ without deleting previous files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import os
+          import shutil
+          from pathlib import Path
+
+          snapshot = Path(os.environ["SNAPSHOT_ROOT"])
+          source = Path(os.environ["TEMP_ROOT"]) / "source"
+          trash = Path(os.environ["TRASH_ROOT"])
+          upstream_sha = os.environ["UPSTREAM_SHA"]
+
+          snapshot.mkdir(parents=True, exist_ok=True)
+          trash.mkdir(parents=True, exist_ok=True)
+
+          preserved_snapshot_paths = {
+              Path("UPSTREAM_SNAPSHOT.md"),
+          }
+
+          def tracked_files(root: Path, *, skip_git: bool = False) -> dict[Path, Path]:
+              result: dict[Path, Path] = {}
+              for path in root.rglob("*"):
+                  if not path.is_file() and not path.is_symlink():
+                      continue
+                  rel = path.relative_to(root)
+                  if skip_git and rel.parts and rel.parts[0] == ".git":
+                      continue
+                  if root == snapshot and rel.parts and rel.parts[0] == "Trash":
+                      continue
+                  if root == snapshot and rel in preserved_snapshot_paths:
+                      continue
+                  result[rel] = path
+              return result
+
+          def digest(path: Path) -> str:
+              if path.is_symlink():
+                  return "symlink:" + os.readlink(path)
+              value = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      value.update(chunk)
+              return value.hexdigest()
+
+          upstream_files = tracked_files(source, skip_git=True)
+          existing_files = tracked_files(snapshot)
+
+          for rel, existing in sorted(existing_files.items()):
+              upstream = upstream_files.get(rel)
+              category = None
+              if upstream is None:
+                  category = "removed"
+              elif digest(existing) != digest(upstream):
+                  category = "modified"
+              if category is None:
+                  continue
+              destination = trash / category / rel
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              if destination.exists() or destination.is_symlink():
+                  suffix = digest(existing).replace(":", "-")[:12]
+                  destination = destination.with_name(f"{destination.name}.{suffix}")
+              shutil.move(str(existing), str(destination))
+
+          for rel, upstream in sorted(upstream_files.items()):
+              destination = snapshot / rel
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              if upstream.is_symlink():
+                  if destination.exists() or destination.is_symlink():
+                      archived = trash / "replaced-links" / rel
+                      archived.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.move(str(destination), str(archived))
+                  destination.symlink_to(os.readlink(upstream))
+              else:
+                  shutil.copy2(upstream, destination)
+
+          marker = snapshot / "UPSTREAM_SNAPSHOT.md"
+          marker.write_text(
+              "# Upstream source snapshot\n\n"
+              f"- Repository: `{os.environ['UPSTREAM_REPOSITORY']}`\n"
+              f"- Commit: `{upstream_sha}`\n"
+              "- Release line: `0.3.0`\n"
+              "- Synced by: `.github/workflows/sync-xyTom-upstream.yml`\n"
+              "- Preservation policy: replaced and upstream-removed files are moved under `old/Trash/`; nothing is deleted.\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Commit synchronized snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add old
+          if git diff --cached --quiet; then
+            echo "Snapshot already matches ${UPSTREAM_SHA}."
+            exit 0
+          fi
+          git commit -m "chore: sync xyTom upstream 0.3.0 snapshot [skip ci]"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
