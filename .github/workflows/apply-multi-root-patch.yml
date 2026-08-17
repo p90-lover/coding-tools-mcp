@@ -77,6 +77,7 @@ jobs:
             src-tauri/src/tools/policy.rs \
             src-tauri/src/tools/exec.rs \
             src-tauri/src/tools/dispatch.rs \
+            src-tauri/tests/call_tool_security.rs \
             src/lib/types.ts \
             src/lib/api/workspaces.ts \
             src/lib/stores/app.ts \
