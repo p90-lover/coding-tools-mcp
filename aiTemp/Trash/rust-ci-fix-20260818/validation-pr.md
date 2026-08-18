@@ -1,3 +1,3 @@
 # Rust port validation
 
-The reviewed Rust source is now committed on this branch. This final repository-authored synchronization reruns the complete Rust tests and Clippy suites on Linux, Windows, and macOS against the committed implementation itself. No files are deleted.
+The reviewed Rust source is committed on this branch. The final matrix now checks formatting and runs the complete Rust tests and Clippy directly on Linux, Windows, and macOS, without applying any temporary patch. No files are deleted.
