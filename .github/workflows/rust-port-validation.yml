@@ -7,7 +7,7 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: rust-port-validation-${{ github.event.pull_request.number }}
@@ -15,7 +15,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  TIMEOUT_PATCHER_MANIFEST: aiTemp/Trash/rust-ci-fix-20260818/timeout-patcher/Cargo.toml
 
 jobs:
   rust-linux:
@@ -51,13 +50,8 @@ jobs:
           workspaces: src-tauri
           shared-key: rust-port-linux
 
-      - name: Apply focused Rust test fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo run --quiet --manifest-path "$TIMEOUT_PATCHER_MANIFEST"
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all
-          git diff --check
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Run Rust tests
         working-directory: src-tauri
@@ -87,13 +81,8 @@ jobs:
           workspaces: src-tauri
           shared-key: rust-port-windows
 
-      - name: Apply focused Rust test fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo run --quiet --manifest-path "$TIMEOUT_PATCHER_MANIFEST"
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all
-          git diff --check
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Run Rust tests
         working-directory: src-tauri
@@ -123,13 +112,8 @@ jobs:
           workspaces: src-tauri
           shared-key: rust-port-macos
 
-      - name: Apply focused Rust test fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo run --quiet --manifest-path "$TIMEOUT_PATCHER_MANIFEST"
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all
-          git diff --check
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Run Rust tests
         working-directory: src-tauri
@@ -138,41 +122,3 @@ jobs:
       - name: Run Clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
-
-  commit-rust-source:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'validation/rust-port-')
-    needs: [rust-linux, rust-windows, rust-macos]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-timeout-patcher
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref }}
-          fetch-depth: 0
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Commit the verified focused Rust test fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo run --quiet --manifest-path "$TIMEOUT_PATCHER_MANIFEST"
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- src-tauri/src/tools/exec.rs
-          if git diff --cached --quiet; then
-            echo "Focused Rust test fix is already committed."
-            exit 0
-          fi
-          if git diff --cached --name-status | grep -q '^D'; then
-            echo "Refusing to commit a deletion."
-            exit 1
-          fi
-          git commit -m "test(windows): allow PowerShell cold startup"
-          git push origin HEAD:"${GITHUB_HEAD_REF}"
