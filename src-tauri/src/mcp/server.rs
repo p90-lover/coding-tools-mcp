@@ -270,8 +270,7 @@ mod tests {
     fn normal_tool_call_auto_bootstraps_and_reuses_the_openai_session() {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let harness = tempfile::tempdir().expect("harness tempdir");
-        fs::write(workspace.path().join("sample.txt"), "automatic history")
-            .expect("sample file");
+        fs::write(workspace.path().join("sample.txt"), "automatic history").expect("sample file");
         let state = Arc::new(
             ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
                 .expect("tool context"),

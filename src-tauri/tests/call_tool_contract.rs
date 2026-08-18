@@ -27,7 +27,10 @@ fn server_info_returns_workspace_and_tools() {
         payload["upstream_compatibility"]["canonical_command_handle"],
         "command_id"
     );
-    assert_eq!(payload["output_retention"]["completed_command_seconds"], 300);
+    assert_eq!(
+        payload["output_retention"]["completed_command_seconds"],
+        300
+    );
 }
 
 #[test]
@@ -337,7 +340,10 @@ fn completed_command_output_uses_command_id_and_keeps_legacy_aliases() {
         .as_str()
         .unwrap_or("")
         .contains("retained-output"));
-    assert!(canonical["warnings"].as_array().expect("warnings").is_empty());
+    assert!(canonical["warnings"]
+        .as_array()
+        .expect("warnings")
+        .is_empty());
 
     let legacy_ref = payload["legacy_output_refs"]["stdout"]
         .as_str()

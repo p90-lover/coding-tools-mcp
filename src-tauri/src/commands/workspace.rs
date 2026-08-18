@@ -30,7 +30,9 @@ pub fn list_linked_projects(
             .cloned()
             .ok_or_else(|| AppError::Message(format!("workspace not found: {id}")))
     })?;
-    Ok(list_linked_projects_for_root(PathBuf::from(profile.path).as_path()))
+    Ok(list_linked_projects_for_root(
+        PathBuf::from(profile.path).as_path(),
+    ))
 }
 
 #[tauri::command]

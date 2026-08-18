@@ -9,9 +9,9 @@ use std::collections::HashSet;
 use super::TunnelServiceKind;
 
 pub(crate) use client::{
-    acquire_frpc_operation_lock, clear_managed_frpc_pid, frpc_log_name, frpc_reconnect_loop_detected,
-    managed_frpc_config_matches, probe_local_mcp_ok, probe_public_mcp_endpoint,
-    read_frpc_log_tail, stop_recorded_frpc_instance, PublicMcpProbe,
+    acquire_frpc_operation_lock, clear_managed_frpc_pid, frpc_log_name,
+    frpc_reconnect_loop_detected, managed_frpc_config_matches, probe_local_mcp_ok,
+    probe_public_mcp_endpoint, read_frpc_log_tail, stop_recorded_frpc_instance, PublicMcpProbe,
 };
 pub(crate) use client::{cached_frpc_path, download_frpc_to_cache};
 pub use client::{resolve_frpc, spawn_frpc};
