@@ -177,6 +177,45 @@ fn bytes_to_mb(bytes: u64) -> f64 {
         )?;
         replace_exact(
             text,
+            r#"        if let Some(project) = self.linked_project_containing_path(path) {
+            let root = project.root_path();
+            let suffix = path
+                .strip_prefix(&root)
+                .map(|value| value.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();"#,
+            r#"        if let Some(project) = self.linked_project_containing_path(path) {
+            let root = project
+                .root_path()
+                .canonicalize()
+                .unwrap_or_else(|_| project.root_path());
+            let normalized = Self::normalize_path_from_existing_ancestor(path);
+            let suffix = normalized
+                .strip_prefix(&root)
+                .map(|value| value.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();"#,
+            1,
+            "display linked paths from canonical roots",
+        )?;
+        replace_exact(
+            text,
+            r#"        let root = self
+            .allowed_root_for_path(&candidate)
+            .ok_or_else(WorkspaceError::path_outside_workspace)?;
+        let relative = candidate
+            .strip_prefix(root)
+            .map_err(|_| WorkspaceError::path_outside_workspace())?;"#,
+            r#"        let candidate = Self::normalize_path_from_existing_ancestor(&candidate);
+        let root = self
+            .allowed_root_for_path(&candidate)
+            .ok_or_else(WorkspaceError::path_outside_workspace)?;
+        let relative = candidate
+            .strip_prefix(root)
+            .map_err(|_| WorkspaceError::path_outside_workspace())?;"#,
+            1,
+            "normalize protected-write candidates before root stripping",
+        )?;
+        replace_exact(
+            text,
             r#"#[cfg(test)]
 mod linked_root_tests {"#,
             r#"#[cfg(test)]
@@ -211,7 +250,10 @@ mod linked_root_tests {"#,
                 .canonicalize()
                 .expect("canonical external")
                 .join("new.txt")
-        );"#,
+        );
+        assert_eq!(resolved.display, "@coc-macro/new.txt");
+        ws.reject_protected_write_path(&resolved.display)
+            .expect("linked display passes protected-path preflight");"#,
             1,
             "strengthen cross-platform linked-root regression coverage",
         )
