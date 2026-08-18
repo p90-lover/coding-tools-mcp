@@ -16,6 +16,22 @@ on:
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/integration-validation.yml"
+      - "aiTemp/Trash/integration-matrix-validation/**"
+  pull_request:
+    branches:
+      - integration/xyTom-v0.3.0
+    paths:
+      - "src-tauri/**"
+      - "src/**"
+      - "tests/**"
+      - "old/**"
+      - "README.md"
+      - "README.en.md"
+      - "AGENTS.md"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/integration-validation.yml"
+      - "aiTemp/Trash/integration-matrix-validation/**"
 
 permissions:
   contents: read
