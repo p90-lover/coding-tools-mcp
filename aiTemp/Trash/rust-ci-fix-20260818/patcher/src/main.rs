@@ -69,6 +69,23 @@ fn bytes_to_mb(bytes: u64) -> f64 {
         )?;
         replace_exact(
             text,
+            r#"        return Ok(WebviewMemorySample {
+            main_mb: (bytes_to_mb(sample.main_bytes) * 10.0).round() / 10.0,
+            webview_mb: (bytes_to_mb(sample.webview_bytes) * 10.0).round() / 10.0,
+            webview_process_count: sample.webview_process_count,
+            supported: true,
+        });"#,
+            r#"        Ok(WebviewMemorySample {
+            main_mb: (bytes_to_mb(sample.main_bytes) * 10.0).round() / 10.0,
+            webview_mb: (bytes_to_mb(sample.webview_bytes) * 10.0).round() / 10.0,
+            webview_process_count: sample.webview_process_count,
+            supported: true,
+        })"#,
+            1,
+            "use the Windows memory sample as the tail expression",
+        )?;
+        replace_exact(
+            text,
             r#"    let outer_position = window
         .outer_position()
         .ok()
@@ -81,6 +98,31 @@ fn bytes_to_mb(bytes: u64) -> f64 {
     let outer_size = window.outer_size().ok().filter(is_sane_size);"#,
             1,
             "remove redundant UI-memory closures",
+        )
+    })?;
+
+    patch_file("src-tauri/src/platform/windows/process.rs", |text| {
+        replace_exact(
+            text,
+            r#"    let mut sample = ProcessTreeMemory::default();
+    sample.main_bytes = working_set_bytes(root).unwrap_or(0);"#,
+            r#"    let mut sample = ProcessTreeMemory {
+        main_bytes: working_set_bytes(root).unwrap_or(0),
+        ..Default::default()
+    };"#,
+            1,
+            "initialize Windows process-tree memory without reassignment",
+        )?;
+        replace_exact(
+            text,
+            r#"        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        counters.cb = mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;"#,
+            r#"        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ..Default::default()
+        };"#,
+            1,
+            "initialize Windows memory counters without reassignment",
         )
     })?;
 
