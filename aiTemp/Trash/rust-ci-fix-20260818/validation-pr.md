@@ -1,3 +1,3 @@
 # Rust port validation
 
-This temporary marker opens the same-repository validation pull request. The workflow runs the idempotent Rust patcher in each operating-system job, executes the complete Rust test and Clippy suites, then commits the verified Rust source without deleting files.
+The reviewed Rust source is now committed on this branch. This final repository-authored synchronization reruns the complete Rust tests and Clippy suites on Linux, Windows, and macOS against the committed implementation itself. No files are deleted.
