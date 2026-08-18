@@ -193,8 +193,7 @@ async fn restart_running_services_async(
             })
             .unwrap_or(false);
     if should_restart_mcp {
-        if let Err(error) = crate::commands::runtime::restart_mcp_by_id(state, &profile.id).await
-        {
+        if let Err(error) = crate::commands::runtime::restart_mcp_by_id(state, &profile.id).await {
             eprintln!(
                 "MCP restart after secret change failed for {}: {error}",
                 profile.id

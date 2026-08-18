@@ -10,9 +10,7 @@ use tokio::process::Command;
 use std::sync::Arc;
 
 use crate::tools::context::ToolContext;
-use crate::tools::session::{
-    ExecSession, SessionStore, COMPLETED_COMMAND_RETENTION_SECONDS,
-};
+use crate::tools::session::{ExecSession, SessionStore, COMPLETED_COMMAND_RETENTION_SECONDS};
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -366,11 +364,7 @@ fn spawn_timeout_monitor(
     });
 }
 
-fn schedule_session_eviction(
-    sessions: Arc<SessionStore>,
-    command_id: String,
-    retention: Duration,
-) {
+fn schedule_session_eviction(sessions: Arc<SessionStore>, command_id: String, retention: Duration) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(retention).await;
         sessions.remove(&command_id);
@@ -466,17 +460,17 @@ fn execution_failure_result(error: &WorkspaceError, command: &str, cwd: &Path) -
         .or_else(|| details.get("session"))
         .cloned()
         .unwrap_or_else(|| {
-        json!({
-            "status": "spawn_failed",
-            "termination_reason": "spawn_failed",
-            "recoverable": error_value["retryable"].as_bool().unwrap_or(false),
-            "exit_code": Value::Null,
-            "stdout": "",
-            "stderr": "",
-            "stdout_truncated": false,
-            "stderr_truncated": false
-        })
-    });
+            json!({
+                "status": "spawn_failed",
+                "termination_reason": "spawn_failed",
+                "recoverable": error_value["retryable"].as_bool().unwrap_or(false),
+                "exit_code": Value::Null,
+                "stdout": "",
+                "stderr": "",
+                "stdout_truncated": false,
+                "stderr_truncated": false
+            })
+        });
     if let Some(object) = result.as_object_mut() {
         object.insert("command".into(), json!(command));
         object.insert("resolved_cwd".into(), json!(cwd.display().to_string()));
@@ -729,7 +723,8 @@ mod tests {
         // Ensure console-subsystem programs (python.exe) also go through the
         // hidden-window flag path; Command does not expose creation_flags for
         // direct assertion, so this only verifies construction still succeeds.
-        let python = command_for_program("C:/Python312/python.exe", &["-c".into(), "print(1)".into()]);
+        let python =
+            command_for_program("C:/Python312/python.exe", &["-c".into(), "print(1)".into()]);
         assert_eq!(
             python.as_std().get_program().to_string_lossy(),
             "C:/Python312/python.exe"
@@ -770,7 +765,8 @@ mod tests {
             let output = call_tool(
                 &ctx,
                 "exec_command",
-                &json!({ "cmd": command, "timeout_ms": 10_000, "yield_time_ms": 10_000 }),
+                // Cold PowerShell startup on hosted Windows runners can exceed ten seconds.
+                &json!({ "cmd": command, "timeout_ms": 30_000, "yield_time_ms": 30_000 }),
             );
             assert_eq!(output["ok"], true, "{command}: {output}");
             assert_eq!(output["command_ok"], true, "{command}: {output}");

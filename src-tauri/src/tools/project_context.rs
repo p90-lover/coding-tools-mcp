@@ -93,7 +93,11 @@ struct InstructionScope {
     label: String,
 }
 
-fn instruction_scope(ctx: &ToolContext, raw_hint: Option<&str>, candidate: &Path) -> Option<InstructionScope> {
+fn instruction_scope(
+    ctx: &ToolContext,
+    raw_hint: Option<&str>,
+    candidate: &Path,
+) -> Option<InstructionScope> {
     if let Some(raw) = raw_hint {
         let normalized = raw.replace('\\', "/");
         if let Some(alias_path) = normalized.strip_prefix('@') {
@@ -133,10 +137,13 @@ fn instruction_scope(ctx: &ToolContext, raw_hint: Option<&str>, candidate: &Path
         })
         .collect::<Vec<_>>();
     matches.sort_by_key(|(root, _)| std::cmp::Reverse(root.components().count()));
-    matches.into_iter().next().map(|(root, alias)| InstructionScope {
-        root,
-        label: format!("@{alias}"),
-    })
+    matches
+        .into_iter()
+        .next()
+        .map(|(root, alias)| InstructionScope {
+            root,
+            label: format!("@{alias}"),
+        })
 }
 
 fn path_hint(tool_name: &str, args: &Value) -> Option<String> {
@@ -148,22 +155,21 @@ fn path_hint(tool_name: &str, args: &Value) -> Option<String> {
             .map(str::to_string)
     };
     let first_array_string = |name: &str| {
-        args.get(name)
-            .and_then(Value::as_array)
-            .and_then(|items| {
-                items.iter().find_map(|item| {
-                    item.as_str()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_string)
-                })
+        args.get(name).and_then(Value::as_array).and_then(|items| {
+            items.iter().find_map(|item| {
+                item.as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
             })
+        })
     };
 
     match tool_name {
-        "read_file" | "list_dir" | "list_files" | "search_text" | "grep_text"
-        | "grep" | "git_status" | "git_log" | "git_blame" | "view_image"
-        | "set_default_cwd" => string("path"),
+        "read_file" | "list_dir" | "list_files" | "search_text" | "grep_text" | "grep"
+        | "git_status" | "git_log" | "git_blame" | "view_image" | "set_default_cwd" => {
+            string("path")
+        }
         "exec_command" => string("workdir").or_else(|| string("cwd")),
         "git_diff" => string("path").or_else(|| first_array_string("paths")),
         "git_show" => string("path").or_else(|| first_array_string("paths")),
@@ -202,10 +208,7 @@ fn candidate_path(ctx: &ToolContext, raw_hint: Option<&str>) -> PathBuf {
     };
     let normalized = raw.replace('\\', "/");
     if let Some(alias_path) = normalized.strip_prefix('@') {
-        let (alias, rest) = alias_path
-            .split_once('/')
-            .map(|(alias, rest)| (alias, rest))
-            .unwrap_or((alias_path, ""));
+        let (alias, rest) = alias_path.split_once('/').unwrap_or((alias_path, ""));
         if let Some(project) = ctx
             .workspace
             .linked_projects()
@@ -281,7 +284,9 @@ fn instruction_files(directory: &Path) -> Vec<PathBuf> {
                 return None;
             }
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-            AGENT_FILE_NAMES.contains(&name.as_str()).then_some(entry.path())
+            AGENT_FILE_NAMES
+                .contains(&name.as_str())
+                .then_some(entry.path())
         })
         .collect::<Vec<_>>();
     paths.sort_by_key(|path| {
@@ -308,12 +313,21 @@ struct ReadPrefix {
 }
 
 fn read_utf8_prefix(path: &Path, budget: usize) -> Result<ReadPrefix, String> {
-    let file = File::open(path)
-        .map_err(|error| format!("Could not read project instruction file {}: {error}", path.display()))?;
+    let file = File::open(path).map_err(|error| {
+        format!(
+            "Could not read project instruction file {}: {error}",
+            path.display()
+        )
+    })?;
     let mut bytes = Vec::with_capacity(budget.saturating_add(1));
     file.take(budget.saturating_add(1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read project instruction file {}: {error}", path.display()))?;
+        .map_err(|error| {
+            format!(
+                "Could not read project instruction file {}: {error}",
+                path.display()
+            )
+        })?;
 
     let truncated = bytes.len() > budget;
     bytes.truncate(budget);
@@ -367,10 +381,10 @@ mod tests {
         fs::write(workspace.path().join("AGENTS.md"), "root rule").expect("root instructions");
         fs::write(workspace.path().join("src/AgEnT.Md"), "nested rule")
             .expect("nested instructions");
-        fs::write(workspace.path().join("src/nested/code.rs"), "fn main() {}")
-            .expect("source");
-        let ctx = ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
-            .expect("context");
+        fs::write(workspace.path().join("src/nested/code.rs"), "fn main() {}").expect("source");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
 
         let context = for_tool(&ctx, "read_file", &json!({"path": "src/nested/code.rs"}));
         assert_eq!(context["scope"], "workspace");
@@ -388,14 +402,19 @@ mod tests {
         fs::create_dir_all(workspace.path().join(".mcp-paths")).expect("mappings");
         fs::write(
             workspace.path().join(".mcp-paths/linked.txt"),
-            format!("name=Linked\npath={}\nmode=read-write\n", linked.path().display()),
+            format!(
+                "name=Linked\npath={}\nmode=read-write\n",
+                linked.path().display()
+            ),
         )
         .expect("mapping");
-        fs::write(workspace.path().join("AGENTS.md"), "workspace rule").expect("workspace instructions");
+        fs::write(workspace.path().join("AGENTS.md"), "workspace rule")
+            .expect("workspace instructions");
         fs::write(linked.path().join("CLAUDE.md"), "linked rule").expect("linked instructions");
         fs::write(linked.path().join("code.py"), "print('ok')").expect("linked source");
-        let ctx = ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
-            .expect("context");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
 
         let context = for_tool(&ctx, "read_file", &json!({"path": "@linked/code.py"}));
         assert_eq!(context["scope"], "@linked");
@@ -410,8 +429,9 @@ mod tests {
         let harness = tempdir().expect("harness");
         fs::write(workspace.path().join("AGENTS.md"), "workspace-only rule")
             .expect("workspace instructions");
-        let ctx = ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
-            .expect("context");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
 
         let context = for_tool(&ctx, "read_file", &json!({"path": "@missing/code.py"}));
         assert_eq!(context["scope"], "external");
@@ -426,8 +446,9 @@ mod tests {
         fs::write(external.path().join("AGENTS.md"), "external secret rule")
             .expect("external instructions");
         fs::write(external.path().join("file.txt"), "value").expect("external file");
-        let ctx = ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
-            .expect("context");
+        let ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .expect("context");
 
         let context = for_tool(
             &ctx,

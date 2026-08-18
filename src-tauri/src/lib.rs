@@ -22,10 +22,10 @@ use app_state::AppState;
 use commands::{
     check_app_update, create_workspace, delete_frp_profile, delete_workspace,
     get_actions_runtime_status, get_app_settings, get_download_config, get_frp_snippet,
-    get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret, get_webview_memory_sample,
-    get_workspace_secret, hide_to_tray, install_software, list_frp_profiles, list_linked_projects,
-    list_software, list_workspaces, open_url, open_workspace_directory, quick_add_linked_project,
-    quit_app, read_workspace_logs,
+    get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret,
+    get_webview_memory_sample, get_workspace_secret, hide_to_tray, install_software,
+    list_frp_profiles, list_linked_projects, list_software, list_workspaces, open_url,
+    open_workspace_directory, quick_add_linked_project, quit_app, read_workspace_logs,
     recreate_ui_webview, regenerate_shared_secret, regenerate_workspace_secret,
     restart_actions_runtime, restart_runtime, restart_tunnel, run_health_checks, save_frp_profile,
     set_download_config, set_last_workspace, set_proxy, set_shared_secret, set_workspace_secret,
@@ -39,7 +39,7 @@ use tauri::{Emitter, Manager, WindowEvent};
 #[cfg(target_os = "windows")]
 fn signal_existing_instance() -> bool {
     use windows::core::w;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
     use windows::Win32::System::Threading::{
         CreateEventW, CreateMutexW, OpenEventW, SetEvent, EVENT_MODIFY_STATE,
     };

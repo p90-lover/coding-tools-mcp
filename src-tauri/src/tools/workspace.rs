@@ -178,19 +178,32 @@ impl Workspace {
             .find(|project| project.alias.eq_ignore_ascii_case(alias))
     }
 
-    fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    fn normalize_path_from_existing_ancestor(path: &Path) -> PathBuf {
         let mut cursor = path;
-        loop {
-            if cursor.exists() || cursor.is_symlink() {
-                return cursor.canonicalize().ok();
-            }
-            cursor = cursor.parent()?;
+        let mut suffix = Vec::new();
+
+        while !cursor.exists() && !cursor.is_symlink() {
+            let Some(name) = cursor.file_name() else {
+                return path.to_path_buf();
+            };
+            suffix.push(name.to_os_string());
+            let Some(parent) = cursor.parent() else {
+                return path.to_path_buf();
+            };
+            cursor = parent;
         }
+
+        let Ok(mut normalized) = cursor.canonicalize() else {
+            return path.to_path_buf();
+        };
+        for component in suffix.iter().rev() {
+            normalized.push(component);
+        }
+        normalized
     }
 
     fn linked_project_containing_path(&self, path: &Path) -> Option<LinkedProject> {
-        let probe = Self::canonical_existing_ancestor(path)
-            .unwrap_or_else(|| path.to_path_buf());
+        let probe = Self::normalize_path_from_existing_ancestor(path);
         self.linked_projects().into_iter().find(|project| {
             project
                 .root_path()
@@ -201,8 +214,7 @@ impl Workspace {
     }
 
     fn allowed_root_for_path(&self, path: &Path) -> Option<PathBuf> {
-        let probe = Self::canonical_existing_ancestor(path)
-            .unwrap_or_else(|| path.to_path_buf());
+        let probe = Self::normalize_path_from_existing_ancestor(path);
         if probe.starts_with(&self.root) {
             return Some(self.root.clone());
         }
@@ -217,10 +229,7 @@ impl Workspace {
     ) -> WorkspaceResult<(PathBuf, Option<LinkedProject>)> {
         let normalized = raw_path.replace('\\', "/");
         if let Some(alias_path) = normalized.strip_prefix('@') {
-            let (alias, rest) = alias_path
-                .split_once('/')
-                .map(|(alias, rest)| (alias, rest))
-                .unwrap_or((alias_path, ""));
+            let (alias, rest) = alias_path.split_once('/').unwrap_or((alias_path, ""));
             if alias.trim().is_empty() {
                 return Err(WorkspaceError::invalid_argument(
                     "Linked project alias cannot be empty",
@@ -241,10 +250,9 @@ impl Workspace {
 
         let input = Path::new(raw_path);
         if input.is_absolute() {
-            return Ok((
-                input.to_path_buf(),
-                self.linked_project_containing_path(input),
-            ));
+            let candidate = Self::normalize_path_from_existing_ancestor(input);
+            let project = self.linked_project_containing_path(&candidate);
+            return Ok((candidate, project));
         }
 
         Ok((
@@ -258,8 +266,12 @@ impl Workspace {
             return relative_display(&self.root, path);
         }
         if let Some(project) = self.linked_project_containing_path(path) {
-            let root = project.root_path();
-            let suffix = path
+            let root = project
+                .root_path()
+                .canonicalize()
+                .unwrap_or_else(|_| project.root_path());
+            let normalized = Self::normalize_path_from_existing_ancestor(path);
+            let suffix = normalized
                 .strip_prefix(&root)
                 .map(|value| value.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
@@ -477,6 +489,7 @@ impl Workspace {
                 retryable: false,
             });
         }
+        let candidate = Self::normalize_path_from_existing_ancestor(&candidate);
         let root = self
             .allowed_root_for_path(&candidate)
             .ok_or_else(WorkspaceError::path_outside_workspace)?;
@@ -564,6 +577,7 @@ impl Workspace {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod linked_root_tests {
     use super::*;
     use std::fs;
@@ -574,10 +588,7 @@ mod linked_root_tests {
         fs::create_dir_all(&mappings).expect("mappings");
         fs::write(
             mappings.join(format!("{alias}.txt")),
-            format!(
-                "name={alias}\npath={}\nmode={mode}\n",
-                external.display()
-            ),
+            format!("name={alias}\npath={}\nmode={mode}\n", external.display()),
         )
         .expect("mapping");
     }
@@ -592,15 +603,21 @@ mod linked_root_tests {
 
         let ws = Workspace::new(workspace.path().to_path_buf()).expect("workspace");
         assert!(ws.resolve_existing("@coc-macro/existing.txt").is_ok());
-        assert!(ws
-            .resolve_for_write(
-                external
-                    .path()
-                    .join("new.txt")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-            .is_ok());
+        let write_target = external.path().join("new.txt");
+        let resolved = ws
+            .resolve_for_write(write_target.to_string_lossy().as_ref())
+            .expect("linked absolute write");
+        assert_eq!(
+            resolved.path,
+            external
+                .path()
+                .canonicalize()
+                .expect("canonical external")
+                .join("new.txt")
+        );
+        assert_eq!(resolved.display, "@coc-macro/new.txt");
+        ws.reject_protected_write_path(&resolved.display)
+            .expect("linked display passes protected-path preflight");
 
         let denied = ws
             .resolve_for_write(
@@ -624,10 +641,7 @@ mod linked_root_tests {
         let denied = ws
             .resolve_for_write("@reference/new.txt")
             .expect_err("read-only mapping must reject writes");
-        assert_eq!(
-            denied.to_error_value()["code"],
-            "READ_ONLY_LINKED_PROJECT"
-        );
+        assert_eq!(denied.to_error_value()["code"], "READ_ONLY_LINKED_PROJECT");
     }
 }
 
