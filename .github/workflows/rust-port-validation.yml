@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  PATCH_PATH: aiTemp/Trash/rust-ci-fix-20260818/rust-ci-fixes.patch
+  PATCHER_MANIFEST: aiTemp/Trash/rust-ci-fix-20260818/patcher/Cargo.toml
 
 jobs:
   rust-linux:
@@ -51,12 +51,11 @@ jobs:
           workspaces: src-tauri
           shared-key: rust-port-linux
 
-      - name: Apply reviewed Rust patch
+      - name: Apply reviewed Rust source changes
         shell: bash
         run: |
           set -euo pipefail
-          git apply --check "$PATCH_PATH"
-          git apply "$PATCH_PATH"
+          cargo run --quiet --manifest-path "$PATCHER_MANIFEST"
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
 
@@ -88,12 +87,11 @@ jobs:
           workspaces: src-tauri
           shared-key: rust-port-windows
 
-      - name: Apply reviewed Rust patch
+      - name: Apply reviewed Rust source changes
         shell: bash
         run: |
           set -euo pipefail
-          git apply --check "$PATCH_PATH"
-          git apply "$PATCH_PATH"
+          cargo run --quiet --manifest-path "$PATCHER_MANIFEST"
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
 
@@ -125,12 +123,11 @@ jobs:
           workspaces: src-tauri
           shared-key: rust-port-macos
 
-      - name: Apply reviewed Rust patch
+      - name: Apply reviewed Rust source changes
         shell: bash
         run: |
           set -euo pipefail
-          git apply --check "$PATCH_PATH"
-          git apply "$PATCH_PATH"
+          cargo run --quiet --manifest-path "$PATCHER_MANIFEST"
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
 
@@ -147,6 +144,8 @@ jobs:
     needs: [rust-linux, rust-windows, rust-macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-rust-patcher
     steps:
       - uses: actions/checkout@v4
         with:
@@ -161,14 +160,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if git apply --check "$PATCH_PATH"; then
-            git apply "$PATCH_PATH"
-          elif git apply --reverse --check "$PATCH_PATH"; then
-            echo "Rust patch is already applied."
-          else
-            echo "Rust patch cannot be applied cleanly."
-            exit 1
-          fi
+          cargo run --quiet --manifest-path "$PATCHER_MANIFEST"
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
           git config user.name "github-actions[bot]"
