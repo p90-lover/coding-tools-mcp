@@ -1,0 +1,186 @@
+name: Rust port validation
+
+on:
+  pull_request:
+    branches:
+      - integration/xyTom-v0.3.0
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rust-port-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PATCH_PATH: aiTemp/Trash/rust-ci-fix-20260818/rust-ci-fixes.patch
+
+jobs:
+  rust-linux:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'validation/rust-port-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-rust-port-linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: rust-port-linux
+
+      - name: Apply reviewed Rust patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check "$PATCH_PATH"
+          git apply "$PATCH_PATH"
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+
+      - name: Run Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Run Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  rust-windows:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'validation/rust-port-')
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-rust-port-windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: rust-port-windows
+
+      - name: Apply reviewed Rust patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check "$PATCH_PATH"
+          git apply "$PATCH_PATH"
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+
+      - name: Run Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Run Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  rust-macos:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'validation/rust-port-')
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-rust-port-macos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: rust-port-macos
+
+      - name: Apply reviewed Rust patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check "$PATCH_PATH"
+          git apply "$PATCH_PATH"
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+
+      - name: Run Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Run Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  commit-rust-source:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'validation/rust-port-')
+    needs: [rust-linux, rust-windows, rust-macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Apply and commit the verified Rust source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git apply --check "$PATCH_PATH"; then
+            git apply "$PATCH_PATH"
+          elif git apply --reverse --check "$PATCH_PATH"; then
+            echo "Rust patch is already applied."
+          else
+            echo "Rust patch cannot be applied cleanly."
+            exit 1
+          fi
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- src-tauri
+          if git diff --cached --quiet; then
+            echo "Verified Rust source is already committed."
+            exit 0
+          fi
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "Refusing to commit a deletion."
+            exit 1
+          fi
+          git commit -m "fix(rust): normalize linked paths and satisfy CI"
+          git push origin HEAD:"${GITHUB_HEAD_REF}"
