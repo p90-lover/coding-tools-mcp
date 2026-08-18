@@ -765,7 +765,8 @@ mod tests {
             let output = call_tool(
                 &ctx,
                 "exec_command",
-                &json!({ "cmd": command, "timeout_ms": 10_000, "yield_time_ms": 10_000 }),
+                // Cold PowerShell startup on hosted Windows runners can exceed ten seconds.
+                &json!({ "cmd": command, "timeout_ms": 30_000, "yield_time_ms": 30_000 }),
             );
             assert_eq!(output["ok"], true, "{command}: {output}");
             assert_eq!(output["command_ok"], true, "{command}: {output}");
