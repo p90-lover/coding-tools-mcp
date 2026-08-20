@@ -1,0 +1,906 @@
+from __future__ import annotations
+
+import shutil
+import time
+from pathlib import Path
+
+ROOT = Path.cwd()
+BACKUP_ROOT = ROOT / "aiTemp" / "Trash" / "secure-auto-approval-persistent-auth" / "persistent-oauth" / str(time.time_ns())
+
+
+def backup(path: str) -> None:
+    source = ROOT / path
+    if not source.exists():
+        return
+    target = BACKUP_ROOT / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
+def replace_once(path: str, before: str, after: str, label: str) -> None:
+    target = ROOT / path
+    text = target.read_text(encoding="utf-8")
+    if after in text:
+        print(f"already applied: {label}")
+        return
+    count = text.count(before)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected one source match, found {count}")
+    backup(path)
+    target.write_text(text.replace(before, after, 1), encoding="utf-8")
+    print(f"applied: {label}")
+
+
+def write_file(path: str, content: str, label: str) -> None:
+    target = ROOT / path
+    if target.exists() and target.read_text(encoding="utf-8") == content:
+        print(f"already applied: {label}")
+        return
+    backup(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    print(f"applied: {label}")
+
+
+replace_once(
+    "src-tauri/src/auth/mod.rs",
+    '''mod oauth;
+mod oauth_flow;
+
+pub use bearer::verify_bearer_header;
+''',
+    '''mod oauth;
+mod oauth_flow;
+mod refresh_tokens;
+
+pub use bearer::verify_bearer_header;
+''',
+    "enable refresh-token module",
+)
+
+replace_once(
+    "src-tauri/src/auth/oauth.rs",
+    '''        "grant_types_supported": ["authorization_code"],
+''',
+    '''        "grant_types_supported": ["authorization_code", "refresh_token"],
+''',
+    "advertise OAuth refresh-token grant",
+)
+
+replace_once(
+    "src-tauri/src/auth/oauth.rs",
+    '''        let meta = authorization_server_metadata("https://example.com", None);
+        assert_eq!(
+            meta["token_endpoint_auth_methods_supported"],
+            json!(["none"])
+        );
+''',
+    '''        let meta = authorization_server_metadata("https://example.com", None);
+        assert_eq!(
+            meta["token_endpoint_auth_methods_supported"],
+            json!(["none"])
+        );
+        assert_eq!(
+            meta["grant_types_supported"],
+            json!(["authorization_code", "refresh_token"])
+        );
+''',
+    "test refresh-token metadata",
+)
+
+write_file(
+    "src-tauri/src/auth/oauth_flow.rs",
+    r'''use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+use super::bearer::constant_time_eq_str;
+use super::refresh_tokens::RefreshTokenStore;
+
+pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
+pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60;
+#[allow(dead_code)]
+pub const OAUTH_MAX_BODY_BYTES: usize = 8_192;
+
+#[derive(Clone)]
+pub struct OAuthRuntime {
+    profile_id: String,
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    pub password: String,
+    pub token_secret: String,
+    refresh_tokens: RefreshTokenStore,
+    pending: Arc<Mutex<HashMap<String, PendingCode>>>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+struct PendingCode {
+    code_challenge: String,
+    client_id: String,
+    redirect_uri: String,
+    state: String,
+    expires_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenClaims {
+    iss: String,
+    aud: String,
+    wid: String,
+    iat: i64,
+    exp: i64,
+    scope: String,
+}
+
+impl OAuthRuntime {
+    pub fn new(
+        profile_id: String,
+        client_id: String,
+        client_secret: Option<String>,
+        password: String,
+        token_secret: String,
+    ) -> Self {
+        Self {
+            refresh_tokens: RefreshTokenStore::new(profile_id.clone()),
+            profile_id,
+            client_id,
+            client_secret,
+            password,
+            token_secret,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn issuer(&self) -> String {
+        format!("urn:coding-tools-mcp:{}", self.profile_id)
+    }
+
+    pub fn client_id_allowed(&self, client_id: &str) -> bool {
+        if client_id.is_empty() {
+            return false;
+        }
+        if self.client_id.is_empty() {
+            return true;
+        }
+        constant_time_eq_str(client_id, &self.client_id)
+    }
+
+    pub fn verify_access_token(&self, token: &str, _server_url: &str) -> bool {
+        let issuer = self.issuer();
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.set_audience(&[self.profile_id.as_str()]);
+        validation.set_issuer(&[issuer.as_str()]);
+        decode::<TokenClaims>(
+            token,
+            &DecodingKey::from_secret(self.token_secret.as_bytes()),
+            &validation,
+        )
+        .map(|decoded| constant_time_eq_str(&decoded.claims.wid, &self.profile_id))
+        .unwrap_or(false)
+    }
+}
+
+pub fn verify_oauth_bearer_header(
+    headers: &HeaderMap,
+    oauth: &OAuthRuntime,
+    server_url: &str,
+) -> Option<Response> {
+    let Some(header_value) = headers.get(AUTHORIZATION) else {
+        return Some((StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response());
+    };
+    let Ok(header_str) = header_value.to_str() else {
+        return Some((StatusCode::UNAUTHORIZED, "Invalid Authorization header").into_response());
+    };
+    let Some(token) = header_str.strip_prefix("Bearer ").map(str::trim) else {
+        return Some((StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response());
+    };
+    if oauth.verify_access_token(token, server_url) {
+        None
+    } else {
+        Some((StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthorizeParams {
+    pub response_type: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthorizeForm {
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    #[serde(default)]
+    pub state: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct TokenForm {
+    #[serde(default)]
+    pub grant_type: String,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub redirect_uri: String,
+    #[serde(default)]
+    pub code_verifier: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+    #[serde(default)]
+    pub refresh_token: String,
+}
+
+pub fn authorize_get(
+    oauth: &OAuthRuntime,
+    params: AuthorizeParams,
+    workspace_path: Option<&str>,
+) -> Response {
+    if params.response_type != "code" {
+        return html_error("response_type must be 'code'", StatusCode::BAD_REQUEST);
+    }
+    if !oauth.client_id_allowed(&params.client_id) {
+        return html_error("Unknown client_id", StatusCode::BAD_REQUEST);
+    }
+    if params.code_challenge_method != "S256" || params.code_challenge.is_empty() {
+        return html_error(
+            "code_challenge_method must be S256 and code_challenge is required",
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    Html(login_page(
+        &params.client_id,
+        &params.redirect_uri,
+        &params.code_challenge,
+        &params.code_challenge_method,
+        &params.state,
+        "",
+        workspace_path,
+    ))
+    .into_response()
+}
+
+pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, _server_url: &str) -> Response {
+    if !oauth.client_id_allowed(&form.client_id) {
+        return Html(login_page(
+            &form.client_id,
+            &form.redirect_uri,
+            &form.code_challenge,
+            &form.code_challenge_method,
+            &form.state,
+            "Invalid client",
+            None,
+        ))
+        .into_response();
+    }
+    if form.code_challenge_method != "S256" || form.code_challenge.is_empty() {
+        return Html(login_page(
+            &form.client_id,
+            &form.redirect_uri,
+            &form.code_challenge,
+            &form.code_challenge_method,
+            &form.state,
+            "Invalid PKCE parameters",
+            None,
+        ))
+        .into_response();
+    }
+    if !constant_time_eq_str(&form.password, &oauth.password) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Html(login_page(
+                &form.client_id,
+                &form.redirect_uri,
+                &form.code_challenge,
+                &form.code_challenge_method,
+                &form.state,
+                "Invalid password",
+                None,
+            )),
+        )
+            .into_response();
+    }
+
+    let code = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let now = unix_now();
+    {
+        let mut pending = oauth.pending.lock().expect("oauth pending lock");
+        pending.retain(|_, value| value.expires_at >= now);
+        pending.insert(
+            code.clone(),
+            PendingCode {
+                code_challenge: form.code_challenge.clone(),
+                client_id: form.client_id.clone(),
+                redirect_uri: form.redirect_uri.clone(),
+                state: form.state.clone(),
+                expires_at: now + OAUTH_CODE_TTL_SECONDS,
+            },
+        );
+    }
+
+    let mut qs = format!("code={}", urlencoding_encode(&code));
+    if !form.state.is_empty() {
+        qs.push_str(&format!("&state={}", urlencoding_encode(&form.state)));
+    }
+    let sep = if form.redirect_uri.contains('?') { '&' } else { '?' };
+    Redirect::to(&format!("{}{}{}", form.redirect_uri, sep, qs)).into_response()
+}
+
+pub fn token_exchange(
+    oauth: &OAuthRuntime,
+    headers: &HeaderMap,
+    mut form: TokenForm,
+    _server_url: &str,
+) -> Response {
+    if let Some((id, secret)) = basic_auth_credentials(headers) {
+        if form.client_id.is_empty() {
+            form.client_id = id;
+        }
+        if form.client_secret.is_empty() {
+            form.client_secret = secret;
+        }
+    }
+
+    if !oauth.client_id_allowed(&form.client_id) {
+        return token_error("invalid_client", "Unknown client_id");
+    }
+    if let Some(expected) = oauth.client_secret.as_deref() {
+        if !constant_time_eq_str(&form.client_secret, expected) {
+            return token_error("invalid_client", "Invalid client_secret");
+        }
+    }
+
+    match form.grant_type.as_str() {
+        "authorization_code" => exchange_authorization_code(oauth, &form),
+        "refresh_token" => exchange_refresh_token(oauth, &form),
+        _ => token_error(
+            "unsupported_grant_type",
+            "Only authorization_code and refresh_token are supported",
+        ),
+    }
+}
+
+fn exchange_authorization_code(oauth: &OAuthRuntime, form: &TokenForm) -> Response {
+    if form.code.is_empty() {
+        return token_error("invalid_grant", "code is required");
+    }
+    if !valid_code_verifier(&form.code_verifier) {
+        return token_error("invalid_grant", "Invalid code_verifier");
+    }
+    let code_data = {
+        let mut pending = oauth.pending.lock().expect("oauth pending lock");
+        pending.remove(&form.code)
+    };
+    let Some(code_data) = code_data else {
+        return token_error(
+            "invalid_grant",
+            "Unknown or already-used authorization code",
+        );
+    };
+    if unix_now() > code_data.expires_at {
+        return token_error("invalid_grant", "Authorization code expired");
+    }
+    if !constant_time_eq_str(&code_data.client_id, &form.client_id) {
+        return token_error("invalid_grant", "client_id mismatch");
+    }
+    if !constant_time_eq_str(&code_data.redirect_uri, &form.redirect_uri) {
+        return token_error("invalid_grant", "redirect_uri mismatch");
+    }
+    if !verify_pkce(&form.code_verifier, &code_data.code_challenge) {
+        return token_error("invalid_grant", "PKCE verification failed");
+    }
+
+    let refresh_token = match oauth.refresh_tokens.issue(&form.client_id, unix_now()) {
+        Ok(token) => token,
+        Err(_) => return token_error("server_error", "Failed to persist refresh token"),
+    };
+    token_success(oauth, refresh_token)
+}
+
+fn exchange_refresh_token(oauth: &OAuthRuntime, form: &TokenForm) -> Response {
+    if form.refresh_token.is_empty() {
+        return token_error("invalid_grant", "refresh_token is required");
+    }
+    let rotated = match oauth
+        .refresh_tokens
+        .rotate(&form.refresh_token, &form.client_id, unix_now())
+    {
+        Ok(value) => value,
+        Err(_) => return token_error("server_error", "Failed to rotate refresh token"),
+    };
+    let Some(refresh_token) = rotated else {
+        return token_error("invalid_grant", "Refresh token is invalid, expired, or already used");
+    };
+    token_success(oauth, refresh_token)
+}
+
+fn token_success(oauth: &OAuthRuntime, refresh_token: String) -> Response {
+    match create_access_token(
+        &oauth.issuer(),
+        &oauth.profile_id,
+        &oauth.token_secret,
+        OAUTH_TOKEN_TTL_SECONDS,
+    ) {
+        Ok(access_token) => (
+            StatusCode::OK,
+            axum::Json(json!({
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": "Bearer",
+                "expires_in": OAUTH_TOKEN_TTL_SECONDS,
+                "scope": "mcp"
+            })),
+        )
+            .into_response(),
+        Err(_) => token_error("server_error", "Failed to issue access token"),
+    }
+}
+
+fn create_access_token(
+    issuer: &str,
+    profile_id: &str,
+    token_secret: &str,
+    ttl: i64,
+) -> Result<String, ()> {
+    let now = unix_now() as i64;
+    let claims = TokenClaims {
+        iss: issuer.to_string(),
+        aud: profile_id.to_string(),
+        wid: profile_id.to_string(),
+        iat: now,
+        exp: now + ttl,
+        scope: "mcp".into(),
+    };
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(token_secret.as_bytes()),
+    )
+    .map_err(|_| ())
+}
+
+fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
+    let digest = Sha256::digest(code_verifier.as_bytes());
+    let expected = URL_SAFE_NO_PAD.encode(digest);
+    constant_time_eq_str(&expected, code_challenge)
+}
+
+fn valid_code_verifier(verifier: &str) -> bool {
+    (43..=128).contains(&verifier.len())
+        && verifier
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | '_' | '~'))
+}
+
+fn basic_auth_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+    let header = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let encoded = header.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (id, secret) = text.split_once(':')?;
+    Some((id.to_string(), secret.to_string()))
+}
+
+fn token_error(error: &str, description: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(json!({
+            "error": error,
+            "error_description": description
+        })),
+    )
+        .into_response()
+}
+
+fn html_error(message: &str, status: StatusCode) -> Response {
+    (status, Html(format!("<h2>Error</h2><p>{message}</p>"))).into_response()
+}
+
+fn login_page(
+    client_id: &str,
+    redirect_uri: &str,
+    code_challenge: &str,
+    code_challenge_method: &str,
+    state: &str,
+    error: &str,
+    workspace_path: Option<&str>,
+) -> String {
+    let error_block = if error.is_empty() {
+        String::new()
+    } else {
+        format!("<p style=\"color:red\">{}</p>", html_escape(error))
+    };
+    let workspace_block = workspace_path
+        .filter(|path| !path.is_empty())
+        .map(|path| format!("<p>Workspace: <code>{}</code></p>", html_escape(path)))
+        .unwrap_or_default();
+    format!(
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>\
+        <title>Authorize MCP Server</title>\
+        <style>body{{font-family:sans-serif;max-width:380px;margin:4rem auto;padding:1rem}}\
+        input{{width:100%;padding:.5rem;margin:.4rem 0;box-sizing:border-box}}\
+        button{{width:100%;padding:.7rem;background:#0066cc;color:#fff;border:none;cursor:pointer}}</style>\
+        </head><body>\
+        <h2>Authorize Coding Tools MCP</h2>\
+        {workspace_block}\
+        <p>Client: <strong>{}</strong></p>\
+        <p>Redirect URI: <code>{}</code></p>\
+        {error_block}\
+        <form method='POST' action='/oauth/authorize'>\
+        <input type='hidden' name='client_id' value='{}'>\
+        <input type='hidden' name='redirect_uri' value='{}'>\
+        <input type='hidden' name='code_challenge' value='{}'>\
+        <input type='hidden' name='code_challenge_method' value='{}'>\
+        <input type='hidden' name='state' value='{}'>\
+        <label>Password<input type='password' name='password' autocomplete='current-password' required></label>\
+        <button type='submit'>Authorize</button>\
+        </form></body></html>",
+        html_escape(client_id),
+        html_escape(redirect_uri),
+        html_escape(client_id),
+        html_escape(redirect_uri),
+        html_escape(code_challenge),
+        html_escape(code_challenge_method),
+        html_escape(state),
+    )
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn urlencoding_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn runtime(profile_id: &str) -> OAuthRuntime {
+        OAuthRuntime::new(
+            profile_id.into(),
+            "chatgpt-client-test".into(),
+            None,
+            "test-password".into(),
+            "token-signing-secret-that-is-long-enough".into(),
+        )
+    }
+
+    #[test]
+    fn token_exchange_without_client_secret() {
+        let oauth = runtime(&format!("test-{}", uuid::Uuid::new_v4()));
+        let verifier = "dBjftJeZ4CVP-mB92Kpru-AEJvkQlLgi3ThpmQ45N_Xyo";
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let redirect_uri = "https://chatgpt.com/connector/oauth/test";
+        let redirect = authorize_post(
+            &oauth,
+            AuthorizeForm {
+                client_id: "chatgpt-client-test".into(),
+                redirect_uri: redirect_uri.into(),
+                code_challenge: challenge,
+                code_challenge_method: "S256".into(),
+                state: "state".into(),
+                password: "test-password".into(),
+            },
+            "https://old-tunnel.example.com",
+        );
+        assert_eq!(redirect.status(), StatusCode::SEE_OTHER);
+        let code = {
+            let pending = oauth.pending.lock().expect("lock");
+            pending.keys().next().cloned().unwrap()
+        };
+
+        let response = token_exchange(
+            &oauth,
+            &HeaderMap::new(),
+            TokenForm {
+                grant_type: "authorization_code".into(),
+                code,
+                redirect_uri: redirect_uri.into(),
+                code_verifier: verifier.into(),
+                client_id: "chatgpt-client-test".into(),
+                ..TokenForm::default()
+            },
+            "https://new-tunnel.example.com",
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn access_token_remains_valid_when_public_tunnel_url_changes() {
+        let oauth = runtime("workspace-stable:mcp");
+        let token = create_access_token(
+            &oauth.issuer(),
+            &oauth.profile_id,
+            &oauth.token_secret,
+            60,
+        )
+        .expect("access token");
+        assert!(oauth.verify_access_token(&token, "https://first.example.com"));
+        assert!(oauth.verify_access_token(&token, "https://second.example.com"));
+
+        let other = runtime("other-workspace:mcp");
+        assert!(!other.verify_access_token(&token, "https://second.example.com"));
+    }
+
+    #[test]
+    fn pkce_round_trip() {
+        let verifier = "dBjftJeZ4CVP-mB92Kpru-AEJvkQlLgi3ThpmQ45N_Xyo";
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        assert!(verify_pkce(verifier, &challenge));
+    }
+}
+''',
+    "install rotating persistent OAuth flow",
+)
+
+replace_once(
+    "src-tauri/src/mcp/listener.rs",
+    '''        let oauth_base = external_base_url(&HeaderMap::new(), port, &configured_public_url);
+        Some(Arc::new(OAuthRuntime::new(
+            oauth_base,
+            auth.oauth_client_id.clone(),
+''',
+    '''        Some(Arc::new(OAuthRuntime::new(
+            format!("{}:mcp", workspace_id),
+            auth.oauth_client_id.clone(),
+''',
+    "bind MCP tokens to stable workspace identity",
+)
+
+replace_once(
+    "src-tauri/src/actions/listener.rs",
+    '''        let oauth_base = external_base_url(&HeaderMap::new(), actions_port, &configured_public_url);
+        Some(Arc::new(OAuthRuntime::new(
+            oauth_base,
+            oauth_client_id,
+''',
+    '''        Some(Arc::new(OAuthRuntime::new(
+            format!("{workspace_id}:actions"),
+            oauth_client_id,
+''',
+    "bind Actions tokens to stable workspace identity",
+)
+
+replace_once(
+    "src-tauri/src/secret/keyring_store.rs",
+    '''    pub fn get_shared(key: &str) -> AppResult<Option<String>> {
+        DataStore::read_file(|data| Ok(data.shared_secrets.get(key).cloned()))
+    }
+
+    pub fn get_app(scope: &str, item_id: &str) -> AppResult<Option<String>> {
+''',
+    '''    pub fn get_shared(key: &str) -> AppResult<Option<String>> {
+        DataStore::read_file(|data| {
+            Ok(data
+                .shared_secrets
+                .get(key)
+                .filter(|value| !value.is_empty())
+                .cloned())
+        })
+    }
+
+    pub fn get_or_regenerate(
+        profile_id: &str,
+        key: &str,
+        use_shared: bool,
+    ) -> AppResult<String> {
+        let existing = if use_shared {
+            Self::get_shared(key)?
+        } else {
+            Self::get(profile_id, key)?
+        };
+        if let Some(value) = existing.filter(|value| !value.is_empty()) {
+            return Ok(value);
+        }
+        let value = random_secret();
+        DataStore::update_file(|data| {
+            if use_shared {
+                data.shared_secrets.insert(key.to_string(), value.clone());
+            } else {
+                workspace_secret_map(data, profile_id).insert(key.to_string(), value.clone());
+            }
+            Ok(())
+        })?;
+        Ok(value)
+    }
+
+    pub fn get_app(scope: &str, item_id: &str) -> AppResult<Option<String>> {
+''',
+    "repair missing persistent auth secrets",
+)
+
+replace_once(
+    "src-tauri/src/secret/keyring_store.rs",
+    '''    #[test]
+    fn workspace_secret_roundtrip() {
+''',
+    '''    #[test]
+    fn missing_workspace_secret_is_regenerated_and_persisted() {
+        let id = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let value = SecretStore::get_or_regenerate(&id, "oauth_token_secret", false)
+            .expect("regenerate");
+        assert!(!value.is_empty());
+        assert_eq!(
+            SecretStore::get(&id, "oauth_token_secret")
+                .expect("read")
+                .as_deref(),
+            Some(value.as_str())
+        );
+        let _ = SecretStore::remove_workspace_secrets(&id);
+    }
+
+    #[test]
+    fn workspace_secret_roundtrip() {
+''',
+    "test persistent secret repair",
+)
+
+replace_once(
+    "src-tauri/src/runtime/supervisor.rs",
+    '''                let oauth_password = if profile.auth.oauth_enabled() {
+                    resolve_secret(&profile.id, "oauth_password", use_shared)?
+                } else {
+                    None
+                };
+                let oauth_token_secret = if profile.auth.oauth_enabled() {
+                    resolve_secret(&profile.id, "oauth_token_secret", use_shared)?
+                } else {
+                    None
+                };
+''',
+    '''                let oauth_password = if profile.auth.oauth_enabled() {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "oauth_password",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+                let oauth_token_secret = if profile.auth.oauth_enabled() {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "oauth_token_secret",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+''',
+    "repair MCP OAuth secrets before listener start",
+)
+
+replace_once(
+    "src-tauri/src/runtime/supervisor.rs",
+    '''                let oauth_client_secret = if auth_type == "oauth" {
+                    if use_shared {
+                        resolve_secret(&profile.id, "actions_oauth_client_secret", true)?
+                    } else {
+                        Some(actions_oauth_secret(
+                            &profile.id,
+                            "actions_oauth_client_secret",
+                        )?)
+                    }
+                } else {
+                    None
+                };
+                let oauth_password = if auth_type == "oauth" {
+                    if use_shared {
+                        resolve_secret(&profile.id, "actions_oauth_password", true)?
+                    } else {
+                        Some(actions_oauth_secret(&profile.id, "actions_oauth_password")?)
+                    }
+                } else {
+                    None
+                };
+                let oauth_token_secret = if auth_type == "oauth" {
+                    if use_shared {
+                        resolve_secret(&profile.id, "actions_oauth_token_secret", true)?
+                    } else {
+                        Some(actions_oauth_secret(
+                            &profile.id,
+                            "actions_oauth_token_secret",
+                        )?)
+                    }
+                } else {
+                    None
+                };
+''',
+    '''                let oauth_client_secret = if auth_type == "oauth" {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_client_secret",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+                let oauth_password = if auth_type == "oauth" {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_password",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+                let oauth_token_secret = if auth_type == "oauth" {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_token_secret",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+''',
+    "repair Actions OAuth secrets before listener start",
+)
+
+replace_once(
+    "src-tauri/src/runtime/supervisor.rs",
+    '''fn actions_oauth_secret(profile_id: &str, key: &str) -> AppResult<String> {
+''',
+    '''#[allow(dead_code)]
+fn actions_oauth_secret(profile_id: &str, key: &str) -> AppResult<String> {
+''',
+    "retain legacy Actions secret helper without warnings",
+)
+
+replace_once(
+    "src/lib/components/AuthConfigForm.svelte",
+    '''  <p class="text-xs text-[var(--color-text-muted)]">
+    复制 Client ID / 密钥等请用上方「GPT 配置」卡片；此处可修改认证类型与重新生成密钥。
+  </p>
+''',
+    '''  <p class="text-xs text-[var(--color-text-muted)]">
+    OAuth 使用一小时 Access Token 与可轮换的 180 日 Refresh Token；公开隧道网址改变后仍可自动续期。认证资料采用原子写入及 Trash 备份，缺失的签署密钥会自动修复。复制 Client ID / 密钥请用上方「GPT 配置」卡片。
+  </p>
+''',
+    "explain persistent OAuth status",
+)
+
+print("persistent OAuth patch applied successfully")

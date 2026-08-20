@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::harness::Harness;
+use crate::tools::approval::ApprovalStore;
 use crate::tools::policy::PolicySettings;
 use crate::tools::session::SessionStore;
 use crate::tools::workspace::Workspace;
@@ -16,6 +17,7 @@ pub struct ToolContext {
     pub workspace: Workspace,
     pub auth: AuthConfig,
     pub policy: PolicySettings,
+    pub approvals: ApprovalStore,
     pub tool_profile: String,
     pub permission_mode: String,
     pub harness: Harness,
@@ -73,6 +75,7 @@ impl ToolContext {
             workspace,
             auth,
             policy,
+            approvals: ApprovalStore::default(),
             tool_profile: crate::tools::registry::normalize_tool_profile(&tool_profile).into(),
             permission_mode,
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),

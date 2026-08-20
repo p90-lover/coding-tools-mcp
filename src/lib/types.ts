@@ -24,6 +24,7 @@ export interface RuntimeConfig {
   local_port: number;
   tool_profile: string;
   permission_mode: string;
+  approval_mode?: string;
   runtime_command?: string;
   allowed_commands?: string;
   workspace_local_entries?: boolean;

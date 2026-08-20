@@ -2,6 +2,7 @@
   export interface RuntimePolicyDraft {
     toolProfile: string;
     permissionMode: string;
+    approvalMode: string;
     allowedCommands: string;
     workspaceLocalEntries: boolean;
     workspaceScriptExtensions: string;
@@ -10,6 +11,7 @@
   interface Props {
     toolProfile: string;
     permissionMode: string;
+    approvalMode: string;
     allowedCommands: string;
     workspaceLocalEntries: boolean;
     workspaceScriptExtensions: string;
@@ -22,28 +24,36 @@
     { value: "compat-readonly-all", label: "兼容只读" },
   ] as const;
 
+  const APPROVAL_MODE_OPTIONS = [
+    { value: "auto-workspace", label: "类似 Codex：自动批准 Workspace 操作" },
+    { value: "ask", label: "每次变更都询问" },
+    { value: "never", label: "不询问；敏感操作直接拒绝" },
+  ] as const;
+
   const PERMISSION_MODE_OPTIONS = [
     { value: "trusted", label: "受信任" },
     { value: "safe", label: "安全受限" },
     { value: "dangerous", label: "完全放开" },
   ] as const;
 
-  let { toolProfile, permissionMode, allowedCommands, workspaceLocalEntries, workspaceScriptExtensions, onSave }: Props = $props();
+  let { toolProfile, permissionMode, approvalMode, allowedCommands, workspaceLocalEntries, workspaceScriptExtensions, onSave }: Props = $props();
 
   let draftProfile = $state("full");
   let draftMode = $state("trusted");
+  let draftApprovalMode = $state("auto-workspace");
   let draftCommands = $state("");
   let draftLocalEntries = $state(true);
   let draftExtensions = $state(".exe,.bat,.cmd,.ps1");
   let saving = $state(false);
 
   const dirty = $derived(
-    draftProfile !== toolProfile || draftMode !== permissionMode || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions,
+    draftProfile !== toolProfile || draftMode !== permissionMode || draftApprovalMode !== approvalMode || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions,
   );
 
   $effect(() => {
     draftProfile = toolProfile;
     draftMode = permissionMode;
+    draftApprovalMode = approvalMode || "auto-workspace";
     draftCommands = allowedCommands;
     draftLocalEntries = workspaceLocalEntries;
     draftExtensions = workspaceScriptExtensions;
@@ -53,7 +63,7 @@
     if (saving || !dirty) return;
     saving = true;
     try {
-      await onSave({ toolProfile: draftProfile, permissionMode: draftMode, allowedCommands: draftCommands.trim(), workspaceLocalEntries: draftLocalEntries, workspaceScriptExtensions: draftExtensions.trim() });
+      await onSave({ toolProfile: draftProfile, permissionMode: draftMode, approvalMode: draftApprovalMode, allowedCommands: draftCommands.trim(), workspaceLocalEntries: draftLocalEntries, workspaceScriptExtensions: draftExtensions.trim() });
     } finally {
       saving = false;
     }
@@ -90,6 +100,20 @@
     <span class="text-xs text-[var(--color-text-muted)]">本地脚本扩展名（逗号分隔）</span>
     <input type="text" class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-sm" placeholder=".exe,.bat,.cmd,.ps1" bind:value={draftExtensions} disabled={!draftLocalEntries} />
   </label>
+  <label class="grid gap-1">
+    <span class="text-xs text-[var(--color-text-muted)]">批准模式</span>
+    <select
+      class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm"
+      bind:value={draftApprovalMode}
+    >
+      {#each APPROVAL_MODE_OPTIONS as option}
+        <option value={option.value}>{option.label}</option>
+      {/each}
+    </select>
+  </label>
+  <p class="text-xs text-[var(--color-text-muted)]">
+    自动批准只适用于已批准 Workspace 内的常规命令与事务式 patch。网络、删除及敏感解释器写入会改用 request_permissions；系统管理员提升、受保护路径及 Workspace 外写入仍会硬性拒绝。
+  </p>
   <label class="grid gap-1">
     <span class="text-xs text-[var(--color-text-muted)]">权限模式</span>
     <select
