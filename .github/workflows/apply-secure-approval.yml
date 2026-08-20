@@ -1,37 +1,45 @@
-name: Apply secure approval feature
+name: Materialize secure release source
 
 on:
   push:
     branches:
-      - feature/secure-auto-approval-persistent-auth
+      - automation/secure-source-v0.3.0-rc1
     paths:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_release_version.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/release_version.txt"
       - ".github/workflows/apply-secure-approval.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-request.yml"
   pull_request:
     branches:
+      - feature/secure-auto-approval-persistent-auth
       - integration/xyTom-v0.3.0
     paths:
-      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
-      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
-      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
-      - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
-      - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/**"
       - ".github/workflows/apply-secure-approval.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-request.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "src/**"
+      - "src-tauri/**"
 
 permissions:
   contents: write
 
 concurrency:
-  group: apply-secure-approval-${{ github.ref }}
+  group: materialize-secure-release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-approval
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-secure-release
+  TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
 
 jobs:
   apply-test-commit:
@@ -41,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref || 'feature/secure-auto-approval-persistent-auth' }}
+          ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
 
       - name: Install Tauri Linux dependencies
@@ -69,13 +77,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          shared-key: secure-approval-auth-linux
+          shared-key: secure-release-linux
 
-      - name: Apply secure approval and persistent auth patches without deleting files
+      - name: Apply secure source and synchronized release version
         run: |
           python aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py
           python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py
           python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py
+          python aiTemp/secure-auto-approval-persistent-auth/apply_release_version.py
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
           if git diff --name-status | grep -q '^D'; then
@@ -117,30 +126,30 @@ jobs:
           npm run build
           node --test tests/*.test.mjs
 
-      - name: Commit verified secure source
+      - name: Commit verified secure release source
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- src-tauri src
+          git add -- package.json package-lock.json src-tauri src
           if git diff --cached --quiet; then
-            echo "Secure approval and persistent authentication source is already committed."
+            echo "Verified secure release source is already committed."
             exit 0
           fi
           if git diff --cached --name-status | grep -q '^D'; then
             echo "Refusing to commit a deletion."
             exit 1
           fi
-          git commit -m "feat: add scoped auto approval and persistent authentication"
+          git commit -m "feat: materialize secure v0.3.0-rc1 release source"
 
           for attempt in 1 2 3; do
-            git fetch origin feature/secure-auto-approval-persistent-auth
-            if git rebase origin/feature/secure-auto-approval-persistent-auth && \
-               git push origin HEAD:feature/secure-auto-approval-persistent-auth; then
+            git fetch origin "$TARGET_BRANCH"
+            if git rebase "origin/$TARGET_BRANCH" && \
+               git push origin "HEAD:$TARGET_BRANCH"; then
               exit 0
             fi
             git rebase --abort || true
             sleep $((attempt * 5))
           done
 
-          echo "Unable to write the verified source after three non-destructive retries."
+          echo "Unable to write verified source after three non-destructive retries."
           exit 1
