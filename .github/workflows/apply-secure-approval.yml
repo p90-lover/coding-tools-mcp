@@ -77,14 +77,25 @@ jobs:
             exit 1
           fi
 
-      - name: Run focused approval and policy tests
+      - name: Test approval store
         working-directory: src-tauri
-        run: |
-          cargo test --locked tools::approval
-          cargo test --locked elevation_requests_are_always_blocked
-          cargo test --locked --test call_tool_security apply_patch_allows_deleting_a_normal_file
-          cargo test --locked --test call_tool_security deleting_readme_requires_explicit_confirmation
-          cargo test --locked --test call_tool_security deleting_git_assets_is_always_rejected
+        run: cargo test --locked tools::approval -- --nocapture
+
+      - name: Test elevation interception
+        working-directory: src-tauri
+        run: cargo test --locked elevation_requests_are_always_blocked -- --nocapture
+
+      - name: Test ordinary file deletion patch
+        working-directory: src-tauri
+        run: cargo test --locked --test call_tool_security apply_patch_allows_deleting_a_normal_file -- --nocapture
+
+      - name: Test protected README deletion confirmation
+        working-directory: src-tauri
+        run: cargo test --locked --test call_tool_security deleting_readme_requires_explicit_confirmation -- --nocapture
+
+      - name: Test hard Git asset protection
+        working-directory: src-tauri
+        run: cargo test --locked --test call_tool_security deleting_git_assets_is_always_rejected -- --nocapture
 
       - name: Run complete Rust tests and Clippy
         working-directory: src-tauri
