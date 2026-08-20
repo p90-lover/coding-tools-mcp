@@ -7,6 +7,7 @@ on:
     paths:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
       - ".github/workflows/apply-secure-approval.yml"
   pull_request:
     branches:
@@ -14,6 +15,7 @@ on:
     paths:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
       - ".github/workflows/apply-secure-approval.yml"
 
 permissions:
@@ -67,7 +69,7 @@ jobs:
 
       - name: Apply approval patch without deleting files
         run: |
-          python aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py
+          python aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
           if git diff --name-status | grep -q '^D'; then
@@ -80,6 +82,9 @@ jobs:
         run: |
           cargo test --locked tools::approval
           cargo test --locked elevation_requests_are_always_blocked
+          cargo test --locked --test call_tool_security apply_patch_allows_deleting_a_normal_file
+          cargo test --locked --test call_tool_security deleting_readme_requires_explicit_confirmation
+          cargo test --locked --test call_tool_security deleting_git_assets_is_always_rejected
 
       - name: Run complete Rust tests and Clippy
         working-directory: src-tauri
