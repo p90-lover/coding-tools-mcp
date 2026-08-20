@@ -6,12 +6,14 @@ on:
       - feature/secure-auto-approval-persistent-auth
     paths:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
       - ".github/workflows/apply-secure-approval.yml"
   pull_request:
     branches:
       - integration/xyTom-v0.3.0
     paths:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
       - ".github/workflows/apply-secure-approval.yml"
 
 permissions:
@@ -65,7 +67,7 @@ jobs:
 
       - name: Apply approval patch without deleting files
         run: |
-          python aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py
+          python aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
           if git diff --name-status | grep -q '^D'; then
