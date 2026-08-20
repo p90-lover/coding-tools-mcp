@@ -344,20 +344,12 @@ fn classify_operation(tool_name: &str, args: &Value) -> Option<ApprovalRisk> {
             let command = args.get("cmd").and_then(Value::as_str).unwrap_or("");
             Some(classify_command(command))
         }
-        "apply_patch" => {
-            let patch = args.get("patch").and_then(Value::as_str).unwrap_or("");
-            if patch.contains("*** Delete File:")
-                || patch.contains("+++ /dev/null")
-                || patch.contains("--- /dev/null")
-            {
-                Some(ApprovalRisk::Destructive)
-            } else {
-                Some(ApprovalRisk::RoutineMutation)
-            }
-        }
-        "kill_command" | "kill_session" | "write_stdin" => {
-            Some(ApprovalRisk::RoutineMutation)
-        }
+        // Transactional patch safety, protected repository assets, and
+        // special-file deletion confirmation remain enforced by patch.rs.
+        // Treat ordinary workspace patches as routine so Auto Workspace mode
+        // does not mask those more specific checks or ask for every file edit.
+        "apply_patch" => Some(ApprovalRisk::RoutineMutation),
+        "kill_command" | "kill_session" | "write_stdin" => Some(ApprovalRisk::RoutineMutation),
         _ => None,
     }
 }
@@ -454,6 +446,18 @@ mod tests {
     }
 
     #[test]
+    fn auto_workspace_allows_transactional_patch_to_reach_patch_safety_checks() {
+        let store = ApprovalStore::default();
+        let mut args = json!({
+            "patch": "--- a/src/delete-me.js\n+++ /dev/null\n@@\n-delete me\n"
+        });
+        store
+            .preflight("apply_patch", &mut args, "auto-workspace", "trusted")
+            .expect("ordinary workspace patch");
+        assert!(args.get("confirm").is_none());
+    }
+
+    #[test]
     fn ask_mode_requires_approval_for_routine_command() {
         let store = ApprovalStore::default();
         let mut args = json!({"cmd": "cargo test"});
@@ -498,12 +502,7 @@ mod tests {
             "approval_token": granted["approval_token"]
         });
         let mismatch = store
-            .preflight(
-                "exec_command",
-                &mut changed,
-                "auto-workspace",
-                "trusted",
-            )
+            .preflight("exec_command", &mut changed, "auto-workspace", "trusted")
             .expect_err("mismatch");
         assert_eq!(mismatch.code, "INVALID_APPROVAL");
     }

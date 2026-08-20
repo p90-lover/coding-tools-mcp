@@ -53,6 +53,8 @@ pub struct RuntimeConfig {
     pub tool_profile: String,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    #[serde(default = "default_approval_mode")]
+    pub approval_mode: String,
     #[serde(default)]
     pub runtime_command: String,
     /// Workspace execution policy shared by MCP clients.
@@ -166,6 +168,10 @@ fn default_permission_mode() -> String {
     "trusted".to_string()
 }
 
+fn default_approval_mode() -> String {
+    "auto-workspace".to_string()
+}
+
 fn default_allowed_commands() -> String {
     "pytest,python,python3,npm,npx,node,pnpm,yarn,make,mvn,mvnw,gradle,gradlew,cargo,go,ruff,mypy,eslint,tsc,git,cmd,powershell,pwsh".to_string()
 }
@@ -213,6 +219,7 @@ impl Default for RuntimeConfig {
             local_port: default_mcp_port(),
             tool_profile: default_tool_profile(),
             permission_mode: default_permission_mode(),
+            approval_mode: default_approval_mode(),
             runtime_command: String::new(),
             allowed_commands: default_allowed_commands(),
             workspace_local_entries: default_workspace_local_entries(),

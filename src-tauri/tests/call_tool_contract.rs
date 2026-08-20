@@ -68,56 +68,66 @@ fn read_file_explicit_parent_path_is_read_only() {
 }
 
 #[test]
-fn request_permissions_is_unsupported_not_silent_grant() {
+fn request_permissions_requires_a_live_pending_request() {
     let fx = tiny_js_fixture();
     let ctx = ctx_for(&fx.root);
     let out = invoke(
         &ctx,
         "request_permissions",
         json!({
-            "tool_name": "exec_command",
-            "permission": "network",
-            "reason": "verify compliance denial shape",
-            "arguments": {"cmd": "curl https://example.com"}
+            "request_id": "missing-or-expired-request",
+            "confirm": true,
+            "scope": "once"
         }),
     );
-    assert_err(&out);
-    assert_eq!(out["error"]["code"], "ELICITATION_UNSUPPORTED");
-    assert_eq!(out["status"], "unsupported");
+    let error = assert_err(&out);
+    assert_eq!(error["error"]["code"], "INVALID_APPROVAL");
+    assert_eq!(error["error"]["category"], "permission");
+    assert_eq!(error["error"]["details"]["reason"], "request_missing");
 }
 
 #[test]
-fn request_permissions_exposes_public_schema_and_grants_in_dangerous_mode() {
+fn request_permissions_exposes_scoped_schema_and_grants_a_pending_operation() {
     let tools = list_tools_for_profile("core");
     let tool = tools
         .iter()
         .find(|tool| tool["name"] == "request_permissions")
         .expect("request_permissions descriptor");
     let schema = &tool["inputSchema"];
+    assert_eq!(schema["required"], json!(["request_id", "confirm"]));
     assert_eq!(
-        schema["required"],
-        json!(["tool_name", "permission", "reason", "arguments"])
+        schema["properties"]["scope"]["enum"],
+        json!(["once", "session"])
     );
-    assert!(schema["properties"]["permission"]["enum"]
-        .as_array()
-        .expect("permission enum")
-        .contains(&json!("network")));
 
     let fx = tiny_js_fixture();
-    let mut ctx = ctx_for(&fx.root);
-    ctx.permission_mode = "dangerous".into();
-    ctx.policy.permission_mode = "dangerous".into();
-    let args = json!({
-        "tool_name": "exec_command",
-        "permission": "network",
-        "reason": "verify dangerous-mode compatibility",
-        "arguments": {"cmd": "curl https://example.com"}
-    });
-    let out = invoke(&ctx, "request_permissions", args.clone());
-    let payload = assert_ok(&out);
+    let ctx = ctx_for(&fx.root);
+    let blocked = invoke(&ctx, "exec_command", json!({"cmd": "rm -rf build"}));
+    let blocked_error = assert_err(&blocked);
+    assert_eq!(blocked_error["error"]["code"], "APPROVAL_REQUIRED");
+    assert_eq!(blocked_error["error"]["details"]["risk"], "destructive");
+    let request_id = blocked_error["error"]["details"]["request_id"]
+        .as_str()
+        .expect("pending request id");
+
+    let granted = invoke(
+        &ctx,
+        "request_permissions",
+        json!({
+            "request_id": request_id,
+            "confirm": true,
+            "scope": "once",
+            "reason": "approve the exact destructive test operation"
+        }),
+    );
+    let payload = assert_ok(&granted);
     assert_eq!(payload["status"], "granted");
-    assert_eq!(payload["constraints"]["mode"], "dangerous");
-    assert_eq!(payload["constraints"]["requested"], args);
+    assert_eq!(payload["scope"], "once");
+    assert_eq!(payload["risk"], "destructive");
+    assert_eq!(payload["remaining_uses"], 1);
+    assert!(payload["approval_token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty()));
 }
 
 #[test]
