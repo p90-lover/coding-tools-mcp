@@ -127,7 +127,6 @@ jobs:
           node --test tests/*.test.mjs
 
       - name: Commit verified secure release source
-        if: github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
