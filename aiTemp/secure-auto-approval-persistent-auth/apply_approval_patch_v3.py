@@ -78,17 +78,22 @@ replace_once(
 ''',
     '''pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
     let mut effective_args = apply_default_cwd(ctx, name, args);
-    // Hard security boundaries run before the soft approval layer. This keeps
-    // protected paths, host scope, shell escapes, and elevation requests as
-    // non-overridable policy errors instead of turning them into approvable
-    // operations.
+    // Run policy once before approval to surface only non-overridable hard
+    // boundaries such as protected paths, host scope, shell escapes, and
+    // administrator elevation. A confirmation-only destructive result is the
+    // soft gate handled by the scoped approval store below.
     if let Err(e) = validate_tool_arguments_for_workspace(
         name,
         &effective_args,
         &ctx.policy,
         Some(&ctx.workspace),
     ) {
-        return attach_project_instructions(ctx, name, &effective_args, policy_tool_err(e));
+        if !e
+            .0
+            .starts_with("DANGEROUS_OPERATION_REQUIRES_CONFIRMATION:")
+        {
+            return attach_project_instructions(ctx, name, &effective_args, policy_tool_err(e));
+        }
     }
     if name != "request_permissions" {
         if let Err(error) = ctx.approvals.preflight(
@@ -105,8 +110,19 @@ replace_once(
             );
         }
     }
+    // Re-run the complete policy after approval. A consumed grant injects the
+    // exact-operation confirmation flag, while every hard boundary remains
+    // enforced and cannot be weakened by an approval token.
+    if let Err(e) = validate_tool_arguments_for_workspace(
+        name,
+        &effective_args,
+        &ctx.policy,
+        Some(&ctx.workspace),
+    ) {
+        return attach_project_instructions(ctx, name, &effective_args, policy_tool_err(e));
+    }
 ''',
-    "run hard policy before scoped approval",
+    "run hard policy boundaries before scoped approval",
 )
 
 replace_once(
