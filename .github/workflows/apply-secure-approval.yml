@@ -7,6 +7,12 @@ on:
     paths:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
       - ".github/workflows/apply-secure-approval.yml"
+  pull_request:
+    branches:
+      - integration/xyTom-v0.3.0
+    paths:
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
+      - ".github/workflows/apply-secure-approval.yml"
 
 permissions:
   contents: write
@@ -21,12 +27,13 @@ env:
 
 jobs:
   apply-test-commit:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feature/secure-auto-approval-persistent-auth
+          ref: ${{ github.head_ref || 'feature/secure-auto-approval-persistent-auth' }}
           fetch-depth: 0
 
       - name: Install Tauri Linux dependencies
