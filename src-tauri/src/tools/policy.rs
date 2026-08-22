@@ -240,10 +240,7 @@ pub fn validate_command_for_workspace(
                 }
             } else {
                 let path = Path::new(workdir);
-                if path.is_absolute()
-                    || path
-                        .components()
-                        .any(|part| part == Component::ParentDir)
+                if path.is_absolute() || path.components().any(|part| part == Component::ParentDir)
                 {
                     return Err(PolicyError(
                         "workdir must stay inside the configured workspace".into(),

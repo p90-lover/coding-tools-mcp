@@ -1,11 +1,16 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
 
 use crate::harness::Harness;
 use crate::tools::policy::PolicySettings;
 use crate::tools::session::SessionStore;
 use crate::tools::workspace::Workspace;
 use crate::workspace::AuthConfig;
+
+const AUTO_HISTORY_CACHE_LIMIT: usize = 128;
 
 pub struct ToolContext {
     pub workspace: Workspace,
@@ -15,6 +20,7 @@ pub struct ToolContext {
     pub permission_mode: String,
     pub harness: Harness,
     default_cwd: Mutex<PathBuf>,
+    auto_history_sessions: Mutex<HashMap<String, Value>>,
     pub sessions: Arc<SessionStore>,
 }
 
@@ -71,6 +77,7 @@ impl ToolContext {
             permission_mode,
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
             default_cwd: Mutex::new(root),
+            auto_history_sessions: Mutex::new(HashMap::new()),
             sessions: Arc::new(SessionStore::new()),
         }
     }
@@ -105,5 +112,40 @@ impl ToolContext {
 
     pub fn default_cwd_path(&self) -> PathBuf {
         self.default_cwd.lock().expect("cwd lock").clone()
+    }
+
+    pub fn cached_auto_history_session(&self, session_key: &str) -> Option<Value> {
+        let cached = self
+            .auto_history_sessions
+            .lock()
+            .expect("auto history lock")
+            .get(session_key)
+            .cloned();
+        let is_current = cached
+            .as_ref()
+            .and_then(|value| value.get("current_path"))
+            .and_then(Value::as_str)
+            .is_some_and(|path| self.workspace.root().join(path).is_file());
+        if is_current {
+            return cached;
+        }
+        if cached.is_some() {
+            self.auto_history_sessions
+                .lock()
+                .expect("auto history lock")
+                .remove(session_key);
+        }
+        None
+    }
+
+    pub fn cache_auto_history_session(&self, session_key: String, value: Value) {
+        let mut sessions = self
+            .auto_history_sessions
+            .lock()
+            .expect("auto history lock");
+        if sessions.len() >= AUTO_HISTORY_CACHE_LIMIT && !sessions.contains_key(&session_key) {
+            sessions.clear();
+        }
+        sessions.insert(session_key, value);
     }
 }

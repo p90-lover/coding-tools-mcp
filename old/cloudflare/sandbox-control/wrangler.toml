@@ -12,7 +12,6 @@ DEFAULT_IMAGE = "ghcr.io/xytom/coding-tools-mcp-sandbox:latest"
 DEFAULT_PORT = "8765"
 DEFAULT_DURATION_MINUTES = "120"
 DEFAULT_PERMISSION_MODE = "trusted"
-DEFAULT_TOOL_PROFILE = "full"
 DEFAULT_TUNNEL_TYPE = "named"
 TUNNEL_HOSTNAME = "mcp.example.com"
 

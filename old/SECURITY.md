@@ -4,7 +4,7 @@ This project exposes local coding-runtime primitives over MCP. The intended boun
 
 ## Current Implementation Caution
 
-The current compliance suite covers workspace traversal, symlink escape, direct and interpreter-mediated outside reads, direct syscall outside reads and writes on Landlock-capable Linux hosts, risky environment variables, network-looking commands, destructive commands, shell-expansion gating, output caps, and session deadlines. Even so, `exec_command` must not be treated as a complete OS/container sandbox. It launches host processes and still relies on platform support plus command classification for non-filesystem risks.
+The current compliance suite covers workspace traversal, symlink escape, direct and interpreter-mediated outside reads, direct syscall outside reads and writes on Landlock-capable Linux hosts, risky environment variables, network-looking commands, destructive commands, shell-expansion gating, output caps, and command deadlines. Even so, `exec_command` must not be treated as a complete OS/container sandbox. It launches host processes and still relies on platform support plus command classification for non-filesystem risks.
 
 For production, expose the server only to trusted local clients, bind HTTP to loopback, and run it inside an external container or sandbox with no host secrets, no broad filesystem mounts, and network egress disabled by policy.
 
@@ -65,9 +65,20 @@ Operators should choose one of three permission modes:
 
 `--allow-network` remains a compatibility flag to open only the network-looking command gate. `--dangerously-skip-all-permissions` remains a compatibility alias for dangerous mode.
 
-## Session Lifecycle
+## Command Lifecycle
 
-Persistent command sessions use opaque server-owned IDs. `write_stdin` requires a live session. `kill_session` terminates only server-managed process groups. Deadlines continue to apply even if the client stops polling, and output buffers are bounded with dropped-byte metadata.
+Persistent commands use opaque server-owned IDs. `write_stdin` requires a live command. `kill_command` terminates only server-managed process groups. Deadlines continue to apply even if the client stops polling, and output buffers are bounded with dropped-byte metadata.
+
+## One Workspace Is One Trust Domain
+
+Since 0.3.0 there are no sessions: one server process, one runtime, one set of resources, shared by every client that authenticates to that workspace. Authentication admits a client; it does not partition anything behind it.
+
+- Any client can read, write stdin to, or kill any command in the workspace, whoever started it, using its `command_id`.
+- Retained output is consumed globally: two clients polling one command split its output rather than each seeing all of it.
+- Files and patch state are shared. Concurrent `apply_patch` calls are serialized, so an edit is never lost, but they are edits to the same tree.
+- The quotas — active commands, retained output entries, output bytes — are per workspace, so one busy client can exhaust what another would have used.
+
+Give mutually distrusting clients separate server processes with separate workspaces and separate credentials. Per-client identity and quotas are tracked in [issue #46](https://github.com/xyTom/coding-tools-mcp/issues/46); see also [docs/migration-0.3.md](docs/migration-0.3.md).
 
 ## HTTP Exposure
 

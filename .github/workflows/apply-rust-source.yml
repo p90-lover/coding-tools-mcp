@@ -1,0 +1,65 @@
+name: Apply Rust source fix
+
+on:
+  push:
+    branches:
+      - integration/xyTom-v0.3.0
+    paths:
+      - ".github/workflows/apply-rust-source.yml"
+      - "aiTemp/Trash/rust-ci-fix-20260818/rust-ci-fixes.patch"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rust-source-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: integration/xyTom-v0.3.0
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Apply reviewed Rust patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_path="aiTemp/Trash/rust-ci-fix-20260818/rust-ci-fixes.patch"
+          if git apply --check "$patch_path"; then
+            git apply "$patch_path"
+          elif git apply --reverse --check "$patch_path"; then
+            echo "Rust patch is already applied."
+          else
+            echo "Rust patch cannot be applied cleanly."
+            exit 1
+          fi
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+
+      - name: Commit formatted Rust source without deletions
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- src-tauri
+          if git diff --cached --quiet; then
+            echo "Rust source is already up to date."
+            exit 0
+          fi
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "Refusing to commit a deletion."
+            exit 1
+          fi
+          git commit -m "fix(rust): normalize linked paths and satisfy CI"
+          git push origin HEAD:"${GITHUB_REF_NAME}"

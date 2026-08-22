@@ -190,13 +190,13 @@ impl TunnelSupervisor {
             // Only treat FRP's own 404 page as proof the proxy is dead. Network
             // blips (Unreachable) alone must not force a restart.
             if matches!(route.kind, TunnelServiceKind::Mcp) {
-                let local_ok =
-                    frp::probe_local_mcp_ok(route.profile.runtime.local_port).await;
+                let local_ok = frp::probe_local_mcp_ok(route.profile.runtime.local_port).await;
                 if !local_ok {
                     continue;
                 }
             }
-            if frp::probe_public_mcp_endpoint(&public_url).await == frp::PublicMcpProbe::FrpNotRouted
+            if frp::probe_public_mcp_endpoint(&public_url).await
+                == frp::PublicMcpProbe::FrpNotRouted
             {
                 return Some(format!(
                     "public endpoint returns FRP not-found page ({public_url})"

@@ -67,3 +67,12 @@ This project is indexed by GitNexus as **coding-tools-mcp** (3598 symbols, 7608 
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+
+## xyTom 0.3 integration invariants
+
+- `old/` is a lossless source snapshot pinned by `old/UPSTREAM_SNAPSHOT.md` to `xyTom/coding-tools-mcp` 0.3.0. Never delete prior snapshot files: move replaced or upstream-removed content under `old/Trash/` and use `aiTemp/` for synchronization/build artifacts.
+- When MCP `_meta.openai/session` is present, the first non-history tool call automatically creates or resumes the matching `docs/history-session/` archive. Explicit `history_session_bootstrap` remains the path for clients without metadata and for verbatim `initial_user_input` capture. Per-turn `history_session_checkpoint` is still required.
+- Every shared `call_tool` result must carry bounded, path-aware `project_instructions`. Resolve the primary workspace and each approved `@alias` linked project as separate scopes; recognize case-insensitive `AGENTS.md`, `agent.md`, and `CLAUDE.md`; never load instructions from unapproved external paths.
+- `command_id`, `kill_command`, and `command:<id>:stdout|stderr` are canonical. Preserve the existing `session_id`, `kill_session`, and `session:<id>:...` aliases until an explicit breaking release. Completed output must remain readable for the documented bounded retention window.
+- Before merging this integration, run the Rust test/clippy/fmt suite, the Svelte check/build and Node tests, and the pinned upstream Python `make ci` suite.

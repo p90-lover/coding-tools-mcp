@@ -9,14 +9,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mybolide/coding-tools-mcp/releases/latest"><img src="https://img.shields.io/github/v/release/mybolide/coding-tools-mcp?label=Release" alt="Latest release"></a>
+  <a href="https://github.com/p90-lover/coding-tools-mcp/releases/latest"><img src="https://img.shields.io/github/v/release/p90-lover/coding-tools-mcp?label=Release" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?logo=windows" alt="Windows x64">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple" alt="macOS Apple Silicon">
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
 </p>
 
 <p align="center">
-  <a href="README.md">中文</a> · <a href="README.en.md">English</a> · <a href="https://github.com/mybolide/coding-tools-mcp/releases/latest">Download latest</a>
+  <a href="README.md">中文</a> · <a href="README.en.md">English</a> · <a href="https://github.com/p90-lover/coding-tools-mcp/releases/latest">Download latest</a>
 </p>
 
 Coding Tools MCP is a Rust + Tauri 2 desktop application. Select a project directory and start the service; an AI agent can then read files, edit code, run commands and tests, inspect Git, and preserve development progress inside the project through MCP. It behaves like an AI opening an IDE workspace that remembers where the last conversation stopped.
@@ -46,7 +46,7 @@ For a first connection, remember only this: **the desktop app turns the project 
 
 ### 1. Install the desktop client
 
-Open [Releases](https://github.com/mybolide/coding-tools-mcp/releases/latest) and download the package for your platform:
+Open [Releases](https://github.com/p90-lover/coding-tools-mcp/releases/latest) and download the package for your platform:
 
 | Platform | Package |
 | --- | --- |
@@ -103,17 +103,16 @@ When a connection fails, inspect recent MCP requests without leaving the desktop
 
 Use the public MCP URL shown by the app. With OAuth enabled, the client follows the server metadata into the authorization flow; authorization codes, Client IDs, and secrets can be generated and managed from the desktop client. This release uses preconfigured OAuth clients, so select static/manual OAuth credentials when creating a ChatGPT plugin; CIMD is not required.
 
-For a first connection, ask the agent to initialize history before inspecting the workspace:
+For a first connection, inspect the workspace directly:
 
 ```text
-history_session_bootstrap
 server_info
 get_default_cwd
 git_status
 check_exec_environment
 ```
 
-This gives the agent explicit project and capability state instead of guessing from the current chat window.
+When a client supplies `openai/session` in tool-call `_meta`, the first ordinary tool call automatically creates or resumes the matching `docs/history-session/` archive and reports the stable target under `history_session`. Older clients without that identifier, or flows that must preserve the first request verbatim, can still call `history_session_bootstrap` explicitly.
 
 ## Two ways to connect ChatGPT
 
@@ -166,7 +165,7 @@ Use Coding Tools MCP to call server_info, get_default_cwd, and git_status.
 Tell me which workspace is connected, its default directory, and its Git status.
 ```
 
-If ChatGPT returns information from the current project, the desktop app, public tunnel, authentication, ChatGPT, and MCP tool chain are connected end to end. Before real development, call `history_session_bootstrap` to initialize or restore project history.
+If ChatGPT returns information from the current project, the desktop app, public tunnel, authentication, ChatGPT, and MCP tool chain are connected end to end. Connectors that supply `openai/session` automatically create or resume history before that ordinary tool call; check `history_session.current_path` in the result to confirm the target.
 
 If ChatGPT still shows an old tool list, disconnect and reconnect the plugin or verify again in a new conversation.
 
@@ -199,17 +198,17 @@ MCP and Actions can run together for the same workspace, with separate ports and
 
 ## Let the project remember every conversation
 
-Chat transcripts are useful for rereading a discussion, but they are a poor long-term development handoff. Coding Tools MCP stores progress in `docs/history-session/` under the current project, so context follows the repository instead of staying trapped in one chat window.
+Chat transcripts are useful for rereading a discussion, but they are a poor long-term development handoff. Coding Tools MCP stores progress in `docs/history-session/` under the current project, so context follows the repository instead of staying trapped in one chat window. MCP clients that supply `_meta["openai/session"]` do not need a pasted startup prompt: the server creates or resumes the matching archive before the first ordinary tool call and uses the same identifier to recover it after a process restart.
 
-![ChatGPT new-conversation startup prompt](docs/images/history-session-prompt.png)
+![ChatGPT automatic session recovery and compatibility prompt](docs/images/history-session-prompt.png)
 
-*Paste the full prompt into a new conversation to initialize or restore history, then save a checkpoint after each completed task.*
+*Clients that supply a conversation identifier initialize or restore history automatically; the expandable compatibility prompt remains for older clients and verbatim first-request capture.*
 
 Five tools work together:
 
 | Tool | Purpose |
 | --- | --- |
-| `history_session_bootstrap` | Initialize or restore a project session; preserve verbatim `initial_user_input` and return a stable `session_key`, `current_path`, and bounded current state instead of all history |
+| `history_session_bootstrap` | Explicitly initialize or restore a project session and optionally preserve verbatim `initial_user_input`; clients with `openai/session` normally initialize automatically on their first ordinary tool call |
 | `history_session_checkpoint` | Append structured progress and verbatim `raw_user_input` to the stable target returned by bootstrap; reject mismatched targets instead of writing to another history file |
 | `history_session_validate` | Validate numbering, history files, and session mappings; rebuild derived indexes when needed without deleting existing history |
 | `history_session_search` | Search lossless Markdown archives by deterministic keywords and return a bounded page of locations and snippets |
@@ -227,7 +226,7 @@ The default `core` profile provides a stable, composable development tool set:
 | --- | --- |
 | File reading | `read_file`, `list_dir`, `list_files`, `search_text`, `grep_text`, `view_image` |
 | File modification | `apply_patch` |
-| Command execution | `exec_command`, `write_stdin`, `read_output`, `kill_session` |
+| Command execution | `exec_command`, `write_stdin`, `read_output`, `kill_command`; `kill_session` is a compatibility alias |
 | Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame` |
 | Environment | `server_info`, `check_exec_environment`, `get_default_cwd`, `set_default_cwd` |
 | History sessions | `history_session_bootstrap`, `history_session_checkpoint`, `history_session_validate`, `history_session_search`, `history_session_read` |
@@ -244,6 +243,14 @@ Open Workspace
 ```
 
 The advanced profile retains project-state and operation-history Harness capabilities, but normal edits and command execution do not require a Task.
+
+### Path-aware project instructions
+
+Every MCP and Actions tool result includes bounded `project_instructions`. The server selects the actual `path`, `paths`, `workdir`, or Patch target and loads case-insensitive `AGENTS.md`, `agent.md`, and `CLAUDE.md` files from that project root down to the target directory. An `@alias/...` call uses only that linked project's instructions instead of inheriting the primary workspace rules, and read-only paths outside the workspace and approved linked projects load no instruction files.
+
+### Upstream 0.3 command-handle compatibility
+
+`exec_command` returns canonical `command_id` and `command:<id>:stdout|stderr` references, and retains completed output for a bounded reconnect window so `read_output` can continue after a client reconnects. Existing clients may continue using the identical `session_id`, `session:<id>:...`, and `kill_session`; new clients should prefer `command_id` and `kill_command`.
 
 ## Permission and recovery model
 
@@ -286,7 +293,7 @@ On Windows, you can also run `dev-desktop.cmd`. Do not use `npm run dev` alone t
 | `src-tauri/src/actions/` | ChatGPT Actions OpenAPI gateway |
 | `src-tauri/src/tunnel/` | FRP / Cloudflare tunnel and process management |
 | `src/` | SvelteKit desktop UI |
-| `old/` | Python reference implementation and compatibility baseline |
+| `old/` | Complete Python upstream snapshot pinned to `xyTom/coding-tools-mcp` 0.3.0; replaced and upstream-removed prior files are preserved under `old/Trash/` |
 
 ## License
 

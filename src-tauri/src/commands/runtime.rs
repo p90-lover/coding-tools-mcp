@@ -175,14 +175,9 @@ async fn start_actions_service(state: &AppState, id: &str) -> AppResult<RuntimeS
 }
 
 /// Async stop→start for MCP. Used by the Tauri command and secret-change hooks.
-pub(crate) async fn restart_mcp_by_id(
-    state: &AppState,
-    id: &str,
-) -> AppResult<RuntimeStatusDto> {
+pub(crate) async fn restart_mcp_by_id(state: &AppState, id: &str) -> AppResult<RuntimeStatusDto> {
     let _guard = RESTART_GATE.lock().await;
-    let was_running = state.with_runtime(|runtime| {
-        Ok(runtime.is_running(id, ServiceKind::Mcp))
-    })?;
+    let was_running = state.with_runtime(|runtime| Ok(runtime.is_running(id, ServiceKind::Mcp)))?;
     if was_running {
         let _ = stop_mcp_service(state, id).await?;
     }
@@ -195,9 +190,8 @@ pub(crate) async fn restart_actions_by_id(
     id: &str,
 ) -> AppResult<RuntimeStatusDto> {
     let _guard = RESTART_GATE.lock().await;
-    let was_running = state.with_runtime(|runtime| {
-        Ok(runtime.is_running(id, ServiceKind::Actions))
-    })?;
+    let was_running =
+        state.with_runtime(|runtime| Ok(runtime.is_running(id, ServiceKind::Actions)))?;
     if was_running {
         let _ = stop_actions_service(state, id).await?;
     }

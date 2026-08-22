@@ -13,6 +13,11 @@ A production-grade embedder keeps the same skeleton and adds request
 timeouts, EPIPE-safe writes, reconnect loops, and a SIGTERM→SIGKILL close
 escalation on top.
 
+Both templates below take the handshake path (`2025-11-25`), which is the
+right default for a client written by hand: it is one exchange at startup and
+nothing to repeat afterwards. If you already speak `2026-07-28`, skip the
+handshake entirely — see [Speaking 2026-07-28](#speaking-2026-07-28).
+
 ## Minimal Node.js Client
 
 ```js
@@ -41,7 +46,7 @@ class CodingToolsClient {
     });
 
     await this.#request("initialize", {
-      protocolVersion: "2025-06-18",
+      protocolVersion: "2025-11-25",
       capabilities: {},
       clientInfo: { name: "my-agent", version: "0.1.0" },
     });
@@ -117,7 +122,7 @@ class CodingToolsClient:
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.next_id = 1
         self.request("initialize", {
-            "protocolVersion": "2025-06-18",
+            "protocolVersion": "2025-11-25",
             "capabilities": {},
             "clientInfo": {"name": "my-agent", "version": "0.1.0"},
         })
@@ -164,6 +169,25 @@ finally:
     client.close()
 ```
 
+## Speaking 2026-07-28
+
+The newer protocol has no handshake. Every request carries its own version and
+client capabilities in `params._meta`, so a client can call a tool as its first
+message, and there is no state to re-establish after a reconnect:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"server_info","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"my-agent","version":"0.1.0"}}}}
+```
+
+`server/discover` — the same request with `"method":"server/discover"` and no
+arguments — reports the versions this server speaks, its capabilities, and the
+workspace instructions, which is what `initialize` would have told you. Results
+in this era carry `resultType`, an `_meta` server identity, and cache hints;
+over HTTP each request also mirrors its version and method in headers (see
+[remote-mcp.md](remote-mcp.md)). Drop the `_meta` and the same request is a
+handshake-era one again — the two eras are decided per request, not per
+connection.
+
 ## Backend Variants
 
 The same client shape works for every deployment; only the spawn/connect step
@@ -199,4 +223,5 @@ consequences for embedders:
   when the workload genuinely needs the full host environment; sensitive
   variables are still filtered outside dangerous mode.
 
-*`HOME` is redirected to a per-workspace runtime dir; see the profile doc.
+*`HOME` is redirected to a per-runtime directory; see the
+[runtime contract](runtime-contract-v0.3.md).

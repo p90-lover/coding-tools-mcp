@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
 
-pub const REPO_URL: &str = "https://github.com/mybolide/coding-tools-mcp";
-pub const RELEASES_LATEST_URL: &str = "https://github.com/mybolide/coding-tools-mcp/releases/latest";
+pub const REPO_URL: &str = "https://github.com/p90-lover/coding-tools-mcp";
+pub const RELEASES_LATEST_URL: &str =
+    "https://github.com/p90-lover/coding-tools-mcp/releases/latest";
 pub const RELEASES_API_URL: &str =
-    "https://api.github.com/repos/mybolide/coding-tools-mcp/releases/latest";
+    "https://api.github.com/repos/p90-lover/coding-tools-mcp/releases/latest";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,7 +81,9 @@ pub fn parse_latest_release(body: &str, current_version: &str) -> AppResult<Upda
     }
     let current = normalize_tag(current_version);
     let ordering = compare_versions(&latest_version, &current).ok_or_else(|| {
-        AppError::Message(format!("无法比较版本: 当前={current} 最新={latest_version}"))
+        AppError::Message(format!(
+            "无法比较版本: 当前={current} 最新={latest_version}"
+        ))
     })?;
     let release_url = release
         .html_url
@@ -177,10 +180,7 @@ mod tests {
             Some(Ordering::Greater)
         );
         assert_eq!(compare_versions("v0.1.23", "0.1.23"), Some(Ordering::Equal));
-        assert_eq!(
-            compare_versions("0.1.20", "v0.1.23"),
-            Some(Ordering::Less)
-        );
+        assert_eq!(compare_versions("0.1.20", "v0.1.23"), Some(Ordering::Less));
         assert_eq!(compare_versions("1.0.0", "0.9.9"), Some(Ordering::Greater));
         assert!(compare_versions("latest", "0.1.0").is_none());
     }
@@ -189,7 +189,7 @@ mod tests {
     fn parse_latest_detects_newer_release() {
         let body = r#"{
             "tag_name": "v0.1.99",
-            "html_url": "https://github.com/mybolide/coding-tools-mcp/releases/tag/v0.1.99"
+            "html_url": "https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.1.99"
         }"#;
         let result = parse_latest_release(body, "0.1.23").expect("parse");
         assert!(result.update_available);
@@ -202,7 +202,7 @@ mod tests {
     fn parse_latest_reports_up_to_date() {
         let body = r#"{
             "tag_name": "v0.1.23",
-            "html_url": "https://github.com/mybolide/coding-tools-mcp/releases/tag/v0.1.23"
+            "html_url": "https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.1.23"
         }"#;
         let result = parse_latest_release(body, "0.1.23").expect("parse");
         assert!(!result.update_available);

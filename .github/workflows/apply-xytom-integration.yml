@@ -1,0 +1,82 @@
+name: Apply xyTom 0.3 integration payload
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [integration/xyTom-v0.3.0]
+    paths:
+      - "patches/xyTom-integration/**"
+      - ".github/workflows/apply-xytom-integration.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-xytom-integration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: integration/xyTom-v0.3.0
+          fetch-depth: 0
+
+      - name: Reconstruct, verify, and apply source payload
+        shell: bash
+        env:
+          STAGE_ROOT: aiTemp/xytom-integration-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$STAGE_ROOT/extracted"
+          cat patches/xyTom-integration/payload.b64.part* | base64 --decode > "$STAGE_ROOT/payload.tar.gz"
+          echo "3900eefa7e7f92dd8b1e67f967a99dedb3bd95a2790e658e1cf18f4d57b7a426  $STAGE_ROOT/payload.tar.gz" | sha256sum -c -
+          tar -xzf "$STAGE_ROOT/payload.tar.gz" -C "$STAGE_ROOT/extracted"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, shutil
+
+          root = Path(os.environ["STAGE_ROOT"]) / "extracted"
+          files = {
+              "AGENTS.md", "README.md", "README.en.md",
+              "src/lib/components/ChatGptSessionPrompt.svelte",
+              "tests/chatgpt-session-prompt-layout.test.mjs",
+              "src-tauri/src/mcp/server.rs",
+              "src-tauri/src/tools/context.rs",
+              "src-tauri/src/tools/dispatch.rs",
+              "src-tauri/src/tools/exec.rs",
+              "src-tauri/src/tools/mod.rs",
+              "src-tauri/src/tools/project_context.rs",
+              "src-tauri/src/tools/registry.rs",
+              "src-tauri/src/tools/session.rs",
+              "src-tauri/tests/call_tool_contract.rs",
+          }
+          for relative in sorted(files):
+              source = root / relative
+              if not source.is_file() or source.is_symlink():
+                  raise SystemExit(f"Unsafe or missing payload file: {relative}")
+              target = Path(relative)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(source, target)
+          PY
+
+      - name: Commit integration source without deleting files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- AGENTS.md README.md README.en.md src tests src-tauri
+          if git diff --cached --quiet; then
+            echo "Integration payload is already applied."
+            exit 0
+          fi
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "Refusing to commit a deletion."
+            exit 1
+          fi
+          git commit -m "feat: integrate xyTom 0.3 compatibility"
+          git push origin HEAD:"${GITHUB_REF_NAME}"

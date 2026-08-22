@@ -213,8 +213,10 @@ pub struct ProcessTreeMemory {
 pub fn sample_process_tree_memory() -> AppResult<ProcessTreeMemory> {
     let root = std::process::id();
     let descendants = collect_child_pids(root)?;
-    let mut sample = ProcessTreeMemory::default();
-    sample.main_bytes = working_set_bytes(root).unwrap_or(0);
+    let mut sample = ProcessTreeMemory {
+        main_bytes: working_set_bytes(root).unwrap_or(0),
+        ..Default::default()
+    };
 
     for pid in descendants {
         let Some(path) = process_image_path(pid)? else {
@@ -244,8 +246,10 @@ fn working_set_bytes(pid: u32) -> Option<u64> {
         if handle == INVALID_HANDLE_VALUE {
             return None;
         }
-        let mut counters = PROCESS_MEMORY_COUNTERS::default();
-        counters.cb = mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ..Default::default()
+        };
         let ok = GetProcessMemoryInfo(handle, &mut counters, counters.cb).is_ok();
         let _ = CloseHandle(handle);
         if ok {

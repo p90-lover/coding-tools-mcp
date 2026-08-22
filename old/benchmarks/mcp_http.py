@@ -2,12 +2,15 @@
 """Small MCP-over-HTTP JSON-RPC client used by deterministic benchmarks.
 
 The client intentionally depends only on the Python standard library so the
-dogfood path can run before project packaging is complete.
+dogfood path can run before project packaging is complete. It speaks the
+handshake era, which keeps the benchmark numbers comparable with earlier runs;
+the `2026-07-28` path is exercised by the compliance suite instead.
 """
 
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -30,6 +33,32 @@ class JsonRpcReply:
     headers: dict[str, str]
 
 
+def connect_with_retry(
+    endpoint: str,
+    timeout_seconds: float,
+    *,
+    poll_interval: float = 0.1,
+    request_timeout: float = 10.0,
+    catch: tuple[type[BaseException], ...] = (McpHttpError,),
+) -> tuple[McpHttpClient | None, dict[str, Any] | None, str | None]:
+    """Poll an MCP endpoint until initialize() succeeds or the deadline passes.
+
+    Returns (client, initialize_result, None) on success and
+    (None, None, error_text) on failure. Shared by the benchmark entry points
+    so the startup retry policy lives in one place.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_error: BaseException | None = None
+    while time.monotonic() <= deadline:
+        client = McpHttpClient(endpoint, timeout=request_timeout)
+        try:
+            return client, client.initialize(), None
+        except catch as exc:
+            last_error = exc
+            time.sleep(poll_interval)
+    return None, None, str(last_error) if last_error is not None else "startup timeout elapsed"
+
+
 class McpHttpClient:
     """Minimal streamable-HTTP MCP client.
 
@@ -43,13 +72,12 @@ class McpHttpClient:
         endpoint: str,
         *,
         timeout: float = 30.0,
-        protocol_version: str = "2025-06-18",
+        protocol_version: str = "2025-11-25",
     ) -> None:
         self.endpoint = endpoint
         self.timeout = timeout
         self.protocol_version = protocol_version
         self._next_id = 1
-        self.session_id: str | None = None
 
     def initialize(self) -> dict[str, Any]:
         result = self.request(
@@ -63,6 +91,9 @@ class McpHttpClient:
                 },
             },
         )
+        negotiated = result.get("protocolVersion")
+        if isinstance(negotiated, str) and negotiated:
+            self.protocol_version = negotiated
         self.notify("notifications/initialized", {})
         return result
 
@@ -113,8 +144,6 @@ class McpHttpClient:
             "Content-Type": "application/json",
             "MCP-Protocol-Version": self.protocol_version,
         }
-        if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
 
         request = urllib.request.Request(self.endpoint, data=body, headers=headers, method="POST")
         try:
@@ -122,11 +151,9 @@ class McpHttpClient:
                 status = response.getcode()
                 raw = response.read()
                 response_headers = {k: v for k, v in response.headers.items()}
-                self._capture_session_id(response_headers)
         except urllib.error.HTTPError as exc:
             raw = exc.read()
             response_headers = {k: v for k, v in exc.headers.items()}
-            self._capture_session_id(response_headers)
             parsed = self._parse_body(raw, response_headers.get("Content-Type", ""))
             raise McpHttpError(
                 f"HTTP {exc.code} from MCP endpoint",
@@ -146,11 +173,6 @@ class McpHttpClient:
                 payload=raw.decode("utf-8", errors="replace"),
             )
         return JsonRpcReply(status=status, payload=parsed, headers=response_headers)
-
-    def _capture_session_id(self, headers: dict[str, str]) -> None:
-        for key, value in headers.items():
-            if key.lower() == "mcp-session-id" and value:
-                self.session_id = value
 
     def _parse_body(self, raw: bytes, content_type: str) -> dict[str, Any] | None:
         text = raw.decode("utf-8", errors="replace").strip()

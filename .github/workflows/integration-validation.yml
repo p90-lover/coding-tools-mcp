@@ -1,0 +1,238 @@
+name: xyTom 0.3 integration validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - integration/xyTom-v0.3.0
+    paths:
+      - "src-tauri/**"
+      - "src/**"
+      - "tests/**"
+      - "old/**"
+      - "README.md"
+      - "README.en.md"
+      - "AGENTS.md"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/integration-validation.yml"
+      - "aiTemp/Trash/integration-matrix-validation/**"
+  pull_request:
+    branches:
+      - integration/xyTom-v0.3.0
+    paths:
+      - "src-tauri/**"
+      - "src/**"
+      - "tests/**"
+      - "old/**"
+      - "README.md"
+      - "README.en.md"
+      - "AGENTS.md"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/integration-validation.yml"
+      - "aiTemp/Trash/integration-matrix-validation/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xytom-integration-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-linux:
+    name: Rust Linux — fmt, build, test, clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: xytom-integration-linux
+
+      - name: Capture cargo fmt changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff -- src-tauri > aiTemp/cargo-fmt.patch
+          if [ -s aiTemp/cargo-fmt.patch ]; then
+            echo "cargo fmt produced changes; the patch will be uploaded."
+            cat aiTemp/cargo-fmt.patch
+          fi
+
+      - name: Cargo build
+        working-directory: src-tauri
+        run: cargo build --locked
+
+      - name: Cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Upload cargo fmt patch
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-fmt-patch
+          path: aiTemp/cargo-fmt.patch
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Verify cargo fmt was already clean
+        shell: bash
+        run: test ! -s aiTemp/cargo-fmt.patch
+
+  frontend:
+    name: Svelte — check, build, Node tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+
+      - name: Svelte type and accessibility checks
+        run: npm run check
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Run Node tests
+        run: node --test tests/*.test.mjs
+
+  rust-compatibility:
+    name: Rust xyTom 0.3 — compatibility contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-compatibility
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: xytom-integration-compatibility
+
+      # `old/` remains the pinned, read-only upstream snapshot. Executable
+      # compatibility validation now runs against the Rust implementation.
+      - name: Run Rust call-tool compatibility contracts
+        working-directory: src-tauri
+        run: cargo test --locked --test call_tool_contract
+
+      - name: Run Rust security compatibility contracts
+        working-directory: src-tauri
+        run: cargo test --locked --test call_tool_security
+
+      - name: Run Rust history-session compatibility contracts
+        working-directory: src-tauri
+        run: cargo test --locked --test history_session
+
+      - name: Run Rust harness compatibility contracts
+        working-directory: src-tauri
+        run: cargo test --locked --test harness_tool_contract
+
+  rust-windows:
+    name: Rust Windows — test and clippy
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: xytom-integration-windows
+
+      - name: Cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  rust-macos:
+    name: Rust macOS — test and clippy
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: xytom-integration-macos
+
+      - name: Cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings

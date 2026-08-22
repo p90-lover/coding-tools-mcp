@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import json
+import os
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from .i18n import tr
+
+
+MCP_ENDPOINT_PATH = "/mcp"
+
 
 def _new_secret() -> str:
     return uuid4().hex + uuid4().hex
-
-
-def _new_client_id() -> str:
-    return f"chatgpt-client-{uuid4().hex[:12]}"
 
 
 @dataclass
@@ -31,8 +35,6 @@ class TunnelConfig:
 @dataclass
 class AuthConfig:
     type: str = "oauth"
-    oauth_client_id: str = field(default_factory=_new_client_id)
-    oauth_client_secret: str = field(default_factory=_new_secret)
     oauth_password: str = field(default_factory=_new_secret)
     oauth_token_secret: str = field(default_factory=_new_secret)
     bearer_token: str = field(default_factory=_new_secret)
@@ -41,40 +43,8 @@ class AuthConfig:
 @dataclass
 class RuntimeConfig:
     local_port: int = 28766
-    tool_profile: str = "full"
     permission_mode: str = "trusted"
     runtime_command: str = ""
-
-
-@dataclass
-class ActionsConfig:
-    public_url: str = ""
-    tunnel_type: str = "frp"
-    frp_server: str = ""
-    frp_subdomain: str = ""
-    cloudflare_mode: str = "quick"
-    cloudflare_token: str = ""
-    local_port: int = 8787
-    permission_mode: str = "trusted"
-    runtime_command: str = ""
-    auth_type: str = "api_key"
-    api_key: str = field(default_factory=_new_secret)
-    oauth_client_id: str = field(default_factory=_new_client_id)
-    oauth_client_secret: str = field(default_factory=_new_secret)
-    oauth_authorization_url: str = ""
-    oauth_token_url: str = ""
-    oauth_scopes: str = ""
-    oauth_token_exchange_method: str = "authorization_header"
-    allowed_commands: str = (
-        "pytest,python,python3,npm,npx,node,pnpm,yarn,"
-        "make,mvn,mvnw,gradle,gradlew,cargo,go,ruff,mypy,eslint,tsc"
-    )
-    max_patch_bytes: int = 200000
-
-    def computed_public_url(self) -> str:
-        if self.tunnel_type == "frp" and self.frp_server and self.frp_subdomain:
-            return f"https://{self.frp_subdomain}.{self.frp_server}"
-        return self.public_url
 
 
 @dataclass
@@ -85,61 +55,29 @@ class WorkspaceProfile:
     tunnel: TunnelConfig = field(default_factory=TunnelConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
-    actions: ActionsConfig = field(default_factory=ActionsConfig)
 
     @property
     def endpoint(self) -> str:
-        return f"{self.effective_public_url.rstrip('/')}/mcp"
+        return f"{self.effective_public_url.rstrip('/')}{MCP_ENDPOINT_PATH}"
 
     @property
     def local_endpoint(self) -> str:
-        return f"http://127.0.0.1:{self.runtime.local_port}/mcp"
+        return f"http://127.0.0.1:{self.runtime.local_port}{MCP_ENDPOINT_PATH}"
 
     @property
     def effective_public_url(self) -> str:
         return self.tunnel.computed_public_url().rstrip("/")
 
-    @property
-    def actions_public_url(self) -> str:
-        return self.actions.computed_public_url().rstrip("/")
-
-    @property
-    def actions_local_base_url(self) -> str:
-        return f"http://127.0.0.1:{self.actions.local_port}"
-
-    @property
-    def actions_openapi_url(self) -> str:
-        if not self.actions_public_url:
-            return ""
-        return f"{self.actions_public_url}/openapi.json"
-
-    @property
-    def actions_privacy_url(self) -> str:
-        if not self.actions_public_url:
-            return ""
-        return f"{self.actions_public_url}/privacy"
-
     def frp_proxy_snippet(self) -> str:
+        proxy_name = re.sub(r"[^a-z0-9_-]+", "-", self.name.lower()).strip("-_") or "workspace"
         return "\n".join(
             [
                 "[[proxies]]",
-                f'name = "{self.name.lower().replace(" ", "-") or "workspace"}-mcp"',
+                f'name = "{proxy_name}-mcp"',
                 'type = "http"',
-                'localIP = "host.docker.internal"',
+                'localIP = "127.0.0.1"',
                 f"localPort = {self.runtime.local_port}",
-                f'subdomain = "{self.tunnel.frp_subdomain}"',
-            ]
-        )
-
-    def actions_frp_proxy_snippet(self) -> str:
-        return "\n".join(
-            [
-                "[[proxies]]",
-                f'name = "{self.name.lower().replace(" ", "-") or "workspace"}-actions"',
-                'type = "http"',
-                'localIP = "host.docker.internal"',
-                f"localPort = {self.actions.local_port}",
-                f'subdomain = "{self.actions.frp_subdomain}"',
+                f"subdomain = {json.dumps(self.tunnel.frp_subdomain, ensure_ascii=False)}",
             ]
         )
 
@@ -148,14 +86,19 @@ class WorkspaceProfile:
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> "WorkspaceProfile":
+        def known_fields(config_cls: type, key: str) -> dict[str, Any]:
+            # Drop keys removed or renamed in newer releases so stale
+            # profiles.json records keep loading.
+            data = dict(record.get(key, {}))
+            return {name: value for name, value in data.items() if name in config_cls.__dataclass_fields__}
+
         return cls(
             id=record["id"],
             name=record["name"],
             path=record["path"],
-            tunnel=TunnelConfig(**record.get("tunnel", {})),
-            auth=AuthConfig(**record.get("auth", {})),
-            runtime=RuntimeConfig(**record.get("runtime", {})),
-            actions=ActionsConfig(**record.get("actions", {})),
+            tunnel=TunnelConfig(**known_fields(TunnelConfig, "tunnel")),
+            auth=AuthConfig(**known_fields(AuthConfig, "auth")),
+            runtime=RuntimeConfig(**known_fields(RuntimeConfig, "runtime")),
         )
 
 
@@ -163,11 +106,13 @@ class WorkspaceProfile:
 class RuntimeStatus:
     state: str = "stopped"
     pid: int | None = None
-    local_message: str = "未启动"
-    public_message: str = "未知"
+    local_message: str = field(default_factory=lambda: tr("Models", "Not started"))
+    public_message: str = field(default_factory=lambda: tr("Models", "Unknown"))
 
 
 def build_profile(path: str, name: str | None = None) -> WorkspaceProfile:
-    cleaned = path.rstrip("\\/")
+    if not path.strip():
+        raise ValueError(tr("Models", "Workspace path cannot be empty."))
+    cleaned = os.path.normpath(path)
     label = name or cleaned.replace("\\", "/").split("/")[-1]
-    return WorkspaceProfile(id=uuid4().hex, name=label or "工作区", path=cleaned)
+    return WorkspaceProfile(id=uuid4().hex, name=label or tr("Models", "Workspace"), path=cleaned)

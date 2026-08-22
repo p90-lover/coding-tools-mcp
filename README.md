@@ -9,14 +9,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mybolide/coding-tools-mcp/releases/latest"><img src="https://img.shields.io/github/v/release/mybolide/coding-tools-mcp?label=Release" alt="Latest release"></a>
+  <a href="https://github.com/p90-lover/coding-tools-mcp/releases/latest"><img src="https://img.shields.io/github/v/release/p90-lover/coding-tools-mcp?label=Release" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?logo=windows" alt="Windows x64">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple" alt="macOS Apple Silicon">
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
 </p>
 
 <p align="center">
-  <a href="README.md">中文</a> · <a href="README.en.md">English</a> · <a href="https://github.com/mybolide/coding-tools-mcp/releases/latest">下载最新版</a>
+  <a href="README.md">中文</a> · <a href="README.en.md">English</a> · <a href="https://github.com/p90-lover/coding-tools-mcp/releases/latest">下载最新版</a>
 </p>
 
 Coding Tools MCP 是一个 Rust + Tauri 2 桌面应用。选择项目目录并启动服务后，AI Agent 就能通过 MCP 读取文件、修改代码、运行命令和测试、查看 Git 状态，并把关键进度保存为项目内的历史会话。它更接近“AI 打开一个会记住开发进度的 IDE 工作区”；普通开发工具不要求先创建 Task，历史会话则负责在新对话中恢复上下文。
@@ -46,7 +46,7 @@ Coding Tools MCP 是一个 Rust + Tauri 2 桌面应用。选择项目目录并�
 
 ### 1. 安装桌面客户端
 
-打开 [Releases](https://github.com/mybolide/coding-tools-mcp/releases/latest) 并下载对应安装包：
+打开 [Releases](https://github.com/p90-lover/coding-tools-mcp/releases/latest) 并下载对应安装包：
 
 | 系统 | 安装包 |
 | --- | --- |
@@ -103,17 +103,16 @@ macOS 安装包目前未签名。如果系统阻止首次打开，请在“系�
 
 支持 MCP 的客户端使用界面中的公网 MCP URL。使用 OAuth 时，客户端会通过服务端元数据进入授权流程；授权口令、Client ID 和 Secret 均可在桌面端集中生成和管理。当前版本使用预配置 OAuth 客户端，创建 ChatGPT 插件时应选择静态/手动 OAuth 凭据，不需要选择 CIMD。
 
-首次连接建议先调用历史初始化，再检查工作区：
+首次连接可以直接检查工作区：
 
 ```text
-history_session_bootstrap
 server_info
 get_default_cwd
 git_status
 check_exec_environment
 ```
 
-这样 Agent 不需要依赖聊天上下文猜测当前项目、工作目录和执行能力。
+当客户端在工具调用的 `_meta` 中提供 `openai/session` 时，第一次普通工具调用会自动创建或恢复对应的 `docs/history-session/` 档案，并在结果的 `history_session` 字段返回稳定目标。没有该会话标识的旧客户端，或需要逐字保存首次请求时，仍可显式调用 `history_session_bootstrap`。
 
 ## ChatGPT 的两种接入方式
 
@@ -166,7 +165,7 @@ check_exec_environment
 告诉我当前连接的工作区、默认目录和 Git 状态。
 ```
 
-如果能够返回当前项目的信息，说明“桌面端 → 公网隧道 → OAuth → ChatGPT → MCP 工具”链路已经打通。首次正式开发时，再调用 `history_session_bootstrap` 初始化或恢复项目历史。
+如果能够返回当前项目的信息，说明“桌面端 → 公网隧道 → OAuth → ChatGPT → MCP 工具”链路已经打通。支持 `openai/session` 的连接器会在这次普通工具调用前自动创建或恢复历史；结果中的 `history_session.current_path` 可用于确认目标。
 
 如果 ChatGPT 仍显示旧的工具列表，请断开并重新连接插件，或创建一个新对话后再次验证。
 
@@ -199,17 +198,17 @@ MCP 和 Actions 可以为同一个工作区同时运行，也可以分别使用�
 
 ## 让项目记住每次对话
 
-普通聊天记录适合回看交流内容，但不适合作为长期开发交接。Coding Tools MCP 将会话进度写入当前项目的 `docs/history-session/`，让上下文跟随项目，而不是困在某一个聊天窗口里。
+普通聊天记录适合回看交流内容，但不适合作为长期开发交接。Coding Tools MCP 将会话进度写入当前项目的 `docs/history-session/`，让上下文跟随项目，而不是困在某一个聊天窗口里。支持 `_meta["openai/session"]` 的 MCP 客户端无需先粘贴启动提示词：服务端会在第一次普通工具调用前自动建立或恢复同一会话的档案，程序重启后仍会按同一个会话标识恢复。
 
-![ChatGPT 新会话启动提示词](docs/images/history-session-prompt.png)
+![ChatGPT 会话自动恢复与兼容提示词](docs/images/history-session-prompt.png)
 
-*复制完整提示词到新会话，即可初始化或恢复历史；每轮任务完成后再保存检查点。*
+*支持会话标识的客户端会自动初始化或恢复历史；展开的兼容提示词用于旧客户端或需要逐字保存首次请求的场景。*
 
 它提供五个互相配合的历史工具：
 
 | 工具 | 作用 |
 | --- | --- |
-| `history_session_bootstrap` | 新对话开始时初始化或恢复项目会话；保存逐字的 `initial_user_input`，返回稳定的 `session_key`、`current_path` 和有界当前状态，不返回全量历史 |
+| `history_session_bootstrap` | 显式初始化或恢复项目会话，并可逐字保存 `initial_user_input`；支持 `openai/session` 的客户端通常由第一次普通工具调用自动完成初始化 |
 | `history_session_checkpoint` | 每轮任务完成后按 bootstrap 返回的稳定目标追加结构化进度，并保存逐字的 `raw_user_input`；目标不一致时拒绝写入，避免串到其他历史文件 |
 | `history_session_validate` | 检查历史编号、文件和会话映射；必要时重建派生索引，不删除已有历史 |
 | `history_session_search` | 按确定性关键词搜索长期 Markdown 档案，返回有界的命中位置和短片段 |
@@ -235,7 +234,7 @@ MCP 和 Actions 可以为同一个工作区同时运行，也可以分别使用�
 | --- | --- |
 | 文件读取 | `read_file`、`list_dir`、`list_files`、`search_text`、`grep_text`、`view_image` |
 | 文件修改 | `apply_patch` |
-| 命令执行 | `exec_command`、`write_stdin`、`read_output`、`kill_session` |
+| 命令执行 | `exec_command`、`write_stdin`、`read_output`、`kill_command`；`kill_session` 为兼容别名 |
 | Git | `git_status`、`git_diff`、`git_log`、`git_show`、`git_blame` |
 | 环境 | `server_info`、`check_exec_environment`、`get_default_cwd`、`set_default_cwd` |
 | 历史会话 | `history_session_bootstrap`、`history_session_checkpoint`、`history_session_validate`、`history_session_search`、`history_session_read` |
@@ -252,6 +251,14 @@ MCP 和 Actions 可以为同一个工作区同时运行，也可以分别使用�
 ```
 
 高级 profile 还保留项目状态、操作记录等 Harness 能力，但普通文件修改和命令执行不要求先创建 Task。
+
+### 按路径选择项目指令
+
+每个 MCP 与 Actions 工具结果都会包含有界的 `project_instructions`。服务端根据本次调用实际访问的 `path`、`paths`、`workdir` 或 Patch 目标，从对应项目根目录到目标目录依次读取大小写不敏感的 `AGENTS.md`、`agent.md` 和 `CLAUDE.md`。`@alias/...` 路径只使用该 linked project 自己的指令，不会错误继承主工作区规则；工作区和已批准 linked project 之外的只读路径不会加载指令文件。
+
+### 上游 0.3 命令句柄兼容
+
+`exec_command` 现在返回规范的 `command_id` 与 `command:<id>:stdout|stderr`，并在命令完成后保留输出一段有界时间，方便客户端重新连接后继续 `read_output`。现有客户端仍可使用同值的 `session_id`、`session:<id>:...` 和 `kill_session`；新客户端应优先使用 `command_id` 与 `kill_command`。
 
 ## 权限与恢复模型
 
@@ -294,7 +301,7 @@ Windows 也可以双击 `dev-desktop.cmd`。不要只用 `npm run dev` 验证桌
 | `src-tauri/src/actions/` | ChatGPT Actions OpenAPI 网关 |
 | `src-tauri/src/tunnel/` | FRP / Cloudflare 隧道和进程管理 |
 | `src/` | SvelteKit 桌面界面 |
-| `old/` | Python 参考实现和兼容性基线 |
+| `old/` | 固定到 `xyTom/coding-tools-mcp` 0.3.0 的完整 Python 上游快照；被替换或上游移除的旧文件保存在 `old/Trash/` |
 
 ## 致谢
 感谢 [Linux.do](https://linux.do/) 社区对项目推广与反馈的支持。

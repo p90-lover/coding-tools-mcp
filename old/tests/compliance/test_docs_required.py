@@ -26,9 +26,12 @@ class RequiredDocsTests(unittest.TestCase):
             "docs/dogfood.md",
             "docs/swe-bench.md",
             "docs/limitations.md",
+            "docs/telemetry.md",
             "docs/troubleshooting.md",
             "docs/competitive-analysis.md",
-            "docs/profile-v0.1.md",
+            "docs/runtime-contract-v0.3.md",
+            "docs/migration-0.3.md",
+            "docs/runtime-contract-v0.2.md",
             "Dockerfile",
             ".dockerignore",
             "docker-compose.yml",
@@ -58,7 +61,7 @@ class RequiredDocsTests(unittest.TestCase):
     def test_docs_contain_required_operational_topics(self) -> None:
         expectations = {
             "README.md": ["Quickstart", "Safety Boundary", "Dogfood", "SWE-bench"],
-            "SECURITY.md": ["Linux Landlock", "Environment Scrubbing", "Session Lifecycle"],
+            "SECURITY.md": ["Linux Landlock", "Environment Scrubbing", "Command Lifecycle"],
             "COMPLIANCE.md": ["make compliance", "required_tools", "not_measured"],
             "BENCHMARK.md": ["make dogfood-smoke", "make benchmark-latency", "PREFLIGHT_ONLY", "swebench-official-attempt"],
             "docs/ci-and-tests.md": ["make ci", "workflow", "swebench-lite"],
@@ -71,6 +74,7 @@ class RequiredDocsTests(unittest.TestCase):
             "docs/security-boundary.md": ["Landlock", "external container or VM"],
             "docs/docker.md": ["permission-mode trusted", "permission_mode=dangerous", "mvn -version"],
             "docs/competitive-analysis.md": ["Claude Code", "Aider", "OpenHands", "Cline"],
+            "docs/migration-0.3.md": ["Breaking changes", "server/discover", "one trust domain"],
         }
         for rel_path, needles in expectations.items():
             text = (ROOT / rel_path).read_text(encoding="utf-8")
@@ -86,6 +90,7 @@ class RequiredDocsTests(unittest.TestCase):
             "make test",
             "make test-protocol",
             "make test-integration",
+            "make check-npm-launcher",
             "make dogfood-smoke",
             "make benchmark-latency",
             "make benchmark-smoke",
@@ -109,6 +114,33 @@ class RequiredDocsTests(unittest.TestCase):
         for needle in ("docker build", "scripts/mcp_smoke.py"):
             with self.subTest(workflow="docker-smoke", needle=needle):
                 self.assertIn(needle, docker_smoke)
+
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        for needle in (
+            'tags: ["v*"]',
+            "scripts/check_release_versions.py",
+            "./.github/workflows/compliance.yml",
+            "./.github/workflows/real-workloads.yml",
+            "./.github/workflows/swebench-lite.yml",
+            "Verify wheel contents and installation",
+            "pypa/gh-action-pypi-publish",
+            "npm@11.18.0",
+            "npm publish ./dist/*.tgz --access public --provenance",
+            "gh release create",
+        ):
+            with self.subTest(workflow="release", needle=needle):
+                self.assertIn(needle, release)
+
+        final_audit = (ROOT / ".github/workflows/final-audit.yml").read_text(encoding="utf-8")
+        for needle in (
+            "actions/setup-python@v6.2.0",
+            'expected_ref="refs/tags/$RELEASE_TAG"',
+            "git rev-list",
+            "scripts/check_release_versions.py",
+            "Validate referenced runs",
+        ):
+            with self.subTest(workflow="final-audit", needle=needle):
+                self.assertIn(needle, final_audit)
 
         smoke_script = (ROOT / "scripts/mcp_smoke.py").read_text(encoding="utf-8")
         for needle in ("server_info", "exec_command"):

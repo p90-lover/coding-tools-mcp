@@ -48,7 +48,12 @@ pub fn list_linked_projects_for_root(workspace_root: &Path) -> Vec<LinkedProject
 
     let mut projects = entries
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().map(|kind| kind.is_file()).unwrap_or(false))
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
         .filter(|entry| {
             entry
                 .path()
@@ -59,7 +64,11 @@ pub fn list_linked_projects_for_root(workspace_root: &Path) -> Vec<LinkedProject
         .filter_map(|entry| parse_mapping_file(&entry.path()))
         .collect::<Vec<_>>();
 
-    projects.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    projects.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    });
     projects
 }
 
@@ -79,7 +88,9 @@ pub fn quick_add_linked_project_for_root(
         return Err(AppError::Message("Linked project 必须是目录".into()));
     }
     if target == root {
-        return Err(AppError::Message("该目录已经是当前 Workspace 根目录".into()));
+        return Err(AppError::Message(
+            "该目录已经是当前 Workspace 根目录".into(),
+        ));
     }
 
     let default_name = target
@@ -231,18 +242,12 @@ mod tests {
         let workspace = tempdir().expect("workspace");
         let external = tempdir().expect("external");
 
-        let first = quick_add_linked_project_for_root(
-            workspace.path(),
-            external.path(),
-            Some("CoC Macro"),
-        )
-        .expect("first");
-        let second = quick_add_linked_project_for_root(
-            workspace.path(),
-            external.path(),
-            Some("CoC Macro"),
-        )
-        .expect("second");
+        let first =
+            quick_add_linked_project_for_root(workspace.path(), external.path(), Some("CoC Macro"))
+                .expect("first");
+        let second =
+            quick_add_linked_project_for_root(workspace.path(), external.path(), Some("CoC Macro"))
+                .expect("second");
 
         assert_eq!(first.alias, "coc-macro");
         assert_eq!(second.alias, "coc-macro-2");

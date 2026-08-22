@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from tests.compliance.mcp_client import MCPError
 from tests.compliance.test_support import ComplianceTestCase
 
@@ -62,52 +64,52 @@ class DeterministicE2ETests(ComplianceTestCase):
             diff = client.call_tool("git_diff", {"path": "src/math_utils.py"})
             self.assertIn("def square", self.tool_text(diff))
 
-    def test_long_running_stdin_session(self) -> None:
+    def test_long_running_stdin_command(self) -> None:
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
                 {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
             )
             payload = self.assert_tool_success(started)
-            session_id = payload.get("session_id")
-            self.assertIsInstance(session_id, str)
-            hello = client.call_tool("write_stdin", {"session_id": session_id, "chars": "hello\n"})
+            command_id = payload.get("command_id")
+            self.assertIsInstance(command_id, str)
+            hello = client.call_tool("write_stdin", {"command_id": command_id, "chars": "hello\n"})
             self.assertIn("echo:hello", self.tool_text(hello))
-            bye = client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})
+            bye = client.call_tool("write_stdin", {"command_id": command_id, "chars": "exit\n"})
             self.assertIn("bye", self.tool_text(bye))
 
-    def test_long_running_session_poll_exit_and_closed_stdin_error(self) -> None:
+    def test_long_running_command_poll_exit_and_closed_stdin_error(self) -> None:
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
                 {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "yield_time_ms": 0, "max_output_bytes": 4096},
             )
             payload = self.assert_tool_success(started)
-            session_id = payload.get("session_id")
-            self.assertIsInstance(session_id, str)
+            command_id = payload.get("command_id")
+            self.assertIsInstance(command_id, str)
 
             poll = client.call_tool(
                 "write_stdin",
-                {"session_id": session_id, "chars": "", "yield_time_ms": 500, "max_output_bytes": 4096},
+                {"command_id": command_id, "chars": "", "yield_time_ms": 500, "max_output_bytes": 4096},
             )
             self.assertIn("ready", self.tool_text(started) + self.tool_text(poll))
 
             alpha = client.call_tool(
                 "write_stdin",
-                {"session_id": session_id, "chars": "alpha\n", "yield_time_ms": 1000, "max_output_bytes": 4096},
+                {"command_id": command_id, "chars": "alpha\n", "yield_time_ms": 1000, "max_output_bytes": 4096},
             )
             self.assertIn("echo:alpha", self.tool_text(alpha))
 
             closed = client.call_tool(
                 "write_stdin",
-                {"session_id": session_id, "chars": "exit\n", "yield_time_ms": 1000, "max_output_bytes": 4096},
+                {"command_id": command_id, "chars": "exit\n", "yield_time_ms": 1000, "max_output_bytes": 4096},
             )
             self.assertIn("bye", self.tool_text(closed))
             try:
-                late = client.call_tool("write_stdin", {"session_id": session_id, "chars": "late\n"})
+                late = client.call_tool("write_stdin", {"command_id": command_id, "chars": "late\n"})
             except MCPError:
                 return
-            self.assertTrue(late.get("isError"), f"write to naturally closed session must fail: {late!r}")
+            self.assertTrue(late.get("isError"), f"write to naturally closed command must fail: {late!r}")
 
     def test_workspace_escape_flow_is_denied(self) -> None:
         self.assert_denied_or_permission_required("read_file", {"path": "../outside-secret.txt"})
@@ -125,8 +127,15 @@ class DeterministicE2ETests(ComplianceTestCase):
             if "view_image" not in names:
                 self.skipTest("view_image is P1 and not exposed by this server")
             image = client.call_tool("view_image", {"path": "assets/screenshot.png"})
-            self.assert_tool_success(image)
+            payload = self.assert_tool_success(image)
             blob = self.tool_text(image)
-            self.assertRegex(blob, r"(data:image/png;base64|image/png)")
+            self.assertIn("image/png", blob)
+            image_blocks = [item for item in image.get("content", []) if item.get("type") == "image"]
+            self.assertEqual(len(image_blocks), 1)
+            encoded = image_blocks[0].get("data")
+            self.assertIsInstance(encoded, str)
+            self.assertEqual(json.dumps(image).count(str(encoded)), 1)
+            self.assertNotIn("base64", payload)
+            self.assertNotIn("data_url", payload)
             bad = client.call_tool("view_image", {"path": "assets/not-image.txt"})
             self.assertTrue(bad.get("isError"), f"non-image input must fail: {bad!r}")

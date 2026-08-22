@@ -25,12 +25,12 @@ test("GPT 配置卡片不再重复展示会话恢复入口", async () => {
   assert.doesNotMatch(source, /ChatGptSessionPrompt/);
 });
 
-test("会话恢复快捷入口默认紧凑，并可展开完整提示词", async () => {
+test("会话自动恢复入口默认紧凑，并可展开兼容提示词", async () => {
   const source = await readFile(sessionPromptPath, "utf8");
 
   assert.match(source, /let expanded = \$state\(false\)/);
   assert.match(source, /aria-expanded=\{expanded\}/);
-  assert.match(source, /查看完整提示词/);
+  assert.match(source, /查看兼容提示词/);
   assert.match(source, /\{#if expanded\}[\s\S]*<pre/);
 });
 
@@ -39,6 +39,8 @@ test("复制和展开操作保留可触达尺寸与状态反馈", async () => {
 
   assert.ok((source.match(/min-h-11/g) ?? []).length >= 2, "两个操作按钮都应至少为 44px 高");
   assert.match(source, /aria-live="polite"/);
-  assert.match(source, /复制完整提示词/);
+  assert.match(source, /复制兼容提示词/);
   assert.match(source, /已复制/);
+  assert.match(source, /openai\/session/);
+  assert.match(source, /自动建立或恢复历史/);
 });

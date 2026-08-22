@@ -18,10 +18,11 @@ ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = ROOT / "reports" / "compliance"
 JSON_REPORT = REPORT_DIR / "latest.json"
 MD_REPORT = REPORT_DIR / "latest.md"
-PROFILE = "coding-tools-mcp-v0.1"
+CONTRACT = "coding-tools-mcp-v0.3"
 
 SUITES = {
     "mcp-contract": ["tests.compliance.test_mcp_contract"],
+    "dual-era": ["tests.compliance.test_dual_era"],
     "tool-golden": ["tests.compliance.test_tool_golden"],
     "security": ["tests.compliance.test_security"],
     "e2e": ["tests.compliance.test_e2e"],
@@ -99,7 +100,19 @@ def git_commit() -> str:
         )
     except Exception:
         return "unknown"
-    return completed.stdout.strip()
+    revision = completed.stdout.strip()
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=str(ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+    except Exception:
+        return revision
+    return f"{revision}+dirty" if status.stdout.strip() else revision
 
 
 def write_reports(
@@ -113,7 +126,7 @@ def write_reports(
     failures = [] if result is None else [record.__dict__ for record in result.records]
     passed = bool(result and result.wasSuccessful())
     report: dict[str, Any] = {
-        "profile": PROFILE,
+        "contract": CONTRACT,
         "commit": git_commit(),
         "suite": suite_name,
         "passed": passed,
@@ -169,7 +182,7 @@ def markdown_report(report: dict[str, Any]) -> str:
     lines = [
         "# Compliance Report",
         "",
-        f"- profile: `{report['profile']}`",
+        f"- contract: `{report['contract']}`",
         f"- commit: `{report['commit']}`",
         f"- suite: `{report['suite']}`",
         f"- passed: `{str(report['passed']).lower()}`",

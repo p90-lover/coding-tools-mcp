@@ -9,7 +9,7 @@ npx coding-tools-mcp --stdio --workspace /path/to/repo
 Requires `uv` or `pipx` on PATH. The launcher runs the latest PyPI release; pin a specific server version with:
 
 ```bash
-CODING_TOOLS_MCP_VERSION=0.1.7 npx coding-tools-mcp --stdio --workspace /path/to/repo
+CODING_TOOLS_MCP_VERSION=0.2.0 npx coding-tools-mcp --stdio --workspace /path/to/repo
 ```
 
 The launcher's own version is independent of the server version. Documentation, configuration, and issues live in the [main repository](https://github.com/xyTom/coding-tools-mcp).
