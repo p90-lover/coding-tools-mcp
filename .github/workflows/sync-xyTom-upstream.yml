@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       UPSTREAM_REPOSITORY: xyTom/coding-tools-mcp
-      UPSTREAM_SHA: 66b3f194a0252ec1903a84c4e1be4184eb9f4c47
+      UPSTREAM_SHA: ed85e41999b0cf840d6e45f2bed11ac7f52eab3f
       SNAPSHOT_ROOT: old
       TEMP_ROOT: aiTemp/upstream-sync
-      TRASH_ROOT: old/Trash/upstream-0.1.7-to-0.3.0
+      TRASH_ROOT: old/Trash/upstream-66b3f194-to-ed85e419
     steps:
       - name: Check out integration branch
         uses: actions/checkout@v4
