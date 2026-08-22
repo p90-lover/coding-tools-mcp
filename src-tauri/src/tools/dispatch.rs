@@ -433,7 +433,7 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
         "upstream_compatibility": {
             "repository": "xyTom/coding-tools-mcp",
             "version": "0.3.0",
-            "commit": "66b3f194a0252ec1903a84c4e1be4184eb9f4c47",
+            "commit": "ed85e41999b0cf840d6e45f2bed11ac7f52eab3f",
             "canonical_command_handle": "command_id",
             "legacy_session_aliases": true
         },

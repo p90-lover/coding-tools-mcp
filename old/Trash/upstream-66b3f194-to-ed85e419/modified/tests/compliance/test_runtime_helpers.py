@@ -353,18 +353,6 @@ class RuntimeHelperTests(unittest.TestCase):
         self.assertIn("--permission-mode", result.stdout)
         self.assertIn("--allow-network", result.stdout)
 
-    def test_package_module_entrypoint_exposes_version(self) -> None:
-        result = subprocess.run(
-            [sys.executable, "-m", "coding_tools_mcp", "--version"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), f"__main__.py {server_module.__version__}")
-
     def test_workspace_init_tolerates_missing_home_lookup(self) -> None:
         with TemporaryDirectory() as tmp:
             with patch.object(server_module.Path, "home", side_effect=RuntimeError("home unavailable")):

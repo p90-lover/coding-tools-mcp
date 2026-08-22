@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn allows_http_and_https() {
         assert!(is_allowed_url(
-            "https://github.com/mybolide/coding-tools-mcp"
+            "https://github.com/p90-lover/coding-tools-mcp"
         ));
         assert!(is_allowed_url("http://example.com/path"));
         assert!(is_allowed_url("  HTTPS://Example.COM  "));

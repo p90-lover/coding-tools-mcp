@@ -24,6 +24,10 @@ fn server_info_returns_workspace_and_tools() {
     assert!(payload["tool_count"].as_u64().unwrap_or(0) > 0);
     assert_eq!(payload["upstream_compatibility"]["version"], "0.3.0");
     assert_eq!(
+        payload["upstream_compatibility"]["commit"],
+        "ed85e41999b0cf840d6e45f2bed11ac7f52eab3f"
+    );
+    assert_eq!(
         payload["upstream_compatibility"]["canonical_command_handle"],
         "command_id"
     );
