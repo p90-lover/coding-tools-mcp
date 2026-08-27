@@ -49,7 +49,7 @@ def remove_once(path: str, block: str, remaining_marker: str, label: str) -> Non
     if text.count(block) != 1:
         raise RuntimeError(f"{label}: expected one source match")
     backup(path)
-    target.write_text(text.replace(block, "", 1), encoding="utf-8")
+    target.write_text(text.replace(block, "\n", 1), encoding="utf-8")
     print(f"applied: {label}")
 
 
@@ -96,13 +96,13 @@ replace_once(
 
 remove_once(
     "src-tauri/src/auth/refresh_tokens.rs",
-    '''    pub fn revoke_all(&self) -> AppResult<()> {
+    '''
+    pub fn revoke_all(&self) -> AppResult<()> {
         DataStore::update_file(|data| {
             data.oauth_refresh_tokens.remove(&self.profile_id);
             Ok(())
         })
     }
-
 ''',
     "pub fn revoke_all(",
     "remove unused refresh-token revocation API",
