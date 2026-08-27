@@ -66,7 +66,8 @@ tower-http = { version = "0.6", features = ["cors"] }
             production,
         )
         self.assertIn("cleanup_staging_root(ws.root(), &staging_root);", production)
-        self.assertIn("restore_backups(ws.root(), &backups);", production)
+        self.assertIn("restore_backups(ws.root(), &backups)", production)
+        self.assertIn("rollback also failed", production)
         self.assertIn("replace_file(ws.root(), &temp, &path)", production)
         self.assertIn("move_to_trash(ws.root(), &path).map(|_| ())", production)
         self.assertIn(
