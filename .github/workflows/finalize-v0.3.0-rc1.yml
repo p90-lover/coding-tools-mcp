@@ -1,0 +1,527 @@
+name: Finalize verified v0.3.0-rc1
+
+on:
+  push:
+    branches:
+      - automation/finalize-v0.3.0-rc1
+    paths:
+      - .github/workflows/finalize-v0.3.0-rc1.yml
+
+permissions: {}
+
+concurrency:
+  group: finalize-v0.3.0-rc1
+  cancel-in-progress: false
+
+env:
+  TARGET_BRANCH: automation/secure-source-v0.3.0-rc1-v2
+  PR4_NUMBER: "4"
+  OLD_PR5_NUMBER: "5"
+  FEATURE_BRANCH: feature/secure-auto-approval-persistent-auth
+  INTEGRATION_BRANCH: integration/xyTom-v0.3.0
+  MAIN_BRANCH: main
+  RELEASE_VERSION: 0.3.0-rc1
+  RELEASE_TAG: v0.3.0-rc1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve-source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      pr4_head: ${{ steps.resolve.outputs.pr4_head }}
+      owner: ${{ steps.resolve.outputs.owner }}
+    steps:
+      - name: Wait for the exact materialized source without mutating it
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%%/*}"
+          source_sha=""
+
+          for attempt in $(seq 1 80); do
+            source_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$TARGET_BRANCH" --jq '.object.sha')"
+            encoded="$(gh api "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$source_sha" --jq '.content' | tr -d '\n')"
+            observed_version="$(printf '%s' "$encoded" | base64 --decode | jq -r '.version')"
+            printf 'attempt=%s source=%s version=%s\n' "$attempt" "$source_sha" "$observed_version"
+            if [ "$observed_version" = "$RELEASE_VERSION" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 80 ]; then
+              echo "Timed out waiting for the materialized $RELEASE_VERSION source."
+              exit 1
+            fi
+            sleep 15
+          done
+
+          pr4="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR4_NUMBER")"
+          test "$(jq -r '.head.ref' <<<"$pr4")" = "$FEATURE_BRANCH"
+          test "$(jq -r '.base.ref' <<<"$pr4")" = "$INTEGRATION_BRANCH"
+          pr4_head="$(jq -r '.head.sha' <<<"$pr4")"
+
+          relation="$(gh api "repos/$GITHUB_REPOSITORY/compare/$pr4_head...$source_sha" --jq '.status')"
+          case "$relation" in
+            ahead|identical) ;;
+            *) echo "Release source is not based on the exact PR #4 head: $relation"; exit 1 ;;
+          esac
+
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'pr4_head=%s\n' "$pr4_head" >> "$GITHUB_OUTPUT"
+          printf 'owner=%s\n' "$owner" >> "$GITHUB_OUTPUT"
+
+  verify-source:
+    needs: resolve-source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+      PR4_HEAD: ${{ needs.resolve-source.outputs.pr4_head }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-final-verify
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-rc1-linux
+
+      - name: Verify exact ancestry, synchronized versions, and no deleted files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$PR4_HEAD"
+          git merge-base --is-ancestor "$PR4_HEAD" "$SOURCE_SHA"
+          if git diff --name-status "$PR4_HEAD..$SOURCE_SHA" | grep -q '^D'; then
+            echo "Refusing release because the release delta deletes a file."
+            git diff --name-status "$PR4_HEAD..$SOURCE_SHA"
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          version = "0.3.0-rc1"
+          package = json.loads(Path("package.json").read_text(encoding="utf-8"))
+          package_lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
+          tauri = json.loads(Path("src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+          observed = {
+              "package.json": package.get("version"),
+              "package-lock.json": package_lock.get("version"),
+              "package-lock root": package_lock.get("packages", {}).get("", {}).get("version"),
+              "tauri.conf.json": tauri.get("version"),
+          }
+          mismatches = {name: value for name, value in observed.items() if value != version}
+          expected = f'name = "coding-tools-mcp-desktop"\nversion = "{version}"'
+          for cargo_path in ("src-tauri/Cargo.toml", "src-tauri/Cargo.lock"):
+              if expected not in Path(cargo_path).read_text(encoding="utf-8"):
+                  mismatches[cargo_path] = "mismatch"
+          if mismatches:
+              raise SystemExit(f"release version mismatch: {mismatches}")
+          print(f"verified synchronized version {version}")
+          PY
+          git diff --check
+
+      - name: Verify scoped approval, elevation blocking, and recoverable deletion boundaries
+        working-directory: src-tauri
+        run: |
+          cargo test --locked tools::approval -- --nocapture
+          cargo test --locked elevation_requests_are_always_blocked -- --nocapture
+          cargo test --locked --test call_tool_security apply_patch_allows_deleting_a_normal_file -- --nocapture
+          cargo test --locked --test call_tool_security deleting_readme_requires_explicit_confirmation -- --nocapture
+          cargo test --locked --test call_tool_security deleting_git_assets_is_always_rejected -- --nocapture
+
+      - name: Verify persistent OAuth rotation, replay rejection, and data recovery
+        working-directory: src-tauri
+        run: |
+          cargo test --locked auth::refresh_tokens -- --nocapture
+          cargo test --locked auth::oauth_flow::tests -- --nocapture
+          cargo test --locked data::store::tests -- --nocapture
+
+      - name: Run complete locked Rust matrix and strict Clippy
+        working-directory: src-tauri
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run frontend checks, production build, and Node tests
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+  build-windows:
+    needs:
+      - resolve-source
+      - verify-source
+    runs-on: windows-latest
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-rc1-windows
+
+      - name: Install and verify Windows source
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path aiTemp/npm-cache | Out-Null
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          node --test tests/*.test.mjs
+          Push-Location src-tauri
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          Pop-Location
+
+      - name: Build Windows NSIS installer
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Create Windows SHA-256 manifest
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
+          if ($files.Count -lt 1) { throw "Windows installer was not produced" }
+          New-Item -ItemType Directory -Force -Path aiTemp/release-checksums | Out-Null
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $lines | Set-Content -Encoding ascii aiTemp/release-checksums/SHA256SUMS-windows.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-windows-${{ env.SOURCE_SHA }}
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            aiTemp/release-checksums/SHA256SUMS-windows.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    needs:
+      - resolve-source
+      - verify-source
+    runs-on: macos-14
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-rc1-macos
+
+      - name: Install and verify macOS source
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          node --test tests/*.test.mjs
+          (cd src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings)
+
+      - name: Build universal macOS DMG
+        run: npm run tauri -- build --target universal-apple-darwin --bundles dmg
+
+      - name: Create macOS SHA-256 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-checksums
+          shopt -s nullglob
+          files=(src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          if [ "${#files[@]}" -lt 1 ]; then
+            echo "macOS DMG was not produced"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            shasum -a 256 "$file"
+          done | sed 's#  .*/#  #' > aiTemp/release-checksums/SHA256SUMS-macos.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-macos-${{ env.SOURCE_SHA }}
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            aiTemp/release-checksums/SHA256SUMS-macos.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  integrate-and-release:
+    needs:
+      - resolve-source
+      - verify-source
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+      PR4_HEAD: ${{ needs.resolve-source.outputs.pr4_head }}
+      OWNER: ${{ needs.resolve-source.outputs.owner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MAIN_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: final-windows-${{ env.SOURCE_SHA }}
+          path: dist/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: final-macos-${{ env.SOURCE_SHA }}
+          path: dist/macos
+
+      - name: Verify immutable source ref and installer manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          live_source="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$TARGET_BRANCH" --jq '.object.sha')"
+          test "$live_source" = "$SOURCE_SHA"
+          compgen -G 'dist/windows/*.exe' >/dev/null
+          compgen -G 'dist/macos/*.dmg' >/dev/null
+          (cd dist/windows && sha256sum -c SHA256SUMS-windows.txt)
+          (cd dist/macos && shasum -a 256 -c SHA256SUMS-macos.txt)
+
+      - name: Merge PR 4 into the integration branch with exact-head protection
+        id: merge_pr4
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR4_NUMBER")"
+          test "$(jq -r '.head.sha' <<<"$pr")" = "$PR4_HEAD"
+          test "$(jq -r '.base.ref' <<<"$pr")" = "$INTEGRATION_BRANCH"
+
+          if [ "$(jq -r '.merged' <<<"$pr")" != "true" ]; then
+            if [ "$(jq -r '.draft' <<<"$pr")" = "true" ]; then
+              gh pr ready "$PR4_NUMBER" --repo "$GITHUB_REPOSITORY"
+            fi
+            payload="$(jq -n --arg sha "$PR4_HEAD" '{sha:$sha,merge_method:"merge"}')"
+            result="$(gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$PR4_NUMBER/merge" --input - <<<"$payload")"
+            test "$(jq -r '.merged' <<<"$result")" = "true"
+          fi
+
+          integration_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$INTEGRATION_BRANCH" --jq '.object.sha')"
+          relation="$(gh api "repos/$GITHUB_REPOSITORY/compare/$PR4_HEAD...$integration_sha" --jq '.status')"
+          case "$relation" in ahead|identical) ;; *) echo "PR #4 head is not in integration"; exit 1 ;; esac
+          printf 'integration_sha=%s\n' "$integration_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Retarget or create the secure release PR, then merge its exact source SHA
+        id: merge_release
+        shell: bash
+        run: |
+          set -euo pipefail
+          query="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=all -f head="$OWNER:$TARGET_BRANCH" -f per_page=20)"
+          release_pr="$(jq -r '[.[] | select(.state == "open")][0].number // empty' <<<"$query")"
+
+          if [ -z "$release_pr" ]; then
+            create_payload="$(jq -n \
+              --arg title 'build: verify and materialize secure v0.3.0-rc1 release source' \
+              --arg head "$TARGET_BRANCH" \
+              --arg base "$INTEGRATION_BRANCH" \
+              --arg body 'Exact source validated on Linux, Windows, and macOS. No files are deleted; backups and temporary data remain under aiTemp/ and aiTemp/Trash/.' \
+              '{title:$title,head:$head,base:$base,body:$body,draft:true}')"
+            release_pr="$(gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" --input - <<<"$create_payload" --jq '.number')"
+          else
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$release_pr" -f base="$INTEGRATION_BRANCH" >/dev/null
+          fi
+
+          for attempt in $(seq 1 30); do
+            pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$release_pr")"
+            test "$(jq -r '.head.sha' <<<"$pr")" = "$SOURCE_SHA"
+            test "$(jq -r '.base.ref' <<<"$pr")" = "$INTEGRATION_BRANCH"
+            mergeable="$(jq -r '.mergeable' <<<"$pr")"
+            state="$(jq -r '.mergeable_state' <<<"$pr")"
+            if [ "$mergeable" != "null" ]; then
+              break
+            fi
+            sleep 4
+          done
+          test "$mergeable" = "true"
+          test "$state" != "dirty"
+
+          if [ "$(jq -r '.draft' <<<"$pr")" = "true" ]; then
+            gh pr ready "$release_pr" --repo "$GITHUB_REPOSITORY"
+          fi
+          payload="$(jq -n --arg sha "$SOURCE_SHA" '{sha:$sha,merge_method:"merge"}')"
+          result="$(gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$release_pr/merge" --input - <<<"$payload")"
+          test "$(jq -r '.merged' <<<"$result")" = "true"
+
+          integration_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$INTEGRATION_BRANCH" --jq '.object.sha')"
+          source_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA" --jq '.commit.tree.sha')"
+          integration_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$integration_sha" --jq '.commit.tree.sha')"
+          test "$integration_tree" = "$source_tree"
+          printf 'release_pr=%s\n' "$release_pr" >> "$GITHUB_OUTPUT"
+          printf 'integration_sha=%s\n' "$integration_sha" >> "$GITHUB_OUTPUT"
+          printf 'source_tree=%s\n' "$source_tree" >> "$GITHUB_OUTPUT"
+
+      - name: Merge the verified integration tree into main
+        id: merge_main
+        env:
+          INTEGRATION_SHA: ${{ steps.merge_release.outputs.integration_sha }}
+          SOURCE_TREE: ${{ steps.merge_release.outputs.source_tree }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          query="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$OWNER:$INTEGRATION_BRANCH" -f base="$MAIN_BRANCH" -f per_page=20)"
+          main_pr="$(jq -r '.[0].number // empty' <<<"$query")"
+          if [ -z "$main_pr" ]; then
+            payload="$(jq -n \
+              --arg title 'release: integrate verified v0.3.0-rc1 desktop source' \
+              --arg head "$INTEGRATION_BRANCH" \
+              --arg base "$MAIN_BRANCH" \
+              --arg body 'Promotes the exact tree already validated by the full security, Rust, frontend, Windows NSIS, and universal macOS DMG matrix.' \
+              '{title:$title,head:$head,base:$base,body:$body,draft:true}')"
+            main_pr="$(gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" --input - <<<"$payload" --jq '.number')"
+          fi
+
+          for attempt in $(seq 1 30); do
+            pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$main_pr")"
+            test "$(jq -r '.head.sha' <<<"$pr")" = "$INTEGRATION_SHA"
+            test "$(jq -r '.base.ref' <<<"$pr")" = "$MAIN_BRANCH"
+            mergeable="$(jq -r '.mergeable' <<<"$pr")"
+            state="$(jq -r '.mergeable_state' <<<"$pr")"
+            if [ "$mergeable" != "null" ]; then
+              break
+            fi
+            sleep 4
+          done
+          test "$mergeable" = "true"
+          test "$state" != "dirty"
+          if [ "$(jq -r '.draft' <<<"$pr")" = "true" ]; then
+            gh pr ready "$main_pr" --repo "$GITHUB_REPOSITORY"
+          fi
+          payload="$(jq -n --arg sha "$INTEGRATION_SHA" '{sha:$sha,merge_method:"merge"}')"
+          result="$(gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$main_pr/merge" --input - <<<"$payload")"
+          test "$(jq -r '.merged' <<<"$result")" = "true"
+
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$MAIN_BRANCH" --jq '.object.sha')"
+          main_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$main_sha" --jq '.commit.tree.sha')"
+          test "$main_tree" = "$SOURCE_TREE"
+          printf 'main_pr=%s\n' "$main_pr" >> "$GITHUB_OUTPUT"
+          printf 'main_sha=%s\n' "$main_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Publish a new immutable prerelease from the exact verified main tree
+        env:
+          MAIN_SHA: ${{ steps.merge_main.outputs.main_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing tag $RELEASE_TAG"
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing release $RELEASE_TAG"
+            exit 1
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$MAIN_SHA" \
+            --title "Coding Tools MCP $RELEASE_TAG" \
+            --generate-notes \
+            --prerelease \
+            dist/windows/*.exe \
+            dist/windows/SHA256SUMS-windows.txt \
+            dist/macos/*.dmg \
+            dist/macos/SHA256SUMS-macos.txt
+
+          release="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,targetCommitish,assets)"
+          test "$(jq -r '.tagName' <<<"$release")" = "$RELEASE_TAG"
+          test "$(jq -r '.isPrerelease' <<<"$release")" = "true"
+          test "$(jq -r '.targetCommitish' <<<"$release")" = "$MAIN_SHA"
+          test "$(jq '.assets | length' <<<"$release")" -ge 4
+
+      - name: Close only the superseded PR conversation while retaining its branch
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          old="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$OLD_PR5_NUMBER")"
+          if [ "$(jq -r '.state' <<<"$old")" = "open" ]; then
+            gh pr comment "$OLD_PR5_NUMBER" --repo "$GITHUB_REPOSITORY" --body "Superseded by the clean, fully validated release-source branch. This PR is closed without deleting its branch or files."
+            gh pr close "$OLD_PR5_NUMBER" --repo "$GITHUB_REPOSITORY"
+          fi
