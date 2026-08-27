@@ -15,7 +15,8 @@ REVIEWED_SCRIPT = (
     / "apply_post_rc1_hardening.py"
 )
 REVIEWED_BLOB_SHA1 = "4afaa1510dff2828be86c90881486cf4c96993ff"
-SOURCE_PATH = Path("src-tauri/src/actions/listener.rs")
+ACTIONS_LISTENER_PATH = Path("src-tauri/src/actions/listener.rs")
+TOOLS_MODULE_PATH = Path("src-tauri/src/tools/mod.rs")
 BACKUP_ROOT = (
     ROOT
     / "aiTemp"
@@ -39,13 +40,21 @@ def checked_regular_file(path: Path, label: str) -> Path:
     return resolved
 
 
+def backup(path: Path, label: str) -> Path:
+    source = checked_regular_file(ROOT / path, label)
+    target = BACKUP_ROOT / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return source
+
+
 def git_blob_sha1(payload: bytes) -> str:
     header = f"blob {len(payload)}\0".encode("ascii")
     return hashlib.sha1(header + payload, usedforsecurity=False).hexdigest()
 
 
 def adapt_reviewed_rustfmt_shape() -> None:
-    target = checked_regular_file(ROOT / SOURCE_PATH, "Actions listener")
+    target = checked_regular_file(ROOT / ACTIONS_LISTENER_PATH, "Actions listener")
     text = target.read_text(encoding="utf-8")
     formatted = "    extract::{Form, Path, Query, State},\n"
     reviewed = "        extract::{Form, Path, Query, State},\n"
@@ -58,9 +67,7 @@ def adapt_reviewed_rustfmt_shape() -> None:
             "Actions import shape drifted; expected exactly one rustfmt-normalized source marker"
         )
 
-    backup = BACKUP_ROOT / SOURCE_PATH
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(target, backup)
+    target = backup(ACTIONS_LISTENER_PATH, "Actions listener")
     target.write_text(text.replace(formatted, reviewed, 1), encoding="utf-8")
     print("adapted: reviewed Actions import indentation with recoverable backup")
 
@@ -76,5 +83,25 @@ def run_reviewed_applicator() -> None:
     runpy.run_path(str(reviewed), run_name="__main__")
 
 
+def repair_reviewed_module_visibility() -> None:
+    target = checked_regular_file(ROOT / TOOLS_MODULE_PATH, "tools module")
+    text = target.read_text(encoding="utf-8")
+    invalid = "pub pub(crate) mod trash;\nmod workspace;\n"
+    corrected = "pub(crate) mod trash;\npub mod workspace;\n"
+
+    if corrected in text:
+        print("already repaired: Trash visibility with public workspace API")
+        return
+    if text.count(invalid) != 1:
+        raise RuntimeError(
+            "tools module visibility drifted; expected exactly one reviewed composite marker"
+        )
+
+    target = backup(TOOLS_MODULE_PATH, "tools module")
+    target.write_text(text.replace(invalid, corrected, 1), encoding="utf-8")
+    print("repaired: Trash visibility while preserving public workspace API")
+
+
 adapt_reviewed_rustfmt_shape()
 run_reviewed_applicator()
+repair_reviewed_module_visibility()
