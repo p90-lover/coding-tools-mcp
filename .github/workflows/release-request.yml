@@ -1,4 +1,4 @@
-name: Release request dispatcher
+name: Release request validation
 
 on:
   push:
@@ -15,19 +15,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  dispatch:
+  validate:
     if: github.actor == github.repository_owner
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      actions: write
-      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - name: Validate owner-scoped release request
+      - name: Validate owner-scoped release request without publishing
         id: request
         shell: bash
         run: |
@@ -55,12 +52,16 @@ jobs:
           print(f'validated owner release request for {tag}')
           PY
 
-      - name: Dispatch verified desktop release from main
+      - name: Record the authorized manual release command
         env:
-          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.request.outputs.tag }}
+        shell: bash
         run: |
-          gh workflow run release.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main \
-            -f release_tag="$RELEASE_TAG"
+          {
+            echo "## Validated release request"
+            echo
+            echo "Tag: \`$RELEASE_TAG\`"
+            echo
+            echo "This read-only workflow does not publish or dispatch another workflow."
+            echo "The repository owner must manually run **Desktop Release** from the exact \`main\` revision after all required checks are green."
+          } >> "$GITHUB_STEP_SUMMARY"
