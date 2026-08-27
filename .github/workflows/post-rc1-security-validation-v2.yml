@@ -1,0 +1,234 @@
+name: Post-RC1 security portability validation v2
+
+on:
+  push:
+    branches:
+      - security/unauthorized-auth-trash-heavy-usage
+    paths:
+      - "src-tauri/src/**"
+      - "src-tauri/tests/**"
+      - "src/**"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "package.json"
+      - "package-lock.json"
+
+permissions: {}
+
+concurrency:
+  group: post-rc1-security-portability-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_BRANCH: security/unauthorized-auth-trash-heavy-usage
+  RELEASE_SOURCE_BRANCH: automation/secure-source-v0.3.0-rc1-v2
+  RELEASE_TAG: v0.3.0-rc1
+
+jobs:
+  linux-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-security-v2-linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: post-rc1-security-portability-v2-linux
+
+      - name: Verify immutable ancestry and no deleted source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$RELEASE_SOURCE_BRANCH"
+          base_sha="$(git rev-parse "origin/$RELEASE_SOURCE_BRANCH")"
+          base_tree="$(git rev-parse "origin/$RELEASE_SOURCE_BRANCH^{tree}")"
+          git merge-base --is-ancestor "$base_sha" "$GITHUB_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" != "$base_tree"
+          if git diff --name-status "$base_sha..$GITHUB_SHA" | grep -q '^D'; then
+            echo "Post-RC1 hardening must not delete files."
+            git diff --name-status "$base_sha..$GITHUB_SHA"
+            exit 1
+          fi
+          git diff --check "$base_sha..$GITHUB_SHA"
+
+      - name: Recheck focused security and heavy-usage behavior
+        working-directory: src-tauri
+        run: |
+          cargo test --locked security_hardening_tests -- --nocapture
+          cargo test --locked request_capacity_hardening_tests -- --nocapture
+          cargo test --locked tools::trash -- --nocapture
+          cargo test --locked --test call_tool_security deleting_readme_requires_explicit_confirmation -- --nocapture
+          cargo test --locked --test call_tool_security deleting_git_assets_is_always_rejected -- --nocapture
+          cargo test --locked elevation_requests_are_always_blocked -- --nocapture
+
+      - name: Complete Linux Rust and frontend matrix
+        run: |
+          (cd src-tauri && cargo fmt --all -- --check)
+          (cd src-tauri && cargo test --locked)
+          (cd src-tauri && cargo clippy --locked --all-targets -- -D warnings)
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+  windows-portability:
+    runs-on: windows-latest
+    timeout-minutes: 110
+    permissions:
+      contents: read
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-security-v2-windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: post-rc1-security-portability-v2-windows
+
+      - name: Complete Windows Rust and frontend matrix
+        shell: pwsh
+        run: |
+          Push-Location src-tauri
+          cargo fmt --all -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path aiTemp/npm-cache | Out-Null
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+  macos-portability:
+    runs-on: macos-14
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-security-v2-macos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: post-rc1-security-portability-v2-macos
+
+      - name: Complete macOS Rust and frontend matrix
+        run: |
+          (cd src-tauri && cargo fmt --all -- --check)
+          (cd src-tauri && cargo test --locked)
+          (cd src-tauri && cargo clippy --locked --all-targets -- -D warnings)
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+  open-dependent-pr:
+    needs:
+      - linux-security
+      - windows-portability
+      - macos-portability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Open or retarget the exact validated hardening PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%%/*}"
+          live_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$SOURCE_BRANCH" --jq '.object.sha')"
+          test "$live_sha" = "$GITHUB_SHA"
+
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            base=main
+            release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+            test "$(jq -r '.prerelease' <<<"$release")" = "true"
+          else
+            base="$RELEASE_SOURCE_BRANCH"
+          fi
+
+          query="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f state=open \
+            -f head="$owner:$SOURCE_BRANCH" \
+            -f per_page=20)"
+          pr_number="$(jq -r '.[0].number // empty' <<<"$query")"
+          body='Adds bounded dynamic-public-client OAuth identity, exact configured-client matching, safer redirect validation, bounded pending authorization state, bounded MCP/Actions request concurrency and body size, off-reactor Actions execution, and atomic recoverable file/directory moves under aiTemp/Trash. The exact source SHA passed Linux, Windows, and macOS locked tests, strict Clippy, frontend checks/builds, and focused deletion/authentication/capacity tests. No file or branch is deleted.'
+
+          if [ -z "$pr_number" ]; then
+            payload="$(jq -n \
+              --arg title 'security: bound authentication load and preserve deletions in Trash' \
+              --arg head "$SOURCE_BRANCH" \
+              --arg base "$base" \
+              --arg body "$body" \
+              '{title:$title,head:$head,base:$base,body:$body,draft:true,maintainer_can_modify:true}')"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" --input - <<<"$payload" >/dev/null
+          else
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$pr_number" \
+              -f base="$base" \
+              -f body="$body" >/dev/null
+          fi
