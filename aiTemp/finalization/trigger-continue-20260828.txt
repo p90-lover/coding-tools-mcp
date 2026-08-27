@@ -1,0 +1,3 @@
+requested_at=2026-08-28
+request=continue_until_end
+safety=no_file_or_branch_deletion
