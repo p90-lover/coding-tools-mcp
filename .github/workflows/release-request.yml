@@ -1,0 +1,66 @@
+name: Release request dispatcher
+
+on:
+  push:
+    branches:
+      - "release/**"
+    paths:
+      - ".github/release-request.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-request-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate owner-scoped release request
+        id: request
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path('.github/release-request.json')
+          data = json.loads(path.read_text(encoding='utf-8'))
+          if not isinstance(data, dict) or set(data) != {'tag'}:
+              raise SystemExit('release request must contain exactly one tag field')
+          tag = str(data['tag']).strip()
+          if not re.fullmatch(r'v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?', tag):
+              raise SystemExit(f'invalid release tag: {tag!r}')
+          expected_branch = f'release/{tag}'
+          if os.environ['GITHUB_REF_NAME'] != expected_branch:
+              raise SystemExit(
+                  f'release request branch must be {expected_branch!r}, '
+                  f'not {os.environ["GITHUB_REF_NAME"]!r}'
+              )
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'tag={tag}\n')
+          print(f'validated owner release request for {tag}')
+          PY
+
+      - name: Dispatch verified desktop release from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
+        run: |
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f release_tag="$RELEASE_TAG"
