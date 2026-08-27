@@ -1,0 +1,1 @@
+This marker confirms the authenticated GitHub connector can materialize files on the security hardening branch without deleting or overwriting existing files.
