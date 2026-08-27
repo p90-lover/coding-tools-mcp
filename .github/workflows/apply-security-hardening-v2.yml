@@ -6,6 +6,7 @@ on:
       - security/unauthorized-auth-trash-heavy-usage
     paths:
       - "aiTemp/security-hardening/apply_security_hardening_v2.py"
+      - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
   workflow_dispatch:
 
@@ -56,6 +57,9 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: apply-security-hardening-linux
+
+      - name: Reproduce applicator dependency generation
+        run: python aiTemp/security-hardening/test_apply_security_hardening_v2.py
 
       - name: Apply backup-first hardening without deleting files
         shell: bash
