@@ -37,7 +37,34 @@ impl SecretStore {
     }
 
     pub fn get_shared(key: &str) -> AppResult<Option<String>> {
-        DataStore::read_file(|data| Ok(data.shared_secrets.get(key).cloned()))
+        DataStore::read_file(|data| {
+            Ok(data
+                .shared_secrets
+                .get(key)
+                .filter(|value| !value.is_empty())
+                .cloned())
+        })
+    }
+
+    pub fn get_or_regenerate(profile_id: &str, key: &str, use_shared: bool) -> AppResult<String> {
+        let existing = if use_shared {
+            Self::get_shared(key)?
+        } else {
+            Self::get(profile_id, key)?
+        };
+        if let Some(value) = existing.filter(|value| !value.is_empty()) {
+            return Ok(value);
+        }
+        let value = random_secret();
+        DataStore::update_file(|data| {
+            if use_shared {
+                data.shared_secrets.insert(key.to_string(), value.clone());
+            } else {
+                workspace_secret_map(data, profile_id).insert(key.to_string(), value.clone());
+            }
+            Ok(())
+        })?;
+        Ok(value)
     }
 
     pub fn get_app(scope: &str, item_id: &str) -> AppResult<Option<String>> {
@@ -83,6 +110,21 @@ mod tests {
     #[test]
     fn random_secret_is_non_empty() {
         assert!(random_secret().len() > 32);
+    }
+
+    #[test]
+    fn missing_workspace_secret_is_regenerated_and_persisted() {
+        let id = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let value =
+            SecretStore::get_or_regenerate(&id, "oauth_token_secret", false).expect("regenerate");
+        assert!(!value.is_empty());
+        assert_eq!(
+            SecretStore::get(&id, "oauth_token_secret")
+                .expect("read")
+                .as_deref(),
+            Some(value.as_str())
+        );
+        let _ = SecretStore::remove_workspace_secrets(&id);
     }
 
     #[test]

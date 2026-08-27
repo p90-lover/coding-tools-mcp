@@ -11,6 +11,7 @@ use super::registry::is_allowed_tool;
 static NETWORK_COMMAND_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 static DANGEROUS_COMMAND_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 static INTERPRETER_MUTATION_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+static ELEVATION_COMMAND_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
 const BASIC_READ_ONLY_COMMANDS: &[&str] = &[
     "pwd", "ls", "dir", "cat", "head", "tail", "grep", "find", "which", "echo",
@@ -60,6 +61,7 @@ pub struct PolicySettings {
     pub workspace_script_extensions: HashSet<String>,
     pub max_patch_bytes: usize,
     pub permission_mode: String,
+    pub approval_mode: String,
 }
 
 impl Default for PolicySettings {
@@ -70,6 +72,7 @@ impl Default for PolicySettings {
             workspace_script_extensions: default_workspace_script_extension_set(),
             max_patch_bytes: 200_000,
             permission_mode: "trusted".into(),
+            approval_mode: "auto-workspace".into(),
         }
     }
 }
@@ -84,6 +87,7 @@ impl PolicySettings {
             ),
             max_patch_bytes: 200_000,
             permission_mode: runtime.permission_mode.clone(),
+            approval_mode: runtime.approval_mode.clone(),
         }
     }
 
@@ -94,6 +98,7 @@ impl PolicySettings {
             workspace_script_extensions: default_workspace_script_extension_set(),
             max_patch_bytes: actions.max_patch_bytes as usize,
             permission_mode: actions.permission_mode.clone(),
+            approval_mode: "auto-workspace".into(),
         }
     }
 
@@ -252,6 +257,11 @@ pub fn validate_command_for_workspace(
     if has_forbidden_shell_syntax(command) {
         return Err(PolicyError(
             "Shell chaining, redirection and expansion are not allowed".into(),
+        ));
+    }
+    if elevation_command_pattern().is_match(command) {
+        return Err(PolicyError(
+            "ELEVATION_NOT_ALLOWED: administrator elevation is blocked for MCP tool calls".into(),
         ));
     }
     if (dangerous_command_pattern().is_match(command)
@@ -450,6 +460,15 @@ fn interpreter_mutation_pattern() -> &'static regex::Regex {
     })
 }
 
+fn elevation_command_pattern() -> &'static regex::Regex {
+    ELEVATION_COMMAND_PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)(^|\s)(sudo|doas|pkexec|runas)(\s|$)|start-process[^\r\n]*-verb\s+runas",
+        )
+        .expect("valid regex")
+    })
+}
+
 fn command_contains_external_path(command: &str) -> bool {
     let normalized = command.replace('\\', "/");
     normalized.contains("../")
@@ -577,6 +596,23 @@ mod tests {
         let policy = PolicySettings::from_actions_config(&actions);
         assert!(validate_command(&json!({"cmd": "pwd"}), &policy).is_ok());
         assert!(validate_command(&json!({"cmd": "pytest"}), &policy).is_ok());
+    }
+
+    #[test]
+    fn elevation_requests_are_always_blocked() {
+        let policy = PolicySettings {
+            permission_mode: "dangerous".into(),
+            ..PolicySettings::default()
+        };
+        for command in [
+            "sudo cargo test",
+            "runas /user:Administrator cmd",
+            "powershell Start-Process cmd -Verb RunAs",
+        ] {
+            let error = validate_command(&json!({"cmd": command, "confirm": true}), &policy)
+                .expect_err("elevation must be blocked");
+            assert!(error.0.contains("ELEVATION_NOT_ALLOWED"));
+        }
     }
 
     #[test]

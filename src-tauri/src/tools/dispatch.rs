@@ -12,14 +12,21 @@ fn policy_tool_err(err: PolicyError) -> Value {
         .0
         .strip_prefix("DANGEROUS_OPERATION_REQUIRES_CONFIRMATION: ");
     let protected = err.0.strip_prefix("PROTECTED_REPOSITORY_ASSET: ");
+    let elevation = err.0.strip_prefix("ELEVATION_NOT_ALLOWED: ");
     let code = if protected.is_some() {
         "PROTECTED_REPOSITORY_ASSET"
+    } else if elevation.is_some() {
+        "ELEVATION_NOT_ALLOWED"
     } else if dangerous.is_some() {
         "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"
     } else {
         "POLICY_REJECTED"
     };
-    let message = protected.or(dangerous).unwrap_or(&err.0).to_string();
+    let message = protected
+        .or(elevation)
+        .or(dangerous)
+        .unwrap_or(&err.0)
+        .to_string();
     let (reason, suggestion) = if dangerous.is_some() {
         (
             "confirmation_required",
@@ -52,7 +59,42 @@ fn policy_tool_err(err: PolicyError) -> Value {
 /// **唯一工具执行入口**。MCP `tools/call` 与 Actions `POST /actions/{tool}` 必须且只能调用此函数。
 /// 策略校验、分发、错误格式在此统一，两路传输层不得另做执行前校验（Actions 仅允许额外的暴露层 `validate_actions_exposure`）。
 pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
-    let effective_args = apply_default_cwd(ctx, name, args);
+    let mut effective_args = apply_default_cwd(ctx, name, args);
+    // Run policy once before approval to surface only non-overridable hard
+    // boundaries such as protected paths, host scope, shell escapes, and
+    // administrator elevation. A confirmation-only destructive result is the
+    // soft gate handled by the scoped approval store below.
+    if let Err(e) = validate_tool_arguments_for_workspace(
+        name,
+        &effective_args,
+        &ctx.policy,
+        Some(&ctx.workspace),
+    ) {
+        if !e
+            .0
+            .starts_with("DANGEROUS_OPERATION_REQUIRES_CONFIRMATION:")
+        {
+            return attach_project_instructions(ctx, name, &effective_args, policy_tool_err(e));
+        }
+    }
+    if name != "request_permissions" {
+        if let Err(error) = ctx.approvals.preflight(
+            name,
+            &mut effective_args,
+            &ctx.policy.approval_mode,
+            &ctx.permission_mode,
+        ) {
+            return attach_project_instructions(
+                ctx,
+                name,
+                &effective_args,
+                tool_err(error.into_workspace_error()),
+            );
+        }
+    }
+    // Re-run the complete policy after approval. A consumed grant injects the
+    // exact-operation confirmation flag, while every hard boundary remains
+    // enforced and cannot be weakened by an approval token.
     if let Err(e) = validate_tool_arguments_for_workspace(
         name,
         &effective_args,
@@ -141,36 +183,26 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "git_blame" => git::git_blame(ws, &effective_args),
         "view_image" => image_tool::view_image(ws, &effective_args),
         "request_permissions" => {
-            if ctx.policy.skip_permission_gates() {
-                Ok(tool_ok(json!({
-                    "ok": true,
-                    "status": "granted",
-                    "grant_id": "dangerously-skip-all-permissions",
-                    "expires_at": null,
-                    "constraints": {
-                        "mode": "dangerous",
-                        "workspace": ctx.workspace.root_display(),
-                        "requested": effective_args
-                    },
-                    "warnings": [
-                        "dangerous permission mode is enabled; permission-gated operations are auto-granted"
-                    ]
-                })))
-            } else {
-                Ok(tool_ok(json!({
-                    "ok": false,
-                    "status": "unsupported",
-                    "grant_id": null,
-                    "expires_at": null,
-                    "next_actions": [],
-                    "error": {
-                        "code": "ELICITATION_UNSUPPORTED",
-                        "message": "Permission elicitation is not available for this client.",
-                        "category": "permission",
-                        "retryable": false,
-                        "details": { "requested": effective_args }
-                    }
-                })))
+            let request_id = effective_args
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| WorkspaceError::invalid_argument("request_id is required"));
+            match request_id {
+                Ok(request_id) => {
+                    let scope = effective_args
+                        .get("scope")
+                        .and_then(Value::as_str)
+                        .unwrap_or("once");
+                    let confirmed = effective_args
+                        .get("confirm")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    ctx.approvals
+                        .grant(request_id, scope, confirmed)
+                        .map(tool_ok)
+                        .map_err(|error| error.into_workspace_error())
+                }
+                Err(error) => Err(error),
             }
         }
         _ => {

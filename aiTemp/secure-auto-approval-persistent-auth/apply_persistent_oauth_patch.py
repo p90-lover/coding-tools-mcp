@@ -1,4 +1,96 @@
-use std::collections::HashMap;
+from __future__ import annotations
+
+import shutil
+import time
+from pathlib import Path
+
+ROOT = Path.cwd()
+BACKUP_ROOT = ROOT / "aiTemp" / "Trash" / "secure-auto-approval-persistent-auth" / "persistent-oauth" / str(time.time_ns())
+
+
+def backup(path: str) -> None:
+    source = ROOT / path
+    if not source.exists():
+        return
+    target = BACKUP_ROOT / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
+def replace_once(path: str, before: str, after: str, label: str) -> None:
+    target = ROOT / path
+    text = target.read_text(encoding="utf-8")
+    if after in text:
+        print(f"already applied: {label}")
+        return
+    count = text.count(before)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected one source match, found {count}")
+    backup(path)
+    target.write_text(text.replace(before, after, 1), encoding="utf-8")
+    print(f"applied: {label}")
+
+
+def write_file(path: str, content: str, label: str) -> None:
+    target = ROOT / path
+    if target.exists() and target.read_text(encoding="utf-8") == content:
+        print(f"already applied: {label}")
+        return
+    backup(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    print(f"applied: {label}")
+
+
+replace_once(
+    "src-tauri/src/auth/mod.rs",
+    '''mod oauth;
+mod oauth_flow;
+
+pub use bearer::verify_bearer_header;
+''',
+    '''mod oauth;
+mod oauth_flow;
+mod refresh_tokens;
+
+pub use bearer::verify_bearer_header;
+''',
+    "enable refresh-token module",
+)
+
+replace_once(
+    "src-tauri/src/auth/oauth.rs",
+    '''        "grant_types_supported": ["authorization_code"],
+''',
+    '''        "grant_types_supported": ["authorization_code", "refresh_token"],
+''',
+    "advertise OAuth refresh-token grant",
+)
+
+replace_once(
+    "src-tauri/src/auth/oauth.rs",
+    '''        let meta = authorization_server_metadata("https://example.com", None);
+        assert_eq!(
+            meta["token_endpoint_auth_methods_supported"],
+            json!(["none"])
+        );
+''',
+    '''        let meta = authorization_server_metadata("https://example.com", None);
+        assert_eq!(
+            meta["token_endpoint_auth_methods_supported"],
+            json!(["none"])
+        );
+        assert_eq!(
+            meta["grant_types_supported"],
+            json!(["authorization_code", "refresh_token"])
+        );
+''',
+    "test refresh-token metadata",
+)
+
+write_file(
+    "src-tauri/src/auth/oauth_flow.rs",
+    r'''use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -249,11 +341,7 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, _server_url: &s
     if !form.state.is_empty() {
         qs.push_str(&format!("&state={}", urlencoding_encode(&form.state)));
     }
-    let sep = if form.redirect_uri.contains('?') {
-        '&'
-    } else {
-        '?'
-    };
+    let sep = if form.redirect_uri.contains('?') { '&' } else { '?' };
     Redirect::to(&format!("{}{}{}", form.redirect_uri, sep, qs)).into_response()
 }
 
@@ -332,19 +420,15 @@ fn exchange_refresh_token(oauth: &OAuthRuntime, form: &TokenForm) -> Response {
     if form.refresh_token.is_empty() {
         return token_error("invalid_grant", "refresh_token is required");
     }
-    let rotated =
-        match oauth
-            .refresh_tokens
-            .rotate(&form.refresh_token, &form.client_id, unix_now())
-        {
-            Ok(value) => value,
-            Err(_) => return token_error("server_error", "Failed to rotate refresh token"),
-        };
+    let rotated = match oauth
+        .refresh_tokens
+        .rotate(&form.refresh_token, &form.client_id, unix_now())
+    {
+        Ok(value) => value,
+        Err(_) => return token_error("server_error", "Failed to rotate refresh token"),
+    };
     let Some(refresh_token) = rotated else {
-        return token_error(
-            "invalid_grant",
-            "Refresh token is invalid, expired, or already used",
-        );
+        return token_error("invalid_grant", "Refresh token is invalid, expired, or already used");
     };
     token_success(oauth, refresh_token)
 }
@@ -567,9 +651,13 @@ mod tests {
     #[test]
     fn access_token_remains_valid_when_public_tunnel_url_changes() {
         let oauth = runtime("workspace-stable:mcp");
-        let token =
-            create_access_token(&oauth.issuer(), &oauth.profile_id, &oauth.token_secret, 60)
-                .expect("access token");
+        let token = create_access_token(
+            &oauth.issuer(),
+            &oauth.profile_id,
+            &oauth.token_secret,
+            60,
+        )
+        .expect("access token");
         assert!(oauth.verify_access_token(&token, "https://first.example.com"));
         assert!(oauth.verify_access_token(&token, "https://second.example.com"));
 
@@ -584,3 +672,235 @@ mod tests {
         assert!(verify_pkce(verifier, &challenge));
     }
 }
+''',
+    "install rotating persistent OAuth flow",
+)
+
+replace_once(
+    "src-tauri/src/mcp/listener.rs",
+    '''        let oauth_base = external_base_url(&HeaderMap::new(), port, &configured_public_url);
+        Some(Arc::new(OAuthRuntime::new(
+            oauth_base,
+            auth.oauth_client_id.clone(),
+''',
+    '''        Some(Arc::new(OAuthRuntime::new(
+            format!("{}:mcp", workspace_id),
+            auth.oauth_client_id.clone(),
+''',
+    "bind MCP tokens to stable workspace identity",
+)
+
+replace_once(
+    "src-tauri/src/actions/listener.rs",
+    '''        let oauth_base = external_base_url(&HeaderMap::new(), actions_port, &configured_public_url);
+        Some(Arc::new(OAuthRuntime::new(
+            oauth_base,
+            oauth_client_id,
+''',
+    '''        Some(Arc::new(OAuthRuntime::new(
+            format!("{workspace_id}:actions"),
+            oauth_client_id,
+''',
+    "bind Actions tokens to stable workspace identity",
+)
+
+replace_once(
+    "src-tauri/src/secret/keyring_store.rs",
+    '''    pub fn get_shared(key: &str) -> AppResult<Option<String>> {
+        DataStore::read_file(|data| Ok(data.shared_secrets.get(key).cloned()))
+    }
+
+    pub fn get_app(scope: &str, item_id: &str) -> AppResult<Option<String>> {
+''',
+    '''    pub fn get_shared(key: &str) -> AppResult<Option<String>> {
+        DataStore::read_file(|data| {
+            Ok(data
+                .shared_secrets
+                .get(key)
+                .filter(|value| !value.is_empty())
+                .cloned())
+        })
+    }
+
+    pub fn get_or_regenerate(
+        profile_id: &str,
+        key: &str,
+        use_shared: bool,
+    ) -> AppResult<String> {
+        let existing = if use_shared {
+            Self::get_shared(key)?
+        } else {
+            Self::get(profile_id, key)?
+        };
+        if let Some(value) = existing.filter(|value| !value.is_empty()) {
+            return Ok(value);
+        }
+        let value = random_secret();
+        DataStore::update_file(|data| {
+            if use_shared {
+                data.shared_secrets.insert(key.to_string(), value.clone());
+            } else {
+                workspace_secret_map(data, profile_id).insert(key.to_string(), value.clone());
+            }
+            Ok(())
+        })?;
+        Ok(value)
+    }
+
+    pub fn get_app(scope: &str, item_id: &str) -> AppResult<Option<String>> {
+''',
+    "repair missing persistent auth secrets",
+)
+
+replace_once(
+    "src-tauri/src/secret/keyring_store.rs",
+    '''    #[test]
+    fn workspace_secret_roundtrip() {
+''',
+    '''    #[test]
+    fn missing_workspace_secret_is_regenerated_and_persisted() {
+        let id = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let value = SecretStore::get_or_regenerate(&id, "oauth_token_secret", false)
+            .expect("regenerate");
+        assert!(!value.is_empty());
+        assert_eq!(
+            SecretStore::get(&id, "oauth_token_secret")
+                .expect("read")
+                .as_deref(),
+            Some(value.as_str())
+        );
+        let _ = SecretStore::remove_workspace_secrets(&id);
+    }
+
+    #[test]
+    fn workspace_secret_roundtrip() {
+''',
+    "test persistent secret repair",
+)
+
+replace_once(
+    "src-tauri/src/runtime/supervisor.rs",
+    '''                let oauth_password = if profile.auth.oauth_enabled() {
+                    resolve_secret(&profile.id, "oauth_password", use_shared)?
+                } else {
+                    None
+                };
+                let oauth_token_secret = if profile.auth.oauth_enabled() {
+                    resolve_secret(&profile.id, "oauth_token_secret", use_shared)?
+                } else {
+                    None
+                };
+''',
+    '''                let oauth_password = if profile.auth.oauth_enabled() {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "oauth_password",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+                let oauth_token_secret = if profile.auth.oauth_enabled() {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "oauth_token_secret",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+''',
+    "repair MCP OAuth secrets before listener start",
+)
+
+replace_once(
+    "src-tauri/src/runtime/supervisor.rs",
+    '''                let oauth_client_secret = if auth_type == "oauth" {
+                    if use_shared {
+                        resolve_secret(&profile.id, "actions_oauth_client_secret", true)?
+                    } else {
+                        Some(actions_oauth_secret(
+                            &profile.id,
+                            "actions_oauth_client_secret",
+                        )?)
+                    }
+                } else {
+                    None
+                };
+                let oauth_password = if auth_type == "oauth" {
+                    if use_shared {
+                        resolve_secret(&profile.id, "actions_oauth_password", true)?
+                    } else {
+                        Some(actions_oauth_secret(&profile.id, "actions_oauth_password")?)
+                    }
+                } else {
+                    None
+                };
+                let oauth_token_secret = if auth_type == "oauth" {
+                    if use_shared {
+                        resolve_secret(&profile.id, "actions_oauth_token_secret", true)?
+                    } else {
+                        Some(actions_oauth_secret(
+                            &profile.id,
+                            "actions_oauth_token_secret",
+                        )?)
+                    }
+                } else {
+                    None
+                };
+''',
+    '''                let oauth_client_secret = if auth_type == "oauth" {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_client_secret",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+                let oauth_password = if auth_type == "oauth" {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_password",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+                let oauth_token_secret = if auth_type == "oauth" {
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_token_secret",
+                        use_shared,
+                    )?)
+                } else {
+                    None
+                };
+''',
+    "repair Actions OAuth secrets before listener start",
+)
+
+replace_once(
+    "src-tauri/src/runtime/supervisor.rs",
+    '''fn actions_oauth_secret(profile_id: &str, key: &str) -> AppResult<String> {
+''',
+    '''#[allow(dead_code)]
+fn actions_oauth_secret(profile_id: &str, key: &str) -> AppResult<String> {
+''',
+    "retain legacy Actions secret helper without warnings",
+)
+
+replace_once(
+    "src/lib/components/AuthConfigForm.svelte",
+    '''  <p class="text-xs text-[var(--color-text-muted)]">
+    复制 Client ID / 密钥等请用上方「GPT 配置」卡片；此处可修改认证类型与重新生成密钥。
+  </p>
+''',
+    '''  <p class="text-xs text-[var(--color-text-muted)]">
+    OAuth 使用一小时 Access Token 与可轮换的 180 日 Refresh Token；公开隧道网址改变后仍可自动续期。认证资料采用原子写入及 Trash 备份，缺失的签署密钥会自动修复。复制 Client ID / 密钥请用上方「GPT 配置」卡片。
+  </p>
+''',
+    "explain persistent OAuth status",
+)
+
+print("persistent OAuth patch applied successfully")

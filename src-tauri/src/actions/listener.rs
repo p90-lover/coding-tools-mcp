@@ -67,9 +67,8 @@ pub fn spawn_listener(
 
     let configured_public_url = public_base_url.trim().to_string();
     let oauth = if auth_type == "oauth" {
-        let oauth_base = external_base_url(&HeaderMap::new(), actions_port, &configured_public_url);
         Some(Arc::new(OAuthRuntime::new(
-            oauth_base,
+            format!("{workspace_id}:actions"),
             oauth_client_id,
             oauth_client_secret.clone(),
             oauth_password.unwrap_or_default(),

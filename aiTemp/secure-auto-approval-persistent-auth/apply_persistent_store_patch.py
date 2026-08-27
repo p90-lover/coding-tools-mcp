@@ -1,4 +1,101 @@
-use std::fs::{self, File};
+from __future__ import annotations
+
+import shutil
+import time
+from pathlib import Path
+
+ROOT = Path.cwd()
+BACKUP_ROOT = ROOT / "aiTemp" / "Trash" / "secure-auto-approval-persistent-auth" / "persistent-store" / str(time.time_ns())
+
+
+def backup(path: str) -> None:
+    source = ROOT / path
+    if not source.exists():
+        return
+    target = BACKUP_ROOT / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
+def replace_once(path: str, before: str, after: str, label: str) -> None:
+    target = ROOT / path
+    text = target.read_text(encoding="utf-8")
+    if after in text:
+        print(f"already applied: {label}")
+        return
+    count = text.count(before)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected one source match, found {count}")
+    backup(path)
+    target.write_text(text.replace(before, after, 1), encoding="utf-8")
+    print(f"applied: {label}")
+
+
+def write_file(path: str, content: str, label: str) -> None:
+    target = ROOT / path
+    if target.exists() and target.read_text(encoding="utf-8") == content:
+        print(f"already applied: {label}")
+        return
+    backup(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    print(f"applied: {label}")
+
+
+replace_once(
+    "src-tauri/src/data/model.rs",
+    '''use crate::workspace::WorkspaceProfile;
+
+/// Unified on-disk payload stored in `data/profiles.json`.
+''',
+    '''use crate::workspace::WorkspaceProfile;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthRefreshTokenRecord {
+    pub token_hash: String,
+    pub client_id: String,
+    pub family_id: String,
+    pub generation: u32,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+
+/// Unified on-disk payload stored in `data/profiles.json`.
+''',
+    "define persisted refresh-token record",
+)
+
+replace_once(
+    "src-tauri/src/data/model.rs",
+    '''    #[serde(default)]
+    pub app_secrets: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    pub profiles: Vec<WorkspaceProfile>,
+''',
+    '''    #[serde(default)]
+    pub app_secrets: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    pub oauth_refresh_tokens: HashMap<String, Vec<OAuthRefreshTokenRecord>>,
+    #[serde(default)]
+    pub profiles: Vec<WorkspaceProfile>,
+''',
+    "persist hashed refresh-token records",
+)
+
+replace_once(
+    "src-tauri/src/data/mod.rs",
+    '''pub use model::AppData;
+pub use store::DataStore;
+''',
+    '''pub use model::{AppData, OAuthRefreshTokenRecord};
+pub use store::DataStore;
+''',
+    "export refresh-token record",
+)
+
+write_file(
+    "src-tauri/src/data/migrate.rs",
+    r'''use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -101,13 +198,7 @@ fn write_data_at(path: &Path, app_root: &Path, data: &AppData) -> AppResult<()> 
     }
 
     let previous_backup = if path.exists() {
-        Some(move_to_trash(
-            path,
-            app_root,
-            "data-backups",
-            "profiles",
-            "json",
-        )?)
+        Some(move_to_trash(path, app_root, "data-backups", "profiles", "json")?)
     } else {
         None
     };
@@ -135,13 +226,7 @@ fn copy_valid_backup(path: &Path, app_root: &Path) -> AppResult<PathBuf> {
 }
 
 fn preserve_corrupt_file(path: &Path, app_root: &Path) -> AppResult<PathBuf> {
-    move_to_trash(
-        path,
-        app_root,
-        "data-corruption",
-        "profiles-corrupt",
-        "json",
-    )
+    move_to_trash(path, app_root, "data-corruption", "profiles-corrupt", "json")
 }
 
 fn move_to_trash(
@@ -241,10 +326,8 @@ mod tests {
     fn atomic_write_keeps_valid_backups_without_deleting_previous_data() {
         let root = tempfile::tempdir().expect("app root");
         let path = root.path().join("data/profiles.json");
-        let first = AppData {
-            last_workspace_id: "first".into(),
-            ..AppData::default()
-        };
+        let mut first = AppData::default();
+        first.last_workspace_id = "first".into();
         write_data_at(&path, root.path(), &first).expect("first write");
 
         let mut second = first.clone();
@@ -256,32 +339,29 @@ mod tests {
             .expect("backups")
             .filter_map(Result::ok)
             .count();
-        assert!(
-            backup_count >= 3,
-            "expected first valid copy, moved previous file, and second valid copy"
-        );
+        assert!(backup_count >= 3, "expected first valid copy, moved previous file, and second valid copy");
     }
 
     #[test]
     fn malformed_current_file_is_preserved_and_latest_valid_backup_is_restored() {
         let root = tempfile::tempdir().expect("app root");
         let path = root.path().join("data/profiles.json");
-        let expected = AppData {
-            last_workspace_id: "recover-me".into(),
-            ..AppData::default()
-        };
+        let mut expected = AppData::default();
+        expected.last_workspace_id = "recover-me".into();
         write_data_at(&path, root.path(), &expected).expect("valid write");
         fs::write(&path, "{not-json").expect("corrupt current");
 
         let recovered = load_or_recover_at(&path, root.path()).expect("recover");
         assert_eq!(recovered.last_workspace_id, "recover-me");
-        assert_eq!(
-            read_valid_data(&path).unwrap().last_workspace_id,
-            "recover-me"
-        );
+        assert_eq!(read_valid_data(&path).unwrap().last_workspace_id, "recover-me");
         assert!(fs::read_dir(root.path().join("Trash/data-corruption"))
             .expect("corruption archive")
             .filter_map(Result::ok)
             .any(|entry| entry.path().is_file()));
     }
 }
+''',
+    "install atomic persistent data store",
+)
+
+print("persistent store patch applied successfully")

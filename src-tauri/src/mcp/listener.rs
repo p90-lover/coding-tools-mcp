@@ -73,9 +73,8 @@ pub fn spawn_listener(
     let oauth = if auth.oauth_enabled() {
         let password = oauth_password.unwrap_or_default();
         let token_secret = oauth_token_secret.unwrap_or_default();
-        let oauth_base = external_base_url(&HeaderMap::new(), port, &configured_public_url);
         Some(Arc::new(OAuthRuntime::new(
-            oauth_base,
+            format!("{}:mcp", workspace_id),
             auth.oauth_client_id.clone(),
             oauth_client_secret.clone(),
             password,

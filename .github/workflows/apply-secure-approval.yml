@@ -1,0 +1,161 @@
+name: Apply secure approval feature
+
+on:
+  push:
+    branches:
+      - feature/secure-auto-approval-persistent-auth
+    paths:
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/check_persistent_oauth_state.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py"
+      - ".github/workflows/apply-secure-approval.yml"
+  pull_request:
+    branches:
+      - integration/xyTom-v0.3.0
+    paths:
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/check_persistent_oauth_state.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py"
+      - ".github/workflows/apply-secure-approval.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-secure-approval-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-approval
+
+jobs:
+  apply-test-commit:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || 'feature/secure-auto-approval-persistent-auth' }}
+          fetch-depth: 0
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: secure-approval-auth-linux
+
+      - name: Apply secure approval and persistent auth patches without deleting files
+        run: |
+          python aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py
+          python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py
+          if python aiTemp/secure-auto-approval-persistent-auth/check_persistent_oauth_state.py; then
+            echo "Persistent OAuth source is already complete; generator safely skipped."
+          else
+            oauth_state=$?
+            if [ "$oauth_state" -eq 10 ]; then
+              python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py
+            else
+              echo "Persistent OAuth source is partial or drifted; refusing unsafe reapplication."
+              exit "$oauth_state"
+            fi
+          fi
+          python aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+          if git diff --name-status | grep -q '^D'; then
+            echo "Refusing to continue because a patch deleted a file."
+            exit 1
+          fi
+
+      - name: Test scoped approval and elevation interception
+        working-directory: src-tauri
+        run: |
+          cargo test --locked tools::approval -- --nocapture
+          cargo test --locked elevation_requests_are_always_blocked -- --nocapture
+
+      - name: Test protected deletion boundaries
+        working-directory: src-tauri
+        run: |
+          cargo test --locked --test call_tool_security apply_patch_allows_deleting_a_normal_file -- --nocapture
+          cargo test --locked --test call_tool_security deleting_readme_requires_explicit_confirmation -- --nocapture
+          cargo test --locked --test call_tool_security deleting_git_assets_is_always_rejected -- --nocapture
+
+      - name: Test persistent OAuth rotation and recovery
+        working-directory: src-tauri
+        run: |
+          cargo test --locked auth::refresh_tokens -- --nocapture
+          cargo test --locked auth::oauth_flow::tests -- --nocapture
+          cargo test --locked data::store::tests -- --nocapture
+
+      - name: Run complete Rust tests and Clippy
+        working-directory: src-tauri
+        run: |
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run frontend checks and build
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+      - name: Commit verified secure source
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- src-tauri src
+          if git diff --cached --quiet; then
+            echo "Secure approval and persistent authentication source is already committed."
+            exit 0
+          fi
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "Refusing to commit a deletion."
+            exit 1
+          fi
+          git commit -m "feat: add scoped auto approval and persistent authentication"
+
+          for attempt in 1 2 3; do
+            git fetch origin feature/secure-auto-approval-persistent-auth
+            if git rebase origin/feature/secure-auto-approval-persistent-auth && \
+               git push origin HEAD:feature/secure-auto-approval-persistent-auth; then
+              exit 0
+            fi
+            git rebase --abort || true
+            sleep $((attempt * 5))
+          done
+
+          echo "Unable to write the verified source after three non-destructive retries."
+          exit 1
