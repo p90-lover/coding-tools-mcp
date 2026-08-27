@@ -7,6 +7,8 @@ on:
     paths:
       - "aiTemp/security-hardening/apply_security_hardening_v2.py"
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py"
+      - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py"
+      - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py"
       - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
   workflow_dispatch:
@@ -59,10 +61,21 @@ jobs:
           workspaces: src-tauri
           shared-key: apply-security-hardening-linux
 
-      - name: Apply reviewed applicator TOML fix with recoverable backup
-        run: python aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py
+      - name: Validate hardening applicators parse
+        run: |
+          python -m py_compile \
+            aiTemp/security-hardening/apply_security_hardening_v2.py \
+            aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py \
+            aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py \
+            aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py \
+            aiTemp/security-hardening/test_apply_security_hardening_v2.py
 
-      - name: Reproduce applicator dependency generation
+      - name: Apply reviewed applicator fixes with recoverable backups
+        run: |
+          python aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py
+          python aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py
+
+      - name: Reproduce applicator dependency and Rust generation
         run: python aiTemp/security-hardening/test_apply_security_hardening_v2.py
 
       - name: Apply backup-first hardening without deleting files
