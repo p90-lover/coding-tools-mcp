@@ -1,0 +1,169 @@
+name: Secure desktop release validation
+
+on:
+  pull_request:
+    branches:
+      - feature/secure-auto-approval-persistent-auth
+      - integration/xyTom-v0.3.0
+    paths:
+      - ".github/workflows/apply-secure-approval.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-request.yml"
+      - ".github/workflows/secure-release-validation.yml"
+      - "aiTemp/secure-auto-approval-persistent-auth/**"
+      - "package.json"
+      - "package-lock.json"
+      - "src/**"
+      - "src-tauri/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: secure-release-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-release-validation
+
+jobs:
+  validate-release-state:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify source materialization and synchronized release version
+        run: |
+          python aiTemp/secure-auto-approval-persistent-auth/check_persistent_oauth_state.py
+          python aiTemp/secure-auto-approval-persistent-auth/apply_release_version.py --check
+          git diff --exit-code
+
+  build-windows-nsis:
+    needs: validate-release-state
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: secure-release-validation-windows
+
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path aiTemp/npm-cache | Out-Null
+          npm ci --cache aiTemp/npm-cache
+
+      - name: Run focused release checks
+        run: |
+          npm run check
+          node --test tests/*.test.mjs
+
+      - name: Run locked Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Build Windows NSIS installer
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Create Windows SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "$env:CARGO_TARGET_DIR/release/bundle/nsis/*.exe"
+          if ($files.Count -lt 1) { throw "Windows installer was not produced" }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          New-Item -ItemType Directory -Force -Path aiTemp/release-checksums | Out-Null
+          $lines | Set-Content -Encoding utf8 aiTemp/release-checksums/SHA256SUMS-windows.txt
+
+      - name: Upload Windows validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-windows-nsis-${{ github.sha }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/release/bundle/nsis/*.exe
+            aiTemp/release-checksums/SHA256SUMS-windows.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  build-universal-macos-dmg:
+    needs: validate-release-state
+    runs-on: macos-14
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: secure-release-validation-macos
+
+      - name: Install frontend dependencies
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+
+      - name: Run focused release checks
+        run: |
+          npm run check
+          node --test tests/*.test.mjs
+
+      - name: Run locked Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Build universal macOS DMG
+        run: npm run tauri -- build --target universal-apple-darwin --bundles dmg
+
+      - name: Create macOS SHA-256 checksums
+        shell: bash
+        run: |
+          mkdir -p aiTemp/release-checksums
+          shopt -s nullglob
+          files=("$CARGO_TARGET_DIR"/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          if [ "${#files[@]}" -lt 1 ]; then
+            echo "macOS DMG was not produced"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            shasum -a 256 "$file"
+          done | sed 's#  .*/#  #' > aiTemp/release-checksums/SHA256SUMS-macos.txt
+
+      - name: Upload macOS validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-macos-dmg-${{ github.sha }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/universal-apple-darwin/release/bundle/dmg/*.dmg
+            aiTemp/release-checksums/SHA256SUMS-macos.txt
+          if-no-files-found: error
+          retention-days: 7
