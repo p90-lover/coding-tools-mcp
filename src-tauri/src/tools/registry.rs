@@ -212,9 +212,9 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "apply_patch",
         "Apply patch",
-        "Apply a patch envelope transactionally inside the workspace.",
+        "Apply a patch envelope transactionally inside the workspace. Sensitive deletions require a scoped approval grant.",
         false,
-        true,
+        false,
         false,
     ),
     (
@@ -228,10 +228,10 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "exec_command",
         "Execute command",
-        "Run a bounded command in the workspace. The result returns canonical command_id and command:<id>:stdout|stderr output refs, plus legacy session aliases; completed output remains readable for a bounded reconnect window.",
+        "Run a bounded workspace command. Routine commands auto-run in auto-workspace mode; sensitive network or destructive operations require request_permissions.",
         false,
-        true,
-        true,
+        false,
+        false,
     ),
     (
         "write_stdin",
@@ -308,10 +308,10 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "request_permissions",
         "Request permissions",
-        "Request a scoped permission grant for dangerous runtime operations.",
+        "Approve a short-lived, argument-bound sensitive operation request.",
+        false,
         true,
-        false,
-        false,
+        true,
     ),
     (
         "view_image",
@@ -745,7 +745,8 @@ pub fn input_schema(name: &str) -> Value {
                 "patch": { "type": "string", "minLength": 1 },
                 "dry_run": { "type": "boolean", "default": false },
                 "confirm": { "type": "boolean", "default": false },
-                "reason": { "type": "string", "default": "" }
+                "reason": { "type": "string", "default": "" },
+                "approval_token": { "type": "string", "minLength": 1 }
             },
             "required": ["patch"],
             "additionalProperties": false
@@ -770,7 +771,8 @@ pub fn input_schema(name: &str) -> Value {
                 "stdin": { "type": "string", "default": "" },
                 "confirm": { "type": "boolean", "default": false },
                 "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" },
-                "reason": { "type": "string", "default": "" }
+                "reason": { "type": "string", "default": "" },
+                "approval_token": { "type": "string", "minLength": 1 }
             },
             "required": ["cmd"],
             "additionalProperties": false
@@ -865,38 +867,16 @@ pub fn input_schema(name: &str) -> Value {
         "request_permissions" => json!({
             "type": "object",
             "properties": {
-                "tool_name": {
-                    "type": "string",
-                    "enum": ["exec_command", "apply_patch"]
-                },
-                "permission": {
-                    "type": "string",
-                    "enum": [
-                        "network",
-                        "destructive_command",
-                        "long_timeout",
-                        "sensitive_env",
-                        "shell_expansion",
-                        "inline_script",
-                        "privileged_executable",
-                        "write_generated_or_ignored"
-                    ]
-                },
-                "reason": { "type": "string", "minLength": 1 },
-                "arguments": { "type": "object", "additionalProperties": true },
+                "request_id": { "type": "string", "minLength": 1 },
                 "scope": {
                     "type": "string",
                     "enum": ["once", "session"],
                     "default": "once"
                 },
-                "ttl_seconds": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 3600,
-                    "default": 300
-                }
+                "confirm": { "type": "boolean", "default": false },
+                "reason": { "type": "string", "default": "" }
             },
-            "required": ["tool_name", "permission", "reason", "arguments"],
+            "required": ["request_id", "confirm"],
             "additionalProperties": false
         }),
         "set_default_cwd" => json!({

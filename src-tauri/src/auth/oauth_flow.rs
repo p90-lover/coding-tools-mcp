@@ -11,18 +11,21 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::bearer::constant_time_eq_str;
+use super::refresh_tokens::RefreshTokenStore;
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
-pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60 * 24 * 30;
+pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60;
 #[allow(dead_code)]
 pub const OAUTH_MAX_BODY_BYTES: usize = 8_192;
 
 #[derive(Clone)]
 pub struct OAuthRuntime {
+    profile_id: String,
     pub client_id: String,
     pub client_secret: Option<String>,
     pub password: String,
     pub token_secret: String,
+    refresh_tokens: RefreshTokenStore,
     pending: Arc<Mutex<HashMap<String, PendingCode>>>,
 }
 
@@ -34,13 +37,13 @@ struct PendingCode {
     redirect_uri: String,
     state: String,
     expires_at: u64,
-    server_url: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct TokenClaims {
     iss: String,
     aud: String,
+    wid: String,
     iat: i64,
     exp: i64,
     scope: String,
@@ -48,19 +51,25 @@ struct TokenClaims {
 
 impl OAuthRuntime {
     pub fn new(
-        _base_url: String,
+        profile_id: String,
         client_id: String,
         client_secret: Option<String>,
         password: String,
         token_secret: String,
     ) -> Self {
         Self {
+            refresh_tokens: RefreshTokenStore::new(profile_id.clone()),
+            profile_id,
             client_id,
             client_secret,
             password,
             token_secret,
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn issuer(&self) -> String {
+        format!("urn:coding-tools-mcp:{}", self.profile_id)
     }
 
     pub fn client_id_allowed(&self, client_id: &str) -> bool {
@@ -73,17 +82,18 @@ impl OAuthRuntime {
         constant_time_eq_str(client_id, &self.client_id)
     }
 
-    pub fn verify_access_token(&self, token: &str, server_url: &str) -> bool {
-        let server_url = server_url.trim_end_matches('/');
+    pub fn verify_access_token(&self, token: &str, _server_url: &str) -> bool {
+        let issuer = self.issuer();
         let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_audience(&[server_url]);
-        validation.set_issuer(&[server_url]);
+        validation.set_audience(&[self.profile_id.as_str()]);
+        validation.set_issuer(&[issuer.as_str()]);
         decode::<TokenClaims>(
             token,
             &DecodingKey::from_secret(self.token_secret.as_bytes()),
             &validation,
         )
-        .is_ok()
+        .map(|decoded| constant_time_eq_str(&decoded.claims.wid, &self.profile_id))
+        .unwrap_or(false)
     }
 }
 
@@ -132,13 +142,20 @@ pub struct AuthorizeForm {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct TokenForm {
+    #[serde(default)]
     pub grant_type: String,
+    #[serde(default)]
     pub code: String,
+    #[serde(default)]
     pub redirect_uri: String,
+    #[serde(default)]
     pub code_verifier: String,
+    #[serde(default)]
     pub client_id: String,
     #[serde(default)]
     pub client_secret: String,
+    #[serde(default)]
+    pub refresh_token: String,
 }
 
 pub fn authorize_get(
@@ -170,7 +187,7 @@ pub fn authorize_get(
     .into_response()
 }
 
-pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &str) -> Response {
+pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, _server_url: &str) -> Response {
     if !oauth.client_id_allowed(&form.client_id) {
         return Html(login_page(
             &form.client_id,
@@ -211,12 +228,11 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
             .into_response();
     }
 
-    let server_url = server_url.trim_end_matches('/').to_string();
     let code = uuid::Uuid::new_v4().to_string().replace('-', "");
     let now = unix_now();
     {
         let mut pending = oauth.pending.lock().expect("oauth pending lock");
-        pending.retain(|_, v| v.expires_at >= now);
+        pending.retain(|_, value| value.expires_at >= now);
         pending.insert(
             code.clone(),
             PendingCode {
@@ -225,7 +241,6 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
                 redirect_uri: form.redirect_uri.clone(),
                 state: form.state.clone(),
                 expires_at: now + OAUTH_CODE_TTL_SECONDS,
-                server_url: server_url.clone(),
             },
         );
     }
@@ -239,8 +254,6 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, server_url: &st
     } else {
         '?'
     };
-    // 授权页面通过 POST 表单提交，但客户端回调必须使用 GET。
-    // 307 会保留 POST 并把表单体转发到 ChatGPT connector，导致 Bad Request。
     Redirect::to(&format!("{}{}{}", form.redirect_uri, sep, qs)).into_response()
 }
 
@@ -248,15 +261,8 @@ pub fn token_exchange(
     oauth: &OAuthRuntime,
     headers: &HeaderMap,
     mut form: TokenForm,
-    server_url: &str,
+    _server_url: &str,
 ) -> Response {
-    if form.grant_type != "authorization_code" {
-        return token_error(
-            "unsupported_grant_type",
-            "Only authorization_code is supported",
-        );
-    }
-
     if let Some((id, secret)) = basic_auth_credentials(headers) {
         if form.client_id.is_empty() {
             form.client_id = id;
@@ -274,13 +280,24 @@ pub fn token_exchange(
             return token_error("invalid_client", "Invalid client_secret");
         }
     }
+
+    match form.grant_type.as_str() {
+        "authorization_code" => exchange_authorization_code(oauth, &form),
+        "refresh_token" => exchange_refresh_token(oauth, &form),
+        _ => token_error(
+            "unsupported_grant_type",
+            "Only authorization_code and refresh_token are supported",
+        ),
+    }
+}
+
+fn exchange_authorization_code(oauth: &OAuthRuntime, form: &TokenForm) -> Response {
     if form.code.is_empty() {
         return token_error("invalid_grant", "code is required");
     }
     if !valid_code_verifier(&form.code_verifier) {
         return token_error("invalid_grant", "Invalid code_verifier");
     }
-
     let code_data = {
         let mut pending = oauth.pending.lock().expect("oauth pending lock");
         pending.remove(&form.code)
@@ -304,18 +321,49 @@ pub fn token_exchange(
         return token_error("invalid_grant", "PKCE verification failed");
     }
 
-    let issuer = if code_data.server_url.trim().is_empty() {
-        server_url.trim_end_matches('/').to_string()
-    } else {
-        code_data.server_url.trim_end_matches('/').to_string()
+    let refresh_token = match oauth.refresh_tokens.issue(&form.client_id, unix_now()) {
+        Ok(token) => token,
+        Err(_) => return token_error("server_error", "Failed to persist refresh token"),
     };
-    match create_access_token(&issuer, &oauth.token_secret, OAUTH_TOKEN_TTL_SECONDS) {
+    token_success(oauth, refresh_token)
+}
+
+fn exchange_refresh_token(oauth: &OAuthRuntime, form: &TokenForm) -> Response {
+    if form.refresh_token.is_empty() {
+        return token_error("invalid_grant", "refresh_token is required");
+    }
+    let rotated =
+        match oauth
+            .refresh_tokens
+            .rotate(&form.refresh_token, &form.client_id, unix_now())
+        {
+            Ok(value) => value,
+            Err(_) => return token_error("server_error", "Failed to rotate refresh token"),
+        };
+    let Some(refresh_token) = rotated else {
+        return token_error(
+            "invalid_grant",
+            "Refresh token is invalid, expired, or already used",
+        );
+    };
+    token_success(oauth, refresh_token)
+}
+
+fn token_success(oauth: &OAuthRuntime, refresh_token: String) -> Response {
+    match create_access_token(
+        &oauth.issuer(),
+        &oauth.profile_id,
+        &oauth.token_secret,
+        OAUTH_TOKEN_TTL_SECONDS,
+    ) {
         Ok(access_token) => (
             StatusCode::OK,
             axum::Json(json!({
                 "access_token": access_token,
+                "refresh_token": refresh_token,
                 "token_type": "Bearer",
-                "expires_in": OAUTH_TOKEN_TTL_SECONDS
+                "expires_in": OAUTH_TOKEN_TTL_SECONDS,
+                "scope": "mcp"
             })),
         )
             .into_response(),
@@ -323,11 +371,17 @@ pub fn token_exchange(
     }
 }
 
-fn create_access_token(server_url: &str, token_secret: &str, ttl: i64) -> Result<String, ()> {
+fn create_access_token(
+    issuer: &str,
+    profile_id: &str,
+    token_secret: &str,
+    ttl: i64,
+) -> Result<String, ()> {
     let now = unix_now() as i64;
     let claims = TokenClaims {
-        iss: server_url.to_string(),
-        aud: server_url.to_string(),
+        iss: issuer.to_string(),
+        aud: profile_id.to_string(),
+        wid: profile_id.to_string(),
         iat: now,
         exp: now + ttl,
         scope: "mcp".into(),
@@ -433,7 +487,7 @@ fn html_escape(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace('\"', "&quot;")
+        .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
 
@@ -452,7 +506,7 @@ fn urlencoding_encode(value: &str) -> String {
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
 
@@ -460,17 +514,19 @@ fn unix_now() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn token_exchange_without_client_secret() {
-        use axum::http::HeaderMap;
-
-        let oauth = OAuthRuntime::new(
-            "https://lb.example.com".into(),
+    fn runtime(profile_id: &str) -> OAuthRuntime {
+        OAuthRuntime::new(
+            profile_id.into(),
             "chatgpt-client-test".into(),
             None,
             "test-password".into(),
-            "token-signing-secret".into(),
-        );
+            "token-signing-secret-that-is-long-enough".into(),
+        )
+    }
+
+    #[test]
+    fn token_exchange_without_client_secret() {
+        let oauth = runtime(&format!("test-{}", uuid::Uuid::new_v4()));
         let verifier = "dBjftJeZ4CVP-mB92Kpru-AEJvkQlLgi3ThpmQ45N_Xyo";
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let redirect_uri = "https://chatgpt.com/connector/oauth/test";
@@ -484,7 +540,7 @@ mod tests {
                 state: "state".into(),
                 password: "test-password".into(),
             },
-            "https://lb.example.com",
+            "https://old-tunnel.example.com",
         );
         assert_eq!(redirect.status(), StatusCode::SEE_OTHER);
         let code = {
@@ -501,11 +557,24 @@ mod tests {
                 redirect_uri: redirect_uri.into(),
                 code_verifier: verifier.into(),
                 client_id: "chatgpt-client-test".into(),
-                client_secret: String::new(),
+                ..TokenForm::default()
             },
-            "https://lb.example.com",
+            "https://new-tunnel.example.com",
         );
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn access_token_remains_valid_when_public_tunnel_url_changes() {
+        let oauth = runtime("workspace-stable:mcp");
+        let token =
+            create_access_token(&oauth.issuer(), &oauth.profile_id, &oauth.token_secret, 60)
+                .expect("access token");
+        assert!(oauth.verify_access_token(&token, "https://first.example.com"));
+        assert!(oauth.verify_access_token(&token, "https://second.example.com"));
+
+        let other = runtime("other-workspace:mcp");
+        assert!(!other.verify_access_token(&token, "https://second.example.com"));
     }
 
     #[test]

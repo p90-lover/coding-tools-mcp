@@ -260,12 +260,20 @@ impl RuntimeSupervisor {
                 // ChatGPT connectors use PKCE only and do not send client_secret.
                 let oauth_client_secret = None;
                 let oauth_password = if profile.auth.oauth_enabled() {
-                    resolve_secret(&profile.id, "oauth_password", use_shared)?
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "oauth_password",
+                        use_shared,
+                    )?)
                 } else {
                     None
                 };
                 let oauth_token_secret = if profile.auth.oauth_enabled() {
-                    resolve_secret(&profile.id, "oauth_token_secret", use_shared)?
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "oauth_token_secret",
+                        use_shared,
+                    )?)
                 } else {
                     None
                 };
@@ -290,35 +298,29 @@ impl RuntimeSupervisor {
                     None
                 };
                 let oauth_client_secret = if auth_type == "oauth" {
-                    if use_shared {
-                        resolve_secret(&profile.id, "actions_oauth_client_secret", true)?
-                    } else {
-                        Some(actions_oauth_secret(
-                            &profile.id,
-                            "actions_oauth_client_secret",
-                        )?)
-                    }
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_client_secret",
+                        use_shared,
+                    )?)
                 } else {
                     None
                 };
                 let oauth_password = if auth_type == "oauth" {
-                    if use_shared {
-                        resolve_secret(&profile.id, "actions_oauth_password", true)?
-                    } else {
-                        Some(actions_oauth_secret(&profile.id, "actions_oauth_password")?)
-                    }
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_password",
+                        use_shared,
+                    )?)
                 } else {
                     None
                 };
                 let oauth_token_secret = if auth_type == "oauth" {
-                    if use_shared {
-                        resolve_secret(&profile.id, "actions_oauth_token_secret", true)?
-                    } else {
-                        Some(actions_oauth_secret(
-                            &profile.id,
-                            "actions_oauth_token_secret",
-                        )?)
-                    }
+                    Some(SecretStore::get_or_regenerate(
+                        &profile.id,
+                        "actions_oauth_token_secret",
+                        use_shared,
+                    )?)
                 } else {
                     None
                 };
@@ -562,6 +564,7 @@ fn resolve_secret(profile_id: &str, key: &str, use_shared: bool) -> AppResult<Op
     }
 }
 
+#[allow(dead_code)]
 fn actions_oauth_secret(profile_id: &str, key: &str) -> AppResult<String> {
     match SecretStore::get(profile_id, key)? {
         Some(value) if !value.is_empty() => Ok(value),
