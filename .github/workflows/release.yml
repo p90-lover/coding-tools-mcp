@@ -7,18 +7,111 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "要创建或更新的 Release 标签，例如 v0.1.22"
+        description: "Release tag, for example v0.3.0-rc1"
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-release
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  validate-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate trusted event, main ancestry, synchronized versions, and release tag
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "Manual releases must run from the main branch."
+              exit 1
+            fi
+          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF_NAME" != "$RELEASE_TAG" ]; then
+              echo "Tag release context is inconsistent."
+              exit 1
+            fi
+          else
+            echo "Unsupported release event: $GITHUB_EVENT_NAME"
+            exit 1
+          fi
+
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Release commit is not contained in main."
+            exit 1
+          fi
+
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ['RELEASE_TAG'].strip()
+          if not re.fullmatch(r'v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?', tag):
+              raise SystemExit(f'invalid release tag: {tag!r}')
+          version = tag[1:]
+
+          package = json.loads(Path('package.json').read_text(encoding='utf-8'))
+          package_lock = json.loads(Path('package-lock.json').read_text(encoding='utf-8'))
+          tauri = json.loads(Path('src-tauri/tauri.conf.json').read_text(encoding='utf-8'))
+          cargo_toml = Path('src-tauri/Cargo.toml').read_text(encoding='utf-8')
+          cargo_lock = Path('src-tauri/Cargo.lock').read_text(encoding='utf-8')
+
+          observed = {
+              'package.json': package.get('version'),
+              'package-lock.json': package_lock.get('version'),
+              'package-lock root': package_lock.get('packages', {}).get('', {}).get('version'),
+              'tauri.conf.json': tauri.get('version'),
+          }
+          failures = {name: value for name, value in observed.items() if value != version}
+          expected = f'name = "coding-tools-mcp-desktop"\nversion = "{version}"'
+          if expected not in cargo_toml:
+              failures['Cargo.toml'] = 'mismatch'
+          if expected not in cargo_lock:
+              failures['Cargo.lock'] = 'mismatch'
+          if failures:
+              raise SystemExit(f'release version mismatch: {failures}')
+          print(f'verified synchronized release version {version}')
+          PY
+
+      - name: Refuse accidental overwrite of an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; create a new tag instead of overwriting assets."
+            exit 1
+          fi
+
+  build-windows:
+    needs: validate-release
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -30,31 +123,58 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: release-windows
 
-      - name: 安装前端依赖
-        run: npm ci
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path aiTemp/npm-cache | Out-Null
+          npm ci --cache aiTemp/npm-cache
 
-      - name: 检查前端
-        run: npm run check
+      - name: Run focused release checks
+        run: |
+          npm run check
+          node --test tests/*.test.mjs
 
-      - name: 运行 Rust 测试
+      - name: Run locked Rust tests
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --locked
 
-      - name: 仅构建 Windows NSIS 安装程序
+      - name: Build Windows NSIS installer
         run: npm run tauri -- build --bundles nsis
 
-      - name: 上传 Windows EXE
+      - name: Create Windows SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem "$env:CARGO_TARGET_DIR/release/bundle/nsis/*.exe"
+          if ($files.Count -lt 1) { throw "Windows installer was not produced" }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          New-Item -ItemType Directory -Force -Path aiTemp/release-checksums | Out-Null
+          $lines | Set-Content -Encoding utf8 aiTemp/release-checksums/SHA256SUMS-windows.txt
+
+      - name: Upload Windows release files
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          name: windows-release-${{ github.sha }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/release/bundle/nsis/*.exe
+            aiTemp/release-checksums/SHA256SUMS-windows.txt
           if-no-files-found: error
+          retention-days: 14
 
   build-universal-macos:
+    needs: validate-release
     runs-on: macos-14
+    timeout-minutes: 75
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -68,52 +188,96 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: release-macos-universal
 
-      - name: 安装前端依赖
-        run: npm ci
+      - name: Install frontend dependencies
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
 
-      - name: 检查前端
-        run: npm run check
+      - name: Run focused release checks
+        run: |
+          npm run check
+          node --test tests/*.test.mjs
 
-      - name: 运行 Rust 测试
+      - name: Run locked Rust tests
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --locked
 
-      - name: 仅构建通用版 macOS DMG
+      - name: Build universal macOS DMG
         run: npm run tauri -- build --target universal-apple-darwin --bundles dmg
 
-      - name: 上传 macOS DMG
+      - name: Create macOS SHA-256 checksums
+        shell: bash
+        run: |
+          mkdir -p aiTemp/release-checksums
+          shopt -s nullglob
+          files=("$CARGO_TARGET_DIR"/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          if [ "${#files[@]}" -lt 1 ]; then
+            echo "macOS DMG was not produced"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            shasum -a 256 "$file"
+          done | sed 's#  .*/#  #' > aiTemp/release-checksums/SHA256SUMS-macos.txt
+
+      - name: Upload macOS release files
         uses: actions/upload-artifact@v4
         with:
-          name: macos-dmg
-          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          name: macos-release-${{ github.sha }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/universal-apple-darwin/release/bundle/dmg/*.dmg
+            aiTemp/release-checksums/SHA256SUMS-macos.txt
           if-no-files-found: error
+          retention-days: 14
 
   publish-release:
     needs:
+      - validate-release
       - build-windows
       - build-universal-macos
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
-      - name: 下载 Windows EXE
+      - name: Download Windows release files
         uses: actions/download-artifact@v4
         with:
-          name: windows-exe
+          name: windows-release-${{ github.sha }}
           path: dist/windows
 
-      - name: 下载 macOS DMG
+      - name: Download macOS release files
         uses: actions/download-artifact@v4
         with:
-          name: macos-dmg
+          name: macos-release-${{ github.sha }}
           path: dist/macos
 
-      - name: 创建 Release 并上传安装包
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
-          name: Coding Tools MCP ${{ inputs.release_tag || github.ref_name }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/windows/*.exe
-            dist/macos/*.dmg
+      - name: Verify release payload
+        shell: bash
+        run: |
+          find dist -maxdepth 3 -type f -print
+          compgen -G 'dist/windows/*.exe' >/dev/null
+          compgen -G 'dist/macos/*.dmg' >/dev/null
+          test -f dist/windows/SHA256SUMS-windows.txt
+          test -f dist/macos/SHA256SUMS-macos.txt
+
+      - name: Create immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Coding Tools MCP $RELEASE_TAG" \
+            --generate-notes \
+            "${prerelease[@]}" \
+            dist/windows/*.exe \
+            dist/windows/SHA256SUMS-windows.txt \
+            dist/macos/*.dmg \
+            dist/macos/SHA256SUMS-macos.txt
