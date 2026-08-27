@@ -158,7 +158,7 @@
   }}
 >
   <p class="text-xs text-[var(--color-text-muted)]">
-    复制 Client ID / 密钥等请用上方「GPT 配置」卡片；此处可修改认证类型与重新生成密钥。
+    OAuth 使用一小时 Access Token 与可轮换的 180 日 Refresh Token；公开隧道网址改变后仍可自动续期。认证资料采用原子写入及 Trash 备份，缺失的签署密钥会自动修复。复制 Client ID / 密钥请用上方「GPT 配置」卡片。
   </p>
 
   <label class="grid gap-1">

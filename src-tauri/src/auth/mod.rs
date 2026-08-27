@@ -1,6 +1,7 @@
 mod bearer;
 mod oauth;
 mod oauth_flow;
+mod refresh_tokens;
 
 pub use bearer::verify_bearer_header;
 pub use oauth::{authorization_server_metadata, external_base_url, protected_resource_metadata};

@@ -41,13 +41,6 @@ impl RefreshTokenStore {
             Ok(rotate_in(records, token, client_id, now))
         })
     }
-
-    pub fn revoke_all(&self) -> AppResult<()> {
-        DataStore::update_file(|data| {
-            data.oauth_refresh_tokens.remove(&self.profile_id);
-            Ok(())
-        })
-    }
 }
 
 fn issue_into(records: &mut Vec<OAuthRefreshTokenRecord>, client_id: &str, now: u64) -> String {
