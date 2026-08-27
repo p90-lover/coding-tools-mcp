@@ -5,6 +5,8 @@ on:
     branches:
       - security/secure-v0.3.2-port
     paths:
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v2.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
