@@ -1,0 +1,860 @@
+name: Finalize RC1 and hardened RC2
+
+on:
+  push:
+    branches:
+      - security/unauthorized-auth-trash-heavy-usage
+    paths:
+      - "aiTemp/security-hardening/set_rc2_version.py"
+      - ".github/workflows/finalize-rc1-and-hardened-rc2.yml"
+
+permissions: {}
+
+concurrency:
+  group: finalize-v0.3.0-rc1
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  HARDENING_BRANCH: security/unauthorized-auth-trash-heavy-usage
+  RELEASE_SOURCE_BRANCH: automation/secure-source-v0.3.0-rc1-v2
+  FEATURE_BRANCH: feature/secure-auto-approval-persistent-auth
+  INTEGRATION_BRANCH: integration/xyTom-v0.3.0
+  MAIN_BRANCH: main
+  PR4_NUMBER: "4"
+  OLD_PR5_NUMBER: "5"
+  RC1_VERSION: 0.3.0-rc1
+  RC1_TAG: v0.3.0-rc1
+  RC2_VERSION: 0.3.0-rc2
+  RC2_TAG: v0.3.0-rc2
+
+jobs:
+  prepare-exact-patch:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      base_sha: ${{ steps.identity.outputs.base_sha }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      source_tree: ${{ steps.identity.outputs.source_tree }}
+      rc2_tree: ${{ steps.package.outputs.rc2_tree }}
+      patch_sha256: ${{ steps.package.outputs.patch_sha256 }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-final-rc2-linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HARDENING_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pin source and branch identities
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha="$(git rev-parse HEAD)"
+          git fetch --no-tags origin \
+            "refs/heads/$RELEASE_SOURCE_BRANCH:refs/remotes/origin/$RELEASE_SOURCE_BRANCH"
+          source_sha="$(git rev-parse "origin/$RELEASE_SOURCE_BRANCH")"
+          source_tree="$(git rev-parse "origin/$RELEASE_SOURCE_BRANCH^{tree}")"
+          git merge-base --is-ancestor "$source_sha" "$base_sha"
+          if git diff --name-status "$source_sha..$base_sha" | grep -q '^D'; then
+            echo "The hardening branch history deletes a file relative to the RC1 source."
+            git diff --name-status "$source_sha..$base_sha"
+            exit 1
+          fi
+          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'source_tree=%s\n' "$source_tree" >> "$GITHUB_OUTPUT"
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-hardened-rc2-linux
+
+      - name: Materialize every reviewed hardening layer and RC2 version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python aiTemp/security-hardening/apply_post_rc1_hardening.py
+          python aiTemp/security-hardening/apply_oauth_connection_compatibility.py
+          python aiTemp/security-hardening/fix_dynamic_client_byte_literals.py
+          python aiTemp/security-hardening/apply_trash_boundary_completion.py
+          python aiTemp/security-hardening/apply_request_capacity_tests.py
+          python aiTemp/security-hardening/apply_clippy_hygiene.py
+          python aiTemp/security-hardening/set_rc2_version.py
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+          if git diff --name-status | grep -q '^D'; then
+            echo "Refusing hardening because a working-tree path was deleted."
+            git diff --name-status
+            exit 1
+          fi
+
+      - name: Assert fail-closed authentication deletion and overload boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R --line-number --fixed-strings 'CorsLayer::permissive()' \
+            src-tauri/src/mcp/listener.rs src-tauri/src/actions/listener.rs; then
+            echo "Permissive browser-wide CORS remains enabled."
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          for name in ("src-tauri/src/tools/patch.rs", "src-tauri/src/tools/file.rs"):
+              production = Path(name).read_text(encoding="utf-8").partition("#[cfg(test)]")[0]
+              if re.search(r"(?:std::)?fs::remove_(?:file|dir|dir_all)\(", production):
+                  raise SystemExit(f"irreversible deletion remains in {name}")
+
+          version = "0.3.0-rc2"
+          package = json.loads(Path("package.json").read_text(encoding="utf-8"))
+          lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
+          tauri = json.loads(Path("src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+          observed = {
+              "package": package.get("version"),
+              "lock": lock.get("version"),
+              "lock root": lock.get("packages", {}).get("", {}).get("version"),
+              "tauri": tauri.get("version"),
+          }
+          bad = {name: value for name, value in observed.items() if value != version}
+          expected = f'name = "coding-tools-mcp-desktop"\nversion = "{version}"'
+          for cargo_path in ("src-tauri/Cargo.toml", "src-tauri/Cargo.lock"):
+              if expected not in Path(cargo_path).read_text(encoding="utf-8"):
+                  bad[cargo_path] = "mismatch"
+          if bad:
+              raise SystemExit(f"RC2 version mismatch: {bad}")
+          print("verified RC2 version and non-destructive source boundaries")
+          PY
+          grep -q 'return valid_dynamic_client_id(client_id);' src-tauri/src/auth/oauth_flow.rs
+          grep -q "!matches!(byte, b'&' | b'=' | b'<' | b'>' | 0x22 | 0x27)" src-tauri/src/auth/oauth_flow.rs
+          grep -q 'OAUTH_MAX_PENDING_CODES' src-tauri/src/auth/oauth_flow.rs
+          grep -q 'redirect_uri_allowed(&params.redirect_uri)' src-tauri/src/auth/oauth_flow.rs
+          grep -q 'redirect_uri_allowed(&form.redirect_uri)' src-tauri/src/auth/oauth_flow.rs
+          grep -q 'DefaultBodyLimit::max' src-tauri/src/mcp/listener.rs
+          grep -q 'DefaultBodyLimit::max' src-tauri/src/actions/listener.rs
+          grep -q 'spawn_blocking' src-tauri/src/actions/listener.rs
+          grep -q 'trash_root.starts_with(&canonical)' src-tauri/src/tools/trash.rs
+          grep -q 'refusing to move Git internals into recovery Trash' src-tauri/src/tools/trash.rs
+          grep -q 'ensure_no_symlink_components' src-tauri/src/tools/trash.rs
+
+      - name: Test focused security and heavy-usage behavior
+        working-directory: src-tauri
+        run: |
+          cargo test --locked security_hardening_tests -- --nocapture
+          cargo test --locked request_capacity_hardening_tests -- --nocapture
+          cargo test --locked tools::trash -- --nocapture
+          cargo test --locked auth::refresh_tokens -- --nocapture
+          cargo test --locked auth::oauth_flow::tests -- --nocapture
+          cargo test --locked --test call_tool_security apply_patch_allows_deleting_a_normal_file -- --nocapture
+          cargo test --locked --test call_tool_security deleting_readme_requires_explicit_confirmation -- --nocapture
+          cargo test --locked --test call_tool_security deleting_git_assets_is_always_rejected -- --nocapture
+          cargo test --locked elevation_requests_are_always_blocked -- --nocapture
+
+      - name: Run complete locked Linux Rust and frontend matrices
+        run: |
+          (cd src-tauri && cargo fmt --all -- --check)
+          (cd src-tauri && cargo test --locked)
+          (cd src-tauri && cargo clippy --locked --all-targets -- -D warnings)
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+      - name: Stage only reviewed paths and package the exact indexed tree
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/security-hardening/final-verified
+          git add -- \
+            package.json \
+            package-lock.json \
+            src-tauri/Cargo.toml \
+            src-tauri/Cargo.lock \
+            src-tauri/tauri.conf.json \
+            src-tauri/src \
+            src-tauri/tests \
+            src
+          if git diff --cached --quiet; then
+            echo "The final hardening patch is unexpectedly empty."
+            exit 1
+          fi
+          git diff --cached --check
+          git diff --cached --name-status \
+            > aiTemp/security-hardening/final-verified/changed-files.txt
+          if grep -q '^D' aiTemp/security-hardening/final-verified/changed-files.txt; then
+            echo "Refusing to package a deleted file."
+            exit 1
+          fi
+          allowed='^(package.json|package-lock.json|src-tauri/Cargo.toml|src-tauri/Cargo.lock|src-tauri/tauri.conf.json|src-tauri/src/|src-tauri/tests/|src/)'
+          unexpected="$(git diff --cached --name-only | grep -Ev "$allowed" || true)"
+          if [ -n "$unexpected" ]; then
+            echo "Unexpected staged paths:"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          git diff --cached --binary \
+            > aiTemp/security-hardening/final-verified/hardened-rc2.patch
+          rc2_tree="$(git write-tree)"
+          patch_sha256="$(sha256sum aiTemp/security-hardening/final-verified/hardened-rc2.patch | cut -d' ' -f1)"
+          printf '%s  hardened-rc2.patch\n' "$patch_sha256" \
+            > aiTemp/security-hardening/final-verified/SHA256SUMS.txt
+          printf 'base_sha=%s\nsource_sha=%s\nsource_tree=%s\nrc2_tree=%s\npatch_sha256=%s\n' \
+            "${{ steps.identity.outputs.base_sha }}" \
+            "${{ steps.identity.outputs.source_sha }}" \
+            "${{ steps.identity.outputs.source_tree }}" \
+            "$rc2_tree" \
+            "$patch_sha256" \
+            > aiTemp/security-hardening/final-verified/metadata.env
+          printf 'rc2_tree=%s\n' "$rc2_tree" >> "$GITHUB_OUTPUT"
+          printf 'patch_sha256=%s\n' "$patch_sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-hardened-rc2-patch-${{ steps.package.outputs.rc2_tree }}
+          path: aiTemp/security-hardening/final-verified/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    needs: prepare-exact-patch
+    runs-on: windows-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      BASE_SHA: ${{ needs.prepare-exact-patch.outputs.base_sha }}
+      SOURCE_SHA: ${{ needs.prepare-exact-patch.outputs.source_sha }}
+      RC2_TREE: ${{ needs.prepare-exact-patch.outputs.rc2_tree }}
+      PATCH_SHA256: ${{ needs.prepare-exact-patch.outputs.patch_sha256 }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-final-windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: exact-hardened-rc2-patch-${{ env.RC2_TREE }}
+          path: aiTemp/security-hardening/final-verified
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-rc1-rc2-windows
+
+      - name: Verify and build exact RC1 Windows installer
+        shell: pwsh
+        run: |
+          git worktree add --detach aiTemp/rc1-source $env:SOURCE_SHA
+          Push-Location aiTemp/rc1-source
+          New-Item -ItemType Directory -Force -Path aiTemp/npm-cache | Out-Null
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          node --test tests/*.test.mjs
+          Push-Location src-tauri
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          Pop-Location
+          npm run tauri -- build --bundles nsis
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path aiTemp/release-assets/rc1/windows | Out-Null
+          $files = @(Get-ChildItem aiTemp/rc1-source/src-tauri/target/release/bundle/nsis/*.exe)
+          if ($files.Count -lt 1) { throw "RC1 Windows installer was not produced" }
+          Copy-Item $files.FullName aiTemp/release-assets/rc1/windows/
+          $lines = foreach ($file in Get-ChildItem aiTemp/release-assets/rc1/windows/*.exe) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $lines | Set-Content -Encoding ascii aiTemp/release-assets/rc1/windows/SHA256SUMS-windows.txt
+
+      - name: Apply exact indexed RC2 patch and verify its tree
+        shell: pwsh
+        run: |
+          $actual = (Get-FileHash -Algorithm SHA256 aiTemp/security-hardening/final-verified/hardened-rc2.patch).Hash.ToLowerInvariant()
+          if ($actual -ne $env:PATCH_SHA256) { throw "RC2 patch checksum mismatch" }
+          git apply --index --binary aiTemp/security-hardening/final-verified/hardened-rc2.patch
+          if ((git write-tree).Trim() -ne $env:RC2_TREE) { throw "RC2 indexed tree mismatch" }
+          if (git diff --cached --name-status | Select-String '^D') { throw "RC2 patch deletes a file" }
+
+      - name: Verify and build exact RC2 Windows installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path aiTemp/npm-cache | Out-Null
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          node --test tests/*.test.mjs
+          Push-Location src-tauri
+          cargo fmt --all -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+          Pop-Location
+          npm run tauri -- build --bundles nsis
+          New-Item -ItemType Directory -Force -Path aiTemp/release-assets/rc2/windows | Out-Null
+          $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe)
+          if ($files.Count -lt 1) { throw "RC2 Windows installer was not produced" }
+          Copy-Item $files.FullName aiTemp/release-assets/rc2/windows/
+          $lines = foreach ($file in Get-ChildItem aiTemp/release-assets/rc2/windows/*.exe) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $lines | Set-Content -Encoding ascii aiTemp/release-assets/rc2/windows/SHA256SUMS-windows.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-windows-rc1-rc2-${{ env.RC2_TREE }}
+          path: aiTemp/release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    needs: prepare-exact-patch
+    runs-on: macos-14
+    timeout-minutes: 210
+    permissions:
+      contents: read
+    env:
+      BASE_SHA: ${{ needs.prepare-exact-patch.outputs.base_sha }}
+      SOURCE_SHA: ${{ needs.prepare-exact-patch.outputs.source_sha }}
+      RC2_TREE: ${{ needs.prepare-exact-patch.outputs.rc2_tree }}
+      PATCH_SHA256: ${{ needs.prepare-exact-patch.outputs.patch_sha256 }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-final-macos
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: exact-hardened-rc2-patch-${{ env.RC2_TREE }}
+          path: aiTemp/security-hardening/final-verified
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-rc1-rc2-macos
+
+      - name: Verify and build exact RC1 universal macOS installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach aiTemp/rc1-source "$SOURCE_SHA"
+          (
+            cd aiTemp/rc1-source
+            mkdir -p aiTemp/npm-cache
+            npm ci --cache aiTemp/npm-cache
+            npm run check
+            node --test tests/*.test.mjs
+            (cd src-tauri && cargo test --locked && cargo clippy --locked --all-targets -- -D warnings)
+            npm run tauri -- build --target universal-apple-darwin --bundles dmg
+          )
+          mkdir -p aiTemp/release-assets/rc1/macos
+          shopt -s nullglob
+          files=(aiTemp/rc1-source/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          if [ "${#files[@]}" -lt 1 ]; then
+            echo "RC1 macOS DMG was not produced"
+            exit 1
+          fi
+          cp "${files[@]}" aiTemp/release-assets/rc1/macos/
+          for file in aiTemp/release-assets/rc1/macos/*.dmg; do
+            shasum -a 256 "$file"
+          done | sed 's#  .*/#  #' > aiTemp/release-assets/rc1/macos/SHA256SUMS-macos.txt
+
+      - name: Apply exact indexed RC2 patch and verify its tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(shasum -a 256 aiTemp/security-hardening/final-verified/hardened-rc2.patch | cut -d' ' -f1)"
+          test "$actual" = "$PATCH_SHA256"
+          git apply --index --binary aiTemp/security-hardening/final-verified/hardened-rc2.patch
+          test "$(git write-tree)" = "$RC2_TREE"
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "RC2 patch deletes a file"
+            exit 1
+          fi
+
+      - name: Verify and build exact RC2 universal macOS installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          node --test tests/*.test.mjs
+          (cd src-tauri && cargo fmt --all -- --check)
+          (cd src-tauri && cargo test --locked)
+          (cd src-tauri && cargo clippy --locked --all-targets -- -D warnings)
+          npm run tauri -- build --target universal-apple-darwin --bundles dmg
+          mkdir -p aiTemp/release-assets/rc2/macos
+          shopt -s nullglob
+          files=(src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          if [ "${#files[@]}" -lt 1 ]; then
+            echo "RC2 macOS DMG was not produced"
+            exit 1
+          fi
+          cp "${files[@]}" aiTemp/release-assets/rc2/macos/
+          for file in aiTemp/release-assets/rc2/macos/*.dmg; do
+            shasum -a 256 "$file"
+          done | sed 's#  .*/#  #' > aiTemp/release-assets/rc2/macos/SHA256SUMS-macos.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-macos-rc1-rc2-${{ env.RC2_TREE }}
+          path: aiTemp/release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
+  commit-promote-and-release:
+    needs:
+      - prepare-exact-patch
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      actions: read
+      checks: write
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_SHA: ${{ needs.prepare-exact-patch.outputs.base_sha }}
+      SOURCE_SHA: ${{ needs.prepare-exact-patch.outputs.source_sha }}
+      SOURCE_TREE: ${{ needs.prepare-exact-patch.outputs.source_tree }}
+      RC2_TREE: ${{ needs.prepare-exact-patch.outputs.rc2_tree }}
+      PATCH_SHA256: ${{ needs.prepare-exact-patch.outputs.patch_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: exact-hardened-rc2-patch-${{ env.RC2_TREE }}
+          path: aiTemp/security-hardening/final-verified
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: final-windows-rc1-rc2-${{ env.RC2_TREE }}
+          path: dist/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: final-macos-rc1-rc2-${{ env.RC2_TREE }}
+          path: dist/macos
+
+      - name: Verify exact artifacts branch freeze and platform checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          live_base="$(git ls-remote origin "refs/heads/$HARDENING_BRANCH" | cut -f1)"
+          test "$live_base" = "$BASE_SHA"
+          live_source="$(git ls-remote origin "refs/heads/$RELEASE_SOURCE_BRANCH" | cut -f1)"
+          live_source_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$live_source" --jq '.commit.tree.sha')"
+          test "$live_source_tree" = "$SOURCE_TREE"
+          actual_patch="$(sha256sum aiTemp/security-hardening/final-verified/hardened-rc2.patch | cut -d' ' -f1)"
+          test "$actual_patch" = "$PATCH_SHA256"
+          (cd aiTemp/security-hardening/final-verified && sha256sum -c SHA256SUMS.txt)
+          test -n "$(find dist/windows/rc1/windows -maxdepth 1 -name '*.exe' -print -quit)"
+          test -n "$(find dist/windows/rc2/windows -maxdepth 1 -name '*.exe' -print -quit)"
+          test -n "$(find dist/macos/rc1/macos -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$(find dist/macos/rc2/macos -maxdepth 1 -name '*.dmg' -print -quit)"
+          (cd dist/windows/rc1/windows && sha256sum -c SHA256SUMS-windows.txt)
+          (cd dist/windows/rc2/windows && sha256sum -c SHA256SUMS-windows.txt)
+          (cd dist/macos/rc1/macos && shasum -a 256 -c SHA256SUMS-macos.txt)
+          (cd dist/macos/rc2/macos && shasum -a 256 -c SHA256SUMS-macos.txt)
+
+      - name: Apply and commit only the exact three-platform-verified RC2 tree
+        id: commit_rc2
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --index --binary aiTemp/security-hardening/final-verified/hardened-rc2.patch
+          test "$(git write-tree)" = "$RC2_TREE"
+          git diff --cached --check
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "Refusing to commit a deleted file."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "security: bound authentication load and preserve deletions in Trash"
+          rc2_sha="$(git rev-parse HEAD)"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$RC2_TREE"
+          git push origin "HEAD:$HARDENING_BRANCH"
+          printf 'rc2_sha=%s\n' "$rc2_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Attach explicit cross-platform verification checks to the RC2 commit
+        env:
+          RC2_SHA: ${{ steps.commit_rc2.outputs.rc2_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for platform in Linux Windows macOS; do
+            payload="$(jq -n \
+              --arg name "Exact hardening validation / $platform" \
+              --arg sha "$RC2_SHA" \
+              --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              --arg title "$platform exact-tree validation passed" \
+              '{name:$name,head_sha:$sha,status:"completed",conclusion:"success",details_url:$url,output:{title:$title,summary:"The exact indexed RC2 tree passed locked tests, strict Clippy, frontend validation, packaging, checksum, and non-deletion gates."}}')"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input - <<<"$payload" >/dev/null
+          done
+
+      - name: Promote the exact RC1 source through PR 4 integration and main
+        id: promote_rc1
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%%/*}"
+
+          ready_pr() {
+            local number="$1"
+            local pr
+            pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number")"
+            if [ "$(jq -r '.draft' <<<"$pr")" = "true" ]; then
+              gh pr ready "$number" --repo "$GITHUB_REPOSITORY"
+            fi
+          }
+
+          wait_clean() {
+            local number="$1"
+            local expected_tree="$2"
+            local allow_update="$3"
+            local expected_base="$4"
+            for attempt in $(seq 1 480); do
+              local pr head_sha head_tree mergeable state base
+              pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number")"
+              head_sha="$(jq -r '.head.sha' <<<"$pr")"
+              head_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$head_sha" --jq '.commit.tree.sha')"
+              base="$(jq -r '.base.ref' <<<"$pr")"
+              test "$head_tree" = "$expected_tree"
+              test "$base" = "$expected_base"
+              mergeable="$(jq -r '.mergeable' <<<"$pr")"
+              state="$(jq -r '.mergeable_state' <<<"$pr")"
+              printf 'PR %s attempt=%s head=%s mergeable=%s state=%s\n' "$number" "$attempt" "$head_sha" "$mergeable" "$state"
+              if [ "$mergeable" = "true" ] && [ "$state" = "clean" ]; then
+                WAIT_HEAD_SHA="$head_sha"
+                return 0
+              fi
+              if [ "$state" = "behind" ] && [ "$allow_update" = "true" ]; then
+                update_payload="$(jq -n --arg sha "$head_sha" '{expected_head_sha:$sha}')"
+                gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$number/update-branch" --input - <<<"$update_payload" >/dev/null || true
+              elif [ "$state" = "dirty" ] || [ "$state" = "unstable" ]; then
+                return 1
+              fi
+              if [ "$attempt" -eq 480 ]; then
+                return 1
+              fi
+              sleep 15
+            done
+          }
+
+          merge_exact() {
+            local number="$1"
+            local sha="$2"
+            payload="$(jq -n --arg sha "$sha" '{sha:$sha,merge_method:"merge"}')"
+            result="$(gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$number/merge" --input - <<<"$payload")"
+            test "$(jq -r '.merged' <<<"$result")" = "true"
+          }
+
+          pr4="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR4_NUMBER")"
+          test "$(jq -r '.head.ref' <<<"$pr4")" = "$FEATURE_BRANCH"
+          test "$(jq -r '.base.ref' <<<"$pr4")" = "$INTEGRATION_BRANCH"
+          pr4_head="$(jq -r '.head.sha' <<<"$pr4")"
+          relation="$(gh api "repos/$GITHUB_REPOSITORY/compare/$pr4_head...$SOURCE_SHA" --jq '.status')"
+          case "$relation" in ahead|identical) ;; *) echo "RC1 source does not contain PR #4 head"; exit 1 ;; esac
+          if [ "$(jq -r '.merged' <<<"$pr4")" != "true" ]; then
+            ready_pr "$PR4_NUMBER"
+            for attempt in $(seq 1 480); do
+              pr4="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR4_NUMBER")"
+              mergeable="$(jq -r '.mergeable' <<<"$pr4")"
+              state="$(jq -r '.mergeable_state' <<<"$pr4")"
+              if [ "$mergeable" = "true" ] && [ "$state" = "clean" ]; then
+                break
+              fi
+              if [ "$state" = "dirty" ] || [ "$state" = "unstable" ] || [ "$attempt" -eq 480 ]; then
+                exit 1
+              fi
+              sleep 15
+            done
+            merge_exact "$PR4_NUMBER" "$pr4_head"
+          fi
+
+          integration_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$INTEGRATION_BRANCH" --jq '.object.sha')"
+          relation="$(gh api "repos/$GITHUB_REPOSITORY/compare/$pr4_head...$integration_sha" --jq '.status')"
+          case "$relation" in ahead|identical) ;; *) echo "PR #4 is not in integration"; exit 1 ;; esac
+
+          integration_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$integration_sha" --jq '.commit.tree.sha')"
+          if [ "$integration_tree" != "$SOURCE_TREE" ]; then
+            query="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=all -f head="$owner:$RELEASE_SOURCE_BRANCH" -f per_page=50)"
+            release_pr="$(jq -r '[.[] | select(.state == "open")][0].number // empty' <<<"$query")"
+            if [ -z "$release_pr" ]; then
+              payload="$(jq -n \
+                --arg title 'build: materialize verified secure v0.3.0-rc1 source' \
+                --arg head "$RELEASE_SOURCE_BRANCH" \
+                --arg base "$INTEGRATION_BRANCH" \
+                --arg body "Exact RC1 source tree $SOURCE_TREE passed Linux, Windows, macOS, installer, checksum, authentication, approval, and non-deletion gates. No branch or file is deleted." \
+                '{title:$title,head:$head,base:$base,body:$body,draft:true,maintainer_can_modify:true}')"
+              release_pr="$(gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" --input - <<<"$payload" --jq '.number')"
+            else
+              gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$release_pr" -f base="$INTEGRATION_BRANCH" >/dev/null
+            fi
+            ready_pr "$release_pr"
+            wait_clean "$release_pr" "$SOURCE_TREE" true "$INTEGRATION_BRANCH"
+            merge_exact "$release_pr" "$WAIT_HEAD_SHA"
+          fi
+
+          integration_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$INTEGRATION_BRANCH" --jq '.object.sha')"
+          integration_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$integration_sha" --jq '.commit.tree.sha')"
+          test "$integration_tree" = "$SOURCE_TREE"
+
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$MAIN_BRANCH" --jq '.object.sha')"
+          main_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$main_sha" --jq '.commit.tree.sha')"
+          if [ "$main_tree" != "$SOURCE_TREE" ]; then
+            query="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$owner:$INTEGRATION_BRANCH" -f base="$MAIN_BRANCH" -f per_page=50)"
+            main_pr="$(jq -r '.[0].number // empty' <<<"$query")"
+            if [ -z "$main_pr" ]; then
+              payload="$(jq -n \
+                --arg title 'release: promote verified v0.3.0-rc1 source' \
+                --arg head "$INTEGRATION_BRANCH" \
+                --arg base "$MAIN_BRANCH" \
+                --arg body "Promotes exact verified RC1 tree $SOURCE_TREE. Windows NSIS and universal macOS DMG checksums were independently verified." \
+                '{title:$title,head:$head,base:$base,body:$body,draft:true,maintainer_can_modify:true}')"
+              main_pr="$(gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" --input - <<<"$payload" --jq '.number')"
+            fi
+            ready_pr "$main_pr"
+            wait_clean "$main_pr" "$SOURCE_TREE" false "$MAIN_BRANCH"
+            merge_exact "$main_pr" "$WAIT_HEAD_SHA"
+          fi
+
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$MAIN_BRANCH" --jq '.object.sha')"
+          main_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$main_sha" --jq '.commit.tree.sha')"
+          test "$main_tree" = "$SOURCE_TREE"
+          printf 'rc1_main_sha=%s\n' "$main_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Publish or validate immutable RC1 prerelease
+        env:
+          RC1_MAIN_SHA: ${{ steps.promote_rc1.outputs.rc1_main_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve_tag_commit() {
+            local tag="$1"
+            local object_sha object_type
+            object_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha')"
+            object_type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.type')"
+            if [ "$object_type" = "tag" ]; then
+              object_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object.sha')"
+            fi
+            printf '%s' "$object_sha"
+          }
+
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC1_TAG" >/dev/null 2>&1; then
+            release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC1_TAG")"
+            test "$(jq -r '.prerelease' <<<"$release")" = "true"
+            tag_commit="$(resolve_tag_commit "$RC1_TAG")"
+            tag_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag_commit" --jq '.commit.tree.sha')"
+            test "$tag_tree" = "$SOURCE_TREE"
+            names="$(jq -r '.assets[].name' <<<"$release")"
+            grep -Eq '\.exe$' <<<"$names"
+            grep -Eq '\.dmg$' <<<"$names"
+            grep -Fxq 'SHA256SUMS-windows.txt' <<<"$names"
+            grep -Fxq 'SHA256SUMS-macos.txt' <<<"$names"
+            exit 0
+          fi
+
+          args=(
+            "$RC1_TAG"
+            --repo "$GITHUB_REPOSITORY"
+            --title "Coding Tools MCP $RC1_TAG"
+            --generate-notes
+            --prerelease
+          )
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RC1_TAG" >/dev/null 2>&1; then
+            tag_commit="$(resolve_tag_commit "$RC1_TAG")"
+            tag_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag_commit" --jq '.commit.tree.sha')"
+            test "$tag_tree" = "$SOURCE_TREE"
+            args+=(--verify-tag)
+          else
+            args+=(--target "$RC1_MAIN_SHA")
+          fi
+          gh release create "${args[@]}" \
+            dist/windows/rc1/windows/*.exe \
+            dist/windows/rc1/windows/SHA256SUMS-windows.txt \
+            dist/macos/rc1/macos/*.dmg \
+            dist/macos/rc1/macos/SHA256SUMS-macos.txt
+
+      - name: Promote exact hardened RC2 tree into main
+        id: promote_rc2
+        env:
+          RC2_SHA: ${{ steps.commit_rc2.outputs.rc2_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%%/*}"
+          live_rc2="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$HARDENING_BRANCH" --jq '.object.sha')"
+          test "$live_rc2" = "$RC2_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$live_rc2" --jq '.commit.tree.sha')" = "$RC2_TREE"
+          if gh api "repos/$GITHUB_REPOSITORY/compare/$SOURCE_SHA...$live_rc2" --jq '.files[].status' | grep -q '^removed$'; then
+            echo "RC2 branch removes a file relative to the RC1 source."
+            exit 1
+          fi
+
+          query="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$owner:$HARDENING_BRANCH" -f base="$MAIN_BRANCH" -f per_page=50)"
+          hardening_pr="$(jq -r '.[0].number // empty' <<<"$query")"
+          body="Exact hardened RC2 tree: $RC2_TREE\n\nValidated before commit on Linux, Windows, and macOS with locked Rust tests, strict Clippy, frontend checks/builds, Windows NSIS, universal macOS DMG, SHA-256 manifests, OAuth identity/redirect/replay tests, bounded request-capacity tests, and recoverable Trash deletion tests. No file or branch is deleted.\n\nEvidence: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ -z "$hardening_pr" ]; then
+            payload="$(jq -n \
+              --arg title 'security: bound authentication load and preserve deletions in Trash' \
+              --arg head "$HARDENING_BRANCH" \
+              --arg base "$MAIN_BRANCH" \
+              --arg body "$body" \
+              '{title:$title,head:$head,base:$base,body:$body,draft:false,maintainer_can_modify:true}')"
+            hardening_pr="$(gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" --input - <<<"$payload" --jq '.number')"
+          else
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$hardening_pr" -f body="$body" >/dev/null
+            pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$hardening_pr")"
+            if [ "$(jq -r '.draft' <<<"$pr")" = "true" ]; then
+              gh pr ready "$hardening_pr" --repo "$GITHUB_REPOSITORY"
+            fi
+          fi
+
+          for attempt in $(seq 1 480); do
+            pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$hardening_pr")"
+            head_sha="$(jq -r '.head.sha' <<<"$pr")"
+            head_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$head_sha" --jq '.commit.tree.sha')"
+            test "$head_sha" = "$RC2_SHA"
+            test "$head_tree" = "$RC2_TREE"
+            mergeable="$(jq -r '.mergeable' <<<"$pr")"
+            state="$(jq -r '.mergeable_state' <<<"$pr")"
+            printf 'RC2 PR attempt=%s mergeable=%s state=%s\n' "$attempt" "$mergeable" "$state"
+            if [ "$mergeable" = "true" ] && [ "$state" = "clean" ]; then
+              break
+            fi
+            if [ "$state" = "dirty" ] || [ "$state" = "unstable" ] || [ "$state" = "behind" ] || [ "$attempt" -eq 480 ]; then
+              exit 1
+            fi
+            sleep 15
+          done
+          payload="$(jq -n --arg sha "$RC2_SHA" '{sha:$sha,merge_method:"merge"}')"
+          result="$(gh api --method PUT "repos/$GITHUB_REPOSITORY/pulls/$hardening_pr/merge" --input - <<<"$payload")"
+          test "$(jq -r '.merged' <<<"$result")" = "true"
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$MAIN_BRANCH" --jq '.object.sha')"
+          main_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$main_sha" --jq '.commit.tree.sha')"
+          test "$main_tree" = "$RC2_TREE"
+          printf 'rc2_main_sha=%s\n' "$main_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Publish or validate immutable hardened RC2 prerelease
+        env:
+          RC2_MAIN_SHA: ${{ steps.promote_rc2.outputs.rc2_main_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve_tag_commit() {
+            local tag="$1"
+            local object_sha object_type
+            object_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha')"
+            object_type="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.type')"
+            if [ "$object_type" = "tag" ]; then
+              object_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object.sha')"
+            fi
+            printf '%s' "$object_sha"
+          }
+
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC2_TAG" >/dev/null 2>&1; then
+            release="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RC2_TAG")"
+            test "$(jq -r '.prerelease' <<<"$release")" = "true"
+            tag_commit="$(resolve_tag_commit "$RC2_TAG")"
+            tag_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag_commit" --jq '.commit.tree.sha')"
+            test "$tag_tree" = "$RC2_TREE"
+            names="$(jq -r '.assets[].name' <<<"$release")"
+            grep -Eq '\.exe$' <<<"$names"
+            grep -Eq '\.dmg$' <<<"$names"
+            grep -Fxq 'SHA256SUMS-windows.txt' <<<"$names"
+            grep -Fxq 'SHA256SUMS-macos.txt' <<<"$names"
+            exit 0
+          fi
+
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RC2_TAG" >/dev/null 2>&1; then
+            tag_commit="$(resolve_tag_commit "$RC2_TAG")"
+            tag_tree="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag_commit" --jq '.commit.tree.sha')"
+            test "$tag_tree" = "$RC2_TREE"
+            target_args=(--verify-tag)
+          else
+            target_args=(--target "$RC2_MAIN_SHA")
+          fi
+          gh release create "$RC2_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Coding Tools MCP $RC2_TAG" \
+            --generate-notes \
+            --prerelease \
+            "${target_args[@]}" \
+            dist/windows/rc2/windows/*.exe \
+            dist/windows/rc2/windows/SHA256SUMS-windows.txt \
+            dist/macos/rc2/macos/*.dmg \
+            dist/macos/rc2/macos/SHA256SUMS-macos.txt
+
+      - name: Close only the superseded PR conversation and retain every branch and file
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          old="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$OLD_PR5_NUMBER")"
+          if [ "$(jq -r '.state' <<<"$old")" = "open" ]; then
+            gh pr comment "$OLD_PR5_NUMBER" --repo "$GITHUB_REPOSITORY" --body "Superseded by the exact-tree RC1/RC2 release pipeline. This PR is closed without deleting its branch or files."
+            gh pr close "$OLD_PR5_NUMBER" --repo "$GITHUB_REPOSITORY"
+          fi
