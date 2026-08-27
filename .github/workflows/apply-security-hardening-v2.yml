@@ -100,11 +100,13 @@ jobs:
           cargo test --locked redirect_uri_policy_rejects_untrusted_destinations -- --nocapture
           cargo test --locked move_to_trash_preserves_content -- --nocapture
 
-      - name: Run complete Rust gates
+      - name: Run complete Rust tests
         working-directory: src-tauri
-        run: |
-          cargo test --locked
-          cargo clippy --locked --all-targets -- -D warnings
+        run: cargo test --locked
+
+      - name: Run strict Rust lint
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run complete frontend and source-contract gates
         run: |
