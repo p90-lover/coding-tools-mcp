@@ -1,0 +1,295 @@
+name: Finalize RC1 and hardened RC2 v3
+
+on:
+  push:
+    branches:
+      - security/unauthorized-auth-trash-heavy-usage
+    paths:
+      - ".github/workflows/finalize-rc1-and-hardened-rc2-v3.yml"
+
+permissions: {}
+
+concurrency:
+  group: finalize-v0.3.0-rc1
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  HARDENING_BRANCH: security/unauthorized-auth-trash-heavy-usage
+  RELEASE_SOURCE_BRANCH: automation/secure-source-v0.3.0-rc1-v2
+  FEATURE_BRANCH: feature/secure-auto-approval-persistent-auth
+  INTEGRATION_BRANCH: integration/xyTom-v0.3.0
+  MAIN_BRANCH: main
+  PR4_NUMBER: "4"
+  OLD_PR5_NUMBER: "5"
+  RC1_TAG: v0.3.0-rc1
+  RC2_TAG: v0.3.0-rc2
+
+jobs:
+  prepare-exact-patch:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 130
+    permissions:
+      contents: read
+    outputs:
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      source_sha: ${{ steps.prepare.outputs.source_sha }}
+      source_tree: ${{ steps.prepare.outputs.source_tree }}
+      rc2_tree: ${{ steps.prepare.outputs.rc2_tree }}
+      patch_sha256: ${{ steps.prepare.outputs.patch_sha256 }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-final-rc2-linux-v3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HARDENING_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-hardened-rc2-linux-v3
+
+      - name: Prepare final runtime hardening logic
+        run: python aiTemp/security-hardening/prepare_final_rc2_runtime.py
+
+      - name: Prepare and fully validate the exact indexed RC2 patch
+        id: prepare
+        shell: bash
+        run: bash aiTemp/runtime/security-hardening/prepare_final_rc2.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exact-hardened-rc2-patch-${{ steps.prepare.outputs.rc2_tree }}
+          path: aiTemp/security-hardening/final-verified/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    needs: prepare-exact-patch
+    runs-on: windows-latest
+    timeout-minutes: 210
+    permissions:
+      contents: read
+    env:
+      BASE_SHA: ${{ needs.prepare-exact-patch.outputs.base_sha }}
+      SOURCE_SHA: ${{ needs.prepare-exact-patch.outputs.source_sha }}
+      RC2_TREE: ${{ needs.prepare-exact-patch.outputs.rc2_tree }}
+      PATCH_SHA256: ${{ needs.prepare-exact-patch.outputs.patch_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: exact-hardened-rc2-patch-${{ env.RC2_TREE }}
+          path: aiTemp/security-hardening/final-verified
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-rc1-rc2-windows-v3
+
+      - name: Validate and build isolated RC1 and RC2 Windows payloads
+        shell: pwsh
+        run: ./aiTemp/security-hardening/build_release_pair_windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-windows-rc1-rc2-${{ env.RC2_TREE }}
+          path: aiTemp/release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    needs: prepare-exact-patch
+    runs-on: macos-14
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    env:
+      BASE_SHA: ${{ needs.prepare-exact-patch.outputs.base_sha }}
+      SOURCE_SHA: ${{ needs.prepare-exact-patch.outputs.source_sha }}
+      RC2_TREE: ${{ needs.prepare-exact-patch.outputs.rc2_tree }}
+      PATCH_SHA256: ${{ needs.prepare-exact-patch.outputs.patch_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: exact-hardened-rc2-patch-${{ env.RC2_TREE }}
+          path: aiTemp/security-hardening/final-verified
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: final-rc1-rc2-macos-v3
+
+      - name: Validate and build isolated RC1 and RC2 universal macOS payloads
+        shell: bash
+        run: bash aiTemp/security-hardening/build_release_pair_macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-macos-rc1-rc2-${{ env.RC2_TREE }}
+          path: aiTemp/release-assets/
+          if-no-files-found: error
+          retention-days: 14
+
+  commit-promote-and-release:
+    needs:
+      - prepare-exact-patch
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      actions: read
+      checks: write
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_SHA: ${{ needs.prepare-exact-patch.outputs.base_sha }}
+      SOURCE_SHA: ${{ needs.prepare-exact-patch.outputs.source_sha }}
+      SOURCE_TREE: ${{ needs.prepare-exact-patch.outputs.source_tree }}
+      RC2_TREE: ${{ needs.prepare-exact-patch.outputs.rc2_tree }}
+      PATCH_SHA256: ${{ needs.prepare-exact-patch.outputs.patch_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: exact-hardened-rc2-patch-${{ env.RC2_TREE }}
+          path: aiTemp/security-hardening/final-verified
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: final-windows-rc1-rc2-${{ env.RC2_TREE }}
+          path: dist/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: final-macos-rc1-rc2-${{ env.RC2_TREE }}
+          path: dist/macos
+
+      - name: Retarget any earlier hardening PR without creating a duplicate
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%%/*}"
+          query="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f state=open \
+            -f head="$owner:$HARDENING_BRANCH" \
+            -f per_page=50)"
+          number="$(jq -r '.[0].number // empty' <<<"$query")"
+          if [ -n "$number" ]; then
+            current_base="$(jq -r '.[0].base.ref' <<<"$query")"
+            if [ "$current_base" != "$MAIN_BRANCH" ]; then
+              gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" \
+                -f base="$MAIN_BRANCH" >/dev/null
+            fi
+          fi
+
+      - name: Prepare non-destructive resumable promotion logic
+        shell: bash
+        run: python aiTemp/security-hardening/prepare_promotion_runtime.py
+
+      - name: Commit promote and release the exact RC1 and RC2 trees
+        id: promote
+        shell: bash
+        run: |
+          set +e
+          bash aiTemp/runtime/security-hardening/promote_release_pair.sh
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then
+            mkdir -p aiTemp/status/final-release
+            if [ ! -f aiTemp/status/final-release/final-rc1-rc2-state.json ]; then
+              jq -n \
+                --arg repository "$GITHUB_REPOSITORY" \
+                --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                --arg base_sha "$BASE_SHA" \
+                --arg source_tree "$SOURCE_TREE" \
+                --arg rc2_tree "$RC2_TREE" \
+                --argjson exit_code "$code" \
+                '{ok:false,repository:$repository,evidence_run:$run_url,base_sha:$base_sha,rc1_tree:$source_tree,rc2_tree:$rc2_tree,exit_code:$exit_code,deletion_policy:"No source file or branch was deleted."}' \
+                > aiTemp/status/final-release/final-rc1-rc2-state.json
+            fi
+            exit "$code"
+          fi
+
+      - name: Publish final evidence in the workflow summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f aiTemp/status/final-release/final-rc1-rc2-state.json ]; then
+            {
+              echo '## Exact-tree RC1 / hardened RC2 result'
+              echo
+              echo '```json'
+              cat aiTemp/status/final-release/final-rc1-rc2-state.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: final-rc1-rc2-state-${{ env.RC2_TREE }}
+          path: aiTemp/status/final-release/
+          if-no-files-found: warn
+          retention-days: 30
