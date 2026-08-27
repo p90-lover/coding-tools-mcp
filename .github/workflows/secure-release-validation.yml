@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -48,18 +48,18 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-27
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
           shared-key: secure-release-validation-windows
@@ -82,25 +82,28 @@ jobs:
       - name: Build Windows NSIS installer
         run: npm run tauri -- build --bundles nsis
 
-      - name: Create Windows SHA-256 checksums
+      - name: Stage Windows validation artifacts
         shell: pwsh
         run: |
-          $files = Get-ChildItem "$env:CARGO_TARGET_DIR/release/bundle/nsis/*.exe"
+          $files = @(Get-ChildItem "$env:CARGO_TARGET_DIR/release/bundle/nsis/*.exe")
           if ($files.Count -lt 1) { throw "Windows installer was not produced" }
+          $checksumDir = "aiTemp/release-checksums"
+          $payloadDir = "aiTemp/release-payload/windows"
+          New-Item -ItemType Directory -Force -Path $checksumDir, $payloadDir | Out-Null
           $lines = foreach ($file in $files) {
             $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
             "$hash  $($file.Name)"
           }
-          New-Item -ItemType Directory -Force -Path aiTemp/release-checksums | Out-Null
-          $lines | Set-Content -Encoding utf8 aiTemp/release-checksums/SHA256SUMS-windows.txt
+          $checksum = Join-Path $checksumDir "SHA256SUMS-windows.txt"
+          $lines | Set-Content -Encoding utf8 $checksum
+          Copy-Item $files.FullName -Destination $payloadDir
+          Copy-Item $checksum -Destination $payloadDir
 
       - name: Upload Windows validation artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: secure-windows-nsis-${{ github.sha }}
-          path: |
-            ${{ env.CARGO_TARGET_DIR }}/release/bundle/nsis/*.exe
-            aiTemp/release-checksums/SHA256SUMS-windows.txt
+          path: aiTemp/release-payload/windows/*
           if-no-files-found: error
           retention-days: 7
 
@@ -109,20 +112,20 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-27
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
           shared-key: secure-release-validation-macos
@@ -144,10 +147,10 @@ jobs:
       - name: Build universal macOS DMG
         run: npm run tauri -- build --target universal-apple-darwin --bundles dmg
 
-      - name: Create macOS SHA-256 checksums
+      - name: Stage macOS validation artifacts
         shell: bash
         run: |
-          mkdir -p aiTemp/release-checksums
+          mkdir -p aiTemp/release-checksums aiTemp/release-payload/macos
           shopt -s nullglob
           files=("$CARGO_TARGET_DIR"/universal-apple-darwin/release/bundle/dmg/*.dmg)
           if [ "${#files[@]}" -lt 1 ]; then
@@ -157,13 +160,13 @@ jobs:
           for file in "${files[@]}"; do
             shasum -a 256 "$file"
           done | sed 's#  .*/#  #' > aiTemp/release-checksums/SHA256SUMS-macos.txt
+          cp "${files[@]}" aiTemp/release-payload/macos/
+          cp aiTemp/release-checksums/SHA256SUMS-macos.txt aiTemp/release-payload/macos/
 
       - name: Upload macOS validation artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: secure-macos-dmg-${{ github.sha }}
-          path: |
-            ${{ env.CARGO_TARGET_DIR }}/universal-apple-darwin/release/bundle/dmg/*.dmg
-            aiTemp/release-checksums/SHA256SUMS-macos.txt
+          path: aiTemp/release-payload/macos/*
           if-no-files-found: error
           retention-days: 7
