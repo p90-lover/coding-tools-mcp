@@ -6,6 +6,7 @@ on:
       - security/unauthorized-auth-trash-heavy-usage
     paths:
       - "aiTemp/security-hardening/apply_security_hardening_v2.py"
+      - "aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py"
       - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
   workflow_dispatch:
@@ -57,6 +58,9 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: apply-security-hardening-linux
+
+      - name: Apply reviewed applicator TOML fix with recoverable backup
+        run: python aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py
 
       - name: Reproduce applicator dependency generation
         run: python aiTemp/security-hardening/test_apply_security_hardening_v2.py
@@ -110,7 +114,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- src-tauri src tests package.json package-lock.json
+          git add -- \
+            aiTemp/security-hardening/apply_security_hardening_v2.py \
+            src-tauri \
+            src \
+            tests \
+            package.json \
+            package-lock.json
           if git diff --cached --quiet; then
             echo "Security hardening source is already materialized."
             exit 0
