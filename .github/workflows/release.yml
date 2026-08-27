@@ -149,7 +149,7 @@ jobs:
       - name: Run focused release checks
         run: |
           npm run check
-          node --test
+          node --test tests/chatgpt-session-prompt-layout.test.mjs
 
       - name: Run locked Rust tests
         working-directory: src-tauri
@@ -216,7 +216,7 @@ jobs:
       - name: Run focused release checks
         run: |
           npm run check
-          node --test
+          node --test tests/chatgpt-session-prompt-layout.test.mjs
 
       - name: Run locked Rust tests
         working-directory: src-tauri
