@@ -1,0 +1,130 @@
+name: Apply security hardening
+
+on:
+  push:
+    branches:
+      - security/unauthorized-auth-trash-heavy-usage
+    paths:
+      - "aiTemp/security-hardening/apply_security_hardening_v2.py"
+      - ".github/workflows/apply-security-hardening.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-security-hardening-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-security-hardening-apply
+
+jobs:
+  apply-test-commit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: security/unauthorized-auth-trash-heavy-usage
+          fetch-depth: 0
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: apply-security-hardening-linux
+
+      - name: Apply backup-first hardening without deleting files
+        shell: bash
+        run: |
+          python aiTemp/security-hardening/apply_security_hardening_v2.py
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+          if git diff --name-status | grep -q '^D'; then
+            echo "Refusing to continue because hardening deleted a file."
+            exit 1
+          fi
+
+      - name: Run targeted security tests
+        working-directory: src-tauri
+        run: |
+          cargo test --locked empty_configured_client_id_is_rejected -- --nocapture
+          cargo test --locked redirect_uri_policy_rejects_untrusted_destinations -- --nocapture
+          cargo test --locked move_to_trash_preserves_content -- --nocapture
+
+      - name: Run complete Rust gates
+        working-directory: src-tauri
+        run: |
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run complete frontend and source-contract gates
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+      - name: Scan changed source for credential-shaped literals
+        shell: bash
+        run: |
+          changed_files=$(git diff --name-only -- src-tauri src tests)
+          if [ -n "$changed_files" ]; then
+            if grep -nE '(gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' $changed_files; then
+              echo "Credential-shaped literal detected in changed source."
+              exit 1
+            fi
+          fi
+
+      - name: Commit only verified materialized source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- src-tauri src tests package.json package-lock.json
+          if git diff --cached --quiet; then
+            echo "Security hardening source is already materialized."
+            exit 0
+          fi
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "Refusing to commit a deletion."
+            exit 1
+          fi
+          git commit -m "security: harden authentication deletion and overload handling"
+
+          for attempt in 1 2 3; do
+            git fetch origin security/unauthorized-auth-trash-heavy-usage
+            if git rebase origin/security/unauthorized-auth-trash-heavy-usage && \
+               git push origin HEAD:security/unauthorized-auth-trash-heavy-usage; then
+              exit 0
+            fi
+            git rebase --abort || true
+            sleep $((attempt * 5))
+          done
+
+          echo "Unable to publish verified hardening source after three non-destructive retries."
+          exit 1
