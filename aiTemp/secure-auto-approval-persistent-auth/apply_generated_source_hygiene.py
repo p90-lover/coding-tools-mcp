@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 
-ROOT = Path.cwd()
+ROOT = Path.cwd().resolve()
 BACKUP_ROOT = (
     ROOT
     / "aiTemp"
@@ -15,17 +15,35 @@ BACKUP_ROOT = (
 )
 
 
+def checked_file(path: str) -> Path:
+    relative = Path(path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError(f"unsafe generated-source path: {path}")
+
+    candidate = ROOT / relative
+    if candidate.is_symlink():
+        raise RuntimeError(f"refusing to modify a symlink: {path}")
+
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(ROOT)
+    except (FileNotFoundError, ValueError) as error:
+        raise RuntimeError(f"generated-source path is missing or escapes the repository: {path}") from error
+
+    if not resolved.is_file():
+        raise RuntimeError(f"generated-source path is not a regular file: {path}")
+    return resolved
+
+
 def backup(path: str) -> None:
-    source = ROOT / path
-    if not source.exists():
-        return
-    target = BACKUP_ROOT / path
+    source = checked_file(path)
+    target = BACKUP_ROOT / Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
 
 
 def replace_once(path: str, before: str, after: str, label: str) -> None:
-    target = ROOT / path
+    target = checked_file(path)
     text = target.read_text(encoding="utf-8")
     if after in text:
         print(f"already applied: {label}")
@@ -39,7 +57,7 @@ def replace_once(path: str, before: str, after: str, label: str) -> None:
 
 
 def remove_once(path: str, block: str, remaining_marker: str, label: str) -> None:
-    target = ROOT / path
+    target = checked_file(path)
     text = target.read_text(encoding="utf-8")
     if block not in text:
         if remaining_marker in text:
@@ -54,8 +72,8 @@ def remove_once(path: str, block: str, remaining_marker: str, label: str) -> Non
 
 
 def verify() -> None:
-    migration = (ROOT / "src-tauri/src/data/migrate.rs").read_text(encoding="utf-8")
-    refresh_tokens = (ROOT / "src-tauri/src/auth/refresh_tokens.rs").read_text(
+    migration = checked_file("src-tauri/src/data/migrate.rs").read_text(encoding="utf-8")
+    refresh_tokens = checked_file("src-tauri/src/auth/refresh_tokens.rs").read_text(
         encoding="utf-8"
     )
     forbidden = (
