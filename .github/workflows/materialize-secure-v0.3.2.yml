@@ -12,6 +12,7 @@ on:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/check_persistent_oauth_state.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py"
+      - "src-tauri/src/tools/approval.rs"
       - ".github/workflows/materialize-secure-v0.3.2.yml"
   workflow_dispatch:
 
