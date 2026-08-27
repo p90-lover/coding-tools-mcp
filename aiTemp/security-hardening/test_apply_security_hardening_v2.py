@@ -55,6 +55,21 @@ tower-http = { version = "0.6", features = ["cors"] }
             ["cors", "timeout"],
         )
 
+    def test_oauth_regression_uses_the_configured_fixture_client_id(self) -> None:
+        functions = load_functions("replace_once", "insert_before_once", "harden_oauth")
+        source = (ROOT / "src-tauri/src/auth/oauth_flow.rs").read_text(encoding="utf-8")
+        generated = functions["harden_oauth"](source)
+        generated_tests = generated.partition("#[cfg(test)]")[2]
+
+        self.assertIn(
+            'assert!(oauth.client_id_allowed("chatgpt-client-test"));',
+            generated_tests,
+        )
+        self.assertNotIn(
+            'assert!(oauth.client_id_allowed("client"));',
+            generated_tests,
+        )
+
     def test_patch_deletion_generation_is_transactional_and_reversible(self) -> None:
         functions = load_functions("workspace_root_expression", "harden_patch_deletion")
         source = (ROOT / "src-tauri/src/tools/patch.rs").read_text(encoding="utf-8")
