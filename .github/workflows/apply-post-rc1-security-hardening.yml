@@ -1,0 +1,233 @@
+name: Apply post-RC1 security hardening
+
+on:
+  push:
+    branches:
+      - security/unauthorized-auth-trash-heavy-usage
+    paths:
+      - "aiTemp/security-hardening/apply_post_rc1_hardening.py"
+      - "docs/superpowers/plans/2026-08-27-post-rc1-security-hardening.md"
+      - ".github/workflows/apply-post-rc1-security-hardening.yml"
+
+permissions: {}
+
+concurrency:
+  group: post-rc1-security-hardening-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-security-hardening
+  HARDENING_BRANCH: security/unauthorized-auth-trash-heavy-usage
+
+jobs:
+  materialize-and-test:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    outputs:
+      base_sha: ${{ steps.identity.outputs.base_sha }}
+      patch_sha256: ${{ steps.package.outputs.patch_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HARDENING_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pin the immutable source identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'base_sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: post-rc1-security-hardening-linux
+
+      - name: Materialize hardening with recoverable backups
+        run: |
+          set -euo pipefail
+          python aiTemp/security-hardening/apply_post_rc1_hardening.py
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check
+          if git diff --name-status | grep -q '^D'; then
+            echo "Refusing security hardening because a file was deleted."
+            git diff --name-status
+            exit 1
+          fi
+
+      - name: Assert fail-closed source boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R --line-number --fixed-strings 'CorsLayer::permissive()' \
+            src-tauri/src/mcp/listener.rs src-tauri/src/actions/listener.rs; then
+            echo "Permissive browser-wide CORS remains enabled."
+            exit 1
+          fi
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          for name in ("src-tauri/src/tools/patch.rs", "src-tauri/src/tools/file.rs"):
+              production = Path(name).read_text(encoding="utf-8").partition("#[cfg(test)]")[0]
+              if re.search(r"(?:std::)?fs::remove_(?:file|dir_all)\(", production):
+                  raise SystemExit(f"irreversible deletion remains in {name}")
+          print("verified: production deletion is routed to recoverable aiTemp/Trash moves")
+          PY
+          test "$(grep -c 'stable_oauth_client_id(' src-tauri/src/runtime/supervisor.rs)" -ge 3
+          grep -q 'OAUTH_MAX_PENDING_CODES' src-tauri/src/auth/oauth_flow.rs
+          grep -q 'DefaultBodyLimit::max' src-tauri/src/mcp/listener.rs
+          grep -q 'DefaultBodyLimit::max' src-tauri/src/actions/listener.rs
+          grep -q 'spawn_blocking' src-tauri/src/actions/listener.rs
+
+      - name: Test unauthorized OAuth rejection and bounded authorization state
+        working-directory: src-tauri
+        run: |
+          cargo test --locked security_hardening_tests -- --nocapture
+          cargo test --locked oauth_client_id_hardening_tests -- --nocapture
+          cargo test --locked auth::refresh_tokens -- --nocapture
+          cargo test --locked auth::oauth_flow::tests -- --nocapture
+
+      - name: Test recoverable Trash and protected deletion boundaries
+        working-directory: src-tauri
+        run: |
+          cargo test --locked tools::trash -- --nocapture
+          cargo test --locked --test call_tool_security apply_patch_allows_deleting_a_normal_file -- --nocapture
+          cargo test --locked --test call_tool_security deleting_readme_requires_explicit_confirmation -- --nocapture
+          cargo test --locked --test call_tool_security deleting_git_assets_is_always_rejected -- --nocapture
+          cargo test --locked elevation_requests_are_always_blocked -- --nocapture
+
+      - name: Run complete locked Rust matrix and strict Clippy
+        working-directory: src-tauri
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run complete frontend validation
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+      - name: Package the exact verified source delta
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/security-hardening/verified
+          git diff --binary -- \
+            src-tauri/src \
+            src-tauri/tests \
+            src > aiTemp/security-hardening/verified/post-rc1-security-hardening.patch
+          test -s aiTemp/security-hardening/verified/post-rc1-security-hardening.patch
+          git diff --name-status -- \
+            src-tauri/src \
+            src-tauri/tests \
+            src > aiTemp/security-hardening/verified/changed-files.txt
+          if grep -q '^D' aiTemp/security-hardening/verified/changed-files.txt; then
+            echo "Refusing to package a source deletion."
+            exit 1
+          fi
+          sha256sum aiTemp/security-hardening/verified/post-rc1-security-hardening.patch \
+            > aiTemp/security-hardening/verified/SHA256SUMS.txt
+          patch_sha256="$(cut -d' ' -f1 aiTemp/security-hardening/verified/SHA256SUMS.txt)"
+          printf 'patch_sha256=%s\n' "$patch_sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-post-rc1-security-hardening-${{ steps.identity.outputs.base_sha }}
+          path: aiTemp/security-hardening/verified/
+          if-no-files-found: error
+          retention-days: 7
+
+  commit-verified-source:
+    needs: materialize-and-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      BASE_SHA: ${{ needs.materialize-and-test.outputs.base_sha }}
+      PATCH_SHA256: ${{ needs.materialize-and-test.outputs.patch_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-post-rc1-security-hardening-${{ env.BASE_SHA }}
+          path: aiTemp/security-hardening/verified
+
+      - name: Verify immutable branch and exact tested artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          live_sha="$(git ls-remote origin "refs/heads/$HARDENING_BRANCH" | cut -f1)"
+          test "$live_sha" = "$BASE_SHA"
+          actual_sha="$(sha256sum aiTemp/security-hardening/verified/post-rc1-security-hardening.patch | cut -d' ' -f1)"
+          test "$actual_sha" = "$PATCH_SHA256"
+          (cd aiTemp/security-hardening/verified && sha256sum -c SHA256SUMS.txt)
+          if grep -q '^D' aiTemp/security-hardening/verified/changed-files.txt; then
+            echo "Refusing to commit a deletion."
+            exit 1
+          fi
+
+      - name: Apply only the already-tested source delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --index --binary aiTemp/security-hardening/verified/post-rc1-security-hardening.patch
+          git diff --cached --check
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "Refusing to commit a deleted file."
+            exit 1
+          fi
+          allowed='^(src-tauri/src/|src-tauri/tests/|src/)'
+          unexpected="$(git diff --cached --name-only | grep -Ev "$allowed" || true)"
+          if [ -n "$unexpected" ]; then
+            echo "Verified artifact touched unexpected paths:"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+
+      - name: Commit without force-push or branch deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "security: fail closed auth and preserve deleted files in Trash"
+          git push origin "HEAD:$HARDENING_BRANCH"
