@@ -1,0 +1,67 @@
+name: Release request validation
+
+on:
+  push:
+    branches:
+      - "release/**"
+    paths:
+      - ".github/release-request.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-request-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate owner-scoped release request without publishing
+        id: request
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path('.github/release-request.json')
+          data = json.loads(path.read_text(encoding='utf-8'))
+          if not isinstance(data, dict) or set(data) != {'tag'}:
+              raise SystemExit('release request must contain exactly one tag field')
+          tag = str(data['tag']).strip()
+          if not re.fullmatch(r'v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?', tag):
+              raise SystemExit(f'invalid release tag: {tag!r}')
+          expected_branch = f'release/{tag}'
+          if os.environ['GITHUB_REF_NAME'] != expected_branch:
+              raise SystemExit(
+                  f'release request branch must be {expected_branch!r}, '
+                  f'not {os.environ["GITHUB_REF_NAME"]!r}'
+              )
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'tag={tag}\n')
+          print(f'validated owner release request for {tag}')
+          PY
+
+      - name: Record the authorized manual release command
+        env:
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
+        shell: bash
+        run: |
+          {
+            echo "## Validated release request"
+            echo
+            echo "Tag: \`$RELEASE_TAG\`"
+            echo
+            echo "This read-only workflow does not publish or dispatch another workflow."
+            echo "The repository owner must manually run **Desktop Release** from the exact \`main\` revision after all required checks are green."
+          } >> "$GITHUB_STEP_SUMMARY"
