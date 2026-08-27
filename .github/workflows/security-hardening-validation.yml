@@ -1,0 +1,149 @@
+name: Security hardening validation
+
+on:
+  push:
+    branches:
+      - security/unauthorized-auth-trash-heavy-usage
+    paths:
+      - "src-tauri/**"
+      - "src/**"
+      - "tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/security-hardening-validation.yml"
+  pull_request:
+    branches:
+      - integration/xyTom-v0.3.0
+    paths:
+      - "src-tauri/**"
+      - "src/**"
+      - "tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/security-hardening-validation.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-hardening-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-security-hardening
+
+jobs:
+  validate-security-boundaries:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse source deletion
+        shell: bash
+        run: |
+          if git diff --name-status "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}" 2>/dev/null | grep -q '^D'; then
+            echo "Security hardening must not delete files."
+            exit 1
+          fi
+
+      - name: Verify materialized security markers
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          checks = {
+              "src-tauri/src/auth/oauth_flow.rs": [
+                  "redirect_uri_allowed",
+                  "OAUTH_MAX_PENDING_CODES",
+                  "client_id_allowed",
+              ],
+              "src-tauri/src/tools/patch.rs": [
+                  "move_to_trash",
+                  "aiTemp",
+                  "deleted-files",
+              ],
+              "src-tauri/src/mcp/listener.rs": [
+                  "DefaultBodyLimit",
+                  "ConcurrencyLimitLayer",
+                  "TimeoutLayer",
+              ],
+              "src-tauri/src/actions/listener.rs": [
+                  "DefaultBodyLimit",
+                  "ConcurrencyLimitLayer",
+                  "TimeoutLayer",
+              ],
+          }
+          missing = []
+          for path, markers in checks.items():
+              text = Path(path).read_text(encoding="utf-8")
+              for marker in markers:
+                  if marker not in text:
+                      missing.append(f"{path}: {marker}")
+          for path in (
+              "src-tauri/src/mcp/listener.rs",
+              "src-tauri/src/actions/listener.rs",
+          ):
+              text = Path(path).read_text(encoding="utf-8")
+              if "CorsLayer::permissive" in text:
+                  missing.append(f"{path}: permissive CORS remains")
+          if missing:
+              raise SystemExit("Missing security materialization:\n" + "\n".join(missing))
+          PY
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: security-hardening-linux
+
+      - name: Rust format and complete gates
+        working-directory: src-tauri
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Frontend and source-contract gates
+        run: |
+          mkdir -p aiTemp/npm-cache
+          npm ci --cache aiTemp/npm-cache
+          npm run check
+          npm run build
+          node --test tests/*.test.mjs
+
+      - name: Refuse staged or working-tree deletion
+        shell: bash
+        run: |
+          git diff --check
+          if git diff --name-status | grep -q '^D'; then
+            echo "Validation produced a deletion."
+            exit 1
+          fi
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo "Validation staged a deletion."
+            exit 1
+          fi
