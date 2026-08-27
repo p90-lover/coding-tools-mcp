@@ -10,6 +10,7 @@ on:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/check_persistent_oauth_state.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py"
       - ".github/workflows/apply-secure-approval.yml"
   pull_request:
@@ -21,6 +22,7 @@ on:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/check_persistent_oauth_state.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py"
       - ".github/workflows/apply-secure-approval.yml"
 
@@ -77,7 +79,17 @@ jobs:
         run: |
           python aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py
           python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py
-          python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py
+          if python aiTemp/secure-auto-approval-persistent-auth/check_persistent_oauth_state.py; then
+            echo "Persistent OAuth source is already complete; generator safely skipped."
+          else
+            oauth_state=$?
+            if [ "$oauth_state" -eq 10 ]; then
+              python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py
+            else
+              echo "Persistent OAuth source is partial or drifted; refusing unsafe reapplication."
+              exit "$oauth_state"
+            fi
+          fi
           python aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
