@@ -10,6 +10,7 @@ on:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py"
       - ".github/workflows/apply-secure-approval.yml"
   pull_request:
     branches:
@@ -20,6 +21,7 @@ on:
       - "aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py"
       - "aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py"
+      - "aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py"
       - ".github/workflows/apply-secure-approval.yml"
 
 permissions:
@@ -76,6 +78,7 @@ jobs:
           python aiTemp/secure-auto-approval-persistent-auth/apply_approval_patch_v3.py
           python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_store_patch.py
           python aiTemp/secure-auto-approval-persistent-auth/apply_persistent_oauth_patch.py
+          python aiTemp/secure-auto-approval-persistent-auth/apply_generated_source_hygiene.py
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
           if git diff --name-status | grep -q '^D'; then
