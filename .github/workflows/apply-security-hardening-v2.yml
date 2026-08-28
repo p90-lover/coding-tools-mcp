@@ -11,6 +11,7 @@ on:
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py"
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py"
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py"
+      - "aiTemp/security-hardening/apply_linked_root_transaction_fix.py"
       - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
       - "aiTemp/security-hardening/test_linked_root_transaction_generation.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
@@ -73,6 +74,7 @@ jobs:
             aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py \
             aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py \
             aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py \
+            aiTemp/security-hardening/apply_linked_root_transaction_fix.py \
             aiTemp/security-hardening/test_apply_security_hardening_v2.py \
             aiTemp/security-hardening/test_linked_root_transaction_generation.py
 
@@ -81,7 +83,7 @@ jobs:
           python aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py
           python aiTemp/security-hardening/fix_apply_security_hardening_v2_oauth_fixture.py
           python aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py
-          python aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py
+          python aiTemp/security-hardening/apply_linked_root_transaction_fix.py
 
       - name: Reproduce applicator dependency and Rust generation
         run: |
