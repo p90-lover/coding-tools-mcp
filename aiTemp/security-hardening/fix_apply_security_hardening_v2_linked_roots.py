@@ -34,32 +34,38 @@ def checked_target() -> Path:
     return resolved
 
 
-def main() -> None:
-    target = checked_target()
-    text = target.read_text(encoding="utf-8")
-
-    already_applied = (
-        "fn approved_storage_root(" in text
-        and "cleanup_staging_roots" in text
-        and "restore_backups(ws, &backups)" in text
-        and "path.strip_prefix(ws.root())" not in text
-    )
-    if already_applied:
-        print("linked-root transaction generation fix is already applied")
-        return
-
-    if "path.strip_prefix(ws.root())" not in text:
-        raise RuntimeError(
-            "expected primary-workspace-only staging marker is missing; "
-            "run the reviewed Rust generation fixer first"
-        )
-
+def generator_bounds(text: str) -> tuple[int, int]:
     start_marker = "def harden_patch_deletion(text: str) -> str:\n"
     end_marker = "\n\nCONTRACT_TEST = r" + "'''"
     start = text.find(start_marker)
     end = text.find(end_marker, start)
     if start < 0 or end < 0:
         raise RuntimeError("unable to locate the reviewed patch-deletion generator")
+    return start, end
+
+
+def main() -> None:
+    target = checked_target()
+    text = target.read_text(encoding="utf-8")
+    start, end = generator_bounds(text)
+    current_generator = text[start:end]
+
+    already_applied = (
+        "fn approved_storage_root(" in current_generator
+        and "cleanup_staging_roots" in current_generator
+        and "restore_backups(ws, &backups)" in current_generator
+        and "path.strip_prefix(ws.root())" not in current_generator
+    )
+    if already_applied:
+        print("linked-root transaction generation fix is already applied")
+        return
+
+    if "path.strip_prefix(ws.root())" not in current_generator:
+        raise RuntimeError(
+            "expected primary-workspace-only staging marker is missing from "
+            "the patch-deletion generator; run the reviewed Rust generation fixer first"
+        )
+
     text = text[:start] + NEW_HARDEN_PATCH_DELETION + text[end:]
 
     backup = BACKUP_ROOT / TARGET_RELATIVE
@@ -68,6 +74,8 @@ def main() -> None:
     target.write_text(text, encoding="utf-8")
 
     verified = target.read_text(encoding="utf-8")
+    verified_start, verified_end = generator_bounds(verified)
+    verified_generator = verified[verified_start:verified_end]
     required = (
         "fn approved_storage_root(",
         "let mut staging_roots: HashMap<PathBuf, PathBuf>",
@@ -78,7 +86,7 @@ def main() -> None:
         "move_to_trash(&storage_root, &path).map(|_| ())",
     )
     for marker in required:
-        if marker not in verified:
+        if marker not in verified_generator:
             raise RuntimeError(f"linked-root generation verification is missing: {marker}")
     forbidden = (
         "path.strip_prefix(ws.root())",
@@ -86,7 +94,7 @@ def main() -> None:
         "cleanup_temporary_files",
     )
     for marker in forbidden:
-        if marker in verified:
+        if marker in verified_generator:
             raise RuntimeError(f"obsolete transaction generation remains: {marker}")
     print("applied linked-root transaction generation fix with recoverable backup")
 
