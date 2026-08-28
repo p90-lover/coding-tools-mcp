@@ -11,6 +11,7 @@ on:
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py"
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py"
       - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
+      - "aiTemp/security-hardening/test_linked_root_transaction_generation.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
   workflow_dispatch:
 
@@ -70,7 +71,8 @@ jobs:
             aiTemp/security-hardening/fix_apply_security_hardening_v2_oauth_fixture.py \
             aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py \
             aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py \
-            aiTemp/security-hardening/test_apply_security_hardening_v2.py
+            aiTemp/security-hardening/test_apply_security_hardening_v2.py \
+            aiTemp/security-hardening/test_linked_root_transaction_generation.py
 
       - name: Apply reviewed applicator fixes with recoverable backups
         run: |
@@ -79,7 +81,9 @@ jobs:
           python aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py
 
       - name: Reproduce applicator dependency and Rust generation
-        run: python aiTemp/security-hardening/test_apply_security_hardening_v2.py
+        run: |
+          python aiTemp/security-hardening/test_apply_security_hardening_v2.py
+          python aiTemp/security-hardening/test_linked_root_transaction_generation.py
 
       - name: Apply backup-first hardening without deleting files
         shell: bash
