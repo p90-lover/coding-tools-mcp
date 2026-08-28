@@ -10,6 +10,7 @@ on:
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_oauth_fixture.py"
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py"
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py"
+      - "aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py"
       - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
       - "aiTemp/security-hardening/test_linked_root_transaction_generation.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
@@ -71,6 +72,7 @@ jobs:
             aiTemp/security-hardening/fix_apply_security_hardening_v2_oauth_fixture.py \
             aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py \
             aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py \
+            aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py \
             aiTemp/security-hardening/test_apply_security_hardening_v2.py \
             aiTemp/security-hardening/test_linked_root_transaction_generation.py
 
@@ -79,6 +81,7 @@ jobs:
           python aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py
           python aiTemp/security-hardening/fix_apply_security_hardening_v2_oauth_fixture.py
           python aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py
+          python aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py
 
       - name: Reproduce applicator dependency and Rust generation
         run: |
@@ -103,6 +106,7 @@ jobs:
           cargo test --locked empty_configured_client_id_is_rejected -- --nocapture
           cargo test --locked redirect_uri_policy_rejects_untrusted_destinations -- --nocapture
           cargo test --locked move_to_trash_preserves_content -- --nocapture
+          cargo test --locked apply_patch_allows_approved_linked_absolute_path_target -- --nocapture
 
       - name: Run complete Rust tests
         working-directory: src-tauri
