@@ -14,6 +14,7 @@ use super::bearer::constant_time_eq_str;
 use super::refresh_tokens::RefreshTokenStore;
 
 pub const OAUTH_CODE_TTL_SECONDS: u64 = 300;
+pub const OAUTH_MAX_PENDING_CODES: usize = 256;
 pub const OAUTH_TOKEN_TTL_SECONDS: i64 = 60 * 60;
 #[allow(dead_code)]
 pub const OAUTH_MAX_BODY_BYTES: usize = 8_192;
@@ -77,9 +78,26 @@ impl OAuthRuntime {
             return false;
         }
         if self.client_id.is_empty() {
-            return true;
+            return false;
         }
         constant_time_eq_str(client_id, &self.client_id)
+    }
+
+    pub fn redirect_uri_allowed(&self, redirect_uri: &str) -> bool {
+        let Ok(uri) = url::Url::parse(redirect_uri) else {
+            return false;
+        };
+        if !uri.username().is_empty() || uri.password().is_some() || uri.fragment().is_some() {
+            return false;
+        }
+        match uri.scheme() {
+            "https" => uri.host_str().is_some(),
+            "http" => matches!(
+                uri.host_str(),
+                Some("127.0.0.1") | Some("localhost") | Some("::1")
+            ),
+            _ => false,
+        }
     }
 
     pub fn verify_access_token(&self, token: &str, _server_url: &str) -> bool {
@@ -169,6 +187,9 @@ pub fn authorize_get(
     if !oauth.client_id_allowed(&params.client_id) {
         return html_error("Unknown client_id", StatusCode::BAD_REQUEST);
     }
+    if !oauth.redirect_uri_allowed(&params.redirect_uri) {
+        return html_error("redirect_uri is not allowed", StatusCode::BAD_REQUEST);
+    }
     if params.code_challenge_method != "S256" || params.code_challenge.is_empty() {
         return html_error(
             "code_challenge_method must be S256 and code_challenge is required",
@@ -199,6 +220,9 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, _server_url: &s
             None,
         ))
         .into_response();
+    }
+    if !oauth.redirect_uri_allowed(&form.redirect_uri) {
+        return html_error("redirect_uri is not allowed", StatusCode::BAD_REQUEST);
     }
     if form.code_challenge_method != "S256" || form.code_challenge.is_empty() {
         return Html(login_page(
@@ -233,6 +257,12 @@ pub fn authorize_post(oauth: &OAuthRuntime, form: AuthorizeForm, _server_url: &s
     {
         let mut pending = oauth.pending.lock().expect("oauth pending lock");
         pending.retain(|_, value| value.expires_at >= now);
+        if pending.len() >= OAUTH_MAX_PENDING_CODES {
+            return html_error(
+                "Too many pending authorization requests",
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+        }
         pending.insert(
             code.clone(),
             PendingCode {
@@ -575,6 +605,32 @@ mod tests {
 
         let other = runtime("other-workspace:mcp");
         assert!(!other.verify_access_token(&token, "https://second.example.com"));
+    }
+
+    #[test]
+    fn empty_configured_client_id_is_rejected() {
+        let oauth = runtime("workspace:oauth");
+        let empty = OAuthRuntime::new(
+            "workspace:oauth".into(),
+            String::new(),
+            None,
+            "password".into(),
+            "token-secret".into(),
+        );
+        assert!(oauth.client_id_allowed("chatgpt-client-test"));
+        assert!(!empty.client_id_allowed("client"));
+    }
+
+    #[test]
+    fn redirect_uri_policy_rejects_untrusted_destinations() {
+        let oauth = runtime("workspace:oauth");
+        assert!(oauth.redirect_uri_allowed("https://chatgpt.com/aip/oauth/callback"));
+        assert!(oauth.redirect_uri_allowed("http://127.0.0.1:53682/callback"));
+        assert!(oauth.redirect_uri_allowed("http://localhost:53682/callback"));
+        assert!(!oauth.redirect_uri_allowed("http://example.com/callback"));
+        assert!(!oauth.redirect_uri_allowed("javascript:alert(1)"));
+        assert!(!oauth.redirect_uri_allowed("https://user:pass@example.com/callback"));
+        assert!(!oauth.redirect_uri_allowed("https://example.com/callback#fragment"));
     }
 
     #[test]

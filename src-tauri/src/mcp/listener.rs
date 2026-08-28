@@ -1,14 +1,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use axum::extract::{Form, Query, State};
+use axum::extract::{DefaultBodyLimit, Form, Query, State};
 use axum::http::{header::CACHE_CONTROL, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
-use tower_http::cors::CorsLayer;
+use tower::limit::ConcurrencyLimitLayer;
+use tower::ServiceBuilder;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post, external_base_url,
@@ -69,6 +72,9 @@ pub fn spawn_listener(
     } else {
         None
     };
+    if auth.oauth_enabled() && auth.oauth_client_id.trim().is_empty() {
+        return Err("MCP OAuth client ID is not configured".into());
+    }
     let configured_public_url = public_base_url.trim().to_string();
     let oauth = if auth.oauth_enabled() {
         let password = oauth_password.unwrap_or_default();
@@ -137,7 +143,15 @@ async fn serve(
         )
         .route("/oauth/token", post(oauth_token_post))
         .with_state(state)
-        .layer(CorsLayer::permissive());
+        .layer(
+            ServiceBuilder::new()
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    Duration::from_secs(120),
+                ))
+                .layer(ConcurrencyLimitLayer::new(64)),
+        )
+        .layer(DefaultBodyLimit::max(4 * 1024 * 1024));
 
     append_profile_log(
         &profile_id,

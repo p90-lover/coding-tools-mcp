@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
-    extract::{Form, Path, Query, State},
+    extract::{DefaultBodyLimit, Form, Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::{Html, IntoResponse, Json, Response},
@@ -12,7 +13,9 @@ use axum::{
 };
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tower_http::cors::CorsLayer;
+use tower::limit::ConcurrencyLimitLayer;
+use tower::ServiceBuilder;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post, external_base_url,
@@ -57,6 +60,9 @@ pub fn spawn_listener(
         return Err("Actions API key is not configured".into());
     }
     if auth_type == "oauth" {
+        if oauth_client_id.trim().is_empty() {
+            return Err("Actions OAuth client ID is not configured".into());
+        }
         if oauth_password.as_ref().is_none_or(String::is_empty) {
             return Err("Actions OAuth password is not configured".into());
         }
@@ -196,7 +202,15 @@ async fn serve(
         .route("/oauth/token", post(oauth_token_post))
         .merge(protected)
         .with_state(state)
-        .layer(CorsLayer::permissive());
+        .layer(
+            ServiceBuilder::new()
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    Duration::from_secs(120),
+                ))
+                .layer(ConcurrencyLimitLayer::new(32)),
+        )
+        .layer(DefaultBodyLimit::max(1024 * 1024));
 
     append_profile_log(
         profile_id,

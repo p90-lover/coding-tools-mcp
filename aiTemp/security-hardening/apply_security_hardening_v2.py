@@ -129,7 +129,7 @@ def ensure_cargo(text: str) -> str:
             chosen = version.group(1) if version else "0.6"
             lines[index] = (
                 f'tower-http = {{ version = "{chosen}", '
-                'features = ["cors", "timeout"] }}'
+                'features = ["cors", "timeout"] }'
             )
             break
     if not found_tower_http:
@@ -267,7 +267,7 @@ def harden_oauth(text: str) -> str:
             "password".into(),
             "token-secret".into(),
         );
-        assert!(oauth.client_id_allowed("client"));
+        assert!(oauth.client_id_allowed("chatgpt-client-test"));
         assert!(!empty.client_id_allowed("client"));
     }
 
@@ -336,7 +336,10 @@ def harden_mcp_listener(text: str) -> str:
     new_layer = '''        .with_state(state)
         .layer(
             ServiceBuilder::new()
-                .layer(TimeoutLayer::new(Duration::from_secs(120)))
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    Duration::from_secs(120),
+                ))
                 .layer(ConcurrencyLimitLayer::new(64)),
         )
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024));
@@ -396,7 +399,10 @@ def harden_actions_listener(text: str) -> str:
     new_layer = '''        .with_state(state)
         .layer(
             ServiceBuilder::new()
-                .layer(TimeoutLayer::new(Duration::from_secs(120)))
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    Duration::from_secs(120),
+                ))
                 .layer(ConcurrencyLimitLayer::new(32)),
         )
         .layer(DefaultBodyLimit::max(1024 * 1024));
@@ -438,24 +444,59 @@ def workspace_root_expression(text: str) -> str:
 def harden_patch_deletion(text: str) -> str:
     production, separator, tests = text.partition("#[cfg(test)]")
     if "fn move_to_trash(" not in production:
-        root_expression = workspace_root_expression(production)
         helper = '''
+fn approved_storage_root(
+    ws: &Workspace,
+    display: &str,
+    target: &std::path::Path,
+) -> Result<PathBuf, WorkspaceError> {
+    if target.starts_with(ws.root()) {
+        return Ok(ws.root().to_path_buf());
+    }
+    let alias = display
+        .strip_prefix('@')
+        .and_then(|value| value.split('/').next())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(WorkspaceError::path_outside_workspace)?;
+    let project = ws
+        .linked_projects()
+        .into_iter()
+        .find(|value| value.alias.eq_ignore_ascii_case(alias))
+        .ok_or_else(WorkspaceError::path_outside_workspace)?;
+    if project.read_only() {
+        return Err(WorkspaceError::Tool {
+            code: "READ_ONLY_LINKED_PROJECT",
+            message: format!("Linked project is read-only: {display}"),
+            category: "permission",
+            retryable: false,
+        });
+    }
+    let root = project
+        .root_path()
+        .canonicalize()
+        .map_err(|_| WorkspaceError::path_outside_workspace())?;
+    if !target.starts_with(&root) {
+        return Err(WorkspaceError::path_outside_workspace());
+    }
+    Ok(root)
+}
+
 fn move_to_trash(
-    workspace_root: impl AsRef<std::path::Path>,
+    storage_root: impl AsRef<std::path::Path>,
     target: impl AsRef<std::path::Path>,
 ) -> std::io::Result<std::path::PathBuf> {
-    let workspace_root = workspace_root.as_ref();
+    let storage_root = storage_root.as_ref();
     let target = target.as_ref();
-    let relative = target.strip_prefix(workspace_root).map_err(|_| {
+    let relative = target.strip_prefix(storage_root).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "refusing to move a path outside the workspace",
+            "refusing to move a path outside its approved storage root",
         )
     })?;
     if relative.as_os_str().is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
-            "refusing to move the workspace root",
+            "refusing to move an approved storage root",
         ));
     }
     if relative.starts_with(std::path::Path::new("aiTemp").join("Trash")) {
@@ -471,7 +512,7 @@ fn move_to_trash(
             "refusing to move a symbolic link",
         ));
     }
-    let destination = workspace_root
+    let destination = storage_root
         .join("aiTemp")
         .join("Trash")
         .join("deleted-files")
@@ -490,18 +531,246 @@ fn move_to_trash(
         if not marker_match:
             raise RuntimeError("patch.rs has no function marker for Trash helper insertion")
         production = production[: marker_match.start()] + helper + production[marker_match.start() :]
-        remove_pattern = re.compile(r"std::fs::remove_(?:file|dir_all)\(([^\n;]+)\)|fs::remove_(?:file|dir_all)\(([^\n;]+)\)")
-        replacements = 0
 
-        def substitute(match: re.Match[str]) -> str:
-            nonlocal replacements
-            argument = match.group(1) or match.group(2)
-            replacements += 1
-            return f"move_to_trash({root_expression}, {argument})"
+        def replace_required(before: str, after: str, label: str, expected: int = 1) -> None:
+            nonlocal production
+            count = production.count(before)
+            if count != expected:
+                raise RuntimeError(f"{label}: expected {expected} source matches, found {count}")
+            production = production.replace(before, after, expected)
 
-        production = remove_pattern.sub(substitute, production)
-        if replacements == 0:
-            raise RuntimeError("no production deletion call was found in patch.rs")
+        replace_required(
+            '''    let mut backups: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
+    let mut temporary_files = HashMap::new();
+''',
+            '''    let mut backups: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
+    let mut temporary_files = HashMap::new();
+    let transaction_id = Uuid::new_v4().simple().to_string();
+    let mut staging_roots: HashMap<PathBuf, PathBuf> = HashMap::new();
+''',
+            "create one transaction ID and root-aware staging registry",
+        )
+
+        replace_required(
+            '''        if let Some(bytes) = content {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
+            }
+            let temp = path.with_file_name(format!(
+                ".{}.harness-stage-{}",
+                path.file_name().and_then(|v| v.to_str()).unwrap_or("file"),
+                Uuid::new_v4().simple()
+            ));
+            if let Err(err) = fs::write(&temp, bytes) {
+                cleanup_temporary_files(temporary_files.values());
+                restore_backups(&backups);
+                return Err(patch_failed(format!("Failed to stage file: {err}")));
+            }
+            temporary_files.insert(path.clone(), temp);
+        }
+''',
+            '''        if let Some(bytes) = content {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
+            }
+            let storage_root = approved_storage_root(ws, &resolved.display, &path)?;
+            let relative = path.strip_prefix(&storage_root).map_err(|_| {
+                patch_failed("Refusing to stage a path outside its approved storage root")
+            })?;
+            let staging_root = storage_root
+                .join("aiTemp")
+                .join("staging")
+                .join(&transaction_id);
+            let temp = staging_root.join(relative);
+            if let Some(parent) = temp.parent() {
+                fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
+            }
+            staging_roots.insert(staging_root.clone(), storage_root.clone());
+            if let Err(err) = fs::write(&temp, bytes) {
+                cleanup_staging_roots(&staging_roots);
+                return Err(patch_failed(format!("Failed to stage file: {err}")));
+            }
+            temporary_files.insert(path.clone(), temp);
+        }
+''',
+            "stage each payload under its approved root",
+        )
+
+        replace_required(
+            '''        let path = resolved.path;
+        let result = if content.is_some() {
+''',
+            '''        let path = resolved.path;
+        let storage_root = approved_storage_root(ws, &resolved.display, &path)?;
+        let result = if content.is_some() {
+''',
+            "resolve the approved storage root before commit",
+        )
+
+        replace_required(
+            '''                Ok(temp) => replace_file(&temp, &path),
+''',
+            '''                Ok(temp) => replace_file(&storage_root, &temp, &path),
+''',
+            "replace from same-root staging",
+        )
+
+        replace_required(
+            '''        } else if path.exists() && path.is_file() {
+            fs::remove_file(&path)
+        } else {
+            Ok(())
+        };
+''',
+            '''        } else if path.exists() && path.is_file() {
+            move_to_trash(&storage_root, &path).map(|_| ())
+        } else {
+            Ok(())
+        };
+''',
+            "move requested deletions into the target root Trash",
+        )
+
+        replace_required(
+            '''        if let Err(err) = result {
+            cleanup_temporary_files(temporary_files.values());
+            restore_backups(&backups);
+            return Err(patch_failed(format!("Failed to write file: {err}")));
+        }
+    }
+    cleanup_temporary_files(temporary_files.values());
+''',
+            '''        if let Err(err) = result {
+            cleanup_staging_roots(&staging_roots);
+            let rollback_error = restore_backups(ws, &backups)
+                .err()
+                .map(|value| value.to_string());
+            let message = match rollback_error {
+                Some(rollback) => format!(
+                    "Failed to write file: {err}; rollback also failed: {rollback}"
+                ),
+                None => format!("Failed to write file: {err}"),
+            };
+            return Err(patch_failed(message));
+        }
+    }
+    cleanup_staging_roots(&staging_roots);
+''',
+            "make root-aware rollback recoverable",
+        )
+
+        replace_required(
+            '''fn restore_backups(backups: &HashMap<PathBuf, Option<Vec<u8>>>) {
+    for (path, data) in backups {
+        match data {
+            None => {
+                let _ = fs::remove_file(path);
+            }
+            Some(bytes) => {
+                if let Some(parent) = path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(path, bytes);
+            }
+        }
+    }
+}
+''',
+            '''fn restore_backups(
+    ws: &Workspace,
+    backups: &HashMap<PathBuf, Option<Vec<u8>>>,
+) -> std::io::Result<()> {
+    let mut first_error = None;
+    for (path, data) in backups {
+        let result = (|| -> std::io::Result<()> {
+            let display = ws.display_path(path);
+            let storage_root = approved_storage_root(ws, &display, path).map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+            })?;
+            match data {
+                None => {
+                    if path.exists() {
+                        move_to_trash(&storage_root, path).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                }
+                Some(bytes) => {
+                    if path.exists() {
+                        move_to_trash(&storage_root, path)?;
+                    }
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(path, bytes)
+                }
+            }
+        })();
+        if let Err(error) = result {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+''',
+            "restore backups in each approved root without overwriting recoverable data",
+        )
+
+        replace_required(
+            '''fn replace_file(temp: &PathBuf, path: &PathBuf) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    fs::rename(temp, path)
+}
+''',
+            '''fn replace_file(
+    storage_root: &std::path::Path,
+    temp: &PathBuf,
+    path: &PathBuf,
+) -> Result<(), std::io::Error> {
+    if path.exists() {
+        move_to_trash(storage_root, path)?;
+    }
+    fs::rename(temp, path)
+}
+''',
+            "preserve replaced versions under the approved root",
+        )
+
+        replace_required(
+            '''fn cleanup_temporary_files<'a>(paths: impl Iterator<Item = &'a PathBuf>) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+''',
+            '''fn cleanup_staging_roots(staging_roots: &HashMap<PathBuf, PathBuf>) {
+    for (staging_root, storage_root) in staging_roots {
+        if staging_root.exists() {
+            let _ = move_to_trash(storage_root, staging_root);
+        }
+    }
+}
+''',
+            "move every root-local staging directory into its Trash",
+        )
+
+        if re.search(r"(?:std::)?fs::remove_file", production):
+            raise RuntimeError("permanent file deletion remains in patch.rs production source")
+        if "cleanup_temporary_files" in production:
+            raise RuntimeError("legacy temporary-file deletion helper remains")
+        if "path.strip_prefix(ws.root())" in production:
+            raise RuntimeError("primary-workspace-only staging remains")
+
     result = production + (separator + tests if separator else "")
     trash_test = '''
     #[test]

@@ -8,6 +8,90 @@ use uuid::Uuid;
 use crate::tools::context::ToolContext;
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
+fn approved_storage_root(
+    ws: &Workspace,
+    display: &str,
+    target: &std::path::Path,
+) -> Result<PathBuf, WorkspaceError> {
+    if target.starts_with(ws.root()) {
+        return Ok(ws.root().to_path_buf());
+    }
+    let alias = display
+        .strip_prefix('@')
+        .and_then(|value| value.split('/').next())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(WorkspaceError::path_outside_workspace)?;
+    let project = ws
+        .linked_projects()
+        .into_iter()
+        .find(|value| value.alias.eq_ignore_ascii_case(alias))
+        .ok_or_else(WorkspaceError::path_outside_workspace)?;
+    if project.read_only() {
+        return Err(WorkspaceError::Tool {
+            code: "READ_ONLY_LINKED_PROJECT",
+            message: format!("Linked project is read-only: {display}"),
+            category: "permission",
+            retryable: false,
+        });
+    }
+    let root = project
+        .root_path()
+        .canonicalize()
+        .map_err(|_| WorkspaceError::path_outside_workspace())?;
+    if !target.starts_with(&root) {
+        return Err(WorkspaceError::path_outside_workspace());
+    }
+    Ok(root)
+}
+
+fn move_to_trash(
+    storage_root: impl AsRef<std::path::Path>,
+    target: impl AsRef<std::path::Path>,
+) -> std::io::Result<std::path::PathBuf> {
+    let storage_root = storage_root.as_ref();
+    let target = target.as_ref();
+    let relative = target.strip_prefix(storage_root).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to move a path outside its approved storage root",
+        )
+    })?;
+    if relative.as_os_str().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to move an approved storage root",
+        ));
+    }
+    if relative.starts_with(std::path::Path::new("aiTemp").join("Trash")) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to move an existing Trash item again",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(target)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to move a symbolic link",
+        ));
+    }
+    let destination = storage_root
+        .join("aiTemp")
+        .join("Trash")
+        .join("deleted-files")
+        .join(uuid::Uuid::new_v4().to_string())
+        .join(relative);
+    let parent = destination.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid Trash destination",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    std::fs::rename(target, &destination)?;
+    Ok(destination)
+}
+
 pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     let ws = &ctx.workspace;
     let patch = args
@@ -429,6 +513,8 @@ pub(crate) fn commit_staged_bytes(
 ) -> Result<HashMap<PathBuf, Option<Vec<u8>>>, WorkspaceError> {
     let mut backups: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
     let mut temporary_files = HashMap::new();
+    let transaction_id = Uuid::new_v4().simple().to_string();
+    let mut staging_roots: HashMap<PathBuf, PathBuf> = HashMap::new();
     for (rel, content) in staged {
         ws.reject_protected_write_path(rel)?;
         let resolved = if content.is_none() {
@@ -449,14 +535,21 @@ pub(crate) fn commit_staged_bytes(
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
             }
-            let temp = path.with_file_name(format!(
-                ".{}.harness-stage-{}",
-                path.file_name().and_then(|v| v.to_str()).unwrap_or("file"),
-                Uuid::new_v4().simple()
-            ));
+            let storage_root = approved_storage_root(ws, &resolved.display, &path)?;
+            let relative = path.strip_prefix(&storage_root).map_err(|_| {
+                patch_failed("Refusing to stage a path outside its approved storage root")
+            })?;
+            let staging_root = storage_root
+                .join("aiTemp")
+                .join("staging")
+                .join(&transaction_id);
+            let temp = staging_root.join(relative);
+            if let Some(parent) = temp.parent() {
+                fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
+            }
+            staging_roots.insert(staging_root.clone(), storage_root.clone());
             if let Err(err) = fs::write(&temp, bytes) {
-                cleanup_temporary_files(temporary_files.values());
-                restore_backups(&backups);
+                cleanup_staging_roots(&staging_roots);
                 return Err(patch_failed(format!("Failed to stage file: {err}")));
             }
             temporary_files.insert(path.clone(), temp);
@@ -470,59 +563,97 @@ pub(crate) fn commit_staged_bytes(
             ws.resolve_for_write(rel)?
         };
         let path = resolved.path;
+        let storage_root = approved_storage_root(ws, &resolved.display, &path)?;
         let result = if content.is_some() {
             let temp = temporary_files
                 .get(&path)
                 .cloned()
                 .ok_or_else(|| patch_failed("Staged file is missing"));
             match temp {
-                Ok(temp) => replace_file(&temp, &path),
+                Ok(temp) => replace_file(&storage_root, &temp, &path),
                 Err(error) => Err(std::io::Error::other(error.to_string())),
             }
         } else if path.exists() && path.is_file() {
-            fs::remove_file(&path)
+            move_to_trash(&storage_root, &path).map(|_| ())
         } else {
             Ok(())
         };
         if let Err(err) = result {
-            cleanup_temporary_files(temporary_files.values());
-            restore_backups(&backups);
-            return Err(patch_failed(format!("Failed to write file: {err}")));
+            cleanup_staging_roots(&staging_roots);
+            let rollback_error = restore_backups(ws, &backups)
+                .err()
+                .map(|value| value.to_string());
+            let message = match rollback_error {
+                Some(rollback) => {
+                    format!("Failed to write file: {err}; rollback also failed: {rollback}")
+                }
+                None => format!("Failed to write file: {err}"),
+            };
+            return Err(patch_failed(message));
         }
     }
-    cleanup_temporary_files(temporary_files.values());
+    cleanup_staging_roots(&staging_roots);
     Ok(backups)
 }
 
-fn restore_backups(backups: &HashMap<PathBuf, Option<Vec<u8>>>) {
+fn restore_backups(
+    ws: &Workspace,
+    backups: &HashMap<PathBuf, Option<Vec<u8>>>,
+) -> std::io::Result<()> {
+    let mut first_error = None;
     for (path, data) in backups {
-        match data {
-            None => {
-                let _ = fs::remove_file(path);
-            }
-            Some(bytes) => {
-                if let Some(parent) = path.parent() {
-                    let _ = fs::create_dir_all(parent);
+        let result = (|| -> std::io::Result<()> {
+            let display = ws.display_path(path);
+            let storage_root = approved_storage_root(ws, &display, path).map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+            })?;
+            match data {
+                None => {
+                    if path.exists() {
+                        move_to_trash(&storage_root, path).map(|_| ())
+                    } else {
+                        Ok(())
+                    }
                 }
-                let _ = fs::write(path, bytes);
+                Some(bytes) => {
+                    if path.exists() {
+                        move_to_trash(&storage_root, path)?;
+                    }
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(path, bytes)
+                }
+            }
+        })();
+        if let Err(error) = result {
+            if first_error.is_none() {
+                first_error = Some(error);
             }
         }
     }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
-fn replace_file(temp: &PathBuf, path: &PathBuf) -> Result<(), std::io::Error> {
-    #[cfg(windows)]
-    {
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
+fn replace_file(
+    storage_root: &std::path::Path,
+    temp: &PathBuf,
+    path: &PathBuf,
+) -> Result<(), std::io::Error> {
+    if path.exists() {
+        move_to_trash(storage_root, path)?;
     }
     fs::rename(temp, path)
 }
 
-fn cleanup_temporary_files<'a>(paths: impl Iterator<Item = &'a PathBuf>) {
-    for path in paths {
-        let _ = fs::remove_file(path);
+fn cleanup_staging_roots(staging_roots: &HashMap<PathBuf, PathBuf>) {
+    for (staging_root, storage_root) in staging_roots {
+        if staging_root.exists() {
+            let _ = move_to_trash(storage_root, staging_root);
+        }
     }
 }
 
@@ -600,6 +731,20 @@ mod tests {
         json!({
             "patch": "--- a/main.rs\n+++ b/main.rs\n@@\n-old\n+new\n"
         })
+    }
+
+    #[test]
+    fn move_to_trash_preserves_content() {
+        let root = tempfile::tempdir().expect("workspace");
+        let target = root.path().join("notes.txt");
+        std::fs::write(&target, "preserve me").expect("write fixture");
+        let destination = move_to_trash(root.path(), &target).expect("move to Trash");
+        assert!(!target.exists());
+        assert_eq!(
+            std::fs::read_to_string(&destination).expect("read Trash copy"),
+            "preserve me"
+        );
+        assert!(destination.starts_with(root.path().join("aiTemp").join("Trash")));
     }
 
     #[test]
