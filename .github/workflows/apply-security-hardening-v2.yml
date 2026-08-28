@@ -12,6 +12,7 @@ on:
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py"
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py"
       - "aiTemp/security-hardening/apply_linked_root_transaction_fix.py"
+      - "aiTemp/security-hardening/apply_public_tunnel_auth_tests.py"
       - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
       - "aiTemp/security-hardening/test_linked_root_transaction_generation.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
@@ -75,6 +76,7 @@ jobs:
             aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation_v2.py \
             aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py \
             aiTemp/security-hardening/apply_linked_root_transaction_fix.py \
+            aiTemp/security-hardening/apply_public_tunnel_auth_tests.py \
             aiTemp/security-hardening/test_apply_security_hardening_v2.py \
             aiTemp/security-hardening/test_linked_root_transaction_generation.py
 
@@ -94,6 +96,7 @@ jobs:
         shell: bash
         run: |
           python aiTemp/security-hardening/apply_security_hardening_v2.py
+          python aiTemp/security-hardening/apply_public_tunnel_auth_tests.py
           cargo check --manifest-path src-tauri/Cargo.toml
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
@@ -105,6 +108,7 @@ jobs:
       - name: Run targeted security tests
         working-directory: src-tauri
         run: |
+          cargo test --locked public_tunnel_auth_ -- --nocapture
           cargo test --locked empty_configured_client_id_is_rejected -- --nocapture
           cargo test --locked redirect_uri_policy_rejects_untrusted_destinations -- --nocapture
           cargo test --locked move_to_trash_preserves_content -- --nocapture
