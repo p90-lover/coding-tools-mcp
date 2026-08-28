@@ -43,23 +43,41 @@ def checked_repository_file(relative: Path) -> Path:
 def load_helper() -> dict[str, Any]:
     helper = checked_repository_file(HELPER_RELATIVE)
     namespace = runpy.run_path(str(helper))
-    required = ("NEW_HARDEN_PATCH_DELETION", "generator_bounds")
-    missing = [name for name in required if name not in namespace]
-    if missing:
-        raise RuntimeError(f"linked-root helper is missing exports: {missing}")
+    if "NEW_HARDEN_PATCH_DELETION" not in namespace:
+        raise RuntimeError("linked-root helper is missing NEW_HARDEN_PATCH_DELETION")
     return namespace
+
+
+def top_level_functions(text: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    parsed = ast.parse(text, filename=str(TARGET_RELATIVE))
+    return {
+        node.name: node
+        for node in parsed.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def function_bounds(text: str, name: str) -> tuple[int, int]:
+    functions = top_level_functions(text)
+    node = functions.get(name)
+    if node is None or node.end_lineno is None:
+        raise RuntimeError(f"unable to locate complete top-level function: {name}")
+    offsets = [0]
+    for line in text.splitlines(keepends=True):
+        offsets.append(offsets[-1] + len(line))
+    return offsets[node.lineno - 1], offsets[node.end_lineno]
 
 
 def main() -> None:
     target = checked_repository_file(TARGET_RELATIVE)
     namespace = load_helper()
     replacement = namespace["NEW_HARDEN_PATCH_DELETION"]
-    bounds = namespace["generator_bounds"]
-    if not isinstance(replacement, str) or not callable(bounds):
-        raise RuntimeError("linked-root helper exports have unexpected types")
+    if not isinstance(replacement, str):
+        raise RuntimeError("linked-root helper replacement has an unexpected type")
 
     text = target.read_text(encoding="utf-8")
-    start, end = bounds(text)
+    original_functions = set(top_level_functions(text))
+    start, end = function_bounds(text, "harden_patch_deletion")
     current = text[start:end]
     if all(marker in current for marker in REQUIRED_MARKERS):
         print("linked-root transaction generation fix is already applied")
@@ -68,6 +86,20 @@ def main() -> None:
         raise RuntimeError(
             "reviewed primary-workspace staging marker is missing before linked-root fix"
         )
+
+    replacement = replacement.rstrip("\n") + "\n"
+    updated = text[:start] + replacement + text[end:]
+    updated_functions = set(top_level_functions(updated))
+    lost_functions = sorted(original_functions - updated_functions)
+    if lost_functions:
+        raise RuntimeError(
+            f"linked-root replacement would remove top-level functions: {lost_functions}"
+        )
+    updated_start, updated_end = function_bounds(updated, "harden_patch_deletion")
+    updated_generator = updated[updated_start:updated_end]
+    missing = [marker for marker in REQUIRED_MARKERS if marker not in updated_generator]
+    if missing:
+        raise RuntimeError(f"linked-root generator verification is missing: {missing}")
 
     backup_root = (
         ROOT
@@ -79,17 +111,15 @@ def main() -> None:
     backup = backup_root / TARGET_RELATIVE
     backup.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(target, backup)
-
-    updated = text[:start] + replacement + text[end:]
-    ast.parse(updated, filename=str(target))
     target.write_text(updated, encoding="utf-8")
 
     verified = target.read_text(encoding="utf-8")
-    verified_start, verified_end = bounds(verified)
-    verified_generator = verified[verified_start:verified_end]
-    missing = [marker for marker in REQUIRED_MARKERS if marker not in verified_generator]
-    if missing:
-        raise RuntimeError(f"linked-root generator verification is missing: {missing}")
+    verified_functions = set(top_level_functions(verified))
+    lost_after_write = sorted(original_functions - verified_functions)
+    if lost_after_write:
+        raise RuntimeError(
+            f"linked-root write lost top-level functions: {lost_after_write}"
+        )
     print("applied linked-root transaction generation fix with recoverable backup")
 
 

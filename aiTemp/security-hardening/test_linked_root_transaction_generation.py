@@ -32,7 +32,13 @@ def load_functions(*names: str) -> dict[str, Callable[..., str]]:
 
 class LinkedRootTransactionGenerationTests(unittest.TestCase):
     def test_linked_root_writes_use_their_approved_root_for_staging_and_trash(self) -> None:
-        functions = load_functions("workspace_root_expression", "harden_patch_deletion")
+        functions = load_functions(
+            "workspace_root_expression",
+            "harden_patch_deletion",
+            "add_dependencies",
+            "harden_exec_timeout",
+            "harden_oauth_flow",
+        )
         source = (ROOT / "src-tauri/src/tools/patch.rs").read_text(encoding="utf-8")
         generated = functions["harden_patch_deletion"](source)
         production = generated.partition("#[cfg(test)]")[0]
