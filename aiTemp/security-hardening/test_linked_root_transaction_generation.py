@@ -35,9 +35,10 @@ class LinkedRootTransactionGenerationTests(unittest.TestCase):
         functions = load_functions(
             "workspace_root_expression",
             "harden_patch_deletion",
-            "add_dependencies",
-            "harden_exec_timeout",
-            "harden_oauth_flow",
+            "ensure_cargo",
+            "harden_oauth",
+            "harden_mcp_listener",
+            "harden_actions_listener",
         )
         source = (ROOT / "src-tauri/src/tools/patch.rs").read_text(encoding="utf-8")
         generated = functions["harden_patch_deletion"](source)
