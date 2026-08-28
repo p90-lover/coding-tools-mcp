@@ -13,6 +13,7 @@ on:
       - "aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py"
       - "aiTemp/security-hardening/apply_linked_root_transaction_fix.py"
       - "aiTemp/security-hardening/apply_public_tunnel_auth_tests.py"
+      - "aiTemp/security-hardening/apply_public_tunnel_auth_hardening.py"
       - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
       - "aiTemp/security-hardening/test_linked_root_transaction_generation.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
@@ -77,6 +78,7 @@ jobs:
             aiTemp/security-hardening/fix_apply_security_hardening_v2_linked_roots.py \
             aiTemp/security-hardening/apply_linked_root_transaction_fix.py \
             aiTemp/security-hardening/apply_public_tunnel_auth_tests.py \
+            aiTemp/security-hardening/apply_public_tunnel_auth_hardening.py \
             aiTemp/security-hardening/test_apply_security_hardening_v2.py \
             aiTemp/security-hardening/test_linked_root_transaction_generation.py
 
@@ -97,6 +99,7 @@ jobs:
         run: |
           python aiTemp/security-hardening/apply_security_hardening_v2.py
           python aiTemp/security-hardening/apply_public_tunnel_auth_tests.py
+          python aiTemp/security-hardening/apply_public_tunnel_auth_hardening.py
           cargo check --manifest-path src-tauri/Cargo.toml
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
