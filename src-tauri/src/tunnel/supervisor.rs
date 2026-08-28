@@ -273,6 +273,16 @@ impl TunnelSupervisor {
         settings: &AppSettings,
     ) -> AppResult<TunnelStatus> {
         let key = (profile.id.clone(), kind);
+        if let Err(auth_error) = validate_public_tunnel_auth(profile, kind) {
+            if self.frp_routes.contains_key(&key) || self.sessions.contains_key(&key) {
+                if let Err(stop_error) = self.stop_internal(&profile.id, kind, settings).await {
+                    return Err(AppError::Message(format!(
+                        "{auth_error}; failed to stop an existing unauthenticated tunnel: {stop_error}"
+                    )));
+                }
+            }
+            return Err(auth_error);
+        }
         let tunnel_type = tunnel_type_for(profile, kind);
         if self.session_is_running(&key) && tunnel_type != "frp" {
             return Ok(self.status(profile, kind, settings));
@@ -537,6 +547,9 @@ impl TunnelSupervisor {
         for profile in profiles {
             for kind in [TunnelServiceKind::Mcp, TunnelServiceKind::Actions] {
                 let key = (profile.id.clone(), kind);
+                if validate_public_tunnel_auth(profile, kind).is_err() {
+                    continue;
+                }
                 if tunnel_type_for(profile, kind) != "frp" || !active_runtime_keys.contains(&key) {
                     continue;
                 }
@@ -847,11 +860,48 @@ fn public_url_for_profile(
     }
 }
 
+fn validate_public_tunnel_auth(
+    profile: &WorkspaceProfile,
+    kind: TunnelServiceKind,
+) -> AppResult<()> {
+    let (auth_type, oauth_client_id, required_modes) = match kind {
+        TunnelServiceKind::Mcp => (
+            profile.auth.auth_type.as_str(),
+            profile.auth.oauth_client_id.as_str(),
+            "oauth 或 bearer",
+        ),
+        TunnelServiceKind::Actions => (
+            profile.actions.auth_type.as_str(),
+            profile.actions.oauth_client_id.as_str(),
+            "api_key 或 oauth",
+        ),
+    };
+    let supported = match kind {
+        TunnelServiceKind::Mcp => matches!(auth_type, "oauth" | "bearer"),
+        TunnelServiceKind::Actions => matches!(auth_type, "api_key" | "oauth"),
+    };
+    if !supported {
+        return Err(AppError::Message(format!(
+            "拒绝启动公网 {} 隧道：认证模式必须为 {}。",
+            tunnel_service_label(kind),
+            required_modes
+        )));
+    }
+    if auth_type == "oauth" && oauth_client_id.trim().is_empty() {
+        return Err(AppError::Message(format!(
+            "拒绝启动公网 {} 隧道：OAuth Client ID 不能为空。",
+            tunnel_service_label(kind)
+        )));
+    }
+    Ok(())
+}
+
 fn validate_tunnel_requirements(
     profile: &WorkspaceProfile,
     kind: TunnelServiceKind,
     settings: &AppSettings,
 ) -> AppResult<()> {
+    validate_public_tunnel_auth(profile, kind)?;
     let tunnel_type = tunnel_type_for(profile, kind);
     if tunnel_type == "frp" {
         let (profile_id, server, subdomain, port) = match kind {
@@ -1203,5 +1253,65 @@ mod tests {
             supervisor.sessions.get(&second_key).and_then(|s| s.pid),
             Some(99)
         );
+    }
+
+    #[test]
+    fn public_tunnel_auth_requires_supported_mcp_modes_and_skips_restore() {
+        let settings = AppSettings::default();
+        let mut profile = frp_profile("mcp-auth", "mcp-auth");
+
+        for denied in ["noauth", "", "OAuth", "unexpected"] {
+            profile.auth.auth_type = denied.into();
+            assert!(validate_public_tunnel_auth(&profile, TunnelServiceKind::Mcp).is_err());
+        }
+
+        profile.auth.auth_type = "oauth".into();
+        profile.auth.oauth_client_id.clear();
+        assert!(validate_public_tunnel_auth(&profile, TunnelServiceKind::Mcp).is_err());
+
+        profile.auth.oauth_client_id = "chatgpt-client-test".into();
+        for allowed in ["oauth", "bearer"] {
+            profile.auth.auth_type = allowed.into();
+            assert!(validate_public_tunnel_auth(&profile, TunnelServiceKind::Mcp).is_ok());
+        }
+
+        profile.auth.auth_type = "noauth".into();
+        let active = HashSet::from([(profile.id.clone(), TunnelServiceKind::Mcp)]);
+        let mut supervisor = TunnelSupervisor::new();
+        supervisor.restore_active_frp_routes(&[profile], &active, &settings);
+        assert!(supervisor.frp_routes.is_empty());
+        assert!(supervisor.sessions.is_empty());
+    }
+
+    #[test]
+    fn public_tunnel_auth_requires_supported_actions_modes_and_skips_restore() {
+        let settings = AppSettings::default();
+        let mut profile = frp_profile("actions-auth", "mcp-auth");
+        profile.actions.tunnel_type = "frp".into();
+        profile.actions.frp_server = "frp.example.com".into();
+        profile.actions.frp_server_port = 7000;
+        profile.actions.frp_subdomain = "actions-auth".into();
+
+        for denied in ["none", "", "OAuth", "unexpected"] {
+            profile.actions.auth_type = denied.into();
+            assert!(validate_public_tunnel_auth(&profile, TunnelServiceKind::Actions).is_err());
+        }
+
+        profile.actions.auth_type = "oauth".into();
+        profile.actions.oauth_client_id.clear();
+        assert!(validate_public_tunnel_auth(&profile, TunnelServiceKind::Actions).is_err());
+
+        profile.actions.oauth_client_id = "chatgpt-actions-test".into();
+        for allowed in ["api_key", "oauth"] {
+            profile.actions.auth_type = allowed.into();
+            assert!(validate_public_tunnel_auth(&profile, TunnelServiceKind::Actions).is_ok());
+        }
+
+        profile.actions.auth_type = "none".into();
+        let active = HashSet::from([(profile.id.clone(), TunnelServiceKind::Actions)]);
+        let mut supervisor = TunnelSupervisor::new();
+        supervisor.restore_active_frp_routes(&[profile], &active, &settings);
+        assert!(supervisor.frp_routes.is_empty());
+        assert!(supervisor.sessions.is_empty());
     }
 }
