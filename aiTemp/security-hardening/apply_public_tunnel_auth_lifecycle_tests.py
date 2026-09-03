@@ -18,7 +18,7 @@ BACKUP_ROOT = (
 TESTS = r'''
 
     #[test]
-    fn public_tunnel_auth_restore_removes_stale_insecure_route_and_requests_reconcile() {
+    fn public_tunnel_auth_restore_removes_stale_insecure_route_and_session() {
         let settings = AppSettings::default();
         let mut profile = frp_profile("stale-auth", "stale-auth");
         profile.auth.auth_type = "noauth".into();
@@ -41,9 +41,8 @@ TESTS = r'''
             },
         );
 
-        let reconcile = supervisor.restore_active_frp_routes(&[profile.clone()], &active, &settings);
+        supervisor.restore_active_frp_routes(&[profile], &active, &settings);
 
-        assert!(reconcile.contains(&profile.id));
         assert!(!supervisor.frp_routes.contains_key(&key));
         assert!(!supervisor.sessions.contains_key(&key));
     }
@@ -70,20 +69,21 @@ TESTS = r'''
             );
         }
 
-        supervisor
-            .enforce_profile_public_tunnel_auth(&profile, &settings)
+        profile.auth.auth_type = "noauth".into();
+        let mcp_error = supervisor
+            .start(&profile, TunnelServiceKind::Mcp, &settings)
             .await
-            .expect("valid auth should preserve managed sessions");
-        assert!(supervisor.sessions.contains_key(&mcp_key));
+            .expect_err("insecure MCP tunnel must be rejected");
+        assert!(mcp_error.to_string().contains("认证模式"));
+        assert!(!supervisor.sessions.contains_key(&mcp_key));
         assert!(supervisor.sessions.contains_key(&actions_key));
 
-        profile.auth.auth_type = "noauth".into();
         profile.actions.auth_type = "none".into();
-        supervisor
-            .enforce_profile_public_tunnel_auth(&profile, &settings)
+        let actions_error = supervisor
+            .start(&profile, TunnelServiceKind::Actions, &settings)
             .await
-            .expect("insecure managed sessions should stop cleanly");
-        assert!(!supervisor.sessions.contains_key(&mcp_key));
+            .expect_err("insecure Actions tunnel must be rejected");
+        assert!(actions_error.to_string().contains("认证模式"));
         assert!(!supervisor.sessions.contains_key(&actions_key));
     }
 '''
@@ -108,7 +108,7 @@ def checked_target() -> Path:
 def main() -> None:
     target = checked_target()
     text = target.read_text(encoding="utf-8")
-    marker = "fn public_tunnel_auth_restore_removes_stale_insecure_route_and_requests_reconcile()"
+    marker = "fn public_tunnel_auth_restore_removes_stale_insecure_route_and_session()"
     if marker in text:
         print("public tunnel auth lifecycle tests are already applied")
         return
@@ -129,12 +129,20 @@ def main() -> None:
     required = (
         marker,
         "fn public_tunnel_auth_profile_update_stops_insecure_managed_sessions()",
+        "supervisor.restore_active_frp_routes(&[profile], &active, &settings);",
+        ".start(&profile, TunnelServiceKind::Mcp, &settings)",
+        ".start(&profile, TunnelServiceKind::Actions, &settings)",
+    )
+    forbidden = (
         "let reconcile = supervisor.restore_active_frp_routes",
         ".enforce_profile_public_tunnel_auth(&profile, &settings)",
     )
     for value in required:
         if value not in verified:
             raise RuntimeError(f"public tunnel auth lifecycle test insertion is missing: {value}")
+    for value in forbidden:
+        if value in verified:
+            raise RuntimeError(f"public tunnel auth lifecycle test still uses a nonexistent API: {value}")
     print("applied public tunnel auth lifecycle tests with recoverable backup")
 
 
