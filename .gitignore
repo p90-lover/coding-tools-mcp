@@ -28,3 +28,7 @@ src-tauri/icons/logo-design.png
 
 docs/history-session/
 tmp-run
+
+# AI scratch, generated validation output, and recoverable local backups.
+# Existing tracked files under aiTemp remain tracked; this only ignores new scratch output.
+/aiTemp/
