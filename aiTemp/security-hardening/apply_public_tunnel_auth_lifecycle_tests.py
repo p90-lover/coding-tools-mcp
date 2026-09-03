@@ -148,3 +148,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Red-phase trigger: exercise only real TunnelSupervisor lifecycle APIs.
