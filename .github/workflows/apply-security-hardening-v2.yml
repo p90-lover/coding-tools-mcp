@@ -17,6 +17,7 @@ on:
       - "aiTemp/security-hardening/apply_public_tunnel_auth_hardening.py"
       - "aiTemp/security-hardening/apply_frp_restore_fail_closed.py"
       - "aiTemp/security-hardening/apply_codex_permission_tests.py"
+      - "aiTemp/security-hardening/apply_codex_permission_model.py"
       - "aiTemp/security-hardening/test_apply_security_hardening_v2.py"
       - "aiTemp/security-hardening/test_linked_root_transaction_generation.py"
       - ".github/workflows/apply-security-hardening-v2.yml"
@@ -85,6 +86,7 @@ jobs:
             aiTemp/security-hardening/apply_public_tunnel_auth_hardening.py \
             aiTemp/security-hardening/apply_frp_restore_fail_closed.py \
             aiTemp/security-hardening/apply_codex_permission_tests.py \
+            aiTemp/security-hardening/apply_codex_permission_model.py \
             aiTemp/security-hardening/test_apply_security_hardening_v2.py \
             aiTemp/security-hardening/test_linked_root_transaction_generation.py
 
@@ -109,6 +111,7 @@ jobs:
           python aiTemp/security-hardening/apply_public_tunnel_auth_lifecycle_tests.py
           python aiTemp/security-hardening/apply_public_tunnel_auth_hardening.py
           python aiTemp/security-hardening/apply_codex_permission_tests.py
+          python aiTemp/security-hardening/apply_codex_permission_model.py
           cargo check --manifest-path src-tauri/Cargo.toml
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git diff --check
