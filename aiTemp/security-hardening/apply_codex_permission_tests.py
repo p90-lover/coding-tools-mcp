@@ -151,11 +151,26 @@ test("Codex permission controls use canonical sandbox and approval values", asyn
   assert.match(runtime, /value:\s*"on-request"/);
   assert.match(runtime, /value:\s*"never"/);
   assert.doesNotMatch(runtime, /value:\s*"auto-workspace"/);
-  assert.match(runtime, /value === "safe" \\|\\| value === "read-only"/);
-  assert.match(runtime, /value === "dangerous" \\|\\| value === "danger-full-access"/);
+  assert.match(runtime, /value === "safe" \|\| value === "read-only"/);
+  assert.match(runtime, /value === "dangerous" \|\| value === "danger-full-access"/);
   assert.match(types, /permission_mode:\s*"workspace-write"/);
 });
 '''
+
+
+def ensure_ui_contract(text: str) -> str:
+    marker = 'test("Codex permission controls use canonical sandbox and approval values"'
+    if marker not in text:
+        return f"{text.rstrip()}\n{UI_TEST}"
+
+    start = text.index(marker)
+    end_marker = "\n});"
+    end = text.find(end_marker, start)
+    if end < 0:
+        raise RuntimeError("existing Codex permission UI contract is unterminated")
+    end += len(end_marker)
+    return f"{text[:start]}{UI_TEST.strip()}{text[end:]}"
+
 
 update(
     "src-tauri/src/tools/policy.rs",
@@ -182,10 +197,8 @@ update(
 )
 update(
     "tests/security-hardening-contract.test.mjs",
-    lambda text: text
-    if "Codex permission controls use canonical sandbox and approval values" in text
-    else f"{text.rstrip()}\n{UI_TEST}",
-    "add Codex permission UI contract",
+    ensure_ui_contract,
+    "add or repair Codex permission UI contract",
 )
 
 print("Codex permission RED tests and compatibility contracts applied with recoverable backups")
