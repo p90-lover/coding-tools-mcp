@@ -59,6 +59,20 @@ def append_rust_test(text: str, marker: str, block: str) -> str:
     return f"{stripped[:-1].rstrip()}\n\n{block.rstrip()}\n}}\n"
 
 
+def canonicalize_exec_environment_contract(text: str) -> str:
+    old = '    assert_eq!(payload["permission_mode"], "trusted");'
+    new = '    assert_eq!(payload["permission_mode"], "workspace-write");'
+    if new in text:
+        return text
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(
+            "expected exactly one legacy check_exec_environment permission assertion, "
+            f"found {count}"
+        )
+    return text.replace(old, new, 1)
+
+
 POLICY_TESTS = r'''    #[test]
     fn codex_permission_read_only_blocks_workspace_mutation() {
         let policy = PolicySettings {
@@ -99,6 +113,16 @@ POLICY_TESTS = r'''    #[test]
         };
         assert!(full.network_allowed());
         assert!(full.skip_permission_gates());
+
+        assert_eq!(SandboxMode::parse("safe").as_str(), "read-only");
+        assert_eq!(
+            SandboxMode::parse("trusted").as_str(),
+            "workspace-write"
+        );
+        assert_eq!(
+            SandboxMode::parse("dangerous").as_str(),
+            "danger-full-access"
+        );
     }
 '''
 
@@ -127,6 +151,8 @@ test("Codex permission controls use canonical sandbox and approval values", asyn
   assert.match(runtime, /value:\s*"on-request"/);
   assert.match(runtime, /value:\s*"never"/);
   assert.doesNotMatch(runtime, /value:\s*"auto-workspace"/);
+  assert.match(runtime, /value === "safe" \\|\\| value === "read-only"/);
+  assert.match(runtime, /value === "dangerous" \\|\\| value === "danger-full-access"/);
   assert.match(types, /permission_mode:\s*"workspace-write"/);
 });
 '''
@@ -138,7 +164,7 @@ update(
         "fn codex_permission_read_only_blocks_workspace_mutation()",
         POLICY_TESTS,
     ),
-    "add Codex sandbox behavior tests",
+    "add Codex sandbox behavior and legacy migration tests",
 )
 update(
     "src-tauri/src/tools/approval.rs",
@@ -150,6 +176,11 @@ update(
     "add canonical approval-name test",
 )
 update(
+    "src-tauri/tests/call_tool_contract.rs",
+    canonicalize_exec_environment_contract,
+    "require canonical workspace-write policy metadata",
+)
+update(
     "tests/security-hardening-contract.test.mjs",
     lambda text: text
     if "Codex permission controls use canonical sandbox and approval values" in text
@@ -157,4 +188,4 @@ update(
     "add Codex permission UI contract",
 )
 
-print("Codex permission RED tests applied with recoverable backups")
+print("Codex permission RED tests and compatibility contracts applied with recoverable backups")
