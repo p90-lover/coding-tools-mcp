@@ -93,19 +93,15 @@ RESTORE_REPLACEMENT = r'''    pub fn restore_active_frp_routes(
 
         for (key, profile) in desired_routes {
             let workspace_id = key.0.clone();
+            let kind = key.1;
             match self.frp_routes.get_mut(&key) {
                 Some(route) => {
                     route.profile = profile;
-                    route.kind = key.1;
+                    route.kind = kind;
                 }
                 None => {
-                    self.frp_routes.insert(
-                        key,
-                        FrpRoute {
-                            profile,
-                            kind: key.1,
-                        },
-                    );
+                    self.frp_routes
+                        .insert(key, FrpRoute { profile, kind });
                 }
             }
             changed_workspaces.insert(workspace_id);
@@ -197,6 +193,7 @@ supervisor = checked_file("src-tauri/src/tunnel/supervisor.rs").read_text(encodi
 access = checked_file("src-tauri/src/tunnel/access.rs").read_text(encoding="utf-8")
 required = (
     "let stale_keys: Vec<_>",
+    "let kind = key.1;",
     "pub async fn reconcile_restored_frp_routes(",
     "stop_workspace_frpc_fail_closed",
     "failed to reconcile restored FRP routes",
