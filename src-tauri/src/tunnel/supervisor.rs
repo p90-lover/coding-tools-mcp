@@ -542,41 +542,114 @@ impl TunnelSupervisor {
         profiles: &[WorkspaceProfile],
         active_runtime_keys: &HashSet<(String, TunnelServiceKind)>,
         settings: &AppSettings,
-    ) {
+    ) -> HashSet<String> {
+        let desired_routes: Vec<((String, TunnelServiceKind), WorkspaceProfile)> = profiles
+            .iter()
+            .flat_map(|profile| {
+                [TunnelServiceKind::Mcp, TunnelServiceKind::Actions]
+                    .into_iter()
+                    .filter_map(move |kind| {
+                        let key = (profile.id.clone(), kind);
+                        if validate_public_tunnel_auth(profile, kind).is_err()
+                            || tunnel_type_for(profile, kind) != "frp"
+                            || !active_runtime_keys.contains(&key)
+                        {
+                            return None;
+                        }
+                        Some((key, profile.clone()))
+                    })
+            })
+            .collect();
+        let desired_keys: HashSet<_> = desired_routes.iter().map(|(key, _)| key.clone()).collect();
+        let stale_keys: Vec<_> = self
+            .frp_routes
+            .keys()
+            .filter(|key| !desired_keys.contains(*key))
+            .cloned()
+            .collect();
         let mut changed_workspaces = HashSet::new();
-        for profile in profiles {
-            for kind in [TunnelServiceKind::Mcp, TunnelServiceKind::Actions] {
-                let key = (profile.id.clone(), kind);
-                if validate_public_tunnel_auth(profile, kind).is_err() {
-                    continue;
-                }
-                if tunnel_type_for(profile, kind) != "frp" || !active_runtime_keys.contains(&key) {
-                    continue;
-                }
 
-                match self.frp_routes.get_mut(&key) {
-                    Some(route) => {
-                        route.profile = profile.clone();
-                        changed_workspaces.insert(profile.id.clone());
-                    }
-                    None => {
-                        self.frp_routes.insert(
-                            key,
-                            FrpRoute {
-                                profile: profile.clone(),
-                                kind,
-                            },
-                        );
-                        changed_workspaces.insert(profile.id.clone());
-                    }
+        for key in stale_keys {
+            self.frp_routes.remove(&key);
+            self.sessions.remove(&key);
+            changed_workspaces.insert(key.0);
+        }
+
+        for (key, profile) in desired_routes {
+            let workspace_id = key.0.clone();
+            let kind = key.1;
+            match self.frp_routes.get_mut(&key) {
+                Some(route) => {
+                    route.profile = profile;
+                    route.kind = kind;
+                }
+                None => {
+                    self.frp_routes.insert(key, FrpRoute { profile, kind });
                 }
             }
+            changed_workspaces.insert(workspace_id);
         }
 
         changed_workspaces.extend(self.frpc.keys().cloned());
-        for workspace_id in changed_workspaces {
-            let pid = self.frpc.get(&workspace_id).and_then(|process| process.pid);
-            self.sync_frp_sessions_for_workspace(settings, &workspace_id, pid);
+        for workspace_id in &changed_workspaces {
+            let pid = self.frpc.get(workspace_id).and_then(|process| process.pid);
+            self.sync_frp_sessions_for_workspace(settings, workspace_id, pid);
+        }
+        changed_workspaces
+    }
+
+    pub async fn reconcile_restored_frp_routes(
+        &mut self,
+        workspace_ids: &HashSet<String>,
+        settings: &AppSettings,
+    ) -> AppResult<()> {
+        for workspace_id in workspace_ids {
+            if let Err(error) = self
+                .ensure_frpc_matches_routes(workspace_id, settings)
+                .await
+            {
+                let stop_result = self
+                    .stop_workspace_frpc_fail_closed(workspace_id, settings)
+                    .await;
+                return match stop_result {
+                    Ok(()) => Err(AppError::Message(format!(
+                        "failed to reconcile restored FRP routes for {workspace_id}; stopped the workspace FRP process fail-closed: {error}"
+                    ))),
+                    Err(stop_error) => Err(AppError::Message(format!(
+                        "failed to reconcile restored FRP routes for {workspace_id}: {error}; fail-closed shutdown also failed: {stop_error}"
+                    ))),
+                };
+            }
+        }
+        Ok(())
+    }
+
+    async fn stop_workspace_frpc_fail_closed(
+        &mut self,
+        workspace_id: &str,
+        settings: &AppSettings,
+    ) -> AppResult<()> {
+        let mut errors = Vec::new();
+        if let Some(process) = self.frpc.remove(workspace_id) {
+            let pid = process.pid;
+            if let Err(error) = cloudflare::stop_child(process.child, pid).await {
+                errors.push(error.to_string());
+                if let Some(pid) = pid {
+                    if let Err(error) = platform().terminate_process_tree(pid) {
+                        errors.push(error.to_string());
+                    }
+                }
+            }
+            frp::clear_managed_frpc_pid(workspace_id);
+        }
+        if let Err(error) = frp::stop_recorded_frpc_instance(workspace_id).await {
+            errors.push(error.to_string());
+        }
+        self.sync_frp_sessions_for_workspace(settings, workspace_id, None);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Message(errors.join("; ")))
         }
     }
 
@@ -1313,5 +1386,75 @@ mod tests {
         supervisor.restore_active_frp_routes(&[profile], &active, &settings);
         assert!(supervisor.frp_routes.is_empty());
         assert!(supervisor.sessions.is_empty());
+    }
+
+    #[test]
+    fn public_tunnel_auth_restore_removes_stale_insecure_route_and_session() {
+        let settings = AppSettings::default();
+        let mut profile = frp_profile("stale-auth", "stale-auth");
+        profile.auth.auth_type = "noauth".into();
+        let key = (profile.id.clone(), TunnelServiceKind::Mcp);
+        let active = HashSet::from([key.clone()]);
+        let mut supervisor = TunnelSupervisor::new();
+        supervisor.frp_routes.insert(
+            key.clone(),
+            FrpRoute {
+                profile: profile.clone(),
+                kind: TunnelServiceKind::Mcp,
+            },
+        );
+        supervisor.sessions.insert(
+            key.clone(),
+            TunnelSession {
+                public_url: "https://stale-auth.frp.example.com".into(),
+                pid: None,
+                child: None,
+            },
+        );
+
+        supervisor.restore_active_frp_routes(&[profile], &active, &settings);
+
+        assert!(!supervisor.frp_routes.contains_key(&key));
+        assert!(!supervisor.sessions.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn public_tunnel_auth_profile_update_stops_insecure_managed_sessions() {
+        let settings = AppSettings::default();
+        let mut profile = frp_profile("auth-transition", "auth-transition");
+        profile.auth.auth_type = "oauth".into();
+        profile.auth.oauth_client_id = "chatgpt-client-test".into();
+        profile.actions.tunnel_type = "cloudflare".into();
+        profile.actions.auth_type = "api_key".into();
+        let mcp_key = (profile.id.clone(), TunnelServiceKind::Mcp);
+        let actions_key = (profile.id.clone(), TunnelServiceKind::Actions);
+        let mut supervisor = TunnelSupervisor::new();
+        for key in [mcp_key.clone(), actions_key.clone()] {
+            supervisor.sessions.insert(
+                key,
+                TunnelSession {
+                    public_url: "https://managed.example.com".into(),
+                    pid: None,
+                    child: None,
+                },
+            );
+        }
+
+        profile.auth.auth_type = "noauth".into();
+        let mcp_error = supervisor
+            .start(&profile, TunnelServiceKind::Mcp, &settings)
+            .await
+            .expect_err("insecure MCP tunnel must be rejected");
+        assert!(mcp_error.to_string().contains("认证模式"));
+        assert!(!supervisor.sessions.contains_key(&mcp_key));
+        assert!(supervisor.sessions.contains_key(&actions_key));
+
+        profile.actions.auth_type = "none".into();
+        let actions_error = supervisor
+            .start(&profile, TunnelServiceKind::Actions, &settings)
+            .await
+            .expect_err("insecure Actions tunnel must be rejected");
+        assert!(actions_error.to_string().contains("认证模式"));
+        assert!(!supervisor.sessions.contains_key(&actions_key));
     }
 }
