@@ -63,8 +63,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f aiTemp/release-v0.3.2/finalize.py
-          python aiTemp/release-v0.3.2/finalize.py 2>&1 | tee aiTemp/validation-logs/finalize.log
+          test -f aiTemp/release-v0.3.2/review.py
+          python aiTemp/release-v0.3.2/review.py 2>&1 | tee aiTemp/validation-logs/finalize.log
       - name: Verify targeted regressions and existing Rust gates
         shell: bash
         working-directory: src-tauri
