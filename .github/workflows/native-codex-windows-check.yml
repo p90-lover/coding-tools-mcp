@@ -1,0 +1,88 @@
+name: Native Codex Windows boundary recheck
+on:
+  push:
+    branches: [feature/native-codex-runtime]
+    paths: [.github/workflows/native-codex-windows-check.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    if: github.repository == 'p90-lover/coding-tools-mcp' && github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      CODEX_HOME: ${{ github.workspace }}/aiTemp/isolated-codex-home
+      PYTHONDONTWRITEBYTECODE: '1'
+      XDG_CONFIG_HOME: ${{ github.workspace }}/aiTemp/test-config
+      PACKAGE: codex-npm-win32-x64-0.153.4.tgz
+      DIGEST: 05f473573f38b3f4dc9484e6807a511a1bb0e128dfa50816dafc5f79e553cdca
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: aiTemp/source
+          persist-credentials: false
+          clean: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: aiTemp/source/src-tauri -> ../../../aiTemp/cargo-target
+          shared-key: native-codex-windows
+          cache-on-failure: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Reuse the exact previously failing test, not a weakened replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          python - <<'PY'
+          import pathlib,subprocess
+          root=pathlib.Path.cwd()
+          source=subprocess.check_output(['git','-C','aiTemp/source','show','b1dc60ca21277a48f2881e4c18df41cfb00fbb4e:.github/workflows/native-codex-platforms.yml']).decode()
+          for name,out in [('Obtain checksum-pinned official native distribution','download.sh'),('Exercise production transport and policy with real Codex (no model calls)','proof.sh')]:
+              section=source.split('      - name: '+name+'\n',1)[1].split('\n      - ',1)[0]
+              script=section.split('        run: |\n',1)[1]
+              lines=script.splitlines()
+              assert all(not line or line.startswith('          ') for line in lines)
+              (root/'aiTemp'/out).write_text('\n'.join(line[10:] if line else '' for line in lines)+'\n',encoding='utf-8')
+          PY
+          bash aiTemp/download.sh
+      - name: Re-run the identical real Codex sandbox boundary checks
+        shell: bash
+        working-directory: aiTemp/source
+        run: bash ../proof.sh
+      - name: Validate complete Windows Rust application and strict lint
+        shell: bash
+        working-directory: aiTemp/source/src-tauri
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked 2>&1 | tee ../../evidence/rust-tests.txt
+          cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee ../../evidence/clippy.txt
+      - name: Validate production frontend
+        shell: bash
+        working-directory: aiTemp/source
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check 2>&1 | tee ../evidence/frontend.txt
+          npm run build 2>&1 | tee ../evidence/frontend-build.txt
+          node --test tests/*.test.mjs 2>&1 | tee ../evidence/contracts.txt
+          git diff --exit-code
+      - name: Preserve real Windows boundary evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-native-recheck-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
