@@ -1,0 +1,248 @@
+name: Publish verified v0.3.2
+'on':
+  push:
+    branches: [automation/publish-verified-v0.3.2]
+    paths: [.github/workflows/publish-verified-v032.yml]
+permissions: {}
+concurrency:
+  group: publish-verified-v032
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'p90-lover/coding-tools-mcp' && github.actor == github.repository_owner && github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Prepare isolated publication directory
+        run: mkdir -p aiTemp
+      - name: Verify merged source, native gates and artifact hashes; publish and re-read
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          TMPDIR: ${{ github.workspace }}/aiTemp
+        run: |
+          set -euo pipefail
+          python - <<'PY_PUBLISH'
+          """Publish only the reviewed v0.3.2 artifacts; never execute archived contents."""
+          from __future__ import annotations
+          import base64
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          from urllib.parse import quote
+          import zipfile
+          
+          REPO = 'p90-lover/coding-tools-mcp'
+          REPO_ID = 1337266202
+          SOURCE = '4eb411af0f65962fef6633a1b52d5dcdeea8a7d6'
+          MERGE = 'ca5ab596a3a8b5e164e37311890325bafd48c270'
+          TREE = 'bfe66fa8ba9007b3c9a4374ac8478b7c7f13e09c'
+          BUILD_HEAD = '0eccf53fe48496878e1ced368f4202318facd2f2'
+          RUN = 34092005259
+          TAG = 'v0.3.2'
+          JOB_IDS = {101647289254, 101647344190, 101647344230, 101647344294}
+          SPECS = [
+              dict(id=10007607049, name='installer-windows-'+SOURCE,
+                   digest='f74e127c4f115cc1e8f65602464a791c89a591ddd6db351df64771fd53d6947d',
+                   member='Coding Tools MCP_0.3.2_x64-setup.exe', asset='Coding.Tools.MCP_0.3.2_x64-setup.exe',
+                   file_hash='56500c6618155c66eaa6150c81d2cc1d40e7acae26f41343922652bf31f60b40', file_size=5327549),
+              dict(id=10007495933, name='installer-macos-'+SOURCE,
+                   digest='25af0f2474683a8ea79941d41542477bca69de5d1cb70febbbce577fcfdc1a99',
+                   member='Coding Tools MCP_0.3.2_universal.dmg', asset='Coding.Tools.MCP_0.3.2_universal.dmg',
+                   file_hash='a6c2d11540d94fbbec0d901aa3d9765fb92aca582e92dfc0ed1940c35acf6080', file_size=16986360),
+              dict(id=10007607397, name='native-evidence-windows-'+SOURCE,
+                   digest='e1a9c7a55ae135b6bf0440319b06ce3cd6ca4a76ab6cb8dbcb8df9d41b41aa7a',
+                   asset='validation-windows-v0.3.2.zip', platform='windows', tests=229),
+              dict(id=10007496532, name='native-evidence-macos-'+SOURCE,
+                   digest='4f3013d6081866ef8c1546ce0ea89ea37f9ed0874c2bc69e8c2dd0422ae14b21',
+                   asset='validation-macos-v0.3.2.zip', platform='macos', tests=226),
+              dict(id=10007229460, name='audit-'+SOURCE,
+                   digest='6e74163e1f6a97ea64ee6488dd838844f91a73b0d9a7ecbb7b4004a07d1e1984',
+                   asset='security-audit-v0.3.2.zip'),
+          ]
+          
+          
+          def require(condition: bool, message: str) -> None:
+              if not condition:
+                  raise ValueError(message)
+          
+          
+          def validate_gate(run: dict, jobs: dict, pr: dict) -> None:
+              require(run['id'] == RUN and run['status'] == 'completed' and run['conclusion'] == 'success', 'Build did not complete successfully')
+              require(run['head_sha'] == BUILD_HEAD and run['event'] == 'push', 'Unreviewed build identity')
+              require(run['path'] == '.github/workflows/build-verified-v032.yml', 'Unexpected build workflow')
+              require(run['repository']['id'] == REPO_ID and run['head_repository']['id'] == REPO_ID, 'Foreign build repository')
+              require(run['actor']['login'] == 'p90-lover', 'Unexpected build actor')
+              require(jobs['total_count'] == 4 and len(jobs['jobs']) == 4, 'Incomplete build job list')
+              require({j['id'] for j in jobs['jobs']} == JOB_IDS, 'Unexpected build jobs')
+              require(all(j['status'] == 'completed' and j['conclusion'] == 'success' for j in jobs['jobs']), 'A required build or audit job did not pass')
+              require(pr['merged'] is True and pr['merge_commit_sha'] == MERGE, 'Reviewed pull request was not merged')
+              require(pr['head']['sha'] == SOURCE and pr['base']['ref'] == 'main', 'Pull request source changed')
+          
+          
+          def validate_artifact(meta: dict, data: bytes, spec: dict) -> None:
+              require(meta['id'] == spec['id'] and meta['name'] == spec['name'] and not meta['expired'], 'Unexpected or expired artifact')
+              require(meta['digest'] == 'sha256:'+spec['digest'], 'Artifact metadata digest changed')
+              origin = meta['workflow_run']
+              require(origin['id'] == RUN and origin['head_sha'] == BUILD_HEAD, 'Artifact from wrong build')
+              require(origin['repository_id'] == REPO_ID and origin['head_repository_id'] == REPO_ID, 'Artifact from foreign repository')
+              require(hashlib.sha256(data).hexdigest() == spec['digest'], 'Artifact bytes do not match reviewed SHA-256')
+          
+          
+          def validate_assets(assets: list[dict], expected: dict) -> None:
+              require(len(assets) == len(expected) and {a['name'] for a in assets} == set(expected), 'Release asset set differs from reviewed files')
+              for asset in assets:
+                  wanted = expected[asset['name']]
+                  require(asset['state'] == 'uploaded' and asset['size'] == wanted['size'], 'Incomplete release asset')
+                  require(asset.get('digest') == 'sha256:'+wanted['sha256'], 'Release asset digest differs from reviewed bytes')
+          
+          
+          def api(path: str, method: str = 'GET', payload: dict | None = None, missing_ok: bool = False):
+              # No credentials appear in command arguments or output; gh reads GH_TOKEN.
+              command = ['gh', 'api', '--method', method, f'repos/{REPO}/{path}', '-H', 'Accept: application/vnd.github+json']
+              if payload is not None:
+                  command.extend(['--input', '-'])
+              result = subprocess.run(command, input=None if payload is None else json.dumps(payload).encode(), capture_output=True, timeout=90)
+              if result.returncode:
+                  if missing_ok and b'HTTP 404' in result.stderr:
+                      return None
+                  raise RuntimeError(f'GitHub {method} failed for {path}: '+result.stderr.decode(errors='replace')[:400])
+              return json.loads(result.stdout) if result.stdout.strip() else None
+          
+          
+          def check_identity() -> None:
+              validate_gate(api(f'actions/runs/{RUN}'), api(f'actions/runs/{RUN}/jobs?per_page=100'), api('pulls/9'))
+              require(api('git/ref/heads/main')['object']['sha'] == MERGE, 'Main moved; re-review before publication')
+              source = api(f'git/commits/{SOURCE}')
+              merged = api(f'git/commits/{MERGE}')
+              require(source['tree']['sha'] == TREE == merged['tree']['sha'], 'Merged tree is not the native-tested tree')
+              require(SOURCE in {p['sha'] for p in merged['parents']}, 'Tested source is not a merge parent')
+          
+          
+          def reviewed_note(path: str, expected_blob: str) -> str:
+              content = api(f'contents/{path}?ref={SOURCE}')
+              require(content['sha'] == expected_blob and content['encoding'] == 'base64', 'Release documentation changed')
+              data = base64.b64decode(content['content'])
+              git_hash = hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+              require(git_hash == expected_blob, 'Release documentation content mismatch')
+              return data.decode('utf-8')
+          
+          
+          def checked_zip(data: bytes) -> zipfile.ZipFile:
+              archive = zipfile.ZipFile(io.BytesIO(data))
+              require(len(archive.infolist()) <= 64, 'Archive contains too many entries')
+              require(sum(i.file_size for i in archive.infolist()) <= 128*1024*1024, 'Archive exceeds uncompressed limit')
+              require(len(archive.namelist()) == len(set(archive.namelist())), 'Duplicate archive entries')
+              require(all('/' not in n and '\\' not in n and n not in ('', '.', '..') for n in archive.namelist()), 'Unexpected archive path')
+              return archive
+          
+          
+          def check_evidence(archive: zipfile.ZipFile, spec: dict) -> None:
+              if 'platform' in spec:
+                  text = archive.read('rust-tests.txt').decode('utf-8')
+                  summaries = re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored;', text)
+                  require(len(summaries) == 8 and all(s == 'ok' and int(f) == 0 and int(i) == 0 for s,p,f,i in summaries), 'Native test failures or incomplete evidence')
+                  require(sum(int(p) for s,p,f,i in summaries) == spec['tests'], 'Unexpected native test count')
+                  require('0 errors and 0 warnings' in archive.read('frontend.txt').decode(), 'Frontend gate failed')
+                  contracts = archive.read('contracts.txt').decode()
+                  require('# tests 10' in contracts and '# pass 10' in contracts and '# fail 0' in contracts, 'Frontend contracts did not pass')
+                  targets = ['x86_64-pc-windows-msvc'] if spec['platform'] == 'windows' else ['aarch64-apple-darwin', 'x86_64-apple-darwin']
+                  for target in targets:
+                      deps = re.sub(r'\x1b\[[0-9;]*m', '', archive.read(f'dependencies-{target}.txt').decode())
+                      require(re.search(r'^glib v', deps, re.M) is None, 'GLib is present in a shipped target')
+              else:
+                  audit = json.loads(archive.read('rustsec.json'))
+                  require(not audit['vulnerabilities']['found'] and audit['vulnerabilities']['count'] == 0, 'RustSec vulnerability gate failed')
+                  screen = json.loads(archive.read('credential-screen.json'))
+                  require(screen['findings'] == [] and screen['blobs_scanned'] == 2306, 'Credential screen failed or scope changed')
+          
+          
+          def main() -> None:
+              require(os.environ.get('GITHUB_REPOSITORY') == REPO and os.environ.get('GITHUB_ACTOR') == 'p90-lover', 'Unexpected publication context')
+              check_identity()
+              root = Path('aiTemp/publish-v032')
+              root.mkdir(parents=True, exist_ok=True)
+              assets_dir = root/'assets'
+              assets_dir.mkdir(exist_ok=True)
+              for spec in SPECS:
+                  metadata = api(f'actions/artifacts/{spec["id"]}')
+                  result = subprocess.run(['gh','api',f'repos/{REPO}/actions/artifacts/{spec["id"]}/zip'],capture_output=True,check=True,timeout=120)
+                  data = result.stdout
+                  validate_artifact(metadata, data, spec)
+                  with checked_zip(data) as archive:
+                      if 'member' in spec:
+                          require(archive.namelist() == [spec['member']], 'Installer archive members differ')
+                          payload = archive.read(spec['member'])
+                          require(len(payload) == spec['file_size'] and hashlib.sha256(payload).hexdigest() == spec['file_hash'], 'Installer content changed')
+                      else:
+                          check_evidence(archive, spec)
+                          payload = data
+                  with (assets_dir/spec['asset']).open('xb') as out:
+                      out.write(payload)
+              note = reviewed_note('docs/releases/v0.3.2.md','a064df40b987afc1c34ecf1cc7cdbffd018ec562')
+              audit_note = reviewed_note('docs/releases/v0.3.2-audit-notes.md','370556a611a1998a967ecfb40dd54b06c76ba79d')
+              validation = f'\n\n## Verified publication\n\nSource `{SOURCE}`; merged into main by PR #9 at `{MERGE}`. Both commits have the identical Git tree `{TREE}`.\n\nNative build and audit: https://github.com/{REPO}/actions/runs/{RUN}\n\nWindows: 229 Rust tests passed. macOS: 226 Rust tests passed. Both platforms passed strict Clippy, formatting, Svelte checks (0 errors, 0 warnings), ten Node contracts, npm audit, and installer builds. Installer archives and the evidence archives are bound to the recorded SHA-256 digests.\n\nThe historical network-policy regression now passes on both platforms. Interactive installation and desktop GUI operation were not manually smoke-tested in this session.\n\n## 已驗證的發佈\n\nPR #9 已合併至 main，原始碼與原生建置版本的 Git 檔案樹完全一致。Windows 通過 229 項 Rust 測試，macOS 通過 226 項；兩邊的嚴格 Clippy、格式、Svelte、10 項 Node 契約、npm audit 及安裝程式建置均通過。安裝程式及驗證紀錄均以 SHA-256 核對。本次會話沒有手動操作安裝程式或桌面 GUI。\n'
+              body = note+validation+'\n\n'+audit_note
+              provenance = {'schema_version':1,'tag':TAG,'source_commit':SOURCE,'main_merge_commit':MERGE,'git_tree':TREE,'build_run_id':RUN,'build_workflow_commit':BUILD_HEAD,'artifacts':SPECS,'native_rust_tests':{'windows':229,'macos':226},'scope':'Windows x64 and macOS universal; no installer signing, OS sandbox, keyring encryption or interactive GUI smoke-test claim'}
+              with (assets_dir/'release-provenance.json').open('x',encoding='utf-8') as out:
+                  out.write(json.dumps(provenance,indent=2,sort_keys=True)+'\n')
+              def fingerprints():
+                  return {p.name:{'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(assets_dir.iterdir()) if p.is_file()}
+              expected = fingerprints()
+              with (assets_dir/'SHA256SUMS.txt').open('x',encoding='utf-8') as out:
+                  out.write(''.join(f'{v["sha256"]}  {k}\n' for k,v in expected.items()))
+              expected = fingerprints()
+              check_identity()
+              tag = api(f'git/ref/tags/{TAG}',missing_ok=True)
+              if tag is None:
+                  api('git/refs','POST',{'ref':'refs/tags/'+TAG,'sha':SOURCE})
+              else:
+                  require(tag['object']['type'] == 'commit' and tag['object']['sha'] == SOURCE, 'Existing tag points elsewhere; refusing overwrite')
+              require(api(f'git/ref/tags/{TAG}')['object']['sha'] == SOURCE, 'Tag identity changed')
+              # Listing includes drafts; never overwrite a release or replace any asset.
+              releases = api('releases?per_page=100')
+              matches = [r for r in releases if r['tag_name'] == TAG]
+              require(len(matches) <= 1, 'Ambiguous existing release')
+              release = matches[0] if matches else api('releases','POST',{'tag_name':TAG,'target_commitish':SOURCE,'name':'Coding Tools MCP v0.3.2 — security and persistence','body':body,'draft':True,'prerelease':False})
+              require(release['target_commitish'] == SOURCE and release['prerelease'] is False, 'Existing release identity differs')
+              remote = api(f'releases/{release["id"]}/assets?per_page=100')
+              names = {a['name']:a for a in remote}
+              require(len(names) == len(remote) and set(names) <= set(expected), 'Unexpected existing release assets')
+              for name,asset in names.items():
+                  validate_assets([asset],{name:expected[name]})
+              require(release['draft'] or set(names) == set(expected), 'Published release is incomplete; refusing mutation')
+              for name in expected:
+                  if name in names:
+                      continue
+                  url = f'https://uploads.github.com/repos/{REPO}/releases/{release["id"]}/assets?name={quote(name,safe="")}'
+                  result = subprocess.run(['gh','api','--method','POST',url,'-H','Content-Type: application/octet-stream','--input',str(assets_dir/name)],capture_output=True,check=True,timeout=120)
+                  uploaded = json.loads(result.stdout)
+                  validate_assets([uploaded],{name:expected[name]})
+              check_identity()
+              require(api(f'git/ref/tags/{TAG}')['object']['sha'] == SOURCE, 'Tag moved before publication')
+              validate_assets(api(f'releases/{release["id"]}/assets?per_page=100'),expected)
+              if release['draft']:
+                  api(f'releases/{release["id"]}','PATCH',{'body':body,'draft':False,'prerelease':False,'make_latest':'true'})
+              published = api(f'releases/{release["id"]}')
+              require(not published['draft'] and not published['prerelease'] and published['published_at'], 'Release was not published')
+              validate_assets(api(f'releases/{release["id"]}/assets?per_page=100'),expected)
+              latest = api('releases/latest')
+              require(latest['id'] == published['id'], 'Published release is not latest')
+              (root/'published-release.json').write_text(json.dumps(published,indent=2)+'\n')
+              with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as out:
+                  out.write(f'## Published {TAG}\n\n{published["html_url"]}\n\nSource: `{SOURCE}`\n\nMain merge: `{MERGE}`\n\nAll seven release assets verified by size and SHA-256. No file, branch, tag or release was deleted.\n')
+              print('Published and independently re-read:',published['html_url'])
+              print('Verified release assets:',len(expected))
+          
+          if __name__ == '__main__':
+              main()
+          PY_PUBLISH
