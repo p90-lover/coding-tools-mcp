@@ -39,7 +39,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '22'
-      - name: Reuse the exact previously failing test, not a weakened replacement
+      - name: Reuse boundary assertions with a constrained-language-compatible write fixture
         shell: bash
         run: |
           set -euo pipefail
@@ -53,10 +53,21 @@ jobs:
               script=section.split('        run: |\n',1)[1]
               lines=script.splitlines()
               assert all(not line or line.startswith('          ') for line in lines)
-              (root/'aiTemp'/out).write_text('\n'.join(line[10:] if line else '' for line in lines)+'\n',encoding='utf-8')
+              script='\n'.join(line[10:] if line else '' for line in lines)+'\n'
+              if out=='proof.sh':
+                  # Native Windows sandbox deliberately uses ConstrainedLanguage.
+                  # A .NET static method is not a valid positive write control there.
+                  # Keep every assertion/policy unchanged; use the ordinary file cmdlet.
+                  old="[IO.File]::WriteAllText('{}','sandbox-proof')"
+                  new="Set-Content -LiteralPath '{}' -Value 'sandbox-proof' -NoNewline -ErrorAction Stop"
+                  assert script.count(old)==1
+                  script=script.replace(old,new)
+                  assert 'outside.exists()' in script and 'readonly.exists()' in script
+                  assert 'successful(&blocked)' in script and 'successful(&control)' in script
+              (root/'aiTemp'/out).write_text(script,encoding='utf-8')
           PY
           bash aiTemp/download.sh
-      - name: Re-run the identical real Codex sandbox boundary checks
+      - name: Re-run real Codex write and network isolation with unchanged boundary assertions
         shell: bash
         working-directory: aiTemp/source
         run: bash ../proof.sh
