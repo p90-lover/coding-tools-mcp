@@ -1,19 +1,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Form, Query, State};
+use axum::extract::{DefaultBodyLimit, Form, FromRequest, Query, Request, State};
 use axum::http::{header::CACHE_CONTROL, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
-use tower_http::cors::CorsLayer;
 
 use crate::auth::{
-    authorization_server_metadata, authorize_get, authorize_post, external_base_url,
-    protected_resource_metadata, token_exchange, verify_bearer_header, verify_oauth_bearer_header,
-    AuthorizeForm, AuthorizeParams, OAuthRuntime, TokenForm,
+    authorization_server_metadata, authorize_get, authorize_post_browser,
+    protected_resource_metadata, token_exchange, trusted_external_base_url, verify_bearer_header,
+    verify_oauth_bearer_header, AuthorizeForm, AuthorizeParams, OAuthRuntime, TokenForm,
 };
 use crate::mcp::server::{handle_request, new_state, SharedState};
 use crate::secret::SecretStore;
@@ -29,7 +28,6 @@ struct ListenerState {
     mcp: SharedState,
     auth: AuthConfig,
     workspace_id: String,
-    workspace_path: String,
     bind_port: u16,
     configured_public_url: String,
     bearer_token: Option<String>,
@@ -49,7 +47,9 @@ pub fn spawn_listener(
     oauth_token_secret: Option<String>,
     runtime: RuntimeConfig,
 ) -> Result<(ShutdownSender, tauri::async_runtime::JoinHandle<()>), String> {
-    let workspace_display = workspace_path.display().to_string();
+    if !matches!(auth.auth_type.as_str(), "noauth" | "bearer" | "oauth") {
+        return Err("Unsupported MCP authentication type; refusing to start".into());
+    }
     let workspace = Workspace::new(workspace_path).map_err(|e| e.message())?;
     let policy = PolicySettings::from_runtime(&runtime);
     let mcp = new_state(
@@ -69,18 +69,30 @@ pub fn spawn_listener(
     } else {
         None
     };
+    if auth.bearer_enabled()
+        && bearer_token
+            .as_deref()
+            .is_none_or(|token| token.trim().is_empty())
+    {
+        return Err("MCP Bearer token is not configured".into());
+    }
+    if auth.oauth_enabled() && auth.oauth_client_id.trim().is_empty() {
+        return Err("MCP OAuth client ID is not configured".into());
+    }
     let configured_public_url = public_base_url.trim().to_string();
     let oauth = if auth.oauth_enabled() {
         let password = oauth_password.unwrap_or_default();
         let token_secret = oauth_token_secret.unwrap_or_default();
-        let oauth_base = external_base_url(&HeaderMap::new(), port, &configured_public_url);
-        Some(Arc::new(OAuthRuntime::new(
-            oauth_base,
+        let oauth = OAuthRuntime::new(
+            format!("{}:mcp", workspace_id),
             auth.oauth_client_id.clone(),
             oauth_client_secret.clone(),
             password,
             token_secret,
-        )))
+        )
+        .with_redirect_uris(auth.oauth_redirect_uris.clone())?;
+        oauth.validate_configuration()?;
+        Some(Arc::new(oauth))
     } else {
         None
     };
@@ -88,7 +100,6 @@ pub fn spawn_listener(
         mcp,
         auth,
         workspace_id,
-        workspace_path: workspace_display,
         bind_port: port,
         configured_public_url,
         bearer_token,
@@ -122,6 +133,13 @@ async fn serve(
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let profile_id = state.workspace_id.clone();
+    let security = crate::auth::http_security::HttpSecurity::new(
+        state.workspace_id.clone(),
+        false,
+        state.bind_port,
+        state.configured_public_url.clone(),
+        64,
+    );
     let app = Router::new()
         .route("/mcp", get(mcp_discovery).post(mcp_post))
         .route(
@@ -134,11 +152,20 @@ async fn serve(
         )
         .route(
             "/oauth/authorize",
-            get(oauth_authorize_get).post(oauth_authorize_post),
+            get(oauth_authorize_get)
+                .post(oauth_authorize_post)
+                .layer(DefaultBodyLimit::max(8192)),
         )
-        .route("/oauth/token", post(oauth_token_post))
+        .route(
+            "/oauth/token",
+            post(oauth_token_post).layer(DefaultBodyLimit::max(8192)),
+        )
         .with_state(state)
-        .layer(CorsLayer::permissive());
+        .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
+        .layer(axum::middleware::from_fn_with_state(
+            security,
+            crate::auth::http_security::guard,
+        ));
 
     append_profile_log(
         &profile_id,
@@ -176,18 +203,23 @@ fn mcp_discovery_payload() -> Value {
     })
 }
 
-fn resolve_oauth_base(state: &ListenerState, headers: &HeaderMap) -> String {
-    external_base_url(headers, state.bind_port, &state.configured_public_url)
+fn resolve_oauth_base(state: &ListenerState, _headers: &HeaderMap) -> String {
+    trusted_external_base_url(
+        &state.workspace_id,
+        false,
+        state.bind_port,
+        &state.configured_public_url,
+    )
 }
 
-async fn mcp_post(
-    State(state): State<ListenerState>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
-    if let Some(response) = require_mcp_auth(&state, &headers) {
+async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Response {
+    if let Some(response) = require_mcp_auth(&state, request.headers()) {
         return response;
     }
+    let Json(body) = match Json::<Value>::from_request(request, &state).await {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
     let method = body
         .get("method")
         .and_then(Value::as_str)
@@ -211,7 +243,15 @@ async fn mcp_post(
 
     let mcp = state.mcp.clone();
     let profile_id = state.workspace_id.clone();
-    let result = tokio::task::spawn_blocking(move || handle_request(&mcp, &body)).await;
+    let permit = match crate::auth::http_security::acquire_tool_worker() {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        handle_request(&mcp, &body)
+    })
+    .await;
     match result {
         Ok(response) => {
             append_profile_log(
@@ -272,8 +312,8 @@ async fn mcp_post(
                     "data": {
                         "stage": "rpc_worker",
                         "reason": "worker_failed",
-                        "retryable": true,
-                        "suggestion": "重试请求或重启 MCP 运行时"
+                        "retryable": false,
+                        "suggestion": "先检查操作状态，再决定是否重试；已接受的操作可能仍会完成"
                     }
                 }
             }))
@@ -293,7 +333,17 @@ fn require_mcp_auth(state: &ListenerState, headers: &HeaderMap) -> Option<Respon
             return verify_oauth_bearer_header(headers, oauth, &server_url);
         }
     }
-    None
+    if state.auth.auth_type == "noauth" {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Authentication configuration is unavailable",
+            )
+                .into_response(),
+        )
+    }
 }
 
 async fn oauth_authorization_server_metadata(
@@ -331,7 +381,8 @@ async fn oauth_authorize_get(
     let Some(oauth) = state.oauth.as_ref() else {
         return oauth_not_configured();
     };
-    authorize_get(oauth, params, Some(state.workspace_path.as_str()))
+    let base = resolve_oauth_base(&state, &HeaderMap::new());
+    authorize_get(oauth, params, Some(&base))
 }
 
 async fn oauth_authorize_post(
@@ -342,7 +393,7 @@ async fn oauth_authorize_post(
     let Some(oauth) = state.oauth.as_ref() else {
         return oauth_not_configured();
     };
-    authorize_post(oauth, form, &resolve_oauth_base(&state, &headers))
+    authorize_post_browser(oauth, &headers, form, &resolve_oauth_base(&state, &headers))
 }
 
 async fn oauth_token_post(

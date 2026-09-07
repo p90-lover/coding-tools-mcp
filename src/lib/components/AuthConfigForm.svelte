@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { DEFAULT_OAUTH_REDIRECT_URIS, parseOAuthRedirectUris } from "$lib/auth-config";
   import { message } from "@tauri-apps/plugin-dialog";
   import SecretInput from "$lib/components/SecretInput.svelte";
   import {
@@ -30,6 +31,9 @@
 
   let { workspaceId, auth, onSaveProfile }: Props = $props();
 
+  let draftRedirectUris = $state("");
+  let secretsLoadError = $state("");
+  let loadingSecrets = $state(true);
   let draft = $state<AuthConfig>({ type: "oauth", oauth_client_id: "", use_shared_secrets: false });
   let saving = $state(false);
   let secrets = $state<Partial<Record<WorkspaceSecretKey, string>>>({});
@@ -50,6 +54,7 @@
       (draft.use_shared_secrets
         ? draft.oauth_client_id !== loadedSharedOauthClientId
         : draft.oauth_client_id !== auth.oauth_client_id) ||
+      draftRedirectUris.trim() !== (auth.oauth_redirect_uris ?? DEFAULT_OAUTH_REDIRECT_URIS).join("\n") ||
       draft.use_shared_secrets !== !!auth.use_shared_secrets ||
       secretsDirty,
   );
@@ -58,7 +63,8 @@
   const showBearer = $derived(draft.type === "bearer");
 
   $effect(() => {
-    draft = { type: auth.type, oauth_client_id: auth.oauth_client_id, use_shared_secrets: !!auth.use_shared_secrets };
+    draft = { ...auth, use_shared_secrets: !!auth.use_shared_secrets };
+    draftRedirectUris = (auth.oauth_redirect_uris ?? DEFAULT_OAUTH_REDIRECT_URIS).join("\n");
   });
 
   $effect(() => {
@@ -71,6 +77,10 @@
 
   async function loadSecrets(id: string, authType: string, useShared: boolean) {
     const seq = ++secretsLoadSeq;
+    loadingSecrets = true;
+    secretsLoadError = "";
+    secrets = {};
+    try {
     const sharedClientId =
       authType === "oauth" && useShared ? await getSharedSecret("oauth_client_id") : null;
     const keys: WorkspaceSecretKey[] = [];
@@ -102,10 +112,15 @@
     }
     secrets = Object.fromEntries(loaded);
     loadedSecrets = Object.fromEntries(loaded);
+    } catch (error) {
+      if (seq === secretsLoadSeq) secretsLoadError = `讀取認證資料失敗：${String(error)}`;
+    } finally {
+      if (seq === secretsLoadSeq) loadingSecrets = false;
+    }
   }
 
   async function save() {
-    if (saving || !dirty) return;
+    if (saving || !dirty || loadingSecrets || secretsLoadError) return;
     saving = true;
     suppressSecretsReload = true;
     try {
@@ -119,7 +134,9 @@
         sharedSecretChanged = clientId !== loadedSharedOauthClientId;
       }
       // Persist profile first so secret-triggered restart sees updated flags.
-      await onSaveProfile({ ...draft }, { skipRuntimeRestart: sharedSecretChanged });
+      const oauthRedirectUris = draft.type === "oauth"
+        ? parseOAuthRedirectUris(draftRedirectUris) : (auth.oauth_redirect_uris ?? DEFAULT_OAUTH_REDIRECT_URIS);
+      await onSaveProfile({ ...draft, oauth_redirect_uris: oauthRedirectUris }, { skipRuntimeRestart: sharedSecretChanged });
       if (sharedSecretChanged) {
         await setSharedSecret("oauth_client_id", clientId);
         loadedSharedOauthClientId = clientId;
@@ -158,7 +175,7 @@
   }}
 >
   <p class="text-xs text-[var(--color-text-muted)]">
-    复制 Client ID / 密钥等请用上方「GPT 配置」卡片；此处可修改认证类型与重新生成密钥。
+    OAuth 使用一小时 Access Token 与可轮换的 180 日 Refresh Token；公开隧道网址改变后仍可自动续期。认证资料采用原子写入及 Trash 备份，缺失的签署密钥会自动修复。复制 Client ID / 密钥请用上方「GPT 配置」卡片。
   </p>
 
   <label class="grid gap-1">
@@ -182,7 +199,16 @@
     <span class="text-xs text-[var(--color-text-muted)]">使用全局共享密钥（在「设置 → 共享密钥」中管理）</span>
   </label>
 
+  {#if secretsLoadError}
+    <p role="alert" class="text-sm text-[var(--color-danger)]">{secretsLoadError}</p>
+  {/if}
+
   {#if showOAuth}
+    <label class="grid gap-1">
+      <span class="text-xs text-[var(--color-text-muted)]">已登記的 OAuth Callback URL（每行一個）</span>
+      <textarea rows="3" class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs" bind:value={draftRedirectUris} spellcheck="false"></textarea>
+    </label>
+    <p class="text-xs text-[var(--color-text-muted)]">從 ChatGPT 或其他用戶端複製完整 Callback URL。只接受精確匹配；不支援萬用字元，也不會自動信任登入請求提供的網址。</p>
     <label class="grid gap-1">
       <span class="text-xs text-[var(--color-text-muted)]">OAuth 客户端 ID</span>
       <input
@@ -233,7 +259,7 @@
     <button
       type="submit"
       class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-      disabled={saving || !dirty}
+      disabled={saving || !dirty || loadingSecrets || !!secretsLoadError}
     >
       {saving ? "保存中…" : "保存配置"}
     </button>

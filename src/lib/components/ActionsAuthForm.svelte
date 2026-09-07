@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { DEFAULT_OAUTH_REDIRECT_URIS, parseOAuthRedirectUris } from "$lib/auth-config";
   import { message } from "@tauri-apps/plugin-dialog";
   import CopyButton from "$lib/components/CopyButton.svelte";
   import SecretInput from "$lib/components/SecretInput.svelte";
@@ -18,6 +19,7 @@
     authType: string;
     oauthClientId: string;
     oauthScopes: string;
+    oauthRedirectUris?: string[];
     openapiUrl: string;
     privacyUrl: string;
     oauthAuthorizeUrl: string;
@@ -31,6 +33,7 @@
     authType,
     oauthClientId,
     oauthScopes,
+    oauthRedirectUris = DEFAULT_OAUTH_REDIRECT_URIS,
     openapiUrl,
     privacyUrl,
     oauthAuthorizeUrl,
@@ -42,6 +45,8 @@
   let draftAuthType = $state("api_key");
   let draftOauthClientId = $state("");
   let draftOauthScopes = $state("");
+  let draftRedirectUris = $state("");
+  let secretsLoadError = $state("");
   let draftUseShared = $state(false);
   let apiKey = $state("");
   let loadedApiKey = $state("");
@@ -74,6 +79,7 @@
     draftAuthType !== authType ||
       draftOauthClientId !== oauthClientId ||
       draftOauthScopes !== oauthScopes ||
+      draftRedirectUris.trim() !== oauthRedirectUris.join("\n") ||
       draftUseShared !== useSharedSecrets ||
       secretsDirty,
   );
@@ -84,6 +90,7 @@
     draftAuthType = authType;
     draftOauthClientId = oauthClientId;
     draftOauthScopes = oauthScopes;
+    draftRedirectUris = oauthRedirectUris.join("\n");
     draftUseShared = useSharedSecrets;
   });
 
@@ -96,6 +103,7 @@
 
   async function loadSecrets() {
     const seq = ++secretsLoadSeq;
+    secretsLoadError = "";
     loadingKey = true;
     loadingOAuthSecret = true;
     loadingOAuthPassword = true;
@@ -124,6 +132,11 @@
       loadedOauthPassword = password ?? "";
       oauthTokenSecret = tokenSecret ?? "";
       loadedOauthTokenSecret = tokenSecret ?? "";
+    } catch (error) {
+      if (seq === secretsLoadSeq) {
+        secretsLoadError = `讀取認證資料失敗：${String(error)}`;
+        apiKey = oauthClientSecret = oauthPassword = oauthTokenSecret = "";
+      }
     } finally {
       if (seq !== secretsLoadSeq) return;
       loadingKey = false;
@@ -134,7 +147,7 @@
   }
 
   async function save() {
-    if (saving || !dirty) return;
+    if (saving || !dirty || loadingKey || secretsLoadError) return;
     saving = true;
     suppressSecretsReload = true;
     try {
@@ -142,6 +155,7 @@
         authType: draftAuthType,
         oauthClientId: draftOauthClientId.trim(),
         oauthScopes: draftOauthScopes.trim(),
+        oauthRedirectUris: draftAuthType === "oauth" ? parseOAuthRedirectUris(draftRedirectUris) : oauthRedirectUris,
         useSharedSecrets: draftUseShared,
       });
       loadedApiKey = apiKey;
@@ -245,6 +259,10 @@
     <span class="text-xs text-[var(--color-text-muted)]">使用全局共享密钥（在「设置 → 共享密钥」中管理）</span>
   </label>
 
+  {#if secretsLoadError}
+    <p role="alert" class="text-sm text-[var(--color-danger)]">{secretsLoadError}</p>
+  {/if}
+
   {#if showApiKey}
     <label class="grid gap-1">
       <span class="text-xs text-[var(--color-text-muted)]">API Key（Bearer）</span>
@@ -261,6 +279,10 @@
       在 GPT Actions 认证里选 API Key → Bearer，Key 填这里的值。
     </p>
   {:else if showOAuth}
+    <label class="grid gap-1">
+      <span class="text-xs text-[var(--color-text-muted)]">已登記的 OAuth Callback URL（每行一個）</span>
+      <textarea rows="3" class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs" bind:value={draftRedirectUris} spellcheck="false"></textarea>
+    </label>
     <label class="grid gap-1">
       <span class="text-xs text-[var(--color-text-muted)]">OAuth Client ID（填到 GPT）</span>
       <div class="flex gap-2">
@@ -345,8 +367,7 @@
       />
     </label>
     <p class="text-xs text-[var(--color-text-muted)]">
-      GPT 编辑器会生成 Callback URL（<code>https://chatgpt.com/aip/g-…/oauth/callback</code>），无需在本应用配置。Token
-      交换方式选默认即可。
+      將 GPT 編輯器顯示的完整 Callback URL 貼到上方清單並儲存。網址、路徑及參數必須精確匹配；不會自動信任未登記的 callback。
     </p>
   {:else}
     <p class="text-xs text-[var(--color-text-muted)]">
@@ -358,7 +379,7 @@
     <button
       type="submit"
       class="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-      disabled={saving || !dirty}
+      disabled={saving || !dirty || loadingKey || !!secretsLoadError}
     >
       {saving ? "保存中…" : "保存配置"}
     </button>

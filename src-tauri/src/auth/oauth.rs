@@ -17,111 +17,70 @@ impl AuthConfig {
     }
 }
 
-/// Resolve the external OAuth/MCP base URL for a request.
-/// Matches the Python server's behavior: prefer configured URL,
-/// then `X-Forwarded-*` / `Host`, then localhost.
-pub fn external_base_url(headers: &HeaderMap, bind_port: u16, configured_url: &str) -> String {
-    let configured = configured_url.trim().trim_end_matches('/');
-    if !configured.is_empty() {
-        return configured.to_string();
+// Request headers are untrusted; only desktop-managed configuration selects
+// the issuer. Tunnel changes are propagated from the serialized data store.
+type OriginMap = std::collections::HashMap<(String, bool), String>;
+static TRUSTED_ORIGINS: std::sync::OnceLock<std::sync::RwLock<OriginMap>> =
+    std::sync::OnceLock::new();
+
+pub fn sync_trusted_origins(data: &crate::data::AppData) {
+    let settings = crate::settings::AppSettings::from_data(data);
+    let mut origins = OriginMap::new();
+    for profile in &data.profiles {
+        origins.insert(
+            (profile.id.clone(), false),
+            profile.effective_public_url_with(&settings),
+        );
+        origins.insert(
+            (profile.id.clone(), true),
+            profile.actions_effective_public_url_with(&settings),
+        );
     }
-
-    let proto = {
-        let value = first_header_value(headers, "x-forwarded-proto");
-        if value.is_empty() {
-            forwarded_header_param(headers, "proto")
-        } else {
-            value
-        }
-    };
-    let host = {
-        let value = safe_external_host(&first_header_value(headers, "x-forwarded-host"));
-        if !value.is_empty() {
-            value
-        } else {
-            let value = safe_external_host(&forwarded_header_param(headers, "host"));
-            if !value.is_empty() {
-                value
-            } else {
-                safe_external_host(&first_header_value(headers, "host"))
-            }
-        }
-    };
-
-    let host = if host.is_empty() {
-        format!("127.0.0.1:{bind_port}")
-    } else {
-        host
-    };
-    let proto = resolve_external_proto(
-        if proto.is_empty() {
-            None
-        } else {
-            Some(proto.as_str())
-        },
-        &host,
-    );
-    format!("{proto}://{host}")
-}
-
-fn first_header_value(headers: &HeaderMap, name: &str) -> String {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(',').next().unwrap_or("").trim().to_string())
-        .unwrap_or_default()
-}
-
-fn forwarded_header_param(headers: &HeaderMap, name: &str) -> String {
-    let first = first_header_value(headers, "forwarded");
-    for part in first.split(';') {
-        let part = part.trim();
-        if let Some((key, value)) = part.split_once('=') {
-            if key.trim().eq_ignore_ascii_case(name) {
-                return value.trim().trim_matches('"').to_string();
-            }
-        }
+    let lock = TRUSTED_ORIGINS.get_or_init(Default::default);
+    if let Ok(mut current) = lock.write() {
+        *current = origins;
     }
-    String::new()
 }
 
-fn safe_external_host(host: &str) -> String {
-    let host = host.trim();
-    if host.is_empty()
-        || host
-            .chars()
-            .any(|ch| matches!(ch, '\r' | '\n' | '/' | '\\'))
+pub fn trusted_external_base_url(id: &str, actions: bool, port: u16, configured: &str) -> String {
+    let lock = TRUSTED_ORIGINS.get_or_init(Default::default);
+    let Ok(origins) = lock.read() else {
+        return format!("http://127.0.0.1:{port}");
+    };
+    let configured = origins
+        .get(&(id.to_owned(), actions))
+        .map(String::as_str)
+        .unwrap_or(configured);
+    external_base_url(&HeaderMap::new(), port, configured)
+}
+
+pub fn external_base_url(_headers: &HeaderMap, bind_port: u16, configured_url: &str) -> String {
+    let value = configured_url.trim_end_matches('/');
+    if !value.is_empty()
+        && value.len() <= 2048
+        && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+        && !value.contains('\\')
     {
-        String::new()
-    } else {
-        host.to_string()
-    }
-}
-
-fn resolve_external_proto(proto: Option<&str>, host: &str) -> &'static str {
-    if let Some(proto) = proto {
-        let proto = proto.trim().to_ascii_lowercase();
-        if proto == "http" {
-            return "http";
+        if let Ok(url) = url::Url::parse(value) {
+            let loopback = match url.host() {
+                Some(url::Host::Domain("localhost")) => true,
+                Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                _ => false,
+            };
+            if (url.scheme() == "https" || (url.scheme() == "http" && loopback))
+                && url.host().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.path() == "/"
+            {
+                return url.origin().ascii_serialization();
+            }
         }
-        if proto == "https" {
-            return "https";
-        }
     }
-
-    let host_without_port = host
-        .rsplit_once(':')
-        .map(|(value, _)| value.trim_matches('[').trim_matches(']'))
-        .unwrap_or_else(|| host.trim_matches('[').trim_matches(']'));
-    if is_loopback_host(host_without_port) {
-        "http"
-    } else {
-        "https"
-    }
-}
-
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+    format!("http://127.0.0.1:{bind_port}")
 }
 
 fn token_endpoint_auth_methods(client_secret: Option<&str>) -> Vec<&'static str> {
@@ -141,7 +100,7 @@ pub fn authorization_server_metadata(base_url: &str, client_secret: Option<&str>
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": methods,
     })
@@ -177,6 +136,10 @@ mod tests {
             meta["token_endpoint_auth_methods_supported"],
             json!(["none"])
         );
+        assert_eq!(
+            meta["grant_types_supported"],
+            json!(["authorization_code", "refresh_token"])
+        );
         let meta = authorization_server_metadata("https://example.com", Some("secret"));
         assert_eq!(
             meta["token_endpoint_auth_methods_supported"],
@@ -203,23 +166,43 @@ mod tests {
     }
 
     #[test]
-    fn external_base_url_uses_forwarded_host() {
+    fn external_base_url_ignores_unregistered_forwarded_host() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-proto", "https".parse().unwrap());
         headers.insert("x-forwarded-host", "lb.frp-tx1.evwali.com".parse().unwrap());
         assert_eq!(
             external_base_url(&headers, 28767, ""),
-            "https://lb.frp-tx1.evwali.com"
+            "http://127.0.0.1:28767"
         );
     }
 
     #[test]
-    fn external_base_url_uses_host_header() {
+    fn external_base_url_ignores_unregistered_host_header() {
         let mut headers = HeaderMap::new();
         headers.insert("host", "lb.frp-tx1.evwali.com".parse().unwrap());
         assert_eq!(
             external_base_url(&headers, 28767, ""),
-            "https://lb.frp-tx1.evwali.com"
+            "http://127.0.0.1:28767"
+        );
+    }
+}
+
+#[cfg(test)]
+mod release_finalization_regressions {
+    use super::*;
+    #[test]
+    fn release_finalization_forwarded_headers_cannot_choose_issuer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-host", "attacker.invalid".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("host", "attacker.invalid".parse().unwrap());
+        assert_eq!(
+            external_base_url(&headers, 28767, ""),
+            "http://127.0.0.1:28767"
+        );
+        assert_eq!(
+            external_base_url(&headers, 28767, "https://trusted.example"),
+            "https://trusted.example"
         );
     }
 }

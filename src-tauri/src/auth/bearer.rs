@@ -2,6 +2,15 @@ use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 pub fn verify_bearer_header(headers: &HeaderMap, expected: &str) -> Option<Response> {
+    if expected.trim().is_empty() || headers.get_all(AUTHORIZATION).iter().count() != 1 {
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                "Bearer authentication is not configured or is ambiguous",
+            )
+                .into_response(),
+        );
+    }
     let Some(header_value) = headers.get(AUTHORIZATION) else {
         return Some((StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response());
     };
@@ -14,7 +23,7 @@ pub fn verify_bearer_header(headers: &HeaderMap, expected: &str) -> Option<Respo
         return Some((StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response());
     };
 
-    if !constant_time_eq_str(token, expected) {
+    if token.is_empty() || token.len() > 8192 || !constant_time_eq_str(token, expected) {
         return Some((StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response());
     }
 

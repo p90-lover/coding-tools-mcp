@@ -2,6 +2,7 @@
   export interface RuntimePolicyDraft {
     toolProfile: string;
     permissionMode: string;
+    approvalMode: string;
     allowedCommands: string;
     workspaceLocalEntries: boolean;
     workspaceScriptExtensions: string;
@@ -10,6 +11,7 @@
   interface Props {
     toolProfile: string;
     permissionMode: string;
+    approvalMode: string;
     allowedCommands: string;
     workspaceLocalEntries: boolean;
     workspaceScriptExtensions: string;
@@ -22,28 +24,51 @@
     { value: "compat-readonly-all", label: "兼容只读" },
   ] as const;
 
-  const PERMISSION_MODE_OPTIONS = [
-    { value: "trusted", label: "受信任" },
-    { value: "safe", label: "安全受限" },
-    { value: "dangerous", label: "完全放开" },
+  const APPROVAL_MODE_OPTIONS = [
+    { value: "ask", label: "每次變更都詢問" },
+    { value: "on-request", label: "按需批准（Codex）" },
+    { value: "never", label: "从不批准" },
   ] as const;
 
-  let { toolProfile, permissionMode, allowedCommands, workspaceLocalEntries, workspaceScriptExtensions, onSave }: Props = $props();
+  const PERMISSION_MODE_OPTIONS = [
+    { value: "read-only", label: "只读（Codex）" },
+    { value: "workspace-write", label: "工作区写入（Codex）" },
+    { value: "danger-full-access", label: "完全访问（Codex）" },
+  ] as const;
+
+  function normalizePermissionMode(value: string): string {
+    if (value === "safe" || value === "read-only") return "read-only";
+    if (value === "dangerous" || value === "danger-full-access") {
+      return "danger-full-access";
+    }
+    if (value === "trusted" || value === "workspace-write") return "workspace-write";
+    return "read-only";
+  }
+
+  function normalizeApprovalMode(value: string): string {
+    if (value === "never") return "never";
+    if (value === "on-request" || value === "auto-workspace") return "on-request";
+    return "ask";
+  }
+
+  let { toolProfile, permissionMode, approvalMode, allowedCommands, workspaceLocalEntries, workspaceScriptExtensions, onSave }: Props = $props();
 
   let draftProfile = $state("full");
-  let draftMode = $state("trusted");
+  let draftMode = $state("workspace-write");
+  let draftApprovalMode = $state("on-request");
   let draftCommands = $state("");
   let draftLocalEntries = $state(true);
   let draftExtensions = $state(".exe,.bat,.cmd,.ps1");
   let saving = $state(false);
 
   const dirty = $derived(
-    draftProfile !== toolProfile || draftMode !== permissionMode || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions,
+    draftProfile !== toolProfile || draftMode !== normalizePermissionMode(permissionMode) || draftApprovalMode !== normalizeApprovalMode(approvalMode) || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions,
   );
 
   $effect(() => {
     draftProfile = toolProfile;
-    draftMode = permissionMode;
+    draftMode = normalizePermissionMode(permissionMode);
+    draftApprovalMode = normalizeApprovalMode(approvalMode);
     draftCommands = allowedCommands;
     draftLocalEntries = workspaceLocalEntries;
     draftExtensions = workspaceScriptExtensions;
@@ -53,7 +78,7 @@
     if (saving || !dirty) return;
     saving = true;
     try {
-      await onSave({ toolProfile: draftProfile, permissionMode: draftMode, allowedCommands: draftCommands.trim(), workspaceLocalEntries: draftLocalEntries, workspaceScriptExtensions: draftExtensions.trim() });
+      await onSave({ toolProfile: draftProfile, permissionMode: draftMode, approvalMode: draftApprovalMode, allowedCommands: draftCommands.trim(), workspaceLocalEntries: draftLocalEntries, workspaceScriptExtensions: draftExtensions.trim() });
     } finally {
       saving = false;
     }
@@ -91,6 +116,20 @@
     <input type="text" class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-sm" placeholder=".exe,.bat,.cmd,.ps1" bind:value={draftExtensions} disabled={!draftLocalEntries} />
   </label>
   <label class="grid gap-1">
+    <span class="text-xs text-[var(--color-text-muted)]">批准模式</span>
+    <select
+      class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm"
+      bind:value={draftApprovalMode}
+    >
+      {#each APPROVAL_MODE_OPTIONS as option}
+        <option value={option.value}>{option.label}</option>
+      {/each}
+    </select>
+  </label>
+  <p class="text-xs text-[var(--color-text-muted)]">
+    on-request 会自动执行已批准 Workspace 内的常规变更；网络、删除及敏感解释器写入会改用 request_permissions。never 会直接拒绝这些敏感操作。
+  </p>
+  <label class="grid gap-1">
     <span class="text-xs text-[var(--color-text-muted)]">权限模式</span>
     <select
       class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm"
@@ -102,7 +141,7 @@
     </select>
   </label>
   <p class="text-xs text-[var(--color-text-muted)]">
-    Workspace 本地入口按当前工作目录解析；系统命令与脚本类型均可按项目配置。当前执行边界仍为 policy_only。
+    read-only 会阻止项目修改及大部分命令；workspace-write 允许 Workspace 内写入；danger-full-access 只跳过软批准。管理员提升、受保护仓库路径及 Workspace 外写入仍会硬性拒绝；当前执行边界仍为 policy_only，并非操作系统级 sandbox。
   </p>
   <div class="flex justify-end pt-1">
     <button

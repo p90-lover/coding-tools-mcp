@@ -6,11 +6,12 @@ use serde_json::Value;
 use crate::tools::workspace::Workspace;
 use crate::workspace::ActionsConfig;
 
-use super::registry::is_allowed_tool;
+use super::registry::{is_allowed_tool, MUTATING_TOOLS};
 
 static NETWORK_COMMAND_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 static DANGEROUS_COMMAND_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 static INTERPRETER_MUTATION_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+static ELEVATION_COMMAND_PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
 const BASIC_READ_ONLY_COMMANDS: &[&str] = &[
     "pwd", "ls", "dir", "cat", "head", "tail", "grep", "find", "which", "echo",
@@ -53,6 +54,42 @@ const DEFAULT_ALLOWED_COMMANDS: &[&str] = &[
     "pwsh",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl SandboxMode {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "read-only" | "safe" => Self::ReadOnly,
+            "danger-full-access" | "dangerous" => Self::DangerFullAccess,
+            "workspace-write" | "trusted" => Self::WorkspaceWrite,
+            _ => Self::ReadOnly,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+fn canonical_approval_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "ask" => "ask",
+        "never" => "never",
+        "on-request" | "auto-workspace" => "on-request",
+        _ => "ask",
+    }
+    .to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct PolicySettings {
     pub allowed_commands: HashSet<String>,
@@ -60,6 +97,7 @@ pub struct PolicySettings {
     pub workspace_script_extensions: HashSet<String>,
     pub max_patch_bytes: usize,
     pub permission_mode: String,
+    pub approval_mode: String,
 }
 
 impl Default for PolicySettings {
@@ -69,7 +107,8 @@ impl Default for PolicySettings {
             workspace_local_entries: true,
             workspace_script_extensions: default_workspace_script_extension_set(),
             max_patch_bytes: 200_000,
-            permission_mode: "trusted".into(),
+            permission_mode: "workspace-write".into(),
+            approval_mode: "on-request".into(),
         }
     }
 }
@@ -83,7 +122,10 @@ impl PolicySettings {
                 &runtime.workspace_script_extensions,
             ),
             max_patch_bytes: 200_000,
-            permission_mode: runtime.permission_mode.clone(),
+            permission_mode: SandboxMode::parse(&runtime.permission_mode)
+                .as_str()
+                .to_string(),
+            approval_mode: canonical_approval_mode(&runtime.approval_mode),
         }
     }
 
@@ -93,16 +135,27 @@ impl PolicySettings {
             workspace_local_entries: true,
             workspace_script_extensions: default_workspace_script_extension_set(),
             max_patch_bytes: actions.max_patch_bytes as usize,
-            permission_mode: actions.permission_mode.clone(),
+            permission_mode: SandboxMode::parse(&actions.permission_mode)
+                .as_str()
+                .to_string(),
+            approval_mode: "on-request".into(),
         }
     }
 
+    pub fn sandbox_mode(&self) -> SandboxMode {
+        SandboxMode::parse(&self.permission_mode)
+    }
+
+    pub fn canonical_permission_mode(&self) -> &'static str {
+        self.sandbox_mode().as_str()
+    }
+
     pub fn network_allowed(&self) -> bool {
-        self.permission_mode == "trusted" || self.permission_mode == "dangerous"
+        !matches!(self.sandbox_mode(), SandboxMode::ReadOnly)
     }
 
     pub fn skip_permission_gates(&self) -> bool {
-        self.permission_mode == "dangerous"
+        matches!(self.sandbox_mode(), SandboxMode::DangerFullAccess)
     }
 }
 
@@ -180,10 +233,78 @@ pub fn validate_tool_arguments_for_workspace(
     policy: &PolicySettings,
     workspace: Option<&Workspace>,
 ) -> Result<(), PolicyError> {
+    if matches!(policy.sandbox_mode(), SandboxMode::ReadOnly) {
+        validate_read_only_sandbox(tool_name, arguments)?;
+    }
     match tool_name {
         "exec_command" => validate_command_for_workspace(arguments, policy, workspace),
         "apply_patch" | "patch_check" => validate_patch(arguments, policy),
         _ => Ok(()),
+    }
+}
+
+fn validate_read_only_sandbox(tool_name: &str, arguments: &Value) -> Result<(), PolicyError> {
+    if tool_name == "exec_command" {
+        let command = arguments
+            .get("cmd")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if network_command_pattern().is_match(command) {
+            return Err(PolicyError(
+                "Network-looking commands are blocked by READ_ONLY_SANDBOX".into(),
+            ));
+        }
+        if read_only_command_allowed(command) {
+            return Ok(());
+        }
+        return Err(PolicyError(
+            "READ_ONLY_SANDBOX: read-only mode permits inspection tools and only minimal non-mutating diagnostics; switch to workspace-write for commands that can change project state"
+                .into(),
+        ));
+    }
+
+    // Changing the relative navigation root does not write project data.
+    if tool_name == "set_default_cwd" {
+        return Ok(());
+    }
+
+    if MUTATING_TOOLS.contains(&tool_name) {
+        return Err(PolicyError(format!(
+            "READ_ONLY_SANDBOX: {tool_name} is unavailable while the sandbox is read-only"
+        )));
+    }
+    Ok(())
+}
+
+fn read_only_command_allowed(command: &str) -> bool {
+    if command.trim().is_empty()
+        || has_forbidden_shell_syntax(command)
+        || command_contains_external_path(command)
+        || network_command_pattern().is_match(command)
+        || dangerous_command_pattern().is_match(command)
+        || interpreter_mutation_pattern().is_match(command)
+        || elevation_command_pattern().is_match(command)
+    {
+        return false;
+    }
+
+    let Ok(parts) = shell_words::split(command) else {
+        return false;
+    };
+    let Some(executable) = parts.first() else {
+        return false;
+    };
+    // Match exact native builtins, not paths or executable suffixes.
+    let stem = executable.to_ascii_lowercase();
+
+    match stem.as_str() {
+        "pwd" => parts.len() == 1,
+        "echo" => true,
+        "which" => parts.len() == 2,
+        "ls" | "dir" => {
+            parts.len() == 1 || (parts.len() == 2 && parts.get(1).is_some_and(|arg| arg == "."))
+        }
+        _ => false,
     }
 }
 
@@ -252,6 +373,11 @@ pub fn validate_command_for_workspace(
     if has_forbidden_shell_syntax(command) {
         return Err(PolicyError(
             "Shell chaining, redirection and expansion are not allowed".into(),
+        ));
+    }
+    if elevation_command_pattern().is_match(command) {
+        return Err(PolicyError(
+            "ELEVATION_NOT_ALLOWED: administrator elevation is blocked for MCP tool calls".into(),
         ));
     }
     if (dangerous_command_pattern().is_match(command)
@@ -450,6 +576,15 @@ fn interpreter_mutation_pattern() -> &'static regex::Regex {
     })
 }
 
+fn elevation_command_pattern() -> &'static regex::Regex {
+    ELEVATION_COMMAND_PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)(^|\s)(sudo|doas|pkexec|runas)(\s|$)|start-process[^\r\n]*-verb\s+runas",
+        )
+        .expect("valid regex")
+    })
+}
+
 fn command_contains_external_path(command: &str) -> bool {
     let normalized = command.replace('\\', "/");
     normalized.contains("../")
@@ -580,6 +715,23 @@ mod tests {
     }
 
     #[test]
+    fn elevation_requests_are_always_blocked() {
+        let policy = PolicySettings {
+            permission_mode: "dangerous".into(),
+            ..PolicySettings::default()
+        };
+        for command in [
+            "sudo cargo test",
+            "runas /user:Administrator cmd",
+            "powershell Start-Process cmd -Verb RunAs",
+        ] {
+            let error = validate_command(&json!({"cmd": command, "confirm": true}), &policy)
+                .expect_err("elevation must be blocked");
+            assert!(error.0.contains("ELEVATION_NOT_ALLOWED"));
+        }
+    }
+
+    #[test]
     fn quoted_python_code_is_not_treated_as_shell_chaining() {
         let policy = PolicySettings::default();
         assert!(validate_command(
@@ -593,5 +745,67 @@ mod tests {
         )
         .is_err());
         assert!(validate_command(&json!({"cmd": "echo hello > output.txt"}), &policy).is_err());
+    }
+
+    #[test]
+    fn codex_permission_read_only_blocks_workspace_mutation() {
+        let policy = PolicySettings {
+            permission_mode: "read-only".into(),
+            ..PolicySettings::default()
+        };
+        let patch = json!({
+            "patch": "*** Begin Patch\n*** Add File: blocked.txt\n+blocked\n*** End Patch"
+        });
+        let patch_error = validate_tool_arguments("apply_patch", &patch, &policy)
+            .expect_err("read-only sandbox must reject patches");
+        assert!(patch_error.0.contains("READ_ONLY_SANDBOX"));
+
+        let command_error =
+            validate_tool_arguments("exec_command", &json!({"cmd": "cargo test"}), &policy)
+                .expect_err("read-only sandbox must reject mutating commands");
+        assert!(command_error.0.contains("READ_ONLY_SANDBOX"));
+
+        validate_tool_arguments("exec_command", &json!({"cmd": "pwd"}), &policy)
+            .expect("read-only diagnostics remain available");
+    }
+
+    #[test]
+    fn codex_permission_canonical_sandbox_names_are_enforced() {
+        let workspace = PolicySettings {
+            permission_mode: "workspace-write".into(),
+            ..PolicySettings::default()
+        };
+        assert!(workspace.network_allowed());
+        assert!(!workspace.skip_permission_gates());
+
+        let full = PolicySettings {
+            permission_mode: "danger-full-access".into(),
+            ..PolicySettings::default()
+        };
+        assert!(full.network_allowed());
+        assert!(full.skip_permission_gates());
+
+        assert_eq!(SandboxMode::parse("safe").as_str(), "read-only");
+        assert_eq!(SandboxMode::parse("trusted").as_str(), "workspace-write");
+        assert_eq!(
+            SandboxMode::parse("dangerous").as_str(),
+            "danger-full-access"
+        );
+    }
+}
+
+#[cfg(test)]
+mod release_hardening_checks {
+    use super::*;
+
+    #[test]
+    fn release_hardening_unknown_sandbox_is_read_only() {
+        for value in ["", "workspace-writ", "invalid", "full-access"] {
+            assert_eq!(
+                SandboxMode::parse(value),
+                SandboxMode::ReadOnly,
+                "{value:?}"
+            );
+        }
     }
 }

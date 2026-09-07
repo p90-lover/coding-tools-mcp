@@ -61,7 +61,7 @@ pub async fn require_actions_auth(
     }
 
     if auth.api_key_enabled() {
-        let Some(expected) = auth.api_key.as_ref() else {
+        let Some(expected) = auth.api_key.as_ref().filter(|key| !key.trim().is_empty()) else {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Actions API key is not configured",
@@ -69,6 +69,13 @@ pub async fn require_actions_auth(
                 .into_response();
         };
 
+        if request.headers().get_all(AUTHORIZATION).iter().count() != 1 {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Exactly one Authorization header is required",
+            )
+                .into_response();
+        }
         let Some(header_value) = request.headers().get(AUTHORIZATION) else {
             return (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response();
         };
@@ -81,7 +88,10 @@ pub async fn require_actions_auth(
             return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response();
         };
 
-        if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+        if token.is_empty()
+            || token.len() > 8192
+            || !constant_time_eq(token.as_bytes(), expected.as_bytes())
+        {
             return (StatusCode::UNAUTHORIZED, "Invalid API key").into_response();
         }
 

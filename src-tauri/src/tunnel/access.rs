@@ -80,8 +80,11 @@ pub async fn sync_managed_runtime_routes(
     let settings = AppSettings::load_or_default();
     let profiles = DataStore::read_file(|data| Ok(data.profiles.clone()))?;
     let mut guard = supervisor().lock().await;
-    guard.restore_active_frp_routes(&profiles, &active_runtime_keys, &settings);
-    Ok(())
+    let changed_workspaces =
+        guard.restore_active_frp_routes(&profiles, &active_runtime_keys, &settings);
+    guard
+        .reconcile_restored_frp_routes(&changed_workspaces, &settings)
+        .await
 }
 
 pub async fn cleanup_orphan_for_runtime(

@@ -74,6 +74,23 @@ pub fn create_workspace(
 
 #[tauri::command]
 pub fn update_workspace(state: State<'_, AppState>, profile: WorkspaceProfile) -> AppResult<()> {
+    if !matches!(
+        profile.auth.auth_type.as_str(),
+        "noauth" | "bearer" | "oauth"
+    ) || !matches!(
+        profile.actions.auth_type.as_str(),
+        "none" | "api_key" | "oauth"
+    ) {
+        return Err(AppError::Message("Unsupported authentication type".into()));
+    }
+    if profile.auth.auth_type == "oauth" {
+        crate::auth::validate_redirect_uris(&profile.auth.oauth_redirect_uris)
+            .map_err(AppError::Message)?;
+    }
+    if profile.actions.auth_type == "oauth" {
+        crate::auth::validate_redirect_uris(&profile.actions.oauth_redirect_uris)
+            .map_err(AppError::Message)?;
+    }
     state.with_workspaces(|store| {
         let current = store
             .get(&profile.id)

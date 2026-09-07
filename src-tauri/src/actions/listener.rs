@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Form, Path, Query, State},
+    extract::{DefaultBodyLimit, Form, Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::{Html, IntoResponse, Json, Response},
@@ -12,11 +12,10 @@ use axum::{
 };
 use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tower_http::cors::CorsLayer;
 
 use crate::auth::{
-    authorization_server_metadata, authorize_get, authorize_post, external_base_url,
-    token_exchange, AuthorizeForm, AuthorizeParams, OAuthRuntime, TokenForm,
+    authorization_server_metadata, authorize_get, authorize_post_browser, token_exchange,
+    trusted_external_base_url, AuthorizeForm, AuthorizeParams, OAuthRuntime, TokenForm,
 };
 use crate::tools::{self, is_allowed_tool, policy::PolicySettings, wrap_tool_result, ToolContext};
 use crate::tunnel::append_profile_log;
@@ -31,7 +30,7 @@ struct AppState {
     ctx: Arc<ToolContext>,
     openapi: Arc<RwLock<Value>>,
     auth: Arc<AuthConfig>,
-    workspace_path: String,
+    workspace_id: String,
     bind_port: u16,
     configured_public_url: String,
     oauth: Option<Arc<OAuthRuntime>>,
@@ -48,15 +47,22 @@ pub fn spawn_listener(
     auth_type: String,
     api_key: Option<String>,
     oauth_client_id: String,
+    oauth_redirect_uris: Vec<String>,
     oauth_client_secret: Option<String>,
     oauth_password: Option<String>,
     oauth_token_secret: Option<String>,
     policy: PolicySettings,
 ) -> Result<(ShutdownSender, tauri::async_runtime::JoinHandle<()>), String> {
-    if auth_type == "api_key" && api_key.as_ref().is_none_or(String::is_empty) {
+    if !matches!(auth_type.as_str(), "none" | "api_key" | "oauth") {
+        return Err("Unsupported Actions authentication type; refusing to start".into());
+    }
+    if auth_type == "api_key" && api_key.as_ref().is_none_or(|key| key.trim().is_empty()) {
         return Err("Actions API key is not configured".into());
     }
     if auth_type == "oauth" {
+        if oauth_client_id.trim().is_empty() {
+            return Err("Actions OAuth client ID is not configured".into());
+        }
         if oauth_password.as_ref().is_none_or(String::is_empty) {
             return Err("Actions OAuth password is not configured".into());
         }
@@ -67,14 +73,16 @@ pub fn spawn_listener(
 
     let configured_public_url = public_base_url.trim().to_string();
     let oauth = if auth_type == "oauth" {
-        let oauth_base = external_base_url(&HeaderMap::new(), actions_port, &configured_public_url);
-        Some(Arc::new(OAuthRuntime::new(
-            oauth_base,
+        let oauth = OAuthRuntime::new(
+            format!("{workspace_id}:actions"),
             oauth_client_id,
             oauth_client_secret.clone(),
             oauth_password.unwrap_or_default(),
             oauth_token_secret.unwrap_or_default(),
-        )))
+        )
+        .with_redirect_uris(oauth_redirect_uris)?;
+        oauth.validate_configuration()?;
+        Some(Arc::new(oauth))
     } else {
         None
     };
@@ -166,7 +174,7 @@ async fn serve(
     ));
 
     let state = AppState {
-        workspace_path: ctx.workspace_path(),
+        workspace_id: profile_id.to_string(),
         ctx,
         openapi: Arc::new(RwLock::new(openapi_doc)),
         auth: auth.clone(),
@@ -182,6 +190,13 @@ async fn serve(
         .layer(middleware::from_fn(require_actions_auth))
         .layer(Extension(auth));
 
+    let security = crate::auth::http_security::HttpSecurity::new(
+        state.workspace_id.clone(),
+        true,
+        state.bind_port,
+        state.configured_public_url.clone(),
+        32,
+    );
     let app = Router::new()
         .route("/health", get(health))
         .route("/openapi.json", get(openapi_json))
@@ -192,12 +207,21 @@ async fn serve(
         )
         .route(
             "/oauth/authorize",
-            get(oauth_authorize_get).post(oauth_authorize_post),
+            get(oauth_authorize_get)
+                .post(oauth_authorize_post)
+                .layer(DefaultBodyLimit::max(8192)),
         )
-        .route("/oauth/token", post(oauth_token_post))
+        .route(
+            "/oauth/token",
+            post(oauth_token_post).layer(DefaultBodyLimit::max(8192)),
+        )
         .merge(protected)
         .with_state(state)
-        .layer(CorsLayer::permissive());
+        .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(axum::middleware::from_fn_with_state(
+            security,
+            crate::auth::http_security::guard,
+        ));
 
     append_profile_log(
         profile_id,
@@ -238,14 +262,16 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "ok": true,
         "service": "coding-tools-actions",
-        "workspace": state.workspace_path,
+        "workspace": "configured",
         "auth_type": state.auth.auth_type,
         "tools_loaded": tools_loaded
     }))
 }
 
 async fn openapi_json(State(state): State<AppState>) -> Json<Value> {
-    Json(state.openapi.read().await.clone())
+    let mut schema = state.openapi.read().await.clone();
+    schema["servers"] = json!([{ "url": resolve_oauth_base(&state, &HeaderMap::new()) }]);
+    Json(schema)
 }
 
 async fn privacy() -> Html<&'static str> {
@@ -267,8 +293,13 @@ async fn privacy() -> Html<&'static str> {
     )
 }
 
-fn resolve_oauth_base(state: &AppState, headers: &HeaderMap) -> String {
-    external_base_url(headers, state.bind_port, &state.configured_public_url)
+fn resolve_oauth_base(state: &AppState, _headers: &HeaderMap) -> String {
+    trusted_external_base_url(
+        &state.workspace_id,
+        true,
+        state.bind_port,
+        &state.configured_public_url,
+    )
 }
 
 async fn oauth_authorization_server_metadata(
@@ -292,7 +323,8 @@ async fn oauth_authorize_get(
     let Some(oauth) = state.oauth.as_ref() else {
         return oauth_not_configured();
     };
-    authorize_get(oauth, params, Some(state.workspace_path.as_str()))
+    let base = resolve_oauth_base(&state, &HeaderMap::new());
+    authorize_get(oauth, params, Some(&base))
 }
 
 async fn oauth_authorize_post(
@@ -303,7 +335,7 @@ async fn oauth_authorize_post(
     let Some(oauth) = state.oauth.as_ref() else {
         return oauth_not_configured();
     };
-    authorize_post(oauth, form, &resolve_oauth_base(&state, &headers))
+    authorize_post_browser(oauth, &headers, form, &resolve_oauth_base(&state, &headers))
 }
 
 async fn oauth_token_post(
@@ -360,12 +392,34 @@ async fn execute_action(
             .into_response();
     }
 
-    let structured = if tools::registry::MUTATING_TOOLS.contains(&tool_name.as_str()) {
-        let _guard = state.write_lock.lock().await;
-        tools::call_tool(state.ctx.as_ref(), &tool_name, &arguments)
-    } else {
-        tools::call_tool(state.ctx.as_ref(), &tool_name, &arguments)
+    let permit = match crate::auth::http_security::acquire_tool_worker() {
+        Ok(permit) => permit,
+        Err(response) => return *response,
     };
+    let guard = if tools::registry::MUTATING_TOOLS.contains(&tool_name.as_str()) {
+        Some(state.write_lock.clone().lock_owned().await)
+    } else {
+        None
+    };
+    let ctx = Arc::clone(&state.ctx);
+    let tool = tool_name.clone();
+    let structured = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _guard = guard;
+        tools::call_tool(ctx.as_ref(), &tool, &arguments)
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Tool worker failed; inspect operation state before retrying",
+            )
+                .into_response()
+        }
+    };
+
     let result = wrap_tool_result(structured);
     let is_error = result
         .get("isError")

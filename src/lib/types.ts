@@ -1,3 +1,5 @@
+import { DEFAULT_OAUTH_REDIRECT_URIS } from "./auth-config";
+
 export type RuntimeState = "stopped" | "starting" | "running" | "stopping" | "error";
 
 export const DEFAULT_SERVICE_PORT = 28766;
@@ -17,6 +19,7 @@ export interface TunnelConfig {
 export interface AuthConfig {
   type: string;
   oauth_client_id: string;
+  oauth_redirect_uris?: string[];
   use_shared_secrets?: boolean;
 }
 
@@ -24,6 +27,7 @@ export interface RuntimeConfig {
   local_port: number;
   tool_profile: string;
   permission_mode: string;
+  approval_mode?: string;
   runtime_command?: string;
   allowed_commands?: string;
   workspace_local_entries?: boolean;
@@ -45,6 +49,7 @@ export interface ActionsConfig {
   runtime_command?: string;
   auth_type: string;
   oauth_client_id?: string;
+  oauth_redirect_uris?: string[];
   oauth_scopes?: string;
   allowed_commands?: string;
   max_patch_bytes?: number;
@@ -85,8 +90,9 @@ export function actionsConfig(profile: WorkspaceProfile): ActionsConfig {
     frp_subdomain: "",
     cloudflare_mode: "quick",
     local_port: DEFAULT_ACTIONS_PORT,
-    permission_mode: "trusted",
+    permission_mode: "workspace-write",
     auth_type: "api_key",
+    oauth_redirect_uris: [...DEFAULT_OAUTH_REDIRECT_URIS],
     allowed_commands:
       "pytest,python,python3,npm,npx,node,pnpm,yarn,make,mvn,mvnw,gradle,gradlew,cargo,go,ruff,mypy,eslint,tsc",
     max_patch_bytes: 200_000,
@@ -105,6 +111,7 @@ export function actionsLocalEndpoint(port: number): string {
 export interface ActionsAuthDraft {
   authType: string;
   oauthClientId: string;
+  oauthRedirectUris: string[];
   oauthScopes: string;
   useSharedSecrets?: boolean;
 }
