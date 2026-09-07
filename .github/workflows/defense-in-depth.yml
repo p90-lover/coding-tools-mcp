@@ -34,6 +34,25 @@ jobs:
           persist-credentials: false
           clean: false
 
+      - name: Preserve exact public source snapshots for offline review
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/source-review
+          git archive --format=tar HEAD > aiTemp/source-review/head.tar
+          git archive --format=tar origin/main > aiTemp/source-review/main.tar
+          base="$(git merge-base HEAD origin/main)"
+          git archive --format=tar "$base" > aiTemp/source-review/base.tar
+          printf 'head=%s\nmain=%s\nbase=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse origin/main)" "$base" > aiTemp/source-review/refs.txt
+          sha256sum aiTemp/source-review/*.tar > aiTemp/source-review/SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: source-review-${{ github.sha }}
+          path: aiTemp/source-review/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Install Tauri build dependencies
         run: |
           sudo apt-get update
