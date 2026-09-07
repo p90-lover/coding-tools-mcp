@@ -49,6 +49,9 @@ pub struct AuthConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
+    /// Local opt-in; never enabled by an MCP argument or full-access mode.
+    #[serde(default)]
+    pub allow_screen_capture: bool,
     #[serde(default = "default_mcp_port")]
     pub local_port: u16,
     #[serde(default = "default_tool_profile")]
@@ -222,6 +225,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             local_port: default_mcp_port(),
+            allow_screen_capture: false,
             tool_profile: default_tool_profile(),
             permission_mode: default_permission_mode(),
             approval_mode: default_approval_mode(),

@@ -5,7 +5,9 @@ use serde_json::{json, Value};
 use crate::tools::context::ToolContext;
 use crate::tools::policy::{validate_tool_arguments_for_workspace, PolicyError};
 use crate::tools::workspace::{tool_err, tool_err_code, tool_ok, WorkspaceError};
-use crate::tools::{exec, file, git, history, image_tool, patch, project_context, session};
+use crate::tools::{
+    exec, file, git, history, image_tool, patch, project_context, screen_tool, session,
+};
 
 fn policy_tool_err(err: PolicyError) -> Value {
     let dangerous = err
@@ -191,6 +193,13 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "git_show" => git::git_show(ws, &effective_args),
         "git_blame" => git::git_blame(ws, &effective_args),
         "view_image" => image_tool::view_image(ws, &effective_args),
+        "image_info" => image_tool::image_info(ws, &effective_args),
+        "compare_images" => image_tool::compare_images(ws, &effective_args),
+        "vision_status" => screen_tool::status(ctx),
+        "list_displays" => screen_tool::list_displays(ctx),
+        "list_windows" => screen_tool::list_windows(ctx, &effective_args),
+        "capture_screenshot" => screen_tool::capture_screenshot(ctx, &effective_args),
+        "capture_window" => screen_tool::capture_window(ctx, &effective_args),
         "request_permissions" => {
             let request_id = effective_args
                 .get("request_id")
@@ -309,9 +318,17 @@ fn apply_default_cwd(ctx: &ToolContext, name: &str, args: &Value) -> Value {
             let path = effective.get("path").and_then(Value::as_str).unwrap_or(".");
             effective["path"] = Value::String(prefix_relative_path(&base, path));
         }
-        "read_file" | "search_text" | "grep_text" | "grep" | "git_blame" | "view_image" => {
+        "read_file" | "search_text" | "grep_text" | "grep" | "git_blame" | "view_image"
+        | "image_info" => {
             if let Some(path) = effective.get("path").and_then(Value::as_str) {
                 effective["path"] = Value::String(prefix_relative_path(&base, path));
+            }
+        }
+        "compare_images" => {
+            for key in ["before_path", "after_path"] {
+                if let Some(path) = effective.get(key).and_then(Value::as_str) {
+                    effective[key] = Value::String(prefix_relative_path(&base, path));
+                }
             }
         }
         "git_diff" => {
@@ -482,6 +499,8 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
             "completed_command_seconds": session::COMPLETED_COMMAND_RETENTION_SECONDS,
             "buffer_bytes_per_stream": session::COMMAND_BUFFER_BYTES
         },
+        "vision": {"screen_capture_enabled": ctx.policy.allow_screen_capture, "storage": "memory_only", "model_calls": false},
+        "local_tool_engine": {"implementation": "embedded_rust", "codex_agent": false, "model_calls": false, "os_sandbox": false},
         "tools": tools,
         "tool_count": tools.len()
     })))

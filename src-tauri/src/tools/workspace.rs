@@ -705,33 +705,47 @@ pub fn wrap_tool_result(structured: Value) -> Value {
     wrap_mcp_tool_result("", &serde_json::json!({}), structured)
 }
 
-pub fn wrap_mcp_tool_result(tool_name: &str, args: &Value, structured: Value) -> Value {
+pub fn wrap_mcp_tool_result(tool_name: &str, args: &Value, mut structured: Value) -> Value {
     let is_error = structured.get("ok").and_then(Value::as_bool) == Some(false);
-    let content = if tool_name == "view_image"
-        && args
-            .get("output")
+    let image_result = matches!(
+        tool_name,
+        "view_image" | "capture_screenshot" | "capture_window"
+    ) && args
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or("mcp_image")
+        == "mcp_image"
+        && !is_error;
+    let content = if image_result {
+        let data = structured
+            .as_object_mut()
+            .and_then(|object| {
+                object.remove("data_url");
+                object.remove("base64")
+            })
+            .unwrap_or(Value::Null);
+        let mime = structured
+            .get("mime_type")
             .and_then(Value::as_str)
-            .unwrap_or("mcp_image")
-            == "mcp_image"
-        && !is_error
-    {
-        vec![json!({
-            "type": "image",
-            "data": structured.get("base64").and_then(Value::as_str).unwrap_or(""),
-            "mimeType": structured
-                .get("mime_type")
-                .and_then(Value::as_str)
-                .unwrap_or("application/octet-stream")
-        })]
+            .unwrap_or("");
+        if data.as_str().is_none_or(str::is_empty)
+            || !matches!(
+                mime,
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            )
+        {
+            return wrap_tool_result(tool_err_code(
+                "INVALID_IMAGE_RESULT",
+                "Image tool did not return a valid image payload",
+                "runtime",
+            ));
+        }
+        vec![
+            json!({"type": "image", "data": data, "mimeType": mime}),
+            json!({"type": "text", "text": structured.to_string()}),
+        ]
     } else {
-        vec![json!({
-            "type": "text",
-            "text": structured.to_string()
-        })]
+        vec![json!({"type": "text", "text": structured.to_string()})]
     };
-    json!({
-        "content": content,
-        "structuredContent": structured,
-        "isError": is_error
-    })
+    json!({"content": content, "structuredContent": structured, "isError": is_error})
 }

@@ -98,6 +98,7 @@ pub struct PolicySettings {
     pub max_patch_bytes: usize,
     pub permission_mode: String,
     pub approval_mode: String,
+    pub allow_screen_capture: bool,
 }
 
 impl Default for PolicySettings {
@@ -109,6 +110,7 @@ impl Default for PolicySettings {
             max_patch_bytes: 200_000,
             permission_mode: "workspace-write".into(),
             approval_mode: "on-request".into(),
+            allow_screen_capture: false,
         }
     }
 }
@@ -126,6 +128,7 @@ impl PolicySettings {
                 .as_str()
                 .to_string(),
             approval_mode: canonical_approval_mode(&runtime.approval_mode),
+            allow_screen_capture: runtime.allow_screen_capture,
         }
     }
 
@@ -139,6 +142,7 @@ impl PolicySettings {
                 .as_str()
                 .to_string(),
             approval_mode: "on-request".into(),
+            allow_screen_capture: false,
         }
     }
 

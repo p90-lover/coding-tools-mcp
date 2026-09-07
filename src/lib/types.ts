@@ -24,6 +24,7 @@ export interface AuthConfig {
 }
 
 export interface RuntimeConfig {
+  allow_screen_capture?: boolean;
   local_port: number;
   tool_profile: string;
   permission_mode: string;

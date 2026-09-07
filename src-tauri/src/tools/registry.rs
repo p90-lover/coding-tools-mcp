@@ -321,6 +321,13 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
         false,
         false,
     ),
+    ("vision_status", "Vision capabilities", "Return local vision capabilities and capture permission status without capturing the screen.", true, false, false),
+    ("image_info", "Inspect image metadata", "Read bounded workspace image dimensions, format, byte size and SHA-256 without returning pixels.", true, false, false),
+    ("compare_images", "Compare images", "Compare two workspace images deterministically; return changed pixel ratio and bounds, not semantic interpretation.", true, false, false),
+    ("list_displays", "List displays", "List displays after desktop-app screen-capture opt-in; no images are captured.", true, false, true),
+    ("list_windows", "List windows", "List bounded window IDs, process IDs and titles after local capture opt-in. Titles are untrusted data.", true, false, true),
+    ("capture_screenshot", "Capture screenshot", "Capture a selected display or crop as native MCP image content. Requires local screen-capture opt-in. In-memory only, no model call.", true, false, true),
+    ("capture_window", "Capture window", "Capture one selected non-minimized window using window_id and expected_pid. Requires local opt-in. Never captures another window on failure.", true, false, true),
 ];
 
 /// old Python 版本默认提供的核心工具集。默认 MCP 只暴露这一组，保持 Agent 的工具面稳定。
@@ -352,6 +359,13 @@ pub const CORE_TOOLS: &[&str] = &[
     "git_blame",
     "request_permissions",
     "view_image",
+    "vision_status",
+    "image_info",
+    "compare_images",
+    "list_displays",
+    "list_windows",
+    "capture_screenshot",
+    "capture_window",
 ];
 
 pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
@@ -372,6 +386,13 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
     "git_blame",
     "request_permissions",
     "view_image",
+    "vision_status",
+    "image_info",
+    "compare_images",
+    "list_displays",
+    "list_windows",
+    "capture_screenshot",
+    "capture_window",
 ];
 
 pub const ALLOWED_TOOLS: &[&str] = &[
@@ -416,6 +437,13 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "change_summary",
     "request_permissions",
     "view_image",
+    "vision_status",
+    "image_info",
+    "compare_images",
+    "list_displays",
+    "list_windows",
+    "capture_screenshot",
+    "capture_window",
 ];
 
 pub const MUTATING_TOOLS: &[&str] = &[
@@ -458,6 +486,13 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "git_blame",
     "request_permissions",
     "view_image",
+    "vision_status",
+    "image_info",
+    "compare_images",
+    "list_displays",
+    "list_windows",
+    "capture_screenshot",
+    "capture_window",
     "patch_check",
     "project_state",
     "task_context",
@@ -472,6 +507,7 @@ pub fn is_allowed_tool(name: &str) -> bool {
 pub fn canonical_tool_name(name: &str) -> &str {
     match name {
         "grep" => "grep_text",
+        "screenshot" | "take_screenshot" => "capture_screenshot",
         _ => name,
     }
 }
@@ -518,8 +554,8 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
                         "title": title,
                         "readOnlyHint": read_only,
                         "destructiveHint": destructive,
-                        "idempotentHint": read_only,
-                        "openWorldHint": open_world
+                        "idempotentHint": read_only && !matches!(name, "capture_screenshot" | "capture_window"),
+                        "openWorldHint": open_world || matches!(name, "list_displays" | "list_windows" | "capture_screenshot" | "capture_window")
                     }
                 })
             })
@@ -886,18 +922,23 @@ pub fn input_schema(name: &str) -> Value {
             },
             "additionalProperties": false
         }),
-        "view_image" => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "minLength": 1 },
-                "max_bytes": { "type": "integer", "minimum": 1024, "maximum": 10485760, "default": 5242880 },
-                "max_width": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2000 },
-                "max_height": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2000 },
-                "auto_resize": { "type": "boolean", "default": true },
-                "output": { "type": "string", "enum": ["mcp_image", "data_url"], "default": "mcp_image" }
-            },
-            "required": ["path"],
-            "additionalProperties": false
+        "view_image" | "capture_screenshot" | "capture_window" => vision_schema(name),
+        "image_info" => json!({
+            "type": "object", "properties": {"path": {"type": "string", "minLength": 1}},
+            "required": ["path"], "additionalProperties": false
+        }),
+        "compare_images" => json!({
+            "type": "object", "properties": {
+                "before_path": {"type": "string", "minLength": 1},
+                "after_path": {"type": "string", "minLength": 1},
+                "threshold": {"type": "integer", "minimum": 0, "maximum": 255, "default": 0}
+            }, "required": ["before_path", "after_path"], "additionalProperties": false
+        }),
+        "list_windows" => json!({
+            "type": "object", "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+                "include_minimized": {"type": "boolean", "default": false}
+            }, "additionalProperties": false
         }),
         _ => json!({
             "type": "object",
@@ -907,6 +948,42 @@ pub fn input_schema(name: &str) -> Value {
     }
 }
 
+fn vision_schema(name: &str) -> Value {
+    let region = json!({"type": "object", "properties": {
+        "x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0},
+        "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}
+    }, "required": ["x", "y", "width", "height"], "additionalProperties": false});
+    let mut properties = json!({
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 5242880, "default": 5242880},
+        "max_width": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
+        "max_height": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
+        "auto_resize": {"type": "boolean", "default": true},
+        "output": {"type": "string", "enum": ["mcp_image", "data_url"], "default": "mcp_image"},
+        "crop": region,
+        "redactions": {"type": "array", "maxItems": 32, "items": region,
+            "description": "Opaque rectangles, in physical pixels relative to the cropped image, applied before resizing."}
+    });
+    let required = match name {
+        "view_image" => {
+            properties["path"] = json!({"type": "string", "minLength": 1});
+            json!(["path"])
+        }
+        "capture_window" => {
+            properties["window_id"] =
+                json!({"type": "integer", "minimum": 0, "maximum": 4294967295u64});
+            properties["expected_pid"] =
+                json!({"type": "integer", "minimum": 1, "maximum": 4294967295u64});
+            json!(["window_id", "expected_pid"])
+        }
+        _ => {
+            properties["monitor_id"] = json!({"type": "integer", "minimum": 0, "maximum": 4294967295u64,
+                "description": "Selected display ID from list_displays; omitted selects the primary display only."});
+            json!([])
+        }
+    };
+    json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -914,7 +991,7 @@ mod tests {
     use super::{input_schema, list_tools_for_profile};
 
     #[test]
-    fn core_catalog_exposes_27_chatgpt_compatible_tools() {
+    fn core_catalog_exposes_chatgpt_compatible_tools() {
         let tools = list_tools_for_profile("core");
         let names: Vec<_> = tools
             .iter()
@@ -922,7 +999,9 @@ mod tests {
             .collect();
         let unique: HashSet<_> = names.iter().copied().collect();
 
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 34);
+        assert!(names.contains(&"capture_screenshot"));
+        assert!(names.contains(&"capture_window"));
         assert_eq!(unique.len(), tools.len());
         assert!(names.contains(&"history_session_bootstrap"));
         assert!(names.contains(&"history_session_checkpoint"));

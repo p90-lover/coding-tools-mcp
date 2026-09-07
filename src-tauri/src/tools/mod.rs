@@ -10,6 +10,7 @@ pub mod patch;
 pub mod policy;
 pub mod project_context;
 pub mod registry;
+mod screen_tool;
 pub mod session;
 pub mod workspace;
 

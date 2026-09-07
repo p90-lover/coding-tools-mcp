@@ -424,6 +424,7 @@
         tool_profile: draft.toolProfile,
         permission_mode: draft.permissionMode,
         approval_mode: draft.approvalMode,
+        allow_screen_capture: draft.allowScreenCapture,
         allowed_commands: draft.allowedCommands,
         workspace_local_entries: draft.workspaceLocalEntries,
         workspace_script_extensions: draft.workspaceScriptExtensions,
@@ -681,6 +682,7 @@
                 toolProfile={profile.runtime.tool_profile}
                 permissionMode={profile.runtime.permission_mode}
                 approvalMode={profile.runtime.approval_mode ?? "auto-workspace"}
+                allowScreenCapture={profile.runtime.allow_screen_capture ?? false}
                 allowedCommands={profile.runtime.allowed_commands ?? ""}
                 workspaceLocalEntries={profile.runtime.workspace_local_entries ?? true}
                 workspaceScriptExtensions={profile.runtime.workspace_script_extensions ?? ".exe,.bat,.cmd,.ps1"}

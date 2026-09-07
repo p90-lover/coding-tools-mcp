@@ -15,6 +15,12 @@ const AGENT_FILE_NAMES: &[&str] = &["agents.md", "agent.md", "claude.md"];
 /// Resolve bounded project instructions for the exact path/workdir addressed by a tool call.
 /// The primary workspace and each approved linked project form separate instruction scopes.
 pub fn for_tool(ctx: &ToolContext, tool_name: &str, args: &Value) -> Value {
+    if tool_name == "compare_images" {
+        let before = for_tool(ctx, "image_info", &json!({"path": args.get("before_path")}));
+        let after = for_tool(ctx, "image_info", &json!({"path": args.get("after_path")}));
+        return json!({"selection": "image_pair", "scopes": [before, after]});
+    }
+
     let hint = path_hint(tool_name, args);
     let candidate = candidate_path(ctx, hint.as_deref());
     let display_target = display_or_dot(ctx, &candidate);
@@ -167,9 +173,9 @@ fn path_hint(tool_name: &str, args: &Value) -> Option<String> {
 
     match tool_name {
         "read_file" | "list_dir" | "list_files" | "search_text" | "grep_text" | "grep"
-        | "git_status" | "git_log" | "git_blame" | "view_image" | "set_default_cwd" => {
-            string("path")
-        }
+        | "git_status" | "git_log" | "git_blame" | "view_image" | "image_info"
+        | "set_default_cwd" => string("path"),
+        "compare_images" => string("before_path"),
         "exec_command" => string("workdir").or_else(|| string("cwd")),
         "git_diff" => string("path").or_else(|| first_array_string("paths")),
         "git_show" => string("path").or_else(|| first_array_string("paths")),

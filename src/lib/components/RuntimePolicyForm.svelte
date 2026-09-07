@@ -6,6 +6,7 @@
     allowedCommands: string;
     workspaceLocalEntries: boolean;
     workspaceScriptExtensions: string;
+    allowScreenCapture: boolean;
   }
 
   interface Props {
@@ -15,6 +16,7 @@
     allowedCommands: string;
     workspaceLocalEntries: boolean;
     workspaceScriptExtensions: string;
+    allowScreenCapture: boolean;
     onSave: (draft: RuntimePolicyDraft) => void | Promise<void>;
   }
 
@@ -51,7 +53,7 @@
     return "ask";
   }
 
-  let { toolProfile, permissionMode, approvalMode, allowedCommands, workspaceLocalEntries, workspaceScriptExtensions, onSave }: Props = $props();
+  let { toolProfile, permissionMode, approvalMode, allowedCommands, workspaceLocalEntries, workspaceScriptExtensions, allowScreenCapture = false, onSave }: Props = $props();
 
   let draftProfile = $state("full");
   let draftMode = $state("workspace-write");
@@ -59,10 +61,11 @@
   let draftCommands = $state("");
   let draftLocalEntries = $state(true);
   let draftExtensions = $state(".exe,.bat,.cmd,.ps1");
+  let draftScreenCapture = $state(false);
   let saving = $state(false);
 
   const dirty = $derived(
-    draftProfile !== toolProfile || draftMode !== normalizePermissionMode(permissionMode) || draftApprovalMode !== normalizeApprovalMode(approvalMode) || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions,
+    draftProfile !== toolProfile || draftMode !== normalizePermissionMode(permissionMode) || draftApprovalMode !== normalizeApprovalMode(approvalMode) || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions || draftScreenCapture !== allowScreenCapture,
   );
 
   $effect(() => {
@@ -72,13 +75,14 @@
     draftCommands = allowedCommands;
     draftLocalEntries = workspaceLocalEntries;
     draftExtensions = workspaceScriptExtensions;
+    draftScreenCapture = allowScreenCapture;
   });
 
   async function save() {
     if (saving || !dirty) return;
     saving = true;
     try {
-      await onSave({ toolProfile: draftProfile, permissionMode: draftMode, approvalMode: draftApprovalMode, allowedCommands: draftCommands.trim(), workspaceLocalEntries: draftLocalEntries, workspaceScriptExtensions: draftExtensions.trim() });
+      await onSave({ toolProfile: draftProfile, permissionMode: draftMode, approvalMode: draftApprovalMode, allowedCommands: draftCommands.trim(), workspaceLocalEntries: draftLocalEntries, workspaceScriptExtensions: draftExtensions.trim(), allowScreenCapture: draftScreenCapture });
     } finally {
       saving = false;
     }
@@ -143,6 +147,15 @@
   <p class="text-xs text-[var(--color-text-muted)]">
     read-only 会阻止项目修改及大部分命令；workspace-write 允许 Workspace 内写入；danger-full-access 只跳过软批准。管理员提升、受保护仓库路径及 Workspace 外写入仍会硬性拒绝；当前执行边界仍为 policy_only，并非操作系统级 sandbox。
   </p>
+  <fieldset class="grid gap-2 rounded-md border border-[var(--color-border)] p-3">
+    <legend class="text-sm font-medium">本機視覺工具 / Local vision</legend>
+    <label class="flex items-start gap-2 text-sm">
+      <input type="checkbox" bind:checked={draftScreenCapture} />
+      <span>允許此 Workspace 的 MCP 擷取螢幕、視窗及列出視窗標題</span>
+    </label>
+    <p class="text-xs text-[var(--color-text-muted)]">預設關閉。啟用後，已連接的客戶端可要求截圖；可能包含私人資料。圖片只在記憶體處理，不會另存檔案或呼叫 Codex／OCR 模型。系統錄屏權限仍須自行授權。儲存後必須重新啟動 MCP；關閉也須重啟才會撤銷執行中服務的權限。</p>
+    <p class="text-xs text-[var(--color-text-muted)]">圖片查看、區域裁切、遮蔽、像素比較在本機執行；語意解讀由收到 MCP 圖片的 ChatGPT 負責。此開關不會開放 Actions 的螢幕擷取。</p>
+  </fieldset>
   <div class="flex justify-end pt-1">
     <button
       type="submit"

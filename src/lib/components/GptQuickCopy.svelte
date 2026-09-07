@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ChatGptSetup from "$lib/components/ChatGptSetup.svelte";
   import CopyFieldRow from "$lib/components/CopyFieldRow.svelte";
   import { getSecret, getSharedSecret } from "$lib/api/secrets";
   import type { AuthConfig, WorkspaceProfile } from "$lib/types";
@@ -116,6 +117,7 @@
 
   <div class="grid gap-3">
     {#if service === "mcp"}
+      <ChatGptSetup {workspaceId} {profile} publicEndpoint={publicMcpEndpoint} />
       <CopyFieldRow
         label="公网 MCP 地址"
         value={publicMcpEndpoint}
