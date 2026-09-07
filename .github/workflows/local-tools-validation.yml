@@ -1,0 +1,40 @@
+name: Local tools validation
+
+on:
+  push:
+    branches: [feature/local-vision-zero-codex]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-tools-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Preserve exact source (no model calls)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          clean: false
+      - name: Archive the immutable tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p aiTemp/source-snapshot
+          git archive --format=zip "$GITHUB_SHA" --output=aiTemp/source-snapshot/source.zip
+          printf '%s\n' "$GITHUB_SHA" > aiTemp/source-snapshot/commit.txt
+          (cd aiTemp/source-snapshot && sha256sum source.zip commit.txt > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: local-tools-source-${{ github.sha }}
+          path: aiTemp/source-snapshot/*
+          if-no-files-found: error
+          retention-days: 7
