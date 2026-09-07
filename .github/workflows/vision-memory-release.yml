@@ -1,0 +1,331 @@
+name: Memory-only vision release candidate
+
+on:
+  push:
+    branches: [release/vision-memory-0.3.3-rc.1]
+    paths:
+      - '.github/workflows/vision-memory-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: vision-memory-release-0.3.3-rc.1
+  cancel-in-progress: false
+
+env:
+  VERSION: 0.3.3-rc.1
+  CARGO_INCREMENTAL: '0'
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner && github.ref == 'refs/heads/release/vision-memory-0.3.3-rc.1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          persist-credentials: false
+          clean: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Materialize the reviewed no-save source and retain originals
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/prepared
+          python - <<'PY'
+          import base64, hashlib, lzma, os, re, shutil, subprocess
+          from pathlib import Path, PurePosixPath
+          paths = ['src-tauri/src/tools/screen_tool.rs','docs/features/local-vision.md','package.json','package-lock.json','src-tauri/tauri.conf.json','src-tauri/Cargo.toml','src-tauri/Cargo.lock','docs/releases/v0.3.3-rc.1.md']
+          encoded = Path('aiTemp/vision-memory-release/source.patch.xz.b64').read_text().strip()
+          assert len(encoded) < 65536
+          data = lzma.decompress(base64.b64decode(encoded,validate=True),memlimit=32*1024*1024)
+          assert hashlib.sha256(data).hexdigest() == '6b0d04ee9d002f579fc6a229f815417ba4ff4720837b4422cfcc8ce097153719'
+          assert not re.search(rb'^(deleted file mode|rename |copy |old mode|new mode|\+\+\+ /dev/null)',data,re.M)
+          changed = re.findall(rb'^\+\+\+ b/(.+)$',data,re.M)
+          assert {p.decode() for p in changed} == set(paths) and len(changed) == len(paths)
+          for path in paths:
+              p=Path(path)
+              assert not p.is_symlink() and '..' not in PurePosixPath(path).parts
+              assert all(not parent.is_symlink() for parent in p.parents)
+          patch=Path('aiTemp/prepared/input.patch'); patch.write_bytes(data)
+          if not Path('docs/releases/v0.3.3-rc.1.md').exists():
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              for path in paths:
+                  p=Path(path)
+                  if p.exists():
+                      dest=Path('aiTemp/Trash/vision-release-before')/os.environ['GITHUB_RUN_ID']/path
+                      assert not dest.exists()
+                      dest.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(p,dest)
+              subprocess.run(['git','apply',str(patch)],check=True)
+          subprocess.run(['rustfmt','--edition','2021','--config','skip_children=true',paths[0]],check=True)
+          subprocess.run(['git','add','--',*paths],check=True)
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          Path('aiTemp/prepared/source.patch').write_bytes(subprocess.check_output(['git','diff','--cached','--binary','--full-index']))
+          Path('aiTemp/prepared/paths.txt').write_text('\n'.join(paths)+'\n')
+          Path('aiTemp/prepared/base-sha.txt').write_text(os.environ['GITHUB_SHA']+'\n')
+          PY
+          (cd aiTemp/prepared && sha256sum source.patch paths.txt base-sha.txt > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memory-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: aiTemp/checkout/aiTemp/prepared/*
+          if-no-files-found: error
+          retention-days: 14
+
+  commit-source:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          persist-credentials: false
+          clean: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: memory-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: aiTemp/checkout/aiTemp/prepared
+      - name: Commit exact production source without running repository scripts
+        id: commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          (cd aiTemp/prepared && sha256sum --check SHA256SUMS)
+          test "$(cat aiTemp/prepared/base-sha.txt)" = "$GITHUB_SHA"
+          python - <<'PY'
+          import os,re,shutil,subprocess
+          from pathlib import Path
+          allowed={'src-tauri/src/tools/screen_tool.rs','docs/features/local-vision.md','package.json','package-lock.json','src-tauri/tauri.conf.json','src-tauri/Cargo.toml','src-tauri/Cargo.lock','docs/releases/v0.3.3-rc.1.md'}
+          patch=Path('aiTemp/prepared/source.patch'); data=patch.read_bytes()
+          assert not re.search(rb'^(deleted file mode|rename |copy |old mode|new mode|\+\+\+ /dev/null)',data,re.M)
+          for raw in re.findall(rb'^\+\+\+ b/(.+)$',data,re.M):
+              path=raw.decode(); assert path in allowed
+              p=Path(path); assert not p.is_symlink() and all(not parent.is_symlink() for parent in p.parents)
+              if p.exists():
+                  dest=Path('aiTemp/Trash/vision-release-commit')/os.environ['GITHUB_RUN_ID']/path
+                  assert not dest.exists(); dest.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(p,dest)
+          if data:
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              subprocess.run(['git','apply','--index',str(patch)],check=True)
+          PY
+          git config user.name p90-lover
+          git config user.email 146848721+p90-lover@users.noreply.github.com
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: enforce memory-only screenshots and prepare v0.3.3-rc.1'
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+            remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin refs/heads/release/vision-memory-0.3.3-rc.1 | cut -f1)"
+            test "$remote" = "$GITHUB_SHA"
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/release/vision-memory-0.3.3-rc.1
+          fi
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  native:
+    needs: commit-source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            bundle: nsis
+          - os: macos-14
+            platform: macos-arm64
+            bundle: dmg
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      SOURCE: ${{ needs.commit-source.outputs.source }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.commit-source.outputs.source }}
+          path: aiTemp/checkout
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Verify source identity, no-save contract, and frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/installer aiTemp/process-temp
+          python - <<'PY'
+          import json,os,re,subprocess,tomllib
+          from pathlib import Path
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['SOURCE']
+          versions=[json.loads(Path(p).read_text())['version'] for p in ['package.json','package-lock.json','src-tauri/tauri.conf.json']]
+          versions.append(json.loads(Path('package-lock.json').read_text())['packages']['']['version'])
+          manifest=tomllib.loads(Path('src-tauri/Cargo.toml').read_text())['package']
+          versions.append(manifest['version'])
+          versions.extend(p['version'] for p in tomllib.loads(Path('src-tauri/Cargo.lock').read_text())['package'] if p['name']==manifest['name'])
+          assert all(v==os.environ['VERSION'] for v in versions)
+          capture=Path('src-tauri/src/tools/screen_tool.rs').read_text().split('#[cfg(test)]')[0]
+          assert 'if !memory_only_backend_supported()' in capture
+          assert capture.count('let options = capture_options(args)?;')==2
+          assert not re.search(r'(std::fs|File::create|OpenOptions|\.save\(|temp_dir\(|tempfile|Command::)',capture)
+          Path('aiTemp/evidence/source-contract.txt').write_text('PASS: version identity, backend gate, destination rejection, no capture file/process sink\n')
+          PY
+          rustfmt --check --edition 2021 --config skip_children=true src-tauri/src/tools/screen_tool.rs
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+      - name: Focused native vision tests and tool catalog (no desktop capture)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib vision_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/vision.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib core_catalog_exposes_chatgpt_compatible_tools -- --test-threads=1 2>&1 | tee aiTemp/evidence/catalog.txt
+          python - <<'PY'
+          from pathlib import Path
+          assert '5 passed; 0 failed' in Path('aiTemp/evidence/vision.txt').read_text()
+          assert '1 passed; 0 failed' in Path('aiTemp/evidence/catalog.txt').read_text()
+          PY
+      - name: Build fresh native installer
+        shell: bash
+        env:
+          BUNDLE: ${{ matrix.bundle }}
+          CI: 'true'
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles "$BUNDLE" -- --locked 2>&1 | tee aiTemp/evidence/installer.txt
+          git diff --exit-code -- package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          python - <<'PY'
+          import hashlib,json,os,shutil,subprocess
+          from pathlib import Path
+          target=Path(os.environ['CARGO_TARGET_DIR'])/'release'
+          windows=os.environ['PLATFORM']=='windows-x64'
+          binaries=[target/'coding-tools-mcp-desktop.exe'] if windows else list((target/'bundle/macos').glob('*.app/Contents/MacOS/coding-tools-mcp-desktop'))
+          assert len(binaries)==1 and binaries[0].is_file()
+          version=subprocess.run([str(binaries[0]),'--version'],capture_output=True,text=True,check=True,timeout=20).stdout.strip()
+          assert version=='coding-tools-mcp-desktop '+os.environ['VERSION'], repr(version)
+          Path('aiTemp/evidence/binary-version.txt').write_text(version+'\n')
+          pattern='bundle/nsis/*.exe' if windows else 'bundle/dmg/*.dmg'
+          assets=list(target.glob(pattern)); assert len(assets)==1 and assets[0].stat().st_size>100000
+          destination=Path('aiTemp/installer')/assets[0].name
+          assert not destination.exists(); shutil.copy2(assets[0],destination)
+          proof={'source_commit':os.environ['SOURCE'],'version':os.environ['VERSION'],'platform':os.environ['PLATFORM'],'asset':destination.name,'size':destination.stat().st_size,'sha256':hashlib.sha256(destination.read_bytes()).hexdigest(),'vision_tests_passed':5,'catalog_tests_passed':1,'screenshot_storage':'memory_only','interactive_capture_verified':False,'codex_invoked':False,'publisher_signed':False}
+          Path('aiTemp/installer/proof.json').write_text(json.dumps(proof,indent=2)+'\n')
+          Path('aiTemp/evidence/proof.json').write_text(json.dumps(proof,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memory-installer-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/installer/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: memory-validation-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [commit-source, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SOURCE: ${{ needs.commit-source.outputs.source }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: memory-installer-*-${{ github.run_id }}
+          path: aiTemp/installers
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: memory-validation-*-${{ github.run_id }}
+          path: aiTemp/validation
+      - name: Verify installer pair and publish a new prerelease only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-assets
+          python - <<'PY'
+          import hashlib,json,os,shutil,zipfile
+          from pathlib import Path
+          root=Path('aiTemp/installers'); dest=Path('aiTemp/release-assets')
+          proofs=[json.loads(p.read_text()) for p in root.glob('*/proof.json')]
+          assert len(proofs)==2 and {p['platform'] for p in proofs}=={'windows-x64','macos-arm64'}
+          for proof in proofs:
+              assert proof['source_commit']==os.environ['SOURCE'] and proof['version']==os.environ['VERSION']
+              assert proof['vision_tests_passed']==5 and proof['catalog_tests_passed']==1
+              assert proof['screenshot_storage']=='memory_only' and proof['codex_invoked'] is False
+              assert Path(proof['asset']).name==proof['asset']
+              matches=list(root.glob('*/'+proof['asset'])); assert len(matches)==1
+              asset=matches[0]; assert asset.is_file() and not asset.is_symlink()
+              assert asset.stat().st_size==proof['size'] and hashlib.sha256(asset.read_bytes()).hexdigest()==proof['sha256']
+              shutil.copy2(asset,dest/asset.name)
+          provenance={'version':os.environ['VERSION'],'tag':'v'+os.environ['VERSION'],'source_commit':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'prerelease':True,'installers':proofs}
+          (dest/'release-provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
+          with zipfile.ZipFile(dest/'vision-validation.zip','x',zipfile.ZIP_DEFLATED) as z:
+              for path in sorted(Path('aiTemp/validation').rglob('*')):
+                  if path.is_file():
+                      assert path.suffix in {'.json','.txt'} and not path.is_symlink()
+                      z.write(path,path.relative_to('aiTemp/validation').as_posix())
+          files=sorted(dest.iterdir())
+          (dest/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))
+          PY
+          branch_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/release/vision-memory-0.3.3-rc.1" --jq .object.sha)"
+          test "$branch_sha" = "$SOURCE"
+          gh api "repos/$GITHUB_REPOSITORY/contents/docs/releases/v$VERSION.md?ref=$SOURCE" --jq .content | base64 --decode > aiTemp/release-notes.md
+          # No --clobber, no existing tag movement, and no latest stable update.
+          gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$VERSION" > aiTemp/existing-tags.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          assert not json.loads(Path('aiTemp/existing-tags.json').read_text()), 'Tag already exists: refusing replacement'
+          PY
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$SOURCE" --draft --prerelease --latest=false --title "Coding Tools MCP v$VERSION — memory-only vision" --notes-file aiTemp/release-notes.md aiTemp/release-assets/*
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" > aiTemp/uploaded.json
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" > aiTemp/tag.json
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          actual=json.loads(Path('aiTemp/uploaded.json').read_text())
+          assert actual['draft'] is True and actual['prerelease'] is True
+          assert json.loads(Path('aiTemp/tag.json').read_text())['object']['sha']==os.environ['SOURCE']
+          assets={a['name']:a for a in actual['assets']}; files=list(Path('aiTemp/release-assets').iterdir())
+          assert set(assets)=={p.name for p in files}
+          for p in files:
+              assert assets[p.name]['size']==p.stat().st_size
+              assert assets[p.name]['digest']=='sha256:'+hashlib.sha256(p.read_bytes()).hexdigest()
+          PY
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" --jq '{url:.html_url,draft,prerelease,tag_name,assets:[.assets[]|{name,size,digest,browser_download_url}]}'
