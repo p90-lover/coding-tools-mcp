@@ -39,7 +39,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '22'
-      - name: Reuse boundary assertions with a constrained-language-compatible write fixture
+      - name: Reuse boundary assertions with an ordinary Windows write fixture
         shell: bash
         run: |
           set -euo pipefail
@@ -55,19 +55,34 @@ jobs:
               assert all(not line or line.startswith('          ') for line in lines)
               script='\n'.join(line[10:] if line else '' for line in lines)+'\n'
               if out=='proof.sh':
-                  # Native Windows sandbox deliberately uses ConstrainedLanguage.
-                  # A .NET static method is not a valid positive write control there.
-                  # Keep every assertion/policy unchanged; use the ordinary file cmdlet.
                   old="[IO.File]::WriteAllText('{}','sandbox-proof')"
                   new="Set-Content -LiteralPath '{}' -Value 'sandbox-proof' -NoNewline -ErrorAction Stop"
                   assert script.count(old)==1
                   script=script.replace(old,new)
                   assert 'outside.exists()' in script and 'readonly.exists()' in script
                   assert 'successful(&blocked)' in script and 'successful(&control)' in script
+                  anchor='cargo run --manifest-path aiTemp/native-proof/Cargo.toml'
+                  assert script.count(anchor)==1
+                  script=script.replace(anchor,"python ../native-diagnostics.py\n"+anchor)
               (root/'aiTemp'/out).write_text(script,encoding='utf-8')
           PY
+          cat > aiTemp/native-diagnostics.py <<'PY'
+          # Diagnostic-only copies under aiTemp, with an empty isolated CODEX_HOME.
+          # No user login or model call occurs, and production error redaction is unchanged.
+          from pathlib import Path
+          p=Path('aiTemp/native-proof/src/transport.rs')
+          text=p.read_text()
+          old='Err(format!("Codex RPC rejected the request (code {}). Check the local Codex login/configuration", message.pointer("/error/code").unwrap_or(&Value::Null)))'
+          assert text.count(old)==1
+          p.write_text(text.replace(old,'Err(format!("Isolated CI native error: {}", message["error"]))'))
+          p=Path('aiTemp/native-proof/src/session.rs')
+          text=p.read_text()
+          old='fn receive(&self, message: Value) {'
+          assert text.count(old)==1
+          p.write_text(text.replace(old,old+'\n        if message["method"].as_str().is_some_and(|m| m.starts_with("windowsSandbox/")) { eprintln!("Isolated Windows setup event: {message}"); }'))
+          PY
           bash aiTemp/download.sh
-      - name: Re-run real Codex write and network isolation with unchanged boundary assertions
+      - name: Re-run native write and network isolation with setup diagnostics
         shell: bash
         working-directory: aiTemp/source
         run: bash ../proof.sh
