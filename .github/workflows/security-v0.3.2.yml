@@ -6,22 +6,18 @@ on:
     paths:
       - aiTemp/release-v0.3.2/**
       - .github/workflows/security-v0.3.2.yml
-
 permissions:
   contents: read
   actions: read
-
 concurrency:
   group: security-v032-${{ github.ref }}
   cancel-in-progress: false
-
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-v032
   PYTHONDONTWRITEBYTECODE: '1'
   XDG_CONFIG_HOME: ${{ github.workspace }}/aiTemp/test-config
   NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
-
 jobs:
   validate:
     if: github.actor == github.repository_owner && github.repository == 'p90-lover/coding-tools-mcp'
@@ -42,7 +38,7 @@ jobs:
           set -euo pipefail
           mkdir -p aiTemp/release-v0.3.2 aiTemp/validation-logs aiTemp/test-config
           gh api repos/p90-lover/coding-tools-mcp/actions/artifacts/10004358051/zip > aiTemp/release-v0.3.2/verified-source.zip
-          python aiTemp/release-v0.3.2/materialize.py | tee aiTemp/validation-logs/materialize.log
+          python aiTemp/release-v0.3.2/materialize.py 2>&1 | tee aiTemp/validation-logs/materialize.log
       - name: Install native Linux build dependencies
         run: |
           sudo apt-get update
@@ -56,8 +52,10 @@ jobs:
         working-directory: src-tauri
         run: |
           set -uo pipefail
+          set +e
           cargo test --locked --lib release_finalization_ -- --nocapture > ../aiTemp/validation-logs/red.log 2>&1
           status=$?
+          set -e
           tail -70 ../aiTemp/validation-logs/red.log
           test "$status" -eq 101
           grep -F 'test result: FAILED. 0 passed; 3 failed;' ../aiTemp/validation-logs/red.log
@@ -66,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f aiTemp/release-v0.3.2/finalize.py
-          python aiTemp/release-v0.3.2/finalize.py | tee aiTemp/validation-logs/finalize.log
+          python aiTemp/release-v0.3.2/finalize.py 2>&1 | tee aiTemp/validation-logs/finalize.log
       - name: Verify targeted regressions and existing Rust gates
         shell: bash
         working-directory: src-tauri
