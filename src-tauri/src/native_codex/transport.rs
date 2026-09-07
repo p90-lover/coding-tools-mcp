@@ -34,6 +34,10 @@ fn native_command(binary: &Path, cwd: &Path) -> Command {
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW, not elevation.
+        // Codex one-off execution reads this from the server's base Config, not
+        // from a thread/start override. Select the real sandbox at both levels.
+        // Setup remains a separate, explicit local action; no UAC is bypassed.
+        cmd.args(["-c", "windows.sandbox=\"elevated\""]);
     }
     cmd
 }
