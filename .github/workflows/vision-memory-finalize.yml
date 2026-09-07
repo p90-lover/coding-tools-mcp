@@ -1,0 +1,141 @@
+name: Publish verified memory-only vision
+on:
+  push:
+    branches: [release/vision-memory-finalize]
+    paths: ['.github/workflows/vision-memory-finalize.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: memory-vision-final-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.actor == github.repository_owner && github.ref == 'refs/heads/release/vision-memory-finalize'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Reserve draft and verify native artifacts before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/publication
+          python - <<'PY'
+          import base64,hashlib,json,os,re,shutil,subprocess,time,zipfile
+          from pathlib import Path
+          repo=os.environ['GITHUB_REPOSITORY']; assert repo=='p90-lover/coding-tools-mcp'
+          source='7bed552df903b0cad31a5f7f016ff2e46201e835'; version='0.3.3-rc.1'; tag='v'+version
+          old_run=34139321515; mac_run=34141210495
+          root=Path('aiTemp/publication')
+          def api(path,method='GET',payload=None):
+              cmd=['gh','api','--method',method,f'repos/{repo}/{path}']
+              if payload is not None: cmd+=['--input','-']
+              result=subprocess.run(cmd,input=json.dumps(payload).encode() if payload is not None else None,stdout=subprocess.PIPE,check=True)
+              return json.loads(result.stdout)
+          note=api(f'contents/docs/releases/{tag}.md?ref={source}')
+          notes=base64.b64decode(note['content']).decode()
+          existing=[r for r in api('releases?per_page=100') if r['tag_name']==tag]
+          assert len(existing)<=1
+          if existing:
+              release=api(f"releases/{existing[0]['id']}")
+              assert release['draft'] is True and release['target_commitish']==source and not release['assets'], 'Refusing to overwrite release or existing assets'
+          else:
+              release=api('releases','POST',{'tag_name':tag,'target_commitish':source,'name':f'Coding Tools MCP {tag} — memory-only vision','body':notes,'draft':True,'prerelease':True,'make_latest':'false'})
+          print('Reserved unpublished candidate draft; waiting only for the existing Mac packaging job.',flush=True)
+          original=api(f'actions/runs/{old_run}')
+          assert original['head_sha']=='e329437218515698fbc25c16357c156631ae5d37'
+          oldjobs={j['name']:j for j in api(f'actions/runs/{old_run}/jobs?per_page=100')['jobs']}
+          assert oldjobs['native (windows-latest, windows-x64, nsis)']['conclusion']=='success'
+          for attempt in range(90):
+              run=api(f'actions/runs/{mac_run}')
+              assert run['head_sha']=='299b5b88a311892845f363c75882d85320142ae5'
+              jobs={j['name']:j for j in api(f'actions/runs/{mac_run}/jobs?per_page=100')['jobs']}
+              job=jobs.get('macos-package')
+              if job and job['status']=='completed':
+                  assert job['conclusion']=='success', 'Mac packaging verification failed; draft remains unpublished'
+                  break
+              time.sleep(10)
+          else:
+              raise SystemExit('Mac packaging is incomplete; draft remains unpublished')
+          downloads=[
+              (old_run,f'memory-installer-windows-x64-{old_run}','installers/windows'),
+              (mac_run,f'repaired-mac-installer-{mac_run}','installers/macos'),
+              (old_run,f'memory-validation-windows-x64-{old_run}','validation/windows'),
+              (mac_run,f'repaired-mac-evidence-{mac_run}','validation/macos'),
+          ]
+          for run,name,directory in downloads:
+              subprocess.run(['gh','run','download',str(run),'--repo',repo,'--name',name,'--dir',str(root/directory)],check=True)
+          dest=root/'assets'; dest.mkdir(exist_ok=False)
+          proofs=[]
+          for platform,directory in [('windows-x64','windows'),('macos-arm64','macos')]:
+              folder=root/'installers'/directory
+              p=json.loads((folder/'proof.json').read_text())
+              assert p['source_commit']==source and p['version']==version and p['platform']==platform
+              assert p['vision_tests_passed']==5 and p['catalog_tests_passed']==1
+              assert p['screenshot_storage']=='memory_only' and p['codex_invoked'] is False
+              assert Path(p['asset']).name==p['asset']
+              expected='Coding Tools MCP_'+version+('_x64-setup.exe' if platform=='windows-x64' else '_aarch64.dmg')
+              assert p['asset']==expected
+              asset=folder/p['asset']; assert not asset.is_symlink()
+              assert asset.stat().st_size==p['size'] and hashlib.sha256(asset.read_bytes()).hexdigest()==p['sha256']
+              evidence=root/'validation'/directory
+              assert '5 passed; 0 failed' in (evidence/'vision.txt').read_text()
+              assert '1 passed; 0 failed' in (evidence/'catalog.txt').read_text()
+              assert json.loads((evidence/'proof.json').read_text())==p
+              if platform=='macos-arm64':
+                  assert p['dmg_payload_verified'] is True and p['packaging_workflow_run']==mac_run and p['test_workflow_run']==old_run
+              # GitHub canonicalizes spaces: normalize before hashing the manifests.
+              published_name=p['asset'].replace(' ','.')
+              assert re.fullmatch(r'[A-Za-z0-9._-]+',published_name)
+              shutil.copy2(asset,dest/published_name)
+              proofs.append({**p,'source_asset':p['asset'],'asset':published_name})
+          provenance={'version':version,'tag':tag,'source_commit':source,'workflow_run':int(os.environ['GITHUB_RUN_ID']),'native_test_run':old_run,'mac_packaging_run':mac_run,'prerelease':True,'installers':proofs}
+          (dest/'release-provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
+          with zipfile.ZipFile(dest/'vision-validation.zip','x',zipfile.ZIP_DEFLATED) as z:
+              for path in sorted((root/'validation').rglob('*')):
+                  if path.is_file():
+                      assert path.suffix in {'.json','.txt'} and not path.is_symlink()
+                      z.write(path,path.relative_to(root/'validation').as_posix())
+          files=sorted(dest.iterdir())
+          (dest/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))
+          # The earlier publisher sees the reserved draft and refuses replacement.
+          fresh=api(f"releases/{release['id']}")
+          assert fresh['draft'] is True and not fresh['assets'] and fresh['target_commitish']==source
+          refs=api('git/matching-refs/tags/'+tag)
+          exact=[r for r in refs if r['ref']=='refs/tags/'+tag]
+          if exact:
+              assert len(exact)==1 and exact[0]['object']['type']=='commit' and exact[0]['object']['sha']==source
+          else:
+              api('git/refs','POST',{'ref':'refs/tags/'+tag,'sha':source})
+          assert api('git/ref/tags/'+tag)['object']['sha']==source
+          for path in sorted(dest.iterdir()):
+              subprocess.run(['gh','release','upload',tag,str(path),'--repo',repo],check=True)
+          uploaded=api(f"releases/{release['id']}")
+          actual={a['name']:a for a in uploaded['assets']}; files=list(dest.iterdir())
+          assert uploaded['draft'] is True and uploaded['prerelease'] is True
+          assert len(actual)==len(uploaded['assets'])==len(files) and set(actual)=={p.name for p in files}
+          for p in files:
+              assert actual[p.name]['state']=='uploaded' and actual[p.name]['size']==p.stat().st_size
+              assert actual[p.name]['digest']=='sha256:'+hashlib.sha256(p.read_bytes()).hexdigest()
+          assert api('git/ref/tags/'+tag)['object']['sha']==source
+          published=api(f"releases/{release['id']}",'PATCH',{'draft':False,'prerelease':True,'make_latest':'false'})
+          assert published['draft'] is False and published['prerelease'] is True
+          print(json.dumps({'url':published['html_url'],'source':source,'tag':tag,'assets':[{'name':a['name'],'url':a['browser_download_url'],'digest':a['digest']} for a in published['assets']]},indent=2))
+          (root/'published.json').write_text(json.dumps(published,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: success()
+        with:
+          name: memory-vision-release-${{ github.run_id }}
+          path: |
+            aiTemp/publication/published.json
+            aiTemp/publication/assets/SHA256SUMS.txt
+            aiTemp/publication/assets/release-provenance.json
+          if-no-files-found: error
+          retention-days: 14
