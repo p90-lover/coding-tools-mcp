@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import tomllib
 import zipfile
 
 ROOT = Path.cwd().resolve()
@@ -34,7 +35,7 @@ def write(relative: str, content: bytes) -> None:
     if path.exists():
         if path.read_bytes() == content:
             return
-        backup = BACKUP / relative
+        backup = BACKUP / str(time.time_ns()) / relative
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, backup)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +103,6 @@ for source in sorted(head.rglob('*')):
         merged = git('merge-file', '-p', str(main), str(base), str(source), check=False)
         result = merged.stdout
         if merged.returncode:
-            # merge-file returns the number of conflict regions, not always 1.
             if not 1 <= merged.returncode < 128 or rel not in version_paths:
                 raise RuntimeError(f'unreviewed source merge conflict: {rel}')
             text = result.decode('utf-8')
@@ -118,7 +118,6 @@ for source in sorted(head.rglob('*')):
     changed.append(rel)
 print(f'Materialized {len(changed)} reviewed production/dependency/test files; preserved newer main-only changes.')
 
-# Three focused regressions must fail by assertion before finalize.py is applied.
 append('src-tauri/src/auth/oauth_flow.rs', r'''
 #[cfg(test)]
 mod release_finalization_regressions {
@@ -172,3 +171,21 @@ mod release_finalization_regressions {
 }
 ''')
 print('Materialized three targeted release regressions.')
+
+# RustCrypto 0.10.2 fixes SSE4.1 instructions used in the SSE2 backend.
+# Verify that this targeted update changes no unrelated locked package.
+lock_path = ROOT / 'src-tauri/Cargo.lock'
+before = tomllib.loads(lock_path.read_text())
+saved = BACKUP / 'chacha-review/Cargo.lock'
+saved.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy2(lock_path, saved)
+subprocess.run(['cargo', 'update', '--manifest-path', 'src-tauri/Cargo.toml', '-p', 'chacha20', '--precise', '0.10.2'], cwd=ROOT, check=True)
+after = tomllib.loads(lock_path.read_text())
+old_packages = [p for p in before['package'] if p['name'] != 'chacha20']
+new_packages = [p for p in after['package'] if p['name'] != 'chacha20']
+if old_packages != new_packages:
+    raise RuntimeError('targeted ChaCha20 update unexpectedly changed another dependency')
+versions = [p['version'] for p in after['package'] if p['name'] == 'chacha20']
+if versions != ['0.10.2']:
+    raise RuntimeError(f'unexpected ChaCha20 versions: {versions}')
+print('Updated only ChaCha20 to reviewed non-yanked 0.10.2; original lockfile preserved.')
