@@ -10,6 +10,8 @@ use windows::Win32::UI::Accessibility::{CUIAutomation8,IUIAutomation,IUIAutomati
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use super::{error,Bounds,Control,Result,Target};
+#[path = "native_capture.rs"]
+mod capture_backend;
 
 fn hwnd(t:&Target)->HWND {HWND(t.window_id as usize as *mut std::ffi::c_void)}
 fn failure(message:&str)->super::WorkspaceError {error("WINDOWS_AUTOMATION_ERROR",message)}
@@ -63,21 +65,20 @@ pub fn validate_identity(target:&Target,foreground:bool)->Result<()> {
 }
 pub fn validate_target(target:&Target,foreground:bool)->Result<Bounds> {
     validate_identity(target,foreground)?;
-    let w=xcap::Window::all().map_err(|_|failure("Cannot verify target geometry"))?.into_iter()
-        .find(|w|w.id().ok()==Some(target.window_id)&&w.pid().ok()==Some(target.pid))
-        .ok_or_else(||error("TARGET_CHANGED","Target is no longer capturable"))?;
-    let (x,y,width,height)=(w.x(),w.y(),w.width(),w.height());
-    match (x,y,width,height) {
-        (Ok(x),Ok(y),Ok(width),Ok(height)) if width>0&&height>0=>Ok(Bounds{x,y,width,height}),
-        _=>Err(failure("Cannot determine target physical-pixel bounds")),
-    }
+    capture_backend::bounds(target)
 }
+pub fn capture_pixels(target:&Target,bounds:Bounds)->Result<image::RgbaImage> {
+    validate_identity(target,false)?;
+    capture_backend::pixels(target,bounds)
+}
+
 pub fn focus(target:&Target)->Result<()> {
     validate_target(target,false)?;
     if !unsafe{SetForegroundWindow(hwnd(target))}.as_bool(){return Err(error("FOREGROUND_NOT_GRANTED","Windows did not grant focus. Click the selected target yourself, then retry."));}
     Ok(())
 }
 pub fn validate_point(target:&Target,x:i32,y:i32)->Result<()> {
+    let _dpi = capture_backend::physical_dpi()?;
     let bounds=validate_target(target,true)?;
     if !bounds.contains(x,y){return Err(error("POINT_OUTSIDE_TARGET","Input must remain inside the selected window"));}
     let under=unsafe{WindowFromPoint(POINT{x,y})};
@@ -109,6 +110,7 @@ fn control(e:&IUIAutomationElement,depth:u32)->Result<Control> {
         bounds:Bounds{x:rect.left,y:rect.top,width:rect.right.saturating_sub(rect.left).max(0) as u32,height:rect.bottom.saturating_sub(rect.top).max(0) as u32},depth})
 }
 pub fn inspect(target:&Target)->Result<(Vec<Control>,bool)> {
+    let _dpi = capture_backend::physical_dpi()?;
     validate_target(target,false)?;
     let _com=Com::initialize()?;let uia=automation()?;
     let root=unsafe{uia.ElementFromHandle(hwnd(target))}.map_err(|_|failure("No UI Automation root for this window"))?;
@@ -143,6 +145,7 @@ fn mouse(flags:MOUSE_EVENT_FLAGS,dx:i32,dy:i32,data:u32)->INPUT {
     INPUT{r#type:INPUT_MOUSE,Anonymous:INPUT_0{mi:MOUSEINPUT{dx,dy,mouseData:data,dwFlags:flags,time:0,dwExtraInfo:0}}}
 }
 fn move_event(point:(i32,i32))->Result<INPUT> {
+    let _dpi = capture_backend::physical_dpi()?;
     let (vx,vy,w,h)=unsafe{(GetSystemMetrics(SM_XVIRTUALSCREEN),GetSystemMetrics(SM_YVIRTUALSCREEN),GetSystemMetrics(SM_CXVIRTUALSCREEN),GetSystemMetrics(SM_CYVIRTUALSCREEN))};
     if w<2||h<2 {return Err(failure("Desktop geometry is invalid"));}
     let x=((i64::from(point.0)-i64::from(vx))*65535/(i64::from(w)-1)) as i32;
