@@ -2,7 +2,6 @@
 from __future__ import annotations
 import hashlib
 import io
-import os
 from pathlib import Path
 import re
 import shutil
@@ -103,12 +102,13 @@ for source in sorted(head.rglob('*')):
         merged = git('merge-file', '-p', str(main), str(base), str(source), check=False)
         result = merged.stdout
         if merged.returncode:
-            if merged.returncode != 1 or rel not in version_paths:
+            # merge-file returns the number of conflict regions, not always 1.
+            if not 1 <= merged.returncode < 128 or rel not in version_paths:
                 raise RuntimeError(f'unreviewed source merge conflict: {rel}')
             text = result.decode('utf-8')
             pattern = r'<<<<<<< [^\n]+\n(.*?)=======\n(.*?)>>>>>>> [^\n]+\n'
             matches = list(re.finditer(pattern, text, re.S))
-            if not matches:
+            if not matches or len(matches) != merged.returncode:
                 raise RuntimeError(f'unknown version conflict: {rel}')
             for match in matches:
                 if match[1].replace('0.3.1', 'VERSION') != match[2].replace('0.3.0-rc1', 'VERSION'):
@@ -118,8 +118,7 @@ for source in sorted(head.rglob('*')):
     changed.append(rel)
 print(f'Materialized {len(changed)} reviewed production/dependency/test files; preserved newer main-only changes.')
 
-# Three focused regressions. These compile against the pre-fix code and must
-# fail by assertion, not compilation, before finalization.py is applied.
+# Three focused regressions must fail by assertion before finalize.py is applied.
 append('src-tauri/src/auth/oauth_flow.rs', r'''
 #[cfg(test)]
 mod release_finalization_regressions {
