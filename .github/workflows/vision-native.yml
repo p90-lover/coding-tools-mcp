@@ -1,0 +1,217 @@
+name: Vision native validation
+
+on:
+  push:
+    branches: [feature/local-vision-zero-codex]
+    paths:
+      - '.github/workflows/vision-native.yml'
+      - 'aiTemp/vision-delivery/**'
+      - 'src/**'
+      - 'src-tauri/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vision-native-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-vision
+  CARGO_INCREMENTAL: '0'
+  npm_config_cache: ${{ github.workspace }}/aiTemp/npm-cache
+
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          clean: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Verify and materialize source without deleting files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/vision-prepared
+          python - <<'PY'
+          import base64, hashlib, lzma, os, re, shutil, subprocess
+          from pathlib import Path, PurePosixPath
+          encoded = ''.join(Path(f'aiTemp/vision-delivery/source.patch.xz.b64.part{i}').read_text().strip() for i in (1,2,3))
+          data = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(data).hexdigest() == '3253ad5e493b62f2ba14acf62509ea3c2e66ae5e240d7fa3a629424de40f5c8c', 'Source payload checksum mismatch'
+          assert not re.search(rb'^(deleted file mode|rename |copy |old mode|new mode|\+\+\+ /dev/null)', data, re.M)
+          names = re.findall(rb'^\+\+\+ b/(.+)$', data, re.M)
+          paths = []
+          for name in names:
+              p = PurePosixPath(name.decode())
+              assert not p.is_absolute() and '..' not in p.parts and str(p).startswith(('src/', 'src-tauri/', 'docs/features/'))
+              paths.append(str(p))
+          assert len(paths) == 17 and len(set(paths)) == 17
+          patch = Path('aiTemp/vision-prepared/input.patch')
+          patch.write_bytes(data)
+          if not Path('src-tauri/src/tools/screen_tool.rs').exists():
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              for path in paths:
+                  original = Path(path)
+                  assert not original.is_symlink()
+                  if original.exists():
+                      saved = Path('aiTemp/Trash/vision-before') / os.environ['GITHUB_RUN_ID'] / path
+                      saved.parent.mkdir(parents=True,exist_ok=True)
+                      shutil.copy2(original,saved)
+              subprocess.run(['git','apply',str(patch)],check=True)
+          paths.append('src-tauri/Cargo.lock')
+          Path('aiTemp/vision-prepared/paths.txt').write_text('\n'.join(paths)+'\n')
+          for path in paths:
+              if path.endswith('.rs'):
+                  subprocess.run(['rustfmt','--edition','2021','--config','skip_children=true',path],check=True)
+          PY
+          cargo update --workspace --manifest-path src-tauri/Cargo.toml
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+          paths = Path('aiTemp/vision-prepared/paths.txt').read_text().splitlines()
+          subprocess.run(['git','add','--',*paths],check=True)
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          data = subprocess.check_output(['git','diff','--cached','--binary','--full-index'])
+          Path('aiTemp/vision-prepared/source.patch').write_bytes(data)
+          PY
+          printf '%s\n' "$GITHUB_SHA" > aiTemp/vision-prepared/base-sha.txt
+          (cd aiTemp/vision-prepared && sha256sum source.patch base-sha.txt paths.txt > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: vision-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: aiTemp/vision-prepared/*
+          retention-days: 14
+          if-no-files-found: error
+
+  commit-source:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source_sha: ${{ steps.commit.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          clean: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: vision-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: aiTemp/vision-prepared
+      - name: Commit the exact materialized production source
+        id: commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: feature/local-vision-zero-codex
+        run: |
+          set -euo pipefail
+          (cd aiTemp/vision-prepared && sha256sum --check SHA256SUMS)
+          test "$(cat aiTemp/vision-prepared/base-sha.txt)" = "$GITHUB_SHA"
+          python - <<'PY'
+          import os, re, shutil, subprocess
+          from pathlib import Path, PurePosixPath
+          patch = Path('aiTemp/vision-prepared/source.patch')
+          data = patch.read_bytes()
+          allowed = set(Path('aiTemp/vision-prepared/paths.txt').read_text().splitlines())
+          assert not re.search(rb'^(deleted file mode|rename |copy |old mode|new mode|\+\+\+ /dev/null)',data,re.M)
+          for raw in re.findall(rb'^\+\+\+ b/(.+)$',data,re.M):
+              path = raw.decode(); p = PurePosixPath(path)
+              assert path in allowed and not p.is_absolute() and '..' not in p.parts
+              assert path.startswith(('src/','src-tauri/','docs/features/'))
+              original = Path(path)
+              assert not original.is_symlink()
+              if original.exists():
+                  saved = Path('aiTemp/Trash/vision-before-commit') / os.environ['GITHUB_RUN_ID'] / path
+                  saved.parent.mkdir(parents=True,exist_ok=True)
+                  shutil.copy2(original,saved)
+          if data:
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              subprocess.run(['git','apply','--index',str(patch)],check=True)
+          PY
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat: implement permission-gated native vision and assisted ChatGPT MCP setup'
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+            remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$TARGET_BRANCH" | cut -f1)"
+            test "$remote" = "$GITHUB_SHA"
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$TARGET_BRANCH"
+          fi
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  native:
+    needs: commit-source
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.commit-source.outputs.source_sha }}
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Frontend check and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/vision-validation
+          npm ci 2>&1 | tee aiTemp/vision-validation/npm-ci.txt
+          npm run check 2>&1 | tee aiTemp/vision-validation/frontend-check.txt
+          npm run build 2>&1 | tee aiTemp/vision-validation/frontend-build.txt
+      - name: Three focused vision tests and MCP catalog contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path src-tauri/Cargo.toml vision_ -- --test-threads=1 2>&1 | tee aiTemp/vision-validation/vision-tests.txt
+          cargo test --locked --manifest-path src-tauri/Cargo.toml core_catalog_exposes_chatgpt_compatible_tools -- --test-threads=1 2>&1 | tee aiTemp/vision-validation/catalog.txt
+      - name: Verify endpoint restart and rotation behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS' 2>&1 | tee aiTemp/vision-validation/setup.txt
+          import assert from 'node:assert/strict';
+          import {connectionState,normalizeMcpEndpoint} from './src/lib/chatgpt-setup.js';
+          for (const s of ['http://mcp.example.com/mcp','https://token@mcp.example.com/mcp','https://mcp.example.com/mcp?token=x','https://localhost/mcp','https://127.0.0.1/mcp','https://[::1]/mcp','https://mcp.example.com/wrong']) assert.throws(()=>normalizeMcpEndpoint(s));
+          assert.equal(normalizeMcpEndpoint('https://mcp.example.com/'),'https://mcp.example.com/mcp');
+          assert.equal(connectionState('https://mcp.example.com/mcp/','https://mcp.example.com/mcp').user_action_required,false);
+          const changed=connectionState('https://new.trycloudflare.com/mcp','https://old.trycloudflare.com/mcp');
+          assert.equal(changed.status,'endpoint_changed'); assert.equal(changed.user_action_required,true); assert.equal(changed.stable_hostname,false);
+          console.log('PASS: endpoint validation, same-endpoint restart, changed-endpoint consent');
+          JS
+      - name: Preserve verification evidence
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p aiTemp/vision-validation
+          git rev-parse HEAD > aiTemp/vision-validation/source-sha.txt
+          git status --short > aiTemp/vision-validation/worktree-status.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: vision-validation-${{ matrix.os }}-${{ github.run_id }}
+          path: aiTemp/vision-validation/*
+          if-no-files-found: error
+          retention-days: 14
