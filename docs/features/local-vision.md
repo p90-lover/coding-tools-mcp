@@ -23,7 +23,7 @@ Captures remain in memory and are not automatically written to the project. Retu
 
 Processing is serialized by a process-wide, non-queuing vision permit. File input is capped at 32 MiB; decoded/captured images at 16,777,216 pixels; decoder allocation at 128 MiB; encoded output at 5 MiB. Output dimensions are capped at 4096 per side and default to 2000. Oversized displays may be captured using a smaller region. These are per-stage bounds, not a promise that total process memory equals a single bound. PNG is preferred; bounded JPEG/downscaling fallback is used only when automatic resizing is allowed. Source files are never overwritten or deleted by these tools.
 
-The native backend is pinned to `xcap` 0.9.8. Headless or locked desktops, protected content, minimized windows, OS consent, and some Wayland configurations may prevent capture. Native capture can block inside an OS call; a network timeout is not proof that the OS call stopped. The global permit remains held until that work exits, preventing repeated concurrent captures. Tests of image handling and disabled-capture permission are not real interactive-desktop capture verification.
+The native backend is pinned to `xcap` 0.9.8. Headless or locked desktops, protected content, minimized windows, OS consent, and OS permission settings may prevent capture. Native capture is disabled outside Windows/macOS: the pinned dependency has Linux/Wayland fallbacks that write temporary files. Native capture can block inside an OS call; a network timeout is not proof that the OS call stopped. The global permit remains held until that work exits, preventing repeated concurrent captures. Tests of image handling and disabled-capture permission are not real interactive-desktop capture verification.
 
 ## Assisted ChatGPT setup
 
@@ -36,3 +36,9 @@ Only the endpoint explicitly confirmed by the user is stored locally; no tokens 
 The application continues to use its embedded Rust tool engine and existing Codex-compatible permission vocabulary. Importing the full upstream Codex executor/OS sandbox is not part of this change, and existing `policy_only` execution must not be represented as an OS sandbox. The vision pipeline itself has no model client. Arbitrary external commands outside these vision tools are not a general quota-metering guarantee.
 
 A native build and focused tests validate compilation and deterministic behavior. Real desktop capture, macOS consent, and the account-specific ChatGPT connection flow require interactive verification before treating this as a stable production release.
+
+## Enforced no-save capture policy (v0.3.3-rc.1)
+
+Screenshots have no file destination or disk cache. Both capture tools reject `path`, `save_path`, `output_path`, `save`, `persist`, and `output: "file"`. Responses report `persisted: false`, `capture_storage: "memory_only"`, and `disk_cache: false`. Screenshot bytes are not automatically stored in local operation logs or a gallery. Existing screenshot files, if any, are left untouched; this version does not delete files.
+
+This is an application-level no-save policy, not locked/zeroized RAM. OS swap/pagefiles, crash dumps, and retention by the receiving ChatGPT/client are outside its guarantee. The release is a candidate pending interactive end-to-end capture/consent verification.

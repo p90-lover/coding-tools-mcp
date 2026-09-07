@@ -11,6 +11,25 @@ use crate::tools::image_tool::{
 };
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 
+// Only these reviewed native backends capture into memory. In particular,
+// xcap's Linux/Wayland portal fallback writes (and deletes) temporary PNGs.
+// Reject unsupported platforms BEFORE calling any native capture API.
+fn memory_only_backend_supported() -> bool {
+    cfg!(any(target_os = "windows", target_os = "macos"))
+}
+
+fn capture_options(args: &Value) -> Result<ViewOptions, WorkspaceError> {
+    // A screenshot never takes a destination path, even an empty/null one.
+    // Do not silently accept a filename inherited from view_image's schema.
+    if args.get("path").is_some() {
+        return Err(vision_error(
+            "SCREENSHOT_SAVE_NOT_SUPPORTED",
+            "Screenshots are memory-only. No output path, image file, or disk cache is supported.",
+        ));
+    }
+    ViewOptions::parse(args)
+}
+
 fn require_capture(ctx: &ToolContext) -> Result<(), WorkspaceError> {
     // This is a local settings opt-in, not an MCP argument. Full-access mode
     // and request_permissions cannot enable it or bypass OS privacy consent.
@@ -21,6 +40,12 @@ fn require_capture(ctx: &ToolContext) -> Result<(), WorkspaceError> {
             category: "permission",
             retryable: false,
         });
+    }
+    if !memory_only_backend_supported() {
+        return Err(vision_error(
+            "MEMORY_ONLY_CAPTURE_UNAVAILABLE",
+            "This platform's capture backend is not approved for no-save screenshots. Native capture is limited to Windows and macOS; file-backed fallbacks are disabled.",
+        ));
     }
     Ok(())
 }
@@ -42,14 +67,15 @@ pub fn status(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
     Ok(tool_ok(json!({
         "backend": "xcap", "backend_version": "0.9.8", "platform": std::env::consts::OS,
         "screen_capture_enabled": ctx.policy.allow_screen_capture,
+        "memory_only_backend_supported": memory_only_backend_supported(),
         "os_permission": "checked_by_native_backend_on_capture",
         "tools": ["view_image", "image_info", "compare_images", "list_displays", "list_windows", "capture_screenshot", "capture_window"],
         "formats": ["image/png", "image/jpeg", "image/webp", "image/gif"],
         "max_source_bytes": image_tool::MAX_SOURCE_BYTES, "max_pixels": image_tool::MAX_PIXELS,
-        "capture_storage": "memory_only", "background_recording": false,
+        "capture_storage": "memory_only", "disk_cache": false, "background_recording": false,
         "inference_performed": false, "codex_invoked": false,
         "semantic_analysis": "The calling vision-capable model interprets returned MCP image content. No separate model or OCR service is called.",
-        "limitations": ["Headless/locked desktops, protected content, minimized windows, and some Wayland environments may not support capture."]
+        "limitations": ["Headless/locked desktops, protected content, minimized windows, and OS permissions may prevent capture. This release disables native capture outside Windows/macOS to prevent file-backed fallbacks."]
     })))
 }
 
@@ -113,12 +139,13 @@ fn capture_metadata(source: &str, width: u32, height: u32) -> Value {
     json!({"source": source, "capture_id": uuid::Uuid::new_v4().to_string(),
         "captured_at_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
         "original": {"width": width, "height": height}, "persisted": false,
+        "capture_storage": "memory_only", "disk_cache": false,
         "coordinate_space": "physical pixels relative to the returned source region"})
 }
 
 pub fn capture_screenshot(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     require_capture(ctx)?;
-    let options = ViewOptions::parse(args)?;
+    let options = capture_options(args)?;
     let selected_id = args
         .get("monitor_id")
         .map(|_| integer(args, "monitor_id", 0, 0, u64::from(u32::MAX)))
@@ -172,7 +199,7 @@ pub fn capture_screenshot(ctx: &ToolContext, args: &Value) -> Result<Value, Work
 
 pub fn capture_window(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
     require_capture(ctx)?;
-    let options = ViewOptions::parse(args)?;
+    let options = capture_options(args)?;
     if args.get("window_id").is_none() || args.get("expected_pid").is_none() {
         return Err(WorkspaceError::invalid_argument(
             "window_id and expected_pid from list_windows are required",
@@ -255,5 +282,59 @@ mod vision_tests {
             status(&ctx).expect("status")["screen_capture_enabled"],
             false
         );
+    }
+
+    #[test]
+    fn vision_memory_only_rejects_save_arguments() {
+        for args in [
+            json!({"path": "aiTemp/screenshot.png"}),
+            json!({"path": null}),
+            json!({"save_path": "screenshot.png"}),
+            json!({"output_path": "screenshot.png"}),
+            json!({"save": true}),
+            json!({"persist": true}),
+            json!({"output": "file"}),
+        ] {
+            assert!(capture_options(&args).is_err(), "{args}");
+        }
+        assert!(capture_options(&json!({"output": "mcp_image"})).is_ok());
+        assert_eq!(
+            memory_only_backend_supported(),
+            cfg!(any(target_os = "windows", target_os = "macos"))
+        );
+    }
+
+    #[test]
+    fn vision_memory_only_capture_envelope_has_no_file_destination() {
+        // Existing fixture is embedded at compile time; no screenshots or
+        // fixture copies are written. This tests the capture rendering path,
+        // not an interactive desktop or OS screen-recording consent.
+        let _permit = image_tool::vision_guard().expect("exclusive image renderer");
+        let image = image::load_from_memory(include_bytes!("../../icons/32x32.png"))
+            .expect("embedded fixture");
+        let args = json!({"output": "mcp_image"});
+        for tool in ["capture_screenshot", "capture_window"] {
+            let metadata = capture_metadata("test_fixture", image.width(), image.height());
+            let result = image_tool::render_image(
+                image.clone(),
+                &args,
+                capture_options(&args).expect("memory options"),
+                metadata,
+            )
+            .expect("in-memory rendering");
+            let wrapped = crate::tools::workspace::wrap_mcp_tool_result(tool, &args, result);
+            assert_eq!(wrapped["isError"], false);
+            assert_eq!(wrapped["content"][0]["type"], "image");
+            assert!(wrapped["content"][0]["data"]
+                .as_str()
+                .is_some_and(|data| !data.is_empty()));
+            let metadata = &wrapped["structuredContent"];
+            assert_eq!(metadata["persisted"], false);
+            assert_eq!(metadata["capture_storage"], "memory_only");
+            assert_eq!(metadata["disk_cache"], false);
+            for key in ["path", "file_path", "save_path", "base64", "data_url"] {
+                assert!(metadata.get(key).is_none(), "unexpected {key}");
+            }
+        }
     }
 }
