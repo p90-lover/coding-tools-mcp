@@ -30,3 +30,41 @@ jobs:
           path: aiTemp/native-codex-source/
           retention-days: 7
           if-no-files-found: error
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          clean: false
+      - name: Test native tool-profile isolation using the real registry
+        run: |
+          mkdir -p aiTemp/native-contract/src
+          cp src-tauri/src/tools/registry.rs aiTemp/native-contract/src/registry.rs
+          cat > aiTemp/native-contract/Cargo.toml <<'TOML'
+          [package]
+          name = "native-codex-contract"
+          version = "0.0.0"
+          edition = "2021"
+          [dependencies]
+          serde_json = "1"
+          TOML
+          cat > aiTemp/native-contract/src/lib.rs <<'RUST'
+          #![allow(dead_code)]
+          mod registry;
+          #[test]
+          fn native_profile_never_exposes_legacy_execution_or_remote_approval() {
+              let expected = vec!["codex_start", "codex_continue", "codex_status", "codex_interrupt"];
+              assert_eq!(registry::exposed_tool_names("codex-native"), expected);
+              let tools = registry::list_tools_for_profile("codex-native");
+              assert_eq!(tools.len(), 4);
+              for tool in tools {
+                  assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+                  assert!(tool["inputSchema"]["properties"].get("sandbox").is_none());
+                  assert!(tool["inputSchema"]["properties"].get("approval_token").is_none());
+              }
+          }
+          RUST
+          CARGO_TARGET_DIR="$PWD/aiTemp/native-contract-target" cargo test --manifest-path aiTemp/native-contract/Cargo.toml native_profile_never_exposes -- --nocapture
