@@ -97,6 +97,7 @@ async fn ensure_port_available(port: u16, service_label: &str) -> AppResult<()> 
 }
 
 async fn stop_mcp_service(state: &AppState, id: &str) -> AppResult<RuntimeStatusDto> {
+    crate::tools::computer::emergency_stop("MCP service lifecycle changed");
     let profile = profile_by_id(state, id)?;
     let port = profile.runtime.local_port;
     let handle = state.with_runtime(|runtime| Ok(runtime.begin_stop(id, ServiceKind::Mcp)))?;
@@ -205,6 +206,7 @@ pub async fn start_runtime(state: State<'_, AppState>, id: String) -> AppResult<
 
 #[tauri::command]
 pub async fn stop_runtime(state: State<'_, AppState>, id: String) -> AppResult<RuntimeStatusDto> {
+    crate::tools::computer::emergency_stop("MCP service stopped");
     stop_mcp_service(&state, &id).await
 }
 

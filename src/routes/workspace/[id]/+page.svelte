@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ComputerControl from "$lib/components/ComputerControl.svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import ActionsAuthForm from "$lib/components/ActionsAuthForm.svelte";
@@ -565,6 +566,7 @@
 </script>
 
 {#if profile && actions}
+  <ComputerControl workspaceId={profile.id} />
   <section class="page-scroll">
     <header class="page-header">
       <div class="flex items-start justify-between gap-4">

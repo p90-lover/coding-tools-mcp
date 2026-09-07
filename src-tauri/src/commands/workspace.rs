@@ -74,6 +74,7 @@ pub fn create_workspace(
 
 #[tauri::command]
 pub fn update_workspace(state: State<'_, AppState>, profile: WorkspaceProfile) -> AppResult<()> {
+    crate::tools::computer::emergency_stop("Workspace configuration changed");
     if !matches!(
         profile.auth.auth_type.as_str(),
         "noauth" | "bearer" | "oauth"

@@ -115,6 +115,7 @@
   }
 
   onMount(() => {
+    if ($page.url.pathname === "/control") return;
     const stopGuard = startUiMemoryGuard();
     const stopClose = startCloseGuard(() => {
       closeConfirmOpen = true;
@@ -138,6 +139,9 @@
   });
 </script>
 
+{#if $page.url.pathname === "/control"}
+  {@render children()}
+{:else}
 <AppShell onAddWorkspace={addWorkspace}>
   {#snippet settingsNav()}
     <button
@@ -197,3 +201,5 @@
     closeConfirmOpen = false;
   }}
 />
+
+{/if}

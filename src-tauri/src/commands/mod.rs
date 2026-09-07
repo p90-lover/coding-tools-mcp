@@ -1,3 +1,8 @@
+mod computer;
+pub use computer::{
+    computer_local_pause, computer_local_poll, computer_local_preview, computer_local_resume,
+    computer_local_start, computer_local_stop, computer_local_targets,
+};
 mod app_info;
 mod frp_profiles;
 mod health;

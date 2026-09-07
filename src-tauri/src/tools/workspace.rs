@@ -49,6 +49,12 @@ pub enum WorkspaceError {
 }
 
 impl WorkspaceError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Tool { code, .. } | Self::ToolDetails { code, .. } => code,
+        }
+    }
+
     pub fn message(&self) -> String {
         match self {
             Self::Tool { message, .. } | Self::ToolDetails { message, .. } => message.clone(),
@@ -707,15 +713,18 @@ pub fn wrap_tool_result(structured: Value) -> Value {
 
 pub fn wrap_mcp_tool_result(tool_name: &str, args: &Value, mut structured: Value) -> Value {
     let is_error = structured.get("ok").and_then(Value::as_bool) == Some(false);
-    let image_result = matches!(
-        tool_name,
-        "view_image" | "capture_screenshot" | "capture_window"
-    ) && args
-        .get("output")
-        .and_then(Value::as_str)
-        .unwrap_or("mcp_image")
-        == "mcp_image"
-        && !is_error;
+    let computer_image = tool_name.starts_with("computer_")
+        && structured.get("base64").and_then(Value::as_str).is_some();
+    let image_result = computer_image
+        || (matches!(
+            tool_name,
+            "view_image" | "capture_screenshot" | "capture_window"
+        ) && args
+            .get("output")
+            .and_then(Value::as_str)
+            .unwrap_or("mcp_image")
+            == "mcp_image"
+            && !is_error);
     let content = if image_result {
         let data = structured
             .as_object_mut()

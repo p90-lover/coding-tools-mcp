@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "computer-overlay",
+  "description": "Local visible computer-control monitor. No shell, filesystem, dialog or remote origins.",
+  "windows": ["computer-use-overlay"],
+  "permissions": ["core:default"]
+}
