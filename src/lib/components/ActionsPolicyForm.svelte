@@ -15,28 +15,37 @@
   }
 
   const PERMISSION_MODE_OPTIONS = [
-    { value: "trusted", label: "受信任" },
-    { value: "safe", label: "安全受限" },
-    { value: "dangerous", label: "完全放开" },
+    { value: "read-only", label: "只读（Codex）" },
+    { value: "workspace-write", label: "工作区写入（Codex）" },
+    { value: "danger-full-access", label: "完全访问（Codex）" },
   ] as const;
+
+  function normalizePermissionMode(value: string): string {
+    if (value === "safe" || value === "read-only") return "read-only";
+    if (value === "dangerous" || value === "danger-full-access") {
+      return "danger-full-access";
+    }
+    if (value === "trusted" || value === "workspace-write") return "workspace-write";
+    return "read-only";
+  }
 
   let { allowedCommands, maxPatchBytes, permissionMode, onSave }: Props = $props();
 
   let draftCommands = $state("");
   let draftMaxPatch = $state(200_000);
-  let draftMode = $state("trusted");
+  let draftMode = $state("workspace-write");
   let saving = $state(false);
 
   const dirty = $derived(
     draftCommands !== allowedCommands ||
       draftMaxPatch !== maxPatchBytes ||
-      draftMode !== permissionMode,
+      draftMode !== normalizePermissionMode(permissionMode),
   );
 
   $effect(() => {
     draftCommands = allowedCommands;
     draftMaxPatch = maxPatchBytes;
-    draftMode = permissionMode;
+    draftMode = normalizePermissionMode(permissionMode);
   });
 
   async function save() {
@@ -92,7 +101,7 @@
     </select>
   </label>
   <p class="text-xs text-[var(--color-text-muted)]">
-    作用于 Actions gateway 的 exec_command 白名单与 apply_patch 大小限制。
+    作用于 Actions gateway 的命令与 patch 边界。read-only 禁止修改；workspace-write 允许 Workspace 内变更；danger-full-access 仍不会绕过管理员提升、受保护仓库路径或 Workspace 外写入的硬性拒绝。
   </p>
   <div class="flex justify-end pt-1">
     <button

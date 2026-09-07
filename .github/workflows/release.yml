@@ -1,119 +1,274 @@
-name: Desktop Release
+name: Verified desktop release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "要创建或更新的 Release 标签，例如 v0.1.22"
+        description: Existing version tag reachable from main
         required: true
         type: string
-
 permissions:
-  contents: write
-
+  contents: read
+concurrency:
+  group: desktop-release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  identity:
+    runs-on: ubuntu-24.04
+    outputs:
+      source: ${{ steps.identity.outputs.source }}
+      tag: ${{ steps.identity.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          node-version: "20"
-          cache: npm
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: false
+      - id: identity
+        shell: bash
+        env:
+          TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          source="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          git merge-base --is-ancestor "$source" origin/main
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+  native:
+    needs: identity
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            args: --bundles nsis
+            assets: aiTemp/cargo-target/release/bundle/nsis/*.exe
+          - os: macos-14
+            platform: macos
+            args: --target universal-apple-darwin --bundles dmg
+            assets: aiTemp/cargo-target/universal-apple-darwin/release/bundle/dmg/*.dmg
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PYTHONDONTWRITEBYTECODE: '1'
+      XDG_CONFIG_HOME: ${{ github.workspace }}/aiTemp/test-config
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          workspaces: src-tauri
-
-      - name: 安装前端依赖
-        run: npm ci
-
-      - name: 检查前端
-        run: npm run check
-
-      - name: 运行 Rust 测试
+          ref: ${{ needs.identity.outputs.source }}
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          targets: ${{ matrix.platform == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          components: rustfmt,clippy
+      - name: Frontend and version checks
+        shell: bash
+        env:
+          TAG: ${{ needs.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib, tomllib
+          root = pathlib.Path.cwd()
+          versions = [json.loads((root/p).read_text())['version'] for p in ['package.json','package-lock.json','src-tauri/tauri.conf.json']]
+          manifest=tomllib.loads((root/'src-tauri/Cargo.toml').read_text())['package']
+          versions.append(manifest['version'])
+          lock=tomllib.loads((root/'src-tauri/Cargo.lock').read_text())
+          versions.extend(p['version'] for p in lock['package'] if p['name']==manifest['name'])
+          versions.append(json.loads((root/'package-lock.json').read_text())['packages']['']['version'])
+          assert all('v'+v == os.environ['TAG'] for v in versions), versions
+          PY
+          mkdir -p aiTemp/native-evidence
+          npm ci
+          npm run check 2>&1 | tee aiTemp/native-evidence/frontend.txt
+          node --test tests/*.test.mjs 2>&1 | tee aiTemp/native-evidence/contracts.txt
+          npm audit --audit-level=low
+      - name: Native tests and strict Clippy
+        shell: bash
         working-directory: src-tauri
-        run: cargo test
-
-      - name: 仅构建 Windows NSIS 安装程序
-        run: npm run tauri -- build --bundles nsis
-
-      - name: 上传 Windows EXE
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-exe
-          path: src-tauri/target/release/bundle/nsis/*.exe
-          if-no-files-found: error
-
-  build-universal-macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - name: 安装前端依赖
-        run: npm ci
-
-      - name: 检查前端
-        run: npm run check
-
-      - name: 运行 Rust 测试
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked 2>&1 | tee ../aiTemp/native-evidence/rust-tests.txt
+          cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee ../aiTemp/native-evidence/clippy.txt
+      - name: Verify shipped target dependency boundaries
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
         working-directory: src-tauri
-        run: cargo test
-
-      - name: 仅构建通用版 macOS DMG
-        run: npm run tauri -- build --target universal-apple-darwin --bundles dmg
-
-      - name: 上传 macOS DMG
-        uses: actions/upload-artifact@v4
+        run: |
+          set -euo pipefail
+          if [ "$PLATFORM" = windows ]; then
+            targets='x86_64-pc-windows-msvc'
+          else
+            targets='aarch64-apple-darwin x86_64-apple-darwin'
+          fi
+          for target in $targets; do
+            cargo tree --locked --target "$target" --prefix none --format '{p}' > "../aiTemp/native-evidence/dependencies-$target.txt"
+            if grep -Eq '^glib v' "../aiTemp/native-evidence/dependencies-$target.txt"; then
+              echo 'Release blocked: affected GLib present in a shipped target'
+              exit 1
+            fi
+          done
+      - name: Build installer
+        shell: bash
+        env:
+          BUILD_ARGS: ${{ matrix.args }}
+        run: |
+          set -euo pipefail
+          npm run tauri -- build $BUILD_ARGS -- --locked 2>&1 | tee aiTemp/native-evidence/installer.txt
+          git diff --exit-code -- package-lock.json src-tauri/Cargo.lock
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: macos-dmg
-          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          name: installer-${{ matrix.platform }}-${{ needs.identity.outputs.source }}
+          path: ${{ matrix.assets }}
           if-no-files-found: error
-
-  publish-release:
-    needs:
-      - build-windows
-      - build-universal-macos
-    runs-on: ubuntu-latest
+          retention-days: 14
+      - name: Preserve native validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-evidence-${{ matrix.platform }}-${{ needs.identity.outputs.source }}
+          path: aiTemp/native-evidence/
+          if-no-files-found: error
+          retention-days: 14
+  audit:
+    needs: identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/audit-target
     steps:
-      - name: 下载 Windows EXE
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          name: windows-exe
-          path: dist/windows
-
-      - name: 下载 macOS DMG
-        uses: actions/download-artifact@v4
+          ref: ${{ needs.identity.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          name: macos-dmg
-          path: dist/macos
-
-      - name: 创建 Release 并上传安装包
-        uses: softprops/action-gh-release@v2
+          toolchain: '1.98.1'
+      - name: Screen reachable Git history for credential patterns
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/audit-evidence
+          python - <<'PYCREDENTIALS' > aiTemp/audit-evidence/credential-screen.json
+          import json, re, subprocess, sys
+          patterns = {
+              'github-token': rb'\bgh[pousr]_[A-Za-z0-9]{36,255}\b',
+              'github-fine-grained-token': rb'\bgithub_pat_[A-Za-z0-9_]{70,255}\b',
+              'private-key-material': rb'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----\s+[A-Za-z0-9+/=\r\n]{100,}-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----',
+              'aws-access-key': rb'\bAKIA[A-Z0-9]{16}\b',
+              'openai-key': rb'\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{40,255}\b',
+          }
+          patterns={key:re.compile(value) for key,value in patterns.items()}
+          lines=subprocess.check_output(['git','rev-list','--objects','--all']).splitlines()
+          objects=list(dict.fromkeys(line.split(b' ',1)[0] for line in lines))
+          process=subprocess.Popen(['git','cat-file','--batch'],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
+          findings=[];blobs=0
+          for oid in objects:
+              process.stdin.write(oid+b'\n');process.stdin.flush()
+              header=process.stdout.readline().split()
+              if len(header)!=3: raise RuntimeError('Git object could not be read')
+              size=int(header[2]);content=process.stdout.read(size)
+              if len(content)!=size or process.stdout.read(1)!=b'\n': raise RuntimeError('Incomplete Git object')
+              if header[1]!=b'blob':continue
+              blobs+=1
+              for name,pattern in patterns.items():
+                  if pattern.search(content): findings.append({'blob':oid.decode(),'kind':name})
+          process.stdin.close()
+          if process.wait()!=0:raise RuntimeError('Git object scan failed')
+          print(json.dumps({'scope':'reachable Git history; selected high-confidence patterns, not proof that every secret is absent','objects_scanned':len(objects),'blobs_scanned':blobs,'findings':findings},indent=2))
+          sys.exit(1 if findings else 0)
+          PYCREDENTIALS
+          cat aiTemp/audit-evidence/credential-screen.json
+      - name: Audit Rust dependencies against RustSec
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/audit-evidence
+          cargo install cargo-audit --locked --version 0.22.2 --root "$PWD/aiTemp/audit-tool"
+          aiTemp/audit-tool/bin/cargo-audit audit --file src-tauri/Cargo.lock 2>&1 | tee aiTemp/audit-evidence/rustsec.txt
+          aiTemp/audit-tool/bin/cargo-audit audit --file src-tauri/Cargo.lock --json > aiTemp/audit-evidence/rustsec.json
+          python - <<'PYAUDIT'
+          import json, pathlib
+          report=json.loads(pathlib.Path('aiTemp/audit-evidence/rustsec.json').read_text())
+          assert not report['vulnerabilities']['found'], 'RustSec vulnerability remains'
+          warnings=report.get('warnings', {})
+          assert not warnings.get('yanked', []), 'A locked crate was yanked'
+          assert all(item['advisory']['id']=='RUSTSEC-2024-0429' and item['package']['name']=='glib'
+            for item in warnings.get('unsound', [])), 'Unreviewed soundness warning'
+          print('RustSec vulnerability/yanked gates passed; GLib exclusion is checked in each native job.')
+          PYAUDIT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
-          name: Coding Tools MCP ${{ inputs.release_tag || github.ref_name }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            dist/windows/*.exe
-            dist/macos/*.dmg
+          name: audit-${{ needs.identity.outputs.source }}
+          path: aiTemp/audit-evidence/
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: [identity, native, audit]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.identity.outputs.source }}
+          persist-credentials: false
+          clean: false
+      - name: Publish only the verified tag and matching installer pair
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.identity.outputs.tag }}
+          SOURCE: ${{ needs.identity.outputs.source }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-assets
+          gh run download "$GITHUB_RUN_ID" -n "installer-windows-$SOURCE" -D aiTemp/release-assets
+          gh run download "$GITHUB_RUN_ID" -n "installer-macos-$SOURCE" -D aiTemp/release-assets
+          git fetch --no-tags origin "refs/tags/$TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE"
+          python - <<'PY'
+          import hashlib, pathlib
+          root=pathlib.Path('aiTemp/release-assets')
+          files=sorted(root.iterdir())
+          assert len(files)==2 and {p.suffix for p in files}=={'.exe','.dmg'}
+          assert all(p.is_file() and p.stat().st_size > 100000 for p in files)
+          (root/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))
+          PY
+          test -f "docs/releases/$TAG.md"
+          cp "docs/releases/$TAG.md" aiTemp/release-notes.md
+          if [ -f "docs/releases/$TAG-audit-notes.md" ]; then
+            printf '\n' >> aiTemp/release-notes.md
+            cat "docs/releases/$TAG-audit-notes.md" >> aiTemp/release-notes.md
+          fi
+          gh release create "$TAG" --verify-tag --draft --title "Coding Tools MCP $TAG" --notes-file aiTemp/release-notes.md aiTemp/release-assets/*
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > aiTemp/release-assets/uploaded.json
+          python - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('aiTemp/release-assets')
+          actual={p['name']:p for p in json.loads((root/'uploaded.json').read_text())['assets']}
+          expected=[p for p in root.iterdir() if p.name!='uploaded.json']
+          assert set(actual)=={p.name for p in expected}
+          assert all(actual[p.name]['size']==p.stat().st_size and actual[p.name]['digest']=='sha256:'+hashlib.sha256(p.read_bytes()).hexdigest() for p in expected)
+          PY
+          git fetch --no-tags origin "refs/tags/$TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE"
+          gh release edit "$TAG" --draft=false --latest

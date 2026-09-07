@@ -41,6 +41,8 @@ pub struct AuthConfig {
     pub auth_type: String,
     #[serde(default = "default_oauth_client_id")]
     pub oauth_client_id: String,
+    #[serde(default = "crate::auth::default_oauth_redirect_uris")]
+    pub oauth_redirect_uris: Vec<String>,
     #[serde(default)]
     pub use_shared_secrets: bool,
 }
@@ -53,6 +55,8 @@ pub struct RuntimeConfig {
     pub tool_profile: String,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    #[serde(default = "default_approval_mode")]
+    pub approval_mode: String,
     #[serde(default)]
     pub runtime_command: String,
     /// Workspace execution policy shared by MCP clients.
@@ -94,6 +98,8 @@ pub struct ActionsConfig {
     pub auth_type: String,
     #[serde(default = "default_actions_oauth_client_id")]
     pub oauth_client_id: String,
+    #[serde(default = "crate::auth::default_oauth_redirect_uris")]
+    pub oauth_redirect_uris: Vec<String>,
     #[serde(default)]
     pub oauth_scopes: String,
     #[serde(default = "default_allowed_commands")]
@@ -163,7 +169,11 @@ fn default_tool_profile() -> String {
 }
 
 fn default_permission_mode() -> String {
-    "trusted".to_string()
+    "workspace-write".to_string()
+}
+
+fn default_approval_mode() -> String {
+    "on-request".to_string()
 }
 
 fn default_allowed_commands() -> String {
@@ -202,6 +212,7 @@ impl Default for AuthConfig {
         Self {
             auth_type: default_auth_type(),
             oauth_client_id: default_oauth_client_id(),
+            oauth_redirect_uris: crate::auth::default_oauth_redirect_uris(),
             use_shared_secrets: false,
         }
     }
@@ -213,6 +224,7 @@ impl Default for RuntimeConfig {
             local_port: default_mcp_port(),
             tool_profile: default_tool_profile(),
             permission_mode: default_permission_mode(),
+            approval_mode: default_approval_mode(),
             runtime_command: String::new(),
             allowed_commands: default_allowed_commands(),
             workspace_local_entries: default_workspace_local_entries(),
@@ -238,6 +250,7 @@ impl Default for ActionsConfig {
             runtime_command: String::new(),
             auth_type: default_actions_auth_type(),
             oauth_client_id: default_actions_oauth_client_id(),
+            oauth_redirect_uris: crate::auth::default_oauth_redirect_uris(),
             oauth_scopes: String::new(),
             allowed_commands: default_allowed_commands(),
             max_patch_bytes: default_max_patch_bytes(),

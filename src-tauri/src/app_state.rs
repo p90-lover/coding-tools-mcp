@@ -24,6 +24,7 @@ impl AppState {
             .data
             .lock()
             .map_err(|_| crate::error::AppError::Message("data store poisoned".into()))?;
+        guard.refresh()?;
         f(&mut guard)
     }
 

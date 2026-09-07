@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::harness::Harness;
+use crate::tools::approval::ApprovalStore;
 use crate::tools::policy::PolicySettings;
 use crate::tools::session::SessionStore;
 use crate::tools::workspace::Workspace;
@@ -16,6 +17,7 @@ pub struct ToolContext {
     pub workspace: Workspace,
     pub auth: AuthConfig,
     pub policy: PolicySettings,
+    pub approvals: ApprovalStore,
     pub tool_profile: String,
     pub permission_mode: String,
     pub harness: Harness,
@@ -38,7 +40,7 @@ impl ToolContext {
             auth,
             PolicySettings::default(),
             "full".into(),
-            "trusted".into(),
+            "workspace-write".into(),
         ))
     }
 
@@ -65,14 +67,16 @@ impl ToolContext {
         auth: AuthConfig,
         policy: PolicySettings,
         tool_profile: String,
-        permission_mode: String,
+        _permission_mode: String,
         harness_root: PathBuf,
     ) -> Self {
         let root = workspace.root().to_path_buf();
+        let permission_mode = policy.canonical_permission_mode().to_string();
         Self {
             workspace,
             auth,
             policy,
+            approvals: ApprovalStore::default(),
             tool_profile: crate::tools::registry::normalize_tool_profile(&tool_profile).into(),
             permission_mode,
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
@@ -92,7 +96,7 @@ impl ToolContext {
             },
             PolicySettings::default(),
             "full".into(),
-            "trusted".into(),
+            "workspace-write".into(),
             harness_root,
         ))
     }

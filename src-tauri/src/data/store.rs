@@ -25,6 +25,7 @@ const SHARED_KEYS: &[&str] = &[
 #[derive(Debug)]
 pub struct DataStore {
     data: AppData,
+    baseline: serde_json::Value,
 }
 
 impl DataStore {
@@ -34,13 +35,15 @@ impl DataStore {
         let existed_before = path.exists();
         let mut data = load_or_migrate()?;
         let imported = import_legacy_profiles_if_empty(&mut data)?;
-        let store = Self { data };
+        let baseline = serde_json::to_value(&data)?;
+        let store = Self { data, baseline };
         if !existed_before || imported > 0 {
-            store.persist_unlocked()?;
+            save(&store.data)?;
         }
         if !existed_before {
             maybe_backup_legacy_files(&path)?;
         }
+        crate::auth::sync_trusted_origins(&store.data);
         Ok(store)
     }
 
@@ -53,8 +56,12 @@ impl DataStore {
     pub fn update_file<R>(f: impl FnOnce(&mut AppData) -> AppResult<R>) -> AppResult<R> {
         let _guard = lock_data_file()?;
         let mut data = load_or_migrate()?;
+        let before = serde_json::to_value(&data)?;
         let result = f(&mut data)?;
-        save(&data)?;
+        if serde_json::to_value(&data)? != before {
+            save(&data)?;
+        }
+        crate::auth::sync_trusted_origins(&data);
         Ok(result)
     }
 
@@ -62,13 +69,36 @@ impl DataStore {
         &self.data
     }
 
-    pub fn save(&self) -> AppResult<()> {
+    pub fn refresh(&mut self) -> AppResult<()> {
         let _guard = lock_data_file()?;
-        self.persist_unlocked()
+        let data = load_or_migrate()?;
+        self.baseline = serde_json::to_value(&data)?;
+        self.data = data;
+        crate::auth::sync_trusted_origins(&self.data);
+        Ok(())
     }
 
-    fn persist_unlocked(&self) -> AppResult<()> {
-        save(&self.data)
+    pub fn save(&mut self) -> AppResult<()> {
+        let _guard = lock_data_file()?;
+        let latest = load_or_migrate()?;
+        let latest_value = serde_json::to_value(&latest)?;
+        let local = serde_json::to_value(&self.data)?;
+        let merged = match merge_local_changes(&self.baseline, &local, &latest_value) {
+            Ok(value) => value,
+            Err(error) => {
+                self.baseline = latest_value;
+                self.data = latest;
+                return Err(error);
+            }
+        };
+        let data: AppData = serde_json::from_value(merged.clone())?;
+        if merged != latest_value {
+            save(&data)?;
+        }
+        self.data = data;
+        self.baseline = merged;
+        crate::auth::sync_trusted_origins(&self.data);
+        Ok(())
     }
 
     pub fn settings(&self) -> AppSettings {
@@ -232,6 +262,53 @@ impl DataStore {
     }
 }
 
+// Persist only locally changed fields. A stale UI snapshot must not erase
+// background refresh-token rotation or credential generation.
+fn merge_local_changes(
+    base: &serde_json::Value,
+    local: &serde_json::Value,
+    latest: &serde_json::Value,
+) -> AppResult<serde_json::Value> {
+    if local == base {
+        return Ok(latest.clone());
+    }
+    if latest == base || latest == local {
+        return Ok(local.clone());
+    }
+    if let (Some(base), Some(local), Some(latest)) =
+        (base.as_object(), local.as_object(), latest.as_object())
+    {
+        let mut merged = latest.clone();
+        let keys: std::collections::BTreeSet<_> = base.keys().chain(local.keys()).collect();
+        for key in keys {
+            let b = base.get(key);
+            let l = local.get(key);
+            let r = latest.get(key);
+            if b == l {
+                continue;
+            }
+            match (b, l, r) {
+                (Some(b), Some(l), Some(r)) => {
+                    merged.insert(key.clone(), merge_local_changes(b, l, r)?);
+                }
+                (_, Some(value), _) if r == b || r == l => {
+                    merged.insert(key.clone(), value.clone());
+                }
+                (_, None, _) if r == b => {
+                    merged.remove(key);
+                }
+                _ => return Err(concurrent_update_error()),
+            }
+        }
+        return Ok(serde_json::Value::Object(merged));
+    }
+    Err(concurrent_update_error())
+}
+
+fn concurrent_update_error() -> AppError {
+    AppError::Message("Configuration changed concurrently; reload settings and retry".into())
+}
+
 fn lock_data_file() -> AppResult<std::sync::MutexGuard<'static, ()>> {
     DATA_FILE_LOCK
         .lock()
@@ -273,5 +350,27 @@ mod tests {
         let value = shared_value_for_key("oauth_client_id");
         assert!(value.starts_with("chatgpt-client-"));
         assert_eq!(value.len(), "chatgpt-client-".len() + 12);
+    }
+}
+
+#[cfg(test)]
+mod release_finalization_regressions {
+    use super::*;
+    #[test]
+    fn release_finalization_desktop_save_preserves_background_credentials() {
+        let key = format!("release-regression-{}", uuid::Uuid::new_v4());
+        let mut desktop = DataStore::load().expect("desktop snapshot");
+        DataStore::update_file(|data| {
+            data.shared_secrets
+                .insert(key.clone(), "newly-rotated-secret".into());
+            Ok(())
+        })
+        .expect("background rotation");
+        desktop
+            .update_settings(desktop.settings())
+            .expect("desktop settings save");
+        let actual =
+            DataStore::read_file(|data| Ok(data.shared_secrets.get(&key).cloned())).unwrap();
+        assert_eq!(actual.as_deref(), Some("newly-rotated-secret"));
     }
 }
