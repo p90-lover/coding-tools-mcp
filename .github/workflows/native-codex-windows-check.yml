@@ -39,6 +39,20 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '22'
+      - name: Record firewall state and enable enforcement only on this disposable runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force aiTemp/evidence | Out-Null
+          Get-NetFirewallProfile | Select-Object Name,Enabled,DefaultOutboundAction | ConvertTo-Json | Set-Content aiTemp/evidence/firewall-before.json
+          Get-Service MpsSvc | Select-Object Name,Status | ConvertTo-Json | Set-Content aiTemp/evidence/firewall-service.json
+          $disabled = @(Get-NetFirewallProfile | Where-Object { $_.Enabled -ne 'True' })
+          if ($disabled.Count -gt 0) {
+            Write-Host 'The disposable runner had disabled firewall profiles. Enabling them before native isolation tests.'
+            Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True
+          }
+          Get-NetFirewallProfile | Select-Object Name,Enabled,DefaultOutboundAction | ConvertTo-Json | Set-Content aiTemp/evidence/firewall-after.json
+          if (@(Get-NetFirewallProfile | Where-Object { $_.Enabled -ne 'True' }).Count -ne 0) { throw 'Firewall enforcement is unavailable' }
       - name: Reuse boundary assertions with an ordinary Windows write fixture
         shell: bash
         run: |
@@ -67,8 +81,8 @@ jobs:
               (root/'aiTemp'/out).write_text(script,encoding='utf-8')
           PY
           cat > aiTemp/native-diagnostics.py <<'PY'
-          # Diagnostic-only copies under aiTemp, with an empty isolated CODEX_HOME.
-          # No user login or model call occurs, and production error redaction is unchanged.
+          # Diagnostic-only copies under aiTemp with an empty isolated CODEX_HOME.
+          # Production code and its error redaction remain unchanged.
           from pathlib import Path
           p=Path('aiTemp/native-proof/src/transport.rs')
           text=p.read_text()
@@ -86,6 +100,11 @@ jobs:
         shell: bash
         working-directory: aiTemp/source
         run: bash ../proof.sh
+      - name: Record installed offline rules without account credentials
+        if: always()
+        shell: pwsh
+        run: |
+          Get-NetFirewallRule -Name 'codex_sandbox_offline*' -ErrorAction SilentlyContinue | Select-Object Name,Enabled,Profile,Direction,Action | ConvertTo-Json | Set-Content aiTemp/evidence/native-firewall-rules.json
       - name: Validate complete Windows Rust application and strict lint
         shell: bash
         working-directory: aiTemp/source/src-tauri
