@@ -9,6 +9,7 @@ mod error;
 pub mod harness;
 mod health;
 mod mcp;
+mod native_codex;
 mod platform;
 mod runtime;
 mod secret;
@@ -218,6 +219,12 @@ pub fn run() {
             hide_to_tray,
             show_main_window,
             quit_app,
+            native_codex::commands::native_codex_connect,
+            native_codex::commands::native_codex_disconnect,
+            native_codex::commands::native_codex_snapshot,
+            native_codex::commands::native_codex_approve,
+            native_codex::commands::native_codex_submit,
+            native_codex::commands::native_codex_interrupt,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -241,6 +248,7 @@ pub fn run() {
                     }
                 }
             }
+            tauri::RunEvent::Exit => native_codex::shutdown_all(),
             _ => {}
         });
 }

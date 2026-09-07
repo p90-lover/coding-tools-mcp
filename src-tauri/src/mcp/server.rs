@@ -20,7 +20,13 @@ pub fn handle_request(state: &SharedState, body: &Value) -> Value {
     }
 
     let result = match method {
-        "initialize" => Ok(initialize_result()),
+        "initialize" => {
+            let mut result = initialize_result();
+            if state.tool_profile == "codex-native" {
+                result["instructions"] = json!("Use only codex_start, codex_continue, codex_status and codex_interrupt. The local desktop must enable this connection. Native Codex chooses coding tools and enforces its own sandbox and approvals. Poll status with cursors only while a turn is active. Never pass permission, cwd, binary or approval overrides. Human approvals are local-only. Do not automatically replay uncertain submissions; use the same request_id to deduplicate a retry within the live connection. Native history is owned by Codex, not the legacy history tools.");
+            }
+            Ok(result)
+        }
         "ping" => Ok(serde_json::json!({})),
         "tools/list" => {
             let tools = list_tools_for_profile(&state.tool_profile);
@@ -73,13 +79,14 @@ fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value
     }
 
     let host_session = host_session_key(params).map(str::to_string);
-    let auto_history = if canonical_name.starts_with("history_session_") {
-        None
-    } else {
-        host_session
-            .as_deref()
-            .map(|session_key| auto_bootstrap_history(state, session_key))
-    };
+    let auto_history =
+        if state.tool_profile == "codex-native" || canonical_name.starts_with("history_session_") {
+            None
+        } else {
+            host_session
+                .as_deref()
+                .map(|session_key| auto_bootstrap_history(state, session_key))
+        };
 
     let mut structured = call_tool(state.as_ref(), canonical_name, &args);
     if canonical_name == "history_session_bootstrap" {

@@ -19,13 +19,15 @@
   }
 
   const TOOL_PROFILE_OPTIONS = [
-    { value: "full", label: "完整工具" },
+    { value: "codex-native", label: "原生 Codex（官方 app-server）" },
+    { value: "full", label: "舊版直接工具（應用程式政策）" },
     { value: "read-only", label: "只读工具" },
     { value: "compat-readonly-all", label: "兼容只读" },
   ] as const;
 
   const APPROVAL_MODE_OPTIONS = [
-    { value: "ask", label: "每次變更都詢問" },
+    { value: "untrusted", label: "untrusted（原生 Codex）" },
+    { value: "ask", label: "舊版 Ask（原生模式對應 untrusted）" },
     { value: "on-request", label: "按需批准（Codex）" },
     { value: "never", label: "从不批准" },
   ] as const;
@@ -46,6 +48,7 @@
   }
 
   function normalizeApprovalMode(value: string): string {
+    if (value === "untrusted") return "untrusted";
     if (value === "never") return "never";
     if (value === "on-request" || value === "auto-workspace") return "on-request";
     return "ask";
@@ -126,9 +129,13 @@
       {/each}
     </select>
   </label>
+  {#if draftProfile === "codex-native"}
+    <p class="text-xs text-[var(--color-text-muted)]">使用已安裝的官方 Codex 0.153.4；工具、命令與批准由原生執行後端處理。本頁白名單只適用於舊版直接工具，不限制原生 Codex。原生 full access 沒有沙箱限制，network 在連線時另外批准。儲存後重新啟動 MCP／Actions，再在原生面板連線。</p>
+  {:else}
   <p class="text-xs text-[var(--color-text-muted)]">
     on-request 会自动执行已批准 Workspace 内的常规变更；网络、删除及敏感解释器写入会改用 request_permissions。never 会直接拒绝这些敏感操作。
   </p>
+  {/if}
   <label class="grid gap-1">
     <span class="text-xs text-[var(--color-text-muted)]">权限模式</span>
     <select
@@ -140,9 +147,11 @@
       {/each}
     </select>
   </label>
+  {#if draftProfile !== "codex-native"}
   <p class="text-xs text-[var(--color-text-muted)]">
     read-only 会阻止项目修改及大部分命令；workspace-write 允许 Workspace 内写入；danger-full-access 只跳过软批准。管理员提升、受保护仓库路径及 Workspace 外写入仍会硬性拒绝；当前执行边界仍为 policy_only，并非操作系统级 sandbox。
   </p>
+  {/if}
   <div class="flex justify-end pt-1">
     <button
       type="submit"

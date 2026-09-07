@@ -48,6 +48,7 @@ pub fn quick_add_linked_project(
             .cloned()
             .ok_or_else(|| AppError::Message(format!("workspace not found: {id}")))
     })?;
+    crate::native_codex::invalidate(&id);
     quick_add_linked_project_for_root(
         PathBuf::from(profile.path).as_path(),
         PathBuf::from(path.trim()).as_path(),
@@ -74,6 +75,8 @@ pub fn create_workspace(
 
 #[tauri::command]
 pub fn update_workspace(state: State<'_, AppState>, profile: WorkspaceProfile) -> AppResult<()> {
+    let native_id = profile.id.clone();
+    crate::native_codex::invalidate(&native_id);
     if !matches!(
         profile.auth.auth_type.as_str(),
         "noauth" | "bearer" | "oauth"
@@ -98,7 +101,9 @@ pub fn update_workspace(state: State<'_, AppState>, profile: WorkspaceProfile) -
             .ok_or_else(|| AppError::Message(format!("workspace not found: {}", profile.id)))?;
         validate_workspace_resources_update(store.list(), &current, &profile)?;
         store.update(profile)
-    })
+    })?;
+    crate::native_codex::invalidate(&native_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -109,6 +114,7 @@ pub fn open_workspace_directory(path: String) -> AppResult<()> {
 
 #[tauri::command]
 pub fn delete_workspace(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    crate::native_codex::invalidate(&id);
     let profile = state.with_workspaces(|store| {
         store
             .get(&id)

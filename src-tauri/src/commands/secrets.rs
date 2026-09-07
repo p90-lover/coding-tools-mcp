@@ -56,7 +56,10 @@ pub fn set_workspace_secret(
 ) -> AppResult<()> {
     validate_key(&key)?;
     ensure_workspace_exists(&state, &id)?;
-    state.with_data(|store| store.set_workspace_secret(&id, &key, &value))
+    crate::native_codex::invalidate(&id);
+    state.with_data(|store| store.set_workspace_secret(&id, &key, &value))?;
+    crate::native_codex::invalidate(&id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -68,7 +71,9 @@ pub fn regenerate_workspace_secret(
 ) -> AppResult<String> {
     validate_key(&key)?;
     ensure_workspace_exists(&state, &id)?;
+    crate::native_codex::invalidate(&id);
     let value = state.with_data(|store| store.regenerate_workspace_secret(&id, &key))?;
+    crate::native_codex::invalidate(&id);
     let profile = state.with_workspaces(|store| {
         store
             .get(&id)
@@ -128,6 +133,7 @@ pub fn set_shared_secret(
     if value.is_empty() {
         return Err(AppError::Message("密钥不能为空。".into()));
     }
+    crate::native_codex::shutdown_all();
     let changed = state.with_data(|store| {
         if store.get_shared_secret(&key).as_deref() == Some(value.as_str()) {
             return Ok(false);
@@ -135,6 +141,7 @@ pub fn set_shared_secret(
         store.set_shared_secret(&key, &value)?;
         Ok(true)
     })?;
+    crate::native_codex::shutdown_all();
     if changed {
         let workspaces = state.with_workspaces(|store| Ok(store.list().to_vec()))?;
         schedule_running_services_restart(app, workspaces, key, true);
@@ -151,7 +158,9 @@ pub fn regenerate_shared_secret(
     if !SHARED_KEYS.contains(&key.as_str()) {
         return Err(AppError::Message(format!("invalid shared key: {key}")));
     }
+    crate::native_codex::shutdown_all();
     let value = state.with_data(|store| store.regenerate_shared_secret(&key))?;
+    crate::native_codex::shutdown_all();
 
     let workspaces = state.with_workspaces(|store| Ok(store.list().to_vec()))?;
     schedule_running_services_restart(app, workspaces, key, true);

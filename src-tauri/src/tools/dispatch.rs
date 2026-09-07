@@ -68,6 +68,9 @@ fn policy_tool_err(err: PolicyError) -> Value {
 /// **唯一工具执行入口**。MCP `tools/call` 与 Actions `POST /actions/{tool}` 必须且只能调用此函数。
 /// 策略校验、分发、错误格式在此统一，两路传输层不得另做执行前校验（Actions 仅允许额外的暴露层 `validate_actions_exposure`）。
 pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
+    if let Some(result) = crate::native_codex::route(ctx, name, args) {
+        return result;
+    }
     let mut effective_args = apply_default_cwd(ctx, name, args);
     // Run policy once before approval to surface only non-overridable hard
     // boundaries such as protected paths, host scope, shell escapes, and

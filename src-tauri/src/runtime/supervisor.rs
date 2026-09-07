@@ -339,6 +339,12 @@ impl RuntimeSupervisor {
                     oauth_password,
                     oauth_token_secret,
                     policy,
+                    if profile.runtime.tool_profile == "codex-native" {
+                        "codex-native"
+                    } else {
+                        "core"
+                    }
+                    .into(),
                 )
             }
         };

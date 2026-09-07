@@ -14,6 +14,7 @@ use crate::workspace::AuthConfig;
 const AUTO_HISTORY_CACHE_LIMIT: usize = 128;
 
 pub struct ToolContext {
+    pub(crate) native_binding: Option<crate::native_codex::Binding>,
     pub workspace: Workspace,
     pub auth: AuthConfig,
     pub policy: PolicySettings,
@@ -73,6 +74,7 @@ impl ToolContext {
         let root = workspace.root().to_path_buf();
         let permission_mode = policy.canonical_permission_mode().to_string();
         Self {
+            native_binding: None,
             workspace,
             auth,
             policy,

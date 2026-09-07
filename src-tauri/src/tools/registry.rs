@@ -1,5 +1,12 @@
 use serde_json::{json, Value};
 
+pub const NATIVE_CODEX_TOOLS: &[&str] = &[
+    "codex_start",
+    "codex_continue",
+    "codex_status",
+    "codex_interrupt",
+];
+
 pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "harness_status",
@@ -466,7 +473,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 pub fn is_allowed_tool(name: &str) -> bool {
-    ALLOWED_TOOLS.contains(&name)
+    ALLOWED_TOOLS.contains(&name) || NATIVE_CODEX_TOOLS.contains(&name)
 }
 
 pub fn canonical_tool_name(name: &str) -> &str {
@@ -478,6 +485,7 @@ pub fn canonical_tool_name(name: &str) -> &str {
 
 pub fn normalize_tool_profile(profile: &str) -> &'static str {
     match profile {
+        "codex-native" => "codex-native",
         "advanced" => "advanced",
         "read-only" => "read-only",
         "compat-readonly-all" => "compat-readonly-all",
@@ -487,6 +495,7 @@ pub fn normalize_tool_profile(profile: &str) -> &'static str {
 
 pub fn exposed_tool_names(tool_profile: &str) -> Vec<&'static str> {
     match normalize_tool_profile(tool_profile) {
+        "codex-native" => NATIVE_CODEX_TOOLS.to_vec(),
         "read-only" => CORE_READ_ONLY_TOOLS.to_vec(),
         "advanced" | "compat-readonly-all" => P0_TOOLS.iter().map(|(name, ..)| *name).collect(),
         _ => CORE_TOOLS.to_vec(),
@@ -498,6 +507,18 @@ pub fn list_tools() -> Vec<Value> {
 }
 
 pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
+    if tool_profile == "codex-native" {
+        return NATIVE_CODEX_TOOLS.iter().map(|name| {
+            let description = match *name {
+                "codex_start" => "Start the first task on a locally enabled official Codex thread. Use a unique request_id; repeated IDs cannot submit different input. Sandbox and approvals are controlled only by the desktop and native Codex, never by tool arguments.",
+                "codex_continue" => "Submit the next task after the prior native turn completed. Do not replay timed-out submissions. Use a fresh request_id for new input.",
+                "codex_status" => "Read bounded native output with cursor pagination. Local approval details and account/configuration data are not exposed.",
+                _ => "Request interruption of the active native turn. Observe completion before resubmitting; a timeout is not cancellation.",
+            };
+            json!({"name":name,"description":description,"inputSchema":input_schema(name),
+                "annotations":{"readOnlyHint":*name=="codex_status","destructiveHint":*name!="codex_status","openWorldHint":true,"idempotentHint":*name=="codex_status"}})
+        }).collect();
+    }
     let compat = tool_profile == "compat-readonly-all";
     exposed_tool_names(tool_profile)
         .into_iter()
@@ -529,6 +550,17 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 
 pub fn input_schema(name: &str) -> Value {
     match name {
+        "codex_start" | "codex_continue" => json!({
+            "type":"object","properties":{
+                "prompt":{"type":"string","minLength":1,"maxLength":65536},
+                "request_id":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"}
+            },"required":["prompt","request_id"],"additionalProperties":false
+        }),
+        "codex_status" => json!({"type":"object","properties":{
+            "cursor":{"type":"integer","minimum":0},
+            "max_events":{"type":"integer","minimum":1,"maximum":32}
+        },"additionalProperties":false}),
+        "codex_interrupt" => json!({"type":"object","properties":{},"additionalProperties":false}),
         "history_session_bootstrap" => json!({
             "type": "object",
             "properties": {

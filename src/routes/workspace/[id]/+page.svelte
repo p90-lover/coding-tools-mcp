@@ -11,6 +11,7 @@
   import RuntimePolicyForm, {
     type RuntimePolicyDraft,
   } from "$lib/components/RuntimePolicyForm.svelte";
+  import NativeCodexPanel from "$lib/components/NativeCodexPanel.svelte";
   import ChatGptSessionPrompt from "$lib/components/ChatGptSessionPrompt.svelte";
   import ServicePanel from "$lib/components/ServicePanel.svelte";
   import GptQuickCopy from "$lib/components/GptQuickCopy.svelte";
@@ -620,6 +621,9 @@
     </header>
 
     <div class="page-body">
+      {#if profile.runtime.tool_profile === "codex-native"}
+        {#key profile.id}<NativeCodexPanel {profile} />{/key}
+      {/if}
       {#if activeService === "mcp"}
         <div class="mt-4 flex flex-col gap-3">
           <ServicePanel

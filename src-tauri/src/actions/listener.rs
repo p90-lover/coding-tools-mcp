@@ -52,6 +52,7 @@ pub fn spawn_listener(
     oauth_password: Option<String>,
     oauth_token_secret: Option<String>,
     policy: PolicySettings,
+    tool_profile: String,
 ) -> Result<(ShutdownSender, tauri::async_runtime::JoinHandle<()>), String> {
     if !matches!(auth_type.as_str(), "none" | "api_key" | "oauth") {
         return Err("Unsupported Actions authentication type; refusing to start".into());
@@ -103,6 +104,7 @@ pub fn spawn_listener(
             oauth,
             oauth_client_secret,
             policy,
+            tool_profile,
             shutdown_rx,
         )
         .await;
@@ -136,20 +138,23 @@ async fn serve(
     oauth: Option<Arc<OAuthRuntime>>,
     oauth_client_secret: Option<String>,
     policy: PolicySettings,
+    tool_profile: String,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let workspace = tools::Workspace::new(workspace_path.clone()).map_err(|e| e.message())?;
-    let ctx = Arc::new(ToolContext::from_workspace(
+    let mut ctx = ToolContext::from_workspace(
         workspace,
         crate::workspace::AuthConfig {
             auth_type: auth_type.clone(),
             ..crate::workspace::AuthConfig::default()
         },
         policy.clone(),
-        "full".into(),
+        tool_profile.clone(),
         policy.permission_mode.clone(),
-    ));
-    let tools: Vec<Value> = tools::list_tools()
+    );
+    crate::native_codex::bind_context(&mut ctx, profile_id, "actions");
+    let ctx = Arc::new(ctx);
+    let tools: Vec<Value> = tools::list_tools_for_profile(&tool_profile)
         .into_iter()
         .filter(|tool| {
             tool.get("name")
