@@ -1,0 +1,125 @@
+name: Finalize verified computer control release
+
+on:
+  push:
+    branches: [release/computer-use-finalize]
+    paths: ['.github/workflows/computer-use-finalize.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: finalize-computer-use-v0.3.4-rc.1
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE: c1bf97179f648bdd46d0c223d198b9dba503357e
+      VERSION: 0.3.4-rc.1
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - name: Verify native checks and existing asset bytes, then publish the same draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/finalize
+          python - <<'PY'
+          import hashlib, io, json, os, subprocess, zipfile
+          from pathlib import Path
+          repo = os.environ['GITHUB_REPOSITORY']
+          source = os.environ['SOURCE']
+          tag = 'v' + os.environ['VERSION']
+          release_id = 384245862
+          run_id = 34148165931
+          root = Path('aiTemp/finalize')
+          expected = {
+              'Coding.Tools.MCP_0.3.4-rc.1_x64-setup.exe': (549167178, 5560424, '2645dbd08ea0c861f488dde15768a2ff76859fc6811d481e2c936d31b796b65a'),
+              'Coding.Tools.MCP_0.3.4-rc.1_aarch64.dmg': (549167180, 9589267, 'dd8037662691a6c83c01a222e808bda1030a0b3da7b98e53e15186c83c726388'),
+              'computer-use-validation.zip': (549167177, 26982, '821ce1fa9bd8e4f400044626c93f31c242b2ec93b47fa243491c0c2f0fe56511'),
+              'release-provenance.json': (549167176, 1175, 'c6bbbebe8d620677c1497d95a7a85f486e27fc05266453e16419e2c85eb4b256'),
+              'SHA256SUMS.txt': (549167179, 398, 'b3002c26b2667eeee2bd9133bfe6ca6e884aea45bfb3becdb5799ab56c3eab01'),
+          }
+          def api(path, body=None):
+              args = ['gh', 'api', 'repos/' + repo + '/' + path]
+              data = None
+              if body is not None:
+                  args += ['--method', 'PATCH', '--input', '-']
+                  data = json.dumps(body).encode('utf-8')
+              return json.loads(subprocess.check_output(args, input=data, timeout=60))
+          def check_assets(release):
+              assert release['id'] == release_id and release['tag_name'] == tag
+              assert release['prerelease'] is True
+              assets = {a['name']: a for a in release['assets']}
+              assert len(release['assets']) == len(expected) and set(assets) == set(expected)
+              for name, (ident, size, digest) in expected.items():
+                  a = assets[name]
+                  assert a['id'] == ident and a['state'] == 'uploaded'
+                  assert a['size'] == size and a['digest'] == 'sha256:' + digest
+              return assets
+          assert api('git/ref/tags/' + tag)['object']['sha'] == source
+          assert api('git/ref/heads/release/computer-use-0.3.4-rc.1')['object']['sha'] == source
+          run = api('actions/runs/' + str(run_id))
+          assert run['head_sha'] == source and run['status'] == 'completed'
+          jobs_response = api(f'actions/runs/{run_id}/jobs?per_page=100')
+          assert jobs_response['total_count'] == len(jobs_response['jobs'])
+          jobs = {j['id']: j for j in jobs_response['jobs']}
+          for ident in (101824568959, 101824569142):
+              assert jobs[ident]['head_sha'] == source
+              assert jobs[ident]['status'] == 'completed' and jobs[ident]['conclusion'] == 'success'
+          smoke = [s for s in jobs[101824568959]['steps'] if s['name'] == 'Real Windows UIA, SendInput and in-memory capture fixture']
+          assert len(smoke) == 1 and smoke[0]['conclusion'] == 'success'
+          release = api('releases/' + str(release_id))
+          check_assets(release)
+          (root / 'draft-before.json').write_text(json.dumps(release, indent=2), encoding='utf-8')
+          for name, (ident, size, digest) in expected.items():
+              data = subprocess.check_output(['gh', 'api', f'repos/{repo}/releases/assets/{ident}', '--header', 'Accept: application/octet-stream'], timeout=90)
+              assert len(data) == size and hashlib.sha256(data).hexdigest() == digest, name
+              with (root / name).open('xb') as f:
+                  f.write(data)
+          provenance = json.loads((root / 'release-provenance.json').read_text(encoding='utf-8'))
+          assert provenance['source_commit'] == source and provenance['version'] == os.environ['VERSION']
+          assert provenance['workflow_run'] == run_id and provenance['prerelease'] is True
+          proofs = provenance['installers']
+          assert len(proofs) == 2 and {p['platform'] for p in proofs} == {'windows-x64', 'macos-arm64'}
+          for proof in proofs:
+              assert proof['source_commit'] == source and proof['version'] == os.environ['VERSION']
+              assert proof['screenshot_storage'] == 'memory_only' and proof['codex_invoked'] is False
+              if proof['platform'] == 'windows-x64':
+                  assert proof['native_fixture_verified'] is True
+              assert expected[proof['asset']][1:] == (proof['size'], proof['sha256'])
+          checksums = dict(line.split('  ', 1)[::-1] for line in (root / 'SHA256SUMS.txt').read_text().splitlines())
+          assert set(checksums) == set(expected) - {'SHA256SUMS.txt'}
+          for name, digest in checksums.items():
+              assert expected[name][2] == digest
+          with zipfile.ZipFile(root / 'computer-use-validation.zip') as z:
+              assert all(Path(n).suffix in {'.json', '.txt'} for n in z.namelist())
+              native = [n for n in z.namelist() if n.endswith('/native-smoke.txt')]
+              assert len(native) == 1
+              log = z.read(native[0]).decode('utf-8')
+              assert '1 passed; 0 failed' in log and 'identical local/MCP pixels' in log
+          # Only metadata publication changes. No assets, refs or files are deleted/replaced.
+          if release['draft']:
+              release = api('releases/' + str(release_id), {'draft': False, 'prerelease': True, 'make_latest': 'false', 'target_commitish': source})
+          check_assets(release)
+          assert release['draft'] is False and release['published_at']
+          assert api('git/ref/tags/' + tag)['object']['sha'] == source
+          public = api('releases/tags/' + tag)
+          check_assets(public)
+          assert public['draft'] is False
+          receipt = {'source_commit': source, 'native_build_run': run_id, 'publication_run': int(os.environ['GITHUB_RUN_ID']), 'release_id': release_id, 'tag': tag, 'url': public['html_url'], 'draft': public['draft'], 'prerelease': public['prerelease'], 'assets': [{k: a[k] for k in ('name', 'size', 'digest', 'browser_download_url')} for a in public['assets']]}
+          (root / 'publication-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+          print(json.dumps(receipt, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: computer-use-publication-${{ github.run_id }}
+          path: aiTemp/finalize/publication-receipt.json
+          retention-days: 14
+          if-no-files-found: error
