@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/source-review
+          mkdir -p aiTemp/source-review aiTemp/validation-logs
           git archive --format=tar HEAD > aiTemp/source-review/head.tar
           git archive --format=tar origin/main > aiTemp/source-review/main.tar
           base="$(git merge-base HEAD origin/main)"
@@ -60,7 +60,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          toolchain: stable
+          toolchain: "1.98.1"
           components: rustfmt,clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
@@ -69,52 +69,65 @@ jobs:
           shared-key: defense-in-depth-linux
           cache-on-failure: true
 
-      - name: Materialize previously reviewed security integration
+      - name: Materialize reviewed security integration
         shell: bash
         run: |
-          python aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py
-          python aiTemp/security-hardening/fix_apply_security_hardening_v2_oauth_fixture.py
-          python aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py
-          python aiTemp/security-hardening/apply_linked_root_transaction_fix.py
-          python aiTemp/security-hardening/apply_frp_restore_fail_closed.py
-          python aiTemp/security-hardening/apply_security_hardening_v2.py
-          python aiTemp/security-hardening/apply_public_tunnel_auth_tests.py
-          python aiTemp/security-hardening/apply_public_tunnel_auth_lifecycle_tests.py
-          python aiTemp/security-hardening/apply_public_tunnel_auth_hardening.py
-          python aiTemp/security-hardening/apply_codex_permission_tests.py
-          python aiTemp/security-hardening/apply_codex_permission_model.py
-          python aiTemp/release-hardening/apply_tests.py
+          set -euo pipefail
+          {
+            python aiTemp/security-hardening/fix_apply_security_hardening_v2_toml.py
+            python aiTemp/security-hardening/fix_apply_security_hardening_v2_oauth_fixture.py
+            python aiTemp/security-hardening/fix_apply_security_hardening_v2_rust_generation.py
+            python aiTemp/security-hardening/apply_linked_root_transaction_fix.py
+            python aiTemp/security-hardening/apply_frp_restore_fail_closed.py
+            python aiTemp/security-hardening/apply_security_hardening_v2.py
+            python aiTemp/security-hardening/apply_public_tunnel_auth_tests.py
+            python aiTemp/security-hardening/apply_public_tunnel_auth_lifecycle_tests.py
+            python aiTemp/security-hardening/apply_public_tunnel_auth_hardening.py
+            python aiTemp/security-hardening/apply_codex_permission_tests.py
+            python aiTemp/security-hardening/apply_codex_permission_model.py
+            python aiTemp/release-hardening/apply_tests.py
+            python aiTemp/release-hardening/apply_core_v2.py
+            for patch in apply_runtime_v2.py apply_downloads_v2.py apply_release_v2.py; do
+              if [ -f "aiTemp/release-hardening/$patch" ]; then
+                python "aiTemp/release-hardening/$patch"
+              fi
+            done
+          } 2>&1 | tee aiTemp/validation-logs/materialize.log
 
-      - name: Apply reviewed defense-in-depth implementation when present
-        if: hashFiles('aiTemp/release-hardening/apply.py') != ''
-        run: python aiTemp/release-hardening/apply.py
-
-      - name: Run five focused security regressions
+      - name: Run focused security regressions
         working-directory: src-tauri
-        run: cargo test --locked --lib release_hardening_ -- --nocapture
-
-      - name: Validate formatting and all existing Rust release gates
-        working-directory: src-tauri
+        shell: bash
         run: |
+          set -euo pipefail
+          cargo test --locked --lib release_hardening_ -- --nocapture 2>&1 | tee ../aiTemp/validation-logs/focused-rust.log
+
+      - name: Validate formatting and existing Rust release gates
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo fmt --all
           cargo fmt --all -- --check
-          cargo test --locked
-          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked 2>&1 | tee ../aiTemp/validation-logs/rust-tests.log
+          cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee ../aiTemp/validation-logs/clippy.log
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: "22"
 
       - name: Validate frontend and existing contracts
-        run: |
-          npm ci --cache aiTemp/npm-cache
-          npm run check
-          npm run build
-          node --test tests/*.test.mjs
-
-      - name: Produce non-destructive source patch for review
         shell: bash
         run: |
+          set -euo pipefail
+          npm ci --cache aiTemp/npm-cache
+          npm run check 2>&1 | tee aiTemp/validation-logs/frontend-check.log
+          npm run build 2>&1 | tee aiTemp/validation-logs/frontend-build.log
+          node --test tests/*.test.mjs 2>&1 | tee aiTemp/validation-logs/node-tests.log
+
+      - name: Produce non-destructive verified source patch
+        shell: bash
+        run: |
+          set -euo pipefail
           git diff --check
           if git diff --name-status | grep -q '^D'; then
             echo 'Refusing to stage any deleted file'
@@ -125,6 +138,7 @@ jobs:
           git diff --cached --binary > aiTemp/release-hardening/evidence/verified-source.patch
           git diff --cached --stat > aiTemp/release-hardening/evidence/source-stat.txt
           printf '%s\n' "$GITHUB_SHA" > aiTemp/release-hardening/evidence/base-sha.txt
+          git write-tree > aiTemp/release-hardening/evidence/tree-sha.txt
           sha256sum aiTemp/release-hardening/evidence/verified-source.patch > aiTemp/release-hardening/evidence/patch.sha256
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -133,3 +147,12 @@ jobs:
           path: aiTemp/release-hardening/evidence/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Retain diagnostic logs even when a gate fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: validation-logs-${{ github.sha }}
+          path: aiTemp/validation-logs/
+          if-no-files-found: ignore
+          retention-days: 7
