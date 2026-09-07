@@ -1,0 +1,118 @@
+name: Security v0.3.2 source validation
+
+on:
+  push:
+    branches: [release/security-v0.3.2-20260907]
+    paths:
+      - aiTemp/release-v0.3.2/**
+      - .github/workflows/security-v0.3.2.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: security-v032-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-v032
+  PYTHONDONTWRITEBYTECODE: '1'
+  XDG_CONFIG_HOME: ${{ github.workspace }}/aiTemp/test-config
+  NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+
+jobs:
+  validate:
+    if: github.actor == github.repository_owner && github.repository == 'p90-lover/coding-tools-mcp'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: false
+      - name: Download immutable reviewed source evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-v0.3.2 aiTemp/validation-logs aiTemp/test-config
+          gh api repos/p90-lover/coding-tools-mcp/actions/artifacts/10004358051/zip > aiTemp/release-v0.3.2/verified-source.zip
+          python aiTemp/release-v0.3.2/materialize.py | tee aiTemp/validation-logs/materialize.log
+      - name: Install native Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - name: Reproduce three focused security and persistence failures
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          set -uo pipefail
+          cargo test --locked --lib release_finalization_ -- --nocapture > ../aiTemp/validation-logs/red.log 2>&1
+          status=$?
+          tail -70 ../aiTemp/validation-logs/red.log
+          test "$status" -eq 101
+          grep -F 'test result: FAILED. 0 passed; 3 failed;' ../aiTemp/validation-logs/red.log
+      - name: Apply finalization fixes only after reproducing their failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f aiTemp/release-v0.3.2/finalize.py
+          python aiTemp/release-v0.3.2/finalize.py | tee aiTemp/validation-logs/finalize.log
+      - name: Verify targeted regressions and existing Rust gates
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test --locked --lib release_finalization_ -- --nocapture 2>&1 | tee ../aiTemp/validation-logs/green.log
+          cargo test --locked 2>&1 | tee ../aiTemp/validation-logs/rust-tests.log
+          cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee ../aiTemp/validation-logs/clippy.log
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Check frontend, build and existing contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check 2>&1 | tee aiTemp/validation-logs/frontend-check.log
+          npm run build 2>&1 | tee aiTemp/validation-logs/frontend-build.log
+          node --test tests/*.test.mjs 2>&1 | tee aiTemp/validation-logs/node-tests.log
+          npm audit --audit-level=high 2>&1 | tee aiTemp/validation-logs/npm-audit.log
+      - name: Retain exact verified source for native packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --name-only --diff-filter=D)"
+          git add -f -- src-tauri/src src-tauri/tests src tests package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          mkdir -p aiTemp/verified-v032
+          git diff --cached --binary --full-index > aiTemp/verified-v032/source.patch
+          git diff --cached --stat > aiTemp/verified-v032/source-stat.txt
+          git write-tree > aiTemp/verified-v032/tree.txt
+          printf '%s\n' "$GITHUB_SHA" > aiTemp/verified-v032/base.txt
+          sha256sum aiTemp/verified-v032/source.patch > aiTemp/verified-v032/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-v032-${{ github.sha }}
+          path: aiTemp/verified-v032/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain bounded validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: validation-v032-${{ github.sha }}
+          path: aiTemp/validation-logs/
+          if-no-files-found: error
+          retention-days: 14
