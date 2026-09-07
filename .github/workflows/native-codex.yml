@@ -2,6 +2,7 @@ name: Native Codex integration
 on:
   push:
     branches: [feature/native-codex-runtime]
+    paths: [.github/workflows/native-codex.yml]
   workflow_dispatch:
 permissions:
   contents: read
@@ -9,40 +10,141 @@ concurrency:
   group: native-codex-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  snapshot:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          clean: false
-      - name: Preserve exact source and identity
-        run: |
-          mkdir -p aiTemp/native-codex-source
-          git archive --format=tar HEAD > aiTemp/native-codex-source/source.tar
-          git rev-parse HEAD > aiTemp/native-codex-source/commit.txt
-          sha256sum aiTemp/native-codex-source/source.tar > aiTemp/native-codex-source/SHA256SUMS
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: native-codex-source-${{ github.sha }}
-          path: aiTemp/native-codex-source/
-          retention-days: 7
-          if-no-files-found: error
-  contract:
+  source:
+    if: github.repository == 'p90-lover/coding-tools-mcp' && github.actor == github.repository_owner && github.ref == 'refs/heads/feature/native-codex-runtime'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.source }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ github.sha }}
+          path: aiTemp/source
           persist-credentials: false
           clean: false
-      - name: Test native tool-profile isolation using the real registry
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Materialize exact reviewed candidate without executing it
+        id: source
+        working-directory: aiTemp/source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
         run: |
-          mkdir -p aiTemp/native-contract/src
+          set -euo pipefail
+          python - <<'PY'
+          import base64,hashlib,json,lzma,os,pathlib,shutil,subprocess
+          root=pathlib.Path.cwd().resolve()
+          def git(*args,env=None):
+              return subprocess.check_output(['git','-c','core.autocrlf=false','-c','gc.auto=0',*args],env=env).decode().strip()
+          head=git('rev-parse','HEAD')
+          assert head==os.environ['GITHUB_SHA']
+          if (root/'src-tauri/src/native_codex/mod.rs').is_file():
+              with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('source='+head+'\n')
+              print('Revalidating materialized source:',head)
+              raise SystemExit(0)
+          blobs=['33a6f2c51dfb09e21166f0cba4456b2881014658','caca6c45c1ec884a132ad94793ac2ed1802b1e75','1706c76f9d5e140b0682bc1ef791d8fa80b4da72','ca1221fde5f18cb475da7d5d37404f5880d857aa']
+          encoded=b''
+          for sha in blobs:
+              result=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}']))
+              assert result['sha']==sha and result['encoding']=='base64'
+              data=base64.b64decode(result['content'])
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==sha
+              encoded+=data
+          compressed=base64.b64decode(encoded,validate=True)
+          assert hashlib.sha256(compressed).hexdigest()=='f3d63a67a3faf1e4a8e1007af4688a389b2ff1ec26da3ba3487b43e8dbeb2af0'
+          decoder=lzma.LZMADecompressor(memlimit=128*1024*1024)
+          payload=decoder.decompress(compressed,max_length=2*1024*1024)
+          assert decoder.eof and not decoder.unused_data
+          candidate=json.loads(payload)
+          files=candidate['files']
+          assert len(files)==20 and len({f['path'] for f in files})==20
+          allowed=[]
+          backup=root/'aiTemp/Trash/native-codex-before'
+          for f in files:
+              path=pathlib.PurePosixPath(f['path'])
+              assert not path.is_absolute() and '..' not in path.parts
+              assert str(path).startswith(('src-tauri/src/','src/')) or str(path) in ('.gitignore','docs/native-codex.md')
+              target=root/path
+              assert not target.is_symlink()
+              if f['before'] is None:
+                  assert not target.exists()
+              else:
+                  assert target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest()==f['before'], f['path']
+                  dest=backup/path
+                  dest.parent.mkdir(parents=True,exist_ok=True)
+                  shutil.copy2(target,dest)
+              allowed.append(str(path))
+          patch=root/'aiTemp/native-candidate.patch'
+          patch.parent.mkdir(parents=True,exist_ok=True)
+          patch.write_text(candidate['patch'],encoding='utf-8')
+          git('apply','--index','--check',str(patch))
+          git('apply','--index',str(patch))
+          for f in files:
+              assert hashlib.sha256((root/f['path']).read_bytes()).hexdigest()==f['after'], f['path']
+          # rustfmt parses source only; no application/build script runs with the write token.
+          subprocess.run(['cargo','fmt','--manifest-path','src-tauri/Cargo.toml','--all'],check=True)
+          assert set(git('diff','--name-only').splitlines())<=set(allowed)
+          git('add','--',*allowed)
+          assert not git('diff','--cached','--name-only','--diff-filter=D')
+          assert set(git('diff','--cached','--name-only').splitlines())==set(allowed)
+          git('diff','--cached','--check')
+          branch='feature/native-codex-runtime'
+          current=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/ref/heads/{branch}']))['object']['sha']
+          assert current==head, 'Branch moved; refusing to rebase tested/reviewed work'
+          env={**os.environ,'GIT_AUTHOR_NAME':'github-actions[bot]','GIT_COMMITTER_NAME':'github-actions[bot]','GIT_AUTHOR_EMAIL':'41898282+github-actions[bot]@users.noreply.github.com','GIT_COMMITTER_EMAIL':'41898282+github-actions[bot]@users.noreply.github.com'}
+          tree=git('write-tree')
+          commit=git('commit-tree',tree,'-p',head,'-m','feat: native Codex app-server, local approvals and isolated native tool profile',env=env)
+          auth=base64.b64encode(('x-access-token:'+os.environ['GH_TOKEN']).encode()).decode()
+          env.update({'GIT_CONFIG_COUNT':'1','GIT_CONFIG_KEY_0':'http.https://github.com/.extraheader','GIT_CONFIG_VALUE_0':'AUTHORIZATION: basic '+auth})
+          subprocess.run(['git','push','origin',commit+':refs/heads/'+branch],env=env,check=True)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('source='+commit+'\n')
+          print('Candidate production source; validation is required:',commit)
+          PY
+  validate:
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PYTHONDONTWRITEBYTECODE: '1'
+      XDG_CONFIG_HOME: ${{ github.workspace }}/aiTemp/test-config
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.source.outputs.source }}
+          path: aiTemp/source
+          persist-credentials: false
+          clean: false
+      - name: Install Tauri dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: aiTemp/source/src-tauri -> ../../../aiTemp/cargo-target
+          shared-key: native-codex-linux
+          cache-on-failure: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Run the previously failing tool-profile contract and policy bounds
+        working-directory: aiTemp/source
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/native-contract/src aiTemp/evidence
           cp src-tauri/src/tools/registry.rs aiTemp/native-contract/src/registry.rs
+          cp src-tauri/src/native_codex/protocol.rs aiTemp/native-contract/src/protocol.rs
           cat > aiTemp/native-contract/Cargo.toml <<'TOML'
           [package]
           name = "native-codex-contract"
@@ -50,10 +152,12 @@ jobs:
           edition = "2021"
           [dependencies]
           serde_json = "1"
+          serde = { version = "1", features = ["derive"] }
           TOML
           cat > aiTemp/native-contract/src/lib.rs <<'RUST'
           #![allow(dead_code)]
           mod registry;
+          mod protocol;
           #[test]
           fn native_profile_never_exposes_legacy_execution_or_remote_approval() {
               let expected = vec!["codex_start", "codex_continue", "codex_status", "codex_interrupt"];
@@ -66,5 +170,59 @@ jobs:
                   assert!(tool["inputSchema"]["properties"].get("approval_token").is_none());
               }
           }
+          #[test]
+          fn effective_native_policy_rejects_network_and_scope_expansion() {
+              use serde_json::json;
+              let cwd=std::env::current_dir().unwrap();
+              let policy=protocol::NativePolicy::new("workspace-write","on-request",false,cwd.clone(),vec![]);
+              let mut response=json!({"thread":{"id":"native-fixture"},"cwd":cwd,"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":{"type":"workspaceWrite","networkAccess":false,"writableRoots":[cwd],"excludeTmpdirEnvVar":true,"excludeSlashTmp":true}});
+              assert!(policy.verify_thread(&response).is_ok());
+              response["sandbox"]["networkAccess"]=json!(true);
+              assert!(policy.verify_thread(&response).is_err());
+              response["sandbox"]["networkAccess"]=json!(false);
+              response["sandbox"]["writableRoots"]=json!([cwd.parent().unwrap()]);
+              assert!(policy.verify_thread(&response).is_err());
+              assert!(protocol::PromptArgs::parse(&json!({"prompt":"hello","request_id":"one","sandbox":"danger-full-access"})).is_err());
+          }
+          #[test]
+          fn retained_output_and_local_decisions_remain_bounded() {
+              use serde_json::json;
+              let mut events=protocol::EventBuffer::default();
+              for _ in 0..200 { events.push("delta",&"界".repeat(20000)); }
+              let page=events.page(0,999);
+              assert!(page.to_string().len()<70*1024);
+              assert_eq!(page["history_truncated"],true);
+              assert!(protocol::approval_response("account/login",&json!({}),"accept").is_err());
+              assert!(protocol::approval_response("item/fileChange/requestApproval",&json!({}),"skip").is_err());
+              assert_eq!(protocol::approval_response("item/fileChange/requestApproval",&json!({}),"decline").unwrap(),json!({"decision":"decline"}));
+          }
           RUST
-          CARGO_TARGET_DIR="$PWD/aiTemp/native-contract-target" cargo test --manifest-path aiTemp/native-contract/Cargo.toml native_profile_never_exposes -- --nocapture
+          cargo test --manifest-path aiTemp/native-contract/Cargo.toml -- --nocapture 2>&1 | tee aiTemp/evidence/native-contracts.txt
+      - name: Native application compilation and existing Rust tests
+        working-directory: aiTemp/source/src-tauri
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked 2>&1 | tee ../aiTemp/evidence/rust-tests.txt
+      - name: Strict native application lint
+        working-directory: aiTemp/source/src-tauri
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --all-targets -- -D warnings 2>&1 | tee ../aiTemp/evidence/clippy.txt
+      - name: Frontend type checks and production build
+        working-directory: aiTemp/source
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/build.txt
+          node --test tests/*.test.mjs 2>&1 | tee aiTemp/evidence/contracts.txt
+          git diff --exit-code
+      - name: Preserve exact-source validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-codex-validation-${{ needs.source.outputs.source }}
+          path: aiTemp/source/aiTemp/evidence/
+          retention-days: 14
+          if-no-files-found: error
