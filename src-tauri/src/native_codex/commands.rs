@@ -22,7 +22,7 @@ pub async fn native_codex_connect(
     let text = if full {
         "Enable native Codex FULL ACCESS for this workspace? This removes Codex filesystem and network sandbox restrictions. Authenticated tool clients may submit tasks using your Codex account and quota. Commands can act with your desktop account's privileges. File-preservation instructions are not an OS deletion prohibition."
     } else {
-        "Enable official native Codex for this workspace? Authenticated tool clients may submit tasks using your configured Codex account/provider and quota. Native approvals will be shown only in this desktop window. Trust the selected executable and project. Temp/file-preservation instructions do not replace backups."
+        "Enable official native Codex for this workspace? Authenticated tool clients may submit tasks using your configured Codex account/provider and quota. Native approvals will be shown only in this desktop window. Trust the selected executable and project. Native read access may extend beyond writable roots. Temp/file-preservation instructions do not replace backups."
     };
     let linked = crate::workspace::linked_projects::list_linked_projects_for_root(
         std::path::Path::new(&config.path),
@@ -36,7 +36,14 @@ pub async fn native_codex_connect(
     if root_lines.len() > 32 * 1024 {
         return Err("Too many writable roots to review safely".into());
     }
-    let text = format!("{text}\n\nExecutable: {binary}\nWorkspace: {}\nAdditional writable roots (workspace-write only):\n{root_lines}\nNetwork requested: {network}", config.path);
+    let reviewed = super::protocol::NativePolicy::new(
+        &config.runtime.permission_mode,
+        &config.runtime.approval_mode,
+        network,
+        std::path::PathBuf::from(&config.path),
+        Vec::new(),
+    );
+    let text = format!("{text}\n\nExecutable: {binary}\nWorkspace: {}\nSandbox: {}\nApproval policy: {}\nCommand network access: {}\nAdditional writable roots (workspace-write only):\n{root_lines}\nThis native policy is shared by MCP and Actions; legacy Actions command settings do not override it.", config.path, reviewed.sandbox, reviewed.approval, reviewed.network);
     let dialog_app = app.clone();
     let confirmed = tauri::async_runtime::spawn_blocking(move || {
         dialog_app
