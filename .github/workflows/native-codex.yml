@@ -1,0 +1,32 @@
+name: Native Codex integration
+on:
+  push:
+    branches: [feature/native-codex-runtime]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-codex-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          clean: false
+      - name: Preserve exact source and identity
+        run: |
+          mkdir -p aiTemp/native-codex-source
+          git archive --format=tar HEAD > aiTemp/native-codex-source/source.tar
+          git rev-parse HEAD > aiTemp/native-codex-source/commit.txt
+          sha256sum aiTemp/native-codex-source/source.tar > aiTemp/native-codex-source/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-codex-source-${{ github.sha }}
+          path: aiTemp/native-codex-source/
+          retention-days: 7
+          if-no-files-found: error
