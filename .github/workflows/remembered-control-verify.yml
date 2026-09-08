@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: verify-remembered-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   VERSION: 0.3.6-rc.1
   SOURCE: ${{ github.sha }}
