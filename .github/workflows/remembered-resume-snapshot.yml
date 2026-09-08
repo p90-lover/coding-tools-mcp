@@ -1,0 +1,35 @@
+name: Remembered source recovery snapshot
+on:
+  push:
+    branches: [audit/remembered-036-resume-source]
+    paths: ['.github/workflows/remembered-resume-snapshot.yml']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: abf96edb3429f61195aae19c892719c33abe19c2
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - name: Preserve immutable source
+        working-directory: aiTemp/source
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/snapshot
+          test "$(git rev-parse HEAD)" = 'abf96edb3429f61195aae19c892719c33abe19c2'
+          git archive --format=zip HEAD --output=aiTemp/snapshot/source.zip
+          git ls-tree -r HEAD > aiTemp/snapshot/tree.txt
+          git rev-parse HEAD > aiTemp/snapshot/source-sha.txt
+          (cd aiTemp/snapshot && sha256sum source.zip tree.txt source-sha.txt > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remembered-resume-source-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/snapshot/*
+          if-no-files-found: error
+          retention-days: 14
