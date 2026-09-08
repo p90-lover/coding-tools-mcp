@@ -1,5 +1,8 @@
 <script lang="ts">
   import "../app.css";
+  import "../control-center.css";
+  import { locale } from "$lib/control-center/locale";
+  import { loadCenter } from "$lib/control-center/api";
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
@@ -15,7 +18,6 @@
     listWorkspaces,
     openWorkspaceDirectory,
   } from "$lib/api/workspaces";
-  import { getLastWorkspaceId } from "$lib/api/settings";
   import {
     actionsRuntimeStates,
     linkedProjectsByWorkspace,
@@ -120,19 +122,15 @@
     const stopClose = startCloseGuard(() => {
       closeConfirmOpen = true;
     });
-    void (async () => {
-      await refreshWorkspaces();
-      const path = $page.url.pathname;
-      if (path === "/") {
-        const lastId = await getLastWorkspaceId();
-        if (lastId && $workspaces.some((item) => item.id === lastId)) {
-          goto(`/workspace/${lastId}`);
-        } else if ($workspaces.length > 0) {
-          goto(`/workspace/${$workspaces[0].id}`);
-        }
-      }
-    })();
+    const refresh = () => { void refreshWorkspaces().catch(e=>showToast(String(e),{kind:"error"})); };
+    const add = () => { void addWorkspace(); };
+    refresh();
+    void loadCenter().catch(()=>{});
+    window.addEventListener("center:refresh",refresh);
+    window.addEventListener("center:add-workspace",add);
     return () => {
+      window.removeEventListener("center:refresh",refresh);
+      window.removeEventListener("center:add-workspace",add);
       stopGuard();
       stopClose();
     };
@@ -149,28 +147,28 @@
       class="tx-settings-link {$page.url.pathname === '/settings/general' ? 'active' : ''}"
       onclick={openGeneralSettings}
     >
-      通用
+      {$locale==='en'?'General':'一般'}
     </button>
     <button
       type="button"
       class="tx-settings-link {$page.url.pathname === '/settings/keys' ? 'active' : ''}"
       onclick={openKeysSettings}
     >
-      共享密钥
+      {$locale==='en'?'Shared keys':'共用金鑰'}
     </button>
     <button
       type="button"
       class="tx-settings-link {$page.url.pathname === '/settings/frp' ? 'active' : ''}"
       onclick={openFrpSettings}
     >
-      FRP 配置
+      {$locale==='en'?'FRP tunnels':'FRP 隧道'}
     </button>
     <button
       type="button"
       class="tx-settings-link {$page.url.pathname === '/settings/software' ? 'active' : ''}"
       onclick={openSoftwareSettings}
     >
-      软件管理
+      {$locale==='en'?'Software':'軟體管理'}
     </button>
   {/snippet}
   {#snippet sidebar()}

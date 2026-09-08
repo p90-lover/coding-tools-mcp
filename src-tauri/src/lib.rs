@@ -1,4 +1,5 @@
 #![cfg_attr(target_os = "windows", allow(linker_messages))]
+mod control_center;
 
 mod actions;
 mod app_state;
@@ -175,6 +176,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            control_center::center_load,
+            control_center::center_save_connection,
+            control_center::center_save_task,
+            control_center::center_sync,
             sandbox_local_prepare,
             sandbox_local_status,
             sandbox_local_disable,

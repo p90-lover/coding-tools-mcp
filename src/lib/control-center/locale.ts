@@ -1,0 +1,6 @@
+import { writable } from 'svelte/store';
+export const locale=writable<'en'|'zh'>('en');
+export const labels={
+  en:{overview:'Overview',tasks:'Task board',sessions:'Sessions',connections:'Connections',computer:'Computer control',settings:'Settings',workspaces:'Workspaces',add:'Add workspace',search:'Find a workspace or page…',searchTitle:'Go to…',local:'Local-first',noAgents:'Agent execution disabled',subtitle:'Your tools, projects and automation. One clear view.',newTask:'New task',refresh:'Refresh',all:'All workspaces',safety:'You stay in control',running:'Services running',attention:'Needs attention',open:'Open workspace',manage:'Manage',empty:'No workspaces yet',emptyHint:'Choose a project folder to connect your tools and start planning.',connect:'Connect your tools',readOnly:'Read-only integration',native:'Local planning',back:'Back to overview'},
+  zh:{overview:'總覽',tasks:'任務看板',sessions:'會話',connections:'連線',computer:'電腦操作',settings:'設定',workspaces:'工作區',add:'新增工作區',search:'搜尋工作區或頁面…',searchTitle:'前往…',local:'本機優先',noAgents:'Agent 執行已停用',subtitle:'在同一介面管理工具、專案及自動化。',newTask:'新增任務',refresh:'重新整理',all:'所有工作區',safety:'控制權在你手上',running:'運行中服務',attention:'需要處理',open:'開啟工作區',manage:'管理',empty:'尚未有工作區',emptyHint:'選擇專案資料夾，連接工具並開始規劃。',connect:'連接你的工具',readOnly:'唯讀整合',native:'本機規劃',back:'返回總覽'},
+};
