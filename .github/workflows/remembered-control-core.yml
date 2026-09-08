@@ -1,0 +1,216 @@
+name: Release remembered control without unverified command sandbox
+on:
+  push:
+    branches: [release/remembered-control-0.3.6-core]
+    paths: ['.github/workflows/remembered-control-core.yml', 'src/**', 'src-tauri/**', 'aiTemp/release-verification/package_control_core.py']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: remembered-control-core-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  VERSION: 0.3.6-rc.1
+  SOURCE: ${{ github.sha }}
+  PYTHONUTF8: '1'
+  PYTHONUNBUFFERED: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_RELEASE_DEBUG: '0'
+  OTEL_SDK_DISABLED: 'true'
+jobs:
+  native:
+    if: github.actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            bundles: nsis
+          - os: macos-14
+            platform: macos-arm64
+            bundles: app,dmg
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Prepare isolated temporary directories
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/aiTemp/process-temp" aiTemp/evidence aiTemp/installer
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          assert 'CODING_TOOLS_SANDBOX_MANIFEST_SHA256' not in os.environ
+          temp=Path(os.environ['GITHUB_WORKSPACE'])/'aiTemp/process-temp'
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as f:
+              for key in ('TEMP','TMP','TMPDIR'): f.write(key+'='+str(temp.resolve())+'\n')
+          PY
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Frontend and RAM-only contracts
+        run: python aiTemp/release-verification/run_step.py frontend
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cache
+        with:
+          path: aiTemp/cargo-target
+          key: remembered-core-${{ matrix.platform }}-rust1981-${{ hashFiles('aiTemp/checkout/src-tauri/Cargo.lock','aiTemp/checkout/src-tauri/src/**') }}
+          restore-keys: remembered-app-${{ matrix.platform }}-rust1981-v1-
+      - name: Focused remembered permissions, vision and catalog
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib computer_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/computer-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib vision_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/vision-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/connection-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib core_catalog_exposes_chatgpt_compatible_tools -- --test-threads=1 2>&1 | tee aiTemp/evidence/catalog.txt
+      - name: Assert command sandbox rejects and cannot execute
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib sandbox_release_rejects_without_helpers_or_filesystem_access -- --test-threads=1 2>&1 | tee aiTemp/evidence/sandbox-withheld.txt
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          text=Path('src-tauri/src/tools/native_sandbox.rs').read_text(encoding='utf-8')
+          assert not re.search(r'(Command::|\.spawn\(|invoke_helper|verified_helpers|mod native_sandbox_prototype)',text)
+          assert '1 passed; 0 failed' in Path('aiTemp/evidence/sandbox-withheld.txt').read_text(encoding='utf-8')
+          assert 'withheld_pending_native_verification' in text
+          PY
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: aiTemp/cargo-target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Real Windows background observation and input
+        if: runner.os == 'Windows'
+        env:
+          COMPUTER_USE_NATIVE_SMOKE: '1'
+        run: python aiTemp/release-verification/run_step.py desktop
+      - name: Build actual installer without command helpers
+        env:
+          CI: 'true'
+          BUNDLES: ${{ matrix.bundles }}
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles "$BUNDLES" -- --locked 2>&1 | tee aiTemp/evidence/installer.txt
+          python aiTemp/release-verification/package_control_core.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remembered-core-installer-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/installer/*
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: remembered-core-evidence-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          retention-days: 14
+          if-no-files-found: error
+
+  publish:
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: remembered-core-installer-*-${{ github.run_id }}
+          path: aiTemp/installers
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: remembered-core-evidence-*-${{ github.run_id }}
+          path: aiTemp/evidence
+      - name: Publish only independently verified control assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-assets
+          python - <<'PY'
+          import base64,hashlib,json,os,shutil,subprocess,zipfile
+          from pathlib import Path
+          repo=os.environ['GITHUB_REPOSITORY'];source=os.environ['SOURCE'];version=os.environ['VERSION'];tag='v'+version
+          def api(path,method='GET',body=None):
+              args=['gh','api',f'repos/{repo}/{path}','--method',method];payload=None
+              if body is not None:args+=['--input','-'];payload=json.dumps(body).encode()
+              return json.loads(subprocess.check_output(args,input=payload,timeout=90))
+          assert api('git/ref/heads/release/remembered-control-0.3.6-core')['object']['sha']==source
+          dest=Path('aiTemp/release-assets');root=Path('aiTemp/installers')
+          proofs=[json.loads(p.read_text()) for p in root.glob('*/proof.json')]
+          assert len(proofs)==2 and {p['platform'] for p in proofs}=={'windows-x64','macos-arm64'}
+          for p in proofs:
+              assert p['source_commit']==source and p['version']==version
+              assert p['screenshot_storage']=='memory_only' and p['codex_agent_invoked'] is False
+              assert p['native_sandbox_verified'] is False and p['native_sandbox_bundled'] is False
+              assert p['native_sandbox_status']=='withheld_pending_native_verification'
+              if p['platform']=='windows-x64':assert p['native_fixture_verified'] is True
+              assert Path(p['asset']).name==p['asset'];matches=list(root.glob('*/'+p['asset']));assert len(matches)==1
+              asset=matches[0];assert not asset.is_symlink()
+              assert asset.stat().st_size==p['size'] and hashlib.sha256(asset.read_bytes()).hexdigest()==p['sha256']
+              shutil.copy2(asset,dest/asset.name)
+          native_logs=list(Path('aiTemp/evidence').glob('*/native-smoke.txt'));assert len(native_logs)==1
+          assert '1 passed; 0 failed' in native_logs[0].read_text()
+          withheld=list(Path('aiTemp/evidence').glob('*/sandbox-withheld.txt'));assert len(withheld)==2
+          assert all('1 passed; 0 failed' in p.read_text() for p in withheld)
+          (dest/'release-provenance.json').write_text(json.dumps({'version':version,'source_commit':source,'workflow_run':int(os.environ['GITHUB_RUN_ID']),'prerelease':True,'native_sandbox_status':'withheld_pending_native_verification','installers':proofs},indent=2)+'\n')
+          with zipfile.ZipFile(dest/'computer-use-validation.zip','x',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(Path('aiTemp/evidence').rglob('*')):
+                  if p.is_file():
+                      assert not p.is_symlink() and p.suffix in {'.json','.txt'}
+                      z.write(p,p.relative_to('aiTemp/evidence').as_posix())
+          files=sorted(dest.iterdir());(dest/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))
+          assert not api('git/matching-refs/tags/'+tag),'Existing release tags are never replaced'
+          notes=base64.b64decode(api(f'contents/docs/releases/{tag}.md?ref={source}')['content']).decode('utf-8')
+          assert 'withheld' in notes and 'not bundled' in notes
+          api('git/refs','POST',{'ref':'refs/tags/'+tag,'sha':source})
+          release=api('releases','POST',{'tag_name':tag,'target_commitish':source,'name':f'Coding Tools MCP {tag} — Remembered/background control','body':notes,'draft':True,'prerelease':True,'make_latest':'false'})
+          ident=release['id'];Path('aiTemp/draft-id.txt').write_text(str(ident)+'\n');expected={}
+          for p in sorted(dest.iterdir()):
+              digest='sha256:'+hashlib.sha256(p.read_bytes()).hexdigest();expected[p.name]=(p.stat().st_size,digest)
+              url=f'https://uploads.github.com/repos/{repo}/releases/{ident}/assets?name={p.name}'
+              asset=json.loads(subprocess.check_output(['gh','api',url,'--method','POST','--header','Content-Type: application/octet-stream','--input',str(p)],timeout=120))
+              assert asset['name']==p.name and (asset['size'],asset['digest'])==expected[p.name]
+              data=subprocess.check_output(['gh','api',f'repos/{repo}/releases/assets/{asset["id"]}','--header','Accept: application/octet-stream'],timeout=120)
+              assert (len(data),'sha256:'+hashlib.sha256(data).hexdigest())==expected[p.name]
+          current=api('releases/'+str(ident));assert current['draft'] and current['prerelease']
+          assert {a['name']:(a['size'],a['digest']) for a in current['assets']}==expected and len(expected)==5
+          assert api('git/ref/tags/'+tag)['object']['sha']==source
+          assert api('git/ref/heads/release/remembered-control-0.3.6-core')['object']['sha']==source
+          api('releases/'+str(ident),'PATCH',{'draft':False,'prerelease':True,'make_latest':'false','target_commitish':source})
+          public=api('releases/tags/'+tag);assert public['draft'] is False and public['published_at']
+          assert {a['name']:(a['size'],a['digest']) for a in public['assets']}==expected
+          receipt={'source_commit':source,'release_id':ident,'url':public['html_url'],'draft':False,'prerelease':True,'native_sandbox_status':'withheld_pending_native_verification','assets':[{k:a[k] for k in ('name','size','digest','browser_download_url')} for a in public['assets']]}
+          Path('aiTemp/publication-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');print(json.dumps(receipt,indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: remembered-core-publication-${{ github.run_id }}
+          path: |
+            aiTemp/publication-receipt.json
+            aiTemp/draft-id.txt
+          retention-days: 14
+          if-no-files-found: warn

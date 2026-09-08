@@ -1,30 +1,24 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { confirm } from '@tauri-apps/plugin-dialog';
   let { workspaceId }: { workspaceId: string } = $props();
-  let status=$state<any>({available:false});let busy=$state(false);let message=$state('');
-  async function refresh(){try{status=await invoke('sandbox_local_status',{workspaceId});}catch(e){message=String(e);}}
-  async function prepare(){
-    if(!await confirm(`Prepare the native OS sandbox for this workspace? Windows may ask for one-time administrator approval to create separate CodingTools sandbox accounts and firewall rules. The sandbox has read-only workspace/platform access and restricted networking. It is not a Codex agent and does not use Codex quota.
-
-為此工作區準備原生沙箱？Windows 可能要求一次管理員授權，以建立獨立 CodingTools 沙箱帳戶及防火牆規則。沙箱僅可讀取工作區／平台檔案並限制網絡，不啟動 Codex Agent。
-
-This enables only sandbox_exec, not an OS sandbox around desktop input or the existing command tools.
-僅適用於 sandbox_exec，不會把桌面輸入或既有命令工具自動放入沙箱。`,{title:'Prepare sandbox / 準備沙箱',kind:'warning'}))return;
-    busy=true;
-    try{const result=await invoke<any>('sandbox_local_prepare',{workspaceId});message=result.ok?'Sandbox prepared and approved. · 沙箱已準備及批准。':String(result.error??'Preparation did not succeed');await refresh();}catch(e){message=String(e);}finally{busy=false;}
+  let message = $state('');
+  async function revoke() {
+    try {
+      await invoke('sandbox_local_disable', { workspaceId });
+      message = 'Stored sandbox approval revoked; files and OS accounts are preserved. · 已撤銷儲存的沙箱批准，檔案及系統帳戶保留。';
+    } catch (e) { message = String(e); }
   }
-  async function disable(){try{await invoke('sandbox_local_disable',{workspaceId});message='Sandbox permission revoked. Existing OS accounts are preserved. · 已撤銷沙箱授權，既有系統帳戶保留。';await refresh();}catch(e){message=String(e);}}
-  onMount(()=>{void refresh();});
+  onMount(() => {
+    void invoke('sandbox_local_status', { workspaceId }).catch((e) => { message = String(e); });
+  });
 </script>
-<section class="mt-4 rounded-lg border border-[var(--border)] p-4" aria-label="Native sandbox">
+<section class="mt-4 rounded-lg border border-[var(--border)] p-4" aria-label="Native sandbox release status">
   <h4 class="font-medium">Native command sandbox · 原生命令沙箱</h4>
-  <p class="mt-1 text-xs opacity-70">Pinned upstream Codex sandbox library, without Codex CLI/agent inference. Read-only execution in a private desktop; separate from computer-use permissions.</p>
-  <div class="mt-3 flex flex-wrap items-center gap-3">
-    <button class="tx-btn-secondary" disabled={busy||!status.available} onclick={prepare}>{busy?'Preparing · 準備中':'Prepare / approve · 準備／批准'}</button>
-    <button class="tx-btn-secondary" disabled={!status.enabled_for_workspace} onclick={disable}>Disable · 停用</button>
-    <span class="text-xs">{status.enabled_for_workspace?'Approved · 已批准':status.available?'Local setup required · 須本機設定':'Not included on this platform/build · 此平台／版本未包含'}</span>
-  </div>
+  <p class="mt-2 text-xs opacity-80">Not included in this release: Windows runtime/isolation verification has not passed. No sandbox helper or administrator setup can run.</p>
+  <p class="mt-1 text-xs opacity-80">此版本未包含：Windows 執行環境／隔離驗證尚未通過，不會執行沙箱輔助程式或管理員設定。</p>
+  <p class="mt-2 text-xs opacity-70">Remembered computer control, background observation and RAM-only vision work independently. They are not an OS sandbox around applications.</p>
+  <p class="mt-1 text-xs opacity-70">記住電腦操作授權、背景觀察及記憶體視覺功能獨立運作，不代表應用程式已受作業系統沙箱限制。</p>
+  <button class="tx-btn-secondary mt-3" onclick={revoke}>Revoke old sandbox approval · 撤銷舊沙箱批准</button>
   {#if message}<p class="mt-2 text-xs" role="status">{message}</p>{/if}
 </section>
