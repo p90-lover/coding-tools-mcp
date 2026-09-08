@@ -1,6 +1,9 @@
-"""Extend the isolated runtime experiment; no production gates are weakened."""
+"""Resolve bounded OS runtime dependencies; retain all original isolation assertions."""
 from pathlib import Path
 import subprocess
+import sys
+sys.path.insert(0,str(Path('aiTemp/release-verification').resolve()))
+from pe_dependencies import runtime_dependencies
 
 def grant_provider_keys(home):
     import ctypes as c
@@ -22,9 +25,6 @@ def grant_provider_keys(home):
 def probe_runtime(request, root, home):
     executable = root / 'runtime-probe.exe'
     subprocess.run(['rustc', '--edition', '2021', 'aiTemp/release-verification/winsock_resource_probe.rs', '-o', str(executable)], check=True)
-    print('PROVIDER POSITIVE CONTROL', flush=True)
-    subprocess.run([str(executable)], check=True)
-    print('TCP HELPER CONFIGURATION READ-ONLY GRANTS',flush=True)
     grant_provider_keys(home)
     result = request('exec', [str(executable)])
     assert result['ok'], result
@@ -35,4 +35,17 @@ source = path.read_text(encoding='utf-8')
 old = "source=source.replace(anchor,anchor+'\\ngrant_runtime(home)')"
 new = "source=source.replace(anchor,anchor+'\\ngrant_runtime(home)\\nprobe_runtime(request,root,home)')"
 assert source.count(old) == 1
-exec(compile(source.replace(old,new),str(path),'exec'),globals())
+source=source.replace(old,new)
+old="files=[runtime/n for n in names if (runtime/n).is_file()]"
+new="files=runtime_dependencies(runtime,names+['dnsapi.dll','bcrypt.dll','sspicli.dll'])\n  print('READ-ONLY OS IMPORT CLOSURE',[p.name for p in files],flush=True)"
+assert source.count(old)==1
+source=source.replace(old,new)
+old="files.extend(p/'cmd.exe.mui' for p in runtime.iterdir() if p.is_dir() and not p.is_symlink() and '-' in p.name and (p/'cmd.exe.mui').is_file())"
+new="""locales=[p for p in runtime.iterdir() if p.is_dir() and not p.is_symlink() and '-' in p.name and len(p.name)<36]
+  assert len(locales)<=64
+  localized=[directory/(file.name+'.mui') for directory in locales for file in files if (directory/(file.name+'.mui')).is_file()]
+  assert len(localized)<=1024
+  files.extend(localized)"""
+assert source.count(old)==1
+source=source.replace(old,new)
+exec(compile(source,str(path),'exec'),globals())
