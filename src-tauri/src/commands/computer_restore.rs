@@ -5,6 +5,19 @@ use crate::tools::computer::{self, permissions};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
+/// Retry frequency is bounded; remembered permission itself does not time out.
+#[derive(Default)]
+struct RestoreRetry {
+    misses: u8,
+}
+impl RestoreRetry {
+    fn delay(&mut self) -> Duration {
+        let seconds = if self.misses < 12 { 5 } else { 30 };
+        self.misses = self.misses.saturating_add(1);
+        Duration::from_secs(seconds)
+    }
+}
+
 pub fn start(app: AppHandle) {
     if !cfg!(target_os = "windows") {
         return;
@@ -45,7 +58,8 @@ pub fn start(app: AppHandle) {
         if permissions::restore_blocked() {
             return;
         }
-        for _ in 0..720 {
+        let mut retry = RestoreRetry::default();
+        loop {
             if computer::has_local_session()
                 || permissions::restore_blocked()
                 || permissions::epoch() != epoch
@@ -69,7 +83,7 @@ pub fn start(app: AppHandle) {
                     .and_then(Result::ok)
                     .flatten();
             let Some(target) = target else {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(retry.delay()).await;
                 continue;
             };
             if computer::has_local_session()
@@ -136,6 +150,23 @@ pub fn start(app: AppHandle) {
             }
             return;
         }
-        // One hour without an unambiguous approved app: leave consent stored but no active control.
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn computer_restore_retry_has_no_expiry_or_counter_overflow() {
+        let mut retry = RestoreRetry::default();
+        for _ in 0..12 {
+            assert_eq!(retry.delay(), Duration::from_secs(5));
+        }
+        // Well beyond the former one-hour cutoff and the counter's capacity.
+        for _ in 0..10_000 {
+            assert_eq!(retry.delay(), Duration::from_secs(30));
+        }
+        assert_eq!(retry.misses, u8::MAX);
+    }
 }

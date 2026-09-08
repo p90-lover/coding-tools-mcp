@@ -6,7 +6,7 @@ The existing Always enabled mode removes the timer. This release additionally ex
 
 Remembered authority is bound to a canonical workspace, its authentication/security settings, and the application's canonical executable path plus SHA-256. It is not an unrestricted desktop grant. Changed executables, changed workspace/authentication policy, ambiguous duplicate windows or minimized/locked desktops are not automatically authorized. App updates require renewed approval. One workspace can be automatically restored at a time. There are at most 16 remembered executables per workspace and 32 remembered workspaces.
 
-On application startup, a bounded discovery loop waits for the already-running preferred app. It never launches the target app. An exact matching window can restore its saved authenticated MCP service/tunnel, its no-expiry control session and the visible control monitor. There is no action until the monitor supplies a live heartbeat. It does not unlock Windows, interact with UAC or operate on the secure desktop. After one hour without an unambiguous match, it stops searching. This is sign-in startup, not pre-login access or operation while Windows is locked.
+On application startup, a rate-limited discovery loop waits for the preferred app to become available. Each scan is bounded; the remembered approval has no one-hour search cutoff. It never launches the target app. An exact matching window can restore its saved authenticated MCP service/tunnel, its no-expiry control session and the visible control monitor. There is no action until the monitor supplies a live heartbeat. It does not unlock Windows, interact with UAC or operate on the secure desktop. While the application remains open, it continues waiting with a capped 30-second retry delay until an unambiguous approved target is available, or Stop/permission changes cancel recovery. This is sign-in startup, not pre-login access or operation while Windows is locked.
 
 Pause, local or remote Stop, the emergency shortcut and monitor hide/minimize/close suspend the remembered automatic grant. Normal explicit application Quit releases RAM session state without revoking the remembered preference. A backed-up profile restored after corruption has all remembered permissions suspended. The local UI can resume or revoke remembered approval; remote MCP cannot enable it. Failure to save revocation is reported, and sign-in startup is disabled where possible. Never interpret a failed persistent-write operation as successful revocation across reboots.
 
@@ -28,7 +28,7 @@ The existing OAuth refresh-token support, Cloudflare child recovery and assisted
 
 ## 繁體中文
 
-此版本新增記住指定程式、程式重啟後恢復、Windows 登入時啟動，以及背景視窗探索。首次必須在本機確認；授權綁定工作區、認證設定及程式路徑／SHA-256。重啟後只會尋找已經運行的已批准程式，不啟動其他程式、不繞過 Windows 鎖定或 UAC。程式更新、模糊的多視窗或設定變更會要求重新確認。
+此版本新增記住指定程式、程式重啟後恢復、Windows 登入時啟動，以及背景視窗探索。首次必須在本機確認；授權綁定工作區、認證設定及程式路徑／SHA-256。重啟後會以最多三十秒的重試間隔，持續等候已批准程式的視窗出現；不再一小時後停止搜尋，也不會啟動其他程式、不繞過 Windows 鎖定或 UAC。程式更新、模糊的多視窗或設定變更會要求重新確認。
 
 `computer_list_windows` 可在獲准後探索背景及已縮小視窗的標題／PID。`computer_select_window` 預設只切換觀察目標，不搶焦點；只有目前或曾明確批准的程式才可選取。背景觀察不等於背景鍵鼠：Windows 真實輸入仍使用前台。縮小視窗只列出，不自動還原。截圖及兩種預覽仍只留在記憶體。
 
