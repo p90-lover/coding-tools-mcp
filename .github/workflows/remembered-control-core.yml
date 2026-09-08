@@ -74,7 +74,9 @@ jobs:
         with:
           path: aiTemp/cargo-target
           key: remembered-core-${{ matrix.platform }}-rust1981-${{ hashFiles('aiTemp/checkout/src-tauri/Cargo.lock','aiTemp/checkout/src-tauri/src/**') }}
-          restore-keys: remembered-app-${{ matrix.platform }}-rust1981-v1-
+          restore-keys: |
+            remembered-core-${{ matrix.platform }}-rust1981-
+            remembered-app-${{ matrix.platform }}-rust1981-v1-
       - name: Focused remembered permissions, vision and catalog
         run: |
           set -euo pipefail
