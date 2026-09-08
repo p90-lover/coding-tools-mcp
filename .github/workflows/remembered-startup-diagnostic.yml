@@ -1,0 +1,44 @@
+name: Isolated native startup access diagnostic
+on:
+  push:
+    branches: [audit/remembered-startup-access]
+    paths: ['.github/workflows/remembered-startup-diagnostic.yml','aiTemp/startup-diagnostic/**']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    if: github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remembered-native-helpers-34220199919
+          run-id: 34220199919
+          github-token: ${{ github.token }}
+          path: aiTemp/helpers
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Diagnose only the isolated fixture
+        working-directory: aiTemp/checkout
+        shell: bash
+        run: python aiTemp/startup-diagnostic/run.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: remembered-startup-access-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/startup-diagnostic/evidence/*
+          retention-days: 14
+          if-no-files-found: warn
