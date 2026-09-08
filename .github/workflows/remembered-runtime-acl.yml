@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
-          python aiTemp/release-verification/runtime_acl_probe.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/runtime-acl-fixture" 2>&1 | tee aiTemp/evidence/runtime-acl.txt
+          python aiTemp/release-verification/runtime_dependency_probe.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/runtime-acl-fixture" 2>&1 | tee aiTemp/evidence/runtime-acl.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
