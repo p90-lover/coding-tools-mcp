@@ -1,0 +1,47 @@
+name: Publish verified remembered control
+on:
+  push:
+    branches: [release/remembered-control-publish-0.3.6]
+    paths: ['.github/workflows/remembered-control-publish-verified.yml', 'aiTemp/release-verification/publish_verified.py']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: publish-remembered-control-v0.3.6-rc.1
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+      OTEL_SDK_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/publisher
+          clean: false
+          persist-credentials: false
+      - name: Verify source, native gates and downloaded bytes before publication
+        working-directory: aiTemp/publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile aiTemp/release-verification/publish_verified.py
+          python aiTemp/release-verification/publish_verified.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: remembered-publication-${{ github.run_id }}
+          path: |
+            aiTemp/publisher/aiTemp/verified-publication/publication-receipt.json
+            aiTemp/publisher/aiTemp/verified-publication/draft-id.txt
+          if-no-files-found: warn
+          retention-days: 14
