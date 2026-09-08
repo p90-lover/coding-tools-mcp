@@ -46,11 +46,29 @@ static bool install() {
 #undef HOOK
     return DetourTransactionCommit()==NO_ERROR;
 }
+static bool uninstall() {
+    printing=true;
+    if(DetourTransactionBegin()!=NO_ERROR || DetourUpdateThread(GetCurrentThread())!=NO_ERROR) return false;
+#define UNHOOK(variable,replacement) if(DetourDetach((PVOID*)&variable,(PVOID)replacement)!=NO_ERROR){DetourTransactionAbort();return false;}
+    UNHOOK(originalKey,tracedKey)
+    UNHOOK(originalKeyEx,tracedKeyEx)
+    UNHOOK(originalCreate,tracedCreate)
+    UNHOOK(originalFile,tracedFile)
+    UNHOOK(originalSection,tracedSection)
+    UNHOOK(originalDirectory,tracedDirectory)
+    UNHOOK(originalEvent,tracedEvent)
+    UNHOOK(originalQuery,tracedQuery)
+#undef UNHOOK
+    return DetourTransactionCommit()==NO_ERROR;
+}
 int main() {
     if(!install()){std::printf("Self-instrumentation unavailable: %lu\n",GetLastError());return 2;}
     WSADATA data={}; int r=WSAStartup(MAKEWORD(2,2),&data);
     std::printf("WSAStartup=%d\n",r); std::fflush(stdout);
-    if(r!=0)return 3;
-    for(int i=0;i<2;i++) {SOCKET s=WSASocketW(AF_INET,SOCK_STREAM,IPPROTO_TCP,nullptr,0,i?WSA_FLAG_OVERLAPPED:0);std::printf("WSASocket flags=%d success=%d error=%d\n",i,s!=INVALID_SOCKET,WSAGetLastError());std::fflush(stdout);if(s!=INVALID_SOCKET)closesocket(s);}
-    WSACleanup();return 0;
+    if(r==0) {
+        for(int i=0;i<2;i++) {SOCKET s=WSASocketW(AF_INET,SOCK_STREAM,IPPROTO_TCP,nullptr,0,i?WSA_FLAG_OVERLAPPED:0);std::printf("WSASocket flags=%d success=%d error=%d\n",i,s!=INVALID_SOCKET,WSAGetLastError());std::fflush(stdout);if(s!=INVALID_SOCKET)closesocket(s);}
+        WSACleanup();
+    }
+    if(!uninstall()) return 4;
+    return r==0?0:3;
 }
