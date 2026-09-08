@@ -65,6 +65,10 @@ jobs:
                       backup=Path('aiTemp/Trash/before-control-center')/os.environ['GITHUB_RUN_ID']/name
                       backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,backup)
               subprocess.run(['git','apply',str(patch)],check=True)
+          p=Path('src-tauri/src/lib.rs');text=p.read_text()
+          misplaced='mod control_center;\n#![cfg_attr(target_os = "windows", allow(linker_messages))]'
+          if text.startswith(misplaced):
+              p.write_text(text.replace(misplaced,'#![cfg_attr(target_os = "windows", allow(linker_messages))]\nmod control_center;',1))
           for name in paths:
               if name.endswith('.rs'):subprocess.run(['rustfmt','--edition','2021','--config','skip_children=true',name],check=True)
           subprocess.run(['cargo','update','--workspace','--manifest-path','src-tauri/Cargo.toml'],check=True)
