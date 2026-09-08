@@ -22,7 +22,6 @@ def write(name,content):
     shutil.copy2(path,prior)
     path.write_text(content,encoding='utf-8')
 def identity(name):
-    # Stable app namespace, distinct from every upstream Codex object identity.
     return '0x'+uuid.uuid5(uuid.NAMESPACE_URL,'https://github.com/p90-lover/coding-tools-mcp/native-sandbox/'+name).hex
 
 path=crate/'src/wfp.rs';text=path.read_text(encoding='utf-8')
@@ -47,26 +46,31 @@ for suffix,layer in [('connect_v4','FWPM_LAYER_ALE_AUTH_CONNECT_V4'),('connect_v
         conditions: &[ConditionSpec::User],
     },
 '''%(identity('offline-'+suffix+'-v1'),suffix,layer))
-text=head+'// App policy permits no direct IP networking or proxy exceptions.\n// ALE user matching is mandatory; all other desktop accounts remain unaffected.\npub(super) const FILTER_SPECS: &[FilterSpec] = &[\n'+''.join(specs)+'];\n'
+text=head+'// App policy permits no direct IP networking or proxy exceptions.\n// ALE user matching is mandatory; other desktop accounts remain unaffected.\npub(super) const FILTER_SPECS: &[FilterSpec] = &[\n'+''.join(specs)+'];\n'
 assert text.count('conditions: &[ConditionSpec::User]')==4
 write('src/wfp/filter_specs.rs',text)
 
-# Keep the complementary Windows Firewall rules in the app's own namespace too.
 path=crate/'src/bin/setup_main/win/firewall.rs';text=path.read_text(encoding='utf-8')
 assert 'codex_sandbox_offline' in text
 write('src/bin/setup_main/win/firewall.rs',text.replace('codex_sandbox_offline','coding_tools_mcp_offline'))
 
-# Upstream WFP extras were best-effort. For this offline executor they are a
-# prerequisite for successful provisioning, not optional additional defenses.
+# Offline WFP enforcement is mandatory, not best effort.
 path=crate/'src/bin/setup_main/win.rs';text=path.read_text(encoding='utf-8')
 old='''    if repairing_disabled_accounts {
         // Ordinary setup keeps its best-effort WFP behavior. Recovery must not reopen logons
         // after cleanup removed protections unless restoring those protections succeeded.
         wfp_result?;'''
-new='''    // App-owned all-protocol WFP denial is required. Never write a successful
-    // setup marker or re-enable an account if these filters could not install.
+new='''    // Never write a successful setup marker or re-enable an account if the
+    // mandatory app-owned direct-network filters could not install.
     wfp_result?;
     if repairing_disabled_accounts {'''
 assert text.count(old)==1
 write('src/bin/setup_main/win.rs',text.replace(old,new))
-print('Applied app-owned IPv4/IPv6 ALE connect/receive denial with mandatory successful WFP installation')
+
+# Old development provisioning must not be accepted as proof of the new policy.
+# Only the explicit local preparation UI can create the new setup marker.
+path=crate/'src/setup.rs';text=path.read_text(encoding='utf-8')
+old='pub const SETUP_VERSION: u32 = 5;'
+assert text.count(old)==1
+write('src/setup.rs',text.replace(old,'pub const SETUP_VERSION: u32 = 1006;'))
+print('Applied app-owned IPv4/IPv6 ALE connect/receive denial; successful WFP installation and fresh local provisioning are mandatory')
