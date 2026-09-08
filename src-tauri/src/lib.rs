@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", allow(linker_messages))]
 
+mod integrations;
+
 mod actions;
 mod app_state;
 mod auth;
@@ -22,18 +24,19 @@ use app_state::AppState;
 use commands::{
     check_app_update, computer_local_forget, computer_local_pause, computer_local_permissions,
     computer_local_poll, computer_local_preview, computer_local_resume, computer_local_start,
-    computer_local_stop, computer_local_targets, create_workspace, delete_frp_profile,
-    delete_workspace, get_actions_runtime_status, get_app_settings, get_download_config,
-    get_frp_snippet, get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret,
-    get_tunnel_connection_status, get_webview_memory_sample, get_workspace_secret, hide_to_tray,
-    install_software, list_frp_profiles, list_linked_projects, list_software, list_workspaces,
-    open_url, open_workspace_directory, quick_add_linked_project, quit_app, read_workspace_logs,
-    recreate_ui_webview, regenerate_shared_secret, regenerate_workspace_secret,
-    restart_actions_runtime, restart_runtime, restart_tunnel, run_health_checks,
-    sandbox_local_disable, sandbox_local_prepare, sandbox_local_status, save_frp_profile,
-    set_download_config, set_last_workspace, set_proxy, set_shared_secret, set_workspace_secret,
-    show_main_window, start_actions_runtime, start_runtime, start_tunnel, stop_actions_runtime,
-    stop_runtime, stop_tunnel, test_tunnel, uninstall_software, update_workspace,
+    computer_local_stop, computer_local_targets, control_board_change, control_board_read,
+    create_workspace, delete_frp_profile, delete_workspace, get_actions_runtime_status,
+    get_app_settings, get_download_config, get_frp_snippet, get_last_workspace_id, get_proxy,
+    get_runtime_status, get_shared_secret, get_tunnel_connection_status, get_webview_memory_sample,
+    get_workspace_secret, hide_to_tray, install_software, integration_read, list_frp_profiles,
+    list_linked_projects, list_software, list_workspaces, open_url, open_workspace_directory,
+    quick_add_linked_project, quit_app, read_workspace_logs, recreate_ui_webview,
+    regenerate_shared_secret, regenerate_workspace_secret, restart_actions_runtime,
+    restart_runtime, restart_tunnel, run_health_checks, sandbox_local_disable,
+    sandbox_local_prepare, sandbox_local_status, save_frp_profile, set_download_config,
+    set_last_workspace, set_proxy, set_shared_secret, set_workspace_secret, show_main_window,
+    start_actions_runtime, start_runtime, start_tunnel, stop_actions_runtime, stop_runtime,
+    stop_tunnel, test_tunnel, uninstall_software, update_workspace,
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -175,6 +178,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            integration_read,
+            control_board_read,
+            control_board_change,
             sandbox_local_prepare,
             sandbox_local_status,
             sandbox_local_disable,

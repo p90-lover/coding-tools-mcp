@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { locale } from "$lib/control-center/state";
+  import { translated as t } from "$lib/control-center/model";
   import ComputerControl from "$lib/components/ComputerControl.svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
@@ -66,6 +68,7 @@
   } from "$lib/types";
 
   type ServiceTab = "mcp" | "actions";
+  let workspaceView = $state("connections");
   type SubTab = "config" | "logs" | "health";
 
   let profile = $state<WorkspaceProfile | null>(null);
@@ -531,10 +534,10 @@
 
   async function removeWorkspace() {
     if (!profile || !workspaceId) return;
-    const confirmed = await confirm(`确定删除工作区「${profile.name}」？此操作不可撤销。`, {
-      title: "删除工作区",
+    const confirmed = await confirm(`移除工作區設定「${profile.name}」？專案檔案不會由此操作刪除。`, {
+      title: "移除工作區設定",
       kind: "warning",
-      okLabel: "删除",
+      okLabel: "移除設定",
       cancelLabel: "取消",
     });
     if (!confirmed) return;
@@ -566,12 +569,11 @@
 </script>
 
 {#if profile && actions}
-  <ComputerControl workspaceId={profile.id} />
-  <section class="page-scroll">
+  <section class="page-scroll cc-workspace-page">
     <header class="page-header">
       <div class="flex items-start justify-between gap-4">
         <div>
-          <p class="page-kicker">工作区</p>
+          <p class="page-kicker">{t($locale,"Workspace","工作區")}</p>
           <h2 class="page-title">{profile.name}</h2>
         </div>
         <button
@@ -579,11 +581,11 @@
           class="tx-btn-ghost text-[var(--danger)]"
           onclick={() => void removeWorkspace()}
         >
-          删除工作区
+          移除設定
         </button>
       </div>
 
-      <div class="mt-4">
+      <details class="cc-workspace-details"><summary>{t($locale,"Workspace details & linked projects","工作區詳情及連結專案")}</summary>
         <WorkspaceMetaForm
           name={profile.name}
           path={profile.path}
@@ -592,13 +594,12 @@
           onUpdatePath={saveWorkspacePath}
           onQuickAddProject={quickAddProject}
         />
-      </div>
+      </details>
 
-      <div class="mt-4">
-        <ChatGptSessionPrompt />
-      </div>
+      <details class="cc-workspace-details"><summary>{t($locale,"Project session handoff prompt","專案會話交接提示詞")}</summary><ChatGptSessionPrompt /></details>
 
-      <div class="mt-4 flex flex-wrap items-center gap-2">
+      <div class="cc-tabs cc-workspace-tabs"><button class:active={workspaceView==='connections'} onclick={()=>workspaceView="connections"}>{t($locale,"Services & permissions","服務及權限")}</button><button class:active={workspaceView==='computer'} onclick={()=>workspaceView="computer"}>{t($locale,"Computer control","電腦操作")}</button></div>
+      {#if workspaceView==='connections'}<div class="mt-4 flex flex-wrap items-center gap-2">
         <button
           type="button"
           class="tx-status-pill"
@@ -619,10 +620,11 @@
           <span class="font-medium">Actions</span>
           <span class="text-[var(--color-text-muted)]">{stateLabel(actionsStatus)}</span>
         </button>
-      </div>
+      </div>{/if}
     </header>
 
     <div class="page-body">
+      {#if workspaceView==='computer'}<ComputerControl workspaceId={profile.id}/>{:else}
       {#if activeService === "mcp"}
         <div class="mt-4 flex flex-col gap-3">
           <ServicePanel
@@ -782,6 +784,7 @@
             <HealthPanel workspaceId={workspaceId!} />
           </div>
         {/if}
+      {/if}
       {/if}
     </div>
 

@@ -1,0 +1,12 @@
+<script lang="ts">
+ import { Cable, ArrowUpRight, FolderOpen } from '@lucide/svelte';
+ import { workspaces,mcpRuntimeStates,actionsRuntimeStates } from '$lib/stores/app';
+ import { locale,workspaceLoadError } from '$lib/control-center/state';
+ import { translated as t } from '$lib/control-center/model';
+ import Status from '$lib/components/control-center/Status.svelte';
+</script>
+<section class="cc-page"><header class="cc-page-heading"><div><h1>{t($locale,'Connections','連線')}</h1><p>{t($locale,'MCP, ChatGPT and public tunnels. Configured per workspace.','按工作區管理 MCP、ChatGPT 及公開隧道。')}</p></div><Cable size={25}/></header>
+ {#if $workspaceLoadError}<div class="cc-notice amber">{$workspaceLoadError}</div>{/if}
+ <section class="cc-panel">{#if $workspaces.length}<div class="cc-table-wrap"><table class="cc-table"><thead><tr><th>{t($locale,'Workspace','工作區')}</th><th>{t($locale,'Service','服務')}</th><th>{t($locale,'Local port','本機連接埠')}</th><th>{t($locale,'Authentication','認證')}</th><th>{t($locale,'Tunnel','隧道')}</th><th></th></tr></thead><tbody>{#each $workspaces as w}<tr><td><strong>{w.name}</strong><small class="cc-block-muted">{w.path}</small></td><td><Status state={$mcpRuntimeStates[w.id]??'unknown'} label={`MCP · ${$mcpRuntimeStates[w.id]??'unknown'}`}/></td><td><code>{w.runtime.local_port}</code></td><td>{w.auth.type}</td><td>{w.tunnel.type||'—'}<small class="cc-block-muted">{w.tunnel.public_url||t($locale,'No public endpoint','沒有公開端點')}</small></td><td><a class="cc-button secondary" href={`/workspace/${w.id}`}>{t($locale,'Manage','管理')}<ArrowUpRight size={14}/></a></td></tr>{/each}</tbody></table></div>{:else}<div class="cc-empty tall"><FolderOpen size={32}/><h2>{t($locale,'Connect a workspace, then ChatGPT','先建立工作區，再連接 ChatGPT')}</h2><p>{t($locale,'Use + in the sidebar to add a folder. Connection setup and permissions remain scoped to that workspace.','按側邊欄的 + 新增資料夾，連線及權限會限定於該工作區。')}</p></div>{/if}</section>
+ <div class="cc-note-panel"><h3>{t($locale,'A stable address means fewer reconnects','固定地址，減少重新連接')}</h3><p>{t($locale,'A named Cloudflare tunnel with a fixed hostname avoids Quick Tunnel URL rotation. The app can recover its owned tunnel processes, but ChatGPT login, connection approval and changed-hostname authorization remain under your control.','使用固定網域的 Cloudflare Named Tunnel 可避免 Quick Tunnel 網址輪替。程式能恢復自己啟動的隧道程序，但 ChatGPT 登入、連接批准及換網域授權仍由你控制。')}</p></div>
+</section>

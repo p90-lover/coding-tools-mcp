@@ -1,3 +1,5 @@
+mod control_center;
+pub use control_center::{control_board_change, control_board_read, integration_read};
 mod computer;
 mod sandbox;
 pub use sandbox::{sandbox_local_disable, sandbox_local_prepare, sandbox_local_status};

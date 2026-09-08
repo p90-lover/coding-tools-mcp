@@ -1,0 +1,14 @@
+{
+  "method": "offline production Svelte component harness in Playwright Chromium",
+  "native_ipc": "isolated test fixtures, not user data",
+  "routing": "test adapter because browser local-server navigation was policy-blocked",
+  "browser_policy_changed": false,
+  "imagegen_concept": "not available; code-native UI",
+  "viewports": [{"width":1440,"height":960},{"width":390,"height":844}],
+  "checks": ["real component rendering", "task creation and step evidence", "archive and restore retains evidence", "Paseo and Anneal read snapshot display", "credential field cleared on request", "session search/attention filter", "English/Traditional Chinese", "command palette", "mobile navigation and body overflow"],
+  "visual_review": ["sidebar/navigation hierarchy", "consistent 12px controls and 27px headings", "neutral surfaces and restrained accent", "table/card spacing and task inspector", "responsive single-column/mobile navigation"],
+  "fixed": ["integration form parse error", "search dialog semantics and keyboard loop", "unknown board count", "CJK sans-serif fallback"],
+  "fixture_only_error": "memory sampler mock omitted supported:false; corrected in test fixture",
+  "remaining": ["full native WebView end-to-end", "live user Paseo/Anneal instances", "legacy advanced form language is preserved"],
+  "screenshots_saved_by_feature": false
+}

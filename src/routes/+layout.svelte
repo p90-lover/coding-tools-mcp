@@ -15,7 +15,7 @@
     listWorkspaces,
     openWorkspaceDirectory,
   } from "$lib/api/workspaces";
-  import { getLastWorkspaceId } from "$lib/api/settings";
+  import { workspaceLoadError, workspaceLoaded } from "$lib/control-center/state";
   import {
     actionsRuntimeStates,
     linkedProjectsByWorkspace,
@@ -58,8 +58,7 @@
           mcpStates[item.id] = mcp.state;
           actionsStates[item.id] = actions.state;
         } catch {
-          mcpStates[item.id] = "stopped";
-          actionsStates[item.id] = "stopped";
+          // Missing status is unknown, never a fabricated stopped/running state.
         }
       }),
     );
@@ -121,16 +120,8 @@
       closeConfirmOpen = true;
     });
     void (async () => {
-      await refreshWorkspaces();
-      const path = $page.url.pathname;
-      if (path === "/") {
-        const lastId = await getLastWorkspaceId();
-        if (lastId && $workspaces.some((item) => item.id === lastId)) {
-          goto(`/workspace/${lastId}`);
-        } else if ($workspaces.length > 0) {
-          goto(`/workspace/${$workspaces[0].id}`);
-        }
-      }
+      try { await refreshWorkspaces(); workspaceLoaded.set(true); workspaceLoadError.set(""); }
+      catch { workspaceLoadError.set("Desktop service unavailable. Open the installed app to load your workspaces. / 桌面服務未連線，請在已安裝程式載入工作區。"); }
     })();
     return () => {
       stopGuard();
@@ -149,28 +140,28 @@
       class="tx-settings-link {$page.url.pathname === '/settings/general' ? 'active' : ''}"
       onclick={openGeneralSettings}
     >
-      通用
+      一般設定
     </button>
     <button
       type="button"
       class="tx-settings-link {$page.url.pathname === '/settings/keys' ? 'active' : ''}"
       onclick={openKeysSettings}
     >
-      共享密钥
+      共用金鑰
     </button>
     <button
       type="button"
       class="tx-settings-link {$page.url.pathname === '/settings/frp' ? 'active' : ''}"
       onclick={openFrpSettings}
     >
-      FRP 配置
+      FRP 設定
     </button>
     <button
       type="button"
       class="tx-settings-link {$page.url.pathname === '/settings/software' ? 'active' : ''}"
       onclick={openSoftwareSettings}
     >
-      软件管理
+      軟體管理
     </button>
   {/snippet}
   {#snippet sidebar()}

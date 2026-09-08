@@ -1,0 +1,15 @@
+{
+  "paseo": {
+    "repository": "getpaseo/paseo",
+    "commit": "da8c1b5c94e752b01d451645e5fa52aba2c1b2f0",
+    "mode": "read_only",
+    "protocol": 1
+  },
+  "anneal": {
+    "repository": "mosonlab/anneal",
+    "commit": "088f0d5971a1692134aaa3db0230cc541b014c07",
+    "mode": "read_only",
+    "boardEndpoint": "/tasks?view=board&archived=false"
+  },
+  "agentLaunchEnabled": false
+}

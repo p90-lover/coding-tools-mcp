@@ -1,25 +1,25 @@
 <script lang="ts">
-  import EmptyState from "$lib/components/EmptyState.svelte";
-  import { workspaces } from "$lib/stores/app";
-  import { DEFAULT_SERVICE_PORT } from "$lib/types";
+ import { onMount } from 'svelte';
+ import { ArrowUpRight, ArrowRight, FolderOpen, Plug, ShieldCheck, Monitor, Check, Circle, Layers, Cable } from '@lucide/svelte';
+ import { workspaces,mcpRuntimeStates,actionsRuntimeStates } from '$lib/stores/app';
+ import { locale,workspaceLoadError,workspaceLoaded,board,boardReady,loadBoard,snapshots,integrationErrors } from '$lib/control-center/state';
+ import { translated as t,attention,formatTime } from '$lib/control-center/model';
+ import Status from '$lib/components/control-center/Status.svelte';
+ let running=$derived(Object.values($mcpRuntimeStates).filter(v=>v==='running').length+Object.values($actionsRuntimeStates).filter(v=>v==='running').length);
+ let activeTasks=$derived($board.tasks.filter(v=>!['archived','done'].includes(v.state)));
+ let connected=$derived(Object.keys($snapshots).length);
+ let waiting=$derived(Object.values($snapshots).flatMap(s=>s?.items??[]).filter(attention));
+ onMount(()=>{void loadBoard();});
 </script>
-
-<div class="page-scroll flex flex-col items-center justify-center p-8">
-  {#if $workspaces.length === 0}
-    <EmptyState />
-    <p class="mt-6 max-w-md text-center text-sm text-[var(--color-text-muted)]">
-      每个工作区可独立运行 MCP 与 Actions 两个本地服务，默认端口均为
-      <span class="font-mono">{DEFAULT_SERVICE_PORT}</span>，可在详情页自行修改。
-    </p>
-  {:else}
-    <div class="max-w-lg text-center">
-      <p class="text-[11px] font-medium uppercase tracking-[0.18em] text-[var(--color-text-muted)]">
-        开始
-      </p>
-      <h2 class="mt-2 text-2xl font-semibold">从左侧选择一个工作区</h2>
-      <p class="mt-3 text-sm leading-relaxed text-[var(--color-text-secondary)]">
-        控制台采用侧边栏导航 + 双服务面板布局。MCP 与 Actions 各自监听独立端口，启动前会自动检测占用并提示。
-      </p>
-    </div>
-  {/if}
-</div>
+<section class="cc-page">
+ <header class="cc-page-heading"><div><h1>{t($locale,'Overview','總覽')}</h1><p>{t($locale,'Your local services, work and agents. One place to stay in control.','集中掌握本機服務、工作與 Agent 狀態。')}</p></div><a class="cc-button primary" href="/connections"><Cable size={16}/>{t($locale,'Manage connections','管理連線')}</a></header>
+ {#if $workspaceLoadError}<div class="cc-notice amber" role="status">{$workspaceLoadError}</div>{/if}
+ <div class="cc-metrics"><div><span>{t($locale,'Workspaces','工作區')}</span><strong>{$workspaceLoaded?$workspaces.length:'—'}</strong><small>{t($locale,'Local project directories','本機專案目錄')}</small></div><div><span>{t($locale,'Services running','運行中的服務')}</span><strong>{$workspaceLoaded?running:'—'}<small>/ {$workspaces.length*2}</small></strong><small>{t($locale,'MCP and Actions listeners','MCP 與 Actions 監聽器')}</small></div><div><span>{t($locale,'Open work','未完成工作')}</span><strong>{$boardReady?activeTasks.length:'—'}</strong><small>{t($locale,'Operator-managed tasks','由使用者管理的任務')}</small></div><div><span>{t($locale,'External sources','外部來源')}</span><strong>{connected}<small>/ 2</small></strong><small>{t($locale,'Last fetched snapshots','最近讀取的狀態')}</small></div></div>
+ <div class="cc-overview-grid"><section class="cc-panel"><div class="cc-panel-heading"><h2>{t($locale,'Workspace health','工作區狀態')}</h2><a href="/connections">{t($locale,'View all','查看全部')}<ArrowUpRight size={15}/></a></div>
+ {#if $workspaces.length}<div class="cc-table-wrap"><table class="cc-table"><thead><tr><th>{t($locale,'Workspace','工作區')}</th><th>MCP</th><th>Actions</th><th></th></tr></thead><tbody>{#each $workspaces as w}<tr><td><a href={`/workspace/${w.id}`} class="cc-workspace-name"><span class="cc-folder-icon"><FolderOpen size={18}/></span><div><strong>{w.name}</strong><small title={w.path}>{w.path}</small></div></a></td><td><Status state={$mcpRuntimeStates[w.id]??'unknown'}/></td><td><Status state={$actionsRuntimeStates[w.id]??'unknown'}/></td><td><a class="cc-icon-btn" href={`/workspace/${w.id}`} aria-label={`Open ${w.name}`}><ArrowUpRight size={17}/></a></td></tr>{/each}</tbody></table></div>{:else}<div class="cc-empty"><FolderOpen size={29}/><h3>{t($locale,'Make room for your next project','建立你的下一個專案空間')}</h3><p>{t($locale,'Use + beside Workspaces to choose a local folder. Your files stay where they are.','按工作區旁的 + 選擇本機資料夾，檔案會保留在原位。')}</p></div>{/if}
+ </section><section class="cc-panel"><div class="cc-panel-heading"><h2>{t($locale,'Connected projects','已連接專案')}</h2><Plug size={17}/></div>{#each ['paseo','anneal'] as key}{@const source=key as 'paseo'|'anneal'}<a class="cc-source-row" href="/integrations"><div class="cc-source-mark">{source==='paseo'?'P':'A'}</div><div><strong>{source==='paseo'?'Paseo':'Anneal'}</strong><small>{t($locale,source==='paseo'?'Session directory':'Task chains',source==='paseo'?'會話目錄':'任務流程')}</small></div><span class="cc-source-status">{$integrationErrors[source]?t($locale,'Check failed','檢查失敗'):$snapshots[source]?formatTime($snapshots[source]?.checked_at):t($locale,'Not connected','未連接')}</span></a>{/each}<div class="cc-panel-footer">{t($locale,'Observation only. No agents or runners are started.','僅觀察，不啟動 Agent 或 Runner。')}</div></section></div>
+ <div class="cc-overview-grid"><section class="cc-panel"><div class="cc-panel-heading"><h2>{t($locale,'Work in motion','目前工作')}</h2><a href="/work">{t($locale,'Open board','開啟看板')}<ArrowUpRight size={15}/></a></div>{#if activeTasks.length}<div class="cc-task-summary">{#each activeTasks.slice(0,4) as task}<a href="/work"><div><strong>{task.title}</strong><small>{task.step} / 12 {t($locale,'steps recorded','個步驟已記錄')}</small></div><Status state={task.state}/></a>{/each}</div>{:else}<div class="cc-quiet-empty"><Layers size={21}/><p>{t($locale,'No open tasks. Turn a spec into a trackable delivery checklist.','目前沒有待辦任務。將規格轉成可追蹤的交付清單。')}</p><a class="cc-button secondary" href="/work">{t($locale,'Create a task','建立任務')}<ArrowRight size={15}/></a></div>{/if}</section>
+ <section class="cc-panel"><div class="cc-panel-heading"><h2>{t($locale,'Keep a human in control','由你掌握控制權')}</h2><ShieldCheck size={18}/></div><div class="cc-safety-list"><p><Check size={16}/>{t($locale,'Screenshots stay in memory','截圖只留在記憶體')}</p><p><Check size={16}/>{t($locale,'Provider-agent execution not exposed','不提供供應商 Agent 執行入口')}</p><p><Check size={16}/>{t($locale,'Local Pause and Stop stay available','保留本機暫停及停止')}</p></div><a class="cc-panel-footer cc-footer-link" href="/computer"><Monitor size={16}/>{t($locale,'Open computer control','開啟電腦操作')}<ArrowRight size={16}/></a></section></div>
+ {#if waiting.length}<div class="cc-notice amber"><Circle size={15}/>{waiting.length} {t($locale,'external records need attention. Resolve them in their source app.','項外部記錄需要處理，請在來源程式處理。')}<a href="/sessions">{t($locale,'View sessions','查看會話')}</a></div>{/if}
+ <footer class="cc-page-footnote">{t($locale,'Local-first by design. No hosted account is required for this dashboard.','本機優先，使用此儀表板不需要託管帳戶。')}</footer>
+</section>

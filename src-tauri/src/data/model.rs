@@ -19,6 +19,8 @@ pub struct OAuthRefreshTokenRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppData {
     #[serde(default)]
+    pub control_board: crate::integrations::board::Board,
+    #[serde(default)]
     pub sandbox_permissions: Vec<crate::tools::native_sandbox::SandboxGrant>,
     #[serde(default)]
     pub computer_permissions: Vec<crate::tools::computer::permissions::SavedPermission>,

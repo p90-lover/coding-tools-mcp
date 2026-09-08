@@ -29,9 +29,9 @@
 
 <button
   type="button"
-  class="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-white/10 bg-white/5 text-[#c5d0ea] transition-colors hover:bg-white/10"
+  class="cc-icon-btn"
   onclick={toggle}
-  aria-label="切换主题"
+  aria-label={dark ? "Use light theme / 使用淺色主題" : "Use dark theme / 使用深色主題"}
 >
   {#if dark}
     <Sun size={16} />
