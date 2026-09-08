@@ -1,0 +1,42 @@
+name: Prioritize corrected control-center build
+on:
+  push:
+    branches: [ci/control-center-superseded-build]
+    paths: ['.github/workflows/control-center-prioritize.yml']
+permissions:
+  contents: read
+  actions: write
+jobs:
+  superseded:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify ancestry and cancel only the old run, preserving files and artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, subprocess
+          repo=os.environ['GITHUB_REPOSITORY']
+          old='48c2b3f48bba51724b14d9fb5a238550dcca3f3e'
+          replacement='0bd9d217205696c59a5c1a3618e74388fd832219'
+          run_id=34244145290
+          def get(path):
+              return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}'],timeout=30))
+          comparison=get(f'compare/{old}...{replacement}')
+          assert comparison['status']=='ahead' and comparison['behind_by']==0
+          head=get('git/ref/heads/feature/paseo-anneal-control-center')['object']['sha']
+          if head!=replacement:
+              assert get(f'compare/{replacement}...{head}')['status']=='ahead'
+          run=get(f'actions/runs/{run_id}')
+          assert run['head_sha']==old and run['head_branch']=='feature/paseo-anneal-control-center'
+          assert run['path']=='.github/workflows/control-center-release.yml'
+          if run['status']!='completed':
+              subprocess.run(['gh','api','--method','POST',f'repos/{repo}/actions/runs/{run_id}/cancel'],check=True,timeout=30)
+              print('Cancellation requested for superseded run',run_id)
+          else:
+              print('Superseded run already completed; no mutation required')
+          PY
