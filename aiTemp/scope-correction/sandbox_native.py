@@ -1,0 +1,110 @@
+"""Native Windows sandbox contract: read scope, write/network restriction, retention.
+
+Shared-file readability is measured explicitly, not misrepresented as a path
+whitelist. Only newly created test files have their ACLs modified.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+
+helper = Path(sys.argv[1]).resolve()
+base = Path(sys.argv[2]).resolve()
+root, home = base / 'workspace', base / 'sandbox-state'
+root.mkdir(parents=True, exist_ok=False)
+(home / 'aiTemp').mkdir(parents=True, exist_ok=False)
+(home / '.sandbox').mkdir(exist_ok=False)
+retained_payload = b'previous-owned-sandbox-report-retention-fixture'
+old_report = home / '.sandbox' / 'setup_error.json'
+old_report.write_bytes(retained_payload)
+inside, shared, private = root / 'sentinel.txt', base / 'outside-shared.txt', base / 'owner-private.txt'
+inside.write_text('unchanged-sandbox-fixture', encoding='utf-8')
+shared.write_text('shared-outside-fixture', encoding='utf-8')
+private.write_text('owner-private-fixture', encoding='utf-8')
+expected = [hashlib.sha256(p.read_bytes()).hexdigest() for p in (inside, shared, private)]
+# Give this new fixture only its owner's rights. This changes no user/project file.
+system = Path(os.environ['SystemRoot']) / 'System32'
+who = subprocess.check_output([str(system/'whoami.exe'),'/user','/fo','csv','/nh']).decode(errors='replace')
+sid = re.search(r'S-1-5-(?:[0-9]+-)*[0-9]+',who)
+assert sid, 'Cannot identify the fixture owner'
+subprocess.run([str(system/'icacls.exe'),str(private),'/inheritance:r','/grant:r','*'+sid.group(0)+':F'],capture_output=True,check=True)
+probe_source, probe = base / 'probe.rs', root / 'isolation-probe.exe'
+probe_source.write_text(r'''
+use std::{env,fs,io::{self,Write},net::{SocketAddr,TcpStream},time::Duration};
+fn main() {
+ let a:Vec<String>=env::args().collect();
+ match a.get(1).map(String::as_str) {
+  Some("read")=>print!("{}",fs::read_to_string(&a[2]).expect("permitted read")),
+  Some("deny-write")=>match fs::OpenOptions::new().write(true).open(&a[2]) {
+   Err(e) if e.kind()==io::ErrorKind::PermissionDenied=>print!("write-denied"),
+   Err(e)=>panic!("wrong write failure: {e}"), Ok(_)=>panic!("write handle unexpectedly granted")},
+  Some("deny-read")=>match fs::read(&a[2]) {
+   Err(e) if e.kind()==io::ErrorKind::PermissionDenied=>print!("private-read-denied"),
+   Err(e)=>panic!("wrong read failure: {e}"), Ok(_)=>panic!("private read unexpectedly allowed")},
+  Some("network")=>{let addr:SocketAddr=a[2].parse().unwrap();
+   match TcpStream::connect_timeout(&addr,Duration::from_millis(1200)) {
+    Ok(mut stream)=>{stream.write_all(b"sandbox-fixture").unwrap();print!("connected")},
+    Err(e) if matches!(e.kind(),io::ErrorKind::PermissionDenied|io::ErrorKind::TimedOut|io::ErrorKind::WouldBlock)=>print!("network-denied"),
+    Err(e)=>panic!("ambiguous network failure: {e}")}},
+  _=>panic!("invalid probe operation")
+ }
+}
+''', encoding='utf-8')
+subprocess.run(['rustc','--edition','2021',str(probe_source),'-o',str(probe)],check=True)
+keep = {'SYSTEMROOT','SYSTEMDRIVE','WINDIR','PROGRAMFILES','PROGRAMFILES(X86)','PROGRAMDATA','USERNAME','USERPROFILE','LOCALAPPDATA','APPDATA'}
+env = {k:v for k,v in os.environ.items() if k.upper() in keep}
+env.update({'TEMP':str(home/'aiTemp'),'TMP':str(home/'aiTemp'),'CODEX_HOME':str(home),'OTEL_SDK_DISABLED':'true','DO_NOT_TRACK':'1'})
+def request(operation, argv=None):
+    child_env = env.copy()
+    if operation=='setup': child_env['CODING_TOOLS_LOCAL_SANDBOX_SETUP']='1'
+    data={'operation':operation,'workspace':str(root),'home':str(home),'argv':argv or [],'timeout_ms':8000}
+    result=subprocess.run([str(helper)],input=json.dumps(data).encode(),capture_output=True,env=child_env,timeout=180 if operation=='setup' else 60)
+    assert len(result.stdout)<=4194304 and len(result.stderr)<=65536
+    try: value=json.loads(result.stdout)
+    except Exception:
+        print(result.stdout.decode(errors='replace'));print(result.stderr.decode(errors='replace'));raise
+    print(json.dumps({'operation':operation,'exit_code':result.returncode,'result':value}))
+    assert value['upstream_commit']=='3caf9f9586baedb4158a7b91545ead3dd320c348' and value['model_calls'] is False
+    return value
+
+def run(mode, arg): return request('exec',[str(probe),mode,str(arg)])
+
+assert subprocess.check_output([str(probe),'read',str(inside)]).decode()=='unchanged-sandbox-fixture'
+assert subprocess.check_output([str(probe),'read',str(private)]).decode()=='owner-private-fixture'
+assert request('setup').get('ready') is True
+assert request('status').get('ready') is True
+retained=list((home/'.sandbox'/'Trash').glob('retained-*.bin'))
+assert not old_report.exists() and any(p.read_bytes()==retained_payload for p in retained), 'Old report must be moved, not deleted'
+print('PASS: actual setup preserved the old report byte-for-byte in protected Trash')
+for path,answer in [(inside,'unchanged-sandbox-fixture'),(shared,'shared-outside-fixture')]:
+    result=run('read',path)
+    assert result['ok'] and result['stdout']==answer,result
+print('PASS: workspace read succeeds; shared out-of-workspace read is explicitly observed, not claimed blocked')
+for mode,path,answer in [('deny-write',inside,'write-denied'),('deny-read',private,'private-read-denied')]:
+    result=run(mode,path)
+    assert result['ok'] and result['stdout']==answer,result
+assert [hashlib.sha256(p.read_bytes()).hexdigest() for p in (inside,shared,private)]==expected
+print('PASS: workspace write handle denied; owner-readable private file denied to the sandbox account; fixtures unchanged')
+with socket.socket() as listener:
+    listener.bind(('127.0.0.1',0));listener.listen(2);listener.settimeout(2)
+    address='127.0.0.1:'+str(listener.getsockname()[1])
+    positive=subprocess.run([str(probe),'network',address],capture_output=True,check=True,timeout=5)
+    assert positive.stdout==b'connected'
+    connection,_=listener.accept()
+    assert connection.recv(64)==b'sandbox-fixture'
+    connection.close()
+    result=run('network',address)
+    assert result['ok'] and result['stdout']=='network-denied',result
+    listener.settimeout(.3)
+    try:
+        connection,_=listener.accept();connection.close()
+        raise AssertionError('Sandbox reached loopback listener')
+    except socket.timeout: pass
+print('PASS: network positive control connects; sandbox direct network is denied')
+assert not any(p.suffix.lower() in ('.png','.jpg','.jpeg','.webp') for p in base.rglob('*') if p.is_file())
+proof={'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'maintenance_retention_verified':True,'read_scope':'sandbox_account_acl_not_path_whitelist','checks':['native_allowed_read','native_shared_read_scope_reported','native_write_handle_denied','native_private_acl_read_denied','native_loopback_denied_with_positive_control','maintenance_file_retained']}
+Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
