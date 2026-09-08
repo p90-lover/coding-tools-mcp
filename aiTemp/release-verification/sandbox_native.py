@@ -23,7 +23,7 @@ subprocess.run([os.environ['COMSPEC'], '/d', '/c', 'mklink', '/J', str(alias), s
 assert (alias / outside.name).read_bytes() == outside.read_bytes()
 probe_source, probe = base / 'probe.rs', root / 'isolation-probe.exe'
 probe_source.write_text(r'''
-use std::{env,fs,io::{self,Write},net::{SocketAddr,TcpStream},time::Duration};
+use std::{env,fs,io::{self,Write},net::{SocketAddr,TcpStream,UdpSocket},time::Duration};
 fn main() {
  let a:Vec<String>=env::args().collect();
  match a.get(1).map(String::as_str) {
@@ -39,6 +39,12 @@ fn main() {
     Ok(mut stream)=>{stream.write_all(b"sandbox-fixture").unwrap();print!("connected")},
     Err(e) if matches!(e.kind(),io::ErrorKind::PermissionDenied|io::ErrorKind::TimedOut|io::ErrorKind::WouldBlock)=>print!("network-denied"),
     Err(e)=>panic!("ambiguous network failure: {e}")}},
+  Some("udp")=>{let addr:SocketAddr=a[2].parse().unwrap();
+   let local=if addr.is_ipv4(){"127.0.0.1:0"}else{"[::1]:0"};
+   let sent=UdpSocket::bind(local).and_then(|s|s.send_to(b"sandbox-fixture",addr));
+   match sent {Ok(15)=>print!("sent"),Ok(n)=>panic!("wrong packet length {n}"),
+    Err(e) if e.kind()==io::ErrorKind::PermissionDenied=>print!("network-denied"),
+    Err(e)=>panic!("ambiguous UDP failure: {e}")}},
   _=>panic!("invalid probe operation")
  }
 }
@@ -65,12 +71,15 @@ def request(operation, argv=None):
 def run(mode, arg): return request('exec', [str(probe), mode, str(arg)])
 
 assert subprocess.check_output([str(probe),'read',str(inside)]).decode()=='unchanged-sandbox-fixture'
+assert request('status').get('ready') is False
 assert request('setup').get('ready') is True
 assert request('status').get('ready') is True
 read = run('read', inside)
 assert read['ok'] and read['stdout']=='unchanged-sandbox-fixture', read
 command = request('exec', [os.environ['COMSPEC'], '/d', '/c', 'ver'])
 assert command['ok'] and 'Windows' in command['stdout'], command
+relative = request('exec', [os.environ['COMSPEC'], '/d', '/c', 'type sentinel.txt'])
+assert relative['ok'] and relative['stdout']=='unchanged-sandbox-fixture' and not relative['stderr'], relative
 for mode,path,answer in [('deny-write',inside,'write-denied'),('deny-read',outside,'outside-read-denied')]:
     denied = run(mode, path)
     assert denied['ok'] and denied['stdout']==answer, denied
@@ -83,21 +92,34 @@ for path in (alias / outside.name, late):
     denied = run('deny-read', path)
     assert denied['ok'] and denied['stdout']=='outside-read-denied', denied
 print('PASS: native permitted read; denied write handle, outside read, junction alias and newly created private file; sentinels unchanged')
-with socket.socket() as listener:
-    listener.bind(('127.0.0.1',0)); listener.listen(2); listener.settimeout(2)
-    address = '127.0.0.1:'+str(listener.getsockname()[1])
-    positive = subprocess.run([str(probe),'network',address],capture_output=True,check=True,timeout=5)
-    assert positive.stdout == b'connected'
-    connection,_ = listener.accept()
-    assert connection.recv(64) == b'sandbox-fixture'
-    connection.close()
-    network = run('network',address)
-    assert network['ok'] and network['stdout']=='network-denied', network
-    listener.settimeout(.3)
-    try:
-        connection,_=listener.accept(); connection.close()
-        raise AssertionError('Sandbox reached loopback listener')
-    except socket.timeout: pass
-print('PASS: native network positive control succeeds; sandbox network is denied')
+for family, host in [(socket.AF_INET,'127.0.0.1'),(socket.AF_INET6,'::1')]:
+    with socket.socket(family,socket.SOCK_STREAM) as listener:
+        listener.bind((host,0)); listener.listen(2); listener.settimeout(2)
+        address=('['+host+']' if family==socket.AF_INET6 else host)+':'+str(listener.getsockname()[1])
+        positive = subprocess.run([str(probe),'network',address],capture_output=True,check=True,timeout=5)
+        assert positive.stdout == b'connected'
+        connection,_ = listener.accept()
+        assert connection.recv(64) == b'sandbox-fixture'
+        connection.close()
+        network = run('network',address)
+        assert network['ok'] and network['stdout']=='network-denied', network
+        listener.settimeout(.3)
+        try:
+            connection,_=listener.accept(); connection.close()
+            raise AssertionError('Sandbox reached loopback listener')
+        except socket.timeout: pass
+    with socket.socket(family,socket.SOCK_DGRAM) as listener:
+        listener.bind((host,0));listener.settimeout(2)
+        address=('['+host+']' if family==socket.AF_INET6 else host)+':'+str(listener.getsockname()[1])
+        positive=subprocess.run([str(probe),'udp',address],capture_output=True,check=True,timeout=5)
+        assert positive.stdout==b'sent' and listener.recvfrom(64)[0]==b'sandbox-fixture'
+        network=run('udp',address)
+        assert network['ok'] and network['stdout']=='network-denied',network
+        listener.settimeout(.3)
+        try:
+            listener.recvfrom(64)
+            raise AssertionError('Sandbox delivered a UDP packet')
+        except socket.timeout:pass
+print('PASS: real TCP and UDP IPv4/IPv6 positive controls succeed; sandbox access denied')
 assert not any(p.suffix.lower() in ('.png','.jpg','.jpeg','.webp') for p in base.rglob('*') if p.is_file())
-Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps({'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'checks':['native_allowed_read','native_windows_runtime','native_write_handle_denied','native_outside_read_denied','native_reparse_read_denied','native_future_private_read_denied','native_loopback_denied_with_positive_control']},indent=2)+'\n',encoding='utf-8')
+Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps({'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'checks':['native_allowed_read','native_windows_runtime','native_relative_workspace_cwd','native_write_handle_denied','native_outside_read_denied','native_reparse_read_denied','native_future_private_read_denied','native_loopback_denied_with_positive_control','native_ipv6_loopback_denied','native_udp_ipv4_ipv6_denied']},indent=2)+'\n',encoding='utf-8')

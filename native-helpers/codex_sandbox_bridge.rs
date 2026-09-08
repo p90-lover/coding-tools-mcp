@@ -15,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const POLICY_REVISION: &str = "ctmcp-read-runtime-network-v1";
 const UPSTREAM: &str = "3caf9f9586baedb4158a7b91545ead3dd320c348";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,7 +31,10 @@ struct Request {
 fn default_timeout() -> u64 { 15_000 }
 fn checked_directory(p: &Path) -> Result<PathBuf> {
     if !p.is_absolute() { bail!("Absolute directory required"); }
-    let real = p.canonicalize().context("Directory is unavailable")?;
+    // Preserve canonical identity while using a legacy-compatible representation
+    // when lossless. CMD otherwise interprets a local \\?\ drive as UNC and
+    // silently falls back to Windows, breaking relative-file permissions.
+    let real = dunce::canonicalize(p).context("Directory is unavailable")?;
     if !real.is_dir() { bail!("Directory is unavailable"); }
     Ok(real)
 }
@@ -78,17 +82,34 @@ fn sanitized_env(home: &Path) -> HashMap<String, String> {
     env.insert("DO_NOT_TRACK".into(), "1".into());
     env
 }
+fn policy_ready(home: &Path) -> bool {
+    let path = home.join(".sandbox-secrets").join(POLICY_REVISION);
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else { return false; };
+    use std::os::windows::fs::MetadataExt;
+    if !metadata.is_file() || metadata.file_attributes() & 0x400 != 0 || metadata.len() > 256 { return false; }
+    std::fs::read_to_string(path).is_ok_and(|s| s == format!("{POLICY_REVISION}\n{UPSTREAM}\n"))
+}
+fn record_policy(home: &Path) -> Result<()> {
+    if policy_ready(home) { return Ok(()); }
+    let directory = home.join(".sandbox-secrets");
+    let path = directory.join(POLICY_REVISION);
+    // Never replace a corrupt/legacy marker; explicit recovery preserves it.
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    writeln!(file, "{POLICY_REVISION}\n{UPSTREAM}")?;
+    file.sync_all()?;
+    Ok(())
+}
 fn process(request: Request) -> Result<serde_json::Value> {
     let root = checked_directory(&request.workspace)?;
     let home = checked_directory(&request.home)?;
     if home.starts_with(&root) || root.starts_with(&home) {
         bail!("Sandbox state must be outside the delegated workspace");
     }
-    let ready = sandbox::sandbox_setup_is_complete_with_settings(
+    let ready = policy_ready(&home) && sandbox::sandbox_setup_is_complete_with_settings(
         &home, &sandbox::WindowsSandboxProvisioningSettings::default(),
     );
     if request.operation == "status" {
-        return Ok(json!({"ok":true,"ready":ready,"upstream_commit":UPSTREAM,
+        return Ok(json!({"ok":true,"ready":ready,"policy_revision":POLICY_REVISION,"upstream_commit":UPSTREAM,
             "backend":"codex_windows_elevated","filesystem":"read_only",
             "network":"restricted","model_calls":false}));
     }
@@ -105,9 +126,13 @@ fn process(request: Request) -> Result<serde_json::Value> {
             codex_home: &home, proxy_enforced: false,
         })?;
         sandbox::run_setup_refresh(&permissions, &roots, &root, &env, &home, false)?;
+        if !sandbox::sandbox_setup_is_complete_with_settings(&home, &sandbox::WindowsSandboxProvisioningSettings::default()) {
+            bail!("Native provisioning did not complete; no ready marker was recorded");
+        }
+        record_policy(&home)?;
         return Ok(json!({"ok":true,"ready":sandbox::sandbox_setup_is_complete_with_settings(
             &home,&sandbox::WindowsSandboxProvisioningSettings::default()),
-            "upstream_commit":UPSTREAM,"model_calls":false}));
+            "policy_revision":POLICY_REVISION,"upstream_commit":UPSTREAM,"model_calls":false}));
     }
     if request.operation != "exec" || !ready {
         bail!("Sandbox not prepared locally; no unsandboxed execution or automatic elevation is allowed");
@@ -134,7 +159,7 @@ fn process(request: Request) -> Result<serde_json::Value> {
     Ok(json!({"ok":result.exit_code==0,"exit_code":result.exit_code,"timed_out":result.timed_out,
         "stdout":String::from_utf8_lossy(&result.stdout),"stderr":String::from_utf8_lossy(&result.stderr),
         "output_may_be_truncated":result.stdout.len()>=262144||result.stderr.len()>=262144,
-        "backend":"codex_windows_elevated","upstream_commit":UPSTREAM,"filesystem":"read_only",
+        "backend":"codex_windows_elevated","policy_revision":POLICY_REVISION,"upstream_commit":UPSTREAM,"filesystem":"read_only",
         "network":"restricted","private_desktop":true,"model_calls":false}))
 }
 fn main() {
@@ -149,7 +174,7 @@ fn main() {
     })();
     let response = match result {
         Ok(value) => value,
-        Err(e) => json!({"ok":false,"error":e.to_string(),"model_calls":false,"upstream_commit":UPSTREAM}),
+        Err(e) => json!({"ok":false,"error":e.to_string(),"model_calls":false,"policy_revision":POLICY_REVISION,"upstream_commit":UPSTREAM}),
     };
     let _ = writeln!(std::io::stdout(), "{}", response);
     if response["ok"] != true { std::process::exit(1); }

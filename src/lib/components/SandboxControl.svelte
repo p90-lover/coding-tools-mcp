@@ -6,9 +6,9 @@
   let status=$state<any>({available:false});let busy=$state(false);let message=$state('');
   async function refresh(){try{status=await invoke('sandbox_local_status',{workspaceId});}catch(e){message=String(e);}}
   async function prepare(){
-    if(!await confirm(`Prepare the native OS sandbox for this workspace? Windows may ask for one-time administrator approval to create separate CodingTools sandbox accounts and firewall rules. The sandbox has read-only workspace/platform access and restricted networking. It is not a Codex agent and does not use Codex quota.
+    if(!await confirm(`Prepare the native OS sandbox for this workspace? Windows may ask for one-time administrator approval to create separate CodingTools sandbox accounts, mandatory kernel network filters, and read-only capability entries on a fixed set of public Windows runtime files/provider registry keys. Existing owners and deny entries are preserved; no broad filesystem read grant is applied. The sandbox has read-only workspace/platform access and restricted networking. It is not a Codex agent and does not use Codex quota.
 
-為此工作區準備原生沙箱？Windows 可能要求一次管理員授權，以建立獨立 CodingTools 沙箱帳戶及防火牆規則。沙箱僅可讀取工作區／平台檔案並限制網絡，不啟動 Codex Agent。
+為此工作區準備原生沙箱？Windows 可能要求一次管理員授權，以建立獨立 CodingTools 沙箱帳戶、強制核心網絡篩選，以及固定範圍的 Windows 公開執行資源檔案／供應元件登錄項目的唯讀授權。既有擁有者及拒絕項目會保留，不會授予整個檔案系統的讀取權限。沙箱僅可讀取工作區／平台檔案並限制網絡，不啟動 Codex Agent。
 
 This enables only sandbox_exec, not an OS sandbox around desktop input or the existing command tools.
 僅適用於 sandbox_exec，不會把桌面輸入或既有命令工具自動放入沙箱。`,{title:'Prepare sandbox / 準備沙箱',kind:'warning'}))return;

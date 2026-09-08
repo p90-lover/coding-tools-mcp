@@ -35,5 +35,5 @@ patch('Cargo.toml',p.read_text(encoding='utf-8'),with_bin)
 shutil.copy2(source,crate/'src/bin/coding_tools_bridge.rs')
 print('Prepared pinned sandbox-only library adapter; no Codex executable invoked')
 
-for adapter in ('restrict_reads.py', 'desktop_boundary.py', 'namespace_objects.py'):
+for adapter in ('restrict_reads.py', 'desktop_boundary.py', 'namespace_objects.py', 'runtime_access.py', 'strict_network.py'):
     subprocess.run([sys.executable, str(Path(__file__).with_name(adapter)), str(crate)], check=True)
