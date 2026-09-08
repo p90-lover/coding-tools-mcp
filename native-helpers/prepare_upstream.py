@@ -34,3 +34,6 @@ p=crate/'Cargo.toml';with_bin=p.read_text(encoding='utf-8')+'\n[[bin]]\nname = "
 patch('Cargo.toml',p.read_text(encoding='utf-8'),with_bin)
 shutil.copy2(source,crate/'src/bin/coding_tools_bridge.rs')
 print('Prepared pinned sandbox-only library adapter; no Codex executable invoked')
+
+# Full read checks are required; upstream write-only restrictions are insufficient.
+subprocess.run([sys.executable, str(Path(__file__).with_name("restrict_reads.py")), str(crate)], check=True)

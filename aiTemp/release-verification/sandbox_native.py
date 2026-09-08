@@ -12,10 +12,15 @@ base = Path(sys.argv[2]).resolve()
 root, home = base / 'workspace', base / 'sandbox-state'
 root.mkdir(parents=True, exist_ok=False)
 (home / 'aiTemp').mkdir(parents=True, exist_ok=False)
-inside, outside = root / 'sentinel.txt', base / 'outside-private.txt'
+private = base / 'private'
+private.mkdir(exist_ok=False)
+inside, outside = root / 'sentinel.txt', private / 'outside-private.txt'
 inside.write_text('unchanged-sandbox-fixture', encoding='utf-8')
 outside.write_text('private-outside-fixture', encoding='utf-8')
 expected = [hashlib.sha256(p.read_bytes()).hexdigest() for p in (inside, outside)]
+alias = root / 'outside-junction'
+subprocess.run([os.environ['COMSPEC'], '/d', '/c', 'mklink', '/J', str(alias), str(private)], check=True)
+assert (alias / outside.name).read_bytes() == outside.read_bytes()
 probe_source, probe = base / 'probe.rs', root / 'isolation-probe.exe'
 probe_source.write_text(r'''
 use std::{env,fs,io::{self,Write},net::{SocketAddr,TcpStream},time::Duration};
@@ -71,7 +76,14 @@ for mode,path,answer in [('deny-write',inside,'write-denied'),('deny-read',outsi
     denied = run(mode, path)
     assert denied['ok'] and denied['stdout']==answer, denied
 assert [hashlib.sha256(p.read_bytes()).hexdigest() for p in (inside,outside)] == expected
-print('PASS: native permitted read; denied write handle and out-of-scope read; sentinel files unchanged')
+# Reparse aliases and files created after setup must not bypass the same read gate.
+late = private / 'created-after-setup.txt'
+late.write_text('late-private-fixture', encoding='utf-8')
+for path in (alias / outside.name, late):
+    assert subprocess.check_output([str(probe),'read',str(path)])
+    denied = run('deny-read', path)
+    assert denied['ok'] and denied['stdout']=='outside-read-denied', denied
+print('PASS: native permitted read; denied write handle, outside read, junction alias and newly created private file; sentinels unchanged')
 with socket.socket() as listener:
     listener.bind(('127.0.0.1',0))
     listener.listen(2)
@@ -93,4 +105,4 @@ with socket.socket() as listener:
         pass
 print('PASS: native network positive control succeeds; sandbox network is denied')
 assert not any(p.suffix.lower() in ('.png','.jpg','.jpeg','.webp') for p in base.rglob('*') if p.is_file())
-Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps({'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'checks':['native_allowed_read','native_write_handle_denied','native_outside_read_denied','native_loopback_denied_with_positive_control']},indent=2)+'\n',encoding='utf-8')
+Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps({'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'checks':['native_allowed_read','native_write_handle_denied','native_outside_read_denied','native_reparse_read_denied','native_future_private_read_denied','native_loopback_denied_with_positive_control']},indent=2)+'\n',encoding='utf-8')

@@ -1,0 +1,119 @@
+name: Remembered control final native verification
+on:
+  push:
+    branches: [release/remembered-control-0.3.6-final]
+    paths: ['.github/workflows/remembered-control-final.yml', 'native-helpers/**', 'src/**', 'src-tauri/**', 'aiTemp/release-verification/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-remembered-final-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  VERSION: 0.3.6-rc.1
+  SOURCE: ${{ github.sha }}
+  CARGO_INCREMENTAL: '0'
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUTF8: '1'
+  CARGO_PROFILE_RELEASE_DEBUG: '0'
+  OTEL_SDK_DISABLED: 'true'
+jobs:
+  native:
+    if: github.actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-14
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+        shell: bash
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Frontend and memory-only contract
+        run: python aiTemp/release-verification/run_step.py frontend
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        if: runner.os == 'Windows'
+        with:
+          repository: openai/codex
+          ref: 3caf9f9586baedb4158a7b91545ead3dd320c348
+          path: aiTemp/upstream
+          clean: false
+          persist-credentials: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: runner.os == 'Windows'
+        id: helper-cache
+        with:
+          path: aiTemp/upstream-target
+          key: remembered-helper-msvc-rust1981-v1-${{ hashFiles('aiTemp/checkout/native-helpers/**') }}
+          restore-keys: remembered-helper-msvc-rust1981-v1-
+      - name: Compile only pinned sandbox helpers
+        if: runner.os == 'Windows'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+        run: python aiTemp/release-verification/run_step.py helpers
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: runner.os == 'Windows' && steps.helper-cache.outputs.cache-hit != 'true'
+        with:
+          path: aiTemp/upstream-target
+          key: ${{ steps.helper-cache.outputs.cache-primary-key }}
+      - name: Preserve compiled helpers before isolation testing
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remembered-native-helpers-${{ github.run_id }}
+          path: aiTemp/checkout/src-tauri/aiTemp/native-sandbox/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Native isolation with positive controls
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          python aiTemp/release-verification/sandbox_native.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/isolation" 2>&1 | tee aiTemp/evidence/sandbox-smoke.txt
+      - name: Focused permission, vision and tool contracts
+        run: python aiTemp/release-verification/run_step.py policy
+      - name: Real Windows background observation and input
+        if: runner.os == 'Windows'
+        env:
+          COMPUTER_USE_NATIVE_SMOKE: '1'
+        run: python aiTemp/release-verification/run_step.py desktop
+      - name: Build and verify actual installer resources
+        env:
+          CI: 'true'
+        run: python aiTemp/release-verification/run_step.py installer
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remembered-installer-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/installer/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: remembered-evidence-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
