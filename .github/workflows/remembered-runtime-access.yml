@@ -2,7 +2,7 @@ name: Verify narrow Windows runtime read access
 on:
   push:
     branches: [audit/remembered-036-runtime-access]
-    paths: ['.github/workflows/remembered-runtime-access.yml','aiTemp/release-verification/runtime_provider_probe.py']
+    paths: ['.github/workflows/remembered-runtime-access.yml','aiTemp/release-verification/runtime_provider_probe.py','aiTemp/release-verification/runtime_trace_probe.py']
 permissions:
   contents: read
   actions: read
@@ -36,11 +36,21 @@ jobs:
           run-id: 34222575916
           name: remembered-native-helpers-34222575916
           path: aiTemp/checkout/src-tauri/aiTemp/native-sandbox
-      - name: Exact system-resource read grants with all original negative checks
+      - name: Verify Microsoft-signed diagnostic tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Path aiTemp/tools | Out-Null
+          Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/ProcessMonitor.zip' -OutFile aiTemp/tools/process-monitor.zip -TimeoutSec 60
+          Expand-Archive -Path aiTemp/tools/process-monitor.zip -DestinationPath aiTemp/tools
+          $signature=Get-AuthenticodeSignature aiTemp/tools/Procmon64.exe
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') {throw 'Invalid diagnostic tool signature'}
+          Get-FileHash aiTemp/tools/Procmon64.exe -Algorithm SHA256
+      - name: Trace the isolated fixture and keep every confinement assertion
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
-          python aiTemp/release-verification/runtime_provider_probe.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/runtime-access" 2>&1 | tee aiTemp/evidence/runtime-access.txt
+          python aiTemp/release-verification/runtime_trace_probe.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/runtime-access" 2>&1 | tee aiTemp/evidence/runtime-access.txt
       - name: Preserve immutable checked source
         if: always()
         run: |
