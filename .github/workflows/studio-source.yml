@@ -1,0 +1,55 @@
+name: Studio source preparation
+on:
+  push:
+    branches: [integration/paseo-anneal-studio]
+    paths: ['.github/workflows/studio-source.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: aiTemp/app
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: getpaseo/paseo
+          ref: da8c1b5c94e752b01d451645e5fa52aba2c1b2f0
+          path: aiTemp/paseo
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: mosonlab/anneal
+          ref: 088f0d5971a1692134aaa3db0230cc541b014c07
+          path: aiTemp/anneal
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Snapshot source and frontend dependencies only
+        shell: bash
+        env:
+          npm_config_cache: ${{ github.workspace }}/aiTemp/npm-cache
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/snapshots
+          git -C aiTemp/app archive --format=zip HEAD --output="$GITHUB_WORKSPACE/aiTemp/snapshots/app.zip"
+          git -C aiTemp/paseo archive --format=zip HEAD --output="$GITHUB_WORKSPACE/aiTemp/snapshots/paseo.zip"
+          git -C aiTemp/anneal archive --format=zip HEAD --output="$GITHUB_WORKSPACE/aiTemp/snapshots/anneal.zip"
+          git -C aiTemp/app rev-parse HEAD > aiTemp/snapshots/app-sha.txt
+          (cd aiTemp/app && npm ci --ignore-scripts)
+          tar -czf aiTemp/snapshots/frontend-deps.tar.gz -C aiTemp/app node_modules
+          (cd aiTemp/snapshots && sha256sum *.zip *.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: studio-sources-${{ github.run_id }}
+          path: aiTemp/snapshots/*
+          if-no-files-found: error
+          retention-days: 14
