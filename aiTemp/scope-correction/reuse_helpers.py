@@ -30,8 +30,12 @@ for name in inputs:
     p=Path(name);assert p.is_file() and not p.is_symlink()
     data=p.read_bytes()
     expected=api(f'contents/{name}?ref={origin}')['sha']
-    actual=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+    # Git objects are canonical bytes; Windows checkout may convert LF to CRLF.
+    # Validate BOTH the immutable object and the working file, not just the index.
+    canonical=subprocess.check_output(['git','cat-file','blob','HEAD:'+name],timeout=10)
+    actual=hashlib.sha1(b'blob '+str(len(canonical)).encode()+b'\0'+canonical).hexdigest()
     assert actual==expected,'Helper build input changed: '+name
+    assert data==canonical or (os.name=='nt' and data.replace(b'\r\n',b'\n')==canonical), 'Working source differs beyond Windows line endings: '+name
     verified[name]=actual
 source=Path('aiTemp/helper-artifact')
 manifest=(source/'manifest.json').read_bytes()
