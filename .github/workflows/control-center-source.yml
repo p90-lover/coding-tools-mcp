@@ -1,0 +1,49 @@
+name: Control center source audit
+on:
+  push:
+    branches: [integration/paseo-anneal-control-center]
+    paths: ['.github/workflows/control-center-source.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/app
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: getpaseo/paseo
+          ref: da8c1b5c94e752b01d451645e5fa52aba2c1b2f0
+          path: aiTemp/paseo
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: mosonlab/anneal
+          ref: 088f0d5971a1692134aaa3db0230cc541b014c07
+          path: aiTemp/anneal
+          clean: false
+          persist-credentials: false
+      - name: Archive reviewed source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/snapshots
+          for name in app paseo anneal; do
+            git -C "aiTemp/$name" archive --format=zip HEAD --output="$GITHUB_WORKSPACE/aiTemp/snapshots/$name.zip"
+            git -C "aiTemp/$name" rev-parse HEAD > "aiTemp/snapshots/$name-sha.txt"
+          done
+          (cd aiTemp/snapshots && sha256sum *.zip > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: control-center-source-${{ github.run_id }}
+          path: aiTemp/snapshots/*
+          if-no-files-found: error
+          retention-days: 14
