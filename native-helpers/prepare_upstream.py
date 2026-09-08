@@ -42,6 +42,12 @@ patch('src/elevated_impl.rs','        unsafe {\n            allow_null_device(si
       '        cap_sids.push(env_map.get(crate::read_isolation::ENV_SID).ok_or_else(|| anyhow::anyhow!("Missing read-container identity"))?.clone());\n        unsafe {\n            allow_null_device(sid_for_null.as_ptr());')
 patch('src/desktop.rs','    let sddl = to_wide(format!(\n        "D:P(A;;0x{DESKTOP_ALL_ACCESS:x};;;{owner_user_sid})(A;;0x{DESKTOP_PARTICIPANT_ACCESS:x};;;{sandbox_sid})"\n    ));',
       '    let participants: String = policy.capability_sids.iter().map(|sid| format!("(A;;0x{DESKTOP_PARTICIPANT_ACCESS:x};;;{sid})")).collect();\n    let sddl = to_wide(format!(\n        "D:P(A;;0x{DESKTOP_ALL_ACCESS:x};;;{owner_user_sid})(A;;0x{DESKTOP_PARTICIPANT_ACCESS:x};;;{sandbox_sid}){participants}S:(ML;;NW;;;LW)"\n    ));')
-patch('src/bin/coding_tools_bridge.rs','    let env = sanitized_env(&home);',
-      '    let mut env = sanitized_env(&home);\n    env.insert(sandbox::read_isolation::ENV_SID.into(), sandbox::read_isolation::prepare(&root, &home)?);')
+bridge='src/bin/coding_tools_bridge.rs'
+patch(bridge,'    let env = sanitized_env(&home);','    let mut env = sanitized_env(&home);')
+# Status returns before this point. Unknown or malformed exec requests must not
+# create profiles or change ACLs either. Setup still requires explicit local consent.
+prepare='env.insert(sandbox::read_isolation::ENV_SID.into(), sandbox::read_isolation::prepare(&root, &home)?);'
+patch(bridge,'        let resolved=sandbox::','        '+prepare+'\n        let resolved=sandbox::')
+patch(bridge,'    let result = sandbox::run_windows_sandbox_capture_for_permission_profile_elevated(',
+      '    '+prepare+'\n    let result = sandbox::run_windows_sandbox_capture_for_permission_profile_elevated(')
 print('Prepared pinned native sandbox with mandatory read-container boundary; no Codex agent invoked')
