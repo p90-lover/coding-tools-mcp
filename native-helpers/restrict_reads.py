@@ -44,6 +44,12 @@ replace('src/token.rs', text[start:end], r'''pub unsafe fn create_readonly_token
     let mut entries: Vec<SID_AND_ATTRIBUTES> = sids.iter().map(|sid|
         SID_AND_ATTRIBUTES { Sid: *sid, Attributes: 0 }
     ).collect();
+    // Windows shared runtime sections (KnownDlls) explicitly permit Restricted
+    // Code. Without it the loader exits STATUS_ACCESS_DENIED before main.
+    // It is NOT granted in filesystem ACEs, the private desktop, or the default
+    // DACL; ordinary Everyone/Users access still cannot satisfy the second check.
+    let runtime_identity = LocalSid::from_string("S-1-5-12")?;
+    entries.push(SID_AND_ATTRIBUTES { Sid: runtime_identity.as_ptr(), Attributes: 0 });
     let mut restricted: HANDLE = 0;
     // No WRITE_RESTRICTED flag: reads AND writes require both access checks.
     if CreateRestrictedToken(base_token, DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
