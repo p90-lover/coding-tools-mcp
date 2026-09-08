@@ -1,8 +1,8 @@
 name: Verify remembered control and native isolation
 on:
   push:
-    branches: [release/remembered-control-0.3.6-rc.1]
-    paths: ['.github/workflows/remembered-control-verify.yml', 'aiTemp/release-verification/**']
+    branches: [release/remembered-control-final]
+    paths: ['.github/workflows/remembered-control-verify.yml', 'aiTemp/release-verification/**', 'native-helpers/**']
   workflow_dispatch:
 permissions:
   contents: read
