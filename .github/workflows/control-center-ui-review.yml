@@ -1,0 +1,55 @@
+name: Focused control center UI review
+on:
+  push:
+    branches: [validation/control-center-ui-review]
+    paths: ['.github/workflows/control-center-ui-review.yml']
+permissions:
+  contents: read
+jobs:
+  ui:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      SOURCE: 03f5dc3e1edc1e34def7084257e40cdac0acde7e
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/aiTemp/browsers
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 03f5dc3e1edc1e34def7084257e40cdac0acde7e
+          path: aiTemp/app
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Render actual product pages with the isolated native bridge
+        working-directory: aiTemp/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/process-temp
+          export TMPDIR="$PWD/aiTemp/process-temp"
+          export PYTHONPATH="$PWD/aiTemp/python"
+          npm ci --ignore-scripts --no-audit --no-fund 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/svelte.txt
+          npm run build 2>&1 | tee aiTemp/evidence/build.txt
+          python -m pip install --target "$PYTHONPATH" 'playwright==1.55.0'
+          python -m playwright install chromium
+          git rev-parse HEAD > aiTemp/evidence/source-sha.txt
+          python aiTemp/control-center/ui-qa.py 2>&1 | tee aiTemp/evidence/ui-tests.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: center-ui-review-${{ github.run_id }}
+          path: |
+            aiTemp/app/aiTemp/evidence/*
+            aiTemp/app/aiTemp/control-center/*-desktop.png
+            aiTemp/app/aiTemp/control-center/*-mobile*.png
+            aiTemp/app/aiTemp/control-center/ui-qa-results.json
+          retention-days: 14
+          if-no-files-found: error
