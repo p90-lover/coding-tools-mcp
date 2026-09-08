@@ -1,0 +1,38 @@
+name: Control center frontend dependencies
+on:
+  push:
+    branches: [integration/paseo-anneal-control-center]
+    paths: ['.github/workflows/control-center-ui-deps.yml']
+permissions:
+  contents: read
+jobs:
+  dependencies:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/app
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Resolve only locked frontend packages
+        working-directory: aiTemp/app
+        env:
+          NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+        run: |
+          set -eu
+          npm ci --ignore-scripts --no-audit --no-fund
+          mkdir -p aiTemp/deps
+          tar -czf aiTemp/deps/node_modules.tar.gz node_modules
+          sha256sum package-lock.json aiTemp/deps/node_modules.tar.gz > aiTemp/deps/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: control-center-ui-deps-${{ github.run_id }}
+          path: aiTemp/app/aiTemp/deps/*
+          if-no-files-found: error
+          retention-days: 7
