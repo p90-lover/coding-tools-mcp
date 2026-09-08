@@ -29,8 +29,19 @@ p=crate/'src/logging.rs';s=p.read_text(encoding='utf-8');start=s.index('fn previ
 patch('src/logging.rs',s[start:end],'''fn preview(_command: &[String]) -> String {
     "[sandbox command arguments omitted]".to_string()
 }''')
-# Dedicated helper binary, not the Codex CLI or an agent. Workspace dependency pins remain intact.
+# Dedicated helper binary, not the Codex CLI or an agent. Dependency pins stay intact.
 p=crate/'Cargo.toml';with_bin=p.read_text(encoding='utf-8')+'\n[[bin]]\nname = "coding-tools-codex-sandbox"\npath = "src/bin/coding_tools_bridge.rs"\n'
 patch('Cargo.toml',p.read_text(encoding='utf-8'),with_bin)
 shutil.copy2(source,crate/'src/bin/coding_tools_bridge.rs')
-print('Prepared pinned sandbox-only library adapter; no Codex executable invoked')
+shutil.copy2(source.parent/'read_isolation.rs',crate/'src/read_isolation.rs')
+patch('src/lib.rs','#[cfg(target_os = "windows")]\nmod acl;', '#[cfg(target_os = "windows")]\npub mod read_isolation;\n#[cfg(target_os = "windows")]\nmod acl;')
+patch('src/process.rs','let mut attrs = ProcThreadAttributeList::new(attr_count)?;',
+      'let mut read_boundary = crate::read_isolation::Boundary::from_env(env_map)?;\n    let mut attrs = ProcThreadAttributeList::new(attr_count + 1)?;\n    read_boundary.install(&mut attrs)?;')
+patch('src/elevated_impl.rs','let (sid_for_null, cap_sids) =', 'let (sid_for_null, mut cap_sids) =')
+patch('src/elevated_impl.rs','        unsafe {\n            allow_null_device(sid_for_null.as_ptr());',
+      '        cap_sids.push(env_map.get(crate::read_isolation::ENV_SID).ok_or_else(|| anyhow::anyhow!("Missing read-container identity"))?.clone());\n        unsafe {\n            allow_null_device(sid_for_null.as_ptr());')
+patch('src/desktop.rs','    let sddl = to_wide(format!(\n        "D:P(A;;0x{DESKTOP_ALL_ACCESS:x};;;{owner_user_sid})(A;;0x{DESKTOP_PARTICIPANT_ACCESS:x};;;{sandbox_sid})"\n    ));',
+      '    let participants: String = policy.capability_sids.iter().map(|sid| format!("(A;;0x{DESKTOP_PARTICIPANT_ACCESS:x};;;{sid})")).collect();\n    let sddl = to_wide(format!(\n        "D:P(A;;0x{DESKTOP_ALL_ACCESS:x};;;{owner_user_sid})(A;;0x{DESKTOP_PARTICIPANT_ACCESS:x};;;{sandbox_sid}){participants}S:(ML;;NW;;;LW)"\n    ));')
+patch('src/bin/coding_tools_bridge.rs','    let env = sanitized_env(&home);',
+      '    let mut env = sanitized_env(&home);\n    env.insert(sandbox::read_isolation::ENV_SID.into(), sandbox::read_isolation::prepare(&root, &home)?);')
+print('Prepared pinned native sandbox with mandatory read-container boundary; no Codex agent invoked')
