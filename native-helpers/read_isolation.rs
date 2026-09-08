@@ -13,8 +13,13 @@ unsafe extern "system" {
 }
 /// Only the controller calls this. Keep the per-workspace profile; no deletion.
 pub fn prepare(root:&Path, home:&Path)->Result<String> {
+    // The pinned upstream generates S-1-5-21 workspace SIDs, not S-1-9.
     let cap=crate::workspace_cap_sid_for_cwd(home,root)?;
-    let name=format!("ctmcp.{}",cap.strip_prefix("S-1-9-").context("Invalid workspace capability")?);
+    let suffix=cap.strip_prefix("S-1-5-21-").context("Invalid workspace capability")?;
+    if suffix.is_empty() || !suffix.bytes().all(|c|c.is_ascii_digit()||c==b'-') {
+        bail!("Invalid workspace capability name");
+    }
+    let name=format!("ctmcp.{suffix}");
     if name.len()>64 {bail!("Read-container name exceeds Windows limit");}
     let name=crate::to_wide(name);
     let label=crate::to_wide("Coding Tools MCP read-only commands");
@@ -25,13 +30,13 @@ pub fn prepare(root:&Path, home:&Path)->Result<String> {
         if derived<0 {bail!("Cannot resolve read-container SID: {derived:#x}");}
     } else if status<0 {bail!("Cannot create read-container profile: {status:#x}");}
     if sid.is_null(){bail!("Missing read-container SID");}
-    let result=(||{
+    let result=(|| -> Result<String> {
         let bytes=unsafe{std::slice::from_raw_parts(sid as *const u8,GetLengthSid(sid) as usize)};
-        let text=crate::string_from_sid_bytes(bytes)?;
-        // Read/execute only. Existing write restriction is retained independently.
+        let text=crate::string_from_sid_bytes(bytes).map_err(anyhow::Error::msg)?;
+        // Read/execute only. The pinned helper applies OBJECT/CONTAINER inheritance.
         let helper=std::env::current_exe()?.parent().context("Missing helper directory")?.canonicalize()?;
         for path in [root,helper.as_path()] {
-            unsafe{crate::ensure_allow_mask_aces_with_inheritance(path,&[sid],0x001200a9,true)}?;
+            unsafe{crate::ensure_allow_mask_aces(path,&[sid],0x001200a9)}?;
         }
         Ok(text)
     })();
