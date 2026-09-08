@@ -1,10 +1,10 @@
-"""Read bounded PE import metadata; never execute a dependency to discover it."""
+"""Bounded immediate PE imports only; no speculative delayed-feature grants."""
 import struct
 from pathlib import Path
 
 def imported_dlls(path):
     data=path.read_bytes()
-    assert len(data)<=64_000_000 and data[:2]==b'MZ'
+    assert len(data)<=64_000_000 and data[:2]==b'MZ', path.name
     def u16(offset): return struct.unpack_from('<H',data,offset)[0]
     def u32(offset): return struct.unpack_from('<I',data,offset)[0]
     pe=u32(0x3c);assert data[pe:pe+4]==b'PE\0\0'
@@ -23,20 +23,18 @@ def imported_dlls(path):
     def name(rva):
         start=offset(rva);end=data.index(0,start,min(len(data),start+257))
         value=data[start:end].decode('ascii').lower()
-        assert '/' not in value and '\\' not in value and ':' not in value and value.endswith('.dll')
-        return value
-    result=set()
-    for directory,stride,name_at in [(1,20,12),(13,32,4)]:
-        rva=u32(directories+directory*8)
-        if not rva:continue
-        start=offset(rva)
-        for i in range(256):
-            p=start+i*stride
-            row=data[p:p+stride];assert len(row)==stride
-            if not any(row):break
-            if directory==13:assert u32(p)&1,'VA-style delayed imports not supported by diagnostic'
-            result.add(name(u32(p+name_at)))
-        else:raise ValueError('import descriptor limit exceeded')
+        assert value and all(c.isalnum() or c in '._-' for c in value),(path.name,value)
+        # Drivers and imported EXEs are not ordinary user-mode runtime DLLs.
+        return value if value.endswith('.dll') else None
+    rva=u32(directories+8)
+    if not rva:return set()
+    result=set();start=offset(rva)
+    for i in range(256):
+        p=start+i*20;row=data[p:p+20];assert len(row)==20
+        if not any(row):break
+        value=name(u32(p+12))
+        if value:result.add(value)
+    else:raise ValueError('import descriptor limit exceeded')
     return result
 
 def runtime_dependencies(runtime,seeds):
