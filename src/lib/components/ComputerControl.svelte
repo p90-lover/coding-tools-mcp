@@ -2,10 +2,12 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { confirm } from '@tauri-apps/plugin-dialog';
+  import { durationLabel } from '$lib/computer-view.js';
   let { workspaceId }: { workspaceId: string } = $props();
   type Target = { window_id: number; pid: number; title: string };
   let targets = $state<Target[]>([]);
   let selection = $state('');
+  let alwaysEnabled = $state(false);
   let message = $state('Select one application. Screenshots remain in memory. · 請選擇一個應用程式；截圖不會儲存。');
   let busy = $state(false);
   let status = $state<any>({ state: 'stopped' });
@@ -18,11 +20,12 @@
   async function start() {
     const target = targets.find(t => `${t.window_id}:${t.pid}` === selection);
     if (!target) return;
-    const accepted = await confirm(`Allow connected MCP clients for this workspace to view and operate ONLY “${target.title}” for 10 minutes?\n\nReal mouse/keyboard input uses your foreground desktop. Stay present for sensitive actions. Screenshots are not saved by this app.\n\n允許此工作區已連接的 MCP 用戶端，在 10 分鐘內查看及操作上述視窗？這會使用前台鍵鼠，請留意敏感操作。\n\nStop anytime with Ctrl+Alt+Escape or the visible Stop button.`, { title: 'Enable local computer control / 啟用電腦操作', kind: 'warning' });
+    const always = alwaysEnabled;
+    const accepted = await confirm(`Allow connected MCP clients for this workspace to view and operate ONLY “${target.title}” ${always ? 'until you stop control, with NO automatic time limit' : 'for 10 minutes'}?\n\nReal mouse/keyboard input uses your foreground desktop. Stay present for sensitive actions. Screenshots are not saved by this app.\n\n允許此工作區已連接的 MCP 用戶端，${always ? '持續查看及操作上述視窗，直到你按停止（沒有時間限制）' : '在 10 分鐘內查看及操作上述視窗'}？這會使用前台鍵鼠，請留意敏感操作。\n\nStop anytime with Ctrl+Alt+Escape or the visible Stop button. Closing the monitor, changing the target, or restarting the app ends authorization. No automatic re-enable after restart.\n關閉監控、變更目標或重啟程式會結束授權；重啟後不會自行重新啟用。`, { title: 'Enable local computer control / 啟用電腦操作', kind: 'warning' });
     if (!accepted) return;
     busy = true;
     try {
-      status = await invoke('computer_local_start', { workspaceId, windowId: target.window_id, pid: target.pid, durationSeconds: 600 });
+      status = await invoke('computer_local_start', { workspaceId, windowId: target.window_id, pid: target.pid, durationSeconds: always ? 0 : 600, alwaysEnabled: always });
       message = 'Control monitor opened. Keep it visible; minimize/close stops authorization. · 控制視窗已開啟，請保持可見。';
     } catch (e) { message = String(e); }
     finally { busy = false; }
@@ -50,9 +53,11 @@
       <option value="">Choose one window · 選擇視窗</option>
       {#each targets as target}<option value={`${target.window_id}:${target.pid}`}>{target.title} (PID {target.pid})</option>{/each}
     </select>
-    <button class="tx-btn-primary" disabled={busy || !selection || status.state !== 'stopped'} onclick={start}>Enable for 10 min · 啟用 10 分鐘</button>
+    <label class="flex items-center gap-2 text-sm"><input type="checkbox" bind:checked={alwaysEnabled} disabled={busy || status.state !== 'stopped'} />Always enabled · 持續啟用</label>
+    <button class="tx-btn-primary" disabled={busy || !selection || status.state !== 'stopped'} onclick={start}>{alwaysEnabled ? 'Enable until stopped · 啟用直到停止' : 'Enable for 10 min · 啟用 10 分鐘'}</button>
     <button class="tx-btn-secondary" onclick={stop}>Stop · 停止</button>
   </div>
+  {#if status.state !== 'stopped'}<p class="mt-3 text-sm">{durationLabel(status)}</p>{/if}
   <p class="mt-3 text-sm opacity-80" role="status">{message}</p>
   <p class="mt-2 text-xs opacity-60">Emergency Stop: Ctrl + Alt + Escape. Password, administration, shell and this controller's windows are not input targets. · 可隨時按快捷鍵停止。</p>
 </section>

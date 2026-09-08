@@ -246,7 +246,14 @@ pub async fn spawn_cloudflare_tunnel(
         }
     }
 
+    if !quick {
+        super::connection::public_origin(named_public_url)?;
+    }
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut cmd = Command::new(&cloudflared);
+    cmd.kill_on_drop(true);
     cmd.current_dir(cwd);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -271,7 +278,8 @@ pub async fn spawn_cloudflare_tunnel(
     if quick {
         cmd.args(["tunnel", "--url", &format!("http://127.0.0.1:{port}")]);
     } else {
-        cmd.args(["tunnel", "run", "--token", cloudflare_token.trim()]);
+        cmd.args(["tunnel", "run"]);
+        cmd.env("TUNNEL_TOKEN", cloudflare_token.trim());
     }
 
     let mut child = cmd
@@ -285,7 +293,11 @@ pub async fn spawn_cloudflare_tunnel(
 
     let (ready_tx, ready_rx) = oneshot::channel();
     let log_path = log_path.to_path_buf();
-    let named_url = named_public_url.trim_end_matches('/').to_string();
+    let named_url = if quick {
+        String::new()
+    } else {
+        super::connection::public_origin(named_public_url)?
+    };
     let log_path_for_error = log_path.clone();
 
     if let Some(stdout) = child.stdout.take() {
@@ -298,24 +310,27 @@ pub async fn spawn_cloudflare_tunnel(
             public_url: if quick {
                 None
             } else {
-                Some(named_public_url.trim_end_matches('/').to_string())
+                Some(super::connection::public_origin(named_public_url)?)
             },
             named_ready: !quick,
         });
     }
 
-    let ready = time::timeout(READY_TIMEOUT, ready_rx)
-        .await
-        .map_err(|_| {
-            AppError::Message(format!(
-                "cloudflared 已启动，但在 {} 秒内没有返回 trycloudflare.com 公网地址。\n\
-                 请检查：1) MCP 服务是否已在本机端口 {port} 运行；2) 设置 → 通用 → 网络代理 是否配置为手动代理（如 http://127.0.0.1:7890）；\
-                 3) 查看日志 {log_hint}",
-                READY_TIMEOUT.as_secs(),
-                log_hint = log_path_for_error.display()
-            ))
-        })?
-        .map_err(|_| AppError::Message("cloudflared 输出流意外结束。".into()))?;
+    let ready = match time::timeout(READY_TIMEOUT, ready_rx).await {
+        Ok(Ok(ready)) => ready,
+        failure => {
+            let reason = if failure.is_err() {
+                "cloudflared readiness timed out"
+            } else {
+                "cloudflared output ended before readiness"
+            };
+            let _ = stop_child(child, pid).await;
+            return Err(AppError::Message(format!(
+                "{reason}; the owned child was stopped. Check proxy/network settings and {}",
+                log_path_for_error.display()
+            )));
+        }
+    };
 
     let public_url = if quick {
         ready.public_url.ok_or_else(|| {
@@ -325,7 +340,7 @@ pub async fn spawn_cloudflare_tunnel(
             ))
         })?
     } else {
-        named_public_url.trim_end_matches('/').to_string()
+        super::connection::public_origin(named_public_url)?
     };
 
     Ok(CloudflareTunnelHandle {

@@ -34,3 +34,11 @@ export async function testTunnel(id: string, service: TunnelService): Promise<Tu
 export async function restartTunnel(id: string, service: TunnelService): Promise<TunnelStatus> {
   return invoke<TunnelStatus>("restart_tunnel", { id, service });
 }
+
+export interface TunnelConnectionStatus {
+  tunnel: TunnelStatus;
+  recovery: { enabled: boolean; state: string; attempts: number; max_attempts: number; retry_after_seconds?: number; requires_manual_start?: boolean; reason?: string | null };
+}
+export async function getTunnelConnectionStatus(id: string, service: TunnelService): Promise<TunnelConnectionStatus> {
+  return invoke<TunnelConnectionStatus>("get_tunnel_connection_status", { id, service });
+}

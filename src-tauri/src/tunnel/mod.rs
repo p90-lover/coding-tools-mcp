@@ -1,7 +1,9 @@
 mod access;
 mod cloudflare;
+pub(crate) mod connection;
 mod download;
 mod frp;
+mod recovery;
 mod software;
 mod supervisor;
 

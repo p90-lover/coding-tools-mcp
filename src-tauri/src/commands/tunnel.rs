@@ -252,7 +252,7 @@ fn local_service_listening(
     Ok(platform().find_pid_listening_on_port(port)?.is_some())
 }
 
-/// Probe tunnel connectivity without leaving it running unless the local service is already up.
+/// Inspect the existing endpoint; never restart a healthy tunnel just to test it.
 #[tauri::command]
 pub async fn test_tunnel(
     state: State<'_, AppState>,
@@ -262,87 +262,47 @@ pub async fn test_tunnel(
     let profile = profile_by_id(&state, &id)?;
     let kind = TunnelServiceKind::parse(&service)?;
     validate_tunnel_start_resources(&state, &id, kind)?;
-    sync_tunnel_routes_from_runtime(&state).await?;
     let settings = state.with_settings(|store| Ok(store.settings()))?;
-    let runtime_running = local_service_listening(&profile, kind)?;
-
-    let was_tunnel_running = {
-        let guard = supervisor().lock().await;
-        guard.status(&profile, kind, &settings).state == "running"
-    };
-
-    let result = {
+    if !local_service_listening(&profile, kind)? {
+        return Ok(TunnelTestResult { success: false, public_url: String::new(), kept_running: false,
+            message: "Start the local service before testing. No tunnel was started or restarted. / 請先啟動本機服務；隧道未被變更。".into() });
+    }
+    let status = {
         let mut guard = supervisor().lock().await;
-        if was_tunnel_running && tunnel_type_for(&profile, kind) == "frp" {
-            guard
-                .start(&profile, kind, &settings)
-                .await
-                .map_err(|error| (error, guard.route_profile(&id, kind)))
+        let current = guard.status(&profile, kind, &settings);
+        if current.state == "running" {
+            current
         } else {
-            let stop_result = if was_tunnel_running {
-                guard.stop(&profile, kind, &settings).await
-            } else {
-                Ok(())
-            };
-            match stop_result {
-                Ok(()) => guard
-                    .start(&profile, kind, &settings)
-                    .await
-                    .map_err(|error| (error, None)),
-                Err(error) => Err((error, None)),
-            }
+            guard.start(&profile, kind, &settings).await?
         }
     };
-
-    let status = match result {
-        Ok(status) => status,
-        Err((error, restored)) => {
-            if let Some(restored) = restored {
-                if let Err(rollback_error) =
-                    restore_tunnel_config(&state, &id, kind, &profile, &restored)
-                {
-                    return Err(AppError::Message(format!(
-                        "FRP 测试失败且配置回滚失败：{error}; rollback: {rollback_error}"
-                    )));
-                }
-            }
-            return Err(error);
-        }
+    // Commit the new trusted origin before reading OAuth discovery from that origin.
+    persist_public_url(&state, &id, kind, &status.public_url)?;
+    let oauth = match kind {
+        TunnelServiceKind::Mcp => profile.auth.auth_type == "oauth",
+        TunnelServiceKind::Actions => profile.actions.auth_type == "oauth",
     };
+    let check =
+        crate::tunnel::connection::probe_public_service(&status.public_url, kind, oauth, &settings)
+            .await;
+    Ok(TunnelTestResult { success: check.is_ok(), public_url: status.public_url, kept_running: status.state == "running",
+        message: match check {
+            Ok(()) => "Public discovery and configured OAuth metadata verified. Existing tunnel retained; no model or credentials sent. / 公開端點及 OAuth 探索已驗證；原連線保持不變。".into(),
+            Err(e) => format!("{e}; tunnel left unchanged / 隧道保持不變"),
+        } })
+}
 
-    let public_url = status.public_url.clone();
-    let keep_tunnel = runtime_running;
-
-    if keep_tunnel {
-        persist_public_url(&state, &id, kind, &public_url)?;
-        return Ok(TunnelTestResult {
-            success: !public_url.is_empty() || status.state == "running",
-            public_url,
-            kept_running: true,
-            message: if runtime_running {
-                "隧道测试成功，已保持连接（服务运行中）。".into()
-            } else {
-                "隧道测试成功，已恢复连接。".into()
-            },
-        });
-    }
-
-    {
-        let mut guard = supervisor().lock().await;
-        guard.stop(&profile, kind, &settings).await?;
-    }
-
-    let success = !public_url.is_empty();
-    let message = if public_url.is_empty() {
-        "隧道进程已退出，未获取到公网地址。".into()
-    } else {
-        "隧道配置验证通过。本地服务未运行，测试连接已自动断开。".into()
-    };
-
-    Ok(TunnelTestResult {
-        success,
-        public_url,
-        kept_running: false,
-        message,
-    })
+#[tauri::command]
+pub async fn get_tunnel_connection_status(
+    state: State<'_, AppState>,
+    id: String,
+    service: String,
+) -> AppResult<serde_json::Value> {
+    let profile = profile_by_id(&state, &id)?;
+    let kind = TunnelServiceKind::parse(&service)?;
+    let settings = state.with_settings(|store| Ok(store.settings()))?;
+    let guard = supervisor().lock().await;
+    Ok(
+        serde_json::json!({"tunnel":guard.status(&profile, kind, &settings),"recovery":guard.cloudflare_recovery_status(&id, kind)}),
+    )
 }

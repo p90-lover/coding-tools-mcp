@@ -8,12 +8,12 @@ export function normalizeMcpEndpoint(value) {
   const host = url.hostname.toLowerCase();
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash ||
       !host.includes(".") || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") ||
-      host.endsWith(".internal") || /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(":")) {
+      host.endsWith(".internal") || host.endsWith(".") || /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(":")) {
     throw new Error("Use a public HTTPS hostname without credentials, query parameters, or fragments.");
   }
   const path = url.pathname.replace(/\/+$/, "");
   url.pathname = path || "/mcp";
-  if (!url.pathname.endsWith("/mcp")) throw new Error("The endpoint must end in /mcp.");
+  if (url.pathname !== "/mcp") throw new Error("Use the root /mcp endpoint; nested or duplicated /mcp paths are not supported.");
   return url.toString();
 }
 
@@ -37,4 +37,9 @@ export function connectionState(endpoint, confirmedEndpoint = "") {
     user_action_required: current !== confirmed,
     stable_hostname,
   };
+}
+
+/** Canonicalize a configured tunnel origin or root MCP URL exactly once. @param {string} value */
+export function endpointFromTunnel(value) {
+  return normalizeMcpEndpoint(value);
 }

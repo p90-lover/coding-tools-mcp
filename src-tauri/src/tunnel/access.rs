@@ -18,7 +18,7 @@ static TUNNEL_SUPERVISOR: LazyLock<Mutex<TunnelSupervisor>> =
     LazyLock::new(|| Mutex::new(TunnelSupervisor::new()));
 static FRP_HEALTH_LOOP_STARTED: AtomicBool = AtomicBool::new(false);
 
-const FRP_HEALTH_INTERVAL: Duration = Duration::from_secs(20);
+const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn supervisor() -> &'static Mutex<TunnelSupervisor> {
     &TUNNEL_SUPERVISOR
@@ -30,11 +30,16 @@ pub fn ensure_frp_health_loop() {
         return;
     }
     tauri::async_runtime::spawn(async {
+        let mut ticks = 0u32;
         loop {
-            sleep(FRP_HEALTH_INTERVAL).await;
+            sleep(HEALTH_INTERVAL).await;
             let settings = AppSettings::load_or_default();
             let mut guard = supervisor().lock().await;
-            let _ = guard.heal_unhealthy_frpc(&settings).await;
+            let _ = guard.heal_exited_cloudflare(&settings).await;
+            ticks = ticks.wrapping_add(1);
+            if ticks % 4 == 0 {
+                let _ = guard.heal_unhealthy_frpc(&settings).await;
+            }
         }
     });
 }

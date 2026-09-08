@@ -66,6 +66,8 @@ pub struct TunnelSupervisor {
     frp_routes: HashMap<(String, TunnelServiceKind), FrpRoute>,
     frpc: HashMap<String, FrpcProcess>,
     frpc_health: HashMap<String, FrpcHealthState>,
+    cloudflare_profiles: HashMap<(String, TunnelServiceKind), WorkspaceProfile>,
+    cloudflare_recovery: HashMap<(String, TunnelServiceKind), super::recovery::Recovery>,
 }
 
 impl Default for TunnelSupervisor {
@@ -85,7 +87,125 @@ impl TunnelSupervisor {
             frp_routes: HashMap::new(),
             frpc: HashMap::new(),
             frpc_health: HashMap::new(),
+            cloudflare_profiles: HashMap::new(),
+            cloudflare_recovery: HashMap::new(),
         }
+    }
+
+    pub fn cloudflare_recovery_status(
+        &self,
+        id: &str,
+        kind: TunnelServiceKind,
+    ) -> serde_json::Value {
+        let key = (id.to_string(), kind);
+        if let Some(budget) = self.cloudflare_recovery.get(&key) {
+            return budget.summary(Instant::now(), self.session_is_running(&key));
+        }
+        serde_json::json!({"enabled":self.cloudflare_profiles.contains_key(&key),"state":"not_managed","attempts":0,"max_attempts":5})
+    }
+
+    /// Only recover owned exited children while this process still owns the local runtime.
+    /// A manual Stop removes the tracked profile, so the loop cannot resurrect it.
+    pub async fn heal_exited_cloudflare(&mut self, settings: &AppSettings) -> usize {
+        if self.cloudflare_profiles.is_empty() {
+            return 0;
+        }
+        let profiles = match crate::data::DataStore::read_file(|d| Ok(d.profiles.clone())) {
+            Ok(profiles) => profiles,
+            Err(_) => return 0,
+        };
+        let keys: Vec<_> = self.cloudflare_profiles.keys().cloned().collect();
+        let mut attempted = 0;
+        for key in keys {
+            let exited = match self.sessions.get_mut(&key).and_then(|s| s.child.as_mut()) {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(_) => continue,
+                },
+                None => continue,
+            };
+            let now = Instant::now();
+            let budget = self.cloudflare_recovery.entry(key.clone()).or_default();
+            if !exited {
+                budget.running(now);
+                continue;
+            }
+            budget.exited();
+            if let Some(s) = self.sessions.get_mut(&key) {
+                s.pid = None;
+            }
+            if attempted >= 2 || !budget.due(now) {
+                continue;
+            }
+            let Some(profile) = profiles.iter().find(|p| p.id == key.0) else {
+                budget.block("workspace_removed");
+                continue;
+            };
+            let unchanged = self
+                .cloudflare_profiles
+                .get(&key)
+                .is_some_and(|old| recovery_config_matches(old, profile, key.1));
+            if !unchanged {
+                budget.block("configuration_changed");
+                continue;
+            }
+            let port = match key.1 {
+                TunnelServiceKind::Mcp => profile.runtime.local_port,
+                TunnelServiceKind::Actions => profile.actions.local_port,
+            };
+            if platform().find_pid_listening_on_port(port).ok().flatten()
+                != Some(std::process::id())
+            {
+                budget.block("local_runtime_not_owned");
+                continue;
+            }
+            // Keep the backoff ledger across start(), which resets it for manual starts.
+            let mut budget = self.cloudflare_recovery.remove(&key).unwrap_or_default();
+            budget.attempt(now);
+            attempted += 1;
+            match self.start(profile, key.1, settings).await {
+                Ok(status) => {
+                    let origin = super::connection::public_origin(&status.public_url);
+                    let persisted = origin.and_then(|url| {
+                        crate::data::DataStore::update_file(|data| {
+                            let current = data
+                                .profiles
+                                .iter_mut()
+                                .find(|p| p.id == profile.id)
+                                .ok_or_else(|| {
+                                    AppError::Message("Workspace removed during recovery".into())
+                                })?;
+                            if !recovery_config_matches(current, profile, key.1) {
+                                return Err(AppError::Message(
+                                    "Configuration changed during recovery".into(),
+                                ));
+                            }
+                            match key.1 {
+                                TunnelServiceKind::Mcp => current.tunnel.public_url = url,
+                                TunnelServiceKind::Actions => current.actions.public_url = url,
+                            }
+                            Ok(())
+                        })
+                    });
+                    if persisted.is_err() {
+                        // Never keep an endpoint whose new identity could not be committed.
+                        let _ = self.stop_internal(&key.0, key.1, settings).await;
+                        budget.block("public_origin_not_committed");
+                    } else {
+                        budget.running(Instant::now());
+                        append_profile_log(&key.0, "connection-recovery.log", "[recovery] owned Cloudflare child restarted; public origin synchronized; existing OAuth secrets retained");
+                    }
+                }
+                Err(_) => append_profile_log(
+                    &key.0,
+                    "connection-recovery.log",
+                    "[recovery] restart failed; bounded retry scheduled; no credentials logged",
+                ),
+            }
+            self.cloudflare_recovery.insert(key, budget);
+        }
+        attempted
     }
 
     /// Probe active FRP workspaces; restart frpc when process is alive but proxy is dead.
@@ -273,6 +393,7 @@ impl TunnelSupervisor {
         settings: &AppSettings,
     ) -> AppResult<TunnelStatus> {
         let key = (profile.id.clone(), kind);
+        self.cloudflare_recovery.remove(&key);
         if let Err(auth_error) = validate_public_tunnel_auth(profile, kind) {
             if self.frp_routes.contains_key(&key) || self.sessions.contains_key(&key) {
                 if let Err(stop_error) = self.stop_internal(&profile.id, kind, settings).await {
@@ -378,6 +499,14 @@ impl TunnelSupervisor {
             public_url,
             pid,
         } = handle;
+        let mut tracked_profile = profile.clone();
+        match kind {
+            TunnelServiceKind::Mcp => tracked_profile.tunnel.public_url = public_url.clone(),
+            TunnelServiceKind::Actions => tracked_profile.actions.public_url = public_url.clone(),
+        }
+        self.cloudflare_profiles
+            .insert(key.clone(), tracked_profile);
+        self.cloudflare_recovery.entry(key.clone()).or_default();
 
         self.sessions.insert(
             key,
@@ -411,6 +540,8 @@ impl TunnelSupervisor {
         settings: &AppSettings,
     ) -> AppResult<()> {
         let key = (workspace_id.to_string(), kind);
+        self.cloudflare_profiles.remove(&key);
+        self.cloudflare_recovery.remove(&key);
         if let Some(route) = self.frp_routes.remove(&key) {
             let session = self.sessions.remove(&key);
             if let Err(error) = self
@@ -503,6 +634,8 @@ impl TunnelSupervisor {
         }
 
         for key in keys {
+            self.cloudflare_profiles.remove(&key);
+            self.cloudflare_recovery.remove(&key);
             let Some(mut session) = self.sessions.remove(&key) else {
                 continue;
             };
@@ -894,6 +1027,23 @@ impl TunnelSupervisor {
                 .unwrap_or(false)
         })
     }
+}
+
+fn recovery_config_matches(
+    a: &WorkspaceProfile,
+    b: &WorkspaceProfile,
+    kind: TunnelServiceKind,
+) -> bool {
+    if a.id != b.id || a.path != b.path {
+        return false;
+    }
+    let value = |p: &WorkspaceProfile| match kind {
+        TunnelServiceKind::Mcp => {
+            serde_json::json!({"auth":p.auth,"runtime":p.runtime,"tunnel":p.tunnel})
+        }
+        TunnelServiceKind::Actions => serde_json::json!({"actions":p.actions}),
+    };
+    value(a) == value(b)
 }
 
 fn proxy_already_exists(error: &AppError) -> bool {
@@ -1456,5 +1606,43 @@ mod tests {
             .expect_err("insecure Actions tunnel must be rejected");
         assert!(actions_error.to_string().contains("认证模式"));
         assert!(!supervisor.sessions.contains_key(&actions_key));
+    }
+}
+
+#[cfg(test)]
+mod connection_regressions {
+    use super::*;
+    #[tokio::test]
+    async fn connection_explicit_stop_disarms_recovery_and_config_changes_fail_closed() {
+        let mut a = WorkspaceProfile::new("fixture".into(), None);
+        a.tunnel.tunnel_type = "cloudflare".into();
+        a.tunnel.public_url = "https://old.trycloudflare.com".into();
+        let mut b = a.clone();
+        assert!(recovery_config_matches(&a, &b, TunnelServiceKind::Mcp));
+        b.auth.auth_type = "noauth".into();
+        assert!(!recovery_config_matches(&a, &b, TunnelServiceKind::Mcp));
+        b = a.clone();
+        b.tunnel.public_url = "https://different.example.com".into();
+        assert!(!recovery_config_matches(&a, &b, TunnelServiceKind::Mcp));
+        let key = (a.id.clone(), TunnelServiceKind::Mcp);
+        let mut supervisor = TunnelSupervisor::new();
+        supervisor
+            .cloudflare_profiles
+            .insert(key.clone(), a.clone());
+        supervisor
+            .cloudflare_recovery
+            .insert(key.clone(), Default::default());
+        supervisor
+            .stop(&a, TunnelServiceKind::Mcp, &AppSettings::default())
+            .await
+            .unwrap();
+        assert!(!supervisor.cloudflare_profiles.contains_key(&key));
+        assert!(!supervisor.cloudflare_recovery.contains_key(&key));
+        assert_eq!(
+            supervisor
+                .heal_exited_cloudflare(&AppSettings::default())
+                .await,
+            0
+        );
     }
 }

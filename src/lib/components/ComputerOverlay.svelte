@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { frameSource, isFrameStale, controlLabel } from '$lib/computer-view.js';
+  import { frameSource, isFrameStale, controlLabel, durationLabel } from '$lib/computer-view.js';
   let status = $state(/** @type {any} */ ({ state: 'stopped' }));
   let agentFrame = $state(/** @type {any} */ (null));
   let liveFrame = $state(/** @type {any} */ (null));
@@ -56,7 +56,7 @@
   </header>
   <section class="target">
     <span>{status.target?.title ?? 'No active control session · 沒有啟用的操作會話'}</span>
-    {#if status.target}<small>PID {status.target.pid} · HWND {status.target.window_id} · {status.remaining_seconds ?? 0}s</small>{/if}
+    {#if status.target}<small>PID {status.target.pid} · HWND {status.target.window_id} · {durationLabel(status)}</small>{/if}
   </section>
   <nav aria-label="Preview mode">
     <button class:selected={mode === 'live'} onclick={() => mode = 'live'}>Live target · 即時畫面</button>

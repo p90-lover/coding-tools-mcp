@@ -33,7 +33,10 @@ pub use secrets::{
 pub use software::{
     get_download_config, install_software, list_software, set_download_config, uninstall_software,
 };
-pub use tunnel::{get_frp_snippet, restart_tunnel, start_tunnel, stop_tunnel, test_tunnel};
+pub use tunnel::{
+    get_frp_snippet, get_tunnel_connection_status, restart_tunnel, start_tunnel, stop_tunnel,
+    test_tunnel,
+};
 pub use ui_memory::{get_webview_memory_sample, recreate_ui_webview};
 pub use window_chrome::{hide_to_tray, quit_app, show_main_window};
 pub use workspace::{

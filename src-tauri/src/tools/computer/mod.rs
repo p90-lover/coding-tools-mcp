@@ -63,7 +63,7 @@ struct Lease {
     id: String,
     root: PathBuf,
     target: Target,
-    expires: Instant,
+    expires: Option<Instant>,
     heartbeat: Option<Instant>,
     paused: bool,
 }
@@ -75,7 +75,7 @@ impl Lease {
                 "The local session belongs to a different workspace or has been replaced",
             ));
         }
-        if now >= self.expires {
+        if self.expires.is_some_and(|deadline| now >= deadline) {
             return Err(error(
                 "CONTROL_EXPIRED",
                 "The local control session has expired; enable a new session locally",
@@ -136,15 +136,46 @@ impl State {
         if self
             .lease
             .as_ref()
-            .is_some_and(|l| Instant::now() >= l.expires)
+            .is_some_and(|l| l.expires.is_some_and(|deadline| Instant::now() >= deadline))
         {
             self.stop("Session expired");
         }
     }
+    // A new request-window ID is a new anti-replay scope, not a renewed local grant.
+    // Called only by explicit computer_status while holding the process-wide execution gate.
+    fn rotate_request_window(&mut self) -> bool {
+        let eligible = self
+            .lease
+            .as_ref()
+            .is_some_and(|l| l.expires.is_none() && !l.paused)
+            && self.receipts.len() >= MAX_RECEIPTS - 8
+            && self.action.is_none()
+            && self
+                .sequence
+                .as_ref()
+                .is_none_or(|s| !s.uncertain && s.next == s.steps.len())
+            && self
+                .receipts
+                .iter()
+                .all(|r| r.2.get("outcome").and_then(Value::as_str) == Some("input_submitted"));
+        if !eligible {
+            return false;
+        }
+        if let Some(l) = &mut self.lease {
+            l.id = uuid::Uuid::new_v4().to_string();
+        }
+        self.frame = None;
+        self.sequence = None;
+        self.receipts.clear();
+        true
+    }
     fn summary(&self) -> Value {
         if let Some(l) = &self.lease {
             json!({"state":if l.paused{"paused"}else{"active"},"session_id":l.id,"target":l.target,
-                "remaining_seconds":l.expires.saturating_duration_since(Instant::now()).as_secs(),
+                "remaining_seconds":l.expires.map(|deadline| deadline.saturating_duration_since(Instant::now()).as_secs()),
+                "always_enabled":l.expires.is_none(),"duration_mode":if l.expires.is_none(){"always"}else{"timed"},
+                "request_capacity_remaining":MAX_RECEIPTS.saturating_sub(self.receipts.len()),
+                "request_window_refresh_needed":self.receipts.len()>=MAX_RECEIPTS-8,
                 "overlay_ready":l.heartbeat.is_some_and(|t|t.elapsed()<=OVERLAY_LEASE),
                 "action":self.action,"screenshot_storage":"memory_only","codex_invoked":false,
                 "sequence":self.sequence.as_ref().map(|s|json!({"sequence_id":s.id,"next_step":s.next,"total_steps":s.steps.len(),"outcome_unknown":s.uncertain})),
@@ -206,11 +237,27 @@ pub fn local_status(heartbeat: bool, last_frame: Option<&str>) -> Value {
 pub fn list_local_targets() -> Result<Vec<Target>> {
     native::targets()
 }
+#[cfg(test)]
 pub fn local_arm(root: PathBuf, target: Target, duration_seconds: u64) -> Result<Value> {
-    let _busy = exclusive()?;
-    if !(30..=900).contains(&duration_seconds) {
-        return Err(error("INVALID_DURATION", "Choose 30–900 seconds"));
+    local_arm_with_mode(root, target, duration_seconds, false)
+}
+
+fn control_deadline(seconds: u64, always_enabled: bool, now: Instant) -> Result<Option<Instant>> {
+    match (always_enabled, seconds) {
+        (true, 0) => Ok(None),
+        (false, 30..=900) => Ok(Some(now + Duration::from_secs(seconds))),
+        _ => Err(error("INVALID_DURATION", "Use 30–900 seconds for timed control, or explicitly select Always enabled with duration 0")),
     }
+}
+
+pub fn local_arm_with_mode(
+    root: PathBuf,
+    target: Target,
+    duration_seconds: u64,
+    always_enabled: bool,
+) -> Result<Value> {
+    let _busy = exclusive()?;
+    let expires = control_deadline(duration_seconds, always_enabled, Instant::now())?;
     native::ensure_monitor()?;
     native::validate_target(&target, false)?;
     let mut s = state();
@@ -226,7 +273,7 @@ pub fn local_arm(root: PathBuf, target: Target, duration_seconds: u64) -> Result
         id: uuid::Uuid::new_v4().to_string(),
         root,
         target,
-        expires: Instant::now() + Duration::from_secs(duration_seconds),
+        expires,
         heartbeat: None,
         paused: false,
     });
@@ -438,7 +485,7 @@ fn prior_receipt(id: &str, digest: &str) -> Result<Option<Value>> {
     if s.receipts.len() >= MAX_RECEIPTS {
         return Err(error(
             "CONTROL_ACTION_LIMIT",
-            "This local session has reached its bounded action limit; start a new session locally",
+            "Request window full. In Always enabled mode call computer_status to obtain a fresh session_id; old IDs cannot replay. Uncertain/incomplete sequences must be resolved locally.",
         ));
     }
     Ok(None)
@@ -717,8 +764,17 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
         return Ok(tool_ok(json!({"state":"stopped"})));
     }
     if name == "computer_status" {
+        let gate = exclusive().ok();
         let mut s = state();
         s.prune();
+        let own_scope = ctx.policy.allow_screen_capture
+            && matches!(ctx.auth.auth_type.as_str(), "bearer" | "oauth")
+            && s.lease
+                .as_ref()
+                .is_some_and(|l| l.root == ctx.workspace.root());
+        if gate.is_some() && own_scope {
+            s.rotate_request_window();
+        }
         let mut value = if s
             .lease
             .as_ref()
@@ -735,6 +791,8 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
         value["codex_invoked"] = json!(false);
         value["capture_storage"] = json!("memory_only");
         value["local_enable_required"] = json!(true);
+        value["duration_modes"] = json!(["timed", "always"]);
+        value["continuous_request_windows"] = json!("Call computer_status when request_window_refresh_needed; use the returned new session_id. Old IDs never replay.");
         value["emergency_stop"] = json!("Ctrl+Alt+Escape or the local Stop button");
         return Ok(tool_ok(value));
     }
@@ -807,7 +865,7 @@ mod tests {
                 pid: 2,
                 title: "fixture".into(),
             },
-            expires: now + Duration::from_secs(30),
+            expires: Some(now + Duration::from_secs(30)),
             heartbeat: None,
             paused: false,
         };
@@ -831,6 +889,79 @@ mod tests {
         };
         s.stop("user");
         assert!(s.lease.is_none() && s.frame.is_none() && s.sequence.is_none());
+    }
+    #[test]
+    fn computer_continuous_lifetime_and_bounded_replay_epochs() {
+        let now = Instant::now();
+        assert!(control_deadline(0, false, now).is_err());
+        assert!(control_deadline(600, true, now).is_err());
+        assert!(control_deadline(u64::MAX, false, now).is_err());
+        assert!(control_deadline(0, true, now).unwrap().is_none());
+        assert_eq!(
+            control_deadline(600, false, now).unwrap(),
+            Some(now + Duration::from_secs(600))
+        );
+        let future = now + Duration::from_secs(86400 * 365);
+        let lease = Lease {
+            id: "old-window".into(),
+            root: PathBuf::from("root"),
+            target: Target {
+                window_id: 1,
+                pid: 2,
+                title: "test".into(),
+            },
+            expires: None,
+            heartbeat: Some(future),
+            paused: false,
+        };
+        assert!(lease.validate(&lease.root, &lease.id, future, true).is_ok());
+        assert!(lease
+            .validate(
+                &lease.root,
+                &lease.id,
+                future + Duration::from_secs(4),
+                true
+            )
+            .is_err());
+        let mut s = State {
+            lease: Some(lease.clone()),
+            ..State::default()
+        };
+        for i in 0..MAX_RECEIPTS - 8 {
+            s.receipts.push_back((
+                i.to_string(),
+                "digest".into(),
+                json!({"outcome":"input_submitted"}),
+            ));
+        }
+        s.prune();
+        assert_eq!(s.summary()["always_enabled"], true);
+        assert!(s.summary()["remaining_seconds"].is_null());
+        s.receipts[0].2 = json!({"outcome":"unknown"});
+        assert!(
+            !s.rotate_request_window(),
+            "Never discard uncertain input evidence"
+        );
+        s.receipts[0].2 = json!({"outcome":"input_submitted"});
+        s.lease.as_mut().unwrap().paused = true;
+        assert!(!s.rotate_request_window());
+        assert!(s
+            .lease
+            .as_ref()
+            .unwrap()
+            .validate(&lease.root, &lease.id, future, false)
+            .is_err());
+        s.lease.as_mut().unwrap().paused = false;
+        assert!(s.rotate_request_window());
+        let current = s.lease.as_ref().unwrap();
+        assert!(current.expires.is_none());
+        assert_eq!(current.target.pid, lease.target.pid);
+        assert!(current
+            .validate(&lease.root, &lease.id, future, true)
+            .is_err());
+        assert!(s.receipts.is_empty() && s.frame.is_none());
+        s.stop("user stopped continuous mode");
+        assert!(s.lease.is_none());
     }
     #[test]
     fn computer_input_and_routing_bounds() {

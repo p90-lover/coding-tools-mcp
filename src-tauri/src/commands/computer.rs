@@ -65,6 +65,7 @@ pub async fn computer_local_start(
     window_id: u32,
     pid: u32,
     duration_seconds: u64,
+    always_enabled: Option<bool>,
 ) -> AppResult<Value> {
     local_window(&window, true)?;
     if !window.is_focused().unwrap_or(false) {
@@ -82,7 +83,12 @@ pub async fn computer_local_start(
                     "Selected window changed; refresh the window list",
                 )
             })?;
-        computer::local_arm(root, target, duration_seconds)
+        computer::local_arm_with_mode(
+            root,
+            target,
+            duration_seconds,
+            always_enabled.unwrap_or(false),
+        )
     })
     .await
     .map_err(|e| AppError::Message(e.to_string()))?

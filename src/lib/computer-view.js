@@ -21,3 +21,11 @@ export function controlLabel(status) {
   if (status?.state !== 'active') return 'Stopped · 已停止';
   return status.action ? 'ChatGPT / MCP is using your computer · 正在操作電腦' : 'Control enabled · 等待下一個操作';
 }
+
+/** @param {Record<string, unknown> | null | undefined} status */
+export function durationLabel(status) {
+  if (status?.state === 'stopped' || !status) return 'Off · 關閉';
+  if (status.always_enabled === true) return 'Always enabled · 持續啟用（直到停止）';
+  const seconds = Number(status.remaining_seconds);
+  return Number.isFinite(seconds) && seconds >= 0 ? `${Math.floor(seconds)}s` : 'Timed · 限時';
+}
