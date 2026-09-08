@@ -1,13 +1,15 @@
-# Upstream provenance and modifications
+# Upstream provenance and modifications — development only
 
-The optional Windows command sandbox uses Apache-2.0 source from https://github.com/openai/codex at `3caf9f9586baedb4158a7b91545ead3dd320c348`. LICENSE-Codex contains the upstream license. This project is not an official OpenAI distribution.
+**Release status: withheld_pending_native_verification. No native command helper binaries are bundled or executable in v0.3.6-rc.1.** The independent remembered/background computer-control and vision features do not depend on this prototype. See `docs/features/native-command-sandbox.md` for the current release boundary.
 
-`prepare_upstream.py` adds a sandbox-only JSON adapter binary, namespaces OS accounts/group, requires local explicit preparation before UAC provisioning, bounds captured output, and omits command arguments from ordinary command log previews. The upstream workspace dependency pins remain intact. The Codex CLI/agent is not built or invoked.
+The preserved experimental Windows command sandbox adapts Apache-2.0 source from https://github.com/openai/codex at `3caf9f9586baedb4158a7b91545ead3dd320c348`. LICENSE-Codex contains the upstream license. This project is not an official OpenAI distribution.
 
-`restrict_reads.py` strengthens the read-only backend: full restricted-token access checks replace write-only checks, and capability SIDs are scoped to each permitted root rather than using a globally shared read capability. Root read/execute ACL grants complete synchronously before setup reports readiness. Unreviewed writable roots or proxy identities are rejected by this adapter. Native positive and negative isolation checks must pass before publication; setup success alone is not evidence of isolation.
+`prepare_upstream.py` is a development adapter for a sandbox-only JSON binary. It namespaces OS accounts/group, requires local explicit preparation before provisioning, bounds captured output, and omits command arguments from ordinary command log previews. The upstream workspace dependency pins remain intact. It does not build or invoke the Codex CLI/agent.
 
-`desktop_boundary.py` adds the selected workspace's capability to its private desktop ACL so fully read-restricted processes can initialize. It does not add shared platform capabilities to that desktop. Non-modal child error handling prevents startup errors from waiting on hidden dialogs.
+`restrict_reads.py`, `desktop_boundary.py`, and `namespace_objects.py` preserve the experimental read-capability, private-desktop, and separate object-namespace changes for review. Their presence is not proof of successful native isolation or runtime compatibility; those release checks have not all passed. They are not applied during the control-only release build.
 
-`namespace_objects.py` gives this application distinct firewall rule names, WFP provider/sublayer/filter GUIDs, and its own read-ACL mutex. It must not modify an existing Codex installation's firewall namespace.
+A future native command release would require validated helper binaries hash-bound into the installer, not runtime downloads. This candidate contains no such binaries. The prototype would apply only to `sandbox_exec`; it does not enclose graphical applications or retrofit existing command tools.
 
-Modified helper binaries are built and hash-bound into each installer. They are not fetched from third parties at runtime. This backend applies only to `sandbox_exec`; graphical applications and existing shell tools are not automatically enclosed by it.
+## 繁體中文
+
+此目錄只保留實驗性原生命令沙箱的來源及授權資料。`v0.3.6-rc.1` 不打包或執行這些輔助程式，因為 Windows 執行環境／隔離驗證尚未全部通過。程式碼存在不代表已啟用或已驗證；電腦操作及視覺功能獨立運作，也不代表既有程式受到作業系統沙箱限制。

@@ -54,5 +54,12 @@ mod tests {
             }
         }
         assert_eq!(list_tools(), list_tools_for_profile("full"));
+        for document in [
+            include_str!("../../../docs/features/native-command-sandbox.md"),
+            include_str!("../../../docs/features/native-sandbox-read-boundary.md"),
+            include_str!("../../../native-helpers/NOTICE.md"),
+        ] {
+            assert!(document.contains(crate::tools::native_sandbox::RELEASE_STATUS));
+        }
     }
 }
