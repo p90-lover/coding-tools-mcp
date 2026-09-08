@@ -1,5 +1,5 @@
 /** Public endpoint handling only. This module never stores tokens or calls ChatGPT APIs. */
-export const CHATGPT_SETUP_URL = "https://chatgpt.com/#settings/Connectors";
+export const CHATGPT_SETUP_URL = "https://chatgpt.com/plugins";
 
 /** @param {string} value */
 export function normalizeMcpEndpoint(value) {
