@@ -1,0 +1,335 @@
+name: Continuous control and connection release
+
+on:
+  push:
+    branches: [release/continuous-control-0.3.5-rc.1]
+    paths: ['.github/workflows/continuous-control-release.yml', 'src/**', 'src-tauri/**', 'package*.json', 'aiTemp/continuous-delivery/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: computer-release-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  VERSION: 0.3.5-rc.1
+  SOURCE: ${{ github.sha }}
+  CARGO_INCREMENTAL: '0'
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUTF8: '1'
+
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Materialize verified source and retain original files
+        id: source
+        working-directory: aiTemp/source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/prepared
+          python - <<'PY'
+          import base64,hashlib,lzma,os,re,shutil,subprocess
+          from pathlib import Path,PurePosixPath
+          data=lzma.decompress(base64.b64decode(''.join(Path(f'aiTemp/continuous-delivery/source.patch.xz.b64.part{i}').read_text().strip() for i in (1,2,3)),validate=True))
+          assert hashlib.sha256(data).hexdigest()=='4efba7cf644e8df36074e2d3f7cab3ce2e45a91265185637bc1b295786880e3f'
+          assert not re.search(rb'^(deleted file mode|rename |copy |old mode|new mode|\+\+\+ /dev/null)',data,re.M)
+          paths=[n.decode() for n in re.findall(rb'^\+\+\+ b/(.+)$',data,re.M)]
+          assert len(paths)==24 and len(set(paths))==24
+          for name in paths:
+              path=PurePosixPath(name)
+              assert not path.is_absolute() and '..' not in path.parts
+              assert name.startswith(('src/','src-tauri/','docs/features/','docs/releases/')) or name in ('package.json','package-lock.json')
+              assert not Path(name).is_symlink()
+          patch=Path('aiTemp/prepared/input.patch');patch.write_bytes(data)
+          if not Path('docs/features/continuous-control.md').exists():
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              for name in paths:
+                  original=Path(name)
+                  if original.exists():
+                      dest=Path('aiTemp/Trash/before-continuous')/os.environ['GITHUB_RUN_ID']/name
+                      dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(original,dest)
+              subprocess.run(['git','apply',str(patch)],check=True)
+          for name in paths:
+              if name.endswith('.rs'): subprocess.run(['rustfmt','--edition','2021','--config','skip_children=true',name],check=True)
+          subprocess.run(['git','add','--',*paths],check=True)
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          assert b'always_enabled' in Path('src-tauri/src/tools/computer/mod.rs').read_bytes()
+          assert b'heal_exited_cloudflare' in Path('src-tauri/src/tunnel/supervisor.rs').read_bytes()
+          PY
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat: continuous local control and bounded Cloudflare connection recovery'
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+            remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+            test "$remote" = "$GITHUB_SHA"
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git archive --format=zip HEAD --output=aiTemp/prepared/source.zip
+          git rev-parse HEAD > aiTemp/prepared/source-sha.txt
+          git ls-tree -r HEAD > aiTemp/prepared/tree.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: continuous-prepared-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/prepared/*
+          if-no-files-found: error
+          retention-days: 14
+
+  native:
+    needs: prepare
+    if: github.actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            bundle: nsis
+          - os: macos-14
+            platform: macos-arm64
+            bundle: app,dmg
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+        shell: bash
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      PLATFORM: ${{ matrix.platform }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          path: aiTemp/checkout
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Source privacy contract and frontend
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/installer aiTemp/process-temp
+          python - <<'PY'
+          import json,os,re,subprocess,tomllib
+          from pathlib import Path
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['SOURCE']
+          versions=[json.loads(Path(p).read_text(encoding='utf-8'))['version'] for p in ['package.json','package-lock.json','src-tauri/tauri.conf.json']]
+          versions.append(tomllib.loads(Path('src-tauri/Cargo.toml').read_text(encoding='utf-8'))['package']['version'])
+          assert all(v==os.environ['VERSION'] for v in versions)
+          for name in ['src-tauri/src/tools/computer/capture.rs','src-tauri/src/tools/screen_tool.rs','src-tauri/src/tools/computer/native_capture.rs']:
+              source=Path(name).read_text(encoding='utf-8').split('#[cfg(test)]')[0]
+              assert not re.search(r'(File::create|OpenOptions|\.save\(|temp_dir\(|tempfile|Command::)',source)
+          display=Path('src/lib/components/ComputerOverlay.svelte').read_text(encoding='utf-8')
+          assert 'computer_local_poll' in display and 'computer_local_stop' in display
+          assert not re.search(r'(localStorage|sessionStorage|indexedDB|writeFile|download=)',display)
+          Path('aiTemp/evidence/source.txt').write_text('PASS: source identity, no capture file/process sink, no preview disk storage\n'+os.environ['SOURCE']+'\n',encoding='utf-8')
+          PY
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+          node --input-type=module <<'JS' 2>&1 | tee aiTemp/evidence/preview.txt
+          import assert from 'node:assert/strict';
+          import {frameSource,isFrameStale,controlLabel,durationLabel} from './src/lib/computer-view.js';
+          assert.equal(frameSource({mime_type:'image/png',base64:'AAAA',persisted:true,capture_storage:'memory_only'}),null);
+          assert.equal(frameSource({mime_type:'image/png',base64:'AAAA',persisted:false,capture_storage:'memory_only'}),'data:image/png;base64,AAAA');
+          assert.equal(isFrameStale({captured_at_unix_ms:1000},7001),true);
+          assert.match(controlLabel({state:'paused',action:'type'}),/Paused/);
+          assert.doesNotMatch(controlLabel({state:'active',action:'type'}),/Codex/);
+          assert.match(durationLabel({state:'active',always_enabled:true,remaining_seconds:null}),/Always enabled/);
+          assert.equal(durationLabel({state:'active',always_enabled:false,remaining_seconds:600}),'600s');
+          const {endpointFromTunnel,connectionState}=await import('./src/lib/chatgpt-setup.js');
+          assert.equal(endpointFromTunnel('https://example.com/mcp/'),'https://example.com/mcp');
+          assert.equal(endpointFromTunnel('https://example.com/'),'https://example.com/mcp');
+          assert.throws(()=>endpointFromTunnel('https://example.com/mcp/mcp'));
+          assert.equal(connectionState('https://new.trycloudflare.com/mcp','https://old.trycloudflare.com/mcp').user_action_required,true);
+          assert.equal(connectionState('https://same.example.com/mcp','https://same.example.com/mcp').user_action_required,false);
+          console.log('PASS: continuous/timed display, bounded frames, canonical endpoints and origin-change handling');
+          JS
+      - name: Focused native policy, vision and catalog checks
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib computer_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/computer-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/connection-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib vision_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/vision-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib core_catalog_exposes_chatgpt_compatible_tools -- --test-threads=1 2>&1 | tee aiTemp/evidence/catalog.txt
+      - name: Real Windows UIA, SendInput and in-memory capture fixture
+        if: runner.os == 'Windows'
+        env:
+          COMPUTER_USE_NATIVE_SMOKE: '1'
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib computer_native_fixture_round_trip -- --ignored --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/native-smoke.txt
+          python - <<'PY'
+          from pathlib import Path
+          assert '1 passed; 0 failed' in Path('aiTemp/evidence/native-smoke.txt').read_text(encoding='utf-8')
+          PY
+      - name: Build and inspect fresh installer
+        env:
+          BUNDLE: ${{ matrix.bundle }}
+          CI: 'true'
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles "$BUNDLE" -- --locked 2>&1 | tee aiTemp/evidence/installer.txt
+          git diff --exit-code -- package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          python - <<'PY'
+          import hashlib,json,os,plistlib,shutil,subprocess
+          from pathlib import Path
+          target=Path(os.environ['CARGO_TARGET_DIR'])/'release';windows=os.environ['PLATFORM']=='windows-x64'
+          assets=list(target.glob('bundle/nsis/*.exe' if windows else 'bundle/dmg/*.dmg'));assert len(assets)==1
+          asset=assets[0];assert asset.stat().st_size>100000
+          binaries=[target/'coding-tools-mcp-desktop.exe'] if windows else list(target.glob('bundle/macos/*.app/Contents/MacOS/coding-tools-mcp-desktop'))
+          assert len(binaries)==1 and binaries[0].is_file()
+          expected='coding-tools-mcp-desktop '+os.environ['VERSION']
+          actual=subprocess.run([str(binaries[0]),'--version'],capture_output=True,text=True,check=True,timeout=20).stdout.strip();assert actual==expected
+          if not windows:
+              info=plistlib.loads(subprocess.check_output(['hdiutil','attach','-readonly','-nobrowse','-plist',str(asset)]))
+              mounts=[Path(e['mount-point']) for e in info['system-entities'] if 'mount-point' in e];assert len(mounts)==1
+              try:
+                  apps=list(mounts[0].glob('*.app/Contents/MacOS/coding-tools-mcp-desktop'));assert len(apps)==1
+                  assert subprocess.run([str(apps[0]),'--version'],capture_output=True,text=True,check=True,timeout=20).stdout.strip()==expected
+                  assert hashlib.sha256(apps[0].read_bytes()).hexdigest()==hashlib.sha256(binaries[0].read_bytes()).hexdigest()
+              finally:subprocess.run(['hdiutil','detach',str(mounts[0])],check=True)
+          name='Coding.Tools.MCP_'+os.environ['VERSION']+('_x64-setup.exe' if windows else '_aarch64.dmg')
+          dest=Path('aiTemp/installer')/name;assert not dest.exists();shutil.copy2(asset,dest)
+          proof={'source_commit':os.environ['SOURCE'],'version':os.environ['VERSION'],'platform':os.environ['PLATFORM'],'asset':name,'size':dest.stat().st_size,'sha256':hashlib.sha256(dest.read_bytes()).hexdigest(),'screenshot_storage':'memory_only','native_fixture_verified':windows,'user_chatgpt_connection_verified':False,'codex_invoked':False,'publisher_signed':False}
+          Path('aiTemp/installer/proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+          Path('aiTemp/evidence/proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+          Path('aiTemp/evidence/binary-version.txt').write_text(actual+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: computer-installer-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/installer/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: computer-evidence-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [prepare, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: computer-installer-*-${{ github.run_id }}
+          path: aiTemp/installers
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: computer-evidence-*-${{ github.run_id }}
+          path: aiTemp/evidence
+      - name: Verify exact native assets and publish new candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-assets
+          python - <<'PY'
+          import hashlib,json,os,shutil,zipfile
+          from pathlib import Path
+          root=Path('aiTemp/installers');dest=Path('aiTemp/release-assets')
+          proofs=[json.loads(p.read_text(encoding='utf-8')) for p in root.glob('*/proof.json')]
+          assert len(proofs)==2 and {p['platform'] for p in proofs}=={'windows-x64','macos-arm64'}
+          for p in proofs:
+              assert p['source_commit']==os.environ['SOURCE'] and p['version']==os.environ['VERSION']
+              assert p['screenshot_storage']=='memory_only' and p['codex_invoked'] is False
+              if p['platform']=='windows-x64':assert p['native_fixture_verified'] is True
+              assert Path(p['asset']).name==p['asset'];matches=list(root.glob('*/'+p['asset']));assert len(matches)==1
+              asset=matches[0];assert asset.is_file() and not asset.is_symlink()
+              assert asset.stat().st_size==p['size'] and hashlib.sha256(asset.read_bytes()).hexdigest()==p['sha256']
+              shutil.copy2(asset,dest/asset.name)
+          (dest/'release-provenance.json').write_text(json.dumps({'version':os.environ['VERSION'],'source_commit':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'prerelease':True,'installers':proofs},indent=2)+'\n',encoding='utf-8')
+          with zipfile.ZipFile(dest/'computer-use-validation.zip','x',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(Path('aiTemp/evidence').rglob('*')):
+                  if p.is_file():
+                      assert p.suffix in {'.json','.txt'} and not p.is_symlink();z.write(p,p.relative_to('aiTemp/evidence').as_posix())
+          files=sorted(dest.iterdir());(dest/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files),encoding='utf-8')
+          PY
+          python - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          repo=os.environ['GITHUB_REPOSITORY']; source=os.environ['SOURCE']; version=os.environ['VERSION']; tag='v'+version
+          def api(path, method='GET', body=None):
+              args=['gh','api',f'repos/{repo}/{path}','--method',method]
+              payload=None
+              if body is not None: args += ['--input','-']; payload=json.dumps(body).encode()
+              return json.loads(subprocess.check_output(args,input=payload,timeout=90))
+          assert api('git/ref/heads/release/continuous-control-0.3.5-rc.1')['object']['sha']==source
+          tags=api('git/matching-refs/tags/'+tag)
+          assert not tags, 'Existing tags are never replaced'
+          notes=base64.b64decode(api(f'contents/docs/releases/{tag}.md?ref={source}')['content']).decode('utf-8')
+          files=sorted(Path('aiTemp/release-assets').iterdir())
+          assert len(files)==5
+          api('git/refs','POST',{'ref':'refs/tags/'+tag,'sha':source})
+          draft=api('releases','POST',{'tag_name':tag,'target_commitish':source,'name':f'Coding Tools MCP {tag} — Always enabled + connection recovery','body':notes,'draft':True,'prerelease':True,'make_latest':'false'})
+          ident=draft['id']; expected={}
+          Path('aiTemp/draft-id.txt').write_text(str(ident)+'\n')
+          for path in files:
+              digest='sha256:'+hashlib.sha256(path.read_bytes()).hexdigest()
+              expected[path.name]=(path.stat().st_size,digest)
+              content_type='application/octet-stream'
+              url=f'https://uploads.github.com/repos/{repo}/releases/{ident}/assets?name={path.name}'
+              asset=json.loads(subprocess.check_output(['gh','api',url,'--method','POST','--header','Content-Type: '+content_type,'--input',str(path)],timeout=120))
+              assert asset['name']==path.name and (asset['size'],asset['digest'])==expected[path.name]
+              downloaded=subprocess.check_output(['gh','api',f'repos/{repo}/releases/assets/{asset["id"]}','--header','Accept: application/octet-stream'],timeout=120)
+              assert len(downloaded)==path.stat().st_size and 'sha256:'+hashlib.sha256(downloaded).hexdigest()==digest
+          current=api('releases/'+str(ident))
+          assert current['draft'] and current['prerelease'] and current['tag_name']==tag
+          assert {a['name']:(a['size'],a['digest']) for a in current['assets']}==expected
+          assert api('git/ref/tags/'+tag)['object']['sha']==source
+          assert api('git/ref/heads/release/continuous-control-0.3.5-rc.1')['object']['sha']==source
+          api('releases/'+str(ident),'PATCH',{'draft':False,'prerelease':True,'make_latest':'false','target_commitish':source})
+          public=api('releases/tags/'+tag)
+          assert public['id']==ident and public['draft'] is False and public['published_at']
+          assert {a['name']:(a['size'],a['digest']) for a in public['assets']}==expected
+          receipt={'source_commit':source,'release_id':ident,'url':public['html_url'],'draft':False,'prerelease':True,'assets':[{k:a[k] for k in ('name','size','digest','browser_download_url')} for a in public['assets']]}
+          Path('aiTemp/publication-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt,indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: continuous-publication-${{ github.run_id }}
+          path: |
+            aiTemp/publication-receipt.json
+            aiTemp/draft-id.txt
+          if-no-files-found: warn
+          retention-days: 14
