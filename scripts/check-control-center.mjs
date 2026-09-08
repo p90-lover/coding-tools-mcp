@@ -1,16 +1,18 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { resolve, dirname } from 'node:path';
 import ts from 'typescript';
 // Evaluate only pure modules; no agent/runtime packages are loaded.
 const modules = new Map();
 function load(path){
+ path=resolve(path);
  if(modules.has(path))return modules.get(path);
- const exports={};const context={exports,require:(specifier)=>load(new URL(specifier+'.ts','file://'+path).pathname)};
+ const exports={};const context={exports,require:(specifier)=>load(resolve(dirname(path),specifier+'.ts'))};
  const out=ts.transpileModule(fs.readFileSync(path,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}});
  vm.runInNewContext(out.outputText,context,{filename:path});modules.set(path,exports);return exports;
 }
-const model=load(process.cwd()+'/src/lib/control-center/model.ts');
+const model=load(resolve('src/lib/control-center/model.ts'));
 const row={id:'a',title:'Existing agent',status:'idle',provider:'codex',workspace:'x',pending_permissions:0,requires_attention:false,attention_reason:'permission',chain_index:null,chain_layer:null,chain_name:null,chain_id:null};
 assert.equal(model.agentBucket(row),'needs_input');assert.equal(model.attention(row),true);
 assert.equal(model.agentBucket({...row,status:'new-unknown-state'}),'unknown');
