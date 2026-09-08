@@ -74,3 +74,24 @@ remain rejected. Separate small tests cover failed/busy atomic saves, workspace
 isolation, stale snapshots, and local tool round trips. The existing isolated
 Windows background-observation/real-input fixture and installer-byte verification
 are rerun. This does not constitute a test of the user's actual ChatGPT connection.
+
+## 繁體中文摘要
+
+權限是每個監聽服務共用的即時狀態，不是啟動後便固定的副本。只變更權限時，
+儲存會先完成持久化，再發佈新的修訂版；不重啟 MCP／Actions、不更換隧道網址，
+也不重建 OAuth。短操作忙碌時會回傳 LIVE_POLICY_BUSY，可重試儲存。
+舊操作批准會撤銷，所屬命令會拒絕新輸入並收到終止要求，既有輸出仍保留。
+已送出的作業系統動作不能追回；不要因回應不明而自動重播。
+
+server_info.live_permissions 顯示實際權限與修訂版。改變工具設定檔可能需要
+用戶端刷新清單；認證、目錄或連接埠改動則屬於另一類服務生命週期變更。
+已記住的應用程式批准仍與安全設定綁定，可能需要本機重新批准，但不是重新連接 MCP。
+
+新增本機計劃、計劃讀取、工具搜尋、系統時間及能力清單。這不是完整 Codex 執行環境，
+不會呼叫模型／子 Agent；原生命令沙箱仍未納入。截圖只在記憶體處理，
+作業系統分頁／傾印及用戶端保留不屬於程式的截圖不落地保證。
+
+使用方式與人類／AI 如何從證據修正理解，參見
+[繁體中文協作指南](../guides/ai-human-workflow.zh-Hant.md)及
+[English workflow guide](../guides/ai-human-workflow.en.md)。記錄歷史是重用上下文，
+不是訓練模型或更新權重。

@@ -86,7 +86,7 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
     {
         return tool_err_code(
             "TOOL_PROFILE_RESTRICTED",
-            "The current live tool profile does not permit this tool".into(),
+            "The current live tool profile does not permit this tool",
             "permission",
         );
     }
@@ -108,8 +108,7 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
     {
         return tool_err_code(
             "CAPTURE_PERMISSION_CHANGED",
-            "Permissions changed during capture; the frame was discarded. No image was saved."
-                .into(),
+            "Permissions changed during the operation; any frame was discarded. An input may already have been submitted: inspect state and do not automatically replay it.",
             "permission",
         );
     }
