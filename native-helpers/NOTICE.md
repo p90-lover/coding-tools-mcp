@@ -6,4 +6,8 @@ The optional Windows command sandbox uses Apache-2.0 source from https://github.
 
 `restrict_reads.py` strengthens the read-only backend: full restricted-token access checks replace write-only checks, and capability SIDs are scoped to each permitted root rather than using a globally shared read capability. Root read/execute ACL grants complete synchronously before setup reports readiness. Unreviewed writable roots or proxy identities are rejected by this adapter. Native positive and negative isolation checks must pass before publication; setup success alone is not evidence of isolation.
 
+`desktop_boundary.py` adds the selected workspace's capability to its private desktop ACL so fully read-restricted processes can initialize. It does not add shared platform capabilities to that desktop. Non-modal child error handling prevents startup errors from waiting on hidden dialogs.
+
+`namespace_objects.py` gives this application distinct firewall rule names, WFP provider/sublayer/filter GUIDs, and its own read-ACL mutex. It must not modify an existing Codex installation's firewall namespace.
+
 Modified helper binaries are built and hash-bound into each installer. They are not fetched from third parties at runtime. This backend applies only to `sandbox_exec`; graphical applications and existing shell tools are not automatically enclosed by it.
