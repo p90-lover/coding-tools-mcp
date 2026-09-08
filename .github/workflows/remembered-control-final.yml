@@ -15,6 +15,7 @@ env:
   CARGO_INCREMENTAL: '0'
   PYTHONDONTWRITEBYTECODE: '1'
   PYTHONUTF8: '1'
+  PYTHONUNBUFFERED: '1'
   CARGO_PROFILE_RELEASE_DEBUG: '0'
   OTEL_SDK_DISABLED: 'true'
 jobs:
@@ -89,22 +90,50 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Native isolation with positive controls
+        id: isolation
         if: runner.os == 'Windows'
+        timeout-minutes: 6
+        continue-on-error: true
         run: |
           set -euo pipefail
-          python aiTemp/release-verification/sandbox_native.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/isolation" 2>&1 | tee aiTemp/evidence/sandbox-smoke.txt
+          python aiTemp/release-verification/monitor_sandbox_probe.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/isolation" 2>&1 | tee aiTemp/evidence/sandbox-smoke.txt
+      - name: Preserve isolation outcome before independent desktop checks
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remembered-isolation-${{ github.run_id }}
+          path: |
+            aiTemp/checkout/aiTemp/evidence/sandbox-smoke.txt
+            aiTemp/checkout/aiTemp/evidence/sandbox-diagnostics.txt
+            aiTemp/checkout/aiTemp/evidence/sandbox-proof.json
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: app-cache
+        with:
+          path: aiTemp/cargo-target
+          key: remembered-app-${{ matrix.platform }}-rust1981-v1-${{ hashFiles('aiTemp/checkout/src-tauri/Cargo.lock','aiTemp/checkout/src-tauri/Cargo.toml','aiTemp/checkout/src-tauri/src/**') }}
+          restore-keys: remembered-app-${{ matrix.platform }}-rust1981-v1-
       - name: Focused permission, vision and tool contracts
         run: python aiTemp/release-verification/run_step.py policy
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: steps.app-cache.outputs.cache-hit != 'true'
+        with:
+          path: aiTemp/cargo-target
+          key: ${{ steps.app-cache.outputs.cache-primary-key }}
       - name: Real Windows background observation and input
         if: runner.os == 'Windows'
         env:
           COMPUTER_USE_NATIVE_SMOKE: '1'
         run: python aiTemp/release-verification/run_step.py desktop
       - name: Build and verify actual installer resources
+        id: installer
+        if: success() && (runner.os != 'Windows' || steps.isolation.outcome == 'success')
         env:
           CI: 'true'
         run: python aiTemp/release-verification/run_step.py installer
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.installer.outcome == 'success'
         with:
           name: remembered-installer-${{ matrix.platform }}-${{ github.run_id }}
           path: aiTemp/checkout/aiTemp/installer/*
@@ -117,3 +146,8 @@ jobs:
           path: aiTemp/checkout/aiTemp/evidence/*
           if-no-files-found: error
           retention-days: 14
+      - name: Require native isolation before release eligibility
+        if: always() && runner.os == 'Windows'
+        env:
+          ISOLATION_OUTCOME: ${{ steps.isolation.outcome }}
+        run: test "$ISOLATION_OUTCOME" = success
