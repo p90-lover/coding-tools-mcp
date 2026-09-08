@@ -1,0 +1,36 @@
+name: Continuous control source
+on:
+  push:
+    branches: [release/continuous-control-0.3.5-rc.1]
+    paths: ['.github/workflows/continuous-control-source.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - name: Archive exact source and git object bundle
+        working-directory: aiTemp/source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/snapshot
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git archive --format=zip HEAD --output=aiTemp/snapshot/source.zip
+          printf '%s\n' "$GITHUB_SHA" > aiTemp/snapshot/commit.txt
+          git ls-tree -r HEAD > aiTemp/snapshot/tree.txt
+          (cd aiTemp/snapshot && sha256sum source.zip commit.txt tree.txt > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: continuous-source-${{ github.sha }}
+          path: aiTemp/source/aiTemp/snapshot/*
+          if-no-files-found: error
+          retention-days: 14
