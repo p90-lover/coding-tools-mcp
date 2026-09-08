@@ -1097,7 +1097,11 @@ mod tests {
             tools.len(),
             34 + crate::tools::computer::schema::NAMES.len()
                 + crate::tools::native_sandbox::NAMES.len()
+                + crate::tools::local_tools::NAMES.len()
         );
+        for name in crate::tools::local_tools::NAMES {
+            assert!(names.contains(name));
+        }
         for name in crate::tools::computer::schema::NAMES {
             assert!(names.contains(name));
         }
