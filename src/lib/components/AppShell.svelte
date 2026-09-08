@@ -60,7 +60,7 @@
       <button class="cc-icon-button cc-menu" aria-label="Open navigation" onclick={()=>mobile=!mobile}><Menu size={21}/></button>
       <span class="cc-breadcrumb">Control center <ChevronRight size={13}/><strong>{current}</strong></span>
       <button class="cc-search-button" onclick={search}><Search size={16}/><span>{t.search}</span><kbd>⌘ / Ctrl K</kbd></button>
-      <span class="cc-top-privacy" title={$locale==='en'?'External agent execution is disabled.':'外部 Agent 執行已停用。'}><ShieldCheck size={15}/>{$locale==='en'?'Observe, not execute':'唯讀觀察'}</span>
+      <span class="cc-top-privacy" title={$locale==='en'?'Paseo and Anneal are read-only; local computer control has separate permissions.':'Paseo 及 Anneal 只供唯讀；本機電腦操作另有獨立權限。'}><ShieldCheck size={15}/>{$locale==='en'?'Read-only integrations':'唯讀外部整合'}</span>
     </header>
     {@render children()}
   </main>
