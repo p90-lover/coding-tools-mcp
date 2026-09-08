@@ -49,13 +49,11 @@ env = {k:v for k,v in os.environ.items() if k.upper() in keep}
 env.update({'TEMP':str(home/'aiTemp'),'TMP':str(home/'aiTemp'),'CODEX_HOME':str(home),'OTEL_SDK_DISABLED':'true','DO_NOT_TRACK':'1'})
 def request(operation, argv=None):
     child_env = env.copy()
-    if operation == 'setup':
-        child_env['CODING_TOOLS_LOCAL_SANDBOX_SETUP'] = '1'
+    if operation == 'setup': child_env['CODING_TOOLS_LOCAL_SANDBOX_SETUP'] = '1'
     data = {'operation':operation,'workspace':str(root),'home':str(home),'argv':argv or [],'timeout_ms':8000}
     result = subprocess.run([str(helper)], input=json.dumps(data).encode(), capture_output=True, env=child_env, timeout=180 if operation=='setup' else 60)
     assert len(result.stdout) <= 4194304 and len(result.stderr) <= 65536
-    try:
-        value = json.loads(result.stdout)
+    try: value = json.loads(result.stdout)
     except Exception:
         print(result.stdout.decode(errors='replace'))
         print(result.stderr.decode(errors='replace'))
@@ -64,14 +62,15 @@ def request(operation, argv=None):
     assert value['upstream_commit']=='3caf9f9586baedb4158a7b91545ead3dd320c348' and value['model_calls'] is False
     return value
 
-def run(mode, arg):
-    return request('exec', [str(probe), mode, str(arg)])
+def run(mode, arg): return request('exec', [str(probe), mode, str(arg)])
 
 assert subprocess.check_output([str(probe),'read',str(inside)]).decode()=='unchanged-sandbox-fixture'
 assert request('setup').get('ready') is True
 assert request('status').get('ready') is True
 read = run('read', inside)
 assert read['ok'] and read['stdout']=='unchanged-sandbox-fixture', read
+command = request('exec', [os.environ['COMSPEC'], '/d', '/c', 'ver'])
+assert command['ok'] and 'Windows' in command['stdout'], command
 for mode,path,answer in [('deny-write',inside,'write-denied'),('deny-read',outside,'outside-read-denied')]:
     denied = run(mode, path)
     assert denied['ok'] and denied['stdout']==answer, denied
@@ -85,9 +84,7 @@ for path in (alias / outside.name, late):
     assert denied['ok'] and denied['stdout']=='outside-read-denied', denied
 print('PASS: native permitted read; denied write handle, outside read, junction alias and newly created private file; sentinels unchanged')
 with socket.socket() as listener:
-    listener.bind(('127.0.0.1',0))
-    listener.listen(2)
-    listener.settimeout(2)
+    listener.bind(('127.0.0.1',0)); listener.listen(2); listener.settimeout(2)
     address = '127.0.0.1:'+str(listener.getsockname()[1])
     positive = subprocess.run([str(probe),'network',address],capture_output=True,check=True,timeout=5)
     assert positive.stdout == b'connected'
@@ -98,11 +95,9 @@ with socket.socket() as listener:
     assert network['ok'] and network['stdout']=='network-denied', network
     listener.settimeout(.3)
     try:
-        connection,_=listener.accept()
-        connection.close()
+        connection,_=listener.accept(); connection.close()
         raise AssertionError('Sandbox reached loopback listener')
-    except socket.timeout:
-        pass
+    except socket.timeout: pass
 print('PASS: native network positive control succeeds; sandbox network is denied')
 assert not any(p.suffix.lower() in ('.png','.jpg','.jpeg','.webp') for p in base.rglob('*') if p.is_file())
-Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps({'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'checks':['native_allowed_read','native_write_handle_denied','native_outside_read_denied','native_reparse_read_denied','native_future_private_read_denied','native_loopback_denied_with_positive_control']},indent=2)+'\n',encoding='utf-8')
+Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps({'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'checks':['native_allowed_read','native_windows_runtime','native_write_handle_denied','native_outside_read_denied','native_reparse_read_denied','native_future_private_read_denied','native_loopback_denied_with_positive_control']},indent=2)+'\n',encoding='utf-8')
