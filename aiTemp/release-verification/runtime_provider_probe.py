@@ -1,9 +1,25 @@
-"""Resolve bounded OS runtime dependencies; retain all original isolation assertions."""
+"""Resolve bounded runtime imports and active languages; retain all isolation assertions."""
 from pathlib import Path
 import subprocess
 import sys
 sys.path.insert(0,str(Path('aiTemp/release-verification').resolve()))
 from pe_dependencies import runtime_dependencies
+
+def preferred_locales(runtime):
+    names={'en-US'}
+    for api_name in ('GetSystemPreferredUILanguages','GetUserPreferredUILanguages'):
+        fn=bind(k,api_name,[w.DWORD,c.POINTER(w.DWORD),w.LPWSTR,c.POINTER(w.DWORD)],w.BOOL)
+        count=w.DWORD();size=w.DWORD()
+        checked(fn(8,c.byref(count),None,c.byref(size)),api_name)
+        assert 0<size.value<=4096 and count.value<=32
+        buffer=c.create_unicode_buffer(size.value)
+        checked(fn(8,c.byref(count),buffer,c.byref(size)),api_name)
+        for name in buffer[:size.value].split('\0'):
+            if name:
+                assert len(name)<36 and all(ch.isascii() and (ch.isalnum() or ch=='-') for ch in name)
+                names.add(name)
+    print('ACTIVE RUNTIME LANGUAGES',sorted(names),flush=True)
+    return [runtime/name for name in sorted(names) if (runtime/name).is_dir()]
 
 def grant_provider_keys(home):
     import ctypes as c
@@ -41,8 +57,7 @@ new="files=runtime_dependencies(runtime,names+['dnsapi.dll','bcrypt.dll','sspicl
 assert source.count(old)==1
 source=source.replace(old,new)
 old="files.extend(p/'cmd.exe.mui' for p in runtime.iterdir() if p.is_dir() and not p.is_symlink() and '-' in p.name and (p/'cmd.exe.mui').is_file())"
-new="""locales=[p for p in runtime.iterdir() if p.is_dir() and not p.is_symlink() and '-' in p.name and len(p.name)<36]
-  assert len(locales)<=64
+new="""locales=preferred_locales(runtime)
   localized=[directory/(file.name+'.mui') for directory in locales for file in files if (directory/(file.name+'.mui')).is_file()]
   assert len(localized)<=1024
   files.extend(localized)"""
