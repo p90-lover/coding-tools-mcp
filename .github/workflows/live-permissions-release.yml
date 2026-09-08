@@ -34,7 +34,7 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Materialize checked source without deleting files
+      - name: Check prepared source and include every local tool in the catalog gate
         id: source
         working-directory: aiTemp/checkout
         shell: bash
@@ -44,54 +44,33 @@ jobs:
           set -euo pipefail
           mkdir -p aiTemp/prepared
           python - <<'PYCODE'
-          import base64,hashlib,lzma,os,re,shutil,subprocess
-          from pathlib import Path,PurePosixPath
-          encoded=''.join(Path(f'aiTemp/live-permissions-delivery/source.patch.xz.b64.part{i}').read_text().strip() for i in (1,2,3))
-          data=lzma.decompress(base64.b64decode(encoded,validate=True))
-          assert len(data)==65044 and hashlib.sha256(data).hexdigest()=='c4bcfa554c0cd25f59951dcb2366d54b275f968e137d0f42b90b7f57e35ad635'
-          assert not re.search(rb'^(deleted file mode|rename |copy |old mode|new mode|\+\+\+ /dev/null)',data,re.M)
-          paths=[p.decode() for p in re.findall(rb'^\+\+\+ b/(.+)$',data,re.M)]
-          assert len(paths)==24 and len(set(paths))==24
-          for name in paths:
-              p=PurePosixPath(name)
-              assert not p.is_absolute() and '..' not in p.parts and not Path(name).is_symlink()
-              assert name.startswith(('src/','src-tauri/','docs/features/','docs/releases/')) or name in ('package.json','package-lock.json')
-          patch=Path('aiTemp/prepared/input.patch');patch.write_bytes(data)
-          if not Path('src-tauri/src/tools/live_policy.rs').exists():
-              subprocess.run(['git','apply','--check',str(patch)],check=True)
-              for name in paths:
-                  original=Path(name)
-                  if original.exists():
-                      backup=Path('aiTemp/Trash/before-live-policy')/os.environ['GITHUB_RUN_ID']/name
-                      backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(original,backup)
-              subprocess.run(['git','apply',str(patch)],check=True)
-          fix=Path('aiTemp/live-permissions-delivery/documentation-fixes.patch')
-          assert hashlib.sha256(fix.read_bytes()).hexdigest()=='3b8b0de1939acc033d2b3660f7e59c21761c718ede0fac72cf9f70bcbe79de22'
-          fix_paths=['src-tauri/src/tools/dispatch.rs','src-tauri/src/tunnel/supervisor.rs']
-          if 'mod live_permission_recovery_test' not in Path(fix_paths[1]).read_text():
-              subprocess.run(['git','apply','--check',str(fix)],check=True)
-              for name in fix_paths:
-                  backup=Path('aiTemp/Trash/before-documentation-fixes')/os.environ['GITHUB_RUN_ID']/name
-                  backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(name,backup)
-              subprocess.run(['git','apply',str(fix)],check=True)
-          doc_additions = {
-              'docs/features/live-permissions.md': '\n## 繁體中文摘要\n\n權限是每個監聽服務共用的即時狀態，不是啟動後便固定的副本。只變更權限時，\n儲存會先完成持久化，再發佈新的修訂版；不重啟 MCP／Actions、不更換隧道網址，\n也不重建 OAuth。短操作忙碌時會回傳 LIVE_POLICY_BUSY，可重試儲存。\n舊操作批准會撤銷，所屬命令會拒絕新輸入並收到終止要求，既有輸出仍保留。\n已送出的作業系統動作不能追回；不要因回應不明而自動重播。\n\nserver_info.live_permissions 顯示實際權限與修訂版。改變工具設定檔可能需要\n用戶端刷新清單；認證、目錄或連接埠改動則屬於另一類服務生命週期變更。\n已記住的應用程式批准仍與安全設定綁定，可能需要本機重新批准，但不是重新連接 MCP。\n\n新增本機計劃、計劃讀取、工具搜尋、系統時間及能力清單。這不是完整 Codex 執行環境，\n不會呼叫模型／子 Agent；原生命令沙箱仍未納入。截圖只在記憶體處理，\n作業系統分頁／傾印及用戶端保留不屬於程式的截圖不落地保證。\n\n使用方式與人類／AI 如何從證據修正理解，參見\n[繁體中文協作指南](../guides/ai-human-workflow.zh-Hant.md)及\n[English workflow guide](../guides/ai-human-workflow.en.md)。記錄歷史是重用上下文，\n不是訓練模型或更新權重。\n',
-              'docs/releases/v0.4.1-rc.1.md': '\n## Documentation / 文件\n\nThe release includes rewritten English and Traditional Chinese READMEs plus matching\nAI–human workflow guides: roles, the twelve-stage operator board, session handoff,\nworked tool examples, review/learning notes and explicit capability boundaries.\nThese describe reusable project context, not automatic model training. Historical\nREADME copies are preserved under aiTemp/Trash rather than deleted.\n\n本版本更新英文及繁體中文 README，並提供對應協作指南，說明角色、十二階段看板、\n會話交接、工具實例、審查／學習筆記及明確能力界線。這是重用專案上下文，\n不是自動訓練模型；舊 README 保留在 aiTemp/Trash，沒有刪除。\n',
-          }
-          for name, addition in doc_additions.items():
-              document=Path(name)
-              if addition.splitlines()[1] not in document.read_text():
-                  document.write_text(document.read_text()+addition)
-          paths=list(dict.fromkeys(paths+fix_paths))
-          for name in paths:
-              if name.endswith('.rs'):subprocess.run(['rustfmt','--edition','2021','--config','skip_children=true',name],check=True)
-          subprocess.run(['git','add','--',*paths],check=True)
+          import json,os,shutil,subprocess
+          from pathlib import Path
+          assert json.loads(Path('package.json').read_text())['version']==os.environ['VERSION']
+          assert Path('src-tauri/src/tools/live_policy.rs').is_file()
+          assert Path('src-tauri/src/tools/local_tools.rs').is_file()
+          subprocess.run(['python','aiTemp/release-verification/check_bilingual_docs.py'],check=True)
+          registry=Path('src-tauri/src/tools/registry_definitions.rs')
+          text=registry.read_text()
+          count='                + crate::tools::native_sandbox::NAMES.len()'
+          extension=count+'\n                + crate::tools::local_tools::NAMES.len()'
+          if extension not in text:
+              assert text.count(count)==1
+              before=Path('aiTemp/Trash/before-catalog-count')/os.environ['GITHUB_RUN_ID']/registry
+              before.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(registry,before)
+              text=text.replace(count,extension,1)
+              marker='        for name in crate::tools::computer::schema::NAMES {'
+              assert text.count(marker)==1
+              text=text.replace(marker,'        for name in crate::tools::local_tools::NAMES {\n            assert!(names.contains(name));\n        }\n'+marker,1)
+              registry.write_text(text)
+          subprocess.run(['rustfmt','--edition','2021','--config','skip_children=true',str(registry)],check=True)
+          subprocess.run(['git','add','--',str(registry)],check=True)
           subprocess.run(['git','diff','--cached','--check'],check=True)
           PYCODE
           git config user.name 'p90-lover'
           git config user.email '146848721+p90-lover@users.noreply.github.com'
           if ! git diff --cached --quiet; then
-            git commit -m 'fix: verified live-permission corrections and bilingual workflow documentation'
+            git commit -m 'test: include all five local tools in catalog count and presence checks'
             auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
             remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
             test "$remote" = "$GITHUB_SHA"
