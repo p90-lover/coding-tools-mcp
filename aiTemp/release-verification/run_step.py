@@ -1,7 +1,8 @@
 """Run one explicit, checked build stage from the existing release workflow.
 
-The production source is already materialized. This runner never applies staged
-payloads or publishes anything, and preserves each expanded script in aiTemp.
+Production source is already materialized. The helper stage applies the reviewed
+source-only adapters to a pinned upstream checkout, never launches a Codex agent,
+and preserves every expanded build script under aiTemp.
 """
 from pathlib import Path
 import os
@@ -27,17 +28,19 @@ lines = body.splitlines()
 assert all(not line or line.startswith('          ') for line in lines)
 script = '\n'.join(line[10:] if line else '' for line in lines) + '\n'
 if key == 'helpers':
-    # Keep compilation unchanged; the old .NET-based check is replaced by the
-    # separate native probe stage, without disabling PowerShell language policy.
+    # Replace the old constrained-PowerShell test with the separate native probe.
+    # The compiled helper itself retains all OS restrictions.
     cut = 'python - "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe"'
     assert script.count(cut) == 1
     script = script.split(cut, 1)[0]
+    prepare = 'python native-helpers/prepare_upstream.py "$GITHUB_WORKSPACE/aiTemp/upstream" "$PWD/native-helpers/codex_sandbox_bridge.rs"'
+    assert script.count(prepare) == 1
+    script = script.replace(prepare, prepare + '\npython native-helpers/prepare_network.py "$GITHUB_WORKSPACE/aiTemp/upstream"')
 path = Path('aiTemp/expanded-build') / (key + '.sh')
 path.parent.mkdir(parents=True, exist_ok=True)
 with path.open('x', encoding='utf-8', newline='\n') as output:
     output.write(script)
-# Windows also supplies System32/bash.exe, which launches WSL rather than Git
-# Bash. Resolve the intended tool explicitly; never install a WSL distribution.
+# System32/bash.exe launches WSL, not Git Bash. Never install or invoke WSL here.
 if os.name == 'nt':
     bash = Path(os.environ['ProgramFiles']) / 'Git' / 'bin' / 'bash.exe'
     assert bash.is_file(), 'The Git Bash installation is required'
