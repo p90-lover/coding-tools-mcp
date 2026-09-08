@@ -2,14 +2,14 @@ name: Verify final remembered-control release
 on:
   push:
     branches: [release/remembered-control-final]
-    paths: ['.github/workflows/remembered-final-verify.yml']
+    paths: ['.github/workflows/remembered-final-verify.yml', 'aiTemp/scope-correction/reuse_helpers.py', 'aiTemp/scope-correction/sandbox_native.py']
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 concurrency:
   group: final-remembered-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   VERSION: 0.3.6-rc.1
   SOURCE: ${{ github.sha }}
