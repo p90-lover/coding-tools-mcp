@@ -1,4 +1,4 @@
-"""Resolve bounded runtime imports and active languages; retain all isolation assertions."""
+"""Resolve bounded runtime resources identified by native tracing; retain isolation checks."""
 from pathlib import Path
 import subprocess
 import sys
@@ -28,13 +28,14 @@ def grant_provider_keys(home):
     caps=json.loads((home/'cap_sid').read_text())
     key=(Path(os.environ['SystemRoot'])/'System32').resolve().as_posix().lower()
     sid=P();checked(a.ConvertStringSidToSidW(caps['writable_root_by_path'][key],c.byref(sid)),'runtime SID')
+    paths=[r'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters',r'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Winsock',r'SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters',r'SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Winsock',r'SYSTEM\CurrentControlSet\Services\Winsock\Setup Migration\Providers',r'SYSTEM\CurrentControlSet\Services\vmbus\Parameters\Winsock',r'SYSTEM\CurrentControlSet\Services\Psched\Parameters\Winsock',r'SYSTEM\CurrentControlSet\Services\afunix\Parameters\Winsock',r'SYSTEM\CurrentControlSet\Services\RFCOMM\Parameters\Winsock']
     try:
-        for path in [r'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters',r'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Winsock',r'SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters',r'SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Winsock']:
+        for path in paths:
             handle=w.HANDLE();code=a.RegOpenKeyExW(w.HANDLE(-2147483646),path,0,0x60000|0x20019,c.byref(handle))
             if code==2:
                 print('optional provider configuration absent',path,flush=True);continue
             assert code==0,(path,code)
-            try:append_read(handle,4,sid,0x20019,0,path)
+            try:append_read(handle,4,sid,0x20019,2 if path.endswith('Setup Migration\\Providers') else 0,path)
             finally:a.RegCloseKey(handle)
     finally:k.LocalFree(sid)
 
