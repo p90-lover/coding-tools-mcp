@@ -17,6 +17,10 @@ const row={id:'a',title:'Existing agent',status:'idle',provider:'codex',workspac
 assert.equal(model.agentBucket(row),'needs_input');assert.equal(model.attention(row),true);
 assert.equal(model.agentBucket({...row,status:'new-unknown-state'}),'unknown');
 assert.equal(model.stateTone('idle'),'neutral');
+assert.equal(model.stateTone('DOING'),'blue');
+assert.equal(model.stateTone('REVIEW'),'amber');
+assert.equal(model.stateTone('DONE'),'green');
+assert.equal(model.attention({...row,status:'REVIEW',attention_reason:null}),true);
 assert.equal(model.sortAgents([{...row,id:'b',status:'running',attention_reason:null},row])[0].id,'a');
 const chain=model.sortChain([{...row,id:'z',chain_id:'x',chain_index:1,chain_layer:3},{...row,id:'a',chain_id:'x',chain_index:9,chain_layer:0}]);
 assert.equal(chain[0].id,'a');assert.equal(model.STEPS.length,12);assert.equal(model.stepLabel(12,'zh-Hant'),'已完成');

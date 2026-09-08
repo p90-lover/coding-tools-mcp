@@ -23,11 +23,11 @@ function agentInput(item: Item) {
  return { status: item.status as 'idle' | 'running' | 'error' | 'closed' | 'initializing', pendingPermissionCount: item.pending_permissions, requiresAttention: item.requires_attention,
  attentionReason: ['finished','error','permission'].includes(item.attention_reason ?? '') ? item.attention_reason as 'finished' | 'error' | 'permission' : null };
 }
-export function attention(item: Item) { return item.requires_attention || item.pending_permissions > 0 || ['error','permission'].includes(item.attention_reason ?? '') || ['error','failed','blocked'].includes(item.status); }
+export function attention(item: Item) { return item.requires_attention || item.pending_permissions > 0 || ['error','permission'].includes(item.attention_reason ?? '') || ['error','failed','blocked','review'].includes(item.status.toLowerCase()); }
 export function agentBucket(item: Item) { return lifecycle.has(item.status) ? deriveAgentStateBucket(agentInput(item)) : 'unknown'; }
 export function sortAgents(items: Item[]) { return [...items].sort((a,b) => (lifecycle.has(a.status) ? getAgentStatusPriority(agentInput(a)) : -1) - (lifecycle.has(b.status) ? getAgentStatusPriority(agentInput(b)) : -1) || a.id.localeCompare(b.id)); }
 export function sortChain(items: Item[]) { return [...items].sort((a,b) => (a.chain_id ?? '').localeCompare(b.chain_id ?? '') || compare({id:a.id,layer:a.chain_layer,index:a.chain_index},{id:b.id,layer:b.chain_layer,index:b.chain_index})); }
-export function stateTone(state: string) { if (['running','in_progress','starting','initializing'].includes(state)) return 'blue'; if(['done','completed','succeeded'].includes(state))return 'green'; if(['blocked','needs_input','attention'].includes(state))return 'amber';if(['error','failed'].includes(state))return 'red';return 'neutral'; }
+export function stateTone(state: string) { state=state.toLowerCase(); if (['running','doing','in_progress','starting','initializing'].includes(state)) return 'blue'; if(['done','completed','succeeded'].includes(state))return 'green'; if(['blocked','review','needs_input','attention'].includes(state))return 'amber';if(['error','failed'].includes(state))return 'red';return 'neutral'; }
 export function stepLabel(step: number, locale: Locale) { return STEPS[step]?.[locale === 'en' ? 0 : 1] ?? (locale === 'en' ? 'Complete' : '已完成'); }
 export function formatTime(seconds?: number) { return seconds ? new Date(seconds*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—'; }
 export function translated(locale: Locale, english: string, chinese: string) { return locale === 'en' ? english : chinese; }
