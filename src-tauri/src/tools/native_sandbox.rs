@@ -296,11 +296,13 @@ fn invoke_helper(
     if cancelled {
         return Err(err("Sandbox helper cancelled, timed out, or exceeded output bounds. No unsandboxed retry was made."));
     }
-    let value: Value = serde_json::from_slice(&bytes)
+    let mut value: Value = serde_json::from_slice(&bytes)
         .map_err(|_| err("Sandbox helper returned an invalid result"))?;
     if value["upstream_commit"] != UPSTREAM || value["model_calls"] != false {
         return Err(err("Unexpected sandbox response identity"));
     }
+    value["read_scope"] = json!("sandbox_account_acl_not_path_whitelist");
+    value["read_scope_notice"] = json!("Shared Windows-readable files outside the workspace may remain readable. Read-only limits workspace writes; it is not a read-path privacy boundary.");
     Ok(value)
 }
 pub fn local_setup(profile: crate::workspace::WorkspaceProfile, root: PathBuf) -> AppResult<Value> {
@@ -377,6 +379,7 @@ pub fn local_status(root: &Path) -> AppResult<Value> {
     Ok(
         json!({"available":available,"enabled_for_workspace":enabled_for(root)?,"upstream_commit":UPSTREAM,
         "filesystem":"read_only","network":"restricted","setup_requires_local_consent":true,"model_calls":false,
+        "read_scope":"sandbox_account_acl_not_path_whitelist","read_scope_notice":"Shared Windows-readable files outside the workspace may remain readable; private files depend on Windows ACLs",
         "scope":"Sandbox applies only to sandbox_exec, not GUI tools or existing unsandboxed command tools"}),
     )
 }

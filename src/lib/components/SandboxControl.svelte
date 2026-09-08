@@ -6,9 +6,9 @@
   let status=$state<any>({available:false});let busy=$state(false);let message=$state('');
   async function refresh(){try{status=await invoke('sandbox_local_status',{workspaceId});}catch(e){message=String(e);}}
   async function prepare(){
-    if(!await confirm(`Prepare the native OS sandbox for this workspace? Windows may ask for one-time administrator approval to create separate CodingTools sandbox accounts and firewall rules. The sandbox has read-only workspace/platform access and restricted networking. It is not a Codex agent and does not use Codex quota.
+    if(!await confirm(`Prepare the native OS sandbox for this workspace? Windows may ask for one-time administrator approval to create separate CodingTools sandbox accounts and firewall rules. The sandbox blocks workspace writes and restricts networking. Read access follows the sandbox account Windows permissions: shared readable files outside the workspace may remain accessible. This is not a read-path privacy boundary. It is not a Codex agent and does not use Codex quota.
 
-為此工作區準備原生沙箱？Windows 可能要求一次管理員授權，以建立獨立 CodingTools 沙箱帳戶及防火牆規則。沙箱僅可讀取工作區／平台檔案並限制網絡，不啟動 Codex Agent。
+為此工作區準備原生沙箱？Windows 可能要求一次管理員授權，以建立獨立 CodingTools 沙箱帳戶及防火牆規則。沙箱會阻止工作區寫入並限制網絡，但讀取範圍取決於沙箱帳戶的 Windows 權限；工作區外可供共用讀取的檔案仍可能可讀。這不是限制讀取路徑的私隱隔離環境，也不啟動 Codex Agent。
 
 This enables only sandbox_exec, not an OS sandbox around desktop input or the existing command tools.
 僅適用於 sandbox_exec，不會把桌面輸入或既有命令工具自動放入沙箱。`,{title:'Prepare sandbox / 準備沙箱',kind:'warning'}))return;
@@ -20,7 +20,7 @@ This enables only sandbox_exec, not an OS sandbox around desktop input or the ex
 </script>
 <section class="mt-4 rounded-lg border border-[var(--border)] p-4" aria-label="Native sandbox">
   <h4 class="font-medium">Native command sandbox · 原生命令沙箱</h4>
-  <p class="mt-1 text-xs opacity-70">Pinned upstream Codex sandbox library, without Codex CLI/agent inference. Read-only execution in a private desktop; separate from computer-use permissions.</p>
+  <p class="mt-1 text-xs opacity-70">Pinned upstream Codex sandbox library, without Codex CLI/agent inference. Read-only workspace execution in a private desktop; separate from computer-use permissions. Shared Windows-readable files outside the workspace may remain readable. 唯讀不等於工作區外所有檔案均不可讀。</p>
   <div class="mt-3 flex flex-wrap items-center gap-3">
     <button class="tx-btn-secondary" disabled={busy||!status.available} onclick={prepare}>{busy?'Preparing · 準備中':'Prepare / approve · 準備／批准'}</button>
     <button class="tx-btn-secondary" disabled={!status.enabled_for_workspace} onclick={disable}>Disable · 停用</button>
