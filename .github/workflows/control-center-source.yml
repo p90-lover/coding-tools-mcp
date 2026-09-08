@@ -1,0 +1,56 @@
+name: Control center source snapshot
+on:
+  push:
+    branches: [feature/paseo-anneal-control-center]
+    paths: ['.github/workflows/control-center-source.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/app
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: getpaseo/paseo
+          ref: da8c1b5c94e752b01d451645e5fa52aba2c1b2f0
+          path: aiTemp/paseo
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: mosonlab/anneal
+          ref: 088f0d5971a1692134aaa3db0230cc541b014c07
+          path: aiTemp/anneal
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Archive immutable source and frontend build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/snapshot
+          for name in app paseo anneal; do
+            git -C "aiTemp/$name" archive --format=zip HEAD --output="$GITHUB_WORKSPACE/aiTemp/snapshot/$name.zip"
+            git -C "aiTemp/$name" rev-parse HEAD > "aiTemp/snapshot/$name.sha"
+          done
+          cd aiTemp/app
+          npm ci --ignore-scripts --cache "$GITHUB_WORKSPACE/aiTemp/npm-cache"
+          tar -czf "$GITHUB_WORKSPACE/aiTemp/snapshot/frontend-deps.tar.gz" node_modules
+          cd "$GITHUB_WORKSPACE/aiTemp/snapshot"
+          sha256sum *.zip *.sha *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: control-center-sources-${{ github.run_id }}
+          path: aiTemp/snapshot/*
+          if-no-files-found: error
+          retention-days: 14
