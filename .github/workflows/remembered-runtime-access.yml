@@ -2,7 +2,7 @@ name: Verify narrow Windows runtime read access
 on:
   push:
     branches: [audit/remembered-036-runtime-access]
-    paths: ['.github/workflows/remembered-runtime-access.yml','aiTemp/release-verification/runtime_acl_probe.py']
+    paths: ['.github/workflows/remembered-runtime-access.yml','aiTemp/release-verification/runtime_provider_probe.py']
 permissions:
   contents: read
   actions: read
@@ -40,12 +40,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
-          python aiTemp/release-verification/runtime_acl_probe.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/runtime-access" 2>&1 | tee aiTemp/evidence/runtime-access.txt
-      - name: Preserve production source for continuation
+          python aiTemp/release-verification/runtime_provider_probe.py "$PWD/src-tauri/aiTemp/native-sandbox/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/runtime-access" 2>&1 | tee aiTemp/evidence/runtime-access.txt
+      - name: Preserve immutable checked source
         if: always()
         run: |
           mkdir -p aiTemp/evidence
-          git archive --format=zip 492d268705839b4f9692c2f55c2009e1ad662d43 --output=aiTemp/evidence/source.zip
+          git archive --format=zip HEAD --output=aiTemp/evidence/source.zip
           git rev-parse HEAD > aiTemp/evidence/diagnostic-source-sha.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
