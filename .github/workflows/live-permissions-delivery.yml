@@ -1,0 +1,200 @@
+name: Deliver verified live-permission installers
+on:
+  push:
+    branches: [release/live-permissions-delivery-0.4.1-rc.1]
+    paths: ['.github/workflows/live-permissions-delivery.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deliver-live-permissions-v0.4.1-rc.1
+  cancel-in-progress: false
+env:
+  SOURCE: fa7f323aa52ee5b5c143f61ff46fc534264f79ff
+  VERSION: 0.4.1-rc.1
+  PLATFORM: windows-x64
+  CARGO_INCREMENTAL: '0'
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  deliver:
+    if: github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      actions: read
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fa7f323aa52ee5b5c143f61ff46fc534264f79ff
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Verify unchanged source, frontend and bilingual documentation
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+          node scripts/check-control-center.mjs 2>&1 | tee aiTemp/evidence/control-center-contract.txt
+          python aiTemp/release-verification/check_bilingual_docs.py 2>&1 | tee aiTemp/evidence/bilingual-documentation.txt
+      - name: Focused live permission, tool and retained native contracts
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib live_policy_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/live-policy-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib local_codex_tools_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/local-tools-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib control_center_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/integration-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib computer_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/computer-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib vision_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/vision-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib core_catalog_exposes_chatgpt_compatible_tools -- --test-threads=1 2>&1 | tee aiTemp/evidence/catalog.txt
+      - name: Real Windows background observation, input and RAM capture
+        env:
+          COMPUTER_USE_NATIVE_SMOKE: '1'
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib computer_native_fixture_round_trip -- --ignored --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/native-smoke.txt
+      - name: Build and inspect actual Windows installer
+        env:
+          CI: 'true'
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles nsis -- --locked 2>&1 | tee aiTemp/evidence/installer.txt
+          python aiTemp/release-verification/package_control_core.py 2>&1 | tee aiTemp/evidence/installer-inspection.txt
+          python - <<'PY'
+          import hashlib,json,re
+          from pathlib import Path
+          expected={'live-policy-tests.txt':5,'local-tools-tests.txt':1,'integration-tests.txt':3,'computer-tests.txt':6,'vision-tests.txt':5,'catalog.txt':2,'native-smoke.txt':1}
+          for name,count in expected.items():
+              assert f'{count} passed; 0 failed' in Path('aiTemp/evidence',name).read_text(),name
+          assert 'same HTTP listener + same bearer token' in Path('aiTemp/evidence/live-policy-tests.txt').read_text()
+          assert 'PASS:' in Path('aiTemp/evidence/bilingual-documentation.txt').read_text()
+          for name in ['src-tauri/src/tools/computer/capture.rs','src-tauri/src/tools/screen_tool.rs','src-tauri/src/tools/computer/native_capture.rs']:
+              text=Path(name).read_text().split('#[cfg(test)]')[0]
+              assert not re.search(r'(File::create|OpenOptions|\.save\(|temp_dir\(|tempfile|Command::)',text)
+          licenses={}
+          for source in [Path('third_party/licenses/Paseo-LICENSE'),Path('third_party/licenses/Anneal-LICENSE'),Path('third_party/CONTROL_CENTER_NOTICES.md')]:
+              matches=[p for p in Path('aiTemp/core-installer-inspection').rglob(source.name) if p.is_file()]
+              assert len(matches)==1 and matches[0].read_bytes()==source.read_bytes()
+              licenses[source.name]=hashlib.sha256(source.read_bytes()).hexdigest()
+          for directory in ['aiTemp/installer','aiTemp/evidence']:
+              p=Path(directory,'proof.json');proof=json.loads(p.read_text())
+              proof.update({'integration_mode':'read_only_management','integration_protocol_fixture_verified':True,'provider_agent_launch_enabled':False,'bundled_license_sha256':licenses,'live_upstream_instances_verified':False,'live_permission_protocol_verified':True,'local_coding_tools_verified':True,'bilingual_documentation_verified':True})
+              p.write_text(json.dumps(proof,indent=2)+'\n')
+          print('PASS: exact source, native behavior, package identity, licenses and memory-only capture contracts')
+          PY
+      - name: Verify prior Mac build and publish directly to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib,io,json,os,shutil,subprocess,urllib.parse,zipfile
+          from pathlib import Path,PurePosixPath
+          repo=os.environ['GITHUB_REPOSITORY'];source=os.environ['SOURCE'];version=os.environ['VERSION'];tag='v'+version
+          root=Path('aiTemp/release-assets');root.mkdir(exist_ok=True)
+          downloads=Path('aiTemp/release-downloads');downloads.mkdir(exist_ok=True)
+          macroot=Path('aiTemp/mac-evidence');macroot.mkdir(exist_ok=True)
+          def api(path,method='GET',body=None):
+              args=['gh','api',f'repos/{repo}/{path}','--method',method];payload=None
+              if body is not None:args+=['--input','-'];payload=json.dumps(body).encode()
+              return json.loads(subprocess.check_output(args,input=payload,timeout=90))
+          assert api('git/ref/heads/release/live-permissions-0.4.1-rc.1')['object']['sha']==source
+          assert not api('git/matching-refs/tags/'+tag),'Existing tags are never replaced'
+          job=api('actions/jobs/102153426953')
+          assert job['run_id']==34253310301 and job['status']=='completed' and job['conclusion']=='success'
+          def artifact(ident,digest):
+              meta=api(f'actions/artifacts/{ident}')
+              assert not meta['expired'] and meta['workflow_run']['id']==34253310301
+              assert meta['digest']=='sha256:'+digest
+              data=subprocess.check_output(['gh','api',f'repos/{repo}/actions/artifacts/{ident}/zip'],timeout=120)
+              assert hashlib.sha256(data).hexdigest()==digest
+              (downloads/f'{ident}.zip').write_bytes(data)
+              return zipfile.ZipFile(io.BytesIO(data))
+          with artifact(10067273334,'5374f14067d58787321a4a928fe9894f1c38f053bb008d51bc36a9d9dea5974a') as z:
+              assert set(z.namelist())=={f'Coding.Tools.MCP_{version}_aarch64.dmg','proof.json'}
+              mac=json.loads(z.read('proof.json'))
+              dmg=z.read(mac['asset'])
+              assert len(dmg)==mac['size'] and hashlib.sha256(dmg).hexdigest()==mac['sha256']
+              (root/mac['asset']).write_bytes(dmg)
+          with artifact(10067274259,'effbc899b730da430b69f0958f760d50f6d761359e0413e5f8b32b12ffdc47f2') as z:
+              for member in z.infolist():
+                  path=PurePosixPath(member.filename)
+                  assert not path.is_absolute() and '..' not in path.parts and '\\' not in member.filename
+                  assert path.suffix in ('.txt','.json') and member.file_size<2_000_000
+                  dest=macroot/Path(*path.parts);dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(z.read(member))
+          assert json.loads((macroot/'proof.json').read_text())==mac
+          windows=json.loads(Path('aiTemp/installer/proof.json').read_text())
+          for proof in (windows,mac):
+              assert proof['source_commit']==source and proof['version']==version
+              assert proof['screenshot_storage']=='memory_only' and proof['codex_agent_invoked'] is False
+              assert proof['native_sandbox_bundled'] is False and proof['provider_agent_launch_enabled'] is False
+              assert proof['live_permission_protocol_verified'] is True and proof['local_coding_tools_verified'] is True
+              assert proof['integration_protocol_fixture_verified'] is True and len(proof['bundled_license_sha256'])==3
+              assert Path(proof['asset']).name==proof['asset']
+          assert windows['platform']=='windows-x64' and windows['native_fixture_verified'] is True
+          assert mac['platform']=='macos-arm64'
+          exe=Path('aiTemp/installer')/windows['asset'];data=exe.read_bytes()
+          assert len(data)==windows['size'] and hashlib.sha256(data).hexdigest()==windows['sha256']
+          shutil.copy2(exe,root/exe.name)
+          provenance={'version':version,'source_commit':source,'workflow_run':int(os.environ['GITHUB_RUN_ID']),'publication_workflow_commit':os.environ['GITHUB_SHA'],'macos_verification_run':34253310301,'prerelease':True,'installers':[windows,mac]}
+          (root/'release-provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
+          with zipfile.ZipFile(root/'live-permissions-validation.zip','x',zipfile.ZIP_DEFLATED) as z:
+              for directory,prefix in [(Path('aiTemp/evidence'),'windows'),(macroot,'macos')]:
+                  for p in sorted(directory.rglob('*')):
+                      if p.is_file():
+                          assert p.suffix in ('.txt','.json') and not p.is_symlink()
+                          z.write(p,prefix+'/'+p.relative_to(directory).as_posix())
+          (root/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(root.iterdir())))
+          assert len(list(root.iterdir()))==5
+          api('git/refs','POST',{'ref':'refs/tags/'+tag,'sha':source})
+          notes=Path('docs/releases',tag+'.md').read_text()
+          release=api('releases','POST',{'tag_name':tag,'target_commitish':source,'name':f'Coding Tools MCP {tag} — Live permissions + bilingual workflow','body':notes,'draft':True,'prerelease':True,'make_latest':'false'})
+          ident=release['id'];Path('aiTemp/draft-id.txt').write_text(str(ident))
+          expected={p.name:(p.stat().st_size,'sha256:'+hashlib.sha256(p.read_bytes()).hexdigest()) for p in root.iterdir()}
+          # Preserve the requested Windows installer first. No artifact-transfer dependency.
+          order=[root/windows['asset']]+[p for p in sorted(root.iterdir()) if p.name!=windows['asset']]
+          for path in order:
+              url=f'https://uploads.github.com/repos/{repo}/releases/{ident}/assets?name='+urllib.parse.quote(path.name,safe='')
+              uploaded=json.loads(subprocess.check_output(['gh','api',url,'--method','POST','--header','Content-Type: application/octet-stream','--input',str(path)],timeout=120))
+              assert uploaded['state']=='uploaded' and (uploaded['size'],uploaded['digest'])==expected[path.name]
+              verified=subprocess.check_output(['gh','api',f'repos/{repo}/releases/assets/{uploaded["id"]}','--header','Accept: application/octet-stream'],timeout=120)
+              assert (len(verified),'sha256:'+hashlib.sha256(verified).hexdigest())==expected[path.name]
+          current=api(f'releases/{ident}')
+          assert current['draft'] and current['prerelease']
+          assert {a['name']:(a['size'],a['digest']) for a in current['assets']}==expected
+          assert api('git/ref/tags/'+tag)['object']['sha']==source
+          api(f'releases/{ident}','PATCH',{'draft':False,'prerelease':True,'make_latest':'false'})
+          public=api('releases/tags/'+tag)
+          assert public['id']==ident and public['draft'] is False and public['published_at']
+          assert {a['name']:(a['size'],a['digest']) for a in public['assets']}==expected
+          receipt={'release_id':ident,'source_commit':source,'tag':tag,'url':public['html_url'],'draft':False,'prerelease':True,'assets':[{k:a[k] for k in ('id','name','size','digest','browser_download_url')} for a in public['assets']]}
+          Path('aiTemp/publication-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt,indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        continue-on-error: true
+        with:
+          name: live-permission-delivery-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            aiTemp/checkout/aiTemp/publication-receipt.json
+            aiTemp/checkout/aiTemp/draft-id.txt
+            aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: warn
+          retention-days: 14
