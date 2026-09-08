@@ -1,4 +1,4 @@
-"""Focused native isolation check; only isolated fixture files, no model calls."""
+"""Focused native isolation and retention checks; isolated fixture files only."""
 import hashlib
 import json
 import os
@@ -12,6 +12,10 @@ base = Path(sys.argv[2]).resolve()
 root, home = base / 'workspace', base / 'sandbox-state'
 root.mkdir(parents=True, exist_ok=False)
 (home / 'aiTemp').mkdir(parents=True, exist_ok=False)
+(home / '.sandbox').mkdir(exist_ok=False)
+retained_payload = b'previous-owned-sandbox-report-retention-fixture'
+old_report = home / '.sandbox' / 'setup_error.json'
+old_report.write_bytes(retained_payload)
 inside, outside = root / 'sentinel.txt', base / 'outside-private.txt'
 inside.write_text('unchanged-sandbox-fixture', encoding='utf-8')
 outside.write_text('private-outside-fixture', encoding='utf-8')
@@ -65,6 +69,9 @@ def run(mode, arg):
 assert subprocess.check_output([str(probe),'read',str(inside)]).decode()=='unchanged-sandbox-fixture'
 assert request('setup').get('ready') is True
 assert request('status').get('ready') is True
+retained = list((home / '.sandbox' / 'Trash').glob('retained-*.bin'))
+assert not old_report.exists() and any(p.read_bytes()==retained_payload for p in retained), 'Old report must be moved, not deleted'
+print('PASS: actual sandbox setup preserved the old report byte-for-byte in protected Trash')
 read = run('read', inside)
 assert read['ok'] and read['stdout']=='unchanged-sandbox-fixture', read
 for mode,path,answer in [('deny-write',inside,'write-denied'),('deny-read',outside,'outside-read-denied')]:
@@ -93,4 +100,4 @@ with socket.socket() as listener:
         pass
 print('PASS: native network positive control succeeds; sandbox network is denied')
 assert not any(p.suffix.lower() in ('.png','.jpg','.jpeg','.webp') for p in base.rglob('*') if p.is_file())
-Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps({'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'checks':['native_allowed_read','native_write_handle_denied','native_outside_read_denied','native_loopback_denied_with_positive_control']},indent=2)+'\n',encoding='utf-8')
+Path('aiTemp/evidence/sandbox-proof.json').write_text(json.dumps({'upstream_commit':'3caf9f9586baedb4158a7b91545ead3dd320c348','native_verified':True,'model_session_invoked':False,'maintenance_retention_verified':True,'checks':['native_allowed_read','native_write_handle_denied','native_outside_read_denied','native_loopback_denied_with_positive_control','maintenance_file_retained']},indent=2)+'\n',encoding='utf-8')
