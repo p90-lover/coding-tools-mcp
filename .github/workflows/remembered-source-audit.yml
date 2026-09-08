@@ -1,0 +1,36 @@
+name: Pinned sandbox source audit
+on:
+  push:
+    branches: [release/remembered-control-0.3.6-rc.1]
+    paths: ['.github/workflows/remembered-source-audit.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openai/codex
+          ref: 3caf9f9586baedb4158a7b91545ead3dd320c348
+          path: aiTemp/upstream
+          clean: false
+          persist-credentials: false
+      - name: Archive source only; do not execute any Codex tool
+        working-directory: aiTemp/upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/audit
+          test "$(git rev-parse HEAD)" = '3caf9f9586baedb4158a7b91545ead3dd320c348'
+          git archive --format=zip HEAD --output=aiTemp/audit/upstream-sandbox-source.zip codex-rs/windows-sandbox-rs codex-rs/protocol/src codex-rs/cli/src LICENSE
+          git rev-parse HEAD > aiTemp/audit/source-sha.txt
+          (cd aiTemp/audit && sha256sum upstream-sandbox-source.zip source-sha.txt > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pinned-sandbox-source-${{ github.run_id }}
+          path: aiTemp/upstream/aiTemp/audit/*
+          if-no-files-found: error
+          retention-days: 14
