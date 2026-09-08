@@ -3,13 +3,19 @@ pub const NAMES: &[&str] = &[
     "computer_status",
     "computer_route",
     "computer_snapshot",
+    "computer_list_windows",
+    "computer_select_window",
     "computer_find_control",
     "computer_wait",
     "computer_action",
     "computer_sequence",
     "computer_stop",
 ];
-pub const WRITES: &[&str] = &["computer_action", "computer_sequence"];
+pub const WRITES: &[&str] = &[
+    "computer_action",
+    "computer_sequence",
+    "computer_select_window",
+];
 fn selector() -> Value {
     json!({"type":"object","properties":{"name":{"type":"string","maxLength":256},"automation_id":{"type":"string","maxLength":256},"role":{"type":"string","maxLength":64},"contains":{"type":"boolean","default":false}},"additionalProperties":false})
 }
@@ -33,6 +39,16 @@ pub fn input(name: &str) -> Value {
         "computer_route" => {
             properties = json!({"api_available":{"type":"boolean"},"specialized_available":{"type":"boolean"},"visual_only":{"type":"boolean"}});
             required.clear();
+        }
+        "computer_list_windows" => {
+            properties = json!({"query":{"type":"string","maxLength":256}});
+            required.clear();
+        }
+        "computer_select_window" => {
+            properties["window_id"] = json!({"type":"integer","minimum":1,"maximum":4294967295u64});
+            properties["pid"] = json!({"type":"integer","minimum":1,"maximum":4294967295u64});
+            properties["activate"] = json!({"type":"boolean","default":false,"description":"Explicitly bring the already-approved app to the foreground for keyboard/mouse input. False only changes observation target."});
+            required.extend(["window_id", "pid"]);
         }
         "computer_snapshot" => properties["include_ui"] = json!({"type":"boolean","default":true}),
         "computer_find_control" | "computer_wait" => {

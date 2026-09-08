@@ -1,10 +1,12 @@
 //! Opt-in local Windows control. No model client, remote consent endpoint or disk frames.
+mod background;
 mod capture;
 #[cfg(target_os = "windows")]
 mod native;
 #[cfg(not(target_os = "windows"))]
 #[path = "unsupported.rs"]
 mod native;
+pub mod permissions;
 pub mod schema;
 mod types;
 
@@ -187,15 +189,22 @@ impl State {
 }
 
 pub fn emergency_stop(reason: &str) {
+    crate::tools::native_sandbox::cancel_active();
+    permissions::block_restore();
     state().stop(reason);
+    permissions::suspend_active();
     wake();
 }
 pub fn stop_workspace(root: &Path) {
     let mut s = state();
     if s.lease.as_ref().is_some_and(|l| l.root == root) {
+        permissions::block_restore();
         s.stop("Workspace service/configuration changed");
+        drop(s);
+        permissions::suspend_active();
+    } else {
+        drop(s);
     }
-    drop(s);
     wake();
 }
 pub fn pause() {
@@ -205,6 +214,7 @@ pub fn pause() {
     }
     s.action = None;
     drop(s);
+    permissions::suspend_active();
     wake();
 }
 pub fn resume_local() -> Result<()> {
@@ -234,6 +244,11 @@ pub fn local_status(heartbeat: bool, last_frame: Option<&str>) -> Value {
     }
     summary
 }
+pub fn has_local_session() -> bool {
+    let mut s = state();
+    s.prune();
+    s.lease.is_some()
+}
 pub fn list_local_targets() -> Result<Vec<Target>> {
     native::targets()
 }
@@ -250,11 +265,44 @@ fn control_deadline(seconds: u64, always_enabled: bool, now: Instant) -> Result<
     }
 }
 
+pub fn restore_arm(root: PathBuf, target: Target, expected_epoch: u64) -> Result<Value> {
+    arm_internal(root, target, 0, true, Some((expected_epoch, true)))
+}
+/// App exit releases live state, but is not a user revocation of remembered consent.
+pub fn runtime_only_stop(reason: &str) {
+    state().stop(reason);
+    wake();
+}
+
 pub fn local_arm_with_mode(
     root: PathBuf,
     target: Target,
     duration_seconds: u64,
     always_enabled: bool,
+) -> Result<Value> {
+    arm_internal(root, target, duration_seconds, always_enabled, None)
+}
+pub fn local_arm_at_epoch(
+    root: PathBuf,
+    target: Target,
+    duration_seconds: u64,
+    always_enabled: bool,
+    expected_epoch: u64,
+) -> Result<Value> {
+    arm_internal(
+        root,
+        target,
+        duration_seconds,
+        always_enabled,
+        Some((expected_epoch, false)),
+    )
+}
+fn arm_internal(
+    root: PathBuf,
+    target: Target,
+    duration_seconds: u64,
+    always_enabled: bool,
+    expected_epoch: Option<(u64, bool)>,
 ) -> Result<Value> {
     let _busy = exclusive()?;
     let expires = control_deadline(duration_seconds, always_enabled, Instant::now())?;
@@ -262,6 +310,14 @@ pub fn local_arm_with_mode(
     native::validate_target(&target, false)?;
     let mut s = state();
     s.prune();
+    if expected_epoch.is_some_and(|(e, restore)| {
+        e != permissions::epoch() || (restore && permissions::restore_blocked())
+    }) {
+        return Err(error(
+            "RESTORE_REVOKED",
+            "Stop or a permission change cancelled automatic restore",
+        ));
+    }
     if s.lease.is_some() {
         return Err(error(
             "CONTROL_ALREADY_ARMED",
@@ -323,6 +379,12 @@ fn check_same_lease(lease: &Lease, input: bool) -> Result<()> {
             "The user stopped control; no further actions are authorized",
         )
     })?;
+    if now.target != lease.target {
+        return Err(error(
+            "TARGET_CHANGED",
+            "The approved target changed during this operation",
+        ));
+    }
     now.validate(&lease.root, &lease.id, Instant::now(), input)
 }
 fn checked_lease(ctx: &ToolContext, args: &Value, input: bool) -> Result<Lease> {
@@ -354,7 +416,7 @@ fn checked_lease(ctx: &ToolContext, args: &Value, input: bool) -> Result<Lease> 
             "The user must select a window and enable control in the local desktop app",
         )
     })?;
-    l.validate(ctx.workspace.root(), id, Instant::now(), input)?;
+    l.validate(ctx.workspace.root(), id, Instant::now(), true)?;
     Ok(l.clone())
 }
 fn record_frame(l: &Lease) -> Result<Value> {
@@ -758,8 +820,13 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
                 ));
             }
         }
+        if s.lease.is_none() {
+            return Ok(tool_ok(json!({"state":"stopped"})));
+        }
+        permissions::block_restore();
         s.stop("Stopped by connected client");
         drop(s);
+        permissions::suspend_active();
         wake();
         return Ok(tool_ok(json!({"state":"stopped"})));
     }
@@ -796,6 +863,9 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
         value["emergency_stop"] = json!("Ctrl+Alt+Escape or the local Stop button");
         return Ok(tool_ok(value));
     }
+    if name == "computer_list_windows" {
+        return background::list(ctx, args);
+    }
     if name == "computer_route" {
         return Ok(tool_ok(types::route(args)));
     }
@@ -805,10 +875,14 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
             "Computer tool arguments exceed 32 KiB",
         ));
     }
-    let input = matches!(name, "computer_action" | "computer_sequence");
+    let input = matches!(
+        name,
+        "computer_action" | "computer_sequence" | "computer_select_window"
+    );
     let l = checked_lease(ctx, args, input)?;
     let _busy = exclusive()?;
     match name {
+        "computer_select_window" => background::select(&l, args),
         "computer_snapshot" => snapshot_result(
             &l,
             args.get("include_ui")

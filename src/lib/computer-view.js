@@ -29,3 +29,15 @@ export function durationLabel(status) {
   const seconds = Number(status.remaining_seconds);
   return Number.isFinite(seconds) && seconds >= 0 ? `${Math.floor(seconds)}s` : 'Timed · 限時';
 }
+
+/** @param {Record<string, unknown> | null | undefined} grant */
+export function rememberedGrantLabel(grant) {
+  if (!grant?.remembered) return 'Session only · 僅本次會話';
+  if (grant.suspended) return 'Auto-restore suspended · 已暫停自動恢復';
+  return grant.restore_on_start ? 'Remembered · Restore after restart · 重啟後恢復' : 'App remembered · 已記住應用程式';
+}
+/** @param {Record<string, unknown>} entry */
+export function windowAvailability(entry) {
+  if (entry.minimized) return 'Minimized — not capturable · 已縮小，不能擷取';
+  return entry.foreground ? 'Foreground · 前台' : 'Background · 背景';
+}

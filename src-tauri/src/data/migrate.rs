@@ -25,7 +25,8 @@ pub fn load_or_migrate() -> AppResult<AppData> {
     if path.exists() {
         return load_or_recover_at(&path, &app_root);
     }
-    if let Some(data) = latest_valid_backup(&app_root)? {
+    if let Some(mut data) = latest_valid_backup(&app_root)? {
+        suspend_recovered_permissions(&mut data);
         write_data_at(&path, &app_root, &data)?;
         return Ok(data);
     }
@@ -68,11 +69,12 @@ fn load_or_recover_at(path: &Path, app_root: &Path) -> AppResult<AppData> {
         Ok(data) => Ok(data),
         Err(error) => {
             preserve_corrupt_file(path, app_root)?;
-            let Some(data) = latest_valid_backup(app_root)? else {
+            let Some(mut data) = latest_valid_backup(app_root)? else {
                 return Err(AppError::Message(format!(
                     "profile data is invalid and no valid backup is available: {error}"
                 )));
             };
+            suspend_recovered_permissions(&mut data);
             write_data_at(path, app_root, &data)?;
             Ok(data)
         }
@@ -291,5 +293,31 @@ mod tests {
             .expect("corruption archive")
             .filter_map(Result::ok)
             .any(|entry| entry.path().is_file()));
+    }
+}
+
+/// Backups preserve documents, not live authority. A recovered consent needs local approval.
+fn suspend_recovered_permissions(data: &mut AppData) {
+    for grant in &mut data.sandbox_permissions {
+        grant.enabled = false;
+    }
+    for grant in &mut data.computer_permissions {
+        grant.suspended = true;
+    }
+}
+#[cfg(test)]
+mod computer_recovery_tests {
+    use super::*;
+    #[test]
+    fn computer_profile_recovery_never_reactivates_old_consent() {
+        let mut data = AppData::default();
+        data.computer_permissions
+            .push(crate::tools::computer::permissions::SavedPermission {
+                restore_on_start: true,
+                suspended: false,
+                ..Default::default()
+            });
+        suspend_recovered_permissions(&mut data);
+        assert!(data.computer_permissions[0].suspended);
     }
 }

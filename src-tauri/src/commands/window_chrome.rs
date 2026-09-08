@@ -50,6 +50,10 @@ pub fn quit_app(app: AppHandle) -> AppResult<()> {
     Ok(())
 }
 
+pub fn is_exit_armed() -> bool {
+    ALLOW_EXIT.load(Ordering::SeqCst)
+}
+
 pub fn arm_allow_exit() {
     ALLOW_EXIT.store(true, Ordering::SeqCst);
 }

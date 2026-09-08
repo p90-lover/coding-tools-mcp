@@ -19,6 +19,10 @@ pub struct OAuthRefreshTokenRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppData {
     #[serde(default)]
+    pub sandbox_permissions: Vec<crate::tools::native_sandbox::SandboxGrant>,
+    #[serde(default)]
+    pub computer_permissions: Vec<crate::tools::computer::permissions::SavedPermission>,
+    #[serde(default)]
     pub frp_profiles: Vec<FrpProfile>,
     #[serde(default)]
     pub last_workspace_id: String,

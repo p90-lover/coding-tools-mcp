@@ -7,6 +7,7 @@ pub mod file;
 pub mod git;
 pub mod history;
 mod image_tool;
+pub mod native_sandbox;
 pub mod patch;
 pub mod policy;
 pub mod project_context;

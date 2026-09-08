@@ -195,6 +195,9 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "view_image" => image_tool::view_image(ws, &effective_args),
         "image_info" => image_tool::image_info(ws, &effective_args),
         "compare_images" => image_tool::compare_images(ws, &effective_args),
+        name if crate::tools::native_sandbox::NAMES.contains(&name) => {
+            crate::tools::native_sandbox::call(ctx, name, &effective_args)
+        }
         name if crate::tools::computer::schema::NAMES.contains(&name) => {
             crate::tools::computer::call(ctx, name, &effective_args)
         }

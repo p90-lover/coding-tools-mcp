@@ -1,7 +1,11 @@
 mod computer;
+mod sandbox;
+pub use sandbox::{sandbox_local_disable, sandbox_local_prepare, sandbox_local_status};
+pub(crate) mod computer_restore;
 pub use computer::{
-    computer_local_pause, computer_local_poll, computer_local_preview, computer_local_resume,
-    computer_local_start, computer_local_stop, computer_local_targets,
+    computer_local_forget, computer_local_pause, computer_local_permissions, computer_local_poll,
+    computer_local_preview, computer_local_resume, computer_local_start, computer_local_stop,
+    computer_local_targets,
 };
 mod app_info;
 mod frp_profiles;

@@ -262,3 +262,34 @@ pub async fn restart_actions_runtime(
 ) -> AppResult<RuntimeStatusDto> {
     restart_actions_by_id(&state, &id).await
 }
+
+/// Called by remembered local consent only; never replaces another running listener.
+pub(crate) async fn restore_mcp_service(
+    state: &AppState,
+    id: &str,
+    config: &str,
+    epoch: u64,
+) -> AppResult<()> {
+    let _guard = RESTART_GATE.lock().await;
+    let profile = profile_by_id(state, id)?;
+    if crate::tools::computer::permissions::epoch() != epoch
+        || crate::tools::computer::permissions::restore_blocked()
+        || crate::tools::computer::permissions::configuration(&profile) != config
+    {
+        return Err(AppError::Message(
+            "Remembered startup was cancelled or configuration changed".into(),
+        ));
+    }
+    if state.with_runtime(|runtime| Ok(runtime.is_running(id, ServiceKind::Mcp)))? {
+        return Ok(());
+    }
+    start_mcp_service(state, id).await?;
+    if crate::tools::computer::permissions::epoch() != epoch
+        || crate::tools::computer::permissions::restore_blocked()
+    {
+        // Start raced an explicit Stop. Revoke and stop only our just-started service.
+        let _ = stop_mcp_service(state, id).await;
+        return Err(AppError::Message("Startup cancelled by Stop".into()));
+    }
+    Ok(())
+}
