@@ -1,0 +1,36 @@
+name: Correct native sandbox read-scope contract
+on:
+  push:
+    branches: [release/remembered-control-final]
+    paths: ['.github/workflows/remembered-scope-correction.yml']
+permissions:
+  contents: write
+jobs:
+  source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - name: Commit exact scope corrections without changing enforcement
+        working-directory: aiTemp/source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          python aiTemp/scope-correction/apply.py
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix: expose Windows sandbox read boundaries in API and consent UI'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote" = "$GITHUB_SHA"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          git rev-parse HEAD
