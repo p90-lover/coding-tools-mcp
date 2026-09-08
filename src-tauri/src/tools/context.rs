@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
 
@@ -13,16 +13,20 @@ use crate::workspace::AuthConfig;
 
 const AUTO_HISTORY_CACHE_LIMIT: usize = 128;
 
+#[derive(Clone)]
 pub struct ToolContext {
+    pub(crate) live_policy: Arc<RwLock<Option<crate::tools::live_policy::LivePolicy>>>,
+    pub policy_revision: u64,
+    pub(crate) local_plan: Arc<Mutex<Value>>,
     pub workspace: Workspace,
     pub auth: AuthConfig,
     pub policy: PolicySettings,
-    pub approvals: ApprovalStore,
+    pub approvals: Arc<ApprovalStore>,
     pub tool_profile: String,
     pub permission_mode: String,
     pub harness: Harness,
-    default_cwd: Mutex<PathBuf>,
-    auto_history_sessions: Mutex<HashMap<String, Value>>,
+    default_cwd: Arc<Mutex<PathBuf>>,
+    auto_history_sessions: Arc<Mutex<HashMap<String, Value>>>,
     pub sessions: Arc<SessionStore>,
 }
 
@@ -76,12 +80,17 @@ impl ToolContext {
             workspace,
             auth,
             policy,
-            approvals: ApprovalStore::default(),
+            approvals: Arc::new(ApprovalStore::default()),
+            live_policy: Arc::new(RwLock::new(None)),
+            policy_revision: 0,
+            local_plan: Arc::new(Mutex::new(
+                serde_json::json!({"revision":0,"plan":[],"explanation":""}),
+            )),
             tool_profile: crate::tools::registry::normalize_tool_profile(&tool_profile).into(),
             permission_mode,
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
-            default_cwd: Mutex::new(root),
-            auto_history_sessions: Mutex::new(HashMap::new()),
+            default_cwd: Arc::new(Mutex::new(root)),
+            auto_history_sessions: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(SessionStore::new()),
         }
     }

@@ -52,7 +52,14 @@ pub fn spawn_listener(
     oauth_password: Option<String>,
     oauth_token_secret: Option<String>,
     policy: PolicySettings,
-) -> Result<(ShutdownSender, tauri::async_runtime::JoinHandle<()>), String> {
+) -> Result<
+    (
+        ShutdownSender,
+        tauri::async_runtime::JoinHandle<()>,
+        Arc<ToolContext>,
+    ),
+    String,
+> {
     if !matches!(auth_type.as_str(), "none" | "api_key" | "oauth") {
         return Err("Unsupported Actions authentication type; refusing to start".into());
     }
@@ -87,6 +94,18 @@ pub fn spawn_listener(
         None
     };
 
+    let workspace = tools::Workspace::new(workspace_path.clone()).map_err(|e| e.message())?;
+    let ctx = Arc::new(ToolContext::from_workspace(
+        workspace,
+        crate::workspace::AuthConfig {
+            auth_type: auth_type.clone(),
+            ..crate::workspace::AuthConfig::default()
+        },
+        policy.clone(),
+        "full".into(),
+        policy.permission_mode.clone(),
+    ));
+    let context = ctx.clone();
     // 在返回 Running 之前完成 bind，避免后台任务里的端口冲突被伪装成启动成功。
     let listener = bind_listener(actions_port)?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -96,13 +115,12 @@ pub fn spawn_listener(
             listener,
             actions_port,
             &profile_id,
-            workspace_path,
+            ctx,
             configured_public_url,
             auth_type,
             api_key,
             oauth,
             oauth_client_secret,
-            policy,
             shutdown_rx,
         )
         .await;
@@ -121,7 +139,7 @@ pub fn spawn_listener(
             );
         }
     });
-    Ok((shutdown_tx, handle))
+    Ok((shutdown_tx, handle, context))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -129,26 +147,14 @@ async fn serve(
     listener: tokio::net::TcpListener,
     actions_port: u16,
     profile_id: &str,
-    workspace_path: PathBuf,
+    ctx: Arc<ToolContext>,
     configured_public_url: String,
     auth_type: String,
     api_key: Option<String>,
     oauth: Option<Arc<OAuthRuntime>>,
     oauth_client_secret: Option<String>,
-    policy: PolicySettings,
     shutdown: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let workspace = tools::Workspace::new(workspace_path.clone()).map_err(|e| e.message())?;
-    let ctx = Arc::new(ToolContext::from_workspace(
-        workspace,
-        crate::workspace::AuthConfig {
-            auth_type: auth_type.clone(),
-            ..crate::workspace::AuthConfig::default()
-        },
-        policy.clone(),
-        "full".into(),
-        policy.permission_mode.clone(),
-    ));
     let tools: Vec<Value> = tools::list_tools()
         .into_iter()
         .filter(|tool| {

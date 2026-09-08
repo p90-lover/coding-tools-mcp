@@ -74,7 +74,6 @@ pub fn create_workspace(
 
 #[tauri::command]
 pub fn update_workspace(state: State<'_, AppState>, profile: WorkspaceProfile) -> AppResult<()> {
-    crate::tools::computer::emergency_stop("Workspace configuration changed");
     if !matches!(
         profile.auth.auth_type.as_str(),
         "noauth" | "bearer" | "oauth"
@@ -92,13 +91,26 @@ pub fn update_workspace(state: State<'_, AppState>, profile: WorkspaceProfile) -
         crate::auth::validate_redirect_uris(&profile.actions.oauth_redirect_uris)
             .map_err(AppError::Message)?;
     }
-    state.with_workspaces(|store| {
-        let current = store
-            .get(&profile.id)
-            .cloned()
-            .ok_or_else(|| AppError::Message(format!("workspace not found: {}", profile.id)))?;
-        validate_workspace_resources_update(store.list(), &current, &profile)?;
-        store.update(profile)
+    state.with_runtime(|runtime| {
+        runtime.commit_live_permissions(&profile, || {
+            state.with_workspaces(|store| {
+                let current = store.get(&profile.id).cloned().ok_or_else(|| {
+                    AppError::Message(format!("workspace not found: {}", profile.id))
+                })?;
+                validate_workspace_resources_update(store.list(), &current, &profile)?;
+                store.update(profile.clone())?;
+                if current.path != profile.path
+                    || current.runtime.local_port != profile.runtime.local_port
+                    || serde_json::to_value(&current.auth).ok()
+                        != serde_json::to_value(&profile.auth).ok()
+                {
+                    if let Ok(root) = PathBuf::from(&current.path).canonicalize() {
+                        crate::tools::computer::stop_workspace(&root);
+                    }
+                }
+                Ok(())
+            })
+        })
     })
 }
 

@@ -1,6 +1,12 @@
 use serde_json::{json, Value};
 
 pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
+    ("codex_tools_status", "Local coding tool capabilities", "Report implemented local Codex-style tools and explicit unsupported model/runtime features. Does not invoke Codex, an AI reviewer, or an inference API.", true, false, false),
+    ("tool_search", "Search installed tool definitions", "Search the current permitted local MCP tool catalog by name or description. No network, provider, installation, or agent launch.", true, false, false),
+    ("get_current_time", "Current system time", "Return system UTC Unix seconds and milliseconds. No network time query.", true, false, false),
+    ("get_plan", "Read current local plan", "Read the current listener's bounded in-memory plan and revision. No file writes or inference.", true, false, false),
+    ("update_plan", "Update local execution plan", "Replace a bounded in-memory plan with pending, in_progress or completed steps. Optional expected_revision prevents lost updates. Does not execute steps or call a model.", false, false, false),
+
     ("sandbox_status", "Native sandbox status", "Report availability and local permission for the pinned upstream Codex sandbox-only backend. Does not call a model or start setup.", true, false, false),
     ("sandbox_exec", "Read-only native sandbox execution", "Run an absolute executable and literal arguments under the prepared native Windows sandbox: read-only scoped filesystem, restricted network and private desktop. Requires prior local setup; never falls back to unsandboxed execution or launches a Codex agent.", false, false, false),
     ("computer_status", "Computer control status", "Inspect the Windows computer-use capability and locally enabled session. No tool can enable control; the user selects a window in the desktop UI.", true, false, true),
@@ -345,6 +351,11 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
 
 /// old Python 版本默认提供的核心工具集。默认 MCP 只暴露这一组，保持 Agent 的工具面稳定。
 pub const CORE_TOOLS: &[&str] = &[
+    "codex_tools_status",
+    "tool_search",
+    "get_current_time",
+    "get_plan",
+    "update_plan",
     "sandbox_status",
     "sandbox_exec",
     "computer_status",
@@ -394,6 +405,11 @@ pub const CORE_TOOLS: &[&str] = &[
 ];
 
 pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
+    "codex_tools_status",
+    "tool_search",
+    "get_current_time",
+    "get_plan",
+    "update_plan",
     "sandbox_status",
     "sandbox_exec",
     "computer_status",
@@ -431,6 +447,11 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 pub const ALLOWED_TOOLS: &[&str] = &[
+    "codex_tools_status",
+    "tool_search",
+    "get_current_time",
+    "get_plan",
+    "update_plan",
     "sandbox_status",
     "sandbox_exec",
     "computer_status",
@@ -513,6 +534,11 @@ pub const MUTATING_TOOLS: &[&str] = &[
 ];
 
 pub const READ_ONLY_TOOLS: &[&str] = &[
+    "codex_tools_status",
+    "tool_search",
+    "get_current_time",
+    "get_plan",
+    "update_plan",
     "sandbox_status",
     "sandbox_exec",
     "computer_status",
@@ -623,6 +649,9 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 }
 
 pub fn input_schema(name: &str) -> Value {
+    if crate::tools::local_tools::NAMES.contains(&name) {
+        return crate::tools::local_tools::input_schema(name);
+    }
     if crate::tools::native_sandbox::NAMES.contains(&name) {
         return crate::tools::native_sandbox::input(name);
     }

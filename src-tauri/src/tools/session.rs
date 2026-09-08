@@ -47,6 +47,25 @@ impl SessionStore {
             })
     }
 
+    pub fn revoke_for_policy_change(&self) {
+        let sessions: Vec<_> = self
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .values()
+            .cloned()
+            .collect();
+        for session in sessions {
+            if !session.has_exited() {
+                session.policy_revoked.store(true, Ordering::SeqCst);
+                session.mark_termination_reason("permission_changed");
+                tauri::async_runtime::spawn(async move {
+                    session.kill_and_wait().await;
+                });
+            }
+        }
+    }
+
     pub fn remove(&self, session_id: &str) {
         self.sessions
             .lock()
@@ -68,6 +87,7 @@ pub struct ExecSession {
     pub started_at: Instant,
     pub exit_code: Mutex<Option<i32>>,
     exited: AtomicBool,
+    policy_revoked: AtomicBool,
     termination_reason: Mutex<Option<String>>,
     reader_tasks: AsyncMutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
 }
@@ -94,6 +114,7 @@ impl ExecSession {
             started_at: Instant::now(),
             exit_code: Mutex::new(None),
             exited: AtomicBool::new(false),
+            policy_revoked: AtomicBool::new(false),
             termination_reason: Mutex::new(None),
             reader_tasks: AsyncMutex::new(Vec::new()),
         }
@@ -395,6 +416,21 @@ fn command_id_argument(args: &Value) -> Result<&str, WorkspaceError> {
 }
 
 pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, WorkspaceError> {
+    write_stdin_inner(store, args, None)
+}
+
+pub fn write_stdin_current(
+    ctx: &crate::tools::ToolContext,
+    args: &Value,
+) -> Result<Value, WorkspaceError> {
+    write_stdin_inner(&ctx.sessions, args, Some(ctx))
+}
+
+fn write_stdin_inner(
+    store: &SessionStore,
+    args: &Value,
+    ctx: Option<&crate::tools::ToolContext>,
+) -> Result<Value, WorkspaceError> {
     let command_id = command_id_argument(args)?;
     let session = store.get(command_id)?;
     let chars = args.get("chars").and_then(Value::as_str).unwrap_or("");
@@ -417,6 +453,10 @@ pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     }
 
     if !chars.is_empty() {
+        let _policy = ctx.map(|c| c.policy_execution_guard()).transpose()?;
+        if session.policy_revoked.load(Ordering::SeqCst) {
+            return Err(WorkspaceError::Tool { code: "COMMAND_PERMISSION_REVOKED", message: "Permission changed; this command cannot receive further input. Do not replay its prior actions.".into(), category: "permission", retryable: false });
+        }
         let mut stdin_guard = tauri::async_runtime::block_on(session.stdin.lock());
         let stdin = stdin_guard.as_mut().ok_or_else(|| WorkspaceError::Tool {
             code: "SESSION_CLOSED",

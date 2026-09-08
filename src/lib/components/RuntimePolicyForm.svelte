@@ -153,7 +153,7 @@
       <input type="checkbox" bind:checked={draftScreenCapture} />
       <span>允許此 Workspace 的 MCP 擷取螢幕、視窗及列出視窗標題</span>
     </label>
-    <p class="text-xs text-[var(--color-text-muted)]">預設關閉。啟用後，已連接的客戶端可要求截圖；可能包含私人資料。圖片只在記憶體處理，不會另存檔案或呼叫 Codex／OCR 模型。系統錄屏權限仍須自行授權。儲存後必須重新啟動 MCP；關閉也須重啟才會撤銷執行中服務的權限。</p>
+    <p class="text-xs text-[var(--color-text-muted)]">預設關閉。啟用後，已連接的客戶端可要求截圖；可能包含私人資料。圖片只在記憶體處理，不會另存檔案或呼叫 Codex／OCR 模型。系統錄屏權限仍須自行授權。儲存後即時套用，毋須重新啟動或重新連接 MCP。關閉擷取會撤銷該工作區的電腦操作授權；已送出的單一步驟無法追回。</p>
     <p class="text-xs text-[var(--color-text-muted)]">圖片查看、區域裁切、遮蔽、像素比較在本機執行；語意解讀由收到 MCP 圖片的 ChatGPT 負責。此開關不會開放 Actions 的螢幕擷取。</p>
   </fieldset>
   <div class="flex justify-end pt-1">

@@ -34,6 +34,7 @@ enum RuntimePhase {
 
 struct RuntimeEntry {
     phase: RuntimePhase,
+    context: Option<crate::tools::SharedToolContext>,
     shutdown: Option<mcp::ShutdownSender>,
     handle: Option<JoinHandle<()>>,
     error_message: Option<String>,
@@ -47,6 +48,39 @@ pub struct RuntimeSupervisor {
 }
 
 impl RuntimeSupervisor {
+    pub fn commit_live_permissions(
+        &self,
+        profile: &WorkspaceProfile,
+        persist: impl FnOnce() -> AppResult<()>,
+    ) -> AppResult<()> {
+        let mut updates = Vec::new();
+        for kind in [ServiceKind::Mcp, ServiceKind::Actions] {
+            if let Some(context) = self
+                .entries
+                .get(&(profile.id.clone(), kind))
+                .and_then(|e| e.context.as_ref())
+            {
+                if PathBuf::from(&profile.path).canonicalize().ok().as_deref()
+                    != Some(context.workspace.root())
+                {
+                    continue;
+                }
+                let (policy, tool_profile) = match kind {
+                    ServiceKind::Mcp => (
+                        PolicySettings::from_runtime(&profile.runtime),
+                        profile.runtime.tool_profile.clone(),
+                    ),
+                    ServiceKind::Actions => (
+                        PolicySettings::from_actions_config(&profile.actions),
+                        "full".into(),
+                    ),
+                };
+                updates.push((context.clone(), policy, tool_profile));
+            }
+        }
+        crate::tools::live_policy::commit_updates(updates, persist)
+    }
+
     pub fn mcp_status(&self, profile: &WorkspaceProfile) -> RuntimeStatusDto {
         self.status(profile, ServiceKind::Mcp)
     }
@@ -218,6 +252,7 @@ impl RuntimeSupervisor {
             key.clone(),
             RuntimeEntry {
                 phase: RuntimePhase::Starting,
+                context: None,
                 shutdown: None,
                 handle: None,
                 error_message: None,
@@ -344,7 +379,7 @@ impl RuntimeSupervisor {
         };
 
         match spawn_result {
-            Ok((shutdown, handle)) => {
+            Ok((shutdown, handle, context)) => {
                 let started_at = self
                     .entries
                     .get(&key)
@@ -354,6 +389,7 @@ impl RuntimeSupervisor {
                     key,
                     RuntimeEntry {
                         phase: RuntimePhase::Running,
+                        context: Some(context),
                         shutdown: Some(shutdown),
                         handle: Some(handle),
                         error_message: None,
@@ -376,6 +412,7 @@ impl RuntimeSupervisor {
                     key,
                     RuntimeEntry {
                         phase: RuntimePhase::Error,
+                        context: None,
                         shutdown: None,
                         handle: None,
                         error_message: Some(err.to_string()),
@@ -580,6 +617,7 @@ mod tests {
     fn entry(phase: RuntimePhase, started_at: Option<std::time::Instant>) -> RuntimeEntry {
         RuntimeEntry {
             phase,
+            context: None,
             shutdown: None,
             handle: None,
             error_message: None,

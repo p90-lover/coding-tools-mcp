@@ -70,6 +70,60 @@ fn policy_tool_err(err: PolicyError) -> Value {
 /// **唯一工具执行入口**。MCP `tools/call` 与 Actions `POST /actions/{tool}` 必须且只能调用此函数。
 /// 策略校验、分发、错误格式在此统一，两路传输层不得另做执行前校验（Actions 仅允许额外的暴露层 `validate_actions_exposure`）。
 pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
+    call_current(ctx, name, args, false)
+}
+pub fn call_tool_mcp(ctx: &ToolContext, name: &str, args: &Value) -> Value {
+    call_current(ctx, name, args, true)
+}
+fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bool) -> Value {
+    let snapshot = match ctx.for_request() {
+        Ok(value) => value,
+        Err(error) => return tool_err(error),
+    };
+    let ctx = &snapshot;
+    if enforce_profile
+        && !crate::tools::registry::exposed_tool_names(&ctx.tool_profile).contains(&name)
+    {
+        return tool_err_code(
+            "TOOL_PROFILE_RESTRICTED",
+            "The current live tool profile does not permit this tool".into(),
+            "permission",
+        );
+    }
+    let _policy_guard = if crate::tools::live_policy::fence_entire_call(name) {
+        match ctx.policy_execution_guard() {
+            Ok(guard) => Some(guard),
+            Err(error) => return tool_err(error),
+        }
+    } else {
+        None
+    };
+    let mut result = call_tool_snapshot(ctx, name, args);
+    if (name.starts_with("computer_")
+        || matches!(
+            name,
+            "capture_screenshot" | "capture_window" | "list_windows" | "list_displays"
+        ))
+        && ctx.current_policy_revision().ok() != Some(ctx.policy_revision)
+    {
+        return tool_err_code(
+            "CAPTURE_PERMISSION_CHANGED",
+            "Permissions changed during capture; the frame was discarded. No image was saved."
+                .into(),
+            "permission",
+        );
+    }
+    if name == "server_info" {
+        result["live_permissions"] = json!({"supported":true,"revision":ctx.policy_revision,
+            "permission_mode":ctx.permission_mode,"approval_mode":ctx.policy.approval_mode,
+            "screen_capture_allowed":ctx.policy.allow_screen_capture,"tool_profile":ctx.tool_profile,
+            "permission_restart_required":false,"permission_relink_required":false,
+            "catalog_refresh_may_be_needed_for_tool_profile_change":true});
+    }
+    result
+}
+
+fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
     let mut effective_args = apply_default_cwd(ctx, name, args);
     // Run policy once before approval to surface only non-overridable hard
     // boundaries such as protected paths, host scope, shell escapes, and
@@ -166,6 +220,9 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
 
     let ws = &ctx.workspace;
     let result = match name {
+        "codex_tools_status" | "tool_search" | "get_current_time" | "get_plan" | "update_plan" => {
+            crate::tools::local_tools::call(ctx, name, &effective_args)
+        }
         "history_session_bootstrap" => history::bootstrap(ctx, &effective_args),
         "history_session_checkpoint" => history::checkpoint(ctx, &effective_args),
         "history_session_validate" => history::validate(ctx, &effective_args),
@@ -184,7 +241,7 @@ pub fn call_tool(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "apply_patch" => patch::apply_patch(ctx, &effective_args),
         "exec_command" => exec::exec_command(ctx, &effective_args),
         "read_output" => session::read_output(&ctx.sessions, &effective_args),
-        "write_stdin" => session::write_stdin(&ctx.sessions, &effective_args),
+        "write_stdin" => session::write_stdin_current(ctx, &effective_args),
         "kill_command" => session::kill_command(&ctx.sessions, &effective_args),
         "kill_session" => session::kill_session(&ctx.sessions, &effective_args),
         "git_status" => git::git_status(ws, &effective_args),

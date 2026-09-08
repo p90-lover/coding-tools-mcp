@@ -165,6 +165,11 @@ pub struct ApprovalStore {
 }
 
 impl ApprovalStore {
+    pub fn revoke_all(&self) {
+        self.pending.lock().expect("pending approvals lock").clear();
+        self.grants.lock().expect("approval grants lock").clear();
+    }
+
     pub fn preflight(
         &self,
         tool_name: &str,

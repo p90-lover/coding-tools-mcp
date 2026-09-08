@@ -437,7 +437,7 @@
     await updateWorkspace(next);
     profile = next;
     await load();
-    await promptServiceRestart(mcpStatus === "running", "MCP 服务");
+    showToast("Permissions applied live · 權限已即時生效；毋須重啟或重新連接 MCP", { kind: "success" });
   }
 
   async function saveActionsPolicy(draft: ActionsPolicyDraft) {
@@ -455,7 +455,7 @@
     await updateWorkspace(next);
     profile = next;
     await load();
-    await promptServiceRestart(actionsStatus === "running", "Actions 服务");
+    showToast("Permissions applied live · 權限已即時生效；毋須重啟 Actions", { kind: "success" });
   }
 
   async function saveMcpAuth(auth: AuthConfig, options?: { skipRuntimeRestart?: boolean }) {

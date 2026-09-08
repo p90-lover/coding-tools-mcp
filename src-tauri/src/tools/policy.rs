@@ -90,7 +90,7 @@ fn canonical_approval_mode(value: &str) -> String {
     .to_string()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicySettings {
     pub allowed_commands: HashSet<String>,
     pub workspace_local_entries: bool,

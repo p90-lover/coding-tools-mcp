@@ -1,16 +1,26 @@
+use crate::tools::dispatch::call_tool_mcp as call_tool;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 
 use crate::tools::{
-    call_tool, list_tools_for_profile, wrap_mcp_tool_result, SharedToolContext, ToolContext,
-    Workspace,
+    list_tools_for_profile, wrap_mcp_tool_result, SharedToolContext, ToolContext, Workspace,
 };
 use crate::workspace::AuthConfig;
 
 pub type SharedState = SharedToolContext;
 
 pub fn handle_request(state: &SharedState, body: &Value) -> Value {
+    let snapshot = match state.for_request() {
+        Ok(value) => Arc::new(value),
+        Err(error) => {
+            return json!({"jsonrpc":"2.0","id":body.get("id").cloned().unwrap_or(Value::Null),"error":{"code":-32603,"message":error.message()}})
+        }
+    };
+    handle_current_request(&snapshot, body)
+}
+
+fn handle_current_request(state: &SharedState, body: &Value) -> Value {
     let method = body.get("method").and_then(Value::as_str).unwrap_or("");
     let id = body.get("id").cloned().unwrap_or(Value::Null);
     let params = body.get("params").cloned().unwrap_or(Value::Null);

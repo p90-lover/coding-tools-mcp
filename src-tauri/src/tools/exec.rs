@@ -249,19 +249,22 @@ async fn run_command(
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONLEGACYWINDOWSSTDIO", "0");
 
-    let child = command.spawn().map_err(|e| WorkspaceError::ToolDetails {
-        code: "COMMAND_SPAWN_FAILED",
-        message: format!("Failed to start command: {e}"),
-        category: "runtime",
-        retryable: true,
-        details: json!({
-            "termination_reason": "spawn_failed",
-            "recoverable": true,
-            "suggestion": "检查命令路径、权限和运行时环境后重试"
-        }),
-    })?;
+    let session = {
+        let _policy = ctx.policy_execution_guard()?;
+        let child = command.spawn().map_err(|e| WorkspaceError::ToolDetails {
+            code: "COMMAND_SPAWN_FAILED",
+            message: format!("Failed to start command: {e}"),
+            category: "runtime",
+            retryable: true,
+            details: json!({
+                "termination_reason": "spawn_failed",
+                "recoverable": true,
+                "suggestion": "检查命令路径、权限和运行时环境后重试"
+            }),
+        })?;
 
-    let session = ctx.sessions.insert(ExecSession::new_with_mode(child, tty));
+        ctx.sessions.insert(ExecSession::new_with_mode(child, tty))
+    };
     session.spawn_readers().await;
     let deadline = start + limit;
 
@@ -272,6 +275,7 @@ async fn run_command(
     }
 
     if !tty && !stdin_text.is_empty() {
+        let _policy = ctx.policy_execution_guard()?;
         let mut stdin_guard = session.stdin.lock().await;
         if let Some(stdin) = stdin_guard.as_mut() {
             use tokio::io::AsyncWriteExt;
