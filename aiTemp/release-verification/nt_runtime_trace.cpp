@@ -1,4 +1,4 @@
-// Fixture-only self-instrumentation. No injection into other processes and no access-policy changes.
+// Fixture-only self-instrumentation. No injection into other processes or policy changes.
 #include <winsock2.h>
 #include <windows.h>
 #include <winternl.h>
@@ -6,12 +6,12 @@
 #include "detours.h"
 using OpenKey = NTSTATUS (NTAPI*)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES);
 using OpenKeyEx = NTSTATUS (NTAPI*)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,ULONG);
-using CreateFile = NTSTATUS (NTAPI*)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,PLARGE_INTEGER,ULONG,ULONG,ULONG,ULONG,PVOID,ULONG);
-using OpenFile = NTSTATUS (NTAPI*)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,ULONG,ULONG);
+using CreateNativeFile = NTSTATUS (NTAPI*)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,PLARGE_INTEGER,ULONG,ULONG,ULONG,ULONG,PVOID,ULONG);
+using OpenNativeFile = NTSTATUS (NTAPI*)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,ULONG,ULONG);
 using OpenObject = NTSTATUS (NTAPI*)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES);
-using QueryValue = NTSTATUS (NTAPI*)(HANDLE,PUNICODE_STRING,KEY_VALUE_INFORMATION_CLASS,PVOID,ULONG,PULONG);
+using QueryValue = NTSTATUS (NTAPI*)(HANDLE,PUNICODE_STRING,ULONG,PVOID,ULONG,PULONG);
 static OpenKey originalKey; static OpenKeyEx originalKeyEx;
-static CreateFile originalCreate; static OpenFile originalFile;
+static CreateNativeFile originalCreate; static OpenNativeFile originalFile;
 static OpenObject originalSection, originalDirectory, originalEvent;
 static QueryValue originalQuery;
 static thread_local bool printing=false;
@@ -30,7 +30,7 @@ static NTSTATUS NTAPI tracedFile(PHANDLE h,ACCESS_MASK a,POBJECT_ATTRIBUTES o,PI
 static NTSTATUS NTAPI tracedSection(PHANDLE h,ACCESS_MASK a,POBJECT_ATTRIBUTES o) {auto r=originalSection(h,a,o);record("OpenSection",r,a,o);return r;}
 static NTSTATUS NTAPI tracedDirectory(PHANDLE h,ACCESS_MASK a,POBJECT_ATTRIBUTES o) {auto r=originalDirectory(h,a,o);record("OpenDirectory",r,a,o);return r;}
 static NTSTATUS NTAPI tracedEvent(PHANDLE h,ACCESS_MASK a,POBJECT_ATTRIBUTES o) {auto r=originalEvent(h,a,o);record("OpenEvent",r,a,o);return r;}
-static NTSTATUS NTAPI tracedQuery(HANDLE h,PUNICODE_STRING n,KEY_VALUE_INFORMATION_CLASS c,PVOID b,ULONG z,PULONG out) {auto r=originalQuery(h,n,c,b,z,out);if(r==LONG(0xc0000022)||r==LONG(0xc0000034)){OBJECT_ATTRIBUTES o={};o.RootDirectory=h;o.ObjectName=n;record("QueryValue",r,0,&o);}return r;}
+static NTSTATUS NTAPI tracedQuery(HANDLE h,PUNICODE_STRING n,ULONG c,PVOID b,ULONG z,PULONG out) {auto r=originalQuery(h,n,c,b,z,out);if(r==LONG(0xc0000022)||r==LONG(0xc0000034)){OBJECT_ATTRIBUTES o={};o.RootDirectory=h;o.ObjectName=n;record("QueryValue",r,0,&o);}return r;}
 static bool install() {
     HMODULE n=GetModuleHandleW(L"ntdll.dll");
     if(DetourTransactionBegin()!=NO_ERROR || DetourUpdateThread(GetCurrentThread())!=NO_ERROR) return false;
