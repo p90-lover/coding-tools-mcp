@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/mcp-dual-era-full-catalog.yml
       - aiTemp/dual-era/ci.py
+      - aiTemp/connection-tests/http.rs
   workflow_dispatch:
 
 permissions:
