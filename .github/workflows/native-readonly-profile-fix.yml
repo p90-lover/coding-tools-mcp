@@ -15,6 +15,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     env:
+      SOURCE: ${{ github.sha }}
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
       CARGO_INCREMENTAL: '0'
