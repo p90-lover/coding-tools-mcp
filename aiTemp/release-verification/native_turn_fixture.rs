@@ -369,3 +369,57 @@ fn native_bridge_actual_turns_against_loopback_fixture() {
     hub.cancel("fixture_complete");
     println!("PASS: real native start/send/review/compact/interrupt/unsubscribe; duplicate not replayed; loopback synthetic Responses only, no paid model or tool execution");
 }
+
+#[test]
+fn native_bridge_review_parent_survives_delegate_start() {
+    for response_first in [true, false] {
+        let mut memory = Memory::default();
+        memory.threads.insert(
+            "owned".into(),
+            ThreadState {
+                id: "owned".into(),
+                status: "starting".into(),
+                turn_id: response_first.then(|| "review-parent".into()),
+                ..Default::default()
+            },
+        );
+        apply_notification(
+            &mut memory,
+            "item/started",
+            &json!({
+            "threadId":"owned","turnId":"review-parent","item":{"id":"entry","type":"enteredReviewMode"}}),
+        );
+        apply_notification(
+            &mut memory,
+            "turn/started",
+            &json!({
+            "threadId":"owned","turn":{"id":"delegate-child","status":"inProgress"}}),
+        );
+        assert_eq!(
+            memory.threads["owned"].turn_id.as_deref(),
+            Some("review-parent"),
+            "NESTED_REVIEW_ID_MUST_NOT_REPLACE_PARENT"
+        );
+        apply_notification(
+            &mut memory,
+            "turn/completed",
+            &json!({
+            "threadId":"owned","turn":{"id":"delegate-child","status":"failed"}}),
+        );
+        assert_ne!(memory.threads["owned"].status, "failed");
+        apply_notification(
+            &mut memory,
+            "item/completed",
+            &json!({
+            "threadId":"owned","turnId":"review-parent","item":{"id":"exit","type":"exitedReviewMode","review":"synthetic review result"}}),
+        );
+        apply_notification(
+            &mut memory,
+            "turn/completed",
+            &json!({
+            "threadId":"owned","turn":{"id":"review-parent","status":"completed"}}),
+        );
+        assert_eq!(memory.threads["owned"].status, "completed");
+        assert_eq!(memory.threads["owned"].answer, "synthetic review result");
+    }
+}

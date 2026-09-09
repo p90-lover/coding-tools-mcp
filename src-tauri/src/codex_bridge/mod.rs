@@ -851,8 +851,26 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
         return;
     }
     match method {
+        "item/started" | "item/completed" if params["item"]["type"] == "enteredReviewMode" => {
+            // Inline review emits its parent item before the delegate's start event.
+            // Pin it even when the review/start response has not arrived yet.
+            if thread.status == "starting" && thread.turn_id.is_none() {
+                if let Some(turn) = params["turnId"].as_str().filter(|s| token(s)) {
+                    thread.turn_id = Some(turn.into());
+                }
+            }
+        }
         "turn/started" => {
             if let Some(turn) = params["turn"]["id"].as_str().filter(|s| token(s)) {
+                // Codex forwards a review delegate's start under the parent thread.
+                // It must not replace the authoritative outer review/turn identity.
+                if thread
+                    .turn_id
+                    .as_deref()
+                    .is_some_and(|active| active != turn)
+                {
+                    return;
+                }
                 if thread.turn_id.as_deref() == Some(turn)
                     && matches!(
                         thread.status.as_str(),
@@ -871,8 +889,6 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
                     .turn_id
                     .as_deref()
                     .is_none_or(|before| before == turn)
-                    || thread.status == "starting"
-                    || thread.status == "compacting"
                 {
                     thread.turn_id = Some(turn.into());
                     thread.status = match params["turn"]["status"].as_str() {
