@@ -321,6 +321,10 @@ impl Hub {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        #[cfg(test)]
+        if std::env::var_os("NATIVE_CODEX_PROBE_BIN").is_some() {
+            command.env("CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG", "1");
+        }
         OwnedProcess::configure(&mut command);
         let mut child = command
             .spawn()
@@ -604,6 +608,18 @@ impl Bridge {
     }
     fn receive(&self, value: Value) {
         if let Some(method) = value["method"].as_str() {
+            #[cfg(test)]
+            if std::env::var_os("NATIVE_CODEX_PROBE_BIN").is_some()
+                && (method == "error"
+                    || (method == "turn/completed"
+                        && value["params"]["turn"]["status"] == "failed"))
+            {
+                // Credential-free fixture only; no production logging of payloads.
+                eprintln!(
+                    "SYNTHETIC_NATIVE_FAILURE {}",
+                    bounded(&value.to_string(), 4096)
+                );
+            }
             if value.get("id").is_some() {
                 // No server-supplied command or permission request becomes a local approval.
                 let reply = if matches!(
@@ -636,7 +652,10 @@ impl Bridge {
                 let result = if value.get("error").is_some() {
                     #[cfg(test)]
                     if std::env::var_os("NATIVE_CODEX_PROBE_BIN").is_some() {
-                        eprintln!("Isolated bridge RPC error: {}", bounded(&value["error"].to_string(), 2048));
+                        eprintln!(
+                            "Isolated bridge RPC error: {}",
+                            bounded(&value["error"].to_string(), 2048)
+                        );
                     }
                     Err(format!("Native RPC rejected (code {}). Inspect local runtime configuration; no automatic fallback",value["error"]["code"].as_i64().unwrap_or(-1)))
                 } else {
@@ -654,23 +673,16 @@ impl Bridge {
             return Err("Native consent was revoked before submission".into());
         }
         let id = if request.operation == "start" {
-            // Named permissions replace removed readOnly.access in native 0.153.4.
-            // A fresh profile avoids inheriting another configured profile's rules.
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| "System clock unavailable")?
-                .as_nanos();
-            let profile = format!("coding_tools_readonly_{}_{nonce}", std::process::id());
+            // The built-in read-only profile is supported by native Windows and macOS.
+            // Split filesystem read restrictions are not supported by the unelevated
+            // Windows sandbox. Never substitute an unsandboxed permission profile.
+            const PROFILE: &str = ":read-only";
             let value = self.rpc("thread/start", json!({"cwd":self.root,"model":self.options.model,
-                "permissions":profile,
-                "config":{"permissions":{(profile.clone()):{
-                    "filesystem":{":root":"deny",":minimal":"read",":workspace_roots":{".":"read"}},
-                    "network":{"enabled":false}}}},
-                "approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,
+                "permissions":PROFILE,"approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,
                 "developerInstructions":"Work only on the explicitly requested task. Never delete files; use Trash for unwanted files and aiTemp for temporary files. Do not change permissions or use unsandboxed fallbacks. Explain evidence and uncertainty. Do not launch extra agents unless explicitly requested."}))?;
-            if value["activePermissionProfile"]["id"].as_str() != Some(profile.as_str()) {
+            if value["activePermissionProfile"]["id"].as_str() != Some(PROFILE) {
                 self.stop("native_permission_profile_mismatch");
-                return Err("Native runtime did not confirm the requested read-only profile; no turn submitted".into());
+                return Err("Native runtime did not confirm the built-in read-only profile; no turn submitted".into());
             }
             let id = value["thread"]["id"]
                 .as_str()
@@ -780,7 +792,8 @@ impl Bridge {
             _ => self.rpc(
                 "turn/start",
                 json!({"threadId":id,"input":[{"type":"text","text":request.text}],
-                // Inherit the confirmed thread-scoped profile; never reset it to legacy broad reads.
+                // Reassert the same supported boundary on every turn, including send.
+                "permissions":":read-only","approvalsReviewer":"user",
                 "cwd":self.root,"model":self.options.model,"approvalPolicy":"on-request"}),
             ),
         };
@@ -904,6 +917,19 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
                 thread.item_id = item.into();
                 thread.answer = bounded(text, MAX_TEXT);
                 thread.answer_truncated = text.len() > MAX_TEXT;
+            }
+        }
+        "item/completed" if params["item"]["type"] == "exitedReviewMode" => {
+            if params["turnId"].as_str() != thread.turn_id.as_deref() {
+                return;
+            }
+            if let (Some(item), Some(review)) = (
+                params["item"]["id"].as_str().filter(|s| token(s)),
+                params["item"]["review"].as_str(),
+            ) {
+                thread.item_id = item.into();
+                thread.answer = bounded(review, MAX_TEXT);
+                thread.answer_truncated = review.len() > MAX_TEXT;
             }
         }
         "item/completed" if params["item"]["type"] == "contextCompaction" => {

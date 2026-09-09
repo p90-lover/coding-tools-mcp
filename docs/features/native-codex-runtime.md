@@ -107,3 +107,21 @@ stdio 單一資料框上限為 512 KiB，送出佇列有容量限制，每次 RP
 人類學習流程：先寫驗收條件、預測可能缺陷，再把原生審查解釋與程式碼及少量相關檢查比較，同時記錄確認及被否定的假設。AI 任務調適則是明確把已審查專案筆記提供給後續任務；介接層不會暗中匯入完整對話或訓練模型。只有審查真的執行、記錄其模型與來源上下文、核對結論，才可描述為獨立審查；推進看板階段本身並不足以證明。
 
 主要參考：[官方 App Server 文件](https://developers.openai.com/codex/app-server/)及[固定版本協定結構](https://github.com/openai/codex/tree/721f46a07ab48f00b5e7cdbf2efb78b993d100de/codex-rs/app-server-protocol/schema/json/v2)。
+
+## 0.4.2 release boundary / 發行範圍
+
+The native bridge uses Codex 0.153.4's built-in `:read-only` profile and reasserts
+it for subsequent turns. Read-only is not a promise that only workspace files
+are readable: native platform read access can be broader. The bridge never
+requests an unsandboxed fallback and declines unsupported approval requests.
+Inline review output is read from the native `exitedReviewMode` event. Native
+connection and inference remain explicitly opt-in in the visible local UI.
+CI uses an isolated loopback synthetic Responses provider, not paid inference,
+a real code review, or acceptance of the user's live provider/ChatGPT setup.
+
+原生橋接使用 Codex 0.153.4 內建的 `:read-only` 權限設定，後續回合亦會
+明確套用相同設定。唯讀不表示只能讀取工作區；原生平台的可讀範圍可能更廣。
+不會自動改用無沙箱模式，不支援的授權要求會被拒絕。行內審查會讀取
+`exitedReviewMode` 事件的結果；原生連線及模型使用仍須於可見的本機 UI 明確啟用。
+CI 只使用隔離的本機模擬 Responses 服務，不代表付費推論、真實程式碼審查，
+或使用者的實際供應商／ChatGPT 環境已完成驗收。

@@ -120,6 +120,7 @@ impl Drop for Fixture {
     }
 }
 fn go(hub: &Hub, operation: &str, id: &str, thread: Option<&str>, text: Option<&str>) -> Value {
+    eprintln!("NATIVE_LIFECYCLE_STAGE {operation}");
     hub.admit(Control {
         operation: operation.into(),
         request_id: id.into(),
@@ -329,7 +330,13 @@ fn native_bridge_actual_turns_against_loopback_fixture() {
         Some("Return the synthetic empty review; do not run tools"),
     );
     assert_eq!(review["ok"], true, "{review}");
-    terminal(&hub, id);
+    let reviewed = terminal(&hub, id);
+    assert!(
+        reviewed["answer"]
+            .as_str()
+            .is_some_and(|s| s.contains("Synthetic protocol fixture")),
+        "{reviewed}"
+    );
     let compact = go(&hub, "compact", "fixture-compact", Some(id), None);
     assert_eq!(compact["ok"], true, "{compact}");
     terminal(&hub, id);

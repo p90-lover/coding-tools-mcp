@@ -613,7 +613,7 @@ pub fn canonical_tool_name(name: &str) -> &str {
 
 pub fn normalize_tool_profile(profile: &str) -> &'static str {
     match profile {
-        "advanced" => "advanced",
+        "advanced" | "full" => "advanced",
         "read-only" => "read-only",
         "compat-readonly-all" => "compat-readonly-all",
         _ => "core",
@@ -663,7 +663,9 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 }
 
 pub fn input_schema(name: &str) -> Value {
-    if crate::tools::codex_runtime::NAMES.contains(&name) { return crate::tools::codex_runtime::input_schema(name); }
+    if crate::tools::codex_runtime::NAMES.contains(&name) {
+        return crate::tools::codex_runtime::input_schema(name);
+    }
     if crate::tools::local_tools::NAMES.contains(&name) {
         return crate::tools::local_tools::input_schema(name);
     }
@@ -1100,6 +1102,27 @@ mod tests {
     use super::{input_schema, list_tools_for_profile};
 
     #[test]
+    fn full_profile_really_exposes_the_complete_catalog() {
+        let full = list_tools_for_profile("full");
+        let advanced = list_tools_for_profile("advanced");
+        assert_eq!(full, advanced);
+        let names: Vec<_> = full
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        for expected in [
+            "codex_tools_status",
+            "harness_status",
+            "start_task",
+            "update_plan",
+            "capture_screenshot",
+            "computer_action",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+    }
+
+    #[test]
     fn core_catalog_exposes_chatgpt_compatible_tools() {
         let tools = list_tools_for_profile("core");
         let names: Vec<_> = tools
@@ -1115,8 +1138,16 @@ mod tests {
                 + crate::tools::local_tools::NAMES.len()
                 + crate::tools::codex_runtime::NAMES.len()
         );
-        for name in crate::tools::codex_runtime::NAMES { assert!(names.contains(name)); }
-        assert_eq!(list_tools_for_profile("compat-readonly-all").into_iter().find(|t|t["name"]=="codex_agent_control").unwrap()["annotations"]["readOnlyHint"], false);
+        for name in crate::tools::codex_runtime::NAMES {
+            assert!(names.contains(name));
+        }
+        assert_eq!(
+            list_tools_for_profile("compat-readonly-all")
+                .into_iter()
+                .find(|t| t["name"] == "codex_agent_control")
+                .unwrap()["annotations"]["readOnlyHint"],
+            false
+        );
         for name in crate::tools::local_tools::NAMES {
             assert!(names.contains(name));
         }

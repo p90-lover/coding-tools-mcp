@@ -10,6 +10,67 @@ use crate::workspace::AuthConfig;
 
 pub type SharedState = SharedToolContext;
 
+pub const MODERN_PROTOCOL: &str = "2026-07-28";
+pub const LEGACY_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18"];
+pub const SUPPORTED_PROTOCOLS: &[&str] = &[MODERN_PROTOCOL, "2025-11-25", "2025-06-18"];
+
+fn server_info() -> Value {
+    json!({"name":"coding-tools-mcp","title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")})
+}
+fn instructions() -> &'static str {
+    "Use these tools only for local coding operations inside the configured workspace. When the client supplies _meta.openai/session, the server automatically creates or resumes the matching bounded history session before the first non-history tool call and reports the stable target under history_session. The same conversation identifier resumes the same Markdown archive after a server restart. history_session_bootstrap remains available for clients without session metadata and whenever verbatim initial_user_input must be captured. Use history_session_search followed by history_session_read only when exact earlier context is needed; follow next_cursor with the returned content hash until the relevant archive page is complete. Preserve session_key and current_path, then pass them unchanged as session_key and expected_path to history_session_checkpoint. After completing each user-requested task, call history_session_checkpoint before the final response and pass that user's verbatim request as raw_user_input. Only state that progress was saved after checkpoint returns ok=true with the same target. The server cannot access ChatGPT transcript text that was not provided as a tool argument, so per-turn checkpoint text remains model-mediated rather than automatic background persistence. Every tool result also includes the bounded project_instructions selected from the addressed workspace or linked-project path."
+}
+fn request_protocol(body: &Value) -> Option<&str> {
+    body.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+        .and_then(Value::as_str)
+}
+fn protocol_error(requested: &str) -> Value {
+    json!({"code":-32022,"message":"Unsupported protocol version","data":{"supported":SUPPORTED_PROTOCOLS,"requested":requested}})
+}
+fn validate_request_protocol(body: &Value) -> Result<bool, Value> {
+    let Some(version) = request_protocol(body) else {
+        return Ok(false);
+    };
+    if !SUPPORTED_PROTOCOLS.contains(&version) {
+        return Err(protocol_error(version));
+    }
+    if version == MODERN_PROTOCOL {
+        let caps = body.pointer("/params/_meta/io.modelcontextprotocol~1clientCapabilities");
+        if caps.is_none_or(|v| !v.is_object()) {
+            return Err(
+                json!({"code":-32021,"message":"Modern MCP requests require clientCapabilities"}),
+            );
+        }
+        if let Some(info) = body.pointer("/params/_meta/io.modelcontextprotocol~1clientInfo") {
+            if !info.is_object() {
+                return Err(
+                    json!({"code":-32602,"message":"clientInfo must be an object when provided"}),
+                );
+            }
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+fn modernize_result(method: &str, mut result: Value) -> Value {
+    if let Some(object) = result.as_object_mut() {
+        object
+            .entry("resultType")
+            .or_insert(Value::String("complete".into()));
+        if matches!(method, "server/discover" | "tools/list") {
+            object.entry("ttlMs").or_insert(json!(0));
+            object
+                .entry("cacheScope")
+                .or_insert(Value::String("private".into()));
+        }
+        let meta = object.entry("_meta").or_insert_with(|| json!({}));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert("io.modelcontextprotocol/serverInfo".into(), server_info());
+        }
+    }
+    result
+}
+
 pub fn handle_request(state: &SharedState, body: &Value) -> Value {
     let snapshot = match state.for_request() {
         Ok(value) => Arc::new(value),
@@ -28,41 +89,61 @@ fn handle_current_request(state: &SharedState, body: &Value) -> Value {
     if id.is_null() && method.starts_with("notifications/") {
         return Value::Null;
     }
-
-    let result = match method {
-        "initialize" => Ok(initialize_result()),
-        "ping" => Ok(serde_json::json!({})),
-        "tools/list" => {
-            let tools = list_tools_for_profile(&state.tool_profile);
-            Ok(serde_json::json!({ "tools": tools }))
-        }
-        "tools/call" => handle_tools_call(state, &params),
-        _ => Err(serde_json::json!({
-            "code": -32601,
-            "message": format!("Method not found: {method}")
-        })),
+    let modern = match validate_request_protocol(body) {
+        Ok(value) => value,
+        Err(error) => return json!({"jsonrpc":"2.0","id":id,"error":error}),
     };
-
+    let result = match method {
+        "initialize" => Ok(initialize_result(&params)),
+        "server/discover" => {
+            if !modern {
+                Err(
+                    json!({"code":-32602,"message":"server/discover requires MCP 2026-07-28 request metadata"}),
+                )
+            } else {
+                Ok(discover_result())
+            }
+        }
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({"tools":list_tools_for_profile(&state.tool_profile)})),
+        "tools/call" => handle_tools_call(state, &params),
+        _ => Err(json!({"code":-32601,"message":format!("Method not found: {method}")})),
+    };
     match result {
-        Ok(result) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err(error) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": error }),
+        Ok(result) => {
+            json!({"jsonrpc":"2.0","id":id,"result":if modern {modernize_result(method,result)} else {result}})
+        }
+        Err(error) => json!({"jsonrpc":"2.0","id":id,"error":error}),
     }
 }
 
-fn initialize_result() -> Value {
-    serde_json::json!({
-        "protocolVersion": "2025-06-18",
-        "capabilities": {
-            "tools": { "listChanged": false },
-            "logging": {}
-        },
-        "serverInfo": {
-            "name": "coding-tools-mcp",
-            "title": "Coding Tools MCP",
-            "version": env!("CARGO_PKG_VERSION")
-        },
-        "instructions": "Use these tools only for local coding operations inside the configured workspace. When the client supplies _meta.openai/session, the server automatically creates or resumes the matching bounded history session before the first non-history tool call and reports the stable target under history_session. The same conversation identifier resumes the same Markdown archive after a server restart. history_session_bootstrap remains available for clients without session metadata and whenever verbatim initial_user_input must be captured. Use history_session_search followed by history_session_read only when exact earlier context is needed; follow next_cursor with the returned content hash until the relevant archive page is complete. Preserve session_key and current_path, then pass them unchanged as session_key and expected_path to history_session_checkpoint. After completing each user-requested task, call history_session_checkpoint before the final response and pass that user's verbatim request as raw_user_input. Only state that progress was saved after checkpoint returns ok=true with the same target. The server cannot access ChatGPT transcript text that was not provided as a tool argument, so per-turn checkpoint text remains model-mediated rather than automatic background persistence. Every tool result also includes the bounded project_instructions selected from the addressed workspace or linked-project path."
+fn initialize_result(params: &Value) -> Value {
+    let requested = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let negotiated = if LEGACY_PROTOCOLS.contains(&requested) {
+        requested
+    } else {
+        LEGACY_PROTOCOLS[0]
+    };
+    json!({
+        "protocolVersion":negotiated,
+        "capabilities":{"tools":{"listChanged":false},"logging":{}},
+        "serverInfo":server_info(),
+        "instructions":instructions()
     })
+}
+
+fn discover_result() -> Value {
+    modernize_result(
+        "server/discover",
+        json!({
+            "supportedVersions":SUPPORTED_PROTOCOLS,
+            "capabilities":{"tools":{"listChanged":false},"logging":{}},
+            "instructions":instructions()
+        }),
+    )
 }
 
 fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value> {
@@ -214,11 +295,11 @@ mod tests {
 
     use crate::tools::ToolContext;
 
-    use super::{handle_request, initialize_result, tool_arguments};
+    use super::{discover_result, handle_request, initialize_result, tool_arguments};
 
     #[test]
     fn initialize_instructions_define_the_history_persistence_workflow() {
-        let initialized = initialize_result();
+        let initialized = initialize_result(&json!({"protocolVersion":"2025-11-25"}));
         let instructions = initialized["instructions"].as_str().expect("instructions");
         assert!(instructions.contains("_meta.openai/session"));
         assert!(instructions.contains("automatically creates or resumes"));
@@ -240,9 +321,28 @@ mod tests {
 
     #[test]
     fn initialize_does_not_claim_tool_catalog_notifications_without_a_stream() {
-        let initialized = initialize_result();
+        let initialized = initialize_result(&json!({"protocolVersion":"2025-11-25"}));
 
         assert_eq!(initialized["capabilities"]["tools"]["listChanged"], false);
+    }
+
+    #[test]
+    fn modern_discover_advertises_dual_era_versions_without_fake_list_notifications() {
+        let result = discover_result();
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["ttlMs"], 0);
+        assert_eq!(result["cacheScope"], "private");
+        assert!(result["supportedVersions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "2026-07-28"));
+        assert!(result["supportedVersions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "2025-11-25"));
+        assert_eq!(result["capabilities"]["tools"]["listChanged"], false);
     }
 
     #[test]
