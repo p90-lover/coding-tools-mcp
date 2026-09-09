@@ -1,0 +1,146 @@
+name: Studio board UI integration
+on:
+  push:
+    branches: [release/studio-integration-0.4.2-rc.1]
+    paths: ['.github/workflows/studio-board-ui.yml','aiTemp/studio-delivery/board.patch.xz.b64','aiTemp/release-verification/board_ui.py','src/routes/work/**','src/lib/control-center/**','src-tauri/src/integrations/board.rs']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: studio-board-ui
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Apply verified seven-file patch once and preserve original files
+        id: source
+        working-directory: aiTemp/checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/prepared
+          python - <<'PY'
+          import base64,hashlib,lzma,os,re,shutil,subprocess
+          from pathlib import Path
+          data=lzma.decompress(base64.b64decode(Path('aiTemp/studio-delivery/board.patch.xz.b64').read_text().strip(),validate=True))
+          assert hashlib.sha256(data).hexdigest()=='a215c9ff098757807c307723fb10db542dceb6691b6d4e0da8d29b517d356720'
+          allowed={'src-tauri/src/commands/ui_memory.rs','src-tauri/src/integrations/board.rs','src-tauri/src/integrations/tests.rs','src-tauri/tauri.conf.json','src/app.css','src/lib/control-center/model.ts','src/routes/work/+page.svelte'}
+          paths=[x.decode() for x in re.findall(rb'^\+\+\+ b/(.+)$',data,re.M)]
+          assert len(paths)==7 and set(paths)==allowed
+          assert not re.search(rb'^(deleted file mode|rename |copy |old mode|new mode|\+\+\+ /dev/null)',data,re.M)
+          patch=Path('aiTemp/prepared/board.patch');patch.write_bytes(data)
+          if 'data-board-column' not in Path('src/routes/work/+page.svelte').read_text():
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              for name in paths:
+                  original=Path(name);assert not original.is_symlink()
+                  dest=Path('aiTemp/Trash/board-before')/os.environ['GITHUB_RUN_ID']/name
+                  dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(original,dest)
+              subprocess.run(['git','apply',str(patch)],check=True)
+              subprocess.run(['git','add','--',*paths],check=True)
+          subprocess.run(['git','diff','--cached','--check'],check=True)
+          PY
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: draggable task board, column creation and evidence-preserving moves'
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+            remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+            test "$remote" = "$GITHUB_SHA"
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Three actual reducer regressions
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/board-probe aiTemp/evidence
+          python - <<'PY'
+          from pathlib import Path
+          root=Path('aiTemp/board-probe')
+          (root/'Cargo.toml').write_text('[package]\nname="studio-board-contract"\nversion="0.1.0"\nedition="2021"\n[workspace]\n[lib]\npath="lib.rs"\n[dependencies]\nserde={version="1",features=["derive"]}\nserde_json="1"\nuuid={version="1",features=["v4"]}\n')
+          (root/'board.rs').write_text(Path('src-tauri/src/integrations/board.rs').read_text().replace('//!','//',1))
+          (root/'tests.rs').write_text(Path('aiTemp/release-verification/board_flow.rs').read_text().replace('//!','//',1))
+          (root/'lib.rs').write_text('pub mod error {pub type AppResult<T>=Result<T,String>;} fn err(s:&str)->String{s.into()} fn now()->u64{1} mod production {include!("board.rs"); #[cfg(test)] mod regression {include!("tests.rs");}}')
+          PY
+          cargo test --manifest-path aiTemp/board-probe/Cargo.toml board_flow_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/board.txt
+          python -c "from pathlib import Path;assert '3 passed; 0 failed' in Path('aiTemp/evidence/board.txt').read_text()"
+      - name: Typecheck and build the real frontend
+        run: |
+          set -euo pipefail
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+      - name: Real browser drag and bilingual task controls with synthetic IPC
+        run: |
+          set -euo pipefail
+          python -m pip install playwright==1.57.0
+          python - <<'PY'
+          import os,subprocess,sys,time,urllib.request
+          from pathlib import Path
+          log=Path('aiTemp/evidence/vite.txt').open('w')
+          process=subprocess.Popen(['node','node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','1420','--strictPort'],stdout=log,stderr=subprocess.STDOUT)
+          try:
+              for attempt in range(60):
+                  if process.poll() is not None: raise RuntimeError('Frontend server exited')
+                  try:
+                      with urllib.request.urlopen('http://127.0.0.1:1420/work',timeout=2) as r:
+                          if r.status==200: break
+                  except OSError: time.sleep(0.25)
+              else: raise RuntimeError('Frontend did not become ready')
+              subprocess.run([sys.executable,'aiTemp/release-verification/board_ui.py'],check=True)
+          finally:
+              process.terminate()
+              try: process.wait(timeout=10)
+              except subprocess.TimeoutExpired: process.kill();process.wait()
+              log.close()
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: studio-board-ui-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          retention-days: 14
+          if-no-files-found: error
