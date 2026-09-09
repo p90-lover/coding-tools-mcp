@@ -74,8 +74,12 @@ jobs:
           new='''    let route = headers.lines().next().unwrap_or("").to_owned();\n    eprintln!("SYNTHETIC_HTTP_ROUTE: {route}");\n'''
           assert text.count(old)==1
           text=text.replace(old,new,1)
+          old='''    reader.read_exact(&mut body)?;\n'''
+          new='''    reader.read_exact(&mut body)?;\n    if let Ok(shape) = serde_json::from_slice::<Value>(&body) {\n        let input = shape.get("input").and_then(Value::as_array).map_or(0, Vec::len);\n        let tools = shape.get("tools").and_then(Value::as_array).map_or(0, Vec::len);\n        eprintln!("SYNTHETIC_REQUEST_SHAPE: model={} input_items={} tools={} stream={} store={}",\n            shape.get("model").and_then(Value::as_str).unwrap_or("<none>"), input, tools,\n            shape.get("stream").and_then(Value::as_bool).unwrap_or(false),\n            shape.get("store").and_then(Value::as_bool).unwrap_or(false));\n    }\n'''
+          assert text.count(old)==1
+          text=text.replace(old,new,1)
           old='''    let n = count.fetch_add(1, Ordering::SeqCst) + 1;\n'''
-          new='''    let n = count.fetch_add(1, Ordering::SeqCst) + 1;\n    eprintln!("SYNTHETIC_MODEL_CALL: {n}");\n'''
+          new='''    let n = count.fetch_add(1, Ordering::SeqCst) + 1;\n    eprintln!("SYNTHETIC_MODEL_CALL: {n}");\n    if n > 1 {\n        let response = b"unexpected synthetic retry";\n        write!(stream,"HTTP/1.1 500 Internal Server Error\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n",response.len())?;\n        stream.write_all(response)?;\n        return stream.flush();\n    }\n'''
           assert text.count(old)==1
           p.write_text(text.replace(old,new,1),encoding='utf-8')
           PY
@@ -84,12 +88,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NATIVE_ASSET: codex-x86_64-pc-windows-msvc.exe.tar.gz
         run: python scripts/native_bridge_ci.py download-native
-      - name: Prove native start-send-review-compact-interrupt-close against loopback
+      - name: Expose first-turn native failure against loopback
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
+          set +e
           cargo test --manifest-path aiTemp/bridge-probe/Cargo.toml native_bridge_actual_turns_against_loopback_fixture -- --ignored --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/native-lifecycle.txt
-          grep -F 'PASS: real native start/send/review/compact/interrupt/unsubscribe' aiTemp/evidence/native-lifecycle.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          grep -F 'SYNTHETIC_MODEL_CALL: 1' aiTemp/evidence/native-lifecycle.txt
+          if [ "$code" -eq 0 ]; then
+            grep -F 'PASS: real native start/send/review/compact/interrupt/unsubscribe' aiTemp/evidence/native-lifecycle.txt
+          else
+            grep -E 'native turn failed:|notice|unexpected synthetic retry|SYNTHETIC_REQUEST_SHAPE' aiTemp/evidence/native-lifecycle.txt
+            exit "$code"
+          fi
       - name: Commit only after the real native lifecycle passes
         env:
           GH_TOKEN: ${{ github.token }}
