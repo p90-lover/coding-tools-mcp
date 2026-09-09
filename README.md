@@ -4,15 +4,15 @@
 
 協助 AI 開發工作的本機桌面控制中心：人類訂立目標與權限，已連接的 AI 思考任務，應用程式執行獲准的本機工具並回傳證據。專案歷史讓下一次對話接續已驗證的工作，而非憑記憶重建進度。
 
-**版本系列：`v0.4.1-rc.1`——權限即時更新。** 請閱讀[版本說明](docs/releases/v0.4.1-rc.1.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
+**版本系列：`v0.4.2-rc.1`——MCP 探索、原生 Codex 與任務看板。** 請閱讀[版本說明](docs/releases/v0.4.2-rc.1.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
 
-## 原生 Codex 候選功能
+## 選用的原生 Codex 橋接
 
 目前候選版本加入須明確啟用的原生 App Server 介接，與已發佈的免模型工具分開。`codex_runtime_status`、`codex_agent_read` 及 `codex_agent_control` 支援所屬文字會話、原生審查、壓縮、中斷及取消訂閱。模型使用同意、可信任執行檔 SHA-256、請求／期限上限及停止，都由本機桌面控制。[閱讀設定、流程及精確限制](docs/features/native-codex-runtime.md)。原始碼存在不代表已發佈或已通過供應商推論驗證。
 
 ## 下載及開始使用
 
-從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.1-rc.1)取得 `Coding.Tools.MCP_0.4.1-rc.1_x64-setup.exe`。同頁亦提供 Apple Silicon `.dmg`、SHA-256 校驗碼、原始碼來源及驗證紀錄。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
+從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.2-rc.1)取得 `Coding.Tools.MCP_0.4.2-rc.1_x64-setup.exe`。同頁亦提供 Apple Silicon `.dmg`、SHA-256 校驗碼、原始碼來源及驗證紀錄。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
 
 安裝並開啟程式，把專案目錄加入工作區，選擇認證及權限設定，然後啟動 MCP。遠端用戶端需要設定支援的 FRP／Cloudflare 連線，再複製介面顯示的 HTTPS `/mcp` 網址。在用戶端完成授權及工具掃描；修改前先使用 `server_info`、`codex_tools_status`、`get_default_cwd` 及 `git_status`。
 
