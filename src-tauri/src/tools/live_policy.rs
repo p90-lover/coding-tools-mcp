@@ -63,6 +63,7 @@ pub fn fence_entire_call(name: &str) -> bool {
         && !matches!(
             name,
             "codex_agent_control"
+                | "codex_command_exec"
                 | "exec_command"
                 | "exec_health_check"
                 | "write_stdin"

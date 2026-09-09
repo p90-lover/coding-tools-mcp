@@ -23,7 +23,7 @@
   const TOOL_PROFILE_OPTIONS = [
     { value: "full", label: "完整工具" },
     { value: "read-only", label: "只读工具" },
-    { value: "compat-readonly-all", label: "兼容只读" },
+    { value: "compat-readonly-all", label: "Compatibility / 完整目錄（如實權限）" },
   ] as const;
 
   const APPROVAL_MODE_OPTIONS = [

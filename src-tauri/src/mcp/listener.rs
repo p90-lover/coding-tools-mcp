@@ -62,13 +62,16 @@ pub fn spawn_listener(
     }
     let workspace = Workspace::new(workspace_path).map_err(|e| e.message())?;
     let policy = PolicySettings::from_runtime(&runtime);
-    let mcp = new_state(
+    let mut mcp = new_state(
         workspace,
         auth.clone(),
         policy,
         runtime.tool_profile.clone(),
         runtime.permission_mode.clone(),
     );
+    Arc::get_mut(&mut mcp)
+        .ok_or("Workspace context is unexpectedly shared")?
+        .workspace_id = Some(workspace_id.clone());
     let bearer_token = if auth.bearer_enabled() {
         let key = "bearer_token";
         if auth.use_shared_secrets {

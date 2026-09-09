@@ -20,6 +20,7 @@ pub struct ToolContext {
     pub(crate) local_plan: Arc<Mutex<Value>>,
     pub(crate) codex_bridge: Arc<crate::codex_bridge::Hub>,
     pub workspace: Workspace,
+    pub(crate) workspace_id: Option<String>,
     pub auth: AuthConfig,
     pub policy: PolicySettings,
     pub approvals: Arc<ApprovalStore>,
@@ -79,6 +80,7 @@ impl ToolContext {
         let permission_mode = policy.canonical_permission_mode().to_string();
         Self {
             workspace,
+            workspace_id: None,
             auth,
             policy,
             approvals: Arc::new(ApprovalStore::default()),

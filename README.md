@@ -4,7 +4,7 @@
 
 協助 AI 開發工作的本機桌面控制中心：人類訂立目標與權限，已連接的 AI 思考任務，應用程式執行獲准的本機工具並回傳證據。專案歷史讓下一次對話接續已驗證的工作，而非憑記憶重建進度。
 
-**版本系列：`v0.4.2-rc.1`——MCP 探索、原生 Codex 與任務看板。** 請閱讀[版本說明](docs/releases/v0.4.2-rc.1.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
+**版本系列：`v0.4.3-rc.1`——MCP 探索、原生 Codex 與任務看板。** 請閱讀[版本說明](docs/releases/v0.4.3-rc.1.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
 
 ## 選用的原生 Codex 橋接
 
@@ -12,7 +12,7 @@
 
 ## 下載及開始使用
 
-從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.2-rc.1)取得 `Coding.Tools.MCP_0.4.2-rc.1_x64-setup.exe`。同頁亦提供 Apple Silicon `.dmg`、SHA-256 校驗碼、原始碼來源及驗證紀錄。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
+從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.3-rc.1)取得 `Coding.Tools.MCP_0.4.3-rc.1_x64-setup.exe`。同頁亦提供 Apple Silicon `.dmg`、SHA-256 校驗碼、原始碼來源及驗證紀錄。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
 
 安裝並開啟程式，把專案目錄加入工作區，選擇認證及權限設定，然後啟動 MCP。遠端用戶端需要設定支援的 FRP／Cloudflare 連線，再複製介面顯示的 HTTPS `/mcp` 網址。在用戶端完成授權及工具掃描；修改前先使用 `server_info`、`codex_tools_status`、`get_default_cwd` 及 `git_status`。
 
@@ -110,3 +110,7 @@ npm run desktop
 ## 授權與來源
 
 [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)。上游資訊及隨安裝程式提供的授權條款：[Paseo／Anneal 聲明](third_party/CONTROL_CENTER_NOTICES.md)。本專案並非 OpenAI／Codex 官方產品。
+
+## 共用流程與免模型原生命令
+
+`workflow_list` 及 `workflow_update` 把經認證的 MCP 工作區連接到同一本機看板；遠端觀察不會冒充人類批准。`codex_command_exec` 使用固定版本的原生命令 API，須獨立本機授權，不啟動模型回合。只變更權限仍不須重新連接／重啟 MCP。範圍、分頁、範例、配額及限制請見[雙語流程／命令指南](docs/features/workflow-native-commands.md)。

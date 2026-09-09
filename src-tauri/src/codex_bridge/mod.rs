@@ -1,5 +1,7 @@
 //! Explicitly opted-in native Codex App Server sessions. No hidden model calls or RPC proxy.
+mod native_command;
 mod process;
+pub use native_command::{CommandRequest, CommandTicket};
 use process::OwnedProcess;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -32,6 +34,8 @@ pub struct Connection {
     pub expected_sha256: String,
     pub codex_home: PathBuf,
     pub allow_model_usage: bool,
+    #[serde(default)]
+    pub allow_command_execution: bool,
     pub model: String,
     pub request_limit: u32,
     pub lifetime_seconds: u64,
@@ -450,7 +454,7 @@ impl Hub {
         let current = lock(&self.current)?;
         let Some(bridge) = current.as_ref() else {
             return Ok(
-                json!({"connected":false,"model_usage_enabled":false,"implementation":"native_app_server_opt_in",
+                json!({"connected":false,"model_usage_enabled":false,"command_execution_enabled":false,"command_runtime_sha256":native_command::COMMAND_RUNTIME_SHA256,"implementation":"native_app_server_opt_in",
                 "protocol_source":PROTOCOL_SOURCE,"native_sandbox_verified":false}),
             );
         };
@@ -458,6 +462,9 @@ impl Hub {
         Ok(
             json!({"connected":bridge.live.load(Ordering::SeqCst)&&bridge.ready.load(Ordering::SeqCst),
             "model_usage_enabled":bridge.live.load(Ordering::SeqCst)&&bridge.options.allow_model_usage,
+            "command_execution_enabled":bridge.live.load(Ordering::SeqCst)&&bridge.options.allow_command_execution
+                && native_command::COMMAND_RUNTIME_SHA256.is_some_and(|sha|sha.eq_ignore_ascii_case(&bridge.options.expected_sha256)),
+            "command_runtime_sha256":native_command::COMMAND_RUNTIME_SHA256,
             "native_identity":memory.native_identity,"executable_sha256":bridge.options.expected_sha256,
             "model":bridge.options.model,"requests_used":memory.requests_used,"request_limit":bridge.options.request_limit,
             "seconds_remaining":bridge.options.lifetime_seconds.saturating_sub(bridge.started.elapsed().as_secs()),
@@ -1000,6 +1007,7 @@ mod tests {
             expected_sha256: String::new(),
             codex_home: PathBuf::new(),
             allow_model_usage: false,
+            allow_command_execution: false,
             model: "fixture".into(),
             request_limit: 1,
             lifetime_seconds: 30,
@@ -1122,6 +1130,7 @@ mod tests {
                 expected_sha256,
                 codex_home: home,
                 allow_model_usage: false,
+                allow_command_execution: false,
                 model: "no-model-request".into(),
                 request_limit: 1,
                 lifetime_seconds: 30,

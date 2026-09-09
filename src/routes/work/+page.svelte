@@ -2,7 +2,7 @@
  import { onMount } from 'svelte';
  import { Plus, Search, RefreshCw, Archive, ArrowRight, Check, X, Play, Pause, FileText, GripVertical } from '@lucide/svelte';
  import { workspaces } from '$lib/stores/app';
- import { locale, board, boardReady, boardBusy, boardError, loadBoard, changeBoard, snapshots, integrationErrors } from '$lib/control-center/state';
+ import { locale, board, boardReady, boardBusy, boardError, loadBoard, refreshBoard, changeBoard, snapshots, integrationErrors } from '$lib/control-center/state';
  import { translated as t, STEPS, COLUMNS, stepLabel, sortChain, formatTime, isBoardState, boardStateLabel, type BoardState, type Change } from '$lib/control-center/model';
  import Status from '$lib/components/control-center/Status.svelte';
  let source = $state('local'), query = $state(''), archive = $state(false), creating = $state(false), selected = $state('');
@@ -61,7 +61,7 @@
   control.value = state;
   await moveTask(id, requested);
  }
- onMount(() => { void loadBoard(); });
+ onMount(() => { void loadBoard(); const timer=setInterval(() => { if (source==='local' && !dragged && document.visibilityState==='visible') void refreshBoard(); },2500); return () => clearInterval(timer); });
 </script>
 <section class="cc-page cc-board-page">
  <header class="cc-page-heading"><div><h1>{t($locale, 'Work board', '任務看板')}</h1><p>{t($locale, 'From specification to delivery. Keep the evidence beside the work.', '從規格到交付，讓工作與依據保持一致。')}</p></div><button class="cc-button primary" disabled={!canEdit || !$workspaces.length} onclick={() => beginCreate()}><Plus size={16}/>{t($locale, 'New task', '新增任務')}</button></header>
@@ -109,7 +109,7 @@
      {#if detail.state === 'backlog'}<button class="cc-button primary" disabled={!canEdit} onclick={() => void change({ operation: 'start', id: detail!.id })}><Play size={14}/>{t($locale, 'Start checklist', '開始清單')}</button>{:else if detail.state === 'in_progress'}<button class="cc-button secondary" disabled={!canEdit} onclick={() => void change({ operation: 'block', id: detail!.id })}><Pause size={14}/>{t($locale, 'Mark blocked', '標記受阻')}</button>{:else if detail.state === 'blocked'}<button class="cc-button secondary" disabled={!canEdit} onclick={() => void change({ operation: 'resume', id: detail!.id })}><Play size={14}/>{t($locale, 'Resume checklist', '繼續清單')}</button>{/if}
      <button class="cc-button ghost" disabled={!canEdit} onclick={() => void change({ operation: detail!.state === 'archived' ? 'restore' : 'archive', id: detail!.id })}><Archive size={14}/>{t($locale, detail.state === 'archived' ? 'Restore' : 'Archive', detail.state === 'archived' ? '還原' : '封存')}</button>
     </div>
-    <ol class="cc-chain-steps">{#each STEPS as step, i}<li class:complete={i < detail.step} class:current={i === detail.step}><span class="cc-step-number">{#if i < detail.step}<Check size={13}/>{:else}{i + 1}{/if}</span><div><strong>{step[$locale === 'en' ? 0 : 1]}</strong>{#if detail.evidence.find(e => e.step === i)}<details><summary>{t($locale, 'Recorded evidence', '已記錄依據')}</summary><p>{detail.evidence.find(e => e.step === i)?.note}</p></details>{/if}</div></li>{/each}</ol>
+    <ol class="cc-chain-steps">{#each STEPS as step, i}<li class:complete={i < detail.step} class:current={i === detail.step}><span class="cc-step-number">{#if i < detail.step}<Check size={13}/>{:else}{i + 1}{/if}</span><div><strong>{step[$locale === 'en' ? 0 : 1]}</strong>{#if detail.evidence.find(e => e.step === i)}<details><summary>{t($locale, 'Recorded evidence', '已記錄依據')}</summary>{#each detail.evidence.filter(e => e.step === i) as evidence}<p><small>{evidence.source === 'mcp_observation' ? t($locale, 'AI / MCP observation — not human approval', 'AI／MCP 觀察 — 不代表人類批准') : t($locale, 'Human attestation', '人類確認')}</small><br/>{evidence.note}</p>{/each}</details>{/if}</div></li>{/each}</ol>
     {#if detail.state === 'in_progress' && detail.step < STEPS.length}<form class="cc-form cc-record-step" onsubmit={e => { e.preventDefault(); void change({ operation: 'record_step', id: detail!.id, note }); }}><label>{t($locale, 'Evidence for this step', '此步驟的依據')}<textarea bind:value={note} rows="3" required maxlength="4096" placeholder={t($locale, 'Test result, review reference or your explicit attestation…', '測試結果、審查參考或你的明確確認…')}></textarea></label><button class="cc-button primary" disabled={!canEdit || !note.trim()}><Check size={15}/>{t($locale, 'Record & complete step', '記錄並完成步驟')}</button></form>{/if}
    </aside>
   {/if}</div>

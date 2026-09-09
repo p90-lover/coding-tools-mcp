@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
 pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
+    ("codex_command_exec", "Native command (no model)", "Run bounded argv using the separately approved native read-only command API. No thread or model turn. Requires local command consent; never falls back to unsandboxed execution.", false, true, true),
+    ("workflow_list", "Read workspace workflow", "Read paged local board tasks for this listener's workspace, including human attestations and distinct MCP observations. No model calls.", true, false, false),
+    ("workflow_update", "Update workspace workflow", "Create, move, edit, archive, restore or observe a task at an expected board revision. Cannot complete human review steps or access other workspaces; no model calls.", false, false, false),
     ("codex_runtime_status", "Native Codex connection status", "Inspect the locally opted-in native App Server connection, request count, lifetime and owned threads. Does not start a process or model request.", true, false, false),
     ("codex_agent_read", "Read owned native Codex response", "Read the latest bounded agent message and observed turn state from this listener's native connection. No inferred success, hidden reasoning, foreign thread or model request.", true, false, false),
     ("codex_agent_control", "Control opted-in native Codex agent", "Submit start/send/review/compact or interrupt/close to a locally enabled native App Server. Model operations can spend provider quota. Unique request_id is mandatory; repeats never replay. Only owned threads, no remote enable, approval escalation or arbitrary RPC. An acknowledgment is not task completion.", false, true, true),
@@ -354,6 +357,9 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
 
 /// old Python 版本默认提供的核心工具集。默认 MCP 只暴露这一组，保持 Agent 的工具面稳定。
 pub const CORE_TOOLS: &[&str] = &[
+    "codex_command_exec",
+    "workflow_list",
+    "workflow_update",
     "codex_runtime_status",
     "codex_agent_read",
     "codex_agent_control",
@@ -411,6 +417,7 @@ pub const CORE_TOOLS: &[&str] = &[
 ];
 
 pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
+    "workflow_list",
     "codex_runtime_status",
     "codex_agent_read",
     "codex_tools_status",
@@ -526,6 +533,8 @@ pub const ALLOWED_TOOLS: &[&str] = &[
 ];
 
 pub const MUTATING_TOOLS: &[&str] = &[
+    "workflow_update",
+    "codex_command_exec",
     "codex_agent_control",
     "computer_action",
     "computer_sequence",
@@ -546,6 +555,7 @@ pub const MUTATING_TOOLS: &[&str] = &[
 ];
 
 pub const READ_ONLY_TOOLS: &[&str] = &[
+    "workflow_list",
     "codex_runtime_status",
     "codex_agent_read",
     "codex_tools_status",
@@ -633,17 +643,12 @@ pub fn list_tools() -> Vec<Value> {
 }
 
 pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
-    let compat = tool_profile == "compat-readonly-all";
     exposed_tool_names(tool_profile)
         .into_iter()
         .filter_map(|name| {
             P0_TOOLS.iter().find(|(n, ..)| *n == name).map(|entry| {
                 let (name, title, description, read_only, destructive, open_world) = *entry;
-                let (read_only, destructive, open_world) = if compat && !name.starts_with("computer_") && name != "codex_agent_control" {
-                    (true, false, false)
-                } else {
-                    (read_only, destructive, open_world)
-                };
+                // A compatibility profile changes visibility, never the truth of side effects.
                 json!({
                     "name": name,
                     "title": title,
@@ -663,6 +668,9 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 }
 
 pub fn input_schema(name: &str) -> Value {
+    if crate::tools::workflow::NAMES.contains(&name) {
+        return crate::tools::workflow::input_schema(name);
+    }
     if crate::tools::codex_runtime::NAMES.contains(&name) {
         return crate::tools::codex_runtime::input_schema(name);
     }
@@ -1137,7 +1145,25 @@ mod tests {
                 + crate::tools::native_sandbox::NAMES.len()
                 + crate::tools::local_tools::NAMES.len()
                 + crate::tools::codex_runtime::NAMES.len()
+                + crate::tools::workflow::NAMES.len()
         );
+        for profile in ["core", "advanced", "compat-readonly-all"] {
+            for name in [
+                "workflow_update",
+                "codex_command_exec",
+                "apply_patch",
+                "exec_command",
+            ] {
+                let tool = list_tools_for_profile(profile)
+                    .into_iter()
+                    .find(|t| t["name"] == name)
+                    .unwrap();
+                assert_eq!(
+                    tool["annotations"]["readOnlyHint"], false,
+                    "{profile}: {name}"
+                );
+            }
+        }
         for name in crate::tools::codex_runtime::NAMES {
             assert!(names.contains(name));
         }

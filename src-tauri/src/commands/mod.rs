@@ -1,5 +1,8 @@
 mod codex_runtime;
-pub use codex_runtime::{codex_local_connect, codex_local_status, codex_local_disconnect, codex_local_control, codex_local_read};
+pub use codex_runtime::{
+    codex_local_command, codex_local_connect, codex_local_control, codex_local_disconnect,
+    codex_local_read, codex_local_status,
+};
 mod control_center;
 pub use control_center::{control_board_change, control_board_read, integration_read};
 mod computer;

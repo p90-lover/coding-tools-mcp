@@ -358,7 +358,9 @@ fn classify_operation(tool_name: &str, args: &Value) -> Option<ApprovalRisk> {
         // special-file deletion confirmation remain enforced by patch.rs.
         // Treat ordinary workspace patches as routine so on-request mode
         // does not mask those more specific checks or ask for every file edit.
-        "apply_patch" => Some(ApprovalRisk::RoutineMutation),
+        "apply_patch" | "workflow_update" | "codex_command_exec" => {
+            Some(ApprovalRisk::RoutineMutation)
+        }
         "kill_command" | "kill_session" | "write_stdin" => Some(ApprovalRisk::RoutineMutation),
         _ => None,
     }

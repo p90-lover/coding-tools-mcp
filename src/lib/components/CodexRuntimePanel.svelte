@@ -5,7 +5,7 @@
   import { locale } from '$lib/control-center/state';
   import { translated as t } from '$lib/control-center/model';
   type Thread = { id: string; status: string; turn_id?: string | null };
-  type Snapshot = { connected: boolean; model_usage_enabled: boolean; model?: string;
+  type Snapshot = { connected: boolean; model_usage_enabled: boolean; command_execution_enabled?: boolean; command_runtime_sha256?: string | null; model?: string;
     requests_used?: number; request_limit?: number; seconds_remaining?: number;
     stop_reason?: string | null; native_identity?: string; threads?: Thread[] };
   type Answer = Thread & { answer: string; answer_truncated: boolean; notice?: string | null };
@@ -15,6 +15,9 @@
   let codexHome = $state('');
   let model = $state('');
   let consent = $state(false);
+  let commandConsent = $state(false);
+  let commandArgs = $state('["cmd.exe", "/d", "/c", "echo Ready"]');
+  let commandResult = $state('');
   let requestLimit = $state(4);
   let lifetime = $state(300);
   let snapshot = $state<Snapshot | null>(null);
@@ -29,7 +32,7 @@
   const active = new Set(['starting', 'inProgress', 'compacting', 'interrupt_requested']);
   function selectionChanged() {
     selectionGeneration += 1;
-    snapshot = null; selectedThread = ''; answer = null; error = ''; consent = false;
+    snapshot = null; selectedThread = ''; answer = null; error = ''; consent = false; commandConsent = false; commandResult = '';
     void refresh();
   }
   async function refresh() {
@@ -59,7 +62,7 @@
     try {
       const result = await invoke<Snapshot>('codex_local_connect', { workspaceId: id, connection: {
         executable: executable.trim(), expected_sha256: sha256.trim(), codex_home: codexHome.trim(),
-        allow_model_usage: consent, model: model.trim(), request_limit: requestLimit, lifetime_seconds: lifetime,
+        allow_model_usage: consent, allow_command_execution: commandConsent, model: model.trim() || 'no-model', request_limit: requestLimit, lifetime_seconds: lifetime,
       }});
       if (generation === selectionGeneration && !disposed) snapshot = result;
     } catch (e) { if (generation === selectionGeneration && !disposed) error = String(e); }
@@ -71,7 +74,7 @@
     // Stop is deliberately usable while another local request is waiting for native RPC.
     try {
       await invoke('codex_local_disconnect', { workspaceId: id });
-      if (id === workspaceId && !disposed) { snapshot = null; answer = null; selectedThread = ''; consent = false; }
+      if (id === workspaceId && !disposed) { snapshot = null; answer = null; selectedThread = ''; consent = false; commandConsent = false; commandResult = ''; }
     } catch (e) { if (id === workspaceId && !disposed) error = String(e); }
   }
   async function control(operation: string) {
@@ -91,6 +94,18 @@
     } catch (e) {
       if (!disposed && generation === selectionGeneration) error = `${String(e)} — ${t($locale, 'Inspect state; do not resubmit an unknown outcome.', '請先檢查狀態，不要重送結果不明的操作。')}`;
     } finally { busy = false; }
+  }
+  async function runCommand() {
+    if (busy || !workspaceId || !snapshot?.command_execution_enabled) return;
+    const id = workspaceId, generation = selectionGeneration;
+    busy = true; error = ''; commandResult = '';
+    try {
+      const argv: unknown = JSON.parse(commandArgs);
+      if (!Array.isArray(argv) || !argv.length || argv.some(v => typeof v !== 'string')) throw new Error('argv must be a JSON string array / argv 必須是 JSON 字串陣列');
+      const result = await invoke<Record<string, unknown>>('codex_local_command', { workspaceId:id, args:{request_id:crypto.randomUUID(),argv,timeout_ms:5000} });
+      if (!disposed && generation === selectionGeneration) commandResult = JSON.stringify(result,null,2);
+    } catch(e) { if (!disposed && generation === selectionGeneration) error=String(e); }
+    finally { busy=false; }
   }
   onMount(() => {
     disposed = false;
@@ -121,11 +136,12 @@
       <label>{t($locale, 'Installed native Codex executable (absolute path)', '已安裝的原生 Codex 執行檔（絕對路徑）')}<input bind:value={executable} autocomplete="off" spellcheck="false" required disabled={busy || !!snapshot?.connected}/></label>
       <label>SHA-256<input bind:value={sha256} autocomplete="off" spellcheck="false" pattern="[a-fA-F0-9]{64}" required disabled={busy || !!snapshot?.connected}/></label>
       <label>{t($locale, 'Dedicated Codex home outside the workspace', '工作區以外的專用 Codex 主目錄')}<input bind:value={codexHome} autocomplete="off" spellcheck="false" required disabled={busy || !!snapshot?.connected}/></label>
-      <label>{t($locale, 'Model ID from your native provider configuration', '原生供應商設定中的模型 ID')}<input bind:value={model} autocomplete="off" spellcheck="false" required disabled={busy || !!snapshot?.connected}/></label>
+      <label>{t($locale, 'Model ID from your native provider configuration', '原生供應商設定中的模型 ID')}<input bind:value={model} autocomplete="off" spellcheck="false" required={consent} disabled={busy || !!snapshot?.connected}/></label>
       <label>{t($locale, 'Model-request limit (not token/cost limit)', '模型請求上限（並非 Token／費用上限）')}<input type="number" bind:value={requestLimit} min="1" max="20" required disabled={busy || !!snapshot?.connected}/></label>
       <label>{t($locale, 'Consent lifetime in seconds', '授權有效秒數')}<input type="number" bind:value={lifetime} min="30" max="900" required disabled={busy || !!snapshot?.connected}/></label>
     </div>
-    <label class="native-consent"><input type="checkbox" bind:checked={consent} disabled={busy || !!snapshot?.connected}/><span>{t($locale, 'I authorize native model usage for this connection. Unchecked connects for handshake/status only.', '我授權這次連接使用原生模型；未勾選時只允許握手及查看狀態。')}</span></label>
+    <label class="native-consent"><input type="checkbox" bind:checked={consent} disabled={busy || !!snapshot?.connected}/><span>{t($locale, 'I authorize native model usage for this connection. Commands have a separate checkbox; leaving this unchecked prohibits model turns.', '我授權這次連接使用原生模型；命令有獨立勾選框；此處未勾選會禁止模型回合。')}</span></label>
+    <label class="native-consent"><input type="checkbox" bind:checked={commandConsent} disabled={busy || !!snapshot?.connected}/><span>{t($locale, 'Allow standalone read-only commands without model usage. Read-only may read outside the workspace; only use trusted commands.', '允許不呼叫模型的獨立唯讀命令。唯讀仍可能讀取工作區外的資料，只應執行可信命令。')}</span></label>
     <p class="cc-help">{t($locale,
       'Select a trusted native binary, not a shell wrapper. Sign in to the dedicated home separately; no credentials are copied or requested here. Native configuration, logs and provider retention are outside the bridge’s RAM-only response handling. Read-only policy is requested, not an independently verified OS sandbox. Permission changes revoke this connection.',
       '請選擇可信任的原生執行檔，而非 Shell 包裝程式。請另行登入專用主目錄；此處不會複製或索取憑證。原生設定、日誌及供應商保留政策，不屬於介接層僅用記憶體處理回應的保證。此處會要求唯讀權限，但不是獨立驗證的作業系統沙箱；權限變更會撤銷此連接。')}</p>
@@ -133,6 +149,14 @@
       <button class="cc-button ghost" type="button" disabled={!workspaceId} onclick={() => void refresh()}>{t($locale, 'Refresh state', '重新讀取狀態')}</button></div>
   </form>
   {#if error}<div class="cc-notice red" role="alert">{error}</div>{/if}
+  {#if snapshot?.command_runtime_sha256}<p class="cc-help">{t($locale, 'Verified standalone-command runtime SHA-256:', '已驗證獨立命令執行環境 SHA-256：')}<br/><code>{snapshot.command_runtime_sha256}</code></p>{/if}
+  {#if snapshot?.command_execution_enabled}
+    <section class="cc-form" aria-label={t($locale, 'Commands without model usage', '免模型命令')}>
+      <label>{t($locale, 'Command argv (JSON array, literal arguments)', '命令 argv（JSON 陣列，字面參數）')}<textarea bind:value={commandArgs} rows="3" maxlength="16000" disabled={busy}></textarea></label>
+      <button class="cc-button" disabled={busy || !snapshot.connected} onclick={() => void runCommand()}>{t($locale, 'Run read-only command · no model', '執行唯讀命令 · 不呼叫模型')}</button>
+      {#if commandResult}<pre class="native-answer">{commandResult}</pre>{/if}
+    </section>
+  {/if}
   {#if snapshot}
     <p class="native-status" role="status">{snapshot.connected ? t($locale, 'Connected', '已連接') : t($locale, 'Not connected', '未連接')} · {snapshot.requests_used ?? 0}/{snapshot.request_limit ?? requestLimit} · {snapshot.seconds_remaining ?? 0}s · {snapshot.stop_reason ?? snapshot.native_identity ?? ''}</p>
     <div class="cc-form">

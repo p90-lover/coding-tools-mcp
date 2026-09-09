@@ -112,3 +112,23 @@ pub fn codex_local_read(
         .read(&thread_id)
         .map_err(AppError::Message)
 }
+
+#[tauri::command]
+pub async fn codex_local_command(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    workspace_id: String,
+    args: Value,
+) -> AppResult<Value> {
+    local(&window, true)?;
+    let ctx = context(&state, &workspace_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::tools::dispatch::call_tool_mcp(&ctx, "codex_command_exec", &args)
+    })
+    .await
+    .map_err(|_| {
+        AppError::Message(
+            "Native command worker failed; inspect the original request before retrying".into(),
+        )
+    })
+}

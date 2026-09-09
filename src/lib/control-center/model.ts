@@ -10,7 +10,7 @@ export interface Item {
   chain_id: string | null; chain_index: number | null; chain_layer: number | null; chain_name: string | null;
 }
 export interface Snapshot { source: Source; endpoint: string; checked_at: number; read_only: true; items: Item[]; has_more: boolean; server_version: string | null }
-export interface Evidence { step: number; note: string; recorded_at: number; source: 'operator_attestation' }
+export interface Evidence { step: number; note: string; recorded_at: number; source: 'operator_attestation' | 'mcp_observation' }
 export interface Task { id: string; workspace_id: string; title: string; description: string; state: string; step: number; created_at: number; updated_at: number; evidence: Evidence[] }
 export interface Board { revision: number; tasks: Task[] }
 export type BoardState = 'backlog' | 'in_progress' | 'blocked' | 'done';

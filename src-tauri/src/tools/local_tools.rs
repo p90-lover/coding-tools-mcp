@@ -64,15 +64,17 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
                 "computer_snapshot",
                 "computer_action",
                 "computer_sequence",
+                "workflow_list",
+                "workflow_update",
             ];
             Ok(tool_ok(
                 json!({"implementation":"local_mcp_counterparts","codex_invoked":false,
                 "inference_client_in_this_path":false,"policy_revision":ctx.policy_revision,
                 "tools":candidates.into_iter().filter(|n|installed.contains(n)).collect::<Vec<_>>(),
                 "native_runtime":ctx.codex_bridge.status().unwrap_or_else(|_|json!({"connected":false,"state":"unavailable"})),
-                "optional_native_tools":["codex_runtime_status","codex_agent_read","codex_agent_control"],
+                "optional_native_tools":["codex_runtime_status","codex_agent_read","codex_agent_control","codex_command_exec"],
                 "not_included":["Complete internal Codex tool parity","Codex account/plugin installation APIs","Codex cloud web-search service","Paseo/Anneal autonomous engines","unverified native command sandbox"],
-                "command_execution_boundary":"policy_only","screenshots":"memory_only",
+                "command_execution_boundary":"exec_command:policy_only; codex_command_exec:explicit_native_read_only_profile_no_model","screenshots":"memory_only",
                 "note":"This status/local-tool path does not invoke inference. The separate explicitly enabled native App Server bridge can use provider quota for agent turns, review and compaction; it is not an OS sandbox guarantee."}),
             ))
         }

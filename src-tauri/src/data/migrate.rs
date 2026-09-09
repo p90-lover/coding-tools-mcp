@@ -12,7 +12,24 @@ use super::model::{AppData, LegacyProfilesOnlyFile};
 const LEGACY_PROFILES_FILE: &str = "profiles.json";
 const LEGACY_SETTINGS_FILE: &str = "app_settings.json";
 
+#[cfg(test)]
+thread_local! { static TEST_DATA_FILE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn with_test_file<R>(path: PathBuf, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_DATA_FILE.with(|v| *v.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(TEST_DATA_FILE.with(|v| v.replace(Some(path))));
+    f()
+}
 pub fn data_file_path() -> AppResult<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_DATA_FILE.with(|v| v.borrow().clone()) {
+        return Ok(path);
+    }
     Ok(platform()
         .app_config_dir()?
         .join("data")

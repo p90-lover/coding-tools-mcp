@@ -95,7 +95,7 @@ pub fn spawn_listener(
     };
 
     let workspace = tools::Workspace::new(workspace_path.clone()).map_err(|e| e.message())?;
-    let ctx = Arc::new(ToolContext::from_workspace(
+    let mut ctx = Arc::new(ToolContext::from_workspace(
         workspace,
         crate::workspace::AuthConfig {
             auth_type: auth_type.clone(),
@@ -105,6 +105,9 @@ pub fn spawn_listener(
         "full".into(),
         policy.permission_mode.clone(),
     ));
+    Arc::get_mut(&mut ctx)
+        .ok_or("Workspace context is unexpectedly shared")?
+        .workspace_id = Some(workspace_id.to_string());
     let context = ctx.clone();
     // 在返回 Running 之前完成 bind，避免后台任务里的端口冲突被伪装成启动成功。
     let listener = bind_listener(actions_port)?;

@@ -4,7 +4,7 @@
 
 A local desktop control center for AI-assisted development: the human defines the goal and permissions, the connected AI reasons about the task, and the app executes approved local tools and returns evidence. Project history helps the next conversation continue from verified work rather than reconstructing it from memory.
 
-**Release line: `v0.4.2-rc.1` — MCP discovery, native Codex and task board.** Read the [release notes](docs/releases/v0.4.2-rc.1.md) and the published release's validation evidence. A version in source code is not proof that a build passed. This is a release candidate, not a certified security sandbox.
+**Release line: `v0.4.3-rc.1` — MCP discovery, native Codex and task board.** Read the [release notes](docs/releases/v0.4.3-rc.1.md) and the published release's validation evidence. A version in source code is not proof that a build passed. This is a release candidate, not a certified security sandbox.
 
 ## Optional native Codex bridge
 
@@ -12,7 +12,7 @@ The current candidate adds an explicitly opted-in native App Server bridge, sepa
 
 ## Download and start
 
-Get `Coding.Tools.MCP_0.4.2-rc.1_x64-setup.exe` from the [versioned release page](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.2-rc.1). The same release provides the Apple Silicon `.dmg`, SHA-256 checksums, source provenance and validation logs. Windows is publisher-unsigned; macOS uses ad-hoc signing and is not notarized. Verify the source and checksum before opening a downloaded installer.
+Get `Coding.Tools.MCP_0.4.3-rc.1_x64-setup.exe` from the [versioned release page](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.3-rc.1). The same release provides the Apple Silicon `.dmg`, SHA-256 checksums, source provenance and validation logs. Windows is publisher-unsigned; macOS uses ad-hoc signing and is not notarized. Verify the source and checksum before opening a downloaded installer.
 
 Install and open the app, add your project directory as a workspace, select its authentication and permission settings, and start MCP. For a remote client, configure the supported FRP or Cloudflare connection and copy the displayed HTTPS `/mcp` endpoint. Complete the client-side authorization and tool scan. Start with `server_info`, `codex_tools_status`, `get_default_cwd` and `git_status` before making changes.
 
@@ -110,3 +110,7 @@ The source is organized under `src/` (UI), `src-tauri/src/tools/` (shared execut
 ## License and attribution
 
 [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0). Upstream details and bundled license notices: [Paseo/Anneal notices](third_party/CONTROL_CENTER_NOTICES.md). This project is not an official OpenAI/Codex product.
+
+## Shared workflow and model-free native commands
+
+`workflow_list` and `workflow_update` connect the authenticated MCP workspace to the same local task board. Remote observations are not human approvals. `codex_command_exec` uses the pinned native command API with separate local consent and no model turns. Permission-only updates still need no MCP relink/restart. See [the bilingual workflow/command guide](docs/features/workflow-native-commands.md) for scope, paging, examples, quotas and remaining boundaries.

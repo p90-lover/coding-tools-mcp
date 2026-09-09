@@ -274,6 +274,7 @@ fn native_bridge_actual_turns_against_loopback_fixture() {
             expected_sha256: sha,
             codex_home: home.canonicalize().unwrap(),
             allow_model_usage: true,
+            allow_command_execution: false,
             model: "mock-model".into(),
             request_limit: 6,
             lifetime_seconds: 120,

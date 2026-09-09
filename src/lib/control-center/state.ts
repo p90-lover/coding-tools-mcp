@@ -40,3 +40,15 @@ export async function readIntegration(source:Source,endpoint:string,credential:s
  finally {integrationBusy.update(v=>({...v,[source]:false}));}
 }
 export function clearIntegration(source:Source) { snapshots.update(v=>{const next={...v};delete next[source];return next;});integrationErrors.update(v=>({...v,[source]:''})); }
+
+let boardRefreshing=false;
+/** Quiet refresh never resets a form or replaces an in-flight mutation with older data. */
+export async function refreshBoard() {
+ if(boardRefreshing||get(boardBusy)||!get(boardReady))return;
+ boardRefreshing=true;const revision=get(board).revision;
+ try {
+  const next=await invoke<Board>('control_board_read');
+  if(!get(boardBusy)&&get(board).revision===revision&&next.revision>revision)board.set(next);
+ } catch { /* Retain verified data and drafts; manual refresh displays actionable errors. */ }
+ finally {boardRefreshing=false;}
+}

@@ -219,7 +219,13 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
 
     let ws = &ctx.workspace;
     let result = match name {
-        "codex_runtime_status" | "codex_agent_read" | "codex_agent_control" => crate::tools::codex_runtime::call(ctx, name, &effective_args),
+        "workflow_list" | "workflow_update" => {
+            crate::tools::workflow::call(ctx, name, &effective_args)
+        }
+        "codex_runtime_status"
+        | "codex_agent_read"
+        | "codex_agent_control"
+        | "codex_command_exec" => crate::tools::codex_runtime::call(ctx, name, &effective_args),
         "codex_tools_status" | "tool_search" | "get_current_time" | "get_plan" | "update_plan" => {
             crate::tools::local_tools::call(ctx, name, &effective_args)
         }

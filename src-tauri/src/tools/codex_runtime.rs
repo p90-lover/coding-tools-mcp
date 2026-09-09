@@ -1,6 +1,6 @@
 //! Native-provider tools are separate from model-free local counterparts.
 use crate::{
-    codex_bridge::Control,
+    codex_bridge::{CommandRequest, Control},
     tools::{
         workspace::{tool_ok, WorkspaceError},
         ToolContext,
@@ -11,9 +11,15 @@ pub const NAMES: &[&str] = &[
     "codex_runtime_status",
     "codex_agent_read",
     "codex_agent_control",
+    "codex_command_exec",
 ];
 pub fn input_schema(name: &str) -> Value {
     match name {
+        "codex_command_exec" => json!({"type":"object","properties":{
+            "request_id":{"type":"string","minLength":1,"maxLength":128},
+            "argv":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"string","maxLength":8192}},
+            "timeout_ms":{"type":"integer","minimum":100,"maximum":10000,"default":5000},
+            "approval_token":{"type":"string"}},"required":["request_id","argv"],"additionalProperties":false}),
         "codex_agent_read" => {
             json!({"type":"object","properties":{"thread_id":{"type":"string","minLength":1,"maxLength":128}},"required":["thread_id"],"additionalProperties":false})
         }
@@ -58,6 +64,24 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
                 .filter(|v| !v.is_empty() && v.len() <= 128)
                 .ok_or_else(|| WorkspaceError::invalid_argument("thread_id is required"))?;
             ctx.codex_bridge.read(id).map(tool_ok).map_err(error)
+        }
+        "codex_command_exec" => {
+            let mut clean = args.clone();
+            // These fields are only consumed after the shared approval preflight.
+            if let Some(o) = clean.as_object_mut() {
+                o.remove("approval_token");
+                o.remove("confirm");
+            }
+            let request: CommandRequest = serde_json::from_value(clean)
+                .map_err(|_| WorkspaceError::invalid_argument("Invalid native command fields"))?;
+            let ticket = {
+                let _fence = ctx.policy_execution_guard()?;
+                ctx.codex_bridge.admit_command(request).map_err(error)?
+            };
+            ticket
+                .run()
+                .map(|v| if v["ok"] == false { v } else { tool_ok(v) })
+                .map_err(error)
         }
         "codex_agent_control" => {
             let request: Control = serde_json::from_value(args.clone())

@@ -1,4 +1,5 @@
 pub mod approval;
+mod codex_runtime;
 pub mod computer;
 pub mod context;
 pub mod dispatch;
@@ -9,7 +10,6 @@ pub mod history;
 mod image_tool;
 pub mod live_policy;
 pub mod local_tools;
-mod codex_runtime;
 pub mod native_sandbox;
 pub mod patch;
 pub mod policy;
@@ -27,3 +27,5 @@ pub use registry::{
     exposed_tool_names, is_allowed_tool, list_tools, list_tools_for_profile, MUTATING_TOOLS,
 };
 pub use workspace::{wrap_mcp_tool_result, wrap_tool_result, Workspace};
+
+pub mod workflow;
