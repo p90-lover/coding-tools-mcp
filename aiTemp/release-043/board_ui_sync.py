@@ -19,7 +19,13 @@ extra = '''  # External updates are simulated only at IPC storage; the actual UI
   page.locator('[data-task-id="mcp-added"] .cc-card-open').click()
   page.get_by_text('Recorded evidence', exact=True).click()
   expect(page.get_by_text('AI / MCP observation — not human approval', exact=True)).to_be_visible()
-  expect(page.get_by_text('AI found a failing check; operator review required', exact=True)).to_be_visible()
+  # The paragraph contains the provenance <small>, a line break and the note text.
+  # Assert the actual paragraph content, not an exact locator for only its text node.
+  evidence = page.locator('.cc-chain-steps details[open] p')
+  expect(evidence).to_have_count(1)
+  expect(evidence).to_be_visible()
+  expect(evidence).to_contain_text('AI / MCP observation — not human approval')
+  expect(evidence).to_contain_text('AI found a failing check; operator review required')
   remote=next(t for t in page.evaluate("JSON.parse(localStorage.getItem('qa-synthetic-board'))")['tasks'] if t['id']=='mcp-added')
   assert remote['step']==0 and remote['state']=='blocked'
   assert not [c for c in page.evaluate('window.__qaCalls') if 'codex' in c['name'] or c['name']=='integration_read']
