@@ -59,7 +59,22 @@ jobs:
           rustfmt --edition 2021 --config skip_children=true src-tauri/src/codex_bridge/mod.rs
           git diff --check -- src-tauri/src/codex_bridge/mod.rs
       - name: Prepare isolated native bridge probe
-        run: python scripts/native_bridge_ci.py probe-init
+        run: |
+          set -euo pipefail
+          python scripts/native_bridge_ci.py probe-init
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('aiTemp/release-verification/native_turn_fixture.rs')
+          text=p.read_text(encoding='utf-8')
+          old='''    let route = headers.lines().next().unwrap_or("").to_owned();\n'''
+          new='''    let route = headers.lines().next().unwrap_or("").to_owned();\n    eprintln!("SYNTHETIC_HTTP_ROUTE: {route}");\n'''
+          assert text.count(old)==1
+          text=text.replace(old,new,1)
+          old='''    let n = count.fetch_add(1, Ordering::SeqCst) + 1;\n'''
+          new='''    let n = count.fetch_add(1, Ordering::SeqCst) + 1;\n    eprintln!("SYNTHETIC_MODEL_CALL: {n}");\n'''
+          assert text.count(old)==1
+          p.write_text(text.replace(old,new,1),encoding='utf-8')
+          PY
       - name: Verify official Codex native binary without account credentials
         env:
           GH_TOKEN: ${{ github.token }}
