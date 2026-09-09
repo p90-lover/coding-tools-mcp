@@ -419,7 +419,7 @@ impl Hub {
             "initialize",
             json!({"clientInfo":{"name":"coding_tools_mcp",
             "title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")},
-            "capabilities":{"experimentalApi":false}}),
+            "capabilities":{"experimentalApi":true}}),
         );
         match result {
             Ok(value) => {
@@ -650,9 +650,24 @@ impl Bridge {
             return Err("Native consent was revoked before submission".into());
         }
         let id = if request.operation == "start" {
+            // Named permissions replace removed readOnly.access in native 0.153.4.
+            // A fresh profile avoids inheriting another configured profile's rules.
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "System clock unavailable")?
+                .as_nanos();
+            let profile = format!("coding_tools_readonly_{}_{nonce}", std::process::id());
             let value = self.rpc("thread/start", json!({"cwd":self.root,"model":self.options.model,
-                "sandbox":"read-only","approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,
+                "permissions":profile,
+                "config":{"permissions":{(profile.clone()):{
+                    "filesystem":{":root":"deny",":minimal":"read",":workspace_roots":{".":"read"}},
+                    "network":{"enabled":false}}}},
+                "approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,
                 "developerInstructions":"Work only on the explicitly requested task. Never delete files; use Trash for unwanted files and aiTemp for temporary files. Do not change permissions or use unsandboxed fallbacks. Explain evidence and uncertainty. Do not launch extra agents unless explicitly requested."}))?;
+            if value["activePermissionProfile"]["id"].as_str() != Some(profile.as_str()) {
+                self.stop("native_permission_profile_mismatch");
+                return Err("Native runtime did not confirm the requested read-only profile; no turn submitted".into());
+            }
             let id = value["thread"]["id"]
                 .as_str()
                 .filter(|s| token(s))
@@ -752,12 +767,18 @@ impl Bridge {
             thread.notice = None;
         }
         let result = match request.operation.as_str() {
-            "compact" => self.rpc("thread/compact/start",json!({"threadId":id})),
-            "review" => self.rpc("review/start",json!({"threadId":id,"delivery":"inline",
-                "target":{"type":"custom","instructions":request.text}})),
-            _ => self.rpc("turn/start",json!({"threadId":id,"input":[{"type":"text","text":request.text}],
-                "cwd":self.root,"model":self.options.model,"approvalPolicy":"on-request",
-                "sandboxPolicy":{"type":"readOnly","access":{"type":"restricted","includePlatformDefaults":true,"readableRoots":[self.root]}}})),
+            "compact" => self.rpc("thread/compact/start", json!({"threadId":id})),
+            "review" => self.rpc(
+                "review/start",
+                json!({"threadId":id,"delivery":"inline",
+                "target":{"type":"custom","instructions":request.text}}),
+            ),
+            _ => self.rpc(
+                "turn/start",
+                json!({"threadId":id,"input":[{"type":"text","text":request.text}],
+                // Inherit the confirmed thread-scoped profile; never reset it to legacy broad reads.
+                "cwd":self.root,"model":self.options.model,"approvalPolicy":"on-request"}),
+            ),
         };
         match result {
             Ok(value) => {
