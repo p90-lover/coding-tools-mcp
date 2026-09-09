@@ -113,3 +113,7 @@ Paseo／Anneal 介接器只觀察已存在的本機服務，未內嵌或啟動�
 實作位置：[即時權限](../../src-tauri/src/tools/live_policy.rs)、[本機工具](../../src-tauri/src/tools/local_tools.rs)、[共用分派器](../../src-tauri/src/tools/dispatch.rs)、[歷史](../../src-tauri/src/tools/history)、[操作者看板](../../src-tauri/src/integrations/board.rs)、[發佈流程](../../.github/workflows/live-permissions-release.yml)。
 
 用戶端設定及批准規則：[OpenAI 開發人員模式指引](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt-beta)。這些與桌面程式的即時權限分開管理。
+
+## 可選原生會話審查候選功能
+
+[原生 Codex 介接](../features/native-codex-runtime.md)新增另一條須本機批准的供應商路徑。上述 v0.4.1 免模型說明仍適用於本機工具，但不適用於已啟用的原生會話。先訂審查範圍與可接受用量、啟用指定監聽服務、提交有界審查任務，再觀察真實回合完成，並以程式碼及相關檢查核對解釋。原生 `compact` 是上下文壓縮，不是訓練或修改模型權重；測試替身通過不代表已完成登入／計費的模型審查。人類修正應成為經審查筆記，而不是暗中信任的指令。停止／撤銷可阻止新的介接提交，但不能追回已交給原生執行環境或供應商的動作。

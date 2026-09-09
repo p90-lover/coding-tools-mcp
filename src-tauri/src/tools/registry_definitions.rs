@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
 pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
+    ("codex_runtime_status", "Native Codex connection status", "Inspect the locally opted-in native App Server connection, request count, lifetime and owned threads. Does not start a process or model request.", true, false, false),
+    ("codex_agent_read", "Read owned native Codex response", "Read the latest bounded agent message and observed turn state from this listener's native connection. No inferred success, hidden reasoning, foreign thread or model request.", true, false, false),
+    ("codex_agent_control", "Control opted-in native Codex agent", "Submit start/send/review/compact or interrupt/close to a locally enabled native App Server. Model operations can spend provider quota. Unique request_id is mandatory; repeats never replay. Only owned threads, no remote enable, approval escalation or arbitrary RPC. An acknowledgment is not task completion.", false, true, true),
     ("codex_tools_status", "Local coding tool capabilities", "Report implemented local Codex-style tools and explicit unsupported model/runtime features. Does not invoke Codex, an AI reviewer, or an inference API.", true, false, false),
     ("tool_search", "Search installed tool definitions", "Search the current permitted local MCP tool catalog by name or description. No network, provider, installation, or agent launch.", true, false, false),
     ("get_current_time", "Current system time", "Return system UTC Unix seconds and milliseconds. No network time query.", true, false, false),
@@ -351,6 +354,9 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
 
 /// old Python 版本默认提供的核心工具集。默认 MCP 只暴露这一组，保持 Agent 的工具面稳定。
 pub const CORE_TOOLS: &[&str] = &[
+    "codex_runtime_status",
+    "codex_agent_read",
+    "codex_agent_control",
     "codex_tools_status",
     "tool_search",
     "get_current_time",
@@ -405,6 +411,8 @@ pub const CORE_TOOLS: &[&str] = &[
 ];
 
 pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
+    "codex_runtime_status",
+    "codex_agent_read",
     "codex_tools_status",
     "tool_search",
     "get_current_time",
@@ -447,6 +455,9 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 pub const ALLOWED_TOOLS: &[&str] = &[
+    "codex_runtime_status",
+    "codex_agent_read",
+    "codex_agent_control",
     "codex_tools_status",
     "tool_search",
     "get_current_time",
@@ -515,6 +526,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
 ];
 
 pub const MUTATING_TOOLS: &[&str] = &[
+    "codex_agent_control",
     "computer_action",
     "computer_sequence",
     "history_session_bootstrap",
@@ -534,6 +546,8 @@ pub const MUTATING_TOOLS: &[&str] = &[
 ];
 
 pub const READ_ONLY_TOOLS: &[&str] = &[
+    "codex_runtime_status",
+    "codex_agent_read",
     "codex_tools_status",
     "tool_search",
     "get_current_time",
@@ -625,7 +639,7 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
         .filter_map(|name| {
             P0_TOOLS.iter().find(|(n, ..)| *n == name).map(|entry| {
                 let (name, title, description, read_only, destructive, open_world) = *entry;
-                let (read_only, destructive, open_world) = if compat && !name.starts_with("computer_") {
+                let (read_only, destructive, open_world) = if compat && !name.starts_with("computer_") && name != "codex_agent_control" {
                     (true, false, false)
                 } else {
                     (read_only, destructive, open_world)
@@ -649,6 +663,7 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 }
 
 pub fn input_schema(name: &str) -> Value {
+    if crate::tools::codex_runtime::NAMES.contains(&name) { return crate::tools::codex_runtime::input_schema(name); }
     if crate::tools::local_tools::NAMES.contains(&name) {
         return crate::tools::local_tools::input_schema(name);
     }
@@ -1098,7 +1113,10 @@ mod tests {
             34 + crate::tools::computer::schema::NAMES.len()
                 + crate::tools::native_sandbox::NAMES.len()
                 + crate::tools::local_tools::NAMES.len()
+                + crate::tools::codex_runtime::NAMES.len()
         );
+        for name in crate::tools::codex_runtime::NAMES { assert!(names.contains(name)); }
+        assert_eq!(list_tools_for_profile("compat-readonly-all").into_iter().find(|t|t["name"]=="codex_agent_control").unwrap()["annotations"]["readOnlyHint"], false);
         for name in crate::tools::local_tools::NAMES {
             assert!(names.contains(name));
         }

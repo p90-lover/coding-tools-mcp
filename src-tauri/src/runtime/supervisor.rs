@@ -48,6 +48,19 @@ pub struct RuntimeSupervisor {
 }
 
 impl RuntimeSupervisor {
+    pub fn stop_native_bridges(&self) {
+        for entry in self.entries.values() {
+            if let Some(context) = &entry.context { context.codex_bridge.cancel("desktop_exiting"); }
+        }
+    }
+
+    pub fn native_bridge_context(&self, workspace_id: &str) -> AppResult<crate::tools::SharedToolContext> {
+        self.entries.get(&(workspace_id.to_string(), ServiceKind::Mcp))
+            .filter(|entry| entry.phase == RuntimePhase::Running)
+            .and_then(|entry| entry.context.clone())
+            .ok_or_else(|| crate::error::AppError::Message("Start this workspace's authenticated MCP listener first".into()))
+    }
+
     pub fn commit_live_permissions(
         &self,
         profile: &WorkspaceProfile,
@@ -150,6 +163,7 @@ impl RuntimeSupervisor {
         let key = (workspace_id.to_string(), kind);
         let entry = self.entries.get_mut(&key)?;
 
+        if let Some(context) = &entry.context { context.codex_bridge.cancel("mcp_listener_stopping"); }
         entry.phase = RuntimePhase::Stopping;
         let shutdown = entry.shutdown.take();
         let handle = entry.handle.take();

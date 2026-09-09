@@ -18,6 +18,7 @@ pub struct ToolContext {
     pub(crate) live_policy: Arc<RwLock<Option<crate::tools::live_policy::LivePolicy>>>,
     pub policy_revision: u64,
     pub(crate) local_plan: Arc<Mutex<Value>>,
+    pub(crate) codex_bridge: Arc<crate::codex_bridge::Hub>,
     pub workspace: Workspace,
     pub auth: AuthConfig,
     pub policy: PolicySettings,
@@ -83,6 +84,7 @@ impl ToolContext {
             approvals: Arc::new(ApprovalStore::default()),
             live_policy: Arc::new(RwLock::new(None)),
             policy_revision: 0,
+            codex_bridge: Arc::new(crate::codex_bridge::Hub::default()),
             local_plan: Arc::new(Mutex::new(
                 serde_json::json!({"revision":0,"plan":[],"explanation":""}),
             )),

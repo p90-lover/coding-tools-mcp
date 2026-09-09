@@ -62,7 +62,8 @@ pub fn fence_entire_call(name: &str) -> bool {
     !name.starts_with("computer_")
         && !matches!(
             name,
-            "exec_command"
+            "codex_agent_control"
+                | "exec_command"
                 | "exec_health_check"
                 | "write_stdin"
                 | "capture_screenshot"
@@ -111,6 +112,7 @@ pub fn commit_updates(
     for ((context, before, after), guard) in changes.iter().zip(guards.iter_mut()) {
         **guard = Some(after.clone());
         context.approvals.revoke_all();
+        context.codex_bridge.cancel("workspace_policy_changed");
         // Existing process outcomes are not replayable. Preserve their output,
         // immediately deny further stdin and request termination of owned children.
         context.sessions.revoke_for_policy_change();

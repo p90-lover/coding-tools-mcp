@@ -6,6 +6,10 @@ A local desktop control center for AI-assisted development: the human defines th
 
 **Release line: `v0.4.1-rc.1` — live permissions.** Read the [release notes](docs/releases/v0.4.1-rc.1.md) and the published release's validation evidence. A version in source code is not proof that a build passed. This is a release candidate, not a certified security sandbox.
 
+## Native Codex candidate
+
+The current candidate adds an explicitly opted-in native App Server bridge, separate from the released model-free tools. `codex_runtime_status`, `codex_agent_read` and `codex_agent_control` provide owned text sessions, native review, native compaction, interruption and unsubscribe. Model-use consent, trusted executable SHA-256, request/lifetime limits and Stop are local desktop controls. [Read setup, workflow and exact limits](docs/features/native-codex-runtime.md). Source presence is not proof of a published or provider-verified build.
+
 ## Download and start
 
 Get `Coding.Tools.MCP_0.4.1-rc.1_x64-setup.exe` from the [versioned release page](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.1-rc.1). The same release provides the Apple Silicon `.dmg`, SHA-256 checksums, source provenance and validation logs. Windows is publisher-unsigned; macOS uses ad-hoc signing and is not notarized. Verify the source and checksum before opening a downloaded installer.
@@ -51,9 +55,10 @@ These are **actual local counterparts**, using the schemas returned by `tools/li
 | Permissions | `request_permissions` for an exact operation. Persistent policy settings remain a local UI responsibility. |
 | Images and desktop | `view_image`, `image_info`, `compare_images`, `capture_screenshot`, `capture_window`, and the `computer_*` tools. |
 | Durable context | `history_session_bootstrap`, `history_session_search`, `history_session_read`, `history_session_checkpoint`, `history_session_validate`. |
-| Not bundled | Codex model/subagent inference, model-context management, cloud web search, Codex account/plugin installation, and the unverified native command sandbox. Chat questions and responses remain in the connected AI client. |
+| Optional native runtime candidate | `codex_runtime_status`, `codex_agent_read`, `codex_agent_control`; the separate local opt-in bridge can invoke installed Codex for text turns, review and native compaction. |
+| Not bundled | Complete internal Codex tool parity, cloud web-search/account/plugin APIs, Paseo/Anneal autonomous engines and the unverified native command sandbox. |
 
-**Not every internal Codex tool is included.** Tool-only execution does not invoke Codex or spend a Codex inference quota. Your chosen AI client still has its own usage, and external Paseo/Anneal agents may independently consume their providers' quotas. This release does not launch those agents or an AI reviewer.
+**Not every internal Codex tool is included.** Tool-only execution does not invoke Codex or spend a Codex inference quota. Your chosen AI client still has its own usage, and external Paseo/Anneal agents may independently consume their providers' quotas. The released model-free path does not launch those agents or an AI reviewer. The separately opted-in native bridge can start model work and native review; it must not be described as quota-free.
 
 ## Work together: human → AI → tools → evidence
 

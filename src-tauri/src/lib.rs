@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", allow(linker_messages))]
 
 mod integrations;
+mod codex_bridge;
 
 mod actions;
 mod app_state;
@@ -22,6 +23,7 @@ mod workspace;
 
 use app_state::AppState;
 use commands::{
+    codex_local_connect, codex_local_status, codex_local_disconnect, codex_local_control, codex_local_read,
     check_app_update, computer_local_forget, computer_local_pause, computer_local_permissions,
     computer_local_poll, computer_local_preview, computer_local_resume, computer_local_start,
     computer_local_stop, computer_local_targets, control_board_change, control_board_read,
@@ -178,6 +180,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            codex_local_connect, codex_local_status, codex_local_disconnect, codex_local_control, codex_local_read,
             integration_read,
             control_board_read,
             control_board_change,
@@ -246,6 +249,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
+            tauri::RunEvent::Exit => {
+                let state = app_handle.state::<AppState>();
+                let _ = state.with_runtime(|runtime| { runtime.stop_native_bridges(); Ok(()) });
+            }
             tauri::RunEvent::ExitRequested { api, .. } => {
                 // While recreating the UI WebView we temporarily destroy the main
                 // window; without prevent_exit Tauri would quit the whole process

@@ -113,3 +113,7 @@ Paseo/Anneal adapters observe existing local services. Their full voice/mobile, 
 Implementation: [live policy](../../src-tauri/src/tools/live_policy.rs), [local tool handlers](../../src-tauri/src/tools/local_tools.rs), [shared dispatcher](../../src-tauri/src/tools/dispatch.rs), [history](../../src-tauri/src/tools/history), [operator board](../../src-tauri/src/integrations/board.rs), [release workflow](../../.github/workflows/live-permissions-release.yml).
 
 Client-side setup and approval rules: [OpenAI developer-mode guidance](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt-beta). These are separate from the desktop application's live permissions.
+
+## Optional native-session review candidate
+
+The [native Codex bridge](../features/native-codex-runtime.md) adds a separate locally approved provider path. The earlier v0.4.1 model-free description still applies to local tools, not to an enabled native session. Define the review scope and spending tolerance, enable the specific listener, submit a bounded review task, inspect actual turn completion, and verify the explanation against code and a relevant check. Native `compact` is context compaction, not training or model-weight changes. A fixture does not prove a paid/authenticated review ran. Human corrections should become reviewed notes, not silently trusted instructions. Stop/revocation prevents new bridge submissions but cannot undo effects already submitted to the native runtime or provider.
