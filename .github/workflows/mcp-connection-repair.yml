@@ -1,0 +1,138 @@
+name: MCP connection repair
+on:
+  push:
+    branches: [fix/mcp-connection-0.4.1-rc.2]
+    paths: ['.github/workflows/mcp-connection-repair.yml', 'src-tauri/**', 'aiTemp/connection-tests/**', 'docs/guides/mcp-connection-repair.md']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mcp-connection-repair
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_INCREMENTAL: '0'
+  VERSION: 0.4.1-rc.2
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.source }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Materialize production wiring without replacing credentials
+        id: source
+        working-directory: aiTemp/checkout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python aiTemp/connection-tests/materialize.py
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: MCP OAuth discovery challenge and HTTP handshake responses'
+            auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+            remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+            test "$remote" = "$GITHUB_SHA"
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          mkdir -p aiTemp/prepared
+          git archive --format=zip HEAD --output=aiTemp/prepared/source.zip
+          git rev-parse HEAD > aiTemp/prepared/source-sha.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: connection-source-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/prepared/*
+          if-no-files-found: error
+          retention-days: 14
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+        shell: bash
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Check existing frontend and three real HTTP regressions
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/installers
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_repair_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/http-tests.txt
+          python - <<'PY'
+          from pathlib import Path
+          log=Path('aiTemp/evidence/http-tests.txt').read_text(encoding='utf-8')
+          assert '3 passed; 0 failed' in log
+          docs=Path('docs/guides/mcp-connection-repair.md').read_text(encoding='utf-8')
+          assert '## English' in docs and '## 繁體中文' in docs
+          PY
+      - name: Build and inspect fresh Windows installer
+        env:
+          CI: 'true'
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles nsis -- --locked 2>&1 | tee aiTemp/evidence/build.txt
+          git diff --exit-code -- package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,shutil,subprocess
+          root=Path(os.environ['CARGO_TARGET_DIR'])/'release'
+          version=subprocess.check_output([str(root/'coding-tools-mcp-desktop.exe'),'--version'],text=True,timeout=15).strip()
+          assert version=='coding-tools-mcp-desktop '+os.environ['VERSION']
+          matches=list(root.glob('bundle/nsis/*.exe'));assert len(matches)==1
+          name='Coding.Tools.MCP_'+os.environ['VERSION']+'_x64-setup.exe'
+          target=Path('aiTemp/installers')/name
+          assert not target.exists();shutil.copy2(matches[0],target)
+          proof={'version':os.environ['VERSION'],'source_commit':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'asset':name,'size':target.stat().st_size,'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'real_http_tests':3,'codex_invoked':False,'publisher_signed':False,'live_user_connection_verified':False}
+          Path('aiTemp/installers/proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+          Path('aiTemp/evidence/proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: connection-windows-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/installers/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: connection-evidence-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
