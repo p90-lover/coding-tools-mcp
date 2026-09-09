@@ -1,0 +1,94 @@
+name: Native review notification probe
+
+on:
+  push:
+    branches: [feature/native-codex-bridge-20260909]
+    paths: ['.github/workflows/native-review-notification-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-review-notification-probe
+  cancel-in-progress: false
+
+env:
+  SOURCE: ${{ github.sha }}
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_INCREMENTAL: '0'
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-native-review-probe
+
+jobs:
+  probe:
+    if: github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Prepare hermetic read-only bridge with bounded notification logging
+        run: |
+          set -euo pipefail
+          python scripts/native_bridge_ci.py probe-init
+          python - <<'PY'
+          from pathlib import Path
+          import os, shutil
+          bridge=Path('src-tauri/src/codex_bridge/mod.rs')
+          backup=Path('aiTemp/Trash/native-review-probe')/os.environ['GITHUB_RUN_ID']/bridge
+          backup.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(bridge,backup)
+          text=bridge.read_text(encoding='utf-8')
+          start='''            // Named permissions replace removed readOnly.access in native 0.153.4.\n            // A fresh profile avoids inheriting another configured profile's rules.\n            let nonce = std::time::SystemTime::now()\n                .duration_since(std::time::UNIX_EPOCH)\n                .map_err(|_| "System clock unavailable")?\n                .as_nanos();\n            let profile = format!("coding_tools_readonly_{}_{nonce}", std::process::id());\n            let value = self.rpc("thread/start", json!({"cwd":self.root,"model":self.options.model,\n                "permissions":profile,\n                "config":{"permissions":{(profile.clone()):{\n                    "filesystem":{":root":"deny",":minimal":"read",":workspace_roots":{".":"read"}},\n                    "network":{"enabled":false}}}},\n                "approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,\n                "developerInstructions":"Work only on the explicitly requested task. Never delete files; use Trash for unwanted files and aiTemp for temporary files. Do not change permissions or use unsandboxed fallbacks. Explain evidence and uncertainty. Do not launch extra agents unless explicitly requested."}))?;\n            if value["activePermissionProfile"]["id"].as_str() != Some(profile.as_str()) {\n                self.stop("native_permission_profile_mismatch");\n                return Err("Native runtime did not confirm the requested read-only profile; no turn submitted".into());\n            }\n'''
+          replacement='''            const PROFILE: &str = ":read-only";\n            let value = self.rpc("thread/start", json!({"cwd":self.root,"model":self.options.model,\n                "permissions":PROFILE,"approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,\n                "developerInstructions":"Work only on the explicitly requested task. Never delete files; use Trash for unwanted files and aiTemp for temporary files. Do not change permissions or use unsandboxed fallbacks. Explain evidence and uncertainty. Do not launch extra agents unless explicitly requested."}))?;\n            if value["activePermissionProfile"]["id"].as_str() != Some(PROFILE) {\n                self.stop("native_permission_profile_mismatch");\n                return Err("Native runtime did not confirm the built-in read-only profile; no turn submitted".into());\n            }\n'''
+          assert text.count(start)==1
+          text=text.replace(start,replacement,1)
+          env_marker='''            .stderr(Stdio::null());\n        OwnedProcess::configure(&mut command);'''
+          env_replacement='''            .stderr(Stdio::null());\n        #[cfg(test)]\n        if std::env::var_os("NATIVE_CODEX_PROBE_BIN").is_some() {\n            command.env("CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG", "1");\n        }\n        OwnedProcess::configure(&mut command);'''
+          assert text.count(env_marker)==1
+          text=text.replace(env_marker,env_replacement,1)
+          recv='''        if let Some(method) = value["method"].as_str() {\n'''
+          recv_new='''        if let Some(method) = value["method"].as_str() {\n            #[cfg(test)]\n            if std::env::var_os("NATIVE_CODEX_PROBE_BIN").is_some() {\n                let status = value.pointer("/params/turn/status").and_then(Value::as_str).unwrap_or("");\n                let item_type = value.pointer("/params/item/type").and_then(Value::as_str).unwrap_or("");\n                eprintln!("NATIVE_NOTIFY method={method} turn_status={status} item_type={item_type}");\n            }\n'''
+          assert text.count(recv)==1
+          bridge.write_text(text.replace(recv,recv_new,1),encoding='utf-8')
+
+          fixture=Path('aiTemp/release-verification/native_turn_fixture.rs')
+          f=fixture.read_text(encoding='utf-8')
+          old='''    let n = count.fetch_add(1, Ordering::SeqCst) + 1;\n'''
+          new='''    let n = count.fetch_add(1, Ordering::SeqCst) + 1;\n    eprintln!("SYNTHETIC_MODEL_CALL {n}");\n'''
+          assert f.count(old)==1
+          fixture.write_text(f.replace(old,new,1),encoding='utf-8')
+          PY
+      - name: Verify official native binary without account credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_ASSET: codex-x86_64-pc-windows-msvc.exe.tar.gz
+        run: python scripts/native_bridge_ci.py download-native
+      - name: Run full synthetic lifecycle and retain notification sequence
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          set +e
+          cargo test --manifest-path aiTemp/bridge-probe/Cargo.toml native_bridge_actual_turns_against_loopback_fixture -- --ignored --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/native-review-notifications.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          grep -E 'SYNTHETIC_MODEL_CALL|NATIVE_NOTIFY' aiTemp/evidence/native-review-notifications.txt > aiTemp/evidence/sequence.txt || true
+          exit "$code"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-review-notification-probe-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: warn
+          retention-days: 14
