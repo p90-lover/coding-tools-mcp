@@ -48,6 +48,24 @@ pub struct RuntimeSupervisor {
 }
 
 impl RuntimeSupervisor {
+    /// Local desktop interaction only; never returns a stopped/replaced listener.
+    pub(crate) fn interaction_contexts(
+        &self,
+    ) -> Vec<(String, ServiceKind, crate::tools::SharedToolContext)> {
+        self.entries
+            .iter()
+            .filter(|(_, e)| {
+                e.phase == RuntimePhase::Running
+                    && e.handle.as_ref().is_some_and(|h| !h.inner().is_finished())
+            })
+            .filter_map(|((id, kind), e)| {
+                e.context
+                    .as_ref()
+                    .map(|ctx| (id.clone(), *kind, ctx.clone()))
+            })
+            .collect()
+    }
+
     pub fn commit_live_permissions(
         &self,
         profile: &WorkspaceProfile,

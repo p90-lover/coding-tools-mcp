@@ -1,3 +1,5 @@
+> **0.4.2-rc.1 候選版本：** 包含 MCP 連線修復，以及免模型的資源、人類提問及有限等待工具。請參閱[工具範圍及流程](docs/guides/codex-local-tools.zh-Hant.md)；並不包含 Codex Agent 的全部內部功能。
+
 # Coding Tools MCP
 
 **繁體中文** · [English](README.en.md) · [版本及 Windows 安裝程式](https://github.com/p90-lover/coding-tools-mcp/releases) · [AI／人類協作流程](docs/guides/ai-human-workflow.zh-Hant.md)

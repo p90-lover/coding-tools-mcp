@@ -1,3 +1,5 @@
+> **0.4.2-rc.1 candidate:** MCP connection fixes plus model-free resource, human-question and bounded-wait tools. Read the [tool scope and workflow](docs/guides/codex-local-tools.en.md). This does not bundle all Codex agent internals.
+
 # Coding Tools MCP
 
 [繁體中文](README.md) · **English** · [Releases and Windows installer](https://github.com/p90-lover/coding-tools-mcp/releases) · [AI + human workflow](docs/guides/ai-human-workflow.en.md)

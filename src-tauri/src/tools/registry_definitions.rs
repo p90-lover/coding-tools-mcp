@@ -1,6 +1,13 @@
 use serde_json::{json, Value};
 
 pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
+    ("list_mcp_resources", "List local MCP resources", "List the current listener's plan and environment resource URIs. No remote proxy or provider call.", true, false, false),
+    ("list_mcp_resource_templates", "List local MCP resource templates", "List parameterized resources for this listener's owned command output. Does not expose other servers or files.", true, false, false),
+    ("read_mcp_resource", "Read local MCP resource", "Read a listed plan/environment or owned command stdout/stderr resource. Reject arbitrary file/network URIs.", true, false, false),
+    ("request_user_input", "Ask the local user", "Show 1–3 questions in the local desktop UI. Returns pending/request_id; use read_user_input for actual answers. Asking does not grant permissions or execute actions.", false, false, false),
+    ("read_user_input", "Read human answer", "Read the answer, pending/cancelled status of this listener's question. Only the local main window may answer.", true, false, false),
+    ("clock_sleep", "Bounded local clock sleep", "Wait 1–5000 ms and report elapsed time. Interrupted by live permission changes; no model or new-input subscription.", true, false, false),
+    ("wait_for_environment", "Wait for local workspace", "Check first, then wait up to 5000 ms for the current workspace to be readable. Does not start a provider or claim remote environments are ready.", true, false, false),
     ("codex_tools_status", "Local coding tool capabilities", "Report implemented local Codex-style tools and explicit unsupported model/runtime features. Does not invoke Codex, an AI reviewer, or an inference API.", true, false, false),
     ("tool_search", "Search installed tool definitions", "Search the current permitted local MCP tool catalog by name or description. No network, provider, installation, or agent launch.", true, false, false),
     ("get_current_time", "Current system time", "Return system UTC Unix seconds and milliseconds. No network time query.", true, false, false),
@@ -351,6 +358,13 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
 
 /// old Python 版本默认提供的核心工具集。默认 MCP 只暴露这一组，保持 Agent 的工具面稳定。
 pub const CORE_TOOLS: &[&str] = &[
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "request_user_input",
+    "read_user_input",
+    "clock_sleep",
+    "wait_for_environment",
     "codex_tools_status",
     "tool_search",
     "get_current_time",
@@ -405,6 +419,13 @@ pub const CORE_TOOLS: &[&str] = &[
 ];
 
 pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "request_user_input",
+    "read_user_input",
+    "clock_sleep",
+    "wait_for_environment",
     "codex_tools_status",
     "tool_search",
     "get_current_time",
@@ -447,6 +468,13 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 pub const ALLOWED_TOOLS: &[&str] = &[
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "request_user_input",
+    "read_user_input",
+    "clock_sleep",
+    "wait_for_environment",
     "codex_tools_status",
     "tool_search",
     "get_current_time",
@@ -534,6 +562,13 @@ pub const MUTATING_TOOLS: &[&str] = &[
 ];
 
 pub const READ_ONLY_TOOLS: &[&str] = &[
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "request_user_input",
+    "read_user_input",
+    "clock_sleep",
+    "wait_for_environment",
     "codex_tools_status",
     "tool_search",
     "get_current_time",
@@ -619,17 +654,12 @@ pub fn list_tools() -> Vec<Value> {
 }
 
 pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
-    let compat = tool_profile == "compat-readonly-all";
     exposed_tool_names(tool_profile)
         .into_iter()
         .filter_map(|name| {
             P0_TOOLS.iter().find(|(n, ..)| *n == name).map(|entry| {
                 let (name, title, description, read_only, destructive, open_world) = *entry;
-                let (read_only, destructive, open_world) = if compat && !name.starts_with("computer_") {
-                    (true, false, false)
-                } else {
-                    (read_only, destructive, open_world)
-                };
+                // The legacy profile name selects the full catalog, never false safety annotations.
                 json!({
                     "name": name,
                     "title": title,
@@ -649,6 +679,9 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 }
 
 pub fn input_schema(name: &str) -> Value {
+    if crate::tools::codex_local::NAMES.contains(&name) {
+        return crate::tools::codex_local::input_schema(name);
+    }
     if crate::tools::local_tools::NAMES.contains(&name) {
         return crate::tools::local_tools::input_schema(name);
     }
@@ -1098,6 +1131,7 @@ mod tests {
             34 + crate::tools::computer::schema::NAMES.len()
                 + crate::tools::native_sandbox::NAMES.len()
                 + crate::tools::local_tools::NAMES.len()
+                + crate::tools::codex_local::NAMES.len()
         );
         for name in crate::tools::local_tools::NAMES {
             assert!(names.contains(name));

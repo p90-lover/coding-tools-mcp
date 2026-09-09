@@ -219,6 +219,9 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
 
     let ws = &ctx.workspace;
     let result = match name {
+        name if crate::tools::codex_local::NAMES.contains(&name) => {
+            crate::tools::codex_local::call(ctx, name, &effective_args)
+        }
         "codex_tools_status" | "tool_search" | "get_current_time" | "get_plan" | "update_plan" => {
             crate::tools::local_tools::call(ctx, name, &effective_args)
         }

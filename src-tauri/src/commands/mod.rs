@@ -1,3 +1,5 @@
+mod human_input;
+pub use human_input::{human_answer, human_pending};
 mod control_center;
 pub use control_center::{control_board_change, control_board_read, integration_read};
 mod computer;

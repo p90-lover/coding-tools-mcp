@@ -18,6 +18,7 @@ pub struct ToolContext {
     pub(crate) live_policy: Arc<RwLock<Option<crate::tools::live_policy::LivePolicy>>>,
     pub policy_revision: u64,
     pub(crate) local_plan: Arc<Mutex<Value>>,
+    pub(crate) human_inputs: Arc<crate::tools::codex_local::HumanInputs>,
     pub workspace: Workspace,
     pub auth: AuthConfig,
     pub policy: PolicySettings,
@@ -83,6 +84,7 @@ impl ToolContext {
             approvals: Arc::new(ApprovalStore::default()),
             live_policy: Arc::new(RwLock::new(None)),
             policy_revision: 0,
+            human_inputs: Arc::new(crate::tools::codex_local::HumanInputs::default()),
             local_plan: Arc::new(Mutex::new(
                 serde_json::json!({"revision":0,"plan":[],"explanation":""}),
             )),

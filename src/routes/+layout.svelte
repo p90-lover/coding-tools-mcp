@@ -6,6 +6,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import AppShell from "$lib/components/AppShell.svelte";
   import ToastHost from "$lib/components/ToastHost.svelte";
+  import HumanQuestions from "$lib/components/HumanQuestions.svelte";
   import WorkspaceNavItem from "$lib/components/WorkspaceNavItem.svelte";
   import {
     createWorkspace,
@@ -186,6 +187,7 @@
 </AppShell>
 
 <ToastHost />
+<HumanQuestions />
 <CloseConfirmDialog
   open={closeConfirmOpen}
   onCancel={() => {

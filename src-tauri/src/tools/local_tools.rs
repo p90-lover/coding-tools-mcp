@@ -45,30 +45,12 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
     match name {
         "codex_tools_status" => {
             let installed = registry::exposed_tool_names(&ctx.tool_profile);
-            let candidates = [
-                "exec_command",
-                "write_stdin",
-                "read_output",
-                "kill_command",
-                "read_file",
-                "list_dir",
-                "list_files",
-                "grep_text",
-                "apply_patch",
-                "request_permissions",
-                "view_image",
-                "update_plan",
-                "get_plan",
-                "tool_search",
-                "get_current_time",
-                "computer_snapshot",
-                "computer_action",
-                "computer_sequence",
-            ];
             Ok(tool_ok(
                 json!({"implementation":"local_mcp_counterparts","codex_invoked":false,
                 "inference_client_in_this_path":false,"policy_revision":ctx.policy_revision,
-                "tools":candidates.into_iter().filter(|n|installed.contains(n)).collect::<Vec<_>>(),
+                "tools":installed,"catalog_tool_count":installed.len(),
+                "upstream_commit":crate::tools::codex_local::UPSTREAM,"all_upstream_tools_integrated":false,
+                "upstream_handler_coverage":crate::tools::codex_local::coverage(ctx),
                 "not_included":["Codex agent inference and subagents","model context-window management","Codex account/plugin installation APIs","Codex cloud web-search service","unverified native command sandbox"],
                 "command_execution_boundary":"policy_only","screenshots":"memory_only",
                 "note":"Use each tool's returned schema. These are local implementations, not every internal Codex runtime tool or an OS sandbox."}),

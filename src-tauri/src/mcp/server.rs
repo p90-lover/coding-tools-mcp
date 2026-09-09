@@ -32,6 +32,14 @@ fn handle_current_request(state: &SharedState, body: &Value) -> Value {
     let result = match method {
         "initialize" => Ok(initialize_result()),
         "ping" => Ok(serde_json::json!({})),
+        "resources/list" => resource_request(state, "list_mcp_resources", &params, "resources"),
+        "resources/templates/list" => resource_request(
+            state,
+            "list_mcp_resource_templates",
+            &params,
+            "resourceTemplates",
+        ),
+        "resources/read" => resource_request(state, "read_mcp_resource", &params, "contents"),
         "tools/list" => {
             let tools = list_tools_for_profile(&state.tool_profile);
             Ok(serde_json::json!({ "tools": tools }))
@@ -49,12 +57,41 @@ fn handle_current_request(state: &SharedState, body: &Value) -> Value {
     }
 }
 
+fn resource_request(
+    state: &SharedState,
+    name: &str,
+    params: &Value,
+    key: &str,
+) -> Result<Value, Value> {
+    let mut args = if params.is_null() {
+        json!({})
+    } else {
+        params.clone()
+    };
+    if !args.is_object() {
+        return Err(json!({"code":-32602,"message":"Resource parameters must be an object"}));
+    }
+    if name == "read_mcp_resource" && args.get("server").is_none() {
+        args["server"] = json!("coding-tools-mcp");
+    }
+    let output = call_tool(state.as_ref(), name, &args);
+    if output["ok"] != true {
+        return Err(
+            json!({"code":-32602,"message":"Resource unavailable in this listener or rejected by policy","data":output}),
+        );
+    }
+    let mut result = json!({});
+    result[key] = output[key].clone();
+    Ok(result)
+}
+
 fn initialize_result() -> Value {
     serde_json::json!({
         "protocolVersion": "2025-06-18",
         "capabilities": {
             "tools": { "listChanged": false },
-            "logging": {}
+            "logging": {},
+            "resources": {"subscribe": false, "listChanged": false}
         },
         "serverInfo": {
             "name": "coding-tools-mcp",

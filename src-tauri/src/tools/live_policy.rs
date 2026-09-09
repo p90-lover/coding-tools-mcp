@@ -62,7 +62,9 @@ pub fn fence_entire_call(name: &str) -> bool {
     !name.starts_with("computer_")
         && !matches!(
             name,
-            "exec_command"
+            "clock_sleep"
+                | "wait_for_environment"
+                | "exec_command"
                 | "exec_health_check"
                 | "write_stdin"
                 | "capture_screenshot"
