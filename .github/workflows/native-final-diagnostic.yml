@@ -5,12 +5,15 @@ on:
     paths: ['.github/workflows/native-final-diagnostic.yml']
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: native-final-lifecycle
+  cancel-in-progress: false
 jobs:
   trace:
     if: github.actor == github.repository_owner
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     env:
       SOURCE: ${{ github.sha }}
       PYTHONUTF8: '1'
@@ -30,47 +33,120 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: '1.98.1'
-      - name: Trace synthetic notification identity without production logging
+          components: rustfmt
+      - name: Reproduce nested native review ID regression
         run: |
           set -euo pipefail
           python scripts/native_bridge_ci.py probe-init
           python - <<'PY'
           from pathlib import Path
           import shutil
-          p=Path('src-tauri/src/codex_bridge/mod.rs')
-          backup=Path('aiTemp/Trash/native-final-trace/mod.rs');backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,backup)
-          s=p.read_text(encoding='utf-8')
-          marker='        if let Some(method) = value["method"].as_str() {\n'
-          assert s.count(marker)==1
-          s=s.replace(marker,marker+'''            #[cfg(test)]
-                      if std::env::var_os("NATIVE_CODEX_PROBE_BIN").is_some() {
-                          let p = &value["params"];
-                          eprintln!("NATIVE_IDENTITY method={} thread={} turn={} turnObj={} item={} status={}", method,
-                              p["threadId"], p["turnId"], p["turn"]["id"],p["item"]["type"], p["turn"]["status"]);
-                      }
-          ''',1)
-          marker='                if request.operation == "review"\n'
-          assert s.count(marker)==1, s.count(marker)
-          s=s.replace(marker,'''                #[cfg(test)]
-                          eprintln!("CONTROL_RESULT operation={} response={}",request.operation,value);
-          '''+marker,1)
-          p.write_text(s,encoding='utf-8')
+          for name in ['src-tauri/src/codex_bridge/mod.rs','aiTemp/release-verification/native_turn_fixture.rs']:
+              p=Path(name);backup=Path('aiTemp/Trash/native-parent-turn')/p
+              backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,backup)
           p=Path('aiTemp/release-verification/native_turn_fixture.rs')
-          backup=Path('aiTemp/Trash/native-final-trace/fixture.rs');shutil.copy2(p,backup)
-          s=p.read_text(encoding='utf-8')
-          marker='    let n = count.fetch_add(1, Ordering::SeqCst) + 1;\n'
-          assert s.count(marker)==1
-          p.write_text(s.replace(marker,marker+'    eprintln!("SYNTHETIC_RESPONSE_NUMBER {n}");\n',1),encoding='utf-8')
+          with p.open('a',encoding='utf-8') as f:
+              f.write('''
+          #[test]
+          fn native_bridge_review_parent_survives_delegate_start() {
+              for response_first in [true, false] {
+                  let mut memory = Memory::default();
+                  memory.threads.insert("owned".into(), ThreadState {
+                      id: "owned".into(), status: "starting".into(),
+                      turn_id: response_first.then(|| "review-parent".into()),
+                      ..Default::default()
+                  });
+                  apply_notification(&mut memory,"item/started",&json!({
+                      "threadId":"owned","turnId":"review-parent","item":{"id":"entry","type":"enteredReviewMode"}}));
+                  apply_notification(&mut memory,"turn/started",&json!({
+                      "threadId":"owned","turn":{"id":"delegate-child","status":"inProgress"}}));
+                  assert_eq!(memory.threads["owned"].turn_id.as_deref(),Some("review-parent"),"NESTED_REVIEW_ID_MUST_NOT_REPLACE_PARENT");
+                  apply_notification(&mut memory,"turn/completed",&json!({
+                      "threadId":"owned","turn":{"id":"delegate-child","status":"failed"}}));
+                  assert_ne!(memory.threads["owned"].status,"failed");
+                  apply_notification(&mut memory,"item/completed",&json!({
+                      "threadId":"owned","turnId":"review-parent","item":{"id":"exit","type":"exitedReviewMode","review":"synthetic review result"}}));
+                  apply_notification(&mut memory,"turn/completed",&json!({
+                      "threadId":"owned","turn":{"id":"review-parent","status":"completed"}}));
+                  assert_eq!(memory.threads["owned"].status,"completed");
+                  assert_eq!(memory.threads["owned"].answer,"synthetic review result");
+              }
+          }
+          ''')
           PY
+          set +e
+          cargo test --manifest-path aiTemp/bridge-probe/Cargo.toml native_bridge_review_parent_survives_delegate_start -- --test-threads=1 --nocapture > aiTemp/evidence/review-red.txt 2>&1
+          code=$?
+          set -e
+          test "$code" -eq 101
+          grep -F 'NESTED_REVIEW_ID_MUST_NOT_REPLACE_PARENT' aiTemp/evidence/review-red.txt
+      - name: Preserve parent identity and reject foreign completion
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src-tauri/src/codex_bridge/mod.rs');s=p.read_text(encoding='utf-8')
+          old='''    match method {
+                  "turn/started" => {
+                      if let Some(turn) = params["turn"]["id"].as_str().filter(|s| token(s)) {
+          '''
+          new='''    match method {
+                  "item/started" | "item/completed" if params["item"]["type"] == "enteredReviewMode" => {
+                      // Inline review emits its parent item before the delegate's start event.
+                      // Pin it even when the review/start response has not arrived yet.
+                      if thread.status == "starting" && thread.turn_id.is_none() {
+                          if let Some(turn) = params["turnId"].as_str().filter(|s| token(s)) {
+                              thread.turn_id = Some(turn.into());
+                          }
+                      }
+                  }
+                  "turn/started" => {
+                      if let Some(turn) = params["turn"]["id"].as_str().filter(|s| token(s)) {
+                          // Codex forwards a review delegate's start under the parent thread.
+                          // It must not replace the authoritative outer review/turn identity.
+                          if thread.turn_id.as_deref().is_some_and(|active| active != turn) {
+                              return;
+                          }
+          '''
+          assert s.count(old)==1
+          s=s.replace(old,new,1)
+          old='''                    .is_none_or(|before| before == turn)
+                              || thread.status == "starting"
+                              || thread.status == "compacting"
+          '''
+          assert s.count(old)==1
+          s=s.replace(old,'                    .is_none_or(|before| before == turn)\n',1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          rustfmt --edition 2021 --config skip_children=true src-tauri/src/codex_bridge/mod.rs aiTemp/release-verification/native_turn_fixture.rs
+          git diff --check
       - name: Verify official native binary
         env:
           GH_TOKEN: ${{ github.token }}
           NATIVE_ASSET: codex-x86_64-pc-windows-msvc.exe.tar.gz
         run: python scripts/native_bridge_ci.py download-native
-      - name: Trace one real lifecycle
+      - name: Prove parent regression and complete native lifecycle
         run: |
           set -euo pipefail
-          cargo test --manifest-path aiTemp/bridge-probe/Cargo.toml native_bridge_actual_turns_against_loopback_fixture -- --ignored --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/native-trace.txt
+          cargo test --manifest-path aiTemp/bridge-probe/Cargo.toml native_bridge_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/native-contracts.txt
+          cargo test --manifest-path aiTemp/bridge-probe/Cargo.toml native_bridge_actual_turns_against_loopback_fixture -- --ignored --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/native-lifecycle.txt
+          grep -F 'PASS: real native start/send/review/compact/interrupt/unsubscribe' aiTemp/evidence/native-lifecycle.txt
+      - name: Commit only the tested implementation and regression
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git add -- src-tauri/src/codex_bridge/mod.rs aiTemp/release-verification/native_turn_fixture.rs
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix: preserve native review parent identity through delegate events'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin refs/heads/release/verified-integration-0.4.2-rc.1 | cut -f1)"
+          test "$remote" = "$GITHUB_SHA"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/release/verified-integration-0.4.2-rc.1
+          git rev-parse HEAD > aiTemp/evidence/tested-source.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
