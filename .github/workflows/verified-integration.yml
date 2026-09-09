@@ -64,7 +64,7 @@ jobs:
             native: codex-x86_64-pc-windows-msvc.exe.tar.gz
           - os: macos-15
             platform: macos-aarch64
-            bundle: dmg
+            bundle: app,dmg
             native: codex-aarch64-apple-darwin.tar.gz
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
