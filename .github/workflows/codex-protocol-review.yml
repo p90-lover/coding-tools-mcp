@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: codex-protocol-review
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   VERSION: 0.4.2-rc.1
   PYTHONUTF8: '1'
@@ -66,13 +66,22 @@ jobs:
               subprocess.run(['git','apply',str(target)],check=True)
           for name in paths:
               if name.endswith('.rs'):subprocess.run(['rustfmt','--edition','2021','--config','skip_children=true',name],check=True)
+          # The selected catalog substring names two real tests. Both must pass.
+          legacy=Path('.github/workflows/codex-local-tools-release.yml')
+          old=legacy.read_text(encoding='utf-8')
+          new=old.replace("assert '1 passed; 0 failed' in Path('aiTemp/evidence/catalog.txt')", "assert '2 passed; 0 failed' in Path('aiTemp/evidence/catalog.txt')").replace("'focused_native_tests':7", "'focused_native_tests':8")
+          if old!=new:
+              backup=Path('aiTemp/Trash/protocol-before')/os.environ['GITHUB_RUN_ID']/legacy
+              backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(legacy,backup)
+              legacy.write_text(new,encoding='utf-8')
+          paths.append(str(legacy))
           subprocess.run(['git','add','--',*paths],check=True)
           subprocess.run(['git','diff','--cached','--check'],check=True)
           PYCODE
           git config user.name 'p90-lover'
           git config user.email '146848721+p90-lover@users.noreply.github.com'
           if ! git diff --cached --quiet; then
-            git commit -m 'fix: negotiate supported MCP versions and expose verifiable catalog fingerprints'
+            git commit -m 'fix: preserve both passing catalog regression gates'
             auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
             remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
             test "$remote" = "$GITHUB_SHA"
@@ -127,7 +136,7 @@ jobs:
           import json
           for name in ('local-tools-tests.txt','connection-tests.txt'):
               assert '3 passed; 0 failed' in Path('aiTemp/evidence',name).read_text(encoding='utf-8')
-          assert '1 passed; 0 failed' in Path('aiTemp/evidence/catalog.txt').read_text(encoding='utf-8')
+          assert '2 passed; 0 failed' in Path('aiTemp/evidence/catalog.txt').read_text(encoding='utf-8')
           en=Path('docs/guides/codex-local-tools.en.md').read_text(encoding='utf-8')
           zh=Path('docs/guides/codex-local-tools.zh-Hant.md').read_text(encoding='utf-8')
           assert en.count('\n## ')==zh.count('\n## ')
@@ -154,7 +163,7 @@ jobs:
           matches=list(root.glob('bundle/nsis/*.exe'));assert len(matches)==1
           name='Coding.Tools.MCP_'+os.environ['VERSION']+'_x64-setup.exe'
           dest=Path('aiTemp/installers')/name;assert not dest.exists();shutil.copy2(matches[0],dest)
-          proof={'version':os.environ['VERSION'],'source_commit':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'asset':name,'size':dest.stat().st_size,'sha256':hashlib.sha256(dest.read_bytes()).hexdigest(),'focused_native_tests':7,'codex_invoked':False,'all_upstream_tools_integrated':False,'publisher_signed':False,'live_user_connection_verified':False,'upstream_inventory':'634ebc1865c6ac840ed3ba118f040d527bf4b55d'}
+          proof={'version':os.environ['VERSION'],'source_commit':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'asset':name,'size':dest.stat().st_size,'sha256':hashlib.sha256(dest.read_bytes()).hexdigest(),'focused_native_tests':8,'codex_invoked':False,'all_upstream_tools_integrated':False,'publisher_signed':False,'live_user_connection_verified':False,'upstream_inventory':'634ebc1865c6ac840ed3ba118f040d527bf4b55d'}
           for folder in ('aiTemp/installers','aiTemp/evidence'):
               Path(folder,'proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
           for name in ('codex-local-tools.en.md','codex-local-tools.zh-Hant.md','mcp-connection-repair.md'):
