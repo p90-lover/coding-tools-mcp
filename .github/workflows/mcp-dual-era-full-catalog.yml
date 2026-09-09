@@ -1,19 +1,27 @@
 name: MCP dual-era full catalog
+
 on:
   push:
-    branches: [fix/mcp-dual-era-full-catalog-0.4.1-rc.3]
-    paths: ['.github/workflows/mcp-dual-era-full-catalog.yml']
+    branches:
+      - fix/mcp-dual-era-full-catalog-0.4.1-rc.3
+    paths:
+      - .github/workflows/mcp-dual-era-full-catalog.yml
+      - aiTemp/dual-era/ci.py
   workflow_dispatch:
+
 permissions:
   contents: write
+
 concurrency:
   group: mcp-dual-era-full-catalog
   cancel-in-progress: false
+
 env:
   VERSION: 0.4.1-rc.3
   PYTHONUTF8: '1'
   PYTHONDONTWRITEBYTECODE: '1'
   CARGO_INCREMENTAL: '0'
+
 jobs:
   windows:
     if: github.actor == github.repository_owner
@@ -41,258 +49,35 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Add failing contract tests first
+      - name: Red contracts
+        run: python aiTemp/dual-era/ci.py red
+      - name: Materialize production source
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/Trash/dual-era-before/$GITHUB_RUN_ID aiTemp/evidence
-          cp aiTemp/connection-tests/http.rs aiTemp/Trash/dual-era-before/$GITHUB_RUN_ID/http.rs
-          cat >> aiTemp/connection-tests/http.rs <<'RS'
-
-          #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-          async fn connection_dual_era_modern_discovery_and_full_catalog() {
-              let f = Fixture::new(false).await;
-              let meta = json!({
-                  "io.modelcontextprotocol/protocolVersion":"2026-07-28",
-                  "io.modelcontextprotocol/clientCapabilities":{},
-                  "io.modelcontextprotocol/clientInfo":{"name":"modern-fixture","version":"1"}
-              });
-              let discover = f.client.post(&f.endpoint).bearer_auth(&f.token)
-                  .header("MCP-Protocol-Version","2026-07-28")
-                  .header("Mcp-Method","server/discover")
-                  .json(&json!({"jsonrpc":"2.0","id":10,"method":"server/discover","params":{"_meta":meta.clone()}}))
-                  .send().await.unwrap();
-              assert_eq!(discover.status().as_u16(),200);
-              let discover:Value=discover.json().await.unwrap();
-              assert_eq!(discover["result"]["resultType"],"complete");
-              assert!(discover["result"]["supportedVersions"].as_array().unwrap().iter().any(|v|v=="2026-07-28"));
-              assert!(discover["result"]["supportedVersions"].as_array().unwrap().iter().any(|v|v=="2025-11-25"));
-              assert_eq!(discover["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],"coding-tools-mcp");
-
-              let mut policy=f.context.for_request().unwrap().policy;
-              policy.permission_mode="on-request".into();
-              commit_updates(vec![(f.context.clone(),policy,"full".into())],||Ok(())).unwrap();
-              let listed=f.client.post(&f.endpoint).bearer_auth(&f.token)
-                  .header("MCP-Protocol-Version","2026-07-28")
-                  .header("Mcp-Method","tools/list")
-                  .json(&json!({"jsonrpc":"2.0","id":11,"method":"tools/list","params":{"_meta":meta.clone()}}))
-                  .send().await.unwrap();
-              assert_eq!(listed.status().as_u16(),200);
-              let listed:Value=listed.json().await.unwrap();
-              assert_eq!(listed["result"]["resultType"],"complete");
-              let names:Vec<_>=listed["result"]["tools"].as_array().unwrap().iter().filter_map(|t|t["name"].as_str()).collect();
-              for expected in ["codex_tools_status","update_plan","harness_status","start_task","capture_screenshot","computer_action"] {
-                  assert!(names.contains(&expected),"full catalog missing {expected}");
-              }
-
-              let mismatch=f.client.post(&f.endpoint).bearer_auth(&f.token)
-                  .header("MCP-Protocol-Version","2026-07-28")
-                  .header("Mcp-Method","ping")
-                  .json(&json!({"jsonrpc":"2.0","id":12,"method":"tools/list","params":{"_meta":meta.clone()}}))
-                  .send().await.unwrap();
-              assert_eq!(mismatch.status().as_u16(),400);
-              let mismatch:Value=mismatch.json().await.unwrap();
-              assert_eq!(mismatch["error"]["code"],-32020);
-
-              let unsupported=f.client.post(&f.endpoint).bearer_auth(&f.token)
-                  .header("MCP-Protocol-Version","2099-01-01")
-                  .json(&json!({"jsonrpc":"2.0","id":13,"method":"tools/list","params":{"_meta":{
-                      "io.modelcontextprotocol/protocolVersion":"2099-01-01",
-                      "io.modelcontextprotocol/clientCapabilities":{}
-                  }}})).send().await.unwrap();
-              assert_eq!(unsupported.status().as_u16(),400);
-              let unsupported:Value=unsupported.json().await.unwrap();
-              assert_eq!(unsupported["error"]["code"],-32022);
-          }
-
-          #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-          async fn connection_legacy_2025_11_negotiates_same_version() {
-              let f=Fixture::new(false).await;
-              let response:Value=f.rpc(json!({"jsonrpc":"2.0","id":20,"method":"initialize","params":{
-                  "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"legacy-fixture","version":"1"}
-              }})).await.json().await.unwrap();
-              assert_eq!(response["result"]["protocolVersion"],"2025-11-25");
-          }
-          RS
-          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_dual_era_ -- --test-threads=1 > aiTemp/evidence/red.txt 2>&1 && { echo 'Tests unexpectedly passed before implementation' >&2; exit 1; } || true
-          grep -Eq 'FAILED|panicked|assertion' aiTemp/evidence/red.txt
-      - name: Implement dual-era protocol and truthful full profile
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-          import os,shutil
-          run=os.environ['GITHUB_RUN_ID']
-          def backup(name):
-              p=Path(name); dest=Path('aiTemp/Trash/dual-era-before')/run/p
-              dest.parent.mkdir(parents=True,exist_ok=True)
-              if not dest.exists(): shutil.copy2(p,dest)
-              assert not p.is_symlink()
-          for name in ['src-tauri/src/mcp/server.rs','src-tauri/src/mcp/listener.rs','src-tauri/src/mcp/transport.rs','src-tauri/src/tools/registry_definitions.rs','package.json','package-lock.json','src-tauri/Cargo.toml','src-tauri/Cargo.lock','src-tauri/tauri.conf.json']:
-              backup(name)
-
-          p=Path('src-tauri/src/mcp/server.rs'); s=p.read_text(encoding='utf-8')
-          marker='pub type SharedState = SharedToolContext;\n'
-          insert='''pub type SharedState = SharedToolContext;\n\npub const MODERN_PROTOCOL: &str = "2026-07-28";\npub const LEGACY_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18"];\npub const SUPPORTED_PROTOCOLS: &[&str] = &[MODERN_PROTOCOL, "2025-11-25", "2025-06-18"];\n\nfn server_info() -> Value {\n    json!({"name":"coding-tools-mcp","title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")})\n}\nfn instructions() -> &'static str {\n    "Use these tools only for local coding operations inside the configured workspace. When the client supplies _meta.openai/session, the server automatically creates or resumes the matching bounded history session before the first non-history tool call and reports the stable target under history_session. The same conversation identifier resumes the same Markdown archive after a server restart. history_session_bootstrap remains available for clients without session metadata and whenever verbatim initial_user_input must be captured. Use history_session_search followed by history_session_read only when exact earlier context is needed; follow next_cursor with the returned content hash until the relevant archive page is complete. Preserve session_key and current_path, then pass them unchanged as session_key and expected_path to history_session_checkpoint. After completing each user-requested task, call history_session_checkpoint before the final response and pass that user's verbatim request as raw_user_input. Only state that progress was saved after checkpoint returns ok=true with the same target. The server cannot access ChatGPT transcript text that was not provided as a tool argument, so per-turn checkpoint text remains model-mediated rather than automatic background persistence. Every tool result also includes the bounded project_instructions selected from the addressed workspace or linked-project path."\n}\nfn request_protocol(body: &Value) -> Option<&str> {\n    body.get("params").and_then(|p|p.get("_meta")).and_then(|m|m.get("io.modelcontextprotocol/protocolVersion")).and_then(Value::as_str)\n}\nfn protocol_error(requested: &str) -> Value {\n    json!({"code":-32022,"message":"Unsupported protocol version","data":{"supported":SUPPORTED_PROTOCOLS,"requested":requested}})\n}\nfn validate_request_protocol(body: &Value) -> Result<bool, Value> {\n    let Some(version)=request_protocol(body) else { return Ok(false); };\n    if !SUPPORTED_PROTOCOLS.contains(&version) { return Err(protocol_error(version)); }\n    if version==MODERN_PROTOCOL {\n        let caps=body.pointer("/params/_meta/io.modelcontextprotocol~1clientCapabilities");\n        if caps.is_none_or(|v|!v.is_object()) {\n            return Err(json!({"code":-32021,"message":"Modern MCP requests require clientCapabilities"}));\n        }\n        return Ok(true);\n    }\n    Ok(false)\n}\nfn modernize_result(mut result: Value) -> Value {\n    if let Some(object)=result.as_object_mut() {\n        object.entry("resultType".into()).or_insert(Value::String("complete".into()));\n        let meta=object.entry("_meta".into()).or_insert_with(||json!({}));\n        if let Some(meta)=meta.as_object_mut() { meta.insert("io.modelcontextprotocol/serverInfo".into(),server_info()); }\n    }\n    result\n}\n'''
-          assert s.count(marker)==1
-          s=s.replace(marker,insert,1)
-          start=s.index('fn handle_current_request('); end=s.index('\nfn handle_tools_call',start)
-          replacement=r'''fn handle_current_request(state: &SharedState, body: &Value) -> Value {
-    let method = body.get("method").and_then(Value::as_str).unwrap_or("");
-    let id = body.get("id").cloned().unwrap_or(Value::Null);
-    let params = body.get("params").cloned().unwrap_or(Value::Null);
-
-    if id.is_null() && method.starts_with("notifications/") {
-        return Value::Null;
-    }
-    let modern = match validate_request_protocol(body) {
-        Ok(value) => value,
-        Err(error) => return json!({"jsonrpc":"2.0","id":id,"error":error}),
-    };
-    let result = match method {
-        "initialize" => initialize_result(&params),
-        "server/discover" => {
-            if !modern {
-                Err(json!({"code":-32602,"message":"server/discover requires MCP 2026-07-28 request metadata"}))
-            } else {
-                Ok(discover_result())
-            }
-        }
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools":list_tools_for_profile(&state.tool_profile)})),
-        "tools/call" => handle_tools_call(state, &params),
-        _ => Err(json!({"code":-32601,"message":format!("Method not found: {method}")})),
-    };
-    match result {
-        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":if modern {modernize_result(result)} else {result}}),
-        Err(error) => json!({"jsonrpc":"2.0","id":id,"error":error}),
-    }
-}
-
-fn initialize_result(params: &Value) -> Result<Value, Value> {
-    let requested=params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
-    if !LEGACY_PROTOCOLS.contains(&requested) {
-        return Err(json!({"code":-32602,"message":"Unsupported legacy protocol version","data":{"supported":LEGACY_PROTOCOLS,"requested":requested}}));
-    }
-    Ok(json!({
-        "protocolVersion":requested,
-        "capabilities":{"tools":{"listChanged":false},"logging":{}},
-        "serverInfo":server_info(),
-        "instructions":instructions()
-    }))
-}
-
-fn discover_result() -> Value {
-    modernize_result(json!({
-        "supportedVersions":SUPPORTED_PROTOCOLS,
-        "capabilities":{"tools":{"listChanged":false},"logging":{}},
-        "instructions":instructions(),
-        "ttlMs":0,
-        "cacheScope":"private"
-    }))
-}
-'''
-          s=s[:start]+replacement+s[end:]
-          s=s.replace('use super::{handle_request, initialize_result, tool_arguments};','use super::{discover_result, handle_request, initialize_result, tool_arguments};')
-          s=s.replace('let initialized = initialize_result();','let initialized = initialize_result(&json!({"protocolVersion":"2025-11-25"})).unwrap();')
-          # two occurrences intentionally replaced
-          anchor='''    #[test]\n    fn initialize_does_not_claim_tool_catalog_notifications_without_a_stream() {'''.encode().decode('unicode_escape')
-          # Add modern discover unit contract before workspace prompt test.
-          target='''    #[test]\n    fn workspace_prompt_initializes_or_restores_a_chatgpt_session() {'''.encode().decode('unicode_escape')
-          add='''    #[test]\n    fn modern_discover_advertises_dual_era_versions_without_fake_list_notifications() {\n        let result = discover_result();\n        assert_eq!(result["resultType"], "complete");\n        assert!(result["supportedVersions"].as_array().unwrap().iter().any(|v| v == "2026-07-28"));\n        assert!(result["supportedVersions"].as_array().unwrap().iter().any(|v| v == "2025-11-25"));\n        assert_eq!(result["capabilities"]["tools"]["listChanged"], false);\n    }\n\n'''.encode().decode('unicode_escape')
-          assert s.count(target)==1
-          s=s.replace(target,add+target,1)
-          p.write_text(s,encoding='utf-8')
-
-          p=Path('src-tauri/src/tools/registry_definitions.rs'); s=p.read_text(encoding='utf-8')
-          old='''pub fn normalize_tool_profile(profile: &str) -> &'static str {\n    match profile {\n        "advanced" => "advanced",\n        "read-only" => "read-only",\n        "compat-readonly-all" => "compat-readonly-all",\n        _ => "core",\n    }\n}'''.encode().decode('unicode_escape')
-          new='''pub fn normalize_tool_profile(profile: &str) -> &'static str {\n    match profile {\n        "advanced" | "full" => "advanced",\n        "read-only" => "read-only",\n        "compat-readonly-all" => "compat-readonly-all",\n        _ => "core",\n    }\n}'''.encode().decode('unicode_escape')
-          assert s.count(old)==1
-          s=s.replace(old,new,1)
-          test_anchor='''    #[test]\n    fn core_catalog_exposes_chatgpt_compatible_tools() {'''.encode().decode('unicode_escape')
-          full_test='''    #[test]\n    fn full_profile_really_exposes_the_complete_catalog() {\n        let full = list_tools_for_profile("full");\n        let advanced = list_tools_for_profile("advanced");\n        assert_eq!(full, advanced);\n        let names: Vec<_> = full.iter().filter_map(|tool| tool["name"].as_str()).collect();\n        for expected in ["codex_tools_status", "harness_status", "start_task", "update_plan", "capture_screenshot", "computer_action"] {\n            assert!(names.contains(&expected), "missing {expected}");\n        }\n    }\n\n'''.encode().decode('unicode_escape')
-          assert s.count(test_anchor)==1
-          s=s.replace(test_anchor,full_test+test_anchor,1)
-          p.write_text(s,encoding='utf-8')
-
-          p=Path('src-tauri/src/mcp/transport.rs'); s=p.read_text(encoding='utf-8')
-          insert_at=s.index('\n#[cfg(test)]')
-          helper=r'''
-
-fn protocol_error(code: i64, message: &str, data: Value) -> Response {
-    (StatusCode::BAD_REQUEST, Json(json!({"jsonrpc":"2.0","error":{"code":code,"message":message,"data":data}}))).into_response()
-}
-pub(super) fn validate_protocol_headers(headers: &HeaderMap, body: &Value) -> Option<Response> {
-    const MODERN: &str = "2026-07-28";
-    const SUPPORTED: &[&str] = &[MODERN, "2025-11-25", "2025-06-18"];
-    let body_version=body.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion").and_then(Value::as_str);
-    let header_version=headers.get("mcp-protocol-version").and_then(|v|v.to_str().ok());
-    for version in [body_version,header_version].into_iter().flatten() {
-        if !SUPPORTED.contains(&version) {
-            return Some(protocol_error(-32022,"Unsupported protocol version",json!({"supported":SUPPORTED,"requested":version})));
-        }
-    }
-    if let (Some(body_version),Some(header_version))=(body_version,header_version) {
-        if body_version != header_version {
-            return Some(protocol_error(-32020,"MCP protocol header/body mismatch",json!({"header":header_version,"body":body_version})));
-        }
-    }
-    if body_version==Some(MODERN) {
-        if header_version!=Some(MODERN) {
-            return Some(protocol_error(-32020,"Modern MCP requires matching MCP-Protocol-Version header",json!({"expected":MODERN})));
-        }
-        let method=body.get("method").and_then(Value::as_str).unwrap_or("");
-        if let Some(header)=headers.get("mcp-method").and_then(|v|v.to_str().ok()) {
-            if header!=method { return Some(protocol_error(-32020,"Mcp-Method header/body mismatch",json!({"header":header,"body":method}))); }
-        }
-        let name=body.pointer("/params/name").and_then(Value::as_str);
-        if let (Some(header),Some(name))=(headers.get("mcp-name").and_then(|v|v.to_str().ok()),name) {
-            if header!=name { return Some(protocol_error(-32020,"Mcp-Name header/body mismatch",json!({"header":header,"body":name}))); }
-        }
-    }
-    None
-}
-'''
-          s=s[:insert_at]+helper+s[insert_at:]
-          p.write_text(s,encoding='utf-8')
-
-          p=Path('src-tauri/src/mcp/listener.rs'); s=p.read_text(encoding='utf-8')
-          s=s.replace('''        "protocolVersion": "2025-06-18"\n''','''        "protocolVersion": "2026-07-28",\n        "supportedVersions": ["2026-07-28", "2025-11-25", "2025-06-18"]\n''',1)
-          old='''async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Response {\n    if let Some(response) = require_mcp_auth(&state, request.headers()) {'''.encode().decode('unicode_escape')
-          new='''async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Response {\n    if let Some(response) = require_mcp_auth(&state, request.headers()) {'''.encode().decode('unicode_escape')
-          assert s.count(old)==1
-          # Keep the original auth check, clone headers immediately after it returns.
-          needle='''        return response;\n    }\n    let Json(body) = match Json::<Value>::from_request(request, &state).await {'''.encode().decode('unicode_escape')
-          repl='''        return response;\n    }\n    let protocol_headers = request.headers().clone();\n    let Json(body) = match Json::<Value>::from_request(request, &state).await {'''.encode().decode('unicode_escape')
-          assert s.count(needle)==1
-          s=s.replace(needle,repl,1)
-          needle='''    if let Some(response) = transport::early_response(&body) {'''.encode().decode('unicode_escape')
-          repl='''    if let Some(response) = transport::validate_protocol_headers(&protocol_headers, &body) {\n        return response;\n    }\n    if let Some(response) = transport::early_response(&body) {'''.encode().decode('unicode_escape')
-          assert s.count(needle)==1
-          s=s.replace(needle,repl,1)
-          p.write_text(s,encoding='utf-8')
-
-          for name in ['package.json','package-lock.json','src-tauri/Cargo.toml','src-tauri/Cargo.lock','src-tauri/tauri.conf.json']:
-              p=Path(name); text=p.read_text(encoding='utf-8');
-              assert '0.4.1-rc.2' in text
-              p.write_text(text.replace('0.4.1-rc.2','0.4.1-rc.3'),encoding='utf-8')
-          PY
+          python aiTemp/dual-era/ci.py materialize
           rustfmt --edition 2021 --config skip_children=true src-tauri/src/mcp/server.rs src-tauri/src/mcp/listener.rs src-tauri/src/mcp/transport.rs src-tauri/src/tools/registry_definitions.rs aiTemp/connection-tests/http.rs
           git diff --check
-      - name: Green tests, frontend, and installer
+      - name: Green protocol and catalog tests
         run: |
           set -euo pipefail
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/connection-tests.txt
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib full_profile_really_exposes_the_complete_catalog -- --test-threads=1 2>&1 | tee aiTemp/evidence/catalog-tests.txt
           grep -F 'test result: ok.' aiTemp/evidence/connection-tests.txt
+      - name: Frontend and Windows installer
+        env:
+          CI: 'true'
+        run: |
+          set -euo pipefail
           npm ci 2>&1 | tee aiTemp/evidence/npm.txt
           npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
           npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
           npm run tauri -- build --bundles nsis -- --locked 2>&1 | tee aiTemp/evidence/installer.txt
-      - name: Commit exact production source and installer proof
+      - name: Commit tested production source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p aiTemp/installer
           python - <<'PY'
           from pathlib import Path
           import hashlib,json,os,shutil,subprocess
@@ -300,12 +85,13 @@ pub(super) fn validate_protocol_headers(headers: &HeaderMap, body: &Value) -> Op
           binary=root/'coding-tools-mcp-desktop.exe'
           actual=subprocess.check_output([str(binary),'--version'],text=True,timeout=20).strip()
           assert actual=='coding-tools-mcp-desktop '+os.environ['VERSION']
-          matches=list(root.glob('bundle/nsis/*.exe'));assert len(matches)==1 and matches[0].stat().st_size>100000
-          out=Path('aiTemp/installer');out.mkdir(parents=True,exist_ok=True)
+          matches=list(root.glob('bundle/nsis/*.exe'))
+          assert len(matches)==1 and matches[0].stat().st_size>100000
           name='Coding.Tools.MCP_'+os.environ['VERSION']+'_x64-setup.exe'
-          shutil.copy2(matches[0],out/name)
-          proof={'version':os.environ['VERSION'],'base_source':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'asset':name,'size':(out/name).stat().st_size,'sha256':hashlib.sha256((out/name).read_bytes()).hexdigest(),'legacy_versions':['2025-11-25','2025-06-18'],'modern_version':'2026-07-28','full_catalog_verified':True,'codex_invoked':False,'live_chatgpt_verified':False}
-          (out/'proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
+          target=Path('aiTemp/installer')/name
+          shutil.copy2(matches[0],target)
+          proof={'version':os.environ['VERSION'],'base_source':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'asset':name,'size':target.stat().st_size,'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'legacy_versions':['2025-11-25','2025-06-18'],'modern_version':'2026-07-28','full_catalog_verified':True,'codex_invoked':False,'live_chatgpt_verified':False}
+          Path('aiTemp/installer/proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
           PY
           git add -- src-tauri/src/mcp/server.rs src-tauri/src/mcp/listener.rs src-tauri/src/mcp/transport.rs src-tauri/src/tools/registry_definitions.rs aiTemp/connection-tests/http.rs package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
           git diff --cached --check
