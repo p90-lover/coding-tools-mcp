@@ -24,16 +24,22 @@ impl OwnedProcess {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
-            use windows::Win32::{Foundation::{CloseHandle, HANDLE}, System::JobObjects::*};
+            use windows::Win32::{
+                Foundation::{CloseHandle, HANDLE},
+                System::JobObjects::*,
+            };
             let result = (|| {
                 let handle = unsafe { CreateJobObjectW(None, None) }.map_err(|_| ())?;
                 let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
                 limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 let assigned = unsafe {
-                    SetInformationJobObject(handle, JobObjectExtendedLimitInformation,
+                    SetInformationJobObject(
+                        handle,
+                        JobObjectExtendedLimitInformation,
                         (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                        std::mem::size_of_val(&limits) as u32)
-                        .and_then(|_| AssignProcessToJobObject(handle, HANDLE(child.as_raw_handle())))
+                        std::mem::size_of_val(&limits) as u32,
+                    )
+                    .and_then(|_| AssignProcessToJobObject(handle, HANDLE(child.as_raw_handle())))
                 };
                 if assigned.is_err() {
                     let _ = unsafe { CloseHandle(handle) };
@@ -42,25 +48,41 @@ impl OwnedProcess {
                 Ok(handle.0 as usize)
             })();
             match result {
-                Ok(job) => Ok(Self { child, job, stopped: false }),
+                Ok(job) => Ok(Self {
+                    child,
+                    job,
+                    stopped: false,
+                }),
                 Err(()) => {
-                    let _ = child.kill(); let _ = child.wait();
-                    Err("Cannot supervise the native process; no model request was submitted".into())
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(
+                        "Cannot supervise the native process; no model request was submitted"
+                            .into(),
+                    )
                 }
             }
         }
         #[cfg(not(windows))]
         {
             let _ = &mut child;
-            Ok(Self { child, stopped: false })
+            Ok(Self {
+                child,
+                stopped: false,
+            })
         }
     }
     pub fn stop(&mut self) {
-        if self.stopped { return; }
+        if self.stopped {
+            return;
+        }
         self.stopped = true;
         #[cfg(windows)]
         if self.job != 0 {
-            use windows::Win32::{Foundation::{CloseHandle, HANDLE}, System::JobObjects::TerminateJobObject};
+            use windows::Win32::{
+                Foundation::{CloseHandle, HANDLE},
+                System::JobObjects::TerminateJobObject,
+            };
             // The owned HANDLE is represented as usize solely to allow a mutex-protected owner
             // to move across threads. It is closed once, only under exclusive &mut self access.
             let handle = HANDLE(self.job as *mut std::ffi::c_void);
@@ -78,4 +100,8 @@ impl OwnedProcess {
         let _ = self.child.wait();
     }
 }
-impl Drop for OwnedProcess { fn drop(&mut self) { self.stop(); } }
+impl Drop for OwnedProcess {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
