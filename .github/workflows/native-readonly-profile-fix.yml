@@ -54,7 +54,11 @@ jobs:
           status='''                    thread.status = match params["turn"]["status"].as_str() {\n                        Some("completed") => "completed",\n                        Some("interrupted") => "interrupted",\n                        _ => "failed",\n                    }\n                    .into();\n'''
           diagnosed=status+'''                    #[cfg(test)]\n                    if thread.status == "failed" {\n                        if let Some(message) = params["turn"]["error"]["message"].as_str() {\n                            thread.notice = Some(bounded(message, 2048));\n                        }\n                    }\n'''
           assert text.count(status)==1
-          p.write_text(text.replace(status,diagnosed,1),encoding='utf-8')
+          text=text.replace(status,diagnosed,1)
+          env_marker='''            .stderr(Stdio::null());\n        OwnedProcess::configure(&mut command);'''
+          env_replacement='''            .stderr(Stdio::null());\n        #[cfg(test)]\n        if std::env::var_os("NATIVE_CODEX_PROBE_BIN").is_some() {\n            command.env("CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG", "1");\n        }\n        OwnedProcess::configure(&mut command);'''
+          assert text.count(env_marker)==1
+          p.write_text(text.replace(env_marker,env_replacement,1),encoding='utf-8')
           PY
           rustfmt --edition 2021 --config skip_children=true src-tauri/src/codex_bridge/mod.rs
           git diff --check -- src-tauri/src/codex_bridge/mod.rs
