@@ -129,7 +129,7 @@ jobs:
           import json,re
           for name in ('local-tools-tests.txt','connection-tests.txt'):
               assert '3 passed; 0 failed' in Path('aiTemp/evidence',name).read_text(encoding='utf-8')
-          assert '1 passed; 0 failed' in Path('aiTemp/evidence/catalog.txt').read_text(encoding='utf-8')
+          assert '2 passed; 0 failed' in Path('aiTemp/evidence/catalog.txt').read_text(encoding='utf-8')
           en=Path('docs/guides/codex-local-tools.en.md').read_text(encoding='utf-8')
           zh=Path('docs/guides/codex-local-tools.zh-Hant.md').read_text(encoding='utf-8')
           assert en.count('\n## ')==zh.count('\n## ')
@@ -156,7 +156,7 @@ jobs:
           matches=list(root.glob('bundle/nsis/*.exe'));assert len(matches)==1
           name='Coding.Tools.MCP_'+os.environ['VERSION']+'_x64-setup.exe'
           dest=Path('aiTemp/installers')/name;assert not dest.exists();shutil.copy2(matches[0],dest)
-          proof={'version':os.environ['VERSION'],'source_commit':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'asset':name,'size':dest.stat().st_size,'sha256':hashlib.sha256(dest.read_bytes()).hexdigest(),'focused_native_tests':7,'codex_invoked':False,'all_upstream_tools_integrated':False,'publisher_signed':False,'live_user_connection_verified':False,'upstream_inventory':'634ebc1865c6ac840ed3ba118f040d527bf4b55d'}
+          proof={'version':os.environ['VERSION'],'source_commit':os.environ['SOURCE'],'workflow_run':int(os.environ['GITHUB_RUN_ID']),'asset':name,'size':dest.stat().st_size,'sha256':hashlib.sha256(dest.read_bytes()).hexdigest(),'focused_native_tests':8,'codex_invoked':False,'all_upstream_tools_integrated':False,'publisher_signed':False,'live_user_connection_verified':False,'upstream_inventory':'634ebc1865c6ac840ed3ba118f040d527bf4b55d'}
           for folder in ('aiTemp/installers','aiTemp/evidence'):
               Path(folder,'proof.json').write_text(json.dumps(proof,indent=2)+'\n',encoding='utf-8')
           for name in ('codex-local-tools.en.md','codex-local-tools.zh-Hant.md','mcp-connection-repair.md'):
