@@ -1,6 +1,6 @@
 // Three real loopback tests; no models, host input, screenshots or deletion.
-use super::super::{serve, ListenerState};
 use super::*;
+use super::super::{serve, ListenerState};
 use crate::auth::OAuthRuntime;
 use crate::tools::{live_policy::commit_updates, ToolContext};
 use std::{
@@ -42,7 +42,7 @@ impl Fixture {
             jsonwebtoken::encode(
                 &jsonwebtoken::Header::default(),
                 &json!({"iss":format!("urn:coding-tools-mcp:{wid}"),"aud":wid,"wid":wid,
-                "iat":now - 3600,"exp":exp,"scope":"mcp"}),
+                    "iat":now - 3600,"exp":exp,"scope":"mcp"}),
                 &jsonwebtoken::EncodingKey::from_secret(key.as_bytes()),
             )
             .unwrap()
@@ -120,8 +120,10 @@ async fn connection_repair_oauth_challenge_and_token_recovery() {
         }
         let response = r.send().await.unwrap();
         assert_eq!(response.status().as_u16(), 401);
-        assert_eq!(response.headers()["www-authenticate"],
-            "Bearer resource_metadata=\"https://repair.example/.well-known/oauth-protected-resource\", scope=\"mcp\"");
+        assert_eq!(
+            response.headers()["www-authenticate"],
+            "Bearer resource_metadata=\"https://repair.example/.well-known/oauth-protected-resource\", scope=\"mcp\""
+        );
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
     let tools: Value = f
@@ -184,9 +186,15 @@ async fn connection_repair_handshake_notifications_catalog_and_live_policy() {
         .unwrap()
         .iter()
         .any(|t| t["name"] == "history_session_bootstrap"));
-    let mut policy = f.context.for_request().unwrap().policy;
+    let current = f.context.for_request().unwrap();
+    let current_profile = current.tool_profile.clone();
+    let mut policy = current.policy;
     policy.permission_mode = "read-only".into();
-    commit_updates(vec![(f.context.clone(), policy, "core".into())], || Ok(())).unwrap();
+    commit_updates(
+        vec![(f.context.clone(), policy, current_profile)],
+        || Ok(()),
+    )
+    .unwrap();
     let after: Value = f
         .rpc(json!({"jsonrpc":"2.0","id":4,"method":"tools/list"}))
         .await
