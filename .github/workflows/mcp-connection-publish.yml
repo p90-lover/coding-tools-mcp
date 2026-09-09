@@ -1,0 +1,82 @@
+name: Publish MCP connection repair
+on:
+  push:
+    branches: [fix/mcp-connection-0.4.1-rc.2]
+    paths: ['.github/workflows/mcp-connection-publish.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-mcp-connection-v0.4.1-rc.2
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: 0.4.1-rc.2
+      SOURCE: 37438e2b4f61a31dabf7f44d95ecf0c9a4aa306c
+      BUILD_RUN: '34325247686'
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: connection-windows-34325247686
+          path: aiTemp/windows
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 34325247686
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: connection-evidence-34325247686
+          path: aiTemp/evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 34325247686
+      - name: Verify exact tested installer and publish immutable prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,shutil,zipfile
+          root=Path('aiTemp/windows')
+          proof=json.loads((root/'proof.json').read_text(encoding='utf-8'))
+          assert proof['version']==os.environ['VERSION']
+          assert proof['source_commit']==os.environ['SOURCE']
+          assert proof['workflow_run']==int(os.environ['BUILD_RUN'])
+          assert proof['real_http_tests']==3 and proof['codex_invoked'] is False
+          asset=root/proof['asset']
+          assert asset.is_file() and not asset.is_symlink()
+          assert asset.stat().st_size==proof['size']
+          assert hashlib.sha256(asset.read_bytes()).hexdigest()==proof['sha256']
+          target=Path('aiTemp/release')/asset.name
+          shutil.copy2(asset,target)
+          with zipfile.ZipFile('aiTemp/release/mcp-connection-validation.zip','x',zipfile.ZIP_DEFLATED) as z:
+              for path in sorted(Path('aiTemp/evidence').glob('*')):
+                  if path.is_file():
+                      assert path.suffix in {'.txt','.json'} and not path.is_symlink()
+                      z.write(path,path.name)
+          files=sorted(Path('aiTemp/release').iterdir())
+          Path('aiTemp/release/SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files),encoding='utf-8')
+          PY
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/fix/mcp-connection-0.4.1-rc.2" --jq .object.sha)" = "$SOURCE"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            echo 'Tag already exists; refusing replacement' >&2; exit 1
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$SOURCE"
+          cat > aiTemp/notes.md <<'EOF'
+          MCP connection recovery candidate. Adds standards-compatible OAuth resource metadata challenges, /mcp protected-resource discovery, correct one-way notification handling, invalid id-less request rejection, and explicit GET/SSE behavior. Permission-only changes still retain the same listener/authentication and do not require MCP relinking/restart.
+
+          No Codex/model call was used for this build. Three isolated real HTTP regressions passed on the tested source. The user's live ChatGPT registration/account/tunnel remains a separate end-to-end boundary.
+
+          MCP 連線修復候選版。新增符合標準的 OAuth 資源資料挑戰、/mcp protected-resource 探索、正確的單向通知處理、拒絕無效無 ID 請求，以及明確的 GET/SSE 行為。只修改權限仍保留同一監聽服務及認證，不需要重新連接／重啟 MCP。
+
+          本次建置沒有呼叫 Codex／模型；已在相同來源上通過三項隔離的真實 HTTP 回歸測試。使用者實際 ChatGPT 註冊、帳戶及 Tunnel 仍屬獨立端到端驗證範圍。
+          EOF
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false --title "Coding Tools MCP v$VERSION — MCP connection recovery" --notes-file aiTemp/notes.md aiTemp/release/*
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$VERSION" --jq '{html_url,draft,prerelease,tag_name,assets:[.assets[]|{name,size,digest,browser_download_url}]}'
