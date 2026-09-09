@@ -49,11 +49,11 @@ jobs:
                               p["threadId"], p["turnId"], p["turn"]["id"],p["item"]["type"], p["turn"]["status"]);
                       }
           ''',1)
-          marker='        match result {\n            Ok(value) => {\n'
-          assert s.count(marker)==1
-          s=s.replace(marker,marker+'''                #[cfg(test)]
+          marker='                if request.operation == "review"\n'
+          assert s.count(marker)==1, s.count(marker)
+          s=s.replace(marker,'''                #[cfg(test)]
                           eprintln!("CONTROL_RESULT operation={} response={}",request.operation,value);
-          ''',1)
+          '''+marker,1)
           p.write_text(s,encoding='utf-8')
           p=Path('aiTemp/release-verification/native_turn_fixture.rs')
           backup=Path('aiTemp/Trash/native-final-trace/fixture.rs');shutil.copy2(p,backup)
