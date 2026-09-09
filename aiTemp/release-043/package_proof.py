@@ -14,7 +14,7 @@ required={
  'native-command-real.txt':['PASS: real native command/exec, read-only write denial, exact replay receipt, zero model/provider requests, zero threads, and Stop revocation','1 passed; 0 failed'],
  'workflow-tests.txt':['2 passed; 0 failed'],
  'connection-tests.txt':['test result: ok.'],
- 'catalog-tests.txt':['1 passed; 0 failed'],
+ 'catalog-tests.txt':['2 passed; 0 failed'],
  'frontend.txt':['0 errors'],
 }
 for name,markers in required.items():
