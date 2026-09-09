@@ -1,0 +1,40 @@
+name: Workflow sync source
+on:
+  push:
+    branches: [release/workflow-sync-0.4.3-rc.1]
+    paths: ['.github/workflows/workflow-sync-source.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Preserve source and call graph without an agent
+        working-directory: aiTemp/checkout
+        shell: bash
+        env:
+          npm_config_cache: ${{ github.workspace }}/aiTemp/npm-cache
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/source-evidence
+          git archive HEAD --format=zip --output=aiTemp/source-evidence/source.zip
+          git rev-parse HEAD > aiTemp/source-evidence/commit.txt
+          git ls-tree -r HEAD > aiTemp/source-evidence/tree.txt
+          if test -x .mcp-probe-kit/bin/probe; then
+            printf '{"project_root":"%s"}' "$PWD" | timeout 40s .mcp-probe-kit/bin/probe exec resume_plan --stdin > aiTemp/source-evidence/resume.json 2>&1 || true
+          fi
+          (cd aiTemp/source-evidence && sha256sum source.zip commit.txt tree.txt > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workflow-sync-source-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/source-evidence/*
+          retention-days: 14
+          if-no-files-found: error
