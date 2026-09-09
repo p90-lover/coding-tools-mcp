@@ -1,0 +1,49 @@
+name: Publish verified quota-free tools release
+on:
+  push:
+    branches: [release/finalize-codex-local-0.4.2-rc.1]
+    paths: ['.github/workflows/finalize-codex-local.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-codex-local-v0.4.2-rc.1
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        working-directory: aiTemp/checkout
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Wait for the exact native build; reject any failing result
+        run: |
+          set -euo pipefail
+          gh run watch 34329651000 --repo p90-lover/coding-tools-mcp --exit-status --interval 30
+      - name: Verify source, test evidence and actual installer bytes, then publish
+        run: |
+          set -euo pipefail
+          python aiTemp/release-publication/publish.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: integrated-publication-${{ github.run_id }}
+          path: |
+            aiTemp/checkout/aiTemp/publication/publication-receipt.json
+            aiTemp/checkout/aiTemp/publication/release-id.txt
+          if-no-files-found: warn
+          retention-days: 14
