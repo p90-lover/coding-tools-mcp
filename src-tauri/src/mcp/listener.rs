@@ -214,7 +214,7 @@ fn mcp_discovery_payload() -> Value {
     json!({
         "name": "coding-tools-mcp",
         "version": env!("CARGO_PKG_VERSION"),
-        "protocolVersion": "2025-06-18"
+        "protocolVersion": crate::mcp::protocol::LATEST
     })
 }
 
@@ -239,10 +239,19 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
         );
         return response;
     }
+    let version_error = crate::mcp::protocol::http_version_error(request.headers());
     let Json(body) = match Json::<Value>::from_request(request, &state).await {
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
+    if body.get("method").and_then(Value::as_str) != Some("initialize") {
+        if let Some(response) = version_error {
+            return response;
+        }
+    }
+    let requested_protocol = crate::mcp::protocol::requested(&body["params"])
+        .unwrap_or("absent-or-invalid")
+        .to_owned();
     if let Some(response) = transport::early_response(&body) {
         append_profile_log(
             &state.workspace_id,
@@ -326,12 +335,35 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
                     ),
                 );
             }
+            if method == "initialize" {
+                let selected = response
+                    .pointer("/result/protocolVersion")
+                    .and_then(Value::as_str)
+                    .unwrap_or("rejected");
+                append_profile_log(
+                    &profile_id,
+                    "mcp-requests.log",
+                    &format!(
+                        "[discovery] initialize requested={} negotiated={}",
+                        requested_protocol, selected
+                    ),
+                );
+            }
             if method == "tools/list" {
                 if let Some(tools) = response.pointer("/result/tools").and_then(Value::as_array) {
                     append_profile_log(
                         &profile_id,
                         "mcp-requests.log",
-                        &format!("[discovery] catalog_served tools_count={}", tools.len()),
+                        &format!(
+                            "[discovery] catalog_served tools_count={} profile={} sha256={}",
+                            tools.len(),
+                            response["result"]["_meta"]["coding-tools-mcp/toolProfile"]
+                                .as_str()
+                                .unwrap_or("unknown"),
+                            response["result"]["_meta"]["coding-tools-mcp/catalogSha256"]
+                                .as_str()
+                                .unwrap_or("unknown")
+                        ),
                     );
                 }
             }

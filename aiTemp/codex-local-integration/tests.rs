@@ -31,6 +31,30 @@ fn nonce(ctx: &ToolContext, id: &str) -> String {
 #[test]
 fn codex_local_resources_have_schemas_real_content_and_listener_boundaries() {
     let ctx = context();
+
+    for profile in [
+        "core",
+        "read-only",
+        "advanced",
+        "compat-readonly-all",
+        "full",
+        "unknown",
+    ] {
+        let catalog = registry::list_tools_for_profile(profile);
+        assert!(!catalog.is_empty());
+        for name in [
+            "update_plan",
+            "get_plan",
+            "tool_search",
+            "get_current_time",
+            "codex_tools_status",
+        ] {
+            assert!(
+                catalog.iter().any(|t| t["name"] == name),
+                "{profile} omits {name}"
+            );
+        }
+    }
     for name in NAMES {
         let catalog = registry::list_tools_for_profile("core");
         let schema = catalog

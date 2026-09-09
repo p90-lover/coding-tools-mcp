@@ -168,6 +168,42 @@ async fn connection_repair_handshake_notifications_catalog_and_live_policy() {
     let init: Value = f.rpc(json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{
         "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"local-fixture","version":"1"}}})).await.json().await.unwrap();
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(
+        init["result"]["capabilities"]["tools"]["listChanged"],
+        false
+    );
+    for (requested, expected) in [
+        ("2025-03-26", "2025-03-26"),
+        ("2025-11-25", "2025-11-25"),
+        ("2099-01-01", "2025-11-25"),
+    ] {
+        let response: Value = f.rpc(json!({"jsonrpc":"2.0","id":"negotiation","method":"initialize","params":{
+            "protocolVersion":requested,"capabilities":{},"clientInfo":{"name":"local-fixture","version":"1"}}})).await.json().await.unwrap();
+        assert_eq!(response["result"]["protocolVersion"], expected);
+    }
+    for requested in ["2025-03-26", "2025-06-18", "2025-11-25"] {
+        let response = f
+            .client
+            .post(&f.endpoint)
+            .bearer_auth(&f.token)
+            .header("MCP-Protocol-Version", requested)
+            .json(&json!({"jsonrpc":"2.0","id":40,"method":"tools/list"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+    }
+    let invalid = f
+        .client
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .header("MCP-Protocol-Version", "2099-01-01")
+        .json(&json!({"jsonrpc":"2.0","id":41,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status().as_u16(), 400);
+
     let ack = f
         .rpc(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
         .await;
@@ -194,6 +230,18 @@ async fn connection_repair_handshake_notifications_catalog_and_live_policy() {
         .await
         .unwrap();
     assert_eq!(before["result"]["tools"], after["result"]["tools"]);
+    assert_eq!(
+        before["result"]["_meta"]["coding-tools-mcp/catalogSha256"],
+        after["result"]["_meta"]["coding-tools-mcp/catalogSha256"]
+    );
+    assert_eq!(
+        before["result"]["_meta"]["coding-tools-mcp/catalogSha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+
     let patch = json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"apply_patch","arguments":{
         "patch":"*** Begin Patch\n*** Add File: rejected.txt\n+must not appear\n*** End Patch\n"}}});
     let denied: Value = f.rpc(patch.clone()).await.json().await.unwrap();

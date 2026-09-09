@@ -30,7 +30,14 @@ fn handle_current_request(state: &SharedState, body: &Value) -> Value {
     }
 
     let result = match method {
-        "initialize" => Ok(initialize_result()),
+        "initialize" => {
+            let version = super::protocol::negotiate(&params);
+            version.map(|version| {
+                let mut result = initialize_result();
+                result["protocolVersion"] = json!(version);
+                result
+            })
+        }
         "ping" => Ok(serde_json::json!({})),
         "resources/list" => resource_request(state, "list_mcp_resources", &params, "resources"),
         "resources/templates/list" => resource_request(
@@ -42,7 +49,8 @@ fn handle_current_request(state: &SharedState, body: &Value) -> Value {
         "resources/read" => resource_request(state, "read_mcp_resource", &params, "contents"),
         "tools/list" => {
             let tools = list_tools_for_profile(&state.tool_profile);
-            Ok(serde_json::json!({ "tools": tools }))
+            super::protocol::catalog_metadata(&tools, &state.tool_profile)
+                .map(|metadata| json!({"tools":tools,"_meta":metadata}))
         }
         "tools/call" => handle_tools_call(state, &params),
         _ => Err(serde_json::json!({
@@ -87,7 +95,7 @@ fn resource_request(
 
 fn initialize_result() -> Value {
     serde_json::json!({
-        "protocolVersion": "2025-06-18",
+        "protocolVersion": super::protocol::LATEST,
         "capabilities": {
             "tools": { "listChanged": false },
             "logging": {},

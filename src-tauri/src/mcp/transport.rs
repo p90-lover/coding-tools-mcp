@@ -30,6 +30,9 @@ pub(super) async fn get_handler(
         if let Some(response) = require_mcp_auth(&state, &headers) {
             return response;
         }
+        if let Some(response) = crate::mcp::protocol::http_version_error(&headers) {
+            return response;
+        }
         return (StatusCode::METHOD_NOT_ALLOWED, [(ALLOW, "POST")]).into_response();
     }
     mcp_discovery().await

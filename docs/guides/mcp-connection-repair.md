@@ -18,6 +18,16 @@ Compare the current public /mcp URL with the installed plugin's URL. Only an act
 
 A fixed Named Tunnel hostname avoids Quick Tunnel address rotation, but does not repair absent plugin registration. The desktop cannot silently inject a namespace into a chat. Report the current /mcp URL, app version, Scan Tools error and relevant status-only logs. Never share profiles.json, OAuth passwords, client secrets, access/refresh tokens or Cloudflare tokens.
 
+### Protocol negotiation and catalog refresh
+
+The server now explicitly negotiates 2025-03-26, 2025-06-18 and 2025-11-25. It echoes a supported proposal and otherwise returns its highest implemented handshake revision, 2025-11-25. It does not blindly echo newer dates or claim the separate 2026 stateless protocol. Requests after initialization reject unsupported or duplicate MCP-Protocol-Version headers with HTTP 400; clients without that header retain legacy compatibility. A fallback only requires disconnection when the client does not support the selected revision—not every downgrade is a failure.
+
+`tools.listChanged: false` means no server-push catalog notifications, not “cache forever.” It remains false because this build deliberately offers JSON POST, not a catalog-notification SSE stream. Flipping it without implementing a real stream is incorrect. ChatGPT's approved/frozen action snapshot is a separate host control; review/refresh the existing app where supported rather than deleting it as the first repair step.
+
+The five v0.4.1 tools (`update_plan`, `get_plan`, `tool_search`, `get_current_time`, `codex_tools_status`) are present in both core and read-only catalogs, and in advanced. Unknown profile strings normalize to core. A read-only profile legitimately omits some execution/history tools, but it does not produce an empty catalog or hide these five tools.
+
+`tools/list` now returns a SHA-256 fingerprint, normalized profile and count in `_meta`; `codex_tools_status` reports the same fingerprint and explicit supported versions. The hash covers definitions only, so permission-only updates leave it unchanged. Status logs record requested/negotiated protocol dates and the catalog fingerprint, without tokens or tool arguments. Compare an actual scan attempt's log with the host's approved tool snapshot before diagnosing the failure.
+
 ### Preserved boundaries
 
 Permission-only updates retain the listener, tool schemas and authentication. This patch does not modify token issuance/rotation, stored credentials, computer-control grants, screenshot persistence, provider configuration or the unfinished native Codex branch. Installing a new binary still requires restarting the desktop application. No Codex/model calls are needed to build or test this repair. Verification uses three isolated local HTTP cases; it is not a test of the user's Windows installation or ChatGPT account.
@@ -40,6 +50,16 @@ ChatGPT 能識別 @mention、桌面程式正在運行、已複製端點，或 JS
 
 固定網域的 Named Tunnel 可避免 Quick Tunnel 換網址，但不能修復沒有註冊的 Plugin。桌面程式無法靜默向對話加入工具命名空間。診斷時提供目前 /mcp 網址、程式版本、Scan Tools 錯誤及相關狀態紀錄即可。不要分享 profiles.json、OAuth 密碼、Client Secret、Access／Refresh Token 或 Cloudflare Token。
 
+### 協定協商與工具目錄刷新
+
+伺服器現明確協商 2025-03-26、2025-06-18 及 2025-11-25。若支援用戶端提出的版本，會回傳相同版本；否則回傳已實作的最高握手版本 2025-11-25，不會盲目回傳更新的日期，亦不會假稱實作了另一套 2026 無狀態協定。初始化後的請求如包含不支援或重複的 MCP-Protocol-Version 標頭，會收到 HTTP 400；未提供標頭的舊用戶端保留相容性。只有用戶端不支援伺服器選定的版本時才應斷線，並非每次降版都會失敗。
+
+`tools.listChanged: false` 代表沒有伺服器主動推送目錄變更通知，不是「永久快取」。本版本刻意使用 JSON POST 而非目錄通知 SSE 串流，因此保留 false；沒有真正實作串流就改為 true 並不正確。ChatGPT 已批准／凍結的工具快照是另一項用戶端控制；在介面支援的情況下，先審查／刷新既有 App，而不是先刪除連接。
+
+五個 v0.4.1 工具（`update_plan`、`get_plan`、`tool_search`、`get_current_time`、`codex_tools_status`）同時存在於 core、read-only 及 advanced 目錄。未知的設定檔字串會正規化為 core。唯讀設定檔確實會省略部分執行／歷史工具，但不會令整個目錄變空，亦不會隱藏這五個工具。
+
+`tools/list` 現在於 `_meta` 回傳 SHA-256 指紋、正規化設定檔及工具數量；`codex_tools_status` 亦會顯示相同指紋及明確支援的版本。雜湊只涵蓋工具定義，因此只修改權限時保持不變。狀態紀錄包含請求／選定的協定日期及目錄指紋，不包含 Token 或工具參數。請把一次實際掃描的紀錄與用戶端已批准的工具快照比對，再判斷失敗環節。
+
 ### 保留的限制
 
 只修改權限時仍保留監聽服務、工具定義及認證。此修正沒有改動 Token 簽發／輪換、已存憑證、電腦操作授權、截圖儲存行為、供應商設定或未完成的原生 Codex 分支。安裝新執行檔仍須重新啟動桌面程式。建置及測試不用呼叫 Codex／模型。驗證使用三個隔離的本機 HTTP 案例，並非在使用者的 Windows 安裝或 ChatGPT 帳戶進行測試。
@@ -50,3 +70,6 @@ ChatGPT 能識別 @mention、桌面程式正在運行、已複製端點，或 JS
 - https://developers.openai.com/plugins/deploy/troubleshooting
 - https://modelcontextprotocol.io/specification/2025-06-18/basic/transports
 - https://help.openai.com/en/articles/12584461
+
+- https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle
+- https://modelcontextprotocol.io/specification/2025-11-25/server/tools
