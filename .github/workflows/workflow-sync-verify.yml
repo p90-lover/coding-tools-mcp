@@ -138,7 +138,7 @@ jobs:
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/connection-tests.txt
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib core_catalog_exposes_chatgpt_compatible_tools -- --test-threads=1 2>&1 | tee aiTemp/evidence/catalog-tests.txt
           grep -F '2 passed; 0 failed' aiTemp/evidence/workflow-tests.txt
-          grep -F '1 passed; 0 failed' aiTemp/evidence/catalog-tests.txt
+          grep -F '2 passed; 0 failed' aiTemp/evidence/catalog-tests.txt
       - name: Build and inspect actual installer and licenses
         run: |
           set -euo pipefail
