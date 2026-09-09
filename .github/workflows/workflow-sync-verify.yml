@@ -73,16 +73,20 @@ jobs:
         include:
           - os: windows-latest
             platform: windows-x64
+            bundle: nsis
             native: codex-x86_64-pc-windows-msvc.exe.tar.gz
           - os: macos-15
             platform: macos-aarch64
+            bundle: app,dmg
             native: codex-aarch64-apple-darwin.tar.gz
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 45
     env:
       SOURCE: ${{ needs.prepare.outputs.source }}
+      PLATFORM: ${{ matrix.platform }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/app-target
       NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      CI: 'true'
     defaults:
       run:
         shell: bash
@@ -135,7 +139,18 @@ jobs:
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib core_catalog_exposes_chatgpt_compatible_tools -- --test-threads=1 2>&1 | tee aiTemp/evidence/catalog-tests.txt
           grep -F '2 passed; 0 failed' aiTemp/evidence/workflow-tests.txt
           grep -F '1 passed; 0 failed' aiTemp/evidence/catalog-tests.txt
+      - name: Build and inspect actual installer and licenses
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles ${{ matrix.bundle }} -- --locked 2>&1 | tee aiTemp/evidence/installer.txt
+          python aiTemp/release-043/package_proof.py
           test -z "$(git diff --name-only)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workflow-043-installer-${{ matrix.platform }}-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/installer/*
+          retention-days: 14
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -143,3 +158,96 @@ jobs:
           path: aiTemp/checkout/aiTemp/evidence/*
           retention-days: 14
           if-no-files-found: error
+  board:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Build UI and provide CJK glyphs for real browser rendering
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y fonts-noto-cjk
+          python -m pip install playwright==1.57.0
+      - name: Real rendered drag and shared refresh without losing human drafts
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess,sys,time,urllib.request
+          from pathlib import Path
+          log=Path('aiTemp/evidence/vite.txt').open('w')
+          process=subprocess.Popen(['node','node_modules/vite/bin/vite.js','--host','127.0.0.1','--port','1420','--strictPort'],stdout=log,stderr=subprocess.STDOUT)
+          try:
+              for attempt in range(60):
+                  if process.poll() is not None:raise RuntimeError('Frontend exited')
+                  try:
+                      with urllib.request.urlopen('http://127.0.0.1:1420/work',timeout=2) as response:
+                          if response.status==200:break
+                  except OSError:time.sleep(.25)
+              else:raise RuntimeError('Frontend did not become ready')
+              subprocess.run([sys.executable,'aiTemp/release-043/board_ui_sync.py'],check=True)
+          finally:
+              process.terminate()
+              try:process.wait(timeout=10)
+              except subprocess.TimeoutExpired:process.kill();process.wait()
+              log.close()
+          PY
+          test -z "$(git diff --name-only)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: workflow-043-board-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          retention-days: 14
+          if-no-files-found: error
+  publish:
+    needs: [prepare,verify,board]
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Re-download verify and publish exact-source release
+        working-directory: aiTemp/checkout
+        run: python aiTemp/release-043/publish.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: workflow-043-receipt-${{ github.run_id }}
+          path: |
+            aiTemp/checkout/aiTemp/release-receipt.json
+            aiTemp/checkout/aiTemp/draft-id.txt
+          retention-days: 14
+          if-no-files-found: warn
