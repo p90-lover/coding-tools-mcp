@@ -13,7 +13,8 @@ export interface Snapshot { source: Source; endpoint: string; checked_at: number
 export interface Evidence { step: number; note: string; recorded_at: number; source: 'operator_attestation' }
 export interface Task { id: string; workspace_id: string; title: string; description: string; state: string; step: number; created_at: number; updated_at: number; evidence: Evidence[] }
 export interface Board { revision: number; tasks: Task[] }
-export type Change = { operation: 'create'; workspace_id: string; title: string; description: string } | { operation: 'start' | 'block' | 'resume' | 'archive' | 'restore'; id: string } | { operation: 'record_step'; id: string; note: string };
+export type BoardState = 'backlog' | 'in_progress' | 'blocked' | 'done';
+export type Change = { operation: 'create'; workspace_id: string; title: string; description: string; state?: BoardState } | { operation: 'move'; id: string; state: BoardState; before_id?: string } | { operation: 'start' | 'block' | 'resume' | 'archive' | 'restore'; id: string } | { operation: 'record_step'; id: string; note: string };
 export const STEPS = [
  ['Specification','規格'],['Plan','計劃'],['Plan review','計劃審查'],['Revise plan','修訂計劃'],['Implementation','實作'],['Code review','程式碼審查'],['Independent review','獨立審查'],['Apply fixes','套用修正'],['Documentation','文件'],['Verification','驗證'],['Merge readiness','合併準備'],['Delivery','交付'],
 ] as const;
@@ -31,3 +32,12 @@ export function stateTone(state: string) { state=state.toLowerCase(); if (['runn
 export function stepLabel(step: number, locale: Locale) { return STEPS[step]?.[locale === 'en' ? 0 : 1] ?? (locale === 'en' ? 'Complete' : '已完成'); }
 export function formatTime(seconds?: number) { return seconds ? new Date(seconds*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—'; }
 export function translated(locale: Locale, english: string, chinese: string) { return locale === 'en' ? english : chinese; }
+
+/** Board placement is independent of the evidence-backed twelve-step checklist. */
+export function isBoardState(value: string): value is BoardState {
+ return COLUMNS.some(column => column[0] === value);
+}
+export function boardStateLabel(value: string, locale: Locale): string {
+ const column = COLUMNS.find(column => column[0] === value);
+ return column ? column[locale === 'en' ? 1 : 2] : translated(locale, 'Archived', '已封存');
+}

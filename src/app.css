@@ -2515,3 +2515,24 @@ input[type=checkbox] {
   color: var(--text-main);
   max-width: 100%;
 }
+
+/* Local board: HTML drag/drop and keyboard status changes share the persisted reducer. */
+.cc-board-page .cc-column { display:flex; flex-direction:column; transition:background .12s,border-color .12s; border:1px solid transparent; }
+.cc-board-page .cc-column.drop-active { border-color:var(--primary); background:var(--surface-hover); }
+.cc-board-page .cc-column-cards { display:flex; flex-direction:column; align-items:stretch; min-height:190px; flex:1; }
+.cc-column-add { display:flex; align-items:center; gap:6px; width:100%; padding:8px; margin:0 0 10px; color:var(--text-muted); background:transparent; border:1px dashed var(--border); border-radius:6px; text-align:left; cursor:pointer; font:inherit; font-size:12px; }
+.cc-column-add:hover:enabled { color:var(--text-main); background:var(--surface-hover); }
+.cc-column-add:disabled { opacity:.45; cursor:not-allowed; }
+.cc-board-page .cc-task-card { display:block; padding:0; flex:none; }
+.cc-board-page .cc-task-card[draggable=true] { cursor:grab; }
+.cc-board-page .cc-task-card.dragging { opacity:.42; cursor:grabbing; }
+.cc-board-page .cc-task-card.drop-before { box-shadow:0 -3px 0 var(--primary); }
+.cc-card-open { display:flex; flex-direction:column; gap:10px; width:100%; padding:14px 12px; border:0; border-radius:inherit; background:transparent; color:inherit; text-align:left; cursor:inherit; font:inherit; }
+.cc-card-open > strong { font-size:13px; font-weight:600; line-height:1.5; overflow-wrap:anywhere; }
+.cc-card-top { display:flex; justify-content:space-between; align-items:center; width:100%; gap:6px; }
+.cc-card-top > svg { flex:none; color:var(--text-muted); }
+.cc-card-open .cc-task-progress,.cc-card-open footer { width:100%; }
+.cc-column-add:focus-visible,.cc-card-open:focus-visible,.cc-move-field select:focus-visible { outline:2px solid var(--primary); outline-offset:3px; }
+.cc-move-field { display:grid; gap:7px; margin-top:16px; font-size:12px; color:var(--text-muted); }
+.cc-move-field select { width:100%; padding:9px 10px; border:1px solid var(--border); border-radius:6px; color:var(--text-main); background:var(--card-bg); font:inherit; }
+.cc-sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }

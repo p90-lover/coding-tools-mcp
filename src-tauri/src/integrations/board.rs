@@ -50,6 +50,14 @@ pub enum Change {
         workspace_id: String,
         title: String,
         description: String,
+        #[serde(default)]
+        state: Option<String>,
+    },
+    Move {
+        id: String,
+        state: String,
+        #[serde(default)]
+        before_id: Option<String>,
     },
     Start {
         id: String,
@@ -83,18 +91,28 @@ fn clean(s: &str, max: usize) -> AppResult<String> {
     }
     Ok(s.into())
 }
+fn active_state(state: &str) -> AppResult<()> {
+    if !matches!(state, "backlog" | "in_progress" | "blocked" | "done") {
+        return Err(err("Choose Backlog, In progress, Needs attention or Done"));
+    }
+    Ok(())
+}
 pub fn apply(b: &mut Board, revision: u64, change: Change) -> AppResult<()> {
     if b.revision != revision {
         return Err(err(
             "The board changed in another window. Refresh before retrying.",
         ));
     }
+    // Validate the revision before touching task state, including at the counter limit.
+    let next_revision = b.revision.checked_add(1)
+        .ok_or_else(|| err("Board revision exhausted"))?;
     let stamp = now();
     match change {
         Change::Create {
             workspace_id,
             title,
             description,
+            state,
         } => {
             if b.tasks.len() >= 250 {
                 return Err(err("Local board limit reached (250 retained tasks). Existing records were preserved."));
@@ -103,17 +121,41 @@ pub fn apply(b: &mut Board, revision: u64, change: Change) -> AppResult<()> {
             if title.is_empty() {
                 return Err(err("Enter a task title"));
             }
+            let state = state.unwrap_or_else(|| "backlog".into());
+            active_state(&state)?;
             b.tasks.push(Task {
                 id: uuid::Uuid::new_v4().to_string(),
                 workspace_id,
                 title,
                 description: clean(&description, 8192)?,
-                state: "backlog".into(),
+                state,
                 step: 0,
                 created_at: stamp,
                 updated_at: stamp,
                 evidence: vec![],
             });
+        }
+        Change::Move { id, state, before_id } => {
+            active_state(&state)?;
+            let from = b.tasks.iter().position(|t| t.id == id)
+                .ok_or_else(|| err("Task no longer exists"))?;
+            if b.tasks[from].state == "archived" {
+                return Err(err("Restore the archived task before moving it"));
+            }
+            // Resolve every fallible input before removal. Reordering changes no evidence.
+            let anchor = if let Some(before) = before_id {
+                if before == id {
+                    return Err(err("A task cannot be placed before itself"));
+                }
+                Some(b.tasks.iter().position(|t| t.id == before && t.state == state)
+                    .ok_or_else(|| err("The destination card changed. Refresh before retrying."))?)
+            } else { None };
+            let mut task = b.tasks.remove(from);
+            task.state = state;
+            task.updated_at = stamp;
+            let at = anchor.map(|i| if i > from { i - 1 } else { i })
+                .unwrap_or(b.tasks.len());
+            b.tasks.insert(at, task);
         }
         other => {
             let id = match &other {
@@ -123,7 +165,7 @@ pub fn apply(b: &mut Board, revision: u64, change: Change) -> AppResult<()> {
                 | Change::Resume { id }
                 | Change::Archive { id }
                 | Change::Restore { id } => id,
-                Change::Create { .. } => unreachable!(),
+                Change::Create { .. } | Change::Move { .. } => unreachable!(),
             };
             let t = b
                 .tasks
@@ -170,9 +212,6 @@ pub fn apply(b: &mut Board, revision: u64, change: Change) -> AppResult<()> {
             t.updated_at = stamp;
         }
     }
-    b.revision = b
-        .revision
-        .checked_add(1)
-        .ok_or_else(|| err("Board revision exhausted"))?;
+    b.revision = next_revision;
     Ok(())
 }

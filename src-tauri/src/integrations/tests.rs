@@ -42,6 +42,7 @@ fn control_center_boundaries_and_lossless_board() {
             workspace_id: "w".into(),
             title: "Deliver".into(),
             description: "Spec".into(),
+            state: None,
         },
     )
     .unwrap();
