@@ -214,7 +214,8 @@ fn mcp_discovery_payload() -> Value {
     json!({
         "name": "coding-tools-mcp",
         "version": env!("CARGO_PKG_VERSION"),
-        "protocolVersion": "2025-06-18"
+        "protocolVersion": "2026-07-28",
+        "supportedVersions": ["2026-07-28", "2025-11-25", "2025-06-18"]
     })
 }
 
@@ -239,10 +240,14 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
         );
         return response;
     }
+    let protocol_headers = request.headers().clone();
     let Json(body) = match Json::<Value>::from_request(request, &state).await {
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
+    if let Some(response) = transport::validate_protocol_headers(&protocol_headers, &body) {
+        return response;
+    }
     if let Some(response) = transport::early_response(&body) {
         append_profile_log(
             &state.workspace_id,

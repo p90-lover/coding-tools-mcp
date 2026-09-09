@@ -1,6 +1,6 @@
 // Three real loopback tests; no models, host input, screenshots or deletion.
-use super::*;
 use super::super::{serve, ListenerState};
+use super::*;
 use crate::auth::OAuthRuntime;
 use crate::tools::{live_policy::commit_updates, ToolContext};
 use std::{
@@ -258,4 +258,140 @@ async fn connection_repair_sse_get_and_legacy_probe_are_distinct() {
         body.get("tools").is_none(),
         "public health does not expose the tool catalog"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_dual_era_modern_discovery_and_full_catalog() {
+    let f = Fixture::new(false).await;
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{},
+        "io.modelcontextprotocol/clientInfo":{"name":"modern-fixture","version":"1"}
+    });
+    let discover = f.client.post(&f.endpoint).bearer_auth(&f.token)
+        .header("MCP-Protocol-Version","2026-07-28")
+        .header("Mcp-Method","server/discover")
+        .json(&json!({"jsonrpc":"2.0","id":10,"method":"server/discover","params":{"_meta":meta.clone()}}))
+        .send().await.unwrap();
+    assert_eq!(discover.status().as_u16(), 200);
+    let discover: Value = discover.json().await.unwrap();
+    assert_eq!(discover["result"]["resultType"], "complete");
+    assert_eq!(discover["result"]["ttlMs"], 0);
+    assert_eq!(discover["result"]["cacheScope"], "private");
+    assert!(discover["result"]["supportedVersions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "2026-07-28"));
+    assert!(discover["result"]["supportedVersions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v == "2025-11-25"));
+    assert_eq!(
+        discover["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "coding-tools-mcp"
+    );
+
+    let mut policy = f.context.for_request().unwrap().policy;
+    policy.permission_mode = "on-request".into();
+    commit_updates(vec![(f.context.clone(), policy, "full".into())], || Ok(())).unwrap();
+    let listed = f
+        .client
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/list")
+        .json(
+            &json!({"jsonrpc":"2.0","id":11,"method":"tools/list","params":{"_meta":meta.clone()}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status().as_u16(), 200);
+    let listed: Value = listed.json().await.unwrap();
+    assert_eq!(listed["result"]["resultType"], "complete");
+    assert_eq!(listed["result"]["ttlMs"], 0);
+    assert_eq!(listed["result"]["cacheScope"], "private");
+    let names: Vec<_> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    for expected in [
+        "codex_tools_status",
+        "update_plan",
+        "harness_status",
+        "start_task",
+        "capture_screenshot",
+        "computer_action",
+    ] {
+        assert!(names.contains(&expected), "full catalog missing {expected}");
+    }
+
+    let mismatch = f
+        .client
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "ping")
+        .json(
+            &json!({"jsonrpc":"2.0","id":12,"method":"tools/list","params":{"_meta":meta.clone()}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mismatch.status().as_u16(), 400);
+    let mismatch: Value = mismatch.json().await.unwrap();
+    assert_eq!(mismatch["error"]["code"], -32020);
+
+    let missing_method = f
+        .client
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(
+            &json!({"jsonrpc":"2.0","id":13,"method":"tools/list","params":{"_meta":meta.clone()}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_method.status().as_u16(), 400);
+    let missing_method: Value = missing_method.json().await.unwrap();
+    assert_eq!(missing_method["error"]["code"], -32020);
+
+    let unsupported = f
+        .client
+        .post(&f.endpoint)
+        .bearer_auth(&f.token)
+        .header("MCP-Protocol-Version", "2099-01-01")
+        .header("Mcp-Method", "tools/list")
+        .json(
+            &json!({"jsonrpc":"2.0","id":14,"method":"tools/list","params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion":"2099-01-01",
+                "io.modelcontextprotocol/clientCapabilities":{}
+            }}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status().as_u16(), 400);
+    let unsupported: Value = unsupported.json().await.unwrap();
+    assert_eq!(unsupported["error"]["code"], -32022);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_legacy_version_negotiation_is_spec_compliant() {
+    let f = Fixture::new(false).await;
+    for requested in ["2025-11-25", "2025-06-18"] {
+        let response:Value=f.rpc(json!({"jsonrpc":"2.0","id":20,"method":"initialize","params":{
+            "protocolVersion":requested,"capabilities":{},"clientInfo":{"name":"legacy-fixture","version":"1"}
+        }})).await.json().await.unwrap();
+        assert_eq!(response["result"]["protocolVersion"], requested);
+    }
+    let downgraded:Value=f.rpc(json!({"jsonrpc":"2.0","id":21,"method":"initialize","params":{
+        "protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"legacy-fixture","version":"1"}
+    }})).await.json().await.unwrap();
+    assert_eq!(downgraded["result"]["protocolVersion"], "2025-11-25");
 }

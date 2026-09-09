@@ -79,6 +79,87 @@ pub(super) fn early_response(body: &Value) -> Option<Response> {
     Some((StatusCode::BAD_REQUEST, Json(json!({"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid MCP request envelope"}}))).into_response())
 }
 
+fn protocol_error(code: i64, message: &str, data: Value) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"jsonrpc":"2.0","error":{"code":code,"message":message,"data":data}})),
+    )
+        .into_response()
+}
+pub(super) fn validate_protocol_headers(headers: &HeaderMap, body: &Value) -> Option<Response> {
+    const MODERN: &str = "2026-07-28";
+    const SUPPORTED: &[&str] = &[MODERN, "2025-11-25", "2025-06-18"];
+    let body_version = body
+        .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+        .and_then(Value::as_str);
+    let header_version = headers
+        .get("mcp-protocol-version")
+        .and_then(|v| v.to_str().ok());
+    for version in [body_version, header_version].into_iter().flatten() {
+        if !SUPPORTED.contains(&version) {
+            return Some(protocol_error(
+                -32022,
+                "Unsupported protocol version",
+                json!({"supported":SUPPORTED,"requested":version}),
+            ));
+        }
+    }
+    if let (Some(body_version), Some(header_version)) = (body_version, header_version) {
+        if body_version != header_version {
+            return Some(protocol_error(
+                -32020,
+                "MCP protocol header/body mismatch",
+                json!({"header":header_version,"body":body_version}),
+            ));
+        }
+    }
+    if body_version == Some(MODERN) || header_version == Some(MODERN) {
+        if body_version != Some(MODERN) || header_version != Some(MODERN) {
+            return Some(protocol_error(
+                -32020,
+                "Modern MCP requires matching protocol metadata and header",
+                json!({"expected":MODERN}),
+            ));
+        }
+        let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+        let Some(method_header) = headers.get("mcp-method").and_then(|v| v.to_str().ok()) else {
+            return Some(protocol_error(
+                -32020,
+                "Modern MCP requires Mcp-Method",
+                json!({"method":method}),
+            ));
+        };
+        if method_header != method {
+            return Some(protocol_error(
+                -32020,
+                "Mcp-Method header/body mismatch",
+                json!({"header":method_header,"body":method}),
+            ));
+        }
+        if method == "tools/call" {
+            let name = body
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let Some(name_header) = headers.get("mcp-name").and_then(|v| v.to_str().ok()) else {
+                return Some(protocol_error(
+                    -32020,
+                    "Modern tools/call requires Mcp-Name",
+                    json!({"name":name}),
+                ));
+            };
+            if name_header != name {
+                return Some(protocol_error(
+                    -32020,
+                    "Mcp-Name header/body mismatch",
+                    json!({"header":name_header,"body":name}),
+                ));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod connection_repair_tests {
     include!("../../../aiTemp/connection-tests/http.rs");

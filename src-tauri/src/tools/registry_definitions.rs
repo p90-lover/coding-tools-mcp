@@ -599,7 +599,7 @@ pub fn canonical_tool_name(name: &str) -> &str {
 
 pub fn normalize_tool_profile(profile: &str) -> &'static str {
     match profile {
-        "advanced" => "advanced",
+        "advanced" | "full" => "advanced",
         "read-only" => "read-only",
         "compat-readonly-all" => "compat-readonly-all",
         _ => "core",
@@ -1083,6 +1083,27 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{input_schema, list_tools_for_profile};
+
+    #[test]
+    fn full_profile_really_exposes_the_complete_catalog() {
+        let full = list_tools_for_profile("full");
+        let advanced = list_tools_for_profile("advanced");
+        assert_eq!(full, advanced);
+        let names: Vec<_> = full
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        for expected in [
+            "codex_tools_status",
+            "harness_status",
+            "start_task",
+            "update_plan",
+            "capture_screenshot",
+            "computer_action",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+    }
 
     #[test]
     fn core_catalog_exposes_chatgpt_compatible_tools() {
