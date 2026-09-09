@@ -263,7 +263,7 @@ fn native_bridge_actual_turns_against_loopback_fixture() {
     let home = base.join("native-home");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-    let config=format!("model = \"mock-model\"\napproval_policy = \"on-request\"\nsandbox_mode = \"read-only\"\nmodel_provider = \"mock_provider\"\n[model_providers.mock_provider]\nname = \"Isolated protocol fixture, no AI\"\nbase_url = \"{}\"\nwire_api = \"responses\"\nrequest_max_retries = 0\nstream_max_retries = 0\nrequires_openai_auth = false\n",fixture.address);
+    let config=format!("model = \"mock-model\"\napproval_policy = \"on-request\"\nmodel_provider = \"mock_provider\"\n[model_providers.mock_provider]\nname = \"Isolated protocol fixture, no AI\"\nbase_url = \"{}\"\nwire_api = \"responses\"\nrequest_max_retries = 0\nstream_max_retries = 0\nrequires_openai_auth = false\n",fixture.address);
     std::fs::write(home.join("config.toml"), config).unwrap();
     let hub = Hub::default();
     hub.connect(

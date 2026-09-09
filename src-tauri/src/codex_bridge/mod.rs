@@ -634,6 +634,10 @@ impl Bridge {
             let sender = self.pending.lock().ok().and_then(|mut p| p.remove(&id));
             if let Some(sender) = sender {
                 let result = if value.get("error").is_some() {
+                    #[cfg(test)]
+                    if std::env::var_os("NATIVE_CODEX_PROBE_BIN").is_some() {
+                        eprintln!("Isolated bridge RPC error: {}", bounded(&value["error"].to_string(), 2048));
+                    }
                     Err(format!("Native RPC rejected (code {}). Inspect local runtime configuration; no automatic fallback",value["error"]["code"].as_i64().unwrap_or(-1)))
                 } else {
                     value
