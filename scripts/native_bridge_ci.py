@@ -17,7 +17,7 @@ BASE = 'fa7f323aa52ee5b5c143f61ff46fc534264f79ff'
 VERSION = '0.4.2-rc.1'
 NATIVE_TAG = 'rust-v0.153.4'
 PACKED_SHA = '8cbe342b60087080597e3f5273cb4c2add774c798ab3aedd5e4fae4e0ee39e45'
-FIXTURE_PATCH_SHA = 'e45f35aa76e33702db509d46f8453f8281c6a09eb7a0c242cfbfc6d65c2eb88d'
+FIXTURE_PATCH_SHA = 'e45f73ed611fb0d909c0fdd223b85fdf65b8e5787c1697c696e78805158d0346'
 
 def digest(path: Path) -> str:
     with path.open('rb') as handle:
