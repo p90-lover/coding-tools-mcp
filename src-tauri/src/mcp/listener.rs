@@ -21,6 +21,9 @@ use crate::tools::Workspace;
 use crate::tunnel::append_profile_log;
 use crate::workspace::{AuthConfig, RuntimeConfig};
 
+#[path = "transport.rs"]
+mod transport;
+
 pub type ShutdownSender = oneshot::Sender<()>;
 
 #[derive(Clone)]
@@ -149,13 +152,17 @@ async fn serve(
         64,
     );
     let app = Router::new()
-        .route("/mcp", get(mcp_discovery).post(mcp_post))
+        .route("/mcp", get(transport::get_handler).post(mcp_post))
         .route(
             "/.well-known/oauth-authorization-server",
             get(oauth_authorization_server_metadata),
         )
         .route(
             "/.well-known/oauth-protected-resource",
+            get(oauth_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
             get(oauth_protected_resource_metadata),
         )
         .route(
@@ -222,12 +229,31 @@ fn resolve_oauth_base(state: &ListenerState, _headers: &HeaderMap) -> String {
 
 async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Response {
     if let Some(response) = require_mcp_auth(&state, request.headers()) {
+        append_profile_log(
+            &state.workspace_id,
+            "mcp-requests.log",
+            &format!(
+                "[transport] authentication_rejected status={}",
+                response.status().as_u16()
+            ),
+        );
         return response;
     }
     let Json(body) = match Json::<Value>::from_request(request, &state).await {
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
+    if let Some(response) = transport::early_response(&body) {
+        append_profile_log(
+            &state.workspace_id,
+            "mcp-requests.log",
+            &format!(
+                "[transport] envelope_handled status={}",
+                response.status().as_u16()
+            ),
+        );
+        return response;
+    }
     let method = body
         .get("method")
         .and_then(Value::as_str)
@@ -300,6 +326,15 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
                     ),
                 );
             }
+            if method == "tools/list" {
+                if let Some(tools) = response.pointer("/result/tools").and_then(Value::as_array) {
+                    append_profile_log(
+                        &profile_id,
+                        "mcp-requests.log",
+                        &format!("[discovery] catalog_served tools_count={}", tools.len()),
+                    );
+                }
+            }
             Json(response).into_response()
         }
         Err(error) => {
@@ -338,7 +373,8 @@ fn require_mcp_auth(state: &ListenerState, headers: &HeaderMap) -> Option<Respon
     if state.auth.oauth_enabled() {
         if let Some(oauth) = state.oauth.as_ref() {
             let server_url = resolve_oauth_base(state, headers);
-            return verify_oauth_bearer_header(headers, oauth, &server_url);
+            return verify_oauth_bearer_header(headers, oauth, &server_url)
+                .map(|response| transport::oauth_challenge(response, &server_url));
         }
     }
     if state.auth.auth_type == "noauth" {
