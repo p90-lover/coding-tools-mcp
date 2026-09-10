@@ -17,8 +17,13 @@ args=[str(program.resolve()),'probe',str(input_file.resolve()),str(external.reso
 baseline=json.loads(subprocess.check_output(args,timeout=10))
 assert baseline=={'container':False,'input_read':True,'input_write':True,'external_read':True,'external_write':True,'work_write':True,'network':True},baseline
 
-def request(command,timeout=4000):
-    run=subprocess.run([str(helper),profile,str(input_dir.resolve()),str(work.resolve()),str(timeout),'--',*command],input=b'start',capture_output=True,timeout=timeout/1000+10)
+def request(command,timeout=4000,extended=True):
+    def spelling(path):
+        value=str(path)
+        prefix='\\'*2+'?'+ '\\'
+        return value if not extended or value.startswith(prefix) else prefix+value
+    command=[spelling(command[0]),*command[1:]]
+    run=subprocess.run([str(helper),profile,spelling(input_dir.resolve()),spelling(work.resolve()),str(timeout),'--',*command],input=b'start',capture_output=True,timeout=timeout/1000+10)
     assert run.returncode==0,(run.returncode,run.stderr.decode(errors='replace'))
     data=json.loads(run.stdout)
     assert data['requested_identity_verified'] and data['appcontainer_token_verified'] and data['network_capabilities']==0 and data['model_requests']==0
@@ -26,6 +31,9 @@ def request(command,timeout=4000):
     data['stderr']=base64.b64decode(data.pop('stderr_base64')).decode(errors='replace')
     return data
 
+ordinary=request(args,extended=False)
+assert ordinary['exit_code']==0 and not ordinary['timed_out'],ordinary
+assert json.loads(ordinary['stdout'])=={'container':True,'input_read':True,'input_write':False,'external_read':False,'external_write':False,'work_write':True,'network':False},ordinary
 result=request(args)
 assert result['exit_code']==0 and not result['timed_out'],result
 observed=json.loads(result['stdout'])
@@ -42,6 +50,6 @@ result=request([str(program.resolve()),'overflow'],3000)
 assert result['limit_exceeded'] and len(result['stdout'].encode())<=65536,result
 print('PASS: bounded output capture aborts overflow without an unsandboxed retry',flush=True)
 listener.close()
-proof={'backend':'windows-appcontainer-v1','passed_groups':3,'helper_sha256':hashlib.sha256(helper.read_bytes()).hexdigest(),'model_requests':0,'native_token_verified':True,'read_only_input':True,'external_user_file_denied':True,'loopback_denied':True,'descendants_terminated':True,'output_bounded':True,'fixtures_retained':str(root),'live_user_workspace_verified':False}
+proof={'backend':'windows-appcontainer-v1','passed_groups':3,'helper_sha256':hashlib.sha256(helper.read_bytes()).hexdigest(),'model_requests':0,'native_token_verified':True,'ordinary_and_extended_paths_verified':True,'read_only_input':True,'external_user_file_denied':True,'loopback_denied':True,'descendants_terminated':True,'output_bounded':True,'fixtures_retained':str(root),'live_user_workspace_verified':False}
 Path('aiTemp/evidence').mkdir(parents=True,exist_ok=True)
 Path('aiTemp/evidence/native-proof.json').write_text(json.dumps(proof,indent=2)+'\n')

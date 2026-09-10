@@ -6,6 +6,7 @@
 #include <sddl.h>
 #include <aclapi.h>
 #include <shellapi.h>
+#include <pathcch.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -70,11 +71,24 @@ static std::wstring sid_text(PSID sid) {
 }
 static void safe_path(const fs::path& path, bool directory) {
     require(path.is_absolute(), "Sandbox path must be absolute");
-    for (auto cursor = path; !cursor.empty(); cursor = cursor.parent_path()) {
-        const DWORD attr = GetFileAttributesW(cursor.c_str());
+    // MSVC filesystem treats the extended namespace prefix as root_path(),
+    // so parent_path() walks past \?\X:\ into invalid \?\X: and \?\.
+    // Keep the extended spelling and let Windows identify the real volume root.
+    const auto native = path.native();
+    require(!native.empty() && native.size() < PATHCCH_MAX_CCH, "Sandbox path exceeds Windows limit");
+    std::vector<wchar_t> cursor(native.begin(), native.end());
+    cursor.push_back(L'\0');
+    size_t previous_length = native.size();
+    for (;;) {
+        const DWORD attr = GetFileAttributesW(cursor.data());
         require(attr != INVALID_FILE_ATTRIBUTES, "Sandbox path unavailable");
         require((attr & FILE_ATTRIBUTE_REPARSE_POINT) == 0, "Sandbox paths cannot contain reparse points");
-        if (cursor == cursor.parent_path()) break;
+        if (PathCchIsRoot(cursor.data())) break;
+        const HRESULT result = PathCchRemoveFileSpec(cursor.data(), cursor.size());
+        require(result == S_OK, "Cannot resolve sandbox parent");
+        const size_t length = wcslen(cursor.data());
+        require(length > 0 && length < previous_length, "Sandbox ancestry made no progress");
+        previous_length = length;
     }
     require(directory ? fs::is_directory(path) : fs::is_regular_file(path), "Unexpected sandbox path kind");
 }
