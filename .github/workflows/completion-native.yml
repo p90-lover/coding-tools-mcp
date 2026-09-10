@@ -2,7 +2,7 @@ name: Native snapshot sandbox boundaries
 on:
   push:
     branches: [feature/complete-controls-0.5.0-rc.1]
-    paths: [.github/workflows/completion-native.yml, aiTemp/completion/native-source.xz.b64]
+    paths: [.github/workflows/completion-native.yml, aiTemp/completion/native-source.xz.b64, aiTemp/completion/native_probe_fix.py]
 permissions:
   contents: read
 jobs:
@@ -30,15 +30,20 @@ jobs:
           mkdir -p aiTemp/evidence
           python - <<'PY'
           from pathlib import Path
-          import ast,base64,json,lzma,hashlib
-          raw=Path('aiTemp/completion/native-source.xz.b64').read_text().strip()
-          files=json.loads(lzma.decompress(base64.b64decode(raw,validate=True)).decode())
+          import ast,base64,json,lzma
+          files=json.loads(lzma.decompress(base64.b64decode(Path('aiTemp/completion/native-source.xz.b64').read_text().strip(),validate=True)).decode())
           assert set(files)=={'native-helpers/app-container/CMakeLists.txt','native-helpers/app-container/main.cpp','aiTemp/completion/native_probe.cpp','aiTemp/completion/native_test.py'}
           for name,text in files.items():
               p=Path(name);assert not p.exists() and not p.is_symlink()
               p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text,encoding='utf-8')
           ast.parse(files['aiTemp/completion/native_test.py'])
-          Path('aiTemp/evidence/source.json').write_text(json.dumps({name:hashlib.sha256(text.encode()).hexdigest() for name,text in files.items()},indent=2)+'\n')
+          PY
+          python aiTemp/completion/native_probe_fix.py
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          names=['native-helpers/app-container/CMakeLists.txt','native-helpers/app-container/main.cpp','aiTemp/completion/native_probe.cpp','aiTemp/completion/native_test.py']
+          Path('aiTemp/evidence/source.json').write_text(json.dumps({name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in names},indent=2)+'\n')
           PY
       - name: Build helper and non-destructive boundary probe
         run: |
