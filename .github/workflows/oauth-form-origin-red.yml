@@ -1,0 +1,82 @@
+name: Reproduce rc4 consent form null Origin
+on:
+  push:
+    branches: [fix/oauth-form-origin-0.4.3-rc.5]
+    paths: [.github/workflows/oauth-form-origin-red.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: aiTemp/source
+          ref: ${{ github.sha }}
+          clean: false
+          persist-credentials: false
+      - name: Capture the browser-generated Origin with production Referrer-Policy present
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/rc4-fixture
+          gh run download 34457693571 --repo "$GITHUB_REPOSITORY" --name oauth-popup-browser-fixture-34457693571 --dir aiTemp/rc4-fixture
+          python -m pip install playwright==1.57.0
+          python - <<'PY' | tee aiTemp/evidence/referrer-red.txt
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright,expect
+          import json,shutil
+          fixture=json.loads(Path('aiTemp/rc4-fixture/browser-fixture.json').read_text())
+          assert fixture['source']=='595728146355170aeaa4c563e179c66d670b3b30'
+          security=Path('src-tauri/src/auth/http_security.rs').read_text()
+          assert '("referrer-policy", "no-referrer")' in security
+          old_replay=Path('aiTemp/compat/browser_test.py').read_text()
+          assert 'referrer-policy' not in old_replay.lower()
+          base='https://old-popup.example';rows=[]
+          with sync_playwright() as p:
+              browser=p.chromium.launch(executable_path=shutil.which('google-chrome'),headless=True,proxy={'server':'http://127.0.0.1:9'},args=['--no-sandbox'])
+              for policy in ['no-referrer','strict-origin']:
+                  context=browser.new_context(service_workers='block');captured=[]
+                  def route(r):
+                      request=r.request
+                      if not request.url.startswith(base+'/oauth/authorize'):
+                          r.abort('blockedbyclient');return
+                      if request.method=='GET':
+                          r.fulfill(status=200,headers={'Content-Type':'text/html','Content-Security-Policy':fixture['csp'],'Set-Cookie':fixture['set_cookie'],'Referrer-Policy':policy,'Cache-Control':'no-store','Pragma':'no-cache','X-Frame-Options':'DENY','X-Content-Type-Options':'nosniff'},body=fixture['html'])
+                      elif request.method=='POST':
+                          h=request.all_headers()
+                          captured.append({'origin':h.get('origin'),'referer':h.get('referer'),'consent_cookie_present':'mcp_consent_' in h.get('cookie','')})
+                          r.fulfill(status=200,content_type='text/html',body='SUBMISSION_CAPTURED')
+                      else:r.abort('blockedbyclient')
+                  context.route('**/*',route)
+                  page=context.new_page();page.goto(fixture['authorize_url'])
+                  page.get_by_label('Password',exact=True).fill(fixture['password'])
+                  page.get_by_role('button',name='Authorize',exact=True).click()
+                  expect(page.get_by_text('SUBMISSION_CAPTURED')).to_be_visible()
+                  assert len(captured)==1
+                  rows.append({'policy':policy,**captured[0]});context.close()
+              version=browser.version;browser.close()
+          assert rows[0]['origin']=='null' and rows[0]['consent_cookie_present'],rows
+          assert rows[1]['origin']==base and rows[1]['referer']==base+'/' and rows[1]['consent_cookie_present'],rows
+          proof={'rc4_source':fixture['source'],'browser':version,'observations':rows,'production_html':True,'header_from_production_source':True,'live_account':False,'model_requests':0}
+          Path('aiTemp/evidence/referrer-red.json').write_text(json.dumps(proof,indent=2)+'\n')
+          print(json.dumps(proof,indent=2))
+          print('REPRODUCED: rc4 no-referrer produces Origin:null on a valid consent POST; prior replay omitted this header')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: oauth-form-origin-red-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
