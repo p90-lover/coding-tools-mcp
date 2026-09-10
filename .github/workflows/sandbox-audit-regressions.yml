@@ -1,3 +1,4 @@
+# TDD gate: this workflow first reproduces file-safety failures on unchanged production source.
 name: File safety and native boundary regressions
 on:
   push:
