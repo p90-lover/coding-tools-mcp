@@ -1,0 +1,66 @@
+name: Native sandbox boundary probe
+on:
+  push:
+    branches: [fix/sandbox-audit-20260910]
+    paths: ['.github/workflows/sandbox-boundary-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 8
+    env:
+      SOURCE: ${{ github.sha }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/native-audit-target
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: aiTemp/checkout
+          ref: ${{ github.sha }}
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Prepare only the native command fixture
+        run: |
+          set -euo pipefail
+          python scripts/native_bridge_ci.py probe-init
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+          p=Path('aiTemp/release-043/native_command_fixture.rs')
+          backup=Path('aiTemp/Trash/native-config-probe/fixture.rs');backup.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,backup)
+          s=p.read_text(encoding='utf-8'); old='[windows]\\nsandbox = \\"unelevated\\"\\n'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,'',1),encoding='utf-8')
+          PY
+      - name: Verify official binary digest (no account or model)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_ASSET: codex-x86_64-pc-windows-msvc.exe.tar.gz
+        run: python scripts/native_bridge_ci.py download-native
+      - name: Observe missing-configuration behavior
+        run: |
+          set -euo pipefail
+          export CODING_TOOLS_COMMAND_NATIVE_SHA256="$NATIVE_CODEX_PROBE_SHA256"
+          set +e
+          cargo test --manifest-path aiTemp/bridge-probe/Cargo.toml native_043_actual_commands_no_model_and_write_denial -- --ignored --test-threads=1 --nocapture > aiTemp/evidence/native-unconfigured.txt 2>&1
+          code=$?
+          set -e
+          echo "fixture_exit=$code" | tee aiTemp/evidence/observation.txt
+          tail -70 aiTemp/evidence/native-unconfigured.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-boundary-probe-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          retention-days: 14
+          if-no-files-found: error
