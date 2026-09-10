@@ -1,0 +1,61 @@
+name: Native snapshot sandbox boundaries
+on:
+  push:
+    branches: [feature/complete-controls-0.5.0-rc.1]
+    paths: [.github/workflows/completion-native.yml, aiTemp/completion/native-source.xz.b64]
+permissions:
+  contents: read
+jobs:
+  native:
+    if: github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 8
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - name: Materialize exact reviewable native source without replacing project files
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          python - <<'PY'
+          from pathlib import Path
+          import ast,base64,json,lzma,hashlib
+          raw=Path('aiTemp/completion/native-source.xz.b64').read_text().strip()
+          files=json.loads(lzma.decompress(base64.b64decode(raw,validate=True)).decode())
+          assert set(files)=={'native-helpers/app-container/CMakeLists.txt','native-helpers/app-container/main.cpp','aiTemp/completion/native_probe.cpp','aiTemp/completion/native_test.py'}
+          for name,text in files.items():
+              p=Path(name);assert not p.exists() and not p.is_symlink()
+              p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text,encoding='utf-8')
+          ast.parse(files['aiTemp/completion/native_test.py'])
+          Path('aiTemp/evidence/source.json').write_text(json.dumps({name:hashlib.sha256(text.encode()).hexdigest() for name,text in files.items()},indent=2)+'\n')
+          PY
+      - name: Build helper and non-destructive boundary probe
+        run: |
+          set -euo pipefail
+          cmake -S native-helpers/app-container -B aiTemp/native-build -A x64 -DCODING_TOOLS_BUILD_PROBE=ON 2>&1 | tee aiTemp/evidence/cmake.txt
+          cmake --build aiTemp/native-build --config Release 2>&1 | tee aiTemp/evidence/build.txt
+      - name: Verify three concrete Windows boundary groups without models or user files
+        env:
+          APP_CONTAINER_HELPER: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-appcontainer.exe
+          APP_CONTAINER_PROBE: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-sandbox-probe.exe
+        run: |
+          set -euo pipefail
+          python aiTemp/completion/native_test.py 2>&1 | tee aiTemp/evidence/native-test.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-snapshot-proof-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
