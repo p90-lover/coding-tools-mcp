@@ -60,8 +60,7 @@ for name,expected in payload['before_sha256'].items():
     assert working in (blob,blob.replace(b'\n',b'\r\n')),'Unexpected working-tree edit: '+name
     canonical[name]=blob
     if working!=blob:normalized.append(name)
-# The failed Windows run stopped before changing source because checkout used
-# CRLF. Keep those bytes in Trash; apply to the exact verified Git content.
+# Preserve CRLF checkout bytes; apply against the exact verified Git content.
 for name in PATHS:backup(Path(name))
 for name,blob in canonical.items():Path(name).write_bytes(blob)
 patch=ROOT/'expanded.patch';assert not patch.exists()
@@ -75,13 +74,12 @@ for constant in ['CORE_READ_ONLY_TOOLS','READ_ONLY_TOOLS']:
     s=s[:start]+section+s[end:]
 Path(name).write_text(s)
 name='src-tauri/src/tools/catalog.rs';path=Path(name);backup(path);s=path.read_text()
-s=once(s,'.filter(|n| *n == "sandbox_exec").collect::<Vec<_>>()', '.filter(|n| *n == "sandbox_exec" && !super::native_sandbox::available()).collect::<Vec<_>>()')
+s=once(s,'.filter(|n| *n == "sandbox_exec").collect::<Vec<_>>()', '.filter(|n| *n == "sandbox_exec" && !crate::tools::native_sandbox::available()).collect::<Vec<_>>()')
 s=once(s,'assert_eq!(describe("read-only")["advertised_count"], 42);','''assert_eq!(describe("read-only")["advertised_count"], 41);
         assert!(!describe("read-only")["advertised_names"].as_array().unwrap().iter().any(|n| n == "sandbox_exec"));
-        assert_eq!(full["advertised_but_unavailable"].as_array().unwrap().is_empty(), super::native_sandbox::available());''')
+        assert_eq!(full["advertised_but_unavailable"].as_array().unwrap().is_empty(), crate::tools::native_sandbox::available());''')
 path.write_text(s);PATHS.append(name)
-# Do not claim an asynchronous Stop has already joined every child, or that a
-# status return inspected every host file. Runtime and tests verify the boundary.
+# A stop request is not proof that every child has already joined.
 name='src/lib/components/SandboxControl.svelte';s=Path(name).read_text()
 s=once(s,'Stopped all snapshot jobs and revoked saved approvals. Files retained. · 已停止所有快照工作並撤銷授權，檔案保留。','Stop requested; saved approvals revoked. Owned processes are being terminated; files retained. · 已要求停止並撤銷授權，正在終止所屬程序，檔案保留。')
 Path(name).write_text(s)
