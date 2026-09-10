@@ -1,0 +1,37 @@
+diff --git a/src-tauri/src/codex_bridge/mod.rs b/src-tauri/src/codex_bridge/mod.rs
+index 001cbd4..122aaab 100644
+--- a/src-tauri/src/codex_bridge/mod.rs
++++ b/src-tauri/src/codex_bridge/mod.rs
+@@ -297,6 +297,14 @@ impl Hub {
+         let temp = options.codex_home.join("aiTemp");
+         std::fs::create_dir_all(&temp).map_err(|_| "Cannot prepare dedicated aiTemp directory")?;
+         let mut command = Command::new(&options.executable);
++        // A per-command read-only profile is not sufficient when native Windows
++        // sandbox selection is disabled. Pin the OS backend before config loading;
++        // never fall back to an ordinary process or provision elevated accounts.
++        #[cfg(windows)]
++        command.args([
++            "-c", "windows.sandbox=\"unelevated\"",
++            "-c", "windows.sandbox_private_desktop=true",
++        ]);
+         command
+             .arg("app-server")
+             .current_dir(&options.codex_home)
+@@ -436,6 +444,17 @@ impl Hub {
+                         bounded(value["userAgent"].as_str().unwrap_or("initialized"), 300);
+                 }
+                 bridge.enqueue(json!({"method":"initialized","params":{}}))?;
++                #[cfg(windows)]
++                {
++                    // This read-only RPC confirms actual loaded native config, not
++                    // merely our requested CLI arguments. Unsupported/missing modes
++                    // stop admission rather than silently running unsandboxed.
++                    let readiness = bridge.rpc("windowsSandbox/readiness", Value::Null);
++                    if !matches!(&readiness, Ok(v) if v["status"] == "ready") {
++                        bridge.stop("windows_sandbox_not_ready");
++                        return Err("Native Windows sandbox did not confirm readiness; no commands or model turns enabled".into());
++                    }
++                }
+                 bridge.ready.store(true, Ordering::SeqCst);
+                 self.status()
+             }
