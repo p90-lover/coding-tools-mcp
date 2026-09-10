@@ -1,0 +1,69 @@
+name: Diagnose paired OAuth browser boundary
+on:
+  push:
+    branches: [release/main-extension-0.4.3-rc.3]
+    paths: [.github/workflows/paired-browser-diagnostic.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      SOURCE: 9c749e1eb7030c25a6f84cc81e4719b6e01bef7d
+      EXTENSION_SOURCE_DIR: ${{ github.workspace }}/aiTemp/extension-source
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: p90-lover/coding-tools-mcp-fast-access-extension
+          ref: b0d4db553227fa3c7300050b8edff6e2eb9afee4
+          path: aiTemp/extension-source
+          clean: false
+          persist-credentials: false
+      - name: Obtain original production fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 34456274103 --repo "$GITHUB_REPOSITORY" --name oauth-popup-browser-fixture-34456274103 --dir aiTemp/browser-fixture
+          python -m pip install playwright==1.57.0
+      - name: Collect exact browser state from failing replay, no inference
+        run: |
+          mkdir -p aiTemp/evidence aiTemp/Trash/diagnostic
+          cp aiTemp/compat/browser_test.py aiTemp/Trash/diagnostic/browser_test.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('aiTemp/compat/browser_test.py').read_text()
+          s=s.replace("        popup.on('console',lambda msg:errors.append(msg.text) if msg.type=='error' else None)","        popup.on('console',lambda msg:errors.append(msg.text) if msg.type=='error' else None)\n        popup.on('pageerror',lambda e:errors.append('PAGEERROR '+str(e)))")
+          old="            expect(popup.get_by_text('CALLBACK_REACHED',exact=True)).to_be_visible()"
+          assert s.count(old)==1
+          s=s.replace(old,"""            try:
+                          expect(popup.get_by_text('CALLBACK_REACHED',exact=True)).to_be_visible()
+                      except Exception:
+                          state=popup.evaluate('''() => ({url:location.href, chrome:typeof chrome?.runtime?.sendMessage, binding:typeof globalThis.__syntheticChromeSend, loaded:globalThis.__codingToolsMcpOauthHelperV03Loaded, form:document.querySelector('form')?.outerHTML, password:document.querySelector('input[type=password]')?.value, fields:document.querySelector('form')?[...new FormData(document.querySelector('form')).entries()]:[], valid:document.querySelector('form')?.checkValidity()})''')
+                          detail={'case':case,'state':state,'calls':calls,'errors':errors,'messages':messages}
+                          Path('aiTemp/evidence/diagnostic.json').write_text(json.dumps(detail,indent=2))
+                          print(json.dumps(detail,indent=2),flush=True)
+                          raise""".replace('\n                      ','\n            '))
+          Path('aiTemp/evidence/diagnostic-replay.py').write_text(s)
+          PY
+          python aiTemp/evidence/diagnostic-replay.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paired-browser-diagnostic-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
