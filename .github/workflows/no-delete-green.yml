@@ -49,11 +49,15 @@ jobs:
           test -z "$(git diff --cached --diff-filter=D --name-only)"
           git config user.name 'p90-lover'
           git config user.email '146848721+p90-lover@users.noreply.github.com'
-          git commit -m 'fix: retire managed files to Trash and keep history temps in aiTemp'
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: retire managed files to Trash and keep history temps in aiTemp'
+          fi
           auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin refs/heads/fix/sandbox-audit-20260910 | cut -f1)"
-          test "$remote" = "$GITHUB_SHA"
-          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/sandbox-audit-20260910
+          test "$remote" = "$GITHUB_SHA" || test "$remote" = "$(git rev-parse HEAD)"
+          if test "$remote" != "$(git rev-parse HEAD)"; then
+            git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/sandbox-audit-20260910
+          fi
           echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   verify:
     needs: prepare
@@ -62,7 +66,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 40
     env:
       SOURCE: ${{ needs.prepare.outputs.source }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/no-delete-target
@@ -86,6 +90,12 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
+      - name: Install Linux Tauri system libraries
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - name: Static deletion invariant
         run: python aiTemp/sandbox-audit/no_delete_source_check.py | tee aiTemp/no-delete-static.txt
       - name: History and tunnel regression tests
