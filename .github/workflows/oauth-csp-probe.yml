@@ -1,0 +1,85 @@
+name: OAuth browser redirect probe
+on:
+  push:
+    branches: [fix/oauth-popup-0.4.3-rc.3]
+    paths: ['.github/workflows/oauth-csp-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: aiTemp/checkout
+          ref: ${{ github.sha }}
+          clean: false
+          persist-credentials: false
+      - name: Observe real Chromium form redirect with actual production CSP
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          python -m pip install playwright==1.57.0
+          python - <<'PY'
+          from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
+          from threading import Thread
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          import re,json,shutil
+          source=Path('src-tauri/src/auth/http_security.rs').read_text()
+          policy=re.search(r'\("content-security-policy", "([^"]+)"\)',source).group(1)
+          records=[]
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self,*args):pass
+              def do_GET(self):
+                  if self.path.startswith('/callback'):
+                      records.append({'method':'GET','path':'callback'})
+                      self.send_response(200);self.end_headers();self.wfile.write(b'CALLBACK_REACHED');return
+                  selected=policy
+                  if self.path.startswith('/allow'):
+                      selected=selected.replace("form-action 'self'",f"form-action 'self' http://127.0.0.1:{callback.server_port}")
+                  body=b'<form method="POST" action="/submit"><input name="password" value="synthetic-fixture"><button>Authorize</button></form>'
+                  self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Security-Policy',selected);self.end_headers();self.wfile.write(body)
+              def do_POST(self):
+                  data=self.rfile.read(int(self.headers.get('Content-Length',0)))
+                  records.append({'method':'POST','path':'submit','body_bytes':len(data)})
+                  self.send_response(303);self.send_header('Location',f'http://127.0.0.1:{callback.server_port}/callback?code=synthetic');self.end_headers()
+          callback=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+          server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+          for s in [callback,server]:Thread(target=s.serve_forever,daemon=True).start()
+          results=[]
+          try:
+              with sync_playwright() as p:
+                  b=p.chromium.launch(executable_path=shutil.which('google-chrome'),headless=True,args=['--no-sandbox'])
+                  for route in ['blocked','allow']:
+                      page=b.new_page();console=[]
+                      page.on('console',lambda m:console.append(m.text) if m.type=='error' else None)
+                      records.clear();page.goto(f'http://127.0.0.1:{server.server_port}/{route}')
+                      page.get_by_role('button',name='Authorize').click();page.wait_for_timeout(600)
+                      reached='CALLBACK_REACHED' in page.content()
+                      result={'case':route,'callback_reached':reached,'browser':b.version,'console_errors':console[:3],'requests':list(records)}
+                      results.append(result)
+                      assert reached==(route=='allow'),result
+                      page.close()
+                  b.close()
+          finally:
+              for s in [server,callback]:s.shutdown();s.server_close()
+          Path('aiTemp/evidence/csp-probe.json').write_text(json.dumps(results,indent=2))
+          print(json.dumps(results,indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: oauth-csp-probe-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: warn
+          retention-days: 14
