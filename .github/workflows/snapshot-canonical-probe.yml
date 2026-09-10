@@ -47,7 +47,7 @@ jobs:
           cmake --build aiTemp/path-build --config Release
           cmake -S native-helpers/app-container -B aiTemp/native-build -A x64
           cmake --build aiTemp/native-build --config Release
-      - name: Reproduce only the DOS versus Rust-style canonical path difference
+      - name: Reproduce DOS versus Rust canonical paths using the actual helper identity format
         run: |
           set -euo pipefail
           python - <<'PY' | tee aiTemp/evidence/canonical-path.txt
@@ -65,13 +65,15 @@ jobs:
               paths=[convert(inp),convert(work),convert(Path(system.value)/'cmd.exe')]
               trace=subprocess.check_output([str(probe),*paths],text=True)
               print(trace)
-              result=subprocess.run([str(helper),'CodingToolsMcp.Snapshot.'+uuid.uuid4().hex,*paths[:2],'5000','--',paths[2],'/d','/c','echo fixture'],input=b'start',capture_output=True,timeout=15)
+              identity='CodingToolsMcp.Snapshot.'+uuid.uuid4().hex[:30]
+              assert len(identity)==54
+              result=subprocess.run([str(helper),identity,*paths[:2],'5000','--',paths[2],'/d','/c','echo fixture'],input=b'start',capture_output=True,timeout=15)
               row={'extended':extended,'code':result.returncode,'stdout':result.stdout.decode(errors='replace'),'stderr':result.stderr.decode(errors='replace'),'trace':trace};rows.append(row)
               print(json.dumps({k:v for k,v in row.items() if k!='trace'}))
-          assert rows[0]['code']==0 and json.loads(rows[0]['stdout'])['appcontainer_token_verified']
-          assert rows[1]['code']==125 and 'Sandbox path unavailable (Win32=87)' in rows[1]['stderr'],rows
           Path('aiTemp/evidence/canonical-path.json').write_text(json.dumps({'observations':rows,'source_unchanged':True,'model_requests':0,'live_workspace':False},indent=2)+'\n')
-          print('REPRODUCED: identical native isolation succeeds for DOS paths and refuses Rust-style extended canonical paths')
+          assert rows[0]['code']==0 and json.loads(rows[0]['stdout'])['appcontainer_token_verified'],rows[0]
+          assert rows[1]['code']==125 and 'Sandbox path unavailable (Win32=87)' in rows[1]['stderr'],rows[1]
+          print('REPRODUCED: native isolation succeeds for DOS paths and refuses Rust extended paths at a non-volume ancestor')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
