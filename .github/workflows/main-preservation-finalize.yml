@@ -1,0 +1,102 @@
+name: Finalize verified rc4 with concurrent main preserved
+on:
+  push:
+    branches: [fix/main-preservation-0.4.3-rc.4]
+    paths: ['.github/workflows/main-preservation-finalize.yml', 'aiTemp/main-preservation/finalize_source.py', 'aiTemp/main-preservation/finalize_publish.py']
+permissions:
+  contents: read
+concurrency:
+  group: main-preservation-rc4-finalization
+  cancel-in-progress: false
+env:
+  SOURCE: 595728146355170aeaa4c563e179c66d670b3b30
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  reconcile_validate:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      source: ${{ steps.merge.outputs.source }}
+    env:
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Preserve both histories and verify every production build input
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          for path in Path('aiTemp/main-preservation').glob('finalize_*.py'):
+              ast.parse(path.read_text(encoding='utf-8'))
+          PY
+          python aiTemp/main-preservation/finalize_source.py
+      - name: Recheck the real callback against original exact-source production responses
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 34457693571 --repo "$GITHUB_REPOSITORY" --name oauth-popup-browser-fixture-34457693571 --dir aiTemp/browser-fixture
+          python -m pip install playwright==1.57.0
+          python aiTemp/oauth-popup/browser_test.py 2>&1 | tee aiTemp/evidence/browser-test.txt
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc4-reconciliation-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14
+  publish:
+    needs: reconcile_validate
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+      actions: read
+    env:
+      VALIDATION_SOURCE: ${{ needs.reconcile_validate.outputs.source }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.VALIDATION_SOURCE }}
+          path: aiTemp/checkout
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Verify original build and merged inputs, then read back uploads and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python aiTemp/main-preservation/finalize_publish.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc4-publication-${{ github.run_id }}
+          path: |
+            aiTemp/checkout/aiTemp/rc4-publication-receipt.json
+            aiTemp/checkout/aiTemp/rc4-draft.json
+          if-no-files-found: warn
+          retention-days: 14
