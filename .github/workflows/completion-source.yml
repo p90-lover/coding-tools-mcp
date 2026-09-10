@@ -1,0 +1,58 @@
+name: Completion source snapshot
+on:
+  push:
+    branches: [feature/complete-controls-0.5.0-rc.1]
+    paths: [.github/workflows/completion-source.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: getpaseo/paseo
+          ref: f7e68e32d1c95215407a23d4ab533d3ccc6e18bf
+          path: aiTemp/paseo
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: mosonlab/anneal
+          ref: 6c5d2f6f17f75ee11079a510bbd4d87fcaaa126c
+          path: aiTemp/anneal
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: p90-lover/coding-tools-mcp-fast-access-extension
+          ref: b0d4db553227fa3c7300050b8edff6e2eb9afee4
+          path: aiTemp/extension
+          clean: false
+          persist-credentials: false
+      - name: Export source without invoking project code or agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          git -C aiTemp/source bundle create ../evidence/source.bundle --all
+          for name in paseo anneal extension; do
+            git -C "aiTemp/$name" archive --format=tar HEAD > "aiTemp/evidence/$name.tar"
+            git -C "aiTemp/$name" rev-parse HEAD > "aiTemp/evidence/$name.commit"
+          done
+          git -C aiTemp/source rev-parse HEAD > aiTemp/evidence/source.commit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: completion-source-${{ github.run_id }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
