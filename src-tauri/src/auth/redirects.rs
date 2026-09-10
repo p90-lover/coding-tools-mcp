@@ -6,6 +6,7 @@ pub fn default_oauth_redirect_uris() -> Vec<String> {
     [
         "https://chatgpt.com/connector_platform/oauth/callback",
         "https://chatgpt.com/connector_platform_oauth_redirect",
+        "https://chatgpt.com/aip/oauth/callback",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -38,6 +39,40 @@ pub fn redirect_uri_syntax_allowed(value: &str) -> bool {
         },
         _ => false,
     }
+}
+
+
+/// ChatGPT mints a unique callback id per connector Connect. Exact allowlists cannot keep up.
+pub fn is_trusted_chatgpt_oauth_redirect(value: &str) -> bool {
+    if !redirect_uri_syntax_allowed(value) {
+        return false;
+    }
+    const EXACT: &[&str] = &[
+        "https://chatgpt.com/connector_platform_oauth_redirect",
+        "https://chatgpt.com/connector_platform/oauth/callback",
+        "https://chatgpt.com/aip/oauth/callback",
+    ];
+    if EXACT.contains(&value) {
+        return true;
+    }
+    const PREFIXES: &[&str] = &[
+        "https://chatgpt.com/connector/oauth/",
+        "https://chatgpt.com/oauth/callback/connector/oauth/",
+    ];
+    for prefix in PREFIXES {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            // One path segment: opaque connector callback id, no extra path/query/fragment.
+            if !rest.is_empty()
+                && !rest.contains('/')
+                && !rest.contains('?')
+                && !rest.contains('#')
+                && rest.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn validate_redirect_uris(uris: &[String]) -> Result<(), String> {

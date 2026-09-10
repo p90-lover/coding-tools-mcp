@@ -103,7 +103,9 @@ jobs:
           set -euo pipefail
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib catalog_exposure_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/catalog-tests.txt
           cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/connection-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib release_hardening_unregistered_redirect_is_rejected -- --test-threads=1 2>&1 | tee aiTemp/evidence/redirect-tests.txt
           grep -F '2 passed; 0 failed' aiTemp/evidence/catalog-tests.txt
+          grep -F '1 passed; 0 failed' aiTemp/evidence/redirect-tests.txt
       - name: Build and inspect Windows installer
         run: |
           set -euo pipefail
@@ -145,12 +147,12 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '22'
-      - name: Reproduce profile bug then verify real component repair
+      - name: Reproduce profile bug and preserve concurrent main OAuth repair
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
           npm ci 2>&1 | tee aiTemp/evidence/npm.txt
-          git fetch --no-tags origin aec0c3fce7086a44eff7efdfc1de018a67ae654e
+          git fetch --no-tags origin aec0c3fce7086a44eff7efdfc1de018a67ae654e 22638b41ba67713502119ad6f54b455be8104112
           git show aec0c3fce7086a44eff7efdfc1de018a67ae654e:src/lib/components/RuntimePolicyForm.svelte > aiTemp/tool-exposure/old-form.svelte
           set +e
           PROFILE_SOURCE=aiTemp/tool-exposure/old-form.svelte node aiTemp/tool-exposure/profile_test.mjs > aiTemp/evidence/profile-red.txt 2>&1
@@ -159,8 +161,8 @@ jobs:
           test "$code" -eq 1
           grep -F 'PROFILE_SELECTION_MISSING: core' aiTemp/evidence/profile-red.txt
           node aiTemp/tool-exposure/profile_test.mjs 2>&1 | tee aiTemp/evidence/profile-green.txt
-          # Catalog contents and sensitive executors must remain unchanged.
-          git diff --exit-code aec0c3fce7086a44eff7efdfc1de018a67ae654e -- src-tauri/src/tools/registry.rs src-tauri/src/tools/registry_definitions.rs src-tauri/src/codex_bridge src-tauri/src/auth src-tauri/src/tools/computer src-tauri/src/tools/workflow.rs
+          # Preserve the exact concurrent main OAuth fix and existing executor/catalog contracts.
+          git diff --exit-code 22638b41ba67713502119ad6f54b455be8104112 -- src-tauri/src/tools/registry.rs src-tauri/src/tools/registry_definitions.rs src-tauri/src/codex_bridge src-tauri/src/auth src-tauri/src/tools/computer src-tauri/src/tools/workflow.rs
       - name: Verify actual dropdown save and read-only diagnostic UI
         run: |
           set -euo pipefail
