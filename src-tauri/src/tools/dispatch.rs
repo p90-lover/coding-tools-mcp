@@ -547,7 +547,9 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
         "server": "coding-tools-mcp",
         "title": "Coding Tools MCP",
         "version": env!("CARGO_PKG_VERSION"),
-        "protocol_version": "2025-06-18",
+        "protocol_version": crate::mcp::server::LEGACY_PROTOCOLS[0],
+        "supported_protocol_versions": crate::mcp::server::SUPPORTED_PROTOCOLS,
+        "protocol_version_basis": "default_legacy_version_not_request_negotiation",
         "workspace": ctx.workspace.root_display(),
         "linked_projects": ctx.workspace.linked_projects(),
         "permission_mode": ctx.permission_mode,
@@ -571,7 +573,8 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
         "vision": {"screen_capture_enabled": ctx.policy.allow_screen_capture, "storage": "memory_only", "model_calls": false},
         "local_tool_engine": {"implementation": "embedded_rust", "codex_agent": false, "model_calls": false, "os_sandbox": false},
         "tools": tools,
-        "tool_count": tools.len()
+        "tool_count": tools.len(),
+        "tool_catalog": crate::tools::catalog::describe_current(ctx)
     })))
 }
 

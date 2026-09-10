@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ToolCatalogStatus from "./ToolCatalogStatus.svelte";
   import { onMount } from "svelte";
   import { openUrl } from "$lib/api/app-info";
   import { getRuntimeStatus, startRuntime } from "$lib/api/workspaces";
@@ -132,3 +133,5 @@
   </div>
   {#if message}<p role="status" class="text-xs break-words">{message}</p>{/if}
 </section>
+
+<ToolCatalogStatus {workspaceId} profile={profile.runtime.tool_profile} />

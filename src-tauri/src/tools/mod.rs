@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod approval;
 mod codex_runtime;
 pub mod computer;

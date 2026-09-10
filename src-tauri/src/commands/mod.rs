@@ -1,3 +1,5 @@
+mod tool_catalog;
+pub use tool_catalog::get_tool_catalog_status;
 mod codex_runtime;
 pub use codex_runtime::{
     codex_local_command, codex_local_connect, codex_local_control, codex_local_disconnect,

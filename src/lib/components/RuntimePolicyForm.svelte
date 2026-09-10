@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { untrack } from "svelte";
+  import { TOOL_PROFILE_OPTIONS, normalizeToolProfile } from "$lib/tool-profile.js";
+
   export interface RuntimePolicyDraft {
     toolProfile: string;
     permissionMode: string;
@@ -19,12 +22,6 @@
     allowScreenCapture: boolean;
     onSave: (draft: RuntimePolicyDraft) => void | Promise<void>;
   }
-
-  const TOOL_PROFILE_OPTIONS = [
-    { value: "full", label: "完整工具" },
-    { value: "read-only", label: "只读工具" },
-    { value: "compat-readonly-all", label: "Compatibility / 完整目錄（如實權限）" },
-  ] as const;
 
   const APPROVAL_MODE_OPTIONS = [
     { value: "ask", label: "每次變更都詢問" },
@@ -55,7 +52,7 @@
 
   let { toolProfile, permissionMode, approvalMode, allowedCommands, workspaceLocalEntries, workspaceScriptExtensions, allowScreenCapture = false, onSave }: Props = $props();
 
-  let draftProfile = $state("full");
+  let draftProfile = $state(untrack(() => normalizeToolProfile(toolProfile)));
   let draftMode = $state("workspace-write");
   let draftApprovalMode = $state("on-request");
   let draftCommands = $state("");
@@ -65,11 +62,11 @@
   let saving = $state(false);
 
   const dirty = $derived(
-    draftProfile !== toolProfile || draftMode !== normalizePermissionMode(permissionMode) || draftApprovalMode !== normalizeApprovalMode(approvalMode) || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions || draftScreenCapture !== allowScreenCapture,
+    draftProfile !== normalizeToolProfile(toolProfile) || draftMode !== normalizePermissionMode(permissionMode) || draftApprovalMode !== normalizeApprovalMode(approvalMode) || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions || draftScreenCapture !== allowScreenCapture,
   );
 
   $effect(() => {
-    draftProfile = toolProfile;
+    draftProfile = normalizeToolProfile(toolProfile);
     draftMode = normalizePermissionMode(permissionMode);
     draftApprovalMode = normalizeApprovalMode(approvalMode);
     draftCommands = allowedCommands;
@@ -97,9 +94,10 @@
   }}
 >
   <label class="grid gap-1">
-    <span class="text-xs text-[var(--color-text-muted)]">工具档位</span>
+    <span class="text-xs text-[var(--color-text-muted)]">Tool catalog / 工具目錄</span>
     <select
       class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm"
+      aria-label="Tool catalog / 工具目錄"
       bind:value={draftProfile}
     >
       {#each TOOL_PROFILE_OPTIONS as option}
@@ -107,6 +105,10 @@
       {/each}
     </select>
   </label>
+  <p class="text-xs text-[var(--color-text-muted)]">
+    Core is a smaller catalog. Advanced / Full advertises every registered tool definition, not every internal Codex capability. Saving the catalog does not grant execution permissions. Refresh the existing ChatGPT connection and enable its actions after changing the catalog; ordinary permission changes need no MCP restart or relink.
+    核心目錄只包含部分工具；Advanced／Full 公開所有已註冊工具定義，不代表所有 Codex 內部功能。儲存目錄不會提升執行權限。變更目錄後請刷新既有 ChatGPT 連接並啟用其操作；一般權限變更不必重啟或重連 MCP。
+  </p>
   <label class="grid gap-1">
     <span class="text-xs text-[var(--color-text-muted)]">系统命令（逗号分隔）</span>
     <input type="text" class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-sm" placeholder="python,git,curl,powershell,..." bind:value={draftCommands} />

@@ -214,6 +214,7 @@ pub fn run() {
             start_runtime,
             stop_runtime,
             get_runtime_status,
+            commands::get_tool_catalog_status,
             start_actions_runtime,
             stop_actions_runtime,
             get_actions_runtime_status,
