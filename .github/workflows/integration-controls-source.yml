@@ -1,0 +1,33 @@
+name: Integration controls source snapshot
+on:
+  push:
+    branches: [fix/integration-controls-0.4.4-rc.2]
+    paths: [.github/workflows/integration-controls-source.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Export tracked source and history without running agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          git -C aiTemp/source bundle create ../evidence/source.bundle --all
+          git -C aiTemp/source rev-parse HEAD > aiTemp/evidence/source.commit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: integration-controls-source-${{ github.run_id }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
