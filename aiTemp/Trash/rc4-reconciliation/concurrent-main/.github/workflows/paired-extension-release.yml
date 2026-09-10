@@ -1,0 +1,287 @@
+name: Verified Desktop and extension release
+on:
+  push:
+    branches: [release/main-extension-0.4.3-rc.3]
+    paths: [.github/workflows/paired-extension-release.yml, 'aiTemp/compat/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: paired-desktop-extension-rc3
+  cancel-in-progress: false
+env:
+  VERSION: 0.4.3-rc.3
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.source }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Preserve OAuth source and fix paired packaging contract
+        run: |
+          set -euo pipefail
+          python aiTemp/oauth-popup/prepare.py
+          python aiTemp/oauth-popup/csp_prepare.py
+          python aiTemp/compat/prepare.py
+      - name: Record immutable tested source candidate
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          if ! git diff --cached --quiet; then git commit -m 'fix: bind release evidence to checkout and verify the paired extension contract'; fi
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote" = "$GITHUB_SHA"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: oauth-popup-preparation-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/preparation.txt
+          if-no-files-found: warn
+          retention-days: 14
+  origin:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/origin-target
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Reproduce prior defects and prove scoped origin policy and feature retention
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          git fetch --no-tags origin ac6a7b21df3391277f6687a2a5a6aef0314663b7 07faa97255e6b60d909f956fa2cebd3b829bbf97
+          for version in released main; do
+            python aiTemp/oauth-popup/probe.py "$version"
+            set +e
+            cargo test --manifest-path "aiTemp/oauth-popup/probe-$version/Cargo.toml" oauth_popup_origin_ -- --test-threads=1 --nocapture > "aiTemp/evidence/$version-red.txt" 2>&1
+            code=$?
+            set -e
+            test "$code" -eq 101
+          done
+          grep -F 'POPUP_ORIGIN_BLOCKED' aiTemp/evidence/released-red.txt
+          grep -F 'HOST_MUST_NOT_SELECT_TRUST' aiTemp/evidence/main-red.txt
+          grep -F 'POPUP_EXCEPTION_ESCAPED_AUTH_ROUTE' aiTemp/evidence/main-red.txt
+          python aiTemp/oauth-popup/probe.py fixed
+          cargo test --manifest-path aiTemp/oauth-popup/probe-fixed/Cargo.toml oauth_popup_origin_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/green.txt
+          grep -F '3 passed; 0 failed' aiTemp/evidence/green.txt
+          git diff --exit-code 07faa97255e6b60d909f956fa2cebd3b829bbf97 -- src-tauri/src/codex_bridge src-tauri/src/tools/registry.rs src-tauri/src/tools/registry_definitions.rs src-tauri/src/tools/native_sandbox.rs src-tauri/src/tools/computer src-tauri/src/auth/redirects.rs src-tauri/src/auth/refresh_tokens.rs
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          notes=Path('docs/releases/v0.4.3-rc.3.md').read_text(encoding='utf-8')
+          assert '## English' in notes and '## 繁體中文' in notes
+          english=notes.split('## English')[1].split('## 繁體中文')[0]
+          chinese=notes.split('## 繁體中文')[1]
+          references=lambda text:set(re.findall(r'^- (https://\S+)$',text,re.M))
+          assert len(references(english))==4 and references(english)==references(chinese)
+          assert 'b0d4db553227fa3c7300050b8edff6e2eb9afee4' in english and 'b0d4db553227fa3c7300050b8edff6e2eb9afee4' in chinese
+          Path('aiTemp/evidence/docs.txt').write_text('PASS: retained main feature sources, bilingual paired release notes and reference links\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: oauth-popup-origin-evidence-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      PLATFORM: windows-x64
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/oauth-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      CODING_TOOLS_COMMAND_NATIVE_SHA256: 444a3f0008050605cae73cd9b7a2dcac61294062dfaab56dd20430fd6498518b
+      CI: 'true'
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Check and build retained frontend
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+      - name: Actual OAuth consent-to-catalog, serialized settings and connection regressions
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib oauth_popup_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/oauth-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib catalog_exposure_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/catalog-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/connection-tests.txt
+          grep -F '4 passed; 0 failed' aiTemp/evidence/oauth-tests.txt
+          grep -F '2 passed; 0 failed' aiTemp/evidence/catalog-tests.txt
+      - name: Build and inspect actual Windows installer
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles nsis -- --locked 2>&1 | tee aiTemp/evidence/installer.txt
+          python aiTemp/oauth-popup/package.py
+          test -z "$(git diff --name-only)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oauth-popup-installer-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/installer/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oauth-popup-browser-fixture-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/oauth-popup/browser-fixture.json
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: oauth-popup-windows-evidence-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
+  browser:
+    needs: [prepare,windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      EXTENSION_SOURCE_DIR: ${{ github.workspace }}/aiTemp/extension-source
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: p90-lover/coding-tools-mcp-fast-access-extension
+          ref: b0d4db553227fa3c7300050b8edff6e2eb9afee4
+          path: aiTemp/extension-source
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Read production fixture from this exact Windows build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "oauth-popup-browser-fixture-$GITHUB_RUN_ID" --dir aiTemp/browser-fixture
+      - name: Paired extension behavior and actual Desktop form in Chromium
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          node --test "$EXTENSION_SOURCE_DIR/aiTemp/compat/worker.test.mjs" "$EXTENSION_SOURCE_DIR/aiTemp/compat/connection-dom.test.mjs" 2>&1 | tee aiTemp/evidence/extension-focused.txt
+          (cd "$EXTENSION_SOURCE_DIR" && node tests/core.test.mjs && node tests/workflow.test.mjs) 2>&1 | tee aiTemp/evidence/extension-smoke.txt
+          python -m pip install playwright==1.57.0
+          python aiTemp/compat/browser_test.py 2>&1 | tee aiTemp/evidence/browser-test.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oauth-popup-extension-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/extension-package/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: oauth-popup-browser-evidence-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: [prepare,origin,windows,browser]
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Verify uploaded bytes and publish with a non-forced main update
+        run: python aiTemp/oauth-popup/publish.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: oauth-popup-publication-${{ github.run_id }}
+          path: |
+            aiTemp/checkout/aiTemp/oauth-popup-publication-receipt.json
+            aiTemp/checkout/aiTemp/oauth-popup-draft.json
+          if-no-files-found: warn
+          retention-days: 14
