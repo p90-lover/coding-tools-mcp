@@ -38,20 +38,11 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Materialize scoped fix while preserving previous source
+      - name: Materialize scoped origin and validated callback CSP fixes
         run: |
           set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-          import shutil
-          p=Path('aiTemp/oauth-popup/http_flow.rs');s=p.read_text(encoding='utf-8')
-          old='    std::fs::create_dir_all(&root).unwrap();'
-          if old in s:
-              backup=Path('aiTemp/Trash/oauth-popup-fixture-before/http_flow.rs');backup.parent.mkdir(parents=True,exist_ok=True);assert not backup.exists();shutil.copy2(p,backup)
-              assert s.count(old)==1
-              p.write_text(s.replace(old,'    std::fs::create_dir_all(root.join("workspace")).unwrap();',1),encoding='utf-8')
-          PY
           python aiTemp/oauth-popup/prepare.py
+          python aiTemp/oauth-popup/csp_prepare.py
       - name: Record immutable candidate source
         id: source
         env:
@@ -61,7 +52,7 @@ jobs:
           git config user.name 'p90-lover'
           git config user.email '146848721+p90-lover@users.noreply.github.com'
           if ! git diff --cached --quiet; then
-            git commit -m 'fix: scope ChatGPT origins to OAuth entry and reject Host-selected trust'
+            git commit -m 'fix: permit only validated OAuth callback origins through form CSP'
           fi
           auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
@@ -115,7 +106,7 @@ jobs:
           python aiTemp/oauth-popup/probe.py fixed
           cargo test --manifest-path aiTemp/oauth-popup/probe-fixed/Cargo.toml oauth_popup_origin_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/green.txt
           grep -F '3 passed; 0 failed' aiTemp/evidence/green.txt
-          git diff --exit-code 07faa97255e6b60d909f956fa2cebd3b829bbf97 -- src-tauri/src/codex_bridge src-tauri/src/tools/registry.rs src-tauri/src/tools/registry_definitions.rs src-tauri/src/tools/native_sandbox.rs src-tauri/src/tools/computer src-tauri/src/auth/oauth_flow.rs src-tauri/src/auth/redirects.rs src-tauri/src/auth/refresh_tokens.rs
+          git diff --exit-code 07faa97255e6b60d909f956fa2cebd3b829bbf97 -- src-tauri/src/codex_bridge src-tauri/src/tools/registry.rs src-tauri/src/tools/registry_definitions.rs src-tauri/src/tools/native_sandbox.rs src-tauri/src/tools/computer src-tauri/src/auth/redirects.rs src-tauri/src/auth/refresh_tokens.rs
           python - <<'PY'
           from pathlib import Path
           import re
@@ -124,7 +115,7 @@ jobs:
           english=notes.split('## English')[1].split('## 繁體中文')[0]
           chinese=notes.split('## 繁體中文')[1]
           references=lambda text:set(re.findall(r'^- (https://\S+)$',text,re.M))
-          assert len(references(english))==3 and references(english)==references(chinese)
+          assert len(references(english))==4 and references(english)==references(chinese)
           Path('aiTemp/evidence/docs.txt').write_text('PASS: bilingual release notes and matching reference links\n')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -190,14 +181,58 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oauth-popup-browser-fixture-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/oauth-popup/browser-fixture.json
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: oauth-popup-windows-evidence-${{ github.run_id }}
           path: aiTemp/checkout/aiTemp/evidence/*
           if-no-files-found: error
           retention-days: 14
+  browser:
+    needs: [prepare,windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Read production response fixture from this exact Windows build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "oauth-popup-browser-fixture-$GITHUB_RUN_ID" --dir aiTemp/browser-fixture
+      - name: Real popup callback and CSP positive negative checks without live accounts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          python -m pip install playwright==1.57.0
+          python aiTemp/oauth-popup/browser_test.py 2>&1 | tee aiTemp/evidence/browser-test.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: oauth-popup-browser-evidence-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
   publish:
-    needs: [prepare,origin,windows]
+    needs: [prepare,origin,windows,browser]
     if: github.actor == github.repository_owner
     runs-on: ubuntu-24.04
     timeout-minutes: 10

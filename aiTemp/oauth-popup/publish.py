@@ -19,6 +19,7 @@ root=Path('aiTemp/oauth-popup-publication');root.mkdir(parents=True,exist_ok=Fal
 download('oauth-popup-installer-'+RUN,root/'installer')
 download('oauth-popup-windows-evidence-'+RUN,root/'windows')
 download('oauth-popup-origin-evidence-'+RUN,root/'origin')
+download('oauth-popup-browser-evidence-'+RUN,root/'browser')
 proof=json.loads((root/'installer/proof.json').read_text())
 assert proof['source_commit']==SOURCE and proof['version']==VERSION and proof['workflow_run']==int(RUN)
 assert proof['oauth_regressions_passed']==4 and proof['catalog_regressions_passed']==2
@@ -26,12 +27,15 @@ assert not proof['codex_executable_invoked'] and proof['model_requests']==0
 assert '3 passed; 0 failed' in (root/'origin/green.txt').read_text()
 assert 'POPUP_ORIGIN_BLOCKED' in (root/'origin/released-red.txt').read_text()
 assert 'HOST_MUST_NOT_SELECT_TRUST' in (root/'origin/main-red.txt').read_text()
+browser=json.loads((root/'browser/browser-csp.json').read_text())
+assert browser['source']==SOURCE and browser['passed'] and not browser['live_chatgpt_account'] and browser['model_requests']==0
+assert [(c['case'],c['callback_reached']) for c in browser['cases']]==[('old_policy',False),('fixed_policy',True),('wrong_destination',False)]
 name=f'Coding.Tools.MCP_{VERSION}_x64-setup.exe';assert proof['asset']==name
 binary=root/'installer'/name;assert digest(binary)==proof['sha256'] and binary.stat().st_size==proof['size']
 assets=root/'assets';assets.mkdir();shutil.copy2(binary,assets/name)
-(assets/'provenance.json').write_text(json.dumps({'version':VERSION,'source_commit':SOURCE,'workflow_run':int(RUN),'preserved_main':BASE,'windows':proof,'live_chatgpt_account_verified':False},indent=2)+'\n')
+(assets/'provenance.json').write_text(json.dumps({'version':VERSION,'source_commit':SOURCE,'workflow_run':int(RUN),'preserved_main':BASE,'windows':proof,'browser':browser,'live_chatgpt_account_verified':False},indent=2)+'\n')
 with zipfile.ZipFile(assets/'validation-evidence.zip','x',zipfile.ZIP_DEFLATED) as z:
-    for directory in [root/'windows',root/'origin']:
+    for directory in [root/'windows',root/'origin',root/'browser']:
         for p in sorted(directory.rglob('*')):
             assert not p.is_symlink()
             if p.is_file():
@@ -43,11 +47,11 @@ assert not api('git/matching-refs/tags/'+TAG),'Existing release tag is not repla
 assert api('git/ref/heads/'+BRANCH)['object']['sha']==SOURCE
 assert api('git/ref/heads/main')['object']['sha']==BASE,'main changed; reconcile before publishing'
 jobs=api(f'actions/runs/{RUN}/jobs?per_page=100');assert jobs['total_count']==len(jobs['jobs'])
-for required in ['prepare','origin','windows']:
+for required in ['prepare','origin','windows','browser']:
     matches=[j for j in jobs['jobs'] if j['name']==required]
     assert len(matches)==1 and matches[0]['conclusion']=='success',required
 notes=Path(f'docs/releases/{TAG}.md').read_text(encoding='utf-8')+f'\n\nSource: `{SOURCE}`\nValidation: https://github.com/{REPO}/actions/runs/{RUN}\n'
-release=api('releases',{'tag_name':TAG,'target_commitish':SOURCE,'name':f'Coding Tools MCP {TAG} — Scoped OAuth popup repair','body':notes,'draft':True,'prerelease':True,'make_latest':'false'})
+release=api('releases',{'tag_name':TAG,'target_commitish':SOURCE,'name':f'Coding Tools MCP {TAG} — OAuth popup and callback repair','body':notes,'draft':True,'prerelease':True,'make_latest':'false'})
 Path('aiTemp/oauth-popup-draft.json').write_text(json.dumps({'id':release['id'],'source':SOURCE,'tag':TAG}))
 for p in files:subprocess.run(['gh','release','upload',TAG,str(p),'--repo',REPO],check=True,timeout=120)
 readback=root/'readback';readback.mkdir()
