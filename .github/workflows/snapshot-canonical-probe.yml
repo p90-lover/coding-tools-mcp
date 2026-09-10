@@ -1,0 +1,78 @@
+name: Diagnose snapshot canonical path boundary
+on:
+  push:
+    branches: [fix/sandbox-permissions-0.4.4-rc.1]
+    paths: [.github/workflows/snapshot-canonical-probe.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ github.sha }}', path: aiTemp/source, clean: false, persist-credentials: false}
+      - name: Build unchanged helper and a read-only path diagnostic
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/path-probe aiTemp/evidence
+          python - <<'PY'
+          from pathlib import Path
+          root=Path('aiTemp/path-probe')
+          (root/'CMakeLists.txt').write_text('cmake_minimum_required(VERSION 3.20)\nproject(path_probe LANGUAGES CXX)\nadd_executable(path_probe main.cpp)\ntarget_compile_features(path_probe PRIVATE cxx_std_20)\n')
+          (root/'main.cpp').write_text(r'''#include <windows.h>
+          #include <filesystem>
+          #include <iomanip>
+          #include <iostream>
+          namespace fs=std::filesystem;
+          int wmain(int argc,wchar_t** argv){
+            for(int i=1;i<argc;++i){
+              fs::path path(argv[i]);
+              std::wcout<<L"PATH "<<std::quoted(path.native())<<L" ROOT "<<std::quoted(path.root_path().native())<<L" CANONICAL "<<std::quoted(fs::canonical(path).native())<<L'\n';
+              int depth=0;
+              for(auto cursor=path;!cursor.empty()&&depth++<40;cursor=cursor.parent_path()){
+                SetLastError(0);auto attr=GetFileAttributesW(cursor.c_str());auto error=GetLastError();
+                std::wcout<<L"ANCESTOR "<<std::quoted(cursor.native())<<L" ATTRIBUTE "<<attr<<L" ERROR "<<error<<L'\n';
+                if(cursor==cursor.parent_path())break;
+              }
+            }
+          }''')
+          PY
+          cmake -S aiTemp/path-probe -B aiTemp/path-build -A x64
+          cmake --build aiTemp/path-build --config Release
+          cmake -S native-helpers/app-container -B aiTemp/native-build -A x64
+          cmake --build aiTemp/native-build --config Release
+      - name: Reproduce only the DOS versus Rust-style canonical path difference
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee aiTemp/evidence/canonical-path.txt
+          from pathlib import Path
+          import json,subprocess,uuid,ctypes
+          helper=Path('aiTemp/native-build/Release/coding-tools-appcontainer.exe').resolve()
+          probe=Path('aiTemp/path-build/Release/path_probe.exe').resolve()
+          system=ctypes.create_unicode_buffer(32768);assert ctypes.windll.kernel32.GetSystemDirectoryW(system,32768)
+          rows=[]
+          for extended in [False,True]:
+              root=(Path('aiTemp/path-fixture')/str(uuid.uuid4())).resolve()
+              inp=root/'input';work=root/'work';inp.mkdir(parents=True);work.mkdir()
+              (inp/'hello.txt').write_text('selected fixture\n')
+              convert=lambda path:('\\\\?\\' if extended else '')+str(path)
+              paths=[convert(inp),convert(work),convert(Path(system.value)/'cmd.exe')]
+              trace=subprocess.check_output([str(probe),*paths],text=True)
+              print(trace)
+              result=subprocess.run([str(helper),'CodingToolsMcp.Snapshot.'+uuid.uuid4().hex,*paths[:2],'5000','--',paths[2],'/d','/c','echo fixture'],input=b'start',capture_output=True,timeout=15)
+              row={'extended':extended,'code':result.returncode,'stdout':result.stdout.decode(errors='replace'),'stderr':result.stderr.decode(errors='replace'),'trace':trace};rows.append(row)
+              print(json.dumps({k:v for k,v in row.items() if k!='trace'}))
+          assert rows[0]['code']==0 and json.loads(rows[0]['stdout'])['appcontainer_token_verified']
+          assert rows[1]['code']==125 and 'Sandbox path unavailable (Win32=87)' in rows[1]['stderr'],rows
+          Path('aiTemp/evidence/canonical-path.json').write_text(json.dumps({'observations':rows,'source_unchanged':True,'model_requests':0,'live_workspace':False},indent=2)+'\n')
+          print('REPRODUCED: identical native isolation succeeds for DOS paths and refuses Rust-style extended canonical paths')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'snapshot-canonical-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
