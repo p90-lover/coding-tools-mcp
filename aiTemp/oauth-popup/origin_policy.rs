@@ -144,3 +144,31 @@ async fn oauth_popup_origin_does_not_broaden_mcp_or_token_routes() {
         );
     }
 }
+
+#[test]
+fn oauth_popup_form_referrer_is_scoped_and_survives_outer_guard() {
+    use crate::auth::http_security::{secure_response, with_oauth_form_redirect};
+    use axum::response::IntoResponse;
+    let mut forged = StatusCode::OK.into_response();
+    forged
+        .headers_mut()
+        .insert("referrer-policy", "strict-origin".parse().unwrap());
+    let ordinary = secure_response(forged);
+    assert_eq!(ordinary.headers()["referrer-policy"], "no-referrer");
+    let callback = url::Url::parse("https://chatgpt.com/connector/oauth/fixture").unwrap();
+    let consent = with_oauth_form_redirect(StatusCode::OK.into_response(), &callback);
+    let consent = secure_response(secure_response(consent));
+    assert_eq!(
+        consent.headers()["referrer-policy"],
+        "strict-origin",
+        "VALID_CONSENT_MUST_PRESERVE_ORIGIN"
+    );
+    assert_eq!(consent.headers()["cache-control"], "no-store");
+    assert!(consent.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .contains("form-action 'self' https://chatgpt.com"));
+    let invalid = url::Url::parse("https://user:password@attacker.invalid/").unwrap();
+    let denied = with_oauth_form_redirect(StatusCode::BAD_REQUEST.into_response(), &invalid);
+    assert_eq!(denied.headers()["referrer-policy"], "no-referrer");
+}

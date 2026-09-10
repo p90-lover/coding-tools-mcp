@@ -76,6 +76,28 @@ async fn run_flow(root: PathBuf) {
         ("state", state_value),
     ];
 
+    // The browser receives every production response header and submits through
+    // this live Rust listener. The old replay omitted Referrer-Policy and missed
+    // the real Origin:null rejection. No real account or external traffic is used.
+    if let Ok(script) = std::env::var("OAUTH_BROWSER_PROBE") {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let mut command = tokio::process::Command::new("python");
+        command
+            .arg(script)
+            .arg(&local)
+            .current_dir(repo)
+            .kill_on_drop(true);
+        let result = tokio::time::timeout(Duration::from_secs(120), command.output())
+            .await
+            .expect("Browser probe timed out")
+            .expect("Python browser probe could not start");
+        println!("{}", String::from_utf8_lossy(&result.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&result.stderr));
+        assert!(result.status.success(), "REAL_BROWSER_ORIGIN_FLOW_FAILED");
+    }
+
     // Raw Host/Forwarded input must not become a trusted origin or issuer.
     let attack = client
         .get(format!("{local}/oauth/authorize"))
@@ -153,6 +175,12 @@ async fn run_flow(root: PathBuf) {
             .unwrap()
             .to_owned();
         let nonce = cookie.split_once('=').unwrap().1.to_owned();
+        let browser_headers: HashMap<String, String> = page
+            .headers()
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_str().unwrap().to_owned()))
+            .collect();
+        assert_eq!(browser_headers["referrer-policy"], "strict-origin");
         let html = page.text().await.unwrap();
         assert!(html.contains("<form method='POST' action='/oauth/authorize'>"));
         assert!(html.contains("name='state' value='popup-state-unchanged'"));
@@ -213,7 +241,7 @@ async fn run_flow(root: PathBuf) {
             url::Url::parse("https://old-popup.example/oauth/authorize").unwrap();
         authorize_url.query_pairs_mut().extend_pairs(query);
         browser_snapshot = json!({"source":std::env::var("SOURCE").unwrap_or_else(|_| "local-test".into()),
-            "authorize_url":authorize_url.as_str(),"html":html,"csp":csp,"set_cookie":browser_cookie,
+            "authorize_url":authorize_url.as_str(),"html":html,"csp":csp,"set_cookie":browser_cookie,"response_headers":browser_headers,
             "callback_url":format!("{callback}?code=synthetic_browser_fixture&state={state_value}"),
             "redirect_status":redirect.status().as_u16(),"password":"fixture-password-not-real",
             "transport":"recorded production HTTP responses; the browser replay does not contact ChatGPT"});

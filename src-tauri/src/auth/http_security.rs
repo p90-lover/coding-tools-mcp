@@ -123,6 +123,13 @@ pub fn secure_response(mut response: Response) -> Response {
         response
             .headers_mut()
             .insert("content-security-policy", policy);
+        // For native HTML form POSTs, no-referrer serializes Origin as null.
+        // Only a validated consent page receives this exception. strict-origin
+        // preserves the real source without exposing OAuth paths/query strings.
+        // Keep null-origin rejection and no-referrer on all other responses.
+        response
+            .headers_mut()
+            .insert("referrer-policy", HeaderValue::from_static("strict-origin"));
     }
     response
 }
