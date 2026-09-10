@@ -27,7 +27,7 @@ pub fn describe(profile: &str) -> Value {
         "catalog_sha256":format!("{:x}",Sha256::digest(&bytes)),
         "catalog_bytes":bytes.len(),
         "advertised_but_unavailable":tools.iter().filter_map(|t| t["name"].as_str())
-            .filter(|n| *n == "sandbox_exec" && !super::native_sandbox::available()).collect::<Vec<_>>(),
+            .filter(|n| *n == "sandbox_exec" && !crate::tools::native_sandbox::available()).collect::<Vec<_>>(),
         "client_loaded_tools":Value::Null,
         "client_registration_verified":false,
         "visibility_grants_execution":false,
@@ -67,7 +67,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .is_empty(),
-            super::native_sandbox::available()
+            crate::tools::native_sandbox::available()
         );
         assert!(full["advertised_names"]
             .as_array()
