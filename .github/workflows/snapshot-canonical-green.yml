@@ -1,0 +1,61 @@
+name: Verify native canonical path repair
+on:
+  push:
+    branches: [fix/sandbox-permissions-0.4.4-rc.1]
+    paths: [.github/workflows/snapshot-canonical-green.yml]
+permissions:
+  contents: read
+jobs:
+  native:
+    if: github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions: {contents: write, actions: read}
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      APP_CONTAINER_HELPER: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-appcontainer.exe
+      APP_CONTAINER_PROBE: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-sandbox-probe.exe
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ github.sha }}', path: aiTemp/source, clean: false, persist-credentials: false}
+      - name: Require reproduced path failure and apply the bounded repair
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download 34477362614 --repo "$GITHUB_REPOSITORY" --name snapshot-canonical-34477362614 --dir aiTemp/evidence
+          python - <<'PY'
+          from pathlib import Path
+          import ast,json
+          rows=json.loads(Path('aiTemp/evidence/canonical-path.json').read_text())['observations']
+          assert rows[0]['code']==0 and rows[1]['code']==125
+          assert 'Sandbox path unavailable (Win32=87)' in rows[1]['stderr']
+          ast.parse(Path('aiTemp/sandbox-permissions/canonical_patch.py').read_text())
+          PY
+          python aiTemp/sandbox-permissions/canonical_patch.py
+          python -c "import ast; from pathlib import Path; ast.parse(Path('aiTemp/completion/native_test.py').read_text())"
+      - name: Same three native groups including ordinary and extended path spellings
+        run: |
+          set -euo pipefail
+          cmake -S native-helpers/app-container -B aiTemp/native-build -A x64 -DCODING_TOOLS_BUILD_PROBE=ON
+          cmake --build aiTemp/native-build --config Release 2>&1 | tee aiTemp/evidence/native-build.txt
+          python aiTemp/completion/native_test.py 2>&1 | tee aiTemp/evidence/native-tests.txt
+      - name: Preserve tested repair source on the branch, without updating main
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git config user.name p90-lover
+          git config user.email 146848721+p90-lover@users.noreply.github.com
+          git commit -m 'fix(sandbox): validate extended Windows ancestors through their actual volume root'
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          git rev-parse HEAD > aiTemp/evidence/tested-source.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'snapshot-canonical-green-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
