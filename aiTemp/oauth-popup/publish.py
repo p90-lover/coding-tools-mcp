@@ -1,8 +1,8 @@
-"""Publish verified rc.3 bytes; do not delete, overwrite a release, or force main."""
+"""Publish verified rc.4 bytes; do not delete, overwrite a release, or force main."""
 from pathlib import Path
 import hashlib,json,os,re,shutil,subprocess,zipfile
 REPO='p90-lover/coding-tools-mcp';BASE='07faa97255e6b60d909f956fa2cebd3b829bbf97'
-BRANCH='fix/oauth-popup-0.4.3-rc.3';VERSION='0.4.3-rc.3';TAG='v'+VERSION
+BRANCH='fix/main-preservation-0.4.3-rc.4';VERSION='0.4.3-rc.4';TAG='v'+VERSION
 SOURCE=os.environ['SOURCE'];RUN=os.environ['GITHUB_RUN_ID']
 assert re.fullmatch('[0-9a-f]{40}',SOURCE) and RUN.isdecimal()
 assert os.environ['GITHUB_REPOSITORY']==REPO
@@ -24,11 +24,14 @@ proof=json.loads((root/'installer/proof.json').read_text())
 assert proof['source_commit']==SOURCE and proof['version']==VERSION and proof['workflow_run']==int(RUN)
 assert proof['oauth_regressions_passed']==4 and proof['catalog_regressions_passed']==2
 assert not proof['codex_executable_invoked'] and proof['model_requests']==0
+assert proof['file_safety_regressions_passed']==3
+assert '3 passed; 0 failed' in (root/'windows/file-safety.txt').read_text()
 assert '3 passed; 0 failed' in (root/'origin/green.txt').read_text()
 assert 'POPUP_ORIGIN_BLOCKED' in (root/'origin/released-red.txt').read_text()
 assert 'HOST_MUST_NOT_SELECT_TRUST' in (root/'origin/main-red.txt').read_text()
 browser=json.loads((root/'browser/browser-csp.json').read_text())
 assert browser['source']==SOURCE and browser['passed'] and not browser['live_chatgpt_account'] and browser['model_requests']==0
+assert browser['external_network_blocked'] and browser['screenshots_written']==0
 assert [(c['case'],c['callback_reached']) for c in browser['cases']]==[('old_policy',False),('fixed_policy',True),('wrong_destination',False)]
 name=f'Coding.Tools.MCP_{VERSION}_x64-setup.exe';assert proof['asset']==name
 binary=root/'installer'/name;assert digest(binary)==proof['sha256'] and binary.stat().st_size==proof['size']
@@ -51,7 +54,7 @@ for required in ['prepare','origin','windows','browser']:
     matches=[j for j in jobs['jobs'] if j['name']==required]
     assert len(matches)==1 and matches[0]['conclusion']=='success',required
 notes=Path(f'docs/releases/{TAG}.md').read_text(encoding='utf-8')+f'\n\nSource: `{SOURCE}`\nValidation: https://github.com/{REPO}/actions/runs/{RUN}\n'
-release=api('releases',{'tag_name':TAG,'target_commitish':SOURCE,'name':f'Coding Tools MCP {TAG} — OAuth popup and callback repair','body':notes,'draft':True,'prerelease':True,'make_latest':'false'})
+release=api('releases',{'tag_name':TAG,'target_commitish':SOURCE,'name':f'Coding Tools MCP {TAG} — Preserved features, OAuth and file-safety repair','body':notes,'draft':True,'prerelease':True,'make_latest':'false'})
 Path('aiTemp/oauth-popup-draft.json').write_text(json.dumps({'id':release['id'],'source':SOURCE,'tag':TAG}))
 for p in files:subprocess.run(['gh','release','upload',TAG,str(p),'--repo',REPO],check=True,timeout=120)
 readback=root/'readback';readback.mkdir()

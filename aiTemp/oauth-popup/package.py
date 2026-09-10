@@ -25,7 +25,8 @@ assert exported.read_bytes() == produced.read_bytes()
 
 runpy.run_path('aiTemp/tool-exposure/package.py', run_name='__main__')
 proof = json.loads(Path('aiTemp/installer/proof.json').read_text(encoding='utf-8'))
-proof.update({'scope': 'scoped OAuth entry and validated callback CSP; no caller-selected Host trust',
+assert '3 passed; 0 failed' in (root/'file-safety.txt').read_text(encoding='utf-8')
+proof.update({'file_safety_regressions_passed':3,'read_file_input_cap_bytes':16777216,'scope': 'scoped OAuth entry and validated callback CSP; no caller-selected Host trust',
     'oauth_regressions_passed': 4, 'validated_callback_csp': True, 'live_user_chatgpt_connection_verified': False,
     'codex_executable_invoked': False, 'model_requests': 0})
 for directory in ['aiTemp/installer', 'aiTemp/evidence']:

@@ -12,6 +12,8 @@ use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 /// Default per-file cap for `search_text` to avoid loading multi-GB assets.
 const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Hard input cap for the text reader. `max_bytes` remains the response cap.
+const MAX_TEXT_READ_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const BINARY_PEEK_BYTES: usize = 8192;
 
 pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
@@ -24,6 +26,22 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         return Err(WorkspaceError::Tool {
             code: "IS_DIRECTORY",
             message: "Path is a directory.".into(),
+            category: "validation",
+            retryable: false,
+        });
+    }
+    let input =
+        File::open(&resolved.path).map_err(|_| WorkspaceError::not_found("File not found"))?;
+    let metadata = input
+        .metadata()
+        .map_err(|_| WorkspaceError::not_found("File not found"))?;
+    if metadata.len() > MAX_TEXT_READ_INPUT_BYTES {
+        return Err(WorkspaceError::Tool {
+            code: "FILE_TOO_LARGE",
+            message: format!(
+                "Text file is {} bytes; the read_file input limit is {} bytes. Use search_text or a bounded external reader instead.",
+                metadata.len(), MAX_TEXT_READ_INPUT_BYTES
+            ),
             category: "validation",
             retryable: false,
         });
@@ -42,7 +60,21 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .and_then(Value::as_u64)
         .map(|v| v as usize);
 
-    let data = fs::read(&resolved.path).map_err(|_| WorkspaceError::not_found("File not found"))?;
+    // Enforce the cap on the actual open handle as well as its initial size.
+    // A file growing after metadata inspection must not trigger an unbounded read.
+    let mut data = Vec::new();
+    input
+        .take(MAX_TEXT_READ_INPUT_BYTES + 1)
+        .read_to_end(&mut data)
+        .map_err(|_| WorkspaceError::not_found("File could not be read"))?;
+    if data.len() as u64 > MAX_TEXT_READ_INPUT_BYTES {
+        return Err(WorkspaceError::Tool {
+            code: "FILE_TOO_LARGE",
+            message: "Text file exceeded the 16 MiB input limit during reading.".into(),
+            category: "validation",
+            retryable: false,
+        });
+    }
     if data.iter().take(4096).any(|b| *b == 0) {
         return Err(WorkspaceError::Tool {
             code: "BINARY_FILE",

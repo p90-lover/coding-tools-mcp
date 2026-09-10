@@ -30,3 +30,7 @@ pub use registry::{
 pub use workspace::{wrap_mcp_tool_result, wrap_tool_result, Workspace};
 
 pub mod workflow;
+
+#[cfg(test)]
+#[path = "../../../aiTemp/main-preservation/file_regressions.rs"]
+mod main_preservation_file_regressions;
