@@ -83,8 +83,10 @@ if 'browser_snapshot' not in s:
             "redirect_status":redirect.status().as_u16(),"password":"fixture-password-not-real",
             "transport":"recorded production HTTP responses; the browser replay does not contact ChatGPT"});''')
     s=once(s,'    shutdown_tx.send(()).unwrap();','''    assert!(!browser_snapshot.is_null());
-    std::fs::create_dir_all("aiTemp/oauth-popup").unwrap();
-    std::fs::write("aiTemp/oauth-popup/browser-fixture.json", serde_json::to_vec_pretty(&browser_snapshot).unwrap()).unwrap();
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent()
+        .expect("desktop crate must have a repository parent").join("aiTemp/oauth-popup");
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    std::fs::write(fixture_dir.join("browser-fixture.json"), serde_json::to_vec_pretty(&browser_snapshot).unwrap()).unwrap();
     shutdown_tx.send(()).unwrap();''')
     save(p,s)
 p=Path(paths[3]);s=p.read_text(encoding='utf-8')

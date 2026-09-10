@@ -323,9 +323,43 @@ async fn run_flow(root: PathBuf) {
         );
     }
     assert!(!browser_snapshot.is_null());
-    std::fs::create_dir_all("aiTemp/oauth-popup").unwrap();
+    // Serialize the real Desktop settings types using synthetic values only.
+    // The extension contract check consumes this JSON, not a hand-invented schema.
+    let mut data = crate::data::AppData::default();
+    let mut profile = crate::workspace::WorkspaceProfile::new("fixture-workspace".into(), None);
+    profile.id = "extension-fixture".into();
+    profile.auth.auth_type = "oauth".into();
+    profile.auth.oauth_client_id = client_id.into();
+    profile.auth.use_shared_secrets = false;
+    profile.tunnel.public_url = "https://old-popup.example".into();
+    data.last_workspace_id = profile.id.clone();
+    data.workspace_secrets.insert(
+        profile.id.clone(),
+        HashMap::from([
+            ("oauth_password".into(), "fixture-password-not-real".into()),
+            (
+                "oauth_client_secret".into(),
+                "fixture-secret-not-real".into(),
+            ),
+        ]),
+    );
+    data.profiles.push(profile);
+    browser_snapshot["profiles_fixture"] = serde_json::to_value(&data).unwrap();
+    data.profiles[0].auth.use_shared_secrets = true;
+    data.shared_secrets = HashMap::from([
+        ("oauth_client_id".into(), "fixture-shared-client".into()),
+        ("oauth_password".into(), "fixture-shared-password".into()),
+        ("oauth_client_secret".into(), "fixture-shared-secret".into()),
+    ]);
+    browser_snapshot["shared_profiles_fixture"] = serde_json::to_value(&data).unwrap();
+    // Cargo tests run in src-tauri; packaging runs at repository root.
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("desktop crate must have a repository parent")
+        .join("aiTemp/oauth-popup");
+    std::fs::create_dir_all(&fixture_dir).unwrap();
     std::fs::write(
-        "aiTemp/oauth-popup/browser-fixture.json",
+        fixture_dir.join("browser-fixture.json"),
         serde_json::to_vec_pretty(&browser_snapshot).unwrap(),
     )
     .unwrap();
