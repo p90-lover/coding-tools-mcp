@@ -1,0 +1,39 @@
+name: No permanent delete red gate
+on:
+  push:
+    branches: [fix/sandbox-audit-20260910]
+    paths: ['.github/workflows/no-delete-red.yml', 'aiTemp/sandbox-audit/no_delete_source_check.py']
+permissions:
+  contents: read
+jobs:
+  red:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Observe production permanent-delete calls before fixes
+        working-directory: aiTemp/checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          set +e
+          python aiTemp/sandbox-audit/no_delete_source_check.py > aiTemp/evidence/no-delete-red.txt 2>&1
+          code=$?
+          set -e
+          cat aiTemp/evidence/no-delete-red.txt
+          test "$code" -ne 0
+          grep -F 'AUDIT_PERMANENT_DELETE_API' aiTemp/evidence/no-delete-red.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: no-delete-red-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          retention-days: 14
+          if-no-files-found: error
