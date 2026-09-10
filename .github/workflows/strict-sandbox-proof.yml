@@ -1,0 +1,84 @@
+name: Strict sandbox-only helper proof
+on:
+  push:
+    branches: [fix/sandbox-audit-20260910]
+    paths: ['.github/workflows/strict-sandbox-proof.yml']
+permissions:
+  contents: read
+jobs:
+  strict:
+    if: github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      SOURCE: ${{ github.sha }}
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      CARGO_INCREMENTAL: '0'
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openai/codex
+          ref: 3caf9f9586baedb4158a7b91545ead3dd320c348
+          path: aiTemp/upstream
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Build only pinned isolated helpers (no CLI agent or inference)
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/strict-helpers
+          python native-helpers/prepare_upstream.py "$GITHUB_WORKSPACE/aiTemp/upstream" "$PWD/native-helpers/codex_sandbox_bridge.rs" > aiTemp/evidence/adapter.txt 2>&1
+          cargo build --locked --release --jobs 2 --manifest-path "$GITHUB_WORKSPACE/aiTemp/upstream/codex-rs/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/aiTemp/strict-target" -p codex-windows-sandbox --bin coding-tools-codex-sandbox --bin codex-command-runner --bin codex-windows-sandbox-setup > aiTemp/evidence/helper-build.txt 2>&1
+          python - <<'PY'
+          from pathlib import Path
+          import os,shutil,hashlib,json
+          built=Path(os.environ['GITHUB_WORKSPACE'])/'aiTemp/strict-target/release'
+          target=Path('aiTemp/strict-helpers')
+          hashes={}
+          for name in ['coding-tools-codex-sandbox.exe','codex-command-runner.exe','codex-windows-sandbox-setup.exe']:
+              p=built/name;assert p.is_file();shutil.copy2(p,target/name);hashes[name]=hashlib.sha256(p.read_bytes()).hexdigest()
+          Path('aiTemp/evidence/helper-provenance.json').write_text(json.dumps({'source':os.environ['SOURCE'],'upstream':'3caf9f9586baedb4158a7b91545ead3dd320c348','files':hashes,'model_calls':False},indent=2))
+          p=Path('aiTemp/release-verification/sandbox_native.py');b=Path('aiTemp/Trash/strict-before/sandbox_native.py');b.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,b)
+          s=p.read_text()
+          marker='  Some("deny-read")=>match fs::read(&a[2]) {'
+          replacement='''  Some("deny-delete")=>{use std::os::windows::fs::OpenOptionsExt;
+             match fs::OpenOptions::new().access_mode(0x00010000).open(&a[2]) {
+              Err(e) if e.kind()==io::ErrorKind::PermissionDenied=>print!("delete-denied"),
+              Err(e)=>panic!("wrong DELETE-access failure: {e}"),Ok(_)=>panic!("DELETE access unexpectedly granted")}},
+          '''+marker
+          assert s.count(marker)==1;s=s.replace(marker,replacement,1)
+          marker="[('deny-write',inside,'write-denied'),('deny-read',outside,'outside-read-denied')]"
+          assert s.count(marker)==1;s=s.replace(marker,"[('deny-write',inside,'write-denied'),('deny-read',outside,'outside-read-denied'),('deny-delete',inside,'delete-denied')]",1)
+          p.write_text(s)
+          PY
+      - name: Verify read scope write DELETE-access and real network isolation
+        run: |
+          set -euo pipefail
+          python aiTemp/release-verification/monitor_sandbox_probe.py "$PWD/aiTemp/strict-helpers/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/strict-isolation" 2>&1 | tee aiTemp/evidence/strict-boundary.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: strict-sandbox-proof-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: strict-sandbox-helpers-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/strict-helpers/*
+          if-no-files-found: warn
+          retention-days: 14
