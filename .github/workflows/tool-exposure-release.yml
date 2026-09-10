@@ -1,0 +1,237 @@
+name: Verified tool exposure repair
+on:
+  push:
+    branches: [fix/tool-exposure-0.4.3-rc.2]
+    paths: ['.github/workflows/tool-exposure-release.yml', 'aiTemp/tool-exposure/**', 'src/**', 'src-tauri/**', 'docs/guides/tool-exposure*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: tool-exposure-043-rc2
+  cancel-in-progress: false
+env:
+  VERSION: 0.4.3-rc.2
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Apply bounded patch and retain originals
+        run: python aiTemp/tool-exposure/prepare.py
+      - name: Record immutable candidate source
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: represent actual tool profiles and expose honest catalog diagnostics'
+          fi
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote" = "$GITHUB_SHA"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: catalog-preparation-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/preparation.txt
+          retention-days: 14
+          if-no-files-found: warn
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      PLATFORM: windows-x64
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/catalog-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      CODING_TOOLS_COMMAND_NATIVE_SHA256: 444a3f0008050605cae73cd9b7a2dcac61294062dfaab56dd20430fd6498518b
+      CI: 'true'
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Check and build actual frontend
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+      - name: Verify exact catalog and live policy without model calls
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib catalog_exposure_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/catalog-tests.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/connection-tests.txt
+          grep -F '2 passed; 0 failed' aiTemp/evidence/catalog-tests.txt
+      - name: Build and inspect Windows installer
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles nsis -- --locked 2>&1 | tee aiTemp/evidence/installer.txt
+          python aiTemp/tool-exposure/package.py
+          test -z "$(git diff --name-only)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: catalog-installer-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/installer/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: catalog-windows-evidence-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
+  browser:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Reproduce profile bug then verify real component repair
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          git fetch --no-tags origin aec0c3fce7086a44eff7efdfc1de018a67ae654e
+          git show aec0c3fce7086a44eff7efdfc1de018a67ae654e:src/lib/components/RuntimePolicyForm.svelte > aiTemp/tool-exposure/old-form.svelte
+          set +e
+          PROFILE_SOURCE=aiTemp/tool-exposure/old-form.svelte node aiTemp/tool-exposure/profile_test.mjs > aiTemp/evidence/profile-red.txt 2>&1
+          code=$?
+          set -e
+          test "$code" -eq 1
+          grep -F 'PROFILE_SELECTION_MISSING: core' aiTemp/evidence/profile-red.txt
+          node aiTemp/tool-exposure/profile_test.mjs 2>&1 | tee aiTemp/evidence/profile-green.txt
+          # Catalog contents and sensitive executors must remain unchanged.
+          git diff --exit-code aec0c3fce7086a44eff7efdfc1de018a67ae654e -- src-tauri/src/tools/registry.rs src-tauri/src/tools/registry_definitions.rs src-tauri/src/codex_bridge src-tauri/src/auth src-tauri/src/tools/computer src-tauri/src/tools/workflow.rs
+      - name: Verify actual dropdown save and read-only diagnostic UI
+        run: |
+          set -euo pipefail
+          python -m pip install playwright==1.57.0
+          python - <<'PY'
+          import subprocess,sys,time,urllib.request
+          from pathlib import Path
+          log=Path('aiTemp/evidence/vite.txt').open('w')
+          process=subprocess.Popen(['node','node_modules/vite/bin/vite.js','--config','aiTemp/tool-exposure/browser.vite.config.mjs'],stdout=log,stderr=subprocess.STDOUT)
+          try:
+              for attempt in range(60):
+                  if process.poll() is not None:raise RuntimeError('Vite exited')
+                  try:
+                      with urllib.request.urlopen('http://127.0.0.1:1429',timeout=2) as r:
+                          if r.status==200:break
+                  except OSError:time.sleep(0.25)
+              else:raise RuntimeError('Vite not ready')
+              subprocess.run([sys.executable,'aiTemp/tool-exposure/browser_test.py'],check=True)
+          finally:
+              process.terminate()
+              try:process.wait(timeout=10)
+              except subprocess.TimeoutExpired:process.kill();process.wait()
+              log.close()
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          import re,json
+          en=Path('docs/guides/tool-exposure.en.md').read_text();zh=Path('docs/guides/tool-exposure.zh-Hant.md').read_text()
+          assert len(re.findall(r'^## ',en,re.M))==len(re.findall(r'^## ',zh,re.M))
+          assert set(re.findall(r'https://\S+',en))==set(re.findall(r'https://\S+',zh))
+          assert set(re.findall(r'`([^`]+)`',en))==set(re.findall(r'`([^`]+)`',zh))
+          Path('aiTemp/evidence/docs.txt').write_text('PASS: bilingual sections, tool identifiers, sources and links\n')
+          PY
+          test -z "$(git diff --name-only)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: catalog-browser-evidence-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: [prepare,windows,browser]
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Verify uploaded bytes before publication and non-forced integration
+        run: python aiTemp/tool-exposure/publish.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: catalog-publication-${{ github.run_id }}
+          path: |
+            aiTemp/checkout/aiTemp/catalog-publication-receipt.json
+            aiTemp/checkout/aiTemp/catalog-draft.json
+          if-no-files-found: warn
+          retention-days: 14
