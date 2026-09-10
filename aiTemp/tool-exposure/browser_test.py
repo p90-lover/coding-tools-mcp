@@ -28,7 +28,8 @@ with sync_playwright() as p:
     page.get_by_text('Hidden by profile / 被目錄隱藏的工具',exact=True).click()
     expect(page.get_by_text('start_task, harness_status',exact=True)).to_be_visible()
     expect(page.get_by_test_id('catalog-fingerprint')).to_contain_text('a'*64)
-    page.evaluate("window.__TAURI_INTERNALS__.invoke=async()=>{throw Error('fixture listener unavailable')}")
+    # A no-return setup function avoids Playwright auto-invoking the assigned stub.
+    page.evaluate("() => { window.__TAURI_INTERNALS__.invoke=async()=>{throw Error('fixture listener unavailable')}; }")
     page.get_by_role('button',name='Check catalog / 檢查目錄',exact=True).click()
     expect(page.get_by_role('alert')).to_contain_text('fixture listener unavailable')
     expect(page.get_by_test_id('catalog-count')).to_have_count(0)
