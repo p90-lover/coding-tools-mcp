@@ -1,0 +1,70 @@
+name: Main preservation redirected callback check
+on:
+  push:
+    branches: [fix/main-preservation-0.4.3-rc.4]
+    paths: ['.github/workflows/main-preservation-browser-green.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  browser:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      SOURCE: 7cf7b375808ec1f727bd38490a6201e31e1a061f
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Check real redirect with all external browser traffic blocked
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/browser-fixture aiTemp/evidence
+          gh run download 34453654250 --repo "$GITHUB_REPOSITORY" --name oauth-popup-browser-fixture-34453654250 --dir aiTemp/browser-fixture
+          python -m pip install playwright==1.57.0
+          python - <<'PY' 2>&1 | tee aiTemp/evidence/browser-test.txt
+          from pathlib import Path
+          source=Path('aiTemp/oauth-popup/browser_test.py').read_text()
+          source=source.replace('import json,os,re,shutil', 'import base64,json,os,re,shutil')
+          source=source.replace("args=['--no-sandbox']", "args=['--no-sandbox','--proxy-server=http://127.0.0.1:9']")
+          source=source.replace('context=browser.new_context();', "context=browser.new_context(service_workers='block');")
+          marker="        popup.get_by_label('Password',exact=True).fill(fixture['password'])"
+          hook='''        # Playwright routing skips redirect hops; CDP observes the real GET
+                  # only after Chromium's normal form-action check has permitted it.
+                  cdp=context.new_cdp_session(popup)
+                  def on_redirect(event):
+                      req=event['request'];request_id=event['requestId']
+                      if req['url']!=callback:
+                          cdp.send('Fetch.failRequest',{'requestId':request_id,'errorReason':'BlockedByClient'});return
+                      calls.append({'method':req['method'],'target':'callback','has_post_body':bool(req.get('hasPostData') or req.get('postData'))})
+                      assert req['method']=='GET' and not req.get('hasPostData') and not req.get('postData')
+                      cdp.send('Fetch.fulfillRequest',{'requestId':request_id,'responseCode':200,'responseHeaders':[{'name':'Content-Type','value':'text/html'}],'body':base64.b64encode(b'CALLBACK_REACHED').decode()})
+                  cdp.on('Fetch.requestPaused',on_redirect)
+                  cdp.send('Fetch.enable',{'patterns':[{'urlPattern':'https://chatgpt.com/connector/oauth/*','requestStage':'Request'},{'urlPattern':'https://attacker.invalid/*','requestStage':'Request'}]})
+          '''
+          import textwrap
+          hook='\n'.join(line[10:] if line.startswith('          ') else line for line in hook.splitlines())+'\n'
+          assert source.count(marker)==1
+          source=source.replace(marker,hook+marker)
+          Path('aiTemp/evidence/redirect-replay.py').write_text(source)
+          exec(compile(source,'corrected-redirect-replay','exec'),{'__name__':'__main__'})
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: main-preservation-browser-green-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
