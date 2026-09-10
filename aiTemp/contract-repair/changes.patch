@@ -1,0 +1,425 @@
+diff --git a/aiTemp/sandbox-permissions/contract.rs b/aiTemp/sandbox-permissions/contract.rs
+index 7d5df06..03116de 100644
+--- a/aiTemp/sandbox-permissions/contract.rs
++++ b/aiTemp/sandbox-permissions/contract.rs
+@@ -180,6 +180,10 @@ fn snapshot_contract_actual_executor_and_live_revocation_stop_owned_descendants(
+     let _serial = TEST_SERIAL.lock().unwrap();
+     let (base, file, p, ctx) = fixture();
+     with_test_file(file.clone(), || {
++        {
++            let _active = EXECUTION.lock().unwrap();
++            assert!(local_archive_retained().is_err(), "ARCHIVE_MUST_NOT_MOVE_ACTIVE_SNAPSHOT");
++        }
+         assert!(available());
+         let probe = PathBuf::from(std::env::var("CODING_TOOLS_SNAPSHOT_PROBE").unwrap());
+         fs::copy(probe, ctx.workspace.root().join("probe.exe")).unwrap();
+diff --git a/src-tauri/src/commands/mod.rs b/src-tauri/src/commands/mod.rs
+index c8b4bff..5a6f5e9 100644
+--- a/src-tauri/src/commands/mod.rs
++++ b/src-tauri/src/commands/mod.rs
+@@ -14,7 +14,7 @@ mod control_center;
+ pub use control_center::{control_board_change, control_board_read, integration_read};
+ mod computer;
+ mod sandbox;
+-pub use sandbox::{sandbox_local_disable, sandbox_local_prepare, sandbox_local_status};
++pub use sandbox::{sandbox_local_disable, sandbox_local_prepare, sandbox_local_status, sandbox_local_archive_retained};
+ pub(crate) mod computer_restore;
+ pub use computer::{
+     computer_local_forget, computer_local_pause, computer_local_permissions, computer_local_poll,
+diff --git a/src-tauri/src/commands/sandbox.rs b/src-tauri/src/commands/sandbox.rs
+index 0d2b28d..bc227d9 100644
+--- a/src-tauri/src/commands/sandbox.rs
++++ b/src-tauri/src/commands/sandbox.rs
+@@ -58,3 +58,19 @@ pub fn sandbox_local_disable(window: WebviewWindow, workspace_id: String) -> App
+     local(&window, true)?;
+     native_sandbox::local_disable(&workspace_id)
+ }
++
++/// Local-only storage recovery, not an MCP privilege and not implicit approval.
++#[tauri::command]
++pub fn sandbox_local_archive_retained(
++    window: WebviewWindow,
++    state: State<'_, AppState>,
++    workspace_id: String,
++    confirm_all_inactive: bool,
++) -> AppResult<Value> {
++    local(&window, true)?;
++    scope(&state, &workspace_id)?;
++    if !confirm_all_inactive {
++        return Err(AppError::Message("Confirm archival of all inactive snapshots; no files are deleted".into()));
++    }
++    native_sandbox::local_archive_retained()
++}
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index d76288f..276d68f 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -35,7 +35,7 @@ use commands::{
+     list_workspaces, open_url, open_workspace_directory, quick_add_linked_project, quit_app,
+     read_workspace_logs, recreate_ui_webview, regenerate_shared_secret,
+     regenerate_workspace_secret, restart_actions_runtime, restart_runtime, restart_tunnel,
+-    run_health_checks, sandbox_local_disable, sandbox_local_prepare, sandbox_local_status,
++    run_health_checks, sandbox_local_disable, sandbox_local_prepare, sandbox_local_status, sandbox_local_archive_retained,
+     save_frp_profile, set_download_config, set_last_workspace, set_proxy, set_shared_secret,
+     set_workspace_secret, show_main_window, start_actions_runtime, start_runtime, start_tunnel,
+     stop_actions_runtime, stop_runtime, stop_tunnel, test_tunnel, uninstall_software,
+@@ -193,6 +193,7 @@ pub fn run() {
+             sandbox_local_prepare,
+             sandbox_local_status,
+             sandbox_local_disable,
++            sandbox_local_archive_retained,
+             computer_local_targets,
+             computer_local_permissions,
+             computer_local_forget,
+diff --git a/src-tauri/src/tools/mod.rs b/src-tauri/src/tools/mod.rs
+index b688bd7..ed9e1c4 100644
+--- a/src-tauri/src/tools/mod.rs
++++ b/src-tauri/src/tools/mod.rs
+@@ -34,3 +34,7 @@ pub mod workflow;
+ #[cfg(test)]
+ #[path = "../../../aiTemp/main-preservation/file_regressions.rs"]
+ mod main_preservation_file_regressions;
++
++#[cfg(test)]
++#[path = "../../../aiTemp/contract-repair/wire.test.rs"]
++mod integration_contract_tests;
+diff --git a/src-tauri/src/tools/native_sandbox.rs b/src-tauri/src/tools/native_sandbox.rs
+index 3e554e5..6fc9811 100644
+--- a/src-tauri/src/tools/native_sandbox.rs
++++ b/src-tauri/src/tools/native_sandbox.rs
+@@ -185,6 +185,17 @@ pub fn local_setup(profile: WorkspaceProfile, root: PathBuf) -> AppResult<Value>
+     drop(_guard);
+     local_status_for(&profile.id, &root)
+ }
++/// Explicit local operation; deliberately absent from the MCP tool catalog.
++/// All snapshots share one bounded store, so archive covers all inactive runs.
++pub fn local_archive_retained() -> AppResult<Value> {
++    let _execution = EXECUTION.try_lock()
++        .map_err(|_| err("A snapshot is still running; stop and wait before archival"))?;
++    let storage = home()?;
++    let count = snapshot::retained_count(&storage)?;
++    let destination = snapshot::archive_retained(&storage)?;
++    Ok(json!({"archived_runs":count,"archive_directory":destination,
++        "files_deleted":false,"scope":"all inactive snapshot runs; approvals unchanged"}))
++}
+ pub fn local_status_for(id: &str, root: &Path) -> AppResult<Value> {
+     Ok(
+         json!({"available":available(),"enabled_for_workspace":permitted(id,root)?,"release_status":RELEASE_STATUS,
+@@ -196,7 +207,7 @@ pub fn local_status_for(id: &str, root: &Path) -> AppResult<Value> {
+         "stop_scope":"one active sandbox job; Stop or permission changes suspend all snapshot grants",
+         "scope":"Only sandbox_exec. Other command tools and GUI control are not sandboxed by this executor",
+         "storage":"retained under application aiTemp; no automatic cleanup or import","max_input_bytes":16777216,
+-        "max_retained_runs":32,"direct_workspace_write":false,"arbitrary_program_compatibility":false,"windows_boundary":"AppContainer; OS/package-readable locations are not blanket-denied; not the full Codex Windows sandbox"}),
++        "max_retained_runs":32,"retention":{"retained_runs":snapshot::retained_count(&home()?)?,"capacity":32,"archive_requires_local_confirmation":true,"archive_scope":"all inactive snapshot runs","files_deleted":false},"direct_workspace_write":false,"arbitrary_program_compatibility":false,"windows_boundary":"AppContainer; OS/package-readable locations are not blanket-denied; not the full Codex Windows sandbox"}),
+     )
+ }
+ // Compatibility entry point: never borrow another workspace's same-path authority.
+diff --git a/src-tauri/src/tools/registry.rs b/src-tauri/src/tools/registry.rs
+index 5f53796..2d32c85 100644
+--- a/src-tauri/src/tools/registry.rs
++++ b/src-tauri/src/tools/registry.rs
+@@ -2,6 +2,8 @@
+ #[path = "registry_definitions.rs"]
+ mod definitions;
+ pub use definitions::*;
++#[path = "output_contracts.rs"]
++mod output_contracts;
+ use serde_json::{json, Value};
+ pub fn list_tools() -> Vec<Value> {
+     list_tools_for_profile("full")
+@@ -10,6 +12,7 @@ pub fn list_tools_for_profile(profile: &str) -> Vec<Value> {
+     let mut tools = definitions::list_tools_for_profile(profile);
+     let included = crate::tools::native_sandbox::available();
+     for tool in &mut tools {
++        tool["outputSchema"] = output_contracts::for_tool(tool["name"].as_str().unwrap_or(""));
+         let status = match tool["name"].as_str() {
+             Some("sandbox_status") => true,
+             Some("sandbox_exec") => false,
+@@ -49,7 +52,9 @@ mod tests {
+             assert_eq!(a.len(), b.len());
+             for (old, new) in a.iter().zip(&b) {
+                 if !crate::tools::native_sandbox::NAMES.contains(&new["name"].as_str().unwrap()) {
+-                    assert_eq!(old, new);
++                    let mut without_output = new.clone();
++                    without_output.as_object_mut().unwrap().remove("outputSchema");
++                    assert_eq!(old, &without_output);
+                 } else {
+                     let status = new["name"] == "sandbox_status";
+                     assert_eq!(
+diff --git a/src-tauri/src/tools/sandbox_snapshot.rs b/src-tauri/src/tools/sandbox_snapshot.rs
+index cc159ea..3a7522d 100644
+--- a/src-tauri/src/tools/sandbox_snapshot.rs
++++ b/src-tauri/src/tools/sandbox_snapshot.rs
+@@ -88,47 +88,59 @@ fn relative(value: &str) -> AppResult<PathBuf> {
+     }
+     Ok(p)
+ }
+-pub(super) fn prepare(root: &Path, home: &Path, files: &[String]) -> AppResult<Snapshot> {
+-    if files.len() > 64 {
+-        return Err(err("At most 64 explicit input files"));
++/// Count only retained run directories, without following contents supplied by children.
++pub(super) fn retained_count(home: &Path) -> AppResult<usize> {
++    let runs = home.join("runs");
++    if !runs.exists() {
++        if home.exists() { safe_path(home)?; }
++        return Ok(0);
+     }
++    safe_path(&runs)?;
++    Ok(fs::read_dir(runs)?.take(33).count())
++}
++/// Caller holds the global execution lock and has explicit visible-local consent.
++/// Move the whole directory on the same filesystem. Never walk or delete child outputs.
++pub(super) fn archive_retained(home: &Path) -> AppResult<Option<PathBuf>> {
++    if retained_count(home)? == 0 { return Ok(None); }
++    let archive_root = home.join("Trash/retained-snapshots");
++    create_safe_directory(&archive_root)?;
++    let destination = archive_root.join(uuid::Uuid::new_v4().to_string());
++    if destination.exists() { return Err(err("Archive collision; nothing moved")); }
++    let runs = home.join("runs");
++    safe_path(&runs)?;
++    fs::rename(&runs, &destination)?;
++    // prepare() creates a fresh runs directory on demand. Failure after this move
++    // must not hide the fact that the original bytes remain in the returned archive.
++    Ok(Some(destination))
++}
++pub(super) fn prepare(root: &Path, home: &Path, files: &[String]) -> AppResult<Snapshot> {
++    if files.len() > 64 { return Err(err("At most 64 explicit input files")); }
+     safe_path(root)?;
++    let root = root.canonicalize()?;
+     create_safe_directory(home)?;
+     let home = home.canonicalize()?;
+-    if root.starts_with(&home) || home.starts_with(root) {
++    if root.starts_with(&home) || home.starts_with(&root) {
+         return Err(err("Sandbox storage must be outside the workspace"));
+     }
+-    let runs = home.join("runs");
+-    create_safe_directory(&runs)?;
+-    if fs::read_dir(&runs)?.take(33).count() >= 32 {
+-        return Err(err(
+-            "32 snapshots retained. Archive them locally before another run; nothing was deleted",
+-        ));
++    if retained_count(&home)? >= 32 {
++        return Err(err("32 snapshots retained. Use the local Archive retained snapshots control; nothing was deleted"));
+     }
+-    let id = uuid::Uuid::new_v4().to_string();
+-    let directory = runs.join(&id);
+-    fs::create_dir(&directory)?;
+-    let input = directory.join("input");
+-    let work = directory.join("work");
+-    fs::create_dir(&input)?;
+-    fs::create_dir(&work)?;
++    // Validate and bounded-read every selected input BEFORE allocating a run.
++    // Rejected/missing/duplicate inputs must not exhaust the 32 retained slots.
+     let mut seen = HashSet::new();
+     let mut bytes = 0u64;
++    let mut inputs = Vec::new();
+     for name in files {
+         let relative = relative(name)?;
+-        if !seen.insert(name.to_lowercase()) {
+-            return Err(err("Duplicate input path"));
+-        }
++        let normalized = relative.to_string_lossy().replace('\\', "/").to_lowercase();
++        if !seen.insert(normalized) { return Err(err("Duplicate input path")); }
+         let source = root.join(&relative);
+         safe_path(&source)?;
+         let resolved = source.canonicalize()?;
+-        if !resolved.starts_with(root) {
+-            return Err(err("Input escaped the workspace"));
+-        }
++        if !resolved.starts_with(&root) { return Err(err("Input escaped the workspace")); }
+         let mut options = OpenOptions::new();
+         options.read(true);
+-        #[cfg(windows)]
+-        {
++        #[cfg(windows)] {
+             use std::os::windows::fs::OpenOptionsExt;
+             options.share_mode(1);
+         }
+@@ -138,27 +150,37 @@ pub(super) fn prepare(root: &Path, home: &Path, files: &[String]) -> AppResult<S
+             return Err(err("Input total exceeds 16 MiB or is not a regular file"));
+         }
+         let mut content = Vec::new();
+-        file.take(16 * 1024 * 1024 - bytes + 1)
+-            .read_to_end(&mut content)?;
++        file.take(16 * 1024 * 1024 - bytes + 1).read_to_end(&mut content)?;
+         bytes += content.len() as u64;
+-        if bytes > 16 * 1024 * 1024 {
+-            return Err(err("Input grew past the snapshot limit"));
+-        }
++        if bytes > 16 * 1024 * 1024 { return Err(err("Input grew past the snapshot limit")); }
++        inputs.push((relative, content));
++    }
++    let runs = home.join("runs");
++    create_safe_directory(&runs)?;
++    // Stage incomplete output away from the retained quota. On I/O errors the
++    // partially written evidence is kept in staging; it is never silently deleted.
++    let staging = home.join("staging");
++    create_safe_directory(&staging)?;
++    let id = uuid::Uuid::new_v4().to_string();
++    let temporary = staging.join(&id);
++    fs::create_dir(&temporary)?;
++    let input = temporary.join("input");
++    let work = temporary.join("work");
++    fs::create_dir(&input)?;
++    fs::create_dir(&work)?;
++    for (relative, content) in inputs {
+         let destination = input.join(relative);
+         create_safe_directory(destination.parent().unwrap())?;
+-        let mut output = OpenOptions::new()
+-            .write(true)
+-            .create_new(true)
+-            .open(destination)?;
++        let mut output = OpenOptions::new().write(true).create_new(true).open(destination)?;
+         output.write_all(&content)?;
+     }
+-    Ok(Snapshot {
+-        id,
+-        directory,
+-        input,
+-        work,
+-    })
++    let directory = runs.join(&id);
++    fs::rename(&temporary, &directory)?;
++    Ok(Snapshot { id, input: directory.join("input"), work: directory.join("work"), directory })
+ }
++#[cfg(test)]
++#[path = "../../../aiTemp/contract-repair/retention.test.rs"]
++mod integration_retention_tests;
+ pub(super) fn executable(value: &str, input: &Path) -> AppResult<PathBuf> {
+     let p = PathBuf::from(value);
+     let p = if p.is_absolute() {
+diff --git a/src/lib/components/SandboxControl.svelte b/src/lib/components/SandboxControl.svelte
+index f1c9c0a..6335bd9 100644
+--- a/src/lib/components/SandboxControl.svelte
++++ b/src/lib/components/SandboxControl.svelte
+@@ -1,9 +1,10 @@
+ <script lang="ts">
+   import { invoke } from '@tauri-apps/api/core';
+   let { workspaceId }: { workspaceId: string } = $props();
+-  type SnapshotStatus = { available: boolean; enabled_for_workspace: boolean; helper_sha256?: string; backend?: string };
++  type SnapshotStatus = { available: boolean; enabled_for_workspace: boolean; helper_sha256?: string; backend?: string; retention?: { retained_runs: number; capacity: number } };
+   let status = $state<SnapshotStatus | null>(null);
+   let consent = $state(false);
++  let archiveConsent = $state(false);
+   let busy = $state(false);
+   let message = $state('');
+   let generation = 0;
+@@ -16,7 +17,7 @@
+   $effect(() => {
+     const id = workspaceId;
+     const ticket = ++generation;
+-    status = null; consent = false; busy = false; message = '';
++    status = null; consent = false; archiveConsent = false; busy = false; message = '';
+     void refresh(id, ticket);
+     return () => { generation++; };
+   });
+@@ -43,6 +44,23 @@
+     } catch (error) { if (id === workspaceId && ticket === generation) message = String(error); }
+     finally { if (id === workspaceId && ticket === generation) busy = false; }
+   }
++  async function archiveRetained() {
++    if (busy || !archiveConsent) return;
++    const id = workspaceId;
++    const ticket = ++generation;
++    busy = true; message = '';
++    try {
++      const result = await invoke<{ archived_runs: number; archive_directory: string | null }>(
++        'sandbox_local_archive_retained', { workspaceId: id, confirmAllInactive: true });
++      if (id === workspaceId && ticket === generation) {
++        archiveConsent = false;
++        message = `Archived ${result.archived_runs} retained runs without deleting files. · 已封存 ${result.archived_runs} 次執行，沒有刪除檔案。 ${result.archive_directory || ''}`;
++        await refresh(id, ticket);
++      }
++    } catch (error) { if (id === workspaceId && ticket === generation) message = String(error); }
++    finally { if (id ===workspaceId && ticket === generation) busy = false; }
++  }
++
+ </script>
+ <section class="mt-4 rounded-lg border border-[var(--border)] p-4" aria-label="Offline snapshot sandbox permissions">
+   <div class="flex flex-wrap items-center justify-between gap-2">
+@@ -68,6 +86,18 @@
+     <button class="tx-btn-secondary" disabled={busy} onclick={() => change(false)}>Stop all snapshots / revoke · 停止全部快照／撤銷</button>
+     <button class="tx-btn-secondary" disabled={busy} onclick={() => refresh(workspaceId, ++generation)}>Refresh status · 更新狀態</button>
+   </div>
++  {#if status?.retention}
++    <div class="mt-3 rounded border border-[var(--border)] p-3 text-xs">
++      <p>Retained runs · 保留紀錄：{status.retention.retained_runs} / {status.retention.capacity}</p>
++      <p class="mt-1 opacity-70">Archive moves ALL inactive runs from the shared snapshot store into its Trash directory. Project files and approvals are unchanged. A running job blocks archival.</p>
++      <p class="mt-1 opacity-70">封存會把共用快照儲存區的全部非執行中紀錄移至 Trash，原專案及授權不變；有工作執行時會拒絕封存。</p>
++      <label class="mt-2 flex items-start gap-2">
++        <input type="checkbox" bind:checked={archiveConsent} disabled={busy || status.retention.retained_runs === 0} />
++        <span>I confirm archival of all inactive snapshots, without deletion. · 我確認封存全部非執行中快照，不刪除檔案。</span>
++      </label>
++      <button class="tx-btn-secondary mt-2" disabled={busy || !archiveConsent || status.retention.retained_runs === 0} onclick={archiveRetained}>Archive retained snapshots · 封存保留快照</button>
++    </div>
++  {/if}
+   {#if status?.helper_sha256}<p class="mt-2 break-all font-mono text-[10px] opacity-60">SHA-256: {status.helper_sha256}</p>{/if}
+   {#if message}<p class="mt-2 text-xs" role="status">{message}</p>{/if}
+ </section>
+diff --git a/src/lib/control-center/state.ts b/src/lib/control-center/state.ts
+index f574ca5..66fc38f 100644
+--- a/src/lib/control-center/state.ts
++++ b/src/lib/control-center/state.ts
+@@ -31,15 +31,41 @@ export async function changeBoard(change:Change) {
+  catch(e) { boardError.set(String(e));return false; }
+  finally {boardBusy.set(false);}
+ }
+-export async function readIntegration(source:Source,endpoint:string,credential:string) {
+- if(get(integrationBusy)[source])return;
+- integrationBusy.update(v=>({...v,[source]:true}));
+- integrationErrors.update(v=>({...v,[source]:''}));
+- try { const result=await invoke<Snapshot>('integration_read',{source,endpoint,credential:credential||null});snapshots.update(v=>({...v,[source]:result})); }
+- catch(e) { integrationErrors.update(v=>({...v,[source]:String(e)})); }
+- finally {integrationBusy.update(v=>({...v,[source]:false}));}
++const integrationEpoch: Record<Source, number> = { paseo: 0, anneal: 0 };
++function forgetSnapshot(source: Source) {
++ snapshots.update(value => Object.fromEntries(Object.entries(value).filter(([key]) => key !== source)));
++}
++export function clearIntegration(source: Source) {
++ ++integrationEpoch[source];
++ forgetSnapshot(source);
++ integrationErrors.update(value => ({ ...value, [source]: '' }));
++ integrationBusy.update(value => ({ ...value, [source]: false }));
++}
++let previousEndpoints = get(endpoints);
++endpoints.subscribe(value => {
++ for (const source of ['paseo', 'anneal'] as const) {
++  if (value[source] !== previousEndpoints[source]) clearIntegration(source);
++ }
++ previousEndpoints = { ...value };
++});
++export async function readIntegration(source: Source, endpoint: string, credential: string) {
++ if (get(integrationBusy)[source] || get(endpoints)[source] !== endpoint) return;
++ const ticket = ++integrationEpoch[source];
++ const current = () => ticket === integrationEpoch[source] && get(endpoints)[source] === endpoint;
++ integrationBusy.update(value => ({ ...value, [source]: true }));
++ integrationErrors.update(value => ({ ...value, [source]: '' }));
++ try {
++  const result = await invoke<Snapshot>('integration_read', { source, endpoint, credential: credential || null });
++  if (current()) snapshots.update(value => ({ ...value, [source]: result }));
++ } catch (error) {
++  if (current()) {
++   forgetSnapshot(source);
++   integrationErrors.update(value => ({ ...value, [source]: String(error) }));
++  }
++ } finally {
++  if (current()) integrationBusy.update(value => ({ ...value, [source]: false }));
++ }
+ }
+-export function clearIntegration(source:Source) { snapshots.update(v=>{const next={...v};delete next[source];return next;});integrationErrors.update(v=>({...v,[source]:''})); }
+ 
+ let boardRefreshing=false;
+ /** Quiet refresh never resets a form or replaces an in-flight mutation with older data. */
+diff --git a/src/routes/integrations/+page.svelte b/src/routes/integrations/+page.svelte
+index 606fe2e..b9e4acc 100644
+--- a/src/routes/integrations/+page.svelte
++++ b/src/routes/integrations/+page.svelte
+@@ -17,7 +17,7 @@
+  <label>{t($locale,'Local service endpoint','本機服務端點')}<input aria-label={`${source} endpoint`} value={$endpoints[source]} oninput={(e)=>{const value=e.currentTarget.value;endpoints.update(v=>({...v,[source]:value}));}} spellcheck="false" autocomplete="off" required/></label>
+  <label>{t($locale,source==='paseo'?'Daemon password (when configured)':'Operator token (when configured)',source==='paseo'?'Daemon 密碼（如有設定）':'Operator Token（如有設定）')}<input type="password" aria-label={`${source} credential`} bind:value={tokens[source]} autocomplete="off" placeholder={t($locale,'Kept in memory for this request only','僅在本次請求的記憶體中保留')}/></label>
+  <p class="cc-help">{t($locale,'Literal loopback only: 127.0.0.1 or [::1]. Remote hosts need a secure local port forward you configure.','僅接受 127.0.0.1 或 [::1]。遠端主機須由你設定安全的本機連接埠轉送。')}</p>
+- <div class="cc-button-row"><button class="cc-button primary" disabled={$integrationBusy[source]}><RefreshCw size={15} class={$integrationBusy[source]?'cc-spin':''}/>{t($locale,$integrationBusy[source]?'Reading…':$snapshots[source]?'Refresh snapshot':'Connect & read',$integrationBusy[source]?'讀取中…':$snapshots[source]?'更新狀態':'連接並讀取')}</button>{#if $snapshots[source]}<button type="button" class="cc-button ghost" disabled={$integrationBusy[source]} onclick={()=>clearIntegration(source)}><Unplug size={15}/>{t($locale,'Clear view','清除顯示')}</button>{/if}</div>
++ <div class="cc-button-row"><button class="cc-button primary" disabled={$integrationBusy[source]}><RefreshCw size={15} class={$integrationBusy[source]?'cc-spin':''}/>{t($locale,$integrationBusy[source]?'Reading…':$snapshots[source]?'Refresh snapshot':'Connect & read',$integrationBusy[source]?'讀取中…':$snapshots[source]?'更新狀態':'連接並讀取')}</button>{#if $snapshots[source]}<button type="button" class="cc-button ghost" onclick={()=>clearIntegration(source)}><Unplug size={15}/>{t($locale,'Clear view','清除顯示')}</button>{/if}</div>
+  </form>
+  {#if $integrationErrors[source]}<div class="cc-notice red" role="alert">{$integrationErrors[source]}</div>{/if}
+  {#if $snapshots[source]}<div class="cc-connection-proof"><span class="cc-status green"><span></span>{t($locale,'Snapshot received','已收到狀態')}</span><strong>{$snapshots[source]?.items.length} {t($locale,'records','項記錄')}</strong><small>{formatTime($snapshots[source]?.checked_at)} · {$snapshots[source]?.endpoint}</small><a href={source==='paseo'?'/sessions':'/work'}>{t($locale,'Open '+(source==='paseo'?'sessions':'task board'),'開啟'+(source==='paseo'?'會話':'任務看板'))}<ExternalLink size={14}/></a></div>{/if}
