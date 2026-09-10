@@ -1,0 +1,70 @@
+name: Main and extension source audit
+on:
+  push:
+    branches: [audit/main-extension-release-20260910]
+    paths: [.github/workflows/main-extension-audit.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+          path: aiTemp/source
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: p90-lover/coding-tools-mcp-fast-access-extension
+          ref: main
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+          path: aiTemp/extension
+      - name: Compare retained branch history without executing app or agents
+        working-directory: aiTemp/source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../evidence
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          main=git('rev-parse','origin/main')
+          print('MAIN_SOURCE', main)
+          rows=[]
+          for line in git('for-each-ref','--format=%(refname:short) %(objectname)','refs/remotes/origin').splitlines():
+              ref,sha=line.split()
+              if ref in ('origin/HEAD','origin/main'): continue
+              counts=git('rev-list','--left-right','--count',f'{main}...{sha}').split()
+              behind,ahead=map(int,counts)
+              row={'branch':ref,'sha':sha,'behind':behind,'ahead':ahead,'included':ahead==0}
+              if ahead:
+                  row['unique_commits']=git('log','--format=%h %s','--max-count=8',f'{main}..{sha}').splitlines()
+                  row['source_changes']=git('diff','--name-status',main,sha,'--','src','src-tauri/src','package.json','src-tauri/Cargo.toml','src-tauri/tauri.conf.json').splitlines()
+              rows.append(row)
+              print(('INCLUDED' if ahead==0 else 'UNMERGED'),ref,sha[:12],f'ahead={ahead} behind={behind}')
+              if ahead and (ref.startswith('origin/feature/') or ref.startswith('origin/integration/') or ref.startswith('origin/fix/')):
+                  for message in row['unique_commits']: print(' ',message)
+          report={'main':main,'branches':rows,'extension':subprocess.check_output(['git','-C','../extension','rev-parse','HEAD'],text=True).strip(),'inference_invoked':False}
+          Path('../evidence/branch-audit.json').write_text(json.dumps(report,indent=2)+'\n')
+          print('EXTENSION_SOURCE',report['extension'])
+          print('WORKFLOWS')
+          print(git('ls-tree','-r','--name-only',main,'.github/workflows'))
+          print('PROJECT_INSTRUCTIONS')
+          print('\n'.join(p for p in git('ls-tree','-r','--name-only',main).splitlines() if p.rsplit('/',1)[-1] in ('AGENTS.md','CLAUDE.md','GEMINI.md')))
+          PY
+          git bundle create ../evidence/mcp.bundle --all
+          git -C ../extension bundle create ../evidence/extension.bundle --all
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: main-extension-audit-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 7
