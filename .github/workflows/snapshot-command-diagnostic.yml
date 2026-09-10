@@ -1,0 +1,61 @@
+name: Diagnose snapshot command parsing
+on:
+  push:
+    branches: [fix/sandbox-permissions-0.4.4-rc.1]
+    paths: [.github/workflows/snapshot-command-diagnostic.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ github.sha }}', path: aiTemp/source, clean: false, persist-credentials: false}
+      - name: Build unchanged native helper and isolate command parsing from path interpretation
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/command-evidence
+          cmake -S native-helpers/app-container -B aiTemp/diagnostic-build -A x64 -DCODING_TOOLS_BUILD_PROBE=ON
+          cmake --build aiTemp/diagnostic-build --config Release
+          python - <<'PY' | tee aiTemp/command-evidence/diagnostic.txt
+          from pathlib import Path
+          import os,subprocess,uuid,json,base64,hashlib
+          root=Path('aiTemp/command-evidence').resolve()
+          helper=Path('aiTemp/diagnostic-build/Release/coding-tools-appcontainer.exe').resolve()
+          cmd=Path(os.environ['SystemRoot'])/'System32/cmd.exe'
+          def quote(value):
+              result='"';slashes=0
+              for c in value:
+                  if c=='\\': slashes+=1;continue
+                  result+='\\'*(slashes*2+1 if c=='"' else slashes);slashes=0;result+=c
+              return result+'\\'*(slashes*2)+'"'
+          def sandbox(script,extended):
+              run=root/uuid.uuid4().hex;inp=run/'input';out=run/'work';inp.mkdir(parents=True);out.mkdir()
+              (inp/'source.txt').write_text('SOURCE_UNCHANGED')
+              spelling=lambda p:'\\\\?\\'+str(p) if extended else str(p)
+              argv=[str(helper),'CodingToolsMcp.Snapshot.'+uuid.uuid4().hex[:30],spelling(inp),spelling(out),'5000','--',str(cmd),'/d','/s','/c',script]
+              done=subprocess.run(argv,input=b'start',capture_output=True,timeout=12)
+              assert done.returncode==0,done.stderr.decode(errors='replace')
+              value=json.loads(done.stdout)
+              assert value['appcontainer_token_verified'] and value['requested_identity_verified']
+              value['stdout']=base64.b64decode(value.pop('stdout_base64')).decode(errors='replace')
+              value['stderr']=base64.b64decode(value.pop('stderr_base64')).decode(errors='replace')
+              return {'script':script,'extended':extended,'result':value}
+          rows=[sandbox('echo SNAPSHOT_OK',True),sandbox('type %MCP_SANDBOX_INPUT%\\source.txt',False),sandbox('type %MCP_SANDBOX_INPUT%\\source.txt',True)]
+          # Pure parsing baseline uses only harmless echo and never changes files.
+          arguments=[str(cmd),'/d','/s','/c','echo SNAPSHOT_OK']
+          baseline=[]
+          for label,line in [('all_quoted',' '.join(map(quote,arguments))),('windows_rules',subprocess.list2cmdline(arguments))]:
+              p=subprocess.run(line,executable=str(cmd),capture_output=True,timeout=5)
+              baseline.append({'quoting':label,'command':line,'exit_code':p.returncode,'stdout':p.stdout.decode(errors='replace'),'stderr':p.stderr.decode(errors='replace')})
+          report={'source':os.environ['GITHUB_SHA'],'sandbox':rows,'benign_echo_baseline':baseline,'helper_sha256':hashlib.sha256(helper.read_bytes()).hexdigest(),'model_requests':0}
+          (root/'diagnostic.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report,indent=2))
+          PY
+          git archive --format=tar HEAD > aiTemp/command-evidence/source.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'snapshot-command-diagnostic-${{ github.run_id }}', path: aiTemp/source/aiTemp/command-evidence/, if-no-files-found: error, retention-days: 14}
