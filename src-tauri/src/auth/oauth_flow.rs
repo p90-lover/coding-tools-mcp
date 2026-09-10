@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use super::bearer::constant_time_eq_str;
 use super::redirects::{
-    default_oauth_redirect_uris, redirect_uri_syntax_allowed, validate_redirect_uris,
+    default_oauth_redirect_uris, is_trusted_chatgpt_oauth_redirect, redirect_uri_syntax_allowed,
+    validate_redirect_uris,
 };
 use super::refresh_tokens::RefreshTokenStore;
 
@@ -123,11 +124,18 @@ impl OAuthRuntime {
     }
 
     pub fn redirect_uri_allowed(&self, redirect_uri: &str) -> bool {
-        redirect_uri_syntax_allowed(redirect_uri)
-            && self
-                .redirect_uris
-                .iter()
-                .any(|registered| registered == redirect_uri)
+        if !redirect_uri_syntax_allowed(redirect_uri) {
+            return false;
+        }
+        if self
+            .redirect_uris
+            .iter()
+            .any(|registered| registered == redirect_uri)
+        {
+            return true;
+        }
+        // ChatGPT rotates the callback id on every Connect; exact profile lists go stale.
+        is_trusted_chatgpt_oauth_redirect(redirect_uri)
     }
 
     pub fn verify_access_token(&self, token: &str, _server_url: &str) -> bool {
@@ -948,6 +956,9 @@ mod release_hardening_checks {
             "https://chatgpt.com.attacker.invalid/connector_platform/oauth/callback"
         ));
         assert!(oauth.redirect_uri_allowed("https://chatgpt.com/connector_platform/oauth/callback"));
+        assert!(oauth.redirect_uri_allowed("https://chatgpt.com/connector/oauth/s3c1Lza4oLC"));
+        assert!(oauth.redirect_uri_allowed("https://chatgpt.com/oauth/callback/connector/oauth/z3x1Lza4sDLC"));
+        assert!(!oauth.redirect_uri_allowed("https://chatgpt.com/connector/oauth/evil/extra"));
     }
 
     #[test]
