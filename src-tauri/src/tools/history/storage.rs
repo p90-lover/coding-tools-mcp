@@ -235,8 +235,17 @@ pub fn read_index(history_dir: &Path) -> WorkspaceResult<Option<HistoryIndex>> {
     )
 }
 
-pub fn write_index(history_dir: &Path, index: &HistoryIndex) -> WorkspaceResult<()> {
-    write_json(&history_dir.join("index.json"), index, "history index")
+pub fn write_index(
+    workspace_root: &Path,
+    history_dir: &Path,
+    index: &HistoryIndex,
+) -> WorkspaceResult<()> {
+    write_json(
+        workspace_root,
+        &history_dir.join("index.json"),
+        index,
+        "history index",
+    )
 }
 
 pub fn memory_dir(history_dir: &Path) -> PathBuf {
@@ -251,8 +260,13 @@ pub fn read_manifest(history_dir: &Path) -> WorkspaceResult<Option<MemoryManifes
     )
 }
 
-pub fn write_manifest(history_dir: &Path, manifest: &MemoryManifest) -> WorkspaceResult<()> {
+pub fn write_manifest(
+    workspace_root: &Path,
+    history_dir: &Path,
+    manifest: &MemoryManifest,
+) -> WorkspaceResult<()> {
     write_json(
+        workspace_root,
         &memory_dir(history_dir).join("manifest.json"),
         manifest,
         "history manifest",
@@ -267,8 +281,13 @@ pub fn read_state(history_dir: &Path) -> WorkspaceResult<Option<MemoryState>> {
     )
 }
 
-pub fn write_state(history_dir: &Path, state: &MemoryState) -> WorkspaceResult<()> {
+pub fn write_state(
+    workspace_root: &Path,
+    history_dir: &Path,
+    state: &MemoryState,
+) -> WorkspaceResult<()> {
     write_json(
+        workspace_root,
         &memory_dir(history_dir).join("state.json"),
         state,
         "history state",
@@ -464,8 +483,8 @@ pub fn truncate_text(value: &str, max_chars: usize) -> String {
     text
 }
 
-pub fn write_markdown(path: &Path, content: &str) -> WorkspaceResult<()> {
-    atomic_write(path, content.as_bytes())
+pub fn write_markdown(workspace_root: &Path, path: &Path, content: &str) -> WorkspaceResult<()> {
+    atomic_write(workspace_root, path, content.as_bytes())
 }
 
 pub fn sha256(content: &[u8]) -> String {
@@ -492,7 +511,12 @@ where
         })
 }
 
-fn write_json<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> WorkspaceResult<()> {
+fn write_json<T: serde::Serialize>(
+    workspace_root: &Path,
+    path: &Path,
+    value: &T,
+    label: &str,
+) -> WorkspaceResult<()> {
     let content =
         serde_json::to_vec_pretty(value).map_err(|error| WorkspaceError::ToolDetails {
             code: "HISTORY_WRITE_FAILED",
@@ -501,15 +525,17 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> Works
             retryable: true,
             details: serde_json::json!({"error": error.to_string()}),
         })?;
-    atomic_write(path, &content)
+    atomic_write(workspace_root, path, &content)
 }
 
-fn atomic_write(target: &Path, content: &[u8]) -> WorkspaceResult<()> {
+fn atomic_write(workspace_root: &Path, target: &Path, content: &[u8]) -> WorkspaceResult<()> {
     let parent = target
         .parent()
         .ok_or_else(|| WorkspaceError::invalid_argument("History target has no parent"))?;
     ensure_directory(parent)?;
-    let temp = parent.join(format!(".history-tmp-{}", uuid::Uuid::new_v4()));
+    let temp_dir = workspace_root.join("aiTemp").join("history-write");
+    ensure_directory(&temp_dir)?;
+    let temp = temp_dir.join(format!("history-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> io::Result<()> {
         let mut file = OpenOptions::new()
             .create_new(true)
@@ -523,8 +549,12 @@ fn atomic_write(target: &Path, content: &[u8]) -> WorkspaceResult<()> {
         }
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
+    if result.is_err() && temp.exists() {
+        let failed_dir = workspace_root.join("Trash").join("history-write-failed");
+        if ensure_directory(&failed_dir).is_ok() {
+            let target = failed_dir.join(format!("history-{}.tmp", uuid::Uuid::new_v4()));
+            let _ = fs::rename(&temp, target);
+        }
     }
     result.map_err(|error| io_error("HISTORY_WRITE_FAILED", error, true))
 }

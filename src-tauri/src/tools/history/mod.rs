@@ -72,6 +72,7 @@ pub fn bootstrap(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
                     };
                     let content = markdown::with_updated_at(&document.content, &record.captured_at);
                     storage::write_markdown(
+                        ctx.workspace.root(),
                         &history_dir.join(format!("{}.md", document.number)),
                         &markdown::append_initial_input_revision(&content, &record),
                     )?;
@@ -136,7 +137,11 @@ pub fn bootstrap(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
                 &timestamp,
                 initial_input.as_ref(),
             );
-            storage::write_markdown(&history_dir.join(format!("{number}.md")), &content)?;
+            storage::write_markdown(
+                ctx.workspace.root(),
+                &history_dir.join(format!("{number}.md")),
+                &content,
+            )?;
             (number, relative_path, true, false, initial_input.is_some())
         };
 
@@ -155,9 +160,13 @@ pub fn bootstrap(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
         &now_timestamp(),
         previous_state_revision + 1,
     );
-    storage::write_index(&history_dir, &storage::rebuild_index(&refreshed))?;
-    storage::write_manifest(&history_dir, &manifest)?;
-    storage::write_state(&history_dir, &state)?;
+    storage::write_index(
+        ctx.workspace.root(),
+        &history_dir,
+        &storage::rebuild_index(&refreshed),
+    )?;
+    storage::write_manifest(ctx.workspace.root(), &history_dir, &manifest)?;
+    storage::write_state(ctx.workspace.root(), &history_dir, &state)?;
 
     let mut result = json!({
         "is_new_session": created,
@@ -267,6 +276,7 @@ pub fn checkpoint(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
     };
     if updated {
         storage::write_markdown(
+            ctx.workspace.root(),
             &history_dir.join(format!("{}.md", document.number)),
             &final_content,
         )?;
@@ -286,9 +296,13 @@ pub fn checkpoint(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
         &now_timestamp(),
         state_revision,
     );
-    storage::write_index(&history_dir, &storage::rebuild_index(&refreshed))?;
-    storage::write_manifest(&history_dir, &manifest)?;
-    storage::write_state(&history_dir, &state)?;
+    storage::write_index(
+        ctx.workspace.root(),
+        &history_dir,
+        &storage::rebuild_index(&refreshed),
+    )?;
+    storage::write_manifest(ctx.workspace.root(), &history_dir, &manifest)?;
+    storage::write_state(ctx.workspace.root(), &history_dir, &state)?;
 
     let mut warnings: Vec<String> = Vec::new();
     if !user_input_captured {
@@ -496,9 +510,13 @@ pub fn validate(ctx: &ToolContext, args: &Value) -> WorkspaceResult<Value> {
             &now_timestamp(),
             state_revision,
         );
-        storage::write_index(&history_dir, &storage::rebuild_index(&locked_report))?;
-        storage::write_manifest(&history_dir, &manifest)?;
-        storage::write_state(&history_dir, &state)?;
+        storage::write_index(
+            ctx.workspace.root(),
+            &history_dir,
+            &storage::rebuild_index(&locked_report),
+        )?;
+        storage::write_manifest(ctx.workspace.root(), &history_dir, &manifest)?;
+        storage::write_state(ctx.workspace.root(), &history_dir, &state)?;
         true
     } else {
         false

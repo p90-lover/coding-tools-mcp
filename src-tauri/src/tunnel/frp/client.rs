@@ -8,7 +8,7 @@ use tokio::process::{Child, Command};
 use tokio::time::{sleep, Duration};
 
 use crate::error::{AppError, AppResult};
-use crate::platform::platform;
+use crate::platform::{move_to_app_trash, platform};
 use crate::tunnel::cloudflare::stop_child;
 use crate::tunnel::supervisor::log_dir_for_profile;
 use crate::tunnel::TunnelServiceKind;
@@ -89,12 +89,14 @@ pub(crate) fn managed_frpc_config_matches(workspace_id: &str, expected: &str) ->
 /// 扩展到应用进程之间，并在持有者崩溃后允许新实例回收过期锁。
 pub(crate) struct FrpcOperationLock {
     path: PathBuf,
-    _file: std::fs::File,
+    file: Option<std::fs::File>,
 }
 
 impl Drop for FrpcOperationLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Windows cannot rename the lock while our own handle is open.
+        drop(self.file.take());
+        let _ = move_to_app_trash(&self.path, "frpc-locks");
     }
 }
 
@@ -115,11 +117,14 @@ pub(crate) async fn acquire_frpc_operation_lock(
         {
             Ok(mut file) => {
                 writeln!(file, "{}", std::process::id())?;
-                return Ok(FrpcOperationLock { path, _file: file });
+                return Ok(FrpcOperationLock {
+                    path,
+                    file: Some(file),
+                });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if stale_lock(&path) {
-                    let _ = std::fs::remove_file(&path);
+                    move_to_app_trash(&path, "frpc-locks")?;
                     continue;
                 }
                 if started.elapsed() >= FRPC_OPERATION_LOCK_TIMEOUT {
@@ -185,7 +190,7 @@ fn write_managed_frpc_pid(workspace_id: &str, pid: u32, image_path: &Path) -> Ap
 
 pub(crate) fn clear_managed_frpc_pid(workspace_id: &str) {
     if let Ok(path) = managed_frpc_pid_path(workspace_id) {
-        let _ = std::fs::remove_file(path);
+        let _ = move_to_app_trash(&path, "frpc-pids");
     }
 }
 

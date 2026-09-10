@@ -47,8 +47,10 @@ pub(crate) mod windows;
 
 mod open;
 mod paths;
+mod trash;
 
 pub use open::{is_allowed_url, open_path_in_file_manager, open_url};
+pub use trash::move_to_app_trash;
 
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPlatform;

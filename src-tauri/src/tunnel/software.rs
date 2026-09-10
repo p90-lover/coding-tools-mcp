@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
-use crate::platform::platform;
+use crate::platform::{move_to_app_trash, platform};
 use crate::tunnel::cloudflare::resolve_cloudflared;
 use crate::tunnel::cloudflare::{cached_cloudflared_path, download_cloudflared_to_cache};
 use crate::tunnel::frp::{cached_frpc_path, download_frpc_to_cache, resolve_frpc};
@@ -100,7 +100,7 @@ pub fn uninstall_software(kind: &str) -> AppResult<SoftwareStatus> {
     };
 
     if path.is_file() {
-        std::fs::remove_file(&path)?;
+        move_to_app_trash(&path, "software")?;
     } else {
         return Err(AppError::Message(
             "该软件不是由本应用安装的，无法在此卸载。".into(),
@@ -111,7 +111,9 @@ pub fn uninstall_software(kind: &str) -> AppResult<SoftwareStatus> {
     if kind == "frpc" {
         if let Ok(dir) = platform().app_config_dir() {
             let downloads = dir.join("bin").join("downloads");
-            let _ = std::fs::remove_dir_all(&downloads);
+            if downloads.exists() {
+                move_to_app_trash(&downloads, "software-downloads")?;
+            }
         }
     }
 
