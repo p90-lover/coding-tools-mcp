@@ -1,0 +1,39 @@
+name: Sandbox audit source
+on:
+  push:
+    branches: [fix/sandbox-audit-20260910]
+    paths: ['.github/workflows/sandbox-audit-source.yml']
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Archive exact source without starting an agent
+        shell: bash
+        working-directory: aiTemp/checkout
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/audit-source
+          git archive HEAD --format=zip --output=aiTemp/audit-source/source.zip
+          git rev-parse HEAD > aiTemp/audit-source/commit.txt
+          git ls-tree -r HEAD > aiTemp/audit-source/tree.txt
+          if test -x .mcp-probe-kit/bin/probe; then
+            printf '{"project_root":"%s"}' "$PWD" | timeout 20s .mcp-probe-kit/bin/probe exec resume_plan --stdin > aiTemp/audit-source/resume.json 2>&1 || true
+          else
+            printf 'Pinned launcher absent; direct source audit, no model or unpinned install.\n' > aiTemp/audit-source/resume.txt
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-audit-source-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/audit-source/*
+          retention-days: 14
+          if-no-files-found: error
