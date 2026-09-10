@@ -44,6 +44,46 @@ fn approved_storage_root(
     Ok(root)
 }
 
+fn ensure_internal_directory(
+    storage_root: &std::path::Path,
+    directory: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    let canonical_root = storage_root.canonicalize()?;
+    let relative = directory.strip_prefix(storage_root).map_err(|_| {
+        std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "internal directory escaped storage root",
+        )
+    })?;
+    let mut current = storage_root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(std::io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "internal directory contains a symbolic link/reparse file or non-directory",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                std::fs::create_dir(&current)?;
+            }
+            Err(error) => return Err(error),
+        }
+        let canonical = current.canonicalize()?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "internal directory resolves outside the approved storage root",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn move_to_trash(
     storage_root: impl AsRef<std::path::Path>,
     target: impl AsRef<std::path::Path>,
@@ -87,7 +127,7 @@ fn move_to_trash(
             "invalid Trash destination",
         )
     })?;
-    std::fs::create_dir_all(parent)?;
+    ensure_internal_directory(storage_root, parent)?;
     std::fs::rename(target, &destination)?;
     Ok(destination)
 }
@@ -523,6 +563,16 @@ pub(crate) fn commit_staged_bytes(
             ws.resolve_for_write(rel)?
         };
         let path = resolved.path.clone();
+        if content.is_some() {
+            if let Ok(metadata) = fs::symlink_metadata(&path) {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(patch_failed(format!(
+                        "Refusing to replace a non-regular file or directory: {}",
+                        resolved.display
+                    )));
+                }
+            }
+        }
         backups.insert(
             path.clone(),
             if path.exists() && path.is_file() {
@@ -532,10 +582,13 @@ pub(crate) fn commit_staged_bytes(
             },
         );
         if let Some(bytes) = content {
+            let storage_root = approved_storage_root(ws, &resolved.display, &path)?;
             if let Some(parent) = path.parent() {
+                // User targets have already passed workspace path validation; creating
+                // ordinary target parents remains allowed. Internal control paths below
+                // get the stricter canonical ancestry check.
                 fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
             }
-            let storage_root = approved_storage_root(ws, &resolved.display, &path)?;
             let relative = path.strip_prefix(&storage_root).map_err(|_| {
                 patch_failed("Refusing to stage a path outside its approved storage root")
             })?;
@@ -545,7 +598,8 @@ pub(crate) fn commit_staged_bytes(
                 .join(&transaction_id);
             let temp = staging_root.join(relative);
             if let Some(parent) = temp.parent() {
-                fs::create_dir_all(parent).map_err(|err| patch_failed(err.to_string()))?;
+                ensure_internal_directory(&storage_root, parent)
+                    .map_err(|err| patch_failed(format!("Unsafe staging directory: {err}")))?;
             }
             staging_roots.insert(staging_root.clone(), storage_root.clone());
             if let Err(err) = fs::write(&temp, bytes) {
