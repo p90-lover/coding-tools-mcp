@@ -1,0 +1,61 @@
+name: Integration stale response red gate
+on:
+  push:
+    branches: [fix/sandbox-audit-20260910]
+    paths: ['.github/workflows/integration-race-red.yml','aiTemp/sandbox-audit/integration-race/**','aiTemp/sandbox-audit/integration_race_test.py']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  red:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Run actual state store against deferred Tauri IPC
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          npm ci >/dev/null
+          python -m pip install -q playwright==1.57.0
+          node node_modules/vite/bin/vite.js --config aiTemp/sandbox-audit/integration-race/vite.config.mjs > aiTemp/evidence/vite.txt 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          python - <<'PY'
+          import time,urllib.request
+          for _ in range(60):
+              try:
+                  if urllib.request.urlopen('http://127.0.0.1:1431',timeout=2).status==200: break
+              except OSError: time.sleep(.2)
+          else: raise SystemExit('Vite did not become ready')
+          PY
+          set +e
+          python aiTemp/sandbox-audit/integration_race_test.py > aiTemp/evidence/integration-race-red.txt 2>&1
+          code=$?
+          set -e
+          cat aiTemp/evidence/integration-race-red.txt
+          test "$code" -ne 0
+          grep -F 'STALE_INTEGRATION_RESPONSE' aiTemp/evidence/integration-race-red.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: integration-race-red-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/*
+          retention-days: 14
+          if-no-files-found: error
