@@ -1,0 +1,58 @@
+name: Main preservation callback diagnosis
+on:
+  push:
+    branches: [fix/main-preservation-0.4.3-rc.4]
+    paths: ['.github/workflows/main-preservation-browser-probe.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      SOURCE: 7cf7b375808ec1f727bd38490a6201e31e1a061f
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - name: Inspect existing failed browser path, without changing application code
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/browser-fixture aiTemp/evidence
+          gh run download 34453654250 --repo "$GITHUB_REPOSITORY" --name oauth-popup-browser-fixture-34453654250 --dir aiTemp/browser-fixture
+          python -m pip install playwright==1.57.0
+          python - <<'PY' 2>&1 | tee aiTemp/evidence/browser-diagnostic.txt
+          from pathlib import Path
+          import traceback
+          source=Path('aiTemp/oauth-popup/browser_test.py').read_text()
+          source=source.replace("args=['--no-sandbox']", "args=['--no-sandbox','--proxy-server=http://127.0.0.1:9']")
+          source=source.replace("context=browser.new_context();calls=[];errors=[]", "context=browser.new_context(service_workers='block');calls=[];errors=[];context.on('requestfailed',lambda r:print('REQUEST_FAILED',r.method,r.url,r.failure,flush=True))")
+          source=source.replace("request=route.request;parts=urlsplit(request.url)", "request=route.request;parts=urlsplit(request.url);print('INTERCEPTED',case,request.method,request.url,flush=True)")
+          source=source.replace("expect(popup.get_by_text('CALLBACK_REACHED',exact=True)).to_be_visible()", "popup.wait_for_timeout(1000);print('CALLBACK_DIAGNOSTIC',case,popup.url,calls,errors,flush=True);expect(popup.get_by_text('CALLBACK_REACHED',exact=True)).to_be_visible()")
+          namespace={'__name__':'__main__'}
+          try:
+              exec(compile(source,'recorded-browser-diagnostic','exec'),namespace)
+          except Exception:
+              traceback.print_exc()
+              raise
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: main-preservation-browser-diagnosis-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
