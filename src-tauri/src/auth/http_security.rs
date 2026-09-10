@@ -38,6 +38,29 @@ impl HttpSecurity {
         }
     }
     fn allowed_origin(&self, origin: &str) -> bool {
+        self.allowed_origin_for_host(origin, None)
+    }
+
+    fn allowed_origin_for_host(&self, origin: &str, host: Option<&str>) -> bool {
+        // ChatGPT opens /oauth/authorize from its own web origin.
+        if matches!(
+            origin,
+            "https://chatgpt.com" | "https://chat.openai.com" | "https://www.chatgpt.com"
+        ) {
+            return true;
+        }
+        // Accept the Host we actually received so quick-tunnel hostname rotations
+        // do not reject same-origin form posts while TRUSTED_ORIGINS catches up.
+        if let Some(host) = host {
+            let host = host.split(',').next().unwrap_or(host).trim();
+            if !host.is_empty() {
+                let https = format!("https://{host}");
+                let http = format!("http://{host}");
+                if origin == https || origin == http {
+                    return true;
+                }
+            }
+        }
         [
             format!("http://127.0.0.1:{}", self.port),
             format!("http://localhost:{}", self.port),
@@ -112,12 +135,16 @@ pub async fn guard(State(security): State<HttpSecurity>, request: Request, next:
                 .into_response(),
         );
     };
+    let host = request
+        .headers()
+        .get("host")
+        .and_then(|value| value.to_str().ok());
     let origins = request.headers().get_all("origin");
     if origins.iter().count() > 1
         || origins.iter().any(|value| {
             !value
                 .to_str()
-                .is_ok_and(|value| security.allowed_origin(value))
+                .is_ok_and(|value| security.allowed_origin_for_host(value, host))
         })
     {
         return secure_response(
@@ -160,6 +187,11 @@ mod tests {
             2,
         );
         assert!(guard.allowed_origin("https://trusted.example"));
+        assert!(guard.allowed_origin("https://chatgpt.com"));
+        assert!(guard.allowed_origin_for_host(
+            "https://bringing-flower-james-five.trycloudflare.com",
+            Some("bringing-flower-james-five.trycloudflare.com"),
+        ));
         assert!(!guard.allowed_origin("https://trusted.example.attacker.invalid"));
         assert!(!guard.allowed_origin("null"));
         let first = guard.slots.clone().try_acquire_owned().unwrap();
