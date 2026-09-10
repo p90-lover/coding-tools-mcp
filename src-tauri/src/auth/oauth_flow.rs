@@ -323,7 +323,10 @@ pub fn authorize_get(
         return html_error("Authorization unavailable", StatusCode::SERVICE_UNAVAILABLE);
     };
     response.headers_mut().insert("set-cookie", cookie);
-    response
+    let Ok(callback) = url::Url::parse(&params.redirect_uri) else {
+        return html_error("Invalid callback URL", StatusCode::BAD_REQUEST);
+    };
+    super::http_security::with_oauth_form_redirect(response, &callback)
 }
 
 fn consent_cookie_name(oauth: &OAuthRuntime) -> String {
@@ -957,7 +960,9 @@ mod release_hardening_checks {
         ));
         assert!(oauth.redirect_uri_allowed("https://chatgpt.com/connector_platform/oauth/callback"));
         assert!(oauth.redirect_uri_allowed("https://chatgpt.com/connector/oauth/s3c1Lza4oLC"));
-        assert!(oauth.redirect_uri_allowed("https://chatgpt.com/oauth/callback/connector/oauth/z3x1Lza4sDLC"));
+        assert!(oauth.redirect_uri_allowed(
+            "https://chatgpt.com/oauth/callback/connector/oauth/z3x1Lza4sDLC"
+        ));
         assert!(!oauth.redirect_uri_allowed("https://chatgpt.com/connector/oauth/evil/extra"));
     }
 

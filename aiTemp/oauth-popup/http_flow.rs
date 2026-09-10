@@ -99,6 +99,25 @@ async fn run_flow(root: PathBuf) {
         .unwrap();
     assert_eq!(metadata["issuer"], "https://old-popup.example");
 
+    let mut bad_query = query;
+    bad_query
+        .iter_mut()
+        .find(|(key, _)| *key == "redirect_uri")
+        .unwrap()
+        .1 = "https://attacker.invalid/callback";
+    let rejected = client
+        .get(format!("{local}/oauth/authorize"))
+        .query(&bad_query)
+        .header("Origin", "https://chatgpt.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status().as_u16(), 400);
+    assert!(!rejected.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .contains("attacker.invalid"));
+    let mut browser_snapshot = Value::Null;
     for round in 0..2 {
         let page = client
             .get(format!("{local}/oauth/authorize"))
@@ -113,6 +132,19 @@ async fn run_flow(root: PathBuf) {
             "OAuth entry was rejected before consent"
         );
         assert_eq!(page.headers()["cache-control"], "no-store");
+        let csp = page.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            csp.split(';')
+                .map(str::trim)
+                .find(|value| value.starts_with("form-action ")),
+            Some("form-action 'self' https://chatgpt.com"),
+            "CSP_MUST_ALLOW_VALIDATED_CALLBACK_ONLY"
+        );
+        assert!(csp.contains("default-src 'none'") && csp.contains("frame-ancestors 'none'"));
+        let browser_cookie = page.headers()["set-cookie"].to_str().unwrap().to_owned();
         let cookie = page.headers()["set-cookie"]
             .to_str()
             .unwrap()
@@ -177,6 +209,14 @@ async fn run_flow(root: PathBuf) {
         assert_eq!(url.path(), "/connector/oauth/popup_fixture_id");
         let returned: HashMap<String, String> = url.query_pairs().into_owned().collect();
         assert_eq!(returned["state"], state_value);
+        let mut authorize_url =
+            url::Url::parse("https://old-popup.example/oauth/authorize").unwrap();
+        authorize_url.query_pairs_mut().extend_pairs(query);
+        browser_snapshot = json!({"source":std::env::var("SOURCE").unwrap_or_else(|_| "local-test".into()),
+            "authorize_url":authorize_url.as_str(),"html":html,"csp":csp,"set_cookie":browser_cookie,
+            "callback_url":format!("{callback}?code=synthetic_browser_fixture&state={state_value}"),
+            "redirect_status":redirect.status().as_u16(),"password":"fixture-password-not-real",
+            "transport":"recorded production HTTP responses; the browser replay does not contact ChatGPT"});
         let token_form = [
             ("grant_type", "authorization_code"),
             ("client_id", client_id),
@@ -282,6 +322,13 @@ async fn run_flow(root: PathBuf) {
                 && !log.contains("fixture-password-not-real")
         );
     }
+    assert!(!browser_snapshot.is_null());
+    std::fs::create_dir_all("aiTemp/oauth-popup").unwrap();
+    std::fs::write(
+        "aiTemp/oauth-popup/browser-fixture.json",
+        serde_json::to_vec_pretty(&browser_snapshot).unwrap(),
+    )
+    .unwrap();
     shutdown_tx.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(4), worker)
         .await

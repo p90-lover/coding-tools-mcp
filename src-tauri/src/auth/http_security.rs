@@ -85,6 +85,27 @@ fn budget(window: &Mutex<(Instant, u32)>, limit: u32) -> bool {
     true
 }
 
+// A response-only marker cannot be supplied by a request header. Only the OAuth
+// handler calls this after validating the complete redirect URI against its policy.
+#[derive(Clone)]
+struct OAuthFormRedirect(HeaderValue);
+
+pub(super) fn with_oauth_form_redirect(mut response: Response, callback: &url::Url) -> Response {
+    if matches!(callback.scheme(), "https" | "http")
+        && callback.host().is_some()
+        && callback.username().is_empty()
+        && callback.password().is_none()
+        && callback.fragment().is_none()
+    {
+        // Serializing only the origin excludes query data, wildcards and header injection.
+        let policy = format!("default-src 'none'; style-src 'unsafe-inline'; form-action 'self' {}; frame-ancestors 'none'; base-uri 'none'", callback.origin().ascii_serialization());
+        if let Ok(policy) = HeaderValue::from_str(&policy) {
+            response.extensions_mut().insert(OAuthFormRedirect(policy));
+        }
+    }
+    secure_response(response)
+}
+
 pub fn secure_response(mut response: Response) -> Response {
     for (name, value) in [
         ("cache-control", "no-store"), ("pragma", "no-cache"),
@@ -92,6 +113,17 @@ pub fn secure_response(mut response: Response) -> Response {
         ("referrer-policy", "no-referrer"),
         ("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
     ] { response.headers_mut().insert(name, HeaderValue::from_static(value)); }
+    // The outer HTTP guard reapplies security headers; retain the trusted OAuth
+    // form target without accepting a caller-provided CSP or widening other pages.
+    if let Some(policy) = response
+        .extensions()
+        .get::<OAuthFormRedirect>()
+        .map(|value| value.0.clone())
+    {
+        response
+            .headers_mut()
+            .insert("content-security-policy", policy);
+    }
     response
 }
 
