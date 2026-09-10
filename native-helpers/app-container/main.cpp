@@ -224,7 +224,27 @@ int wmain(int argc, wchar_t** argv) {
         startup.StartupInfo.hStdInput = null_input.value; startup.StartupInfo.hStdOutput = out_write.value; startup.StartupInfo.hStdError = err_write.value;
         startup.lpAttributeList = attributes.list;
         std::wstring command = quote(executable.wstring());
-        for (int i = 7; i < argc; ++i) { command += L" "; command += quote(argv[i]); }
+        // cmd_uses_command_string_not_crt_argv: quoted /c switches misparse even
+        // echo. Only the real system interpreter receives explicit cmd grammar;
+        // other EXEs retain literal argv. Native isolation is unchanged.
+        if (fs::equivalent(executable, system / L"cmd.exe")) {
+            const bool long_form = argc == 11 && _wcsicmp(argv[7], L"/d") == 0
+                && _wcsicmp(argv[8], L"/s") == 0 && _wcsicmp(argv[9], L"/c") == 0;
+            const bool short_form = argc == 10 && _wcsicmp(argv[7], L"/d") == 0
+                && _wcsicmp(argv[8], L"/c") == 0;
+            require(long_form || short_form, "cmd requires /d [/s] /c and one command string; no interactive fallback");
+            const std::wstring script = argv[argc - 1];
+            require(!script.empty() && script.find_first_of(std::wstring{wchar_t{13},wchar_t{10}}) == std::wstring::npos,
+                "cmd command must be a nonempty single line");
+            // /s strips this outer pair. Inner quotes are cmd syntax, not CRT
+            // backslash-quote escapes. AutoRun and delayed expansion stay off.
+            command += L" /d /v:off /s /c ";
+            command.push_back(wchar_t{34});
+            command += script;
+            command.push_back(wchar_t{34});
+        } else {
+            for (int i = 7; i < argc; ++i) { command += L" "; command += quote(argv[i]); }
+        }
         require(command.size() < 24000, "Command line exceeds limit");
         const fs::path windows = system.parent_path();
         std::vector<std::wstring> variables = {

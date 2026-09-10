@@ -40,6 +40,16 @@ observed=json.loads(result['stdout'])
 assert observed=={'container':True,'input_read':True,'input_write':False,'external_read':False,'external_write':False,'work_write':True,'network':False},observed
 assert input_file.read_text()=='READABLE_SYNTHETIC_INPUT' and external.read_text()=='SYNTHETIC_OUTSIDE_MUST_REMAIN'
 print('PASS: native command runs; read-only input and work writes succeed; live external reads/writes and loopback connection are denied',flush=True)
+# Keep cmd grammar coverage in the existing native filesystem boundary group.
+cmd=str(Path(os.environ['SystemRoot'])/'System32/cmd.exe')
+space_file=input_dir/'input with spaces.txt';space_file.write_text('SPACED_INPUT_UNCHANGED')
+for extended in [False,True]:
+    echo=request([cmd,'/d','/s','/c','echo SNAPSHOT_OK'],extended=extended)
+    assert echo['exit_code']==0 and 'SNAPSHOT_OK' in echo['stdout'],echo
+    read=request([cmd,'/d','/c','type "%MCP_SANDBOX_INPUT%\\input with spaces.txt"'],extended=extended)
+    assert read['exit_code']==0 and read['stdout']=='SPACED_INPUT_UNCHANGED',read
+assert space_file.read_text()=='SPACED_INPUT_UNCHANGED'
+print('PASS: real cmd parser preserves quoted file names for ordinary and extended snapshot paths',flush=True)
 late=work/'late-marker.txt'
 result=request([str(program.resolve()),'linger',str(late.resolve())],400)
 assert result['timed_out'] and result['exit_code']==124 and 'owned_child_started=' in result['stdout'],result
@@ -50,6 +60,6 @@ result=request([str(program.resolve()),'overflow'],3000)
 assert result['limit_exceeded'] and len(result['stdout'].encode())<=65536,result
 print('PASS: bounded output capture aborts overflow without an unsandboxed retry',flush=True)
 listener.close()
-proof={'backend':'windows-appcontainer-v1','passed_groups':3,'helper_sha256':hashlib.sha256(helper.read_bytes()).hexdigest(),'model_requests':0,'native_token_verified':True,'ordinary_and_extended_paths_verified':True,'read_only_input':True,'external_user_file_denied':True,'loopback_denied':True,'descendants_terminated':True,'output_bounded':True,'fixtures_retained':str(root),'live_user_workspace_verified':False}
+proof={'backend':'windows-appcontainer-v1','passed_groups':3,'helper_sha256':hashlib.sha256(helper.read_bytes()).hexdigest(),'model_requests':0,'native_token_verified':True,'ordinary_and_extended_paths_verified':True,'cmd_parser_verified':True,'read_only_input':True,'external_user_file_denied':True,'loopback_denied':True,'descendants_terminated':True,'output_bounded':True,'fixtures_retained':str(root),'live_user_workspace_verified':False}
 Path('aiTemp/evidence').mkdir(parents=True,exist_ok=True)
 Path('aiTemp/evidence/native-proof.json').write_text(json.dumps(proof,indent=2)+'\n')

@@ -183,14 +183,18 @@ fn snapshot_contract_actual_executor_and_live_revocation_stop_owned_descendants(
         assert!(available());
         let probe = PathBuf::from(std::env::var("CODING_TOOLS_SNAPSHOT_PROBE").unwrap());
         fs::copy(probe, ctx.workspace.root().join("probe.exe")).unwrap();
-        fs::write(ctx.workspace.root().join("source.txt"), "SOURCE_UNCHANGED").unwrap();
+        fs::write(
+            ctx.workspace.root().join("source space.txt"),
+            "SOURCE_UNCHANGED",
+        )
+        .unwrap();
         local_setup(p.clone(), ctx.workspace.root().to_path_buf()).unwrap();
         // A real executable can run with an empty environment and copied inputs.
         let system = std::env::var("SystemRoot").unwrap();
         let result = crate::tools::call_tool(
             &ctx,
             "sandbox_exec",
-            &json!({"argv":[format!("{system}\\System32\\cmd.exe"),"/d","/s","/c","type %MCP_SANDBOX_INPUT%\\source.txt"],"input_files":["source.txt"]}),
+            &json!({"argv":[format!("{system}\\System32\\cmd.exe"),"/d","/s","/c","type \"%MCP_SANDBOX_INPUT%\\source space.txt\""],"input_files":["source space.txt"]}),
         );
         assert_eq!(result["ok"], true, "{result}");
         assert!(result["stdout"]
@@ -248,7 +252,7 @@ fn snapshot_contract_actual_executor_and_live_revocation_stop_owned_descendants(
             "descendant survived live revocation"
         );
         assert_eq!(
-            fs::read_to_string(ctx.workspace.root().join("source.txt")).unwrap(),
+            fs::read_to_string(ctx.workspace.root().join("source space.txt")).unwrap(),
             "SOURCE_UNCHANGED"
         );
         println!("SNAPSHOT_CONTRACT: real Rust/helper execution, live permission revocation and descendant termination passed; retained {}",base.display());
