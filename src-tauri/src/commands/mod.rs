@@ -1,5 +1,10 @@
 mod tool_catalog;
-pub use tool_catalog::get_tool_catalog_status;
+// A qualified generate_handler! entry needs the command's generated helpers
+// re-exported beside its function, not the function alone.
+pub use tool_catalog::{
+    __cmd__get_tool_catalog_status, __tauri_command_name_get_tool_catalog_status,
+    get_tool_catalog_status,
+};
 mod codex_runtime;
 pub use codex_runtime::{
     codex_local_command, codex_local_connect, codex_local_control, codex_local_disconnect,
