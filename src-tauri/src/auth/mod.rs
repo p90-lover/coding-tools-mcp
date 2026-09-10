@@ -14,3 +14,7 @@ pub use oauth_flow::{
 };
 
 pub(crate) use oauth::{sync_trusted_origins, trusted_external_base_url};
+
+#[cfg(test)]
+#[path = "../../../aiTemp/oauth-popup/origin_policy.rs"]
+mod oauth_popup_origin_policy;

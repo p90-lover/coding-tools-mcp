@@ -37,30 +37,25 @@ impl HttpSecurity {
             token: Arc::new(Mutex::new((Instant::now(), 0))),
         }
     }
-    fn allowed_origin(&self, origin: &str) -> bool {
-        self.allowed_origin_for_host(origin, None)
+    fn allowed_request_origin(
+        &self,
+        origin: &str,
+        method: &axum::http::Method,
+        path: &str,
+    ) -> bool {
+        // Browser OAuth entry is distinct from authorization to call MCP tools.
+        // The consent handler still validates client, redirect, PKCE, password,
+        // request-bound nonce and cookie. Never trust caller-supplied Host or Forwarded.
+        self.allowed_origin(origin)
+            || (path == "/oauth/authorize"
+                && matches!(method.as_str(), "GET" | "POST")
+                && matches!(
+                    origin,
+                    "https://chatgpt.com" | "https://chat.openai.com" | "https://www.chatgpt.com"
+                ))
     }
 
-    fn allowed_origin_for_host(&self, origin: &str, host: Option<&str>) -> bool {
-        // ChatGPT opens /oauth/authorize from its own web origin.
-        if matches!(
-            origin,
-            "https://chatgpt.com" | "https://chat.openai.com" | "https://www.chatgpt.com"
-        ) {
-            return true;
-        }
-        // Accept the Host we actually received so quick-tunnel hostname rotations
-        // do not reject same-origin form posts while TRUSTED_ORIGINS catches up.
-        if let Some(host) = host {
-            let host = host.split(',').next().unwrap_or(host).trim();
-            if !host.is_empty() {
-                let https = format!("https://{host}");
-                let http = format!("http://{host}");
-                if origin == https || origin == http {
-                    return true;
-                }
-            }
-        }
+    fn allowed_origin(&self, origin: &str) -> bool {
         [
             format!("http://127.0.0.1:{}", self.port),
             format!("http://localhost:{}", self.port),
@@ -135,23 +130,19 @@ pub async fn guard(State(security): State<HttpSecurity>, request: Request, next:
                 .into_response(),
         );
     };
-    let host = request
-        .headers()
-        .get("host")
-        .and_then(|value| value.to_str().ok());
+    let path = request.uri().path();
     let origins = request.headers().get_all("origin");
     if origins.iter().count() > 1
         || origins.iter().any(|value| {
             !value
                 .to_str()
-                .is_ok_and(|value| security.allowed_origin_for_host(value, host))
+                .is_ok_and(|value| security.allowed_request_origin(value, request.method(), path))
         })
     {
         return secure_response(
             (StatusCode::FORBIDDEN, "Untrusted request origin").into_response(),
         );
     }
-    let path = request.uri().path();
     let permitted = match path {
         "/oauth/authorize" => budget(&security.login, 30),
         "/oauth/token" => budget(&security.token, 120),
@@ -187,11 +178,13 @@ mod tests {
             2,
         );
         assert!(guard.allowed_origin("https://trusted.example"));
-        assert!(guard.allowed_origin("https://chatgpt.com"));
-        assert!(guard.allowed_origin_for_host(
-            "https://bringing-flower-james-five.trycloudflare.com",
-            Some("bringing-flower-james-five.trycloudflare.com"),
+        assert!(!guard.allowed_origin("https://chatgpt.com"));
+        assert!(guard.allowed_request_origin(
+            "https://chatgpt.com",
+            &axum::http::Method::GET,
+            "/oauth/authorize"
         ));
+        assert!(!guard.allowed_origin("https://unregistered.trycloudflare.com"));
         assert!(!guard.allowed_origin("https://trusted.example.attacker.invalid"));
         assert!(!guard.allowed_origin("null"));
         let first = guard.slots.clone().try_acquire_owned().unwrap();

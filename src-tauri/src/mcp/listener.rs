@@ -611,3 +611,7 @@ mod live_permission_protocol_test {
         println!("PASS: same HTTP listener + same bearer token + unchanged tool schemas; live read-only deny then workspace-write allow; no restart or relink");
     }
 }
+
+#[cfg(test)]
+#[path = "../../../aiTemp/oauth-popup/http_flow.rs"]
+mod oauth_popup_http_flow;
