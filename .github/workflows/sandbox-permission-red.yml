@@ -1,0 +1,51 @@
+name: Reproduce unavailable sandbox entry
+on:
+  push:
+    branches: [fix/sandbox-permissions-0.4.4-rc.1]
+    paths: [.github/workflows/sandbox-permission-red.yml]
+permissions:
+  contents: read
+jobs:
+  red:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - name: Call the exact released setup entry in a small dependency-only harness
+        working-directory: aiTemp/source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/red/src aiTemp/evidence
+          python - <<'PY'
+          from pathlib import Path
+          root=Path('aiTemp/red')
+          (root/'Cargo.toml').write_text('[package]\nname="sandbox-release-entry"\nversion="0.1.0"\nedition="2021"\n[dependencies]\nserde={version="1",features=["derive"]}\nserde_json="1"\n')
+          source=Path('src-tauri/src/tools/native_sandbox.rs').resolve().as_posix()
+          text='''mod error { #[derive(Debug)] pub enum AppError{Message(String)} impl std::fmt::Display for AppError{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{match self{Self::Message(s)=>write!(f,"{s}")}}} pub type AppResult<T>=Result<T,AppError>; }
+          mod workspace {pub struct WorkspaceProfile;}
+          mod data {pub struct Data{pub sandbox_permissions:Vec<crate::native::SandboxGrant>} pub struct DataStore; impl DataStore{pub fn update_file<R>(f:impl FnOnce(&mut Data)->crate::error::AppResult<R>)->crate::error::AppResult<R>{f(&mut Data{sandbox_permissions:vec![]})}}}
+          mod tools {pub struct Auth{pub auth_type:String} pub struct ToolContext{pub auth:Auth,pub workspace:workspace::Workspace} pub mod workspace{pub struct Workspace;impl Workspace{pub fn root(&self)->&std::path::Path{std::path::Path::new(".")}} pub fn tool_ok(v:serde_json::Value)->serde_json::Value{v} pub enum WorkspaceError{Tool{code:&'static str,message:String,category:&'static str,retryable:bool}}}}
+          #[path="NATIVE_SOURCE"] mod native;
+          #[test] fn requested_sandbox_is_not_implemented(){assert!(native::local_setup(workspace::WorkspaceProfile,std::path::PathBuf::from(".")).is_ok(),"SANDBOX_STILL_WITHHELD");}
+          '''.replace('NATIVE_SOURCE',source)
+          (root/'src/lib.rs').write_text(text)
+          PY
+          set +e
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/aiTemp/target" cargo test --manifest-path aiTemp/red/Cargo.toml requested_sandbox_is_not_implemented > aiTemp/evidence/red.txt 2>&1
+          code=$?
+          set -e
+          test "$code" -eq 101
+          grep -F SANDBOX_STILL_WITHHELD aiTemp/evidence/red.txt
+          echo 'Reproduced actual released entry refusal. Dependency harness only; not an isolation or integration test.' >> aiTemp/evidence/red.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: sandbox-entry-red-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
