@@ -426,7 +426,6 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
     "get_plan",
     "update_plan",
     "sandbox_status",
-    "sandbox_exec",
     "computer_status",
     "computer_route",
     "computer_snapshot",
@@ -533,6 +532,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
 ];
 
 pub const MUTATING_TOOLS: &[&str] = &[
+    "sandbox_exec",
     "workflow_update",
     "codex_command_exec",
     "codex_agent_control",
@@ -564,7 +564,6 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "get_plan",
     "update_plan",
     "sandbox_status",
-    "sandbox_exec",
     "computer_status",
     "computer_route",
     "computer_snapshot",

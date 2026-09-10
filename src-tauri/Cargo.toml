@@ -1,9 +1,12 @@
 [package]
 name = "coding-tools-mcp-desktop"
-version = "0.4.3-rc.5"
+version = "0.4.4-rc.1"
 description = "Coding Tools MCP desktop client"
 authors = ["Coding Tools MCP Contributors"]
 edition = "2021"
+
+[features]
+native-snapshot = []
 
 [lib]
 name = "coding_tools_mcp_desktop_lib"
@@ -56,6 +59,7 @@ windows = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_JobObjects",
     "Win32_UI_Accessibility",

@@ -63,6 +63,7 @@ pub fn fence_entire_call(name: &str) -> bool {
         && !matches!(
             name,
             "codex_agent_control"
+                | "sandbox_exec"
                 | "codex_command_exec"
                 | "exec_command"
                 | "exec_health_check"
@@ -110,6 +111,9 @@ pub fn commit_updates(
         ))?);
     }
     persist()?;
+    if !changes.is_empty() {
+        crate::tools::native_sandbox::cancel_active();
+    }
     for ((context, before, after), guard) in changes.iter().zip(guards.iter_mut()) {
         **guard = Some(after.clone());
         context.approvals.revoke_all();

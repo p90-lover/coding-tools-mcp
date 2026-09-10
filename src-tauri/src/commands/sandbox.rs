@@ -1,4 +1,4 @@
-//! Local setup of OS users/ACLs/firewall. Never expose preparation through MCP.
+//! Visible local consent for the included offline snapshot helper. Never exposed through MCP.
 use crate::{
     app_state::AppState,
     error::{AppError, AppResult},
@@ -51,7 +51,7 @@ pub fn sandbox_local_status(
 ) -> AppResult<Value> {
     local(&window, false)?;
     let (_, root) = scope(&state, &workspace_id)?;
-    native_sandbox::local_status(&root)
+    native_sandbox::local_status_for(&workspace_id, &root)
 }
 #[tauri::command]
 pub fn sandbox_local_disable(window: WebviewWindow, workspace_id: String) -> AppResult<()> {

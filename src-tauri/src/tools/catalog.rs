@@ -27,7 +27,7 @@ pub fn describe(profile: &str) -> Value {
         "catalog_sha256":format!("{:x}",Sha256::digest(&bytes)),
         "catalog_bytes":bytes.len(),
         "advertised_but_unavailable":tools.iter().filter_map(|t| t["name"].as_str())
-            .filter(|n| *n == "sandbox_exec").collect::<Vec<_>>(),
+            .filter(|n| *n == "sandbox_exec" && !super::native_sandbox::available()).collect::<Vec<_>>(),
         "client_loaded_tools":Value::Null,
         "client_registration_verified":false,
         "visibility_grants_execution":false,
@@ -56,7 +56,19 @@ mod tests {
         assert_eq!(full["advertised_count"], full["registered_count"]);
         assert_eq!(full["registered_count"], 70);
         assert_eq!(describe("core")["advertised_count"], 57);
-        assert_eq!(describe("read-only")["advertised_count"], 42);
+        assert_eq!(describe("read-only")["advertised_count"], 41);
+        assert!(!describe("read-only")["advertised_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n == "sandbox_exec"));
+        assert_eq!(
+            full["advertised_but_unavailable"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            super::native_sandbox::available()
+        );
         assert!(full["advertised_names"]
             .as_array()
             .unwrap()
