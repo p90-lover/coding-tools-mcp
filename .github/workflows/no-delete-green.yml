@@ -1,0 +1,113 @@
+name: No permanent delete green gate
+on:
+  push:
+    branches: [fix/sandbox-audit-20260910]
+    paths: ['.github/workflows/no-delete-green.yml', 'aiTemp/sandbox-audit/apply_no_delete.py']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: no-delete-green
+  cancel-in-progress: false
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Replace only red-proven permanent deletion sites
+        run: python aiTemp/sandbox-audit/apply_no_delete.py
+      - name: Commit without deleting any repository path
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python aiTemp/sandbox-audit/no_delete_source_check.py
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix: retire managed files to Trash and keep history temps in aiTemp'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          remote="$(git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" ls-remote origin refs/heads/fix/sandbox-audit-20260910 | cut -f1)"
+          test "$remote" = "$GITHUB_SHA"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/sandbox-audit-20260910
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/no-delete-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      CODING_TOOLS_COMMAND_NATIVE_SHA256: 444a3f0008050605cae73cd9b7a2dcac61294062dfaab56dd20430fd6498518b
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          path: aiTemp/checkout
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Static deletion invariant
+        run: python aiTemp/sandbox-audit/no_delete_source_check.py | tee aiTemp/no-delete-static.txt
+      - name: History and tunnel regression tests
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib 'tools::history' -- --test-threads=1 2>&1 | tee aiTemp/evidence/history.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib 'tunnel::frp' -- --test-threads=1 2>&1 | tee aiTemp/evidence/frp.txt
+          cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib 'tunnel::software' -- --test-threads=1 2>&1 | tee aiTemp/evidence/software.txt
+      - name: App build sanity
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2021 --check src-tauri/src/platform/trash.rs src-tauri/src/platform/mod.rs src-tauri/src/tunnel/software.rs src-tauri/src/tunnel/frp/client.rs src-tauri/src/tools/history/storage.rs src-tauri/src/tools/history/mod.rs
+          npm ci > aiTemp/evidence/npm.txt 2>&1
+          npm run check 2>&1 | tee aiTemp/evidence/frontend-check.txt
+          npm run build > aiTemp/evidence/frontend-build.txt 2>&1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: no-delete-green-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            aiTemp/checkout/aiTemp/evidence/*
+            aiTemp/checkout/aiTemp/no-delete-static.txt
+          retention-days: 14
+          if-no-files-found: warn
