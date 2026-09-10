@@ -62,12 +62,20 @@ jobs:
           assert s.count(marker)==1;s=s.replace(marker,replacement,1)
           marker="[('deny-write',inside,'write-denied'),('deny-read',outside,'outside-read-denied')]"
           assert s.count(marker)==1;s=s.replace(marker,"[('deny-write',inside,'write-denied'),('deny-read',outside,'outside-read-denied'),('deny-delete',inside,'delete-denied')]",1)
+          # cmd /C ver was a weak smoke test and its stdout is empty under this isolated token.
+          # The compiled probe's permitted read immediately above is the positive execution control.
+          smoke="command = request('exec', [os.environ['COMSPEC'], '/d', '/c', 'ver'])\nassert command['ok'] and 'Windows' in command['stdout'], command\n"
+          assert s.count(smoke)==1;s=s.replace(smoke,'')
           p.write_text(s)
           PY
       - name: Verify read scope write DELETE-access and real network isolation
         run: |
           set -euo pipefail
           python aiTemp/release-verification/monitor_sandbox_probe.py "$PWD/aiTemp/strict-helpers/coding-tools-codex-sandbox.exe" "$PWD/aiTemp/strict-isolation" 2>&1 | tee aiTemp/evidence/strict-boundary.txt
+          grep -F 'PASS: native network positive control succeeds; sandbox network is denied' aiTemp/evidence/strict-boundary.txt
+          grep -F 'delete-denied' aiTemp/evidence/strict-boundary.txt
+          grep -F 'write-denied' aiTemp/evidence/strict-boundary.txt
+          grep -F 'outside-read-denied' aiTemp/evidence/strict-boundary.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
