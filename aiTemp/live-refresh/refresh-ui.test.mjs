@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import ts from 'typescript';
+const text=fs.readFileSync('src/lib/workspace-refresh.ts','utf8');
+const code=ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
+const exports={};new Function('exports',code)(exports);
+test('live metadata refresh coalesces polling, invalidates stale reads and stops cleanly',async()=>{
+ const pending=[],applied=[],errors=[];
+ const c=exports.createWorkspaceRefresh(()=>new Promise((resolve,reject)=>pending.push({resolve,reject})),v=>applied.push(v),e=>errors.push(String(e)));
+ const first=c.run();assert.equal(pending.length,1);
+ await c.run(false);assert.equal(pending.length,1,'poll must not pile up requests');
+ await c.run(true);await c.run(true);assert.equal(pending.length,1);
+ pending[0].resolve('obsolete roots');await new Promise(r=>setImmediate(r));
+ assert.deepEqual(applied,[]);assert.equal(pending.length,2);
+ pending[1].resolve('approved roots');await first;assert.deepEqual(applied,['approved roots']);
+ const failed=c.run();pending[2].reject(Error('unavailable'));await failed;
+ assert.deepEqual(applied,['approved roots']);assert.equal(errors.length,1);
+ const stopping=c.run();c.stop();pending[3].resolve('late result');await stopping;
+ await c.run();assert.equal(pending.length,4);assert.deepEqual(applied,['approved roots']);
+ console.log('LIVE_REFRESH_UI: production coordinator; one inflight read, stale edits suppressed, last verified state retained, stop prevents late publication');
+});
