@@ -54,9 +54,9 @@ mod tests {
         assert_eq!(full, describe("advanced"));
         assert!(full["hidden_by_profile"].as_array().unwrap().is_empty());
         assert_eq!(full["advertised_count"], full["registered_count"]);
-        assert_eq!(full["registered_count"], 70);
-        assert_eq!(describe("core")["advertised_count"], 57);
-        assert_eq!(describe("read-only")["advertised_count"], 41);
+        assert_eq!(full["registered_count"], 71);
+        assert_eq!(describe("core")["advertised_count"], 58);
+        assert_eq!(describe("read-only")["advertised_count"], 42);
         assert!(!describe("read-only")["advertised_names"]
             .as_array()
             .unwrap()

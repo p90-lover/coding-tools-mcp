@@ -219,6 +219,19 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
 
     let ws = &ctx.workspace;
     let result = match name {
+        "mcp_operation_status" => ctx
+            .operations
+            .query(
+                &effective_args,
+                ctx.policy_revision,
+                &crate::tools::registry::exposed_tool_names(&ctx.tool_profile),
+            )
+            .map_err(|message| WorkspaceError::Tool {
+                code: "OPERATION_QUERY_REJECTED",
+                message,
+                category: "validation",
+                retryable: false,
+            }),
         "workflow_list" | "workflow_update" => {
             crate::tools::workflow::call(ctx, name, &effective_args)
         }

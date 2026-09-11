@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
+    ("mcp_operation_status", "Inspect MCP operation without retry", "Read this listener's bounded runtime-local operation receipts after HTTP timeout. Query an operation_id or original request_id, or omit both for recent records. include_result requires an exact operation_id. Never reruns work; unknown/expired/restarted records are NOT proof of nonexecution. Completed means RPC dispatch returned, not that an owned command/process exited. Shared workspace authentication still applies.", true, false, false),
     ("codex_command_exec", "Native command (no model)", "Run bounded argv using the separately approved native read-only command API. No thread or model turn. Requires local command consent; never falls back to unsandboxed execution.", false, true, true),
     ("workflow_list", "Read workspace workflow", "Read paged local board tasks for this listener's workspace, including human attestations and distinct MCP observations. No model calls.", true, false, false),
     ("workflow_update", "Update workspace workflow", "Create, move, edit, archive, restore or observe a task at an expected board revision. Cannot complete human review steps or access other workspaces; no model calls.", false, false, false),
@@ -357,6 +358,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
 
 /// old Python 版本默认提供的核心工具集。默认 MCP 只暴露这一组，保持 Agent 的工具面稳定。
 pub const CORE_TOOLS: &[&str] = &[
+    "mcp_operation_status",
     "codex_command_exec",
     "workflow_list",
     "workflow_update",
@@ -417,6 +419,7 @@ pub const CORE_TOOLS: &[&str] = &[
 ];
 
 pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
+    "mcp_operation_status",
     "workflow_list",
     "codex_runtime_status",
     "codex_agent_read",
@@ -461,6 +464,7 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 pub const ALLOWED_TOOLS: &[&str] = &[
+    "mcp_operation_status",
     "codex_runtime_status",
     "codex_agent_read",
     "codex_agent_control",
@@ -555,6 +559,7 @@ pub const MUTATING_TOOLS: &[&str] = &[
 ];
 
 pub const READ_ONLY_TOOLS: &[&str] = &[
+    "mcp_operation_status",
     "workflow_list",
     "codex_runtime_status",
     "codex_agent_read",
@@ -648,7 +653,7 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
             P0_TOOLS.iter().find(|(n, ..)| *n == name).map(|entry| {
                 let (name, title, description, read_only, destructive, open_world) = *entry;
                 // A compatibility profile changes visibility, never the truth of side effects.
-                json!({
+                let mut definition = json!({
                     "name": name,
                     "title": title,
                     "description": description,
@@ -660,13 +665,20 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
                         "idempotentHint": read_only && !matches!(name, "capture_screenshot" | "capture_window" | "computer_snapshot"),
                         "openWorldHint": open_world || matches!(name, "list_displays" | "list_windows" | "capture_screenshot" | "capture_window")
                     }
-                })
+                });
+                if name == crate::mcp::operation_store::TOOL {
+                    definition["outputSchema"] = crate::mcp::operation_store::output_schema();
+                }
+                definition
             })
         })
         .collect()
 }
 
 pub fn input_schema(name: &str) -> Value {
+    if name == crate::mcp::operation_store::TOOL {
+        return crate::mcp::operation_store::input_schema();
+    }
     if crate::tools::workflow::NAMES.contains(&name) {
         return crate::tools::workflow::input_schema(name);
     }

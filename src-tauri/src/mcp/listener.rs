@@ -279,31 +279,42 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
         "mcp-requests.log",
         &format!(
             "[rpc] request id={} method={} tool={}",
-            request_id, method, tool_name
+            request_id,
+            json!(method),
+            json!(tool_name)
         ),
     );
 
     let mcp = state.mcp.clone();
-    let profile_id = state.workspace_id.clone();
+    if method == "tools/call" && tool_name == super::operation_store::TOOL {
+        // Authentication/envelope checks above still apply. Recovery must not
+        // queue behind occupied execution slots or create an automatic history.
+        return super::tracked::query(move || handle_request(&mcp, &body)).await;
+    }
+    let revision = match mcp.current_policy_revision() {
+        Ok(revision) => revision,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Live policy unavailable; operation not admitted",
+            )
+                .into_response()
+        }
+    };
     let permit = match crate::auth::http_security::acquire_tool_worker() {
         Ok(permit) => permit,
         Err(response) => return *response,
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let store = mcp.operations.clone();
+    let recorded_body = json!({"id":request_id,"method":method,"params":{"name":tool_name}});
+    let profile_id = state.workspace_id.clone();
+    let log_profile = profile_id.clone();
+    let recorder: super::tracked::Recorder = Arc::new(move |line| {
+        append_profile_log(&log_profile, "mcp-requests.log", line);
+    });
+    super::tracked::execute(store, recorded_body, revision, super::tracked::HTTP_WAIT, move || {
         let _permit = permit;
-        handle_request(&mcp, &body)
-    })
-    .await;
-    match result {
-        Ok(response) => {
-            append_profile_log(
-                &profile_id,
-                "mcp-requests.log",
-                &format!(
-                    "[rpc] completed id={} method={} tool={}",
-                    request_id, method, tool_name
-                ),
-            );
+        let response = handle_request(&mcp, &body);
             if tool_name == "exec_command" || tool_name == "exec_health_check" {
                 let structured = response
                     .get("result")
@@ -343,35 +354,14 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
                     );
                 }
             }
-            Json(response).into_response()
-        }
-        Err(error) => {
-            append_profile_log(
-                &profile_id,
-                "mcp-requests.log",
-                &format!(
-                    "[rpc] worker_failed id={} method={} tool={} error={error}",
-                    request_id, method, tool_name
-                ),
-            );
-            Json(json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {
-                    "code": -32603,
-                    "message": "Exec RPC worker failed",
-                    "data": {
-                        "stage": "rpc_worker",
-                        "reason": "worker_failed",
-                        "retryable": false,
-                        "suggestion": "先检查操作状态，再决定是否重试；已接受的操作可能仍会完成"
-                    }
-                }
-            }))
-            .into_response()
-        }
-    }
+
+        response
+    }, recorder).await
 }
+
+#[cfg(test)]
+#[path = "../../../aiTemp/timeout-recovery/http_contract.rs"]
+mod recovery_http_contract;
 
 fn require_mcp_auth(state: &ListenerState, headers: &HeaderMap) -> Option<Response> {
     if state.auth.bearer_enabled() {

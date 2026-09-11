@@ -128,7 +128,7 @@ with sync_playwright() as p:
                 assert status==200,'Actual PKCE/token exchange failed'
                 token=json.loads(body)['access_token']
                 status, _, body=request_local('POST','/mcp',{'Content-Type':'application/json','Authorization':'Bearer '+token},json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list'}))
-                assert status==200 and len(json.loads(body)['result']['tools'])==70
+                assert status==200 and len(json.loads(body)['result']['tools'])==71
                 if case=='extension': assert messages==['OAUTH_PAGE_READY','OAUTH_SUBMITTED']
             rows.append({'case':case,'post':posts[0],'all_response_headers_forwarded':True,
                          'callback_get_without_body':bool(callbacks),'actual_token_and_catalog_verified':case!='old_no_referrer'})

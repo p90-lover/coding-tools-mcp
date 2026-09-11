@@ -299,7 +299,7 @@ async fn run_flow(root: PathBuf) {
             .json()
             .await
             .unwrap();
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 70);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 71);
 
         // Trust changes come from the same persisted desktop data path as tunnels,
         // not Host headers. The listener and OAuth runtime are not restarted.
@@ -396,5 +396,5 @@ async fn run_flow(root: PathBuf) {
         .await
         .unwrap()
         .unwrap();
-    println!("PASS: actual OAuth entry, consent cookie/state, PKCE token exchange, one-use code, authenticated 70-tool catalog and trusted origin rotation without restart");
+    println!("PASS: actual OAuth entry, consent cookie/state, PKCE token exchange, one-use code, authenticated 71-tool catalog and trusted origin rotation without restart");
 }

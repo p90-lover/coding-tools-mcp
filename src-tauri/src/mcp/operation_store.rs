@@ -32,45 +32,84 @@ struct Record {
 
 impl Default for OperationStore {
     fn default() -> Self {
-        Self { runtime_id: uuid::Uuid::new_v4().to_string(), records: Mutex::new(VecDeque::new()) }
+        Self {
+            runtime_id: uuid::Uuid::new_v4().to_string(),
+            records: Mutex::new(VecDeque::new()),
+        }
     }
 }
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 fn prune(records: &mut VecDeque<Record>) {
     // Only RAM expires. Active work is never evicted and no files are removed.
     records.retain(|r| r.finished.is_none_or(|t| t.elapsed() < RETENTION));
 }
 impl OperationStore {
-    pub fn runtime_id(&self) -> &str { &self.runtime_id }
+    pub fn runtime_id(&self) -> &str {
+        &self.runtime_id
+    }
 
     pub fn admit(&self, body: &Value, revision: u64) -> Result<String, String> {
         let request_id = body.get("id").ok_or("Missing RPC id")?;
-        if !(request_id.is_i64() || request_id.is_u64() || request_id.as_str().is_some_and(|s| s.len() <= 256)) {
+        if !(request_id.is_i64()
+            || request_id.is_u64()
+            || request_id.as_str().is_some_and(|s| s.len() <= 256))
+        {
             return Err("RPC id must be an integer or a string of at most 256 bytes".into());
         }
-        let method = body.get("method").and_then(Value::as_str).ok_or("Missing method")?;
-        let tool = body.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
-        if method.len() > 128 || tool.len() > 128 { return Err("RPC method/tool name exceeds 128 bytes".into()); }
-        let mut records = self.records.lock().map_err(|_| "Operation store is unavailable")?;
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .ok_or("Missing method")?;
+        let tool = body
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if method.len() > 128 || tool.len() > 128 {
+            return Err("RPC method/tool name exceeds 128 bytes".into());
+        }
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| "Operation store is unavailable")?;
         prune(&mut records);
         if records.len() >= MAX_RECORDS {
             let oldest_terminal = records.iter().position(|r| r.finished.is_some());
-            if let Some(index) = oldest_terminal { records.remove(index); }
-            else { return Err("Operation tracking capacity reached; no new operation was started".into()); }
+            if let Some(index) = oldest_terminal {
+                records.remove(index);
+            } else {
+                return Err(
+                    "Operation tracking capacity reached; no new operation was started".into(),
+                );
+            }
         }
         let id = format!("{}:{}", self.runtime_id, uuid::Uuid::new_v4());
         records.push_back(Record {
-            id: id.clone(), request_id: request_id.clone(), method: method.into(), tool: tool.into(), revision,
-            admitted_ms: now_ms(), finished_ms: None, finished: None, state: "admitted", completion: "pending",
-            cached: None, cache_state: "pending",
+            id: id.clone(),
+            request_id: request_id.clone(),
+            method: method.into(),
+            tool: tool.into(),
+            revision,
+            admitted_ms: now_ms(),
+            finished_ms: None,
+            finished: None,
+            state: "admitted",
+            completion: "pending",
+            cached: None,
+            cache_state: "pending",
         });
         Ok(id)
     }
     pub fn started(&self, id: &str) {
         if let Ok(mut records) = self.records.lock() {
-            if let Some(r) = records.iter_mut().find(|r| r.id == id) { r.state = "running"; }
+            if let Some(r) = records.iter_mut().find(|r| r.id == id) {
+                r.state = "running";
+            }
         }
     }
     pub fn finish(&self, id: &str, response: &Value, worker_failed: bool) {
@@ -80,11 +119,20 @@ impl OperationStore {
         let fits = serde_json::to_writer(&mut bytes, response).is_ok();
         if let Ok(mut records) = self.records.lock() {
             if let Some(r) = records.iter_mut().find(|r| r.id == id) {
-                r.state = if worker_failed { "worker_failed" } else { "completed" };
-                r.completion = if worker_failed { "outcome_unknown" }
-                    else if response.get("error").is_some() { "rpc_error" }
-                    else if response.pointer("/result/isError") == Some(&Value::Bool(true)) { "tool_error" }
-                    else { "returned" };
+                r.state = if worker_failed {
+                    "worker_failed"
+                } else {
+                    "completed"
+                };
+                r.completion = if worker_failed {
+                    "outcome_unknown"
+                } else if response.get("error").is_some() {
+                    "rpc_error"
+                } else if response.pointer("/result/isError") == Some(&Value::Bool(true)) {
+                    "tool_error"
+                } else {
+                    "returned"
+                };
                 r.cached = fits.then_some(bytes.0);
                 r.cache_state = if fits { "available" } else { "too_large" };
                 r.finished_ms = Some(now_ms());
@@ -94,28 +142,49 @@ impl OperationStore {
     }
     pub fn query(&self, args: &Value, revision: u64, permitted: &[&str]) -> Result<Value, String> {
         let object = args.as_object().ok_or("Arguments must be an object")?;
-        if object.keys().any(|k| !matches!(k.as_str(), "operation_id" | "request_id" | "include_result" | "limit")) {
+        if object.keys().any(|k| {
+            !matches!(
+                k.as_str(),
+                "operation_id" | "request_id" | "include_result" | "limit"
+            )
+        }) {
             return Err("Unknown operation query argument".into());
         }
         let id = match object.get("operation_id") {
             None => None,
-            Some(v) => Some(v.as_str().filter(|s| !s.is_empty() && s.len() <= 73).ok_or("Invalid operation_id")?),
+            Some(v) => Some(
+                v.as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 73)
+                    .ok_or("Invalid operation_id")?,
+            ),
         };
         let request_id = object.get("request_id");
-        if request_id.is_some_and(|v| !(v.is_i64() || v.is_u64() || v.as_str().is_some_and(|s| s.len() <= 256))) {
+        if request_id.is_some_and(|v| {
+            !(v.is_i64() || v.is_u64() || v.as_str().is_some_and(|s| s.len() <= 256))
+        }) {
             return Err("request_id must be an integer or a string of at most 256 bytes".into());
         }
-        if id.is_some() && request_id.is_some() { return Err("Use operation_id OR request_id, not both".into()); }
+        if id.is_some() && request_id.is_some() {
+            return Err("Use operation_id OR request_id, not both".into());
+        }
         let include_result = match object.get("include_result") {
             None => false,
             Some(v) => v.as_bool().ok_or("include_result must be a boolean")?,
         };
-        if include_result && id.is_none() { return Err("include_result requires an exact operation_id".into()); }
+        if include_result && id.is_none() {
+            return Err("include_result requires an exact operation_id".into());
+        }
         let limit = match object.get("limit") {
             None => 10,
-            Some(v) => v.as_u64().filter(|n| (1..=20).contains(n)).ok_or("limit must be 1..20")? as usize,
+            Some(v) => v
+                .as_u64()
+                .filter(|n| (1..=20).contains(n))
+                .ok_or("limit must be 1..20")? as usize,
         };
-        let mut records = self.records.lock().map_err(|_| "Operation store is unavailable")?;
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| "Operation store is unavailable")?;
         prune(&mut records);
         let matches: Vec<Value> = records.iter().rev()
             .filter(|r| id.is_none_or(|id| id == r.id) && request_id.is_none_or(|wanted| wanted == &r.request_id))
@@ -153,7 +222,9 @@ impl Write for CappedBytes {
         self.0.extend_from_slice(buffer);
         Ok(buffer.len())
     }
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub fn input_schema() -> Value {

@@ -4,7 +4,7 @@
 
 協助 AI 開發工作的本機桌面控制中心：人類訂立目標與權限，已連接的 AI 思考任務，應用程式執行獲准的本機工具並回傳證據。專案歷史讓下一次對話接續已驗證的工作，而非憑記憶重建進度。
 
-**版本系列：`v0.4.4-rc.1`——限定 OAuth 彈出視窗來源修正。** 請閱讀[版本說明](docs/releases/v0.4.4-rc.1.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
+**版本系列：`v0.4.4-rc.2`——限定 OAuth 彈出視窗來源修正。** 請閱讀[版本說明](docs/releases/v0.4.4-rc.2.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
 
 ## 為何 ChatGPT 可能看不到全部工具
 
@@ -16,7 +16,7 @@
 
 ## 下載及開始使用
 
-從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.4-rc.1)取得 `Coding.Tools.MCP_0.4.4-rc.1_x64-setup.exe`。本次 Windows 修正版提供 SHA-256 校驗碼、原始碼來源及驗證紀錄；Apple Silicon `.dmg` 仍保留於前一版 `v0.4.3-rc.1`。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
+從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.4-rc.2)取得 `Coding.Tools.MCP_0.4.4-rc.2_x64-setup.exe`。本次 Windows 修正版提供 SHA-256 校驗碼、原始碼來源及驗證紀錄；Apple Silicon `.dmg` 仍保留於前一版 `v0.4.3-rc.1`。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
 
 安裝並開啟程式，把專案目錄加入工作區，選擇認證及權限設定，然後啟動 MCP。遠端用戶端需要設定支援的 FRP／Cloudflare 連線，再複製介面顯示的 HTTPS `/mcp` 網址。在用戶端完成授權及工具掃描；修改前先使用 `server_info`、`codex_tools_status`、`get_default_cwd` 及 `git_status`。
 

@@ -30,6 +30,7 @@ pub struct ToolContext {
     default_cwd: Arc<Mutex<PathBuf>>,
     auto_history_sessions: Arc<Mutex<HashMap<String, Value>>>,
     pub sessions: Arc<SessionStore>,
+    pub(crate) operations: Arc<crate::mcp::operation_store::OperationStore>,
 }
 
 pub type SharedToolContext = Arc<ToolContext>;
@@ -96,6 +97,7 @@ impl ToolContext {
             default_cwd: Arc::new(Mutex::new(root)),
             auto_history_sessions: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(SessionStore::new()),
+            operations: Arc::new(crate::mcp::operation_store::OperationStore::default()),
         }
     }
 
