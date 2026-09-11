@@ -32,16 +32,25 @@ async fn check(root:PathBuf){
  let rejected=call(&client,&url,"apply_patch",json!({"patch":"*** Begin Patch\n*** Add File: @second/rejected.txt\n+no\n*** End Patch\n"})).await;
  assert_eq!(rejected["ok"],false);assert!(!root.join("project-two/rejected.txt").exists());
  let status=call(&client,&url,"server_info",json!({})).await;assert_eq!(status["live_permissions"]["revision"],1);
+ assert_eq!(call(&client,&url,"read_file",json!({"path":"@second/fresh.txt"})).await["ok"],true);
+ let records=ctx.operations.query(&json!({"request_id":"read_file"}),1,&["read_file"]).unwrap();
+ let cached_id=records["operations"][0]["operation_id"].as_str().unwrap().to_string();
+ let cached=call(&client,&url,"mcp_operation_status",json!({"operation_id":cached_id,"include_result":true})).await;
+ assert!(cached["operations"][0].get("rpc_response").is_some());
  let active=ctx.for_request().unwrap();
  std::fs::create_dir_all(root.join("Trash")).unwrap();
  std::fs::rename(ctx.workspace.root().join(".mcp-paths").join(format!("{}.txt",linked.alias)),root.join("Trash/second.txt")).unwrap();
  assert!(active.workspace.resolve_for_write("@second/stale.txt").is_err());
  assert_eq!(call(&client,&url,"read_file",json!({"path":"@second/fresh.txt"})).await["ok"],false);
+ let hidden=call(&client,&url,"mcp_operation_status",json!({"operation_id":cached_id,"include_result":true})).await;
+ assert_eq!(hidden["operations"][0]["result_state"],"policy_changed_or_tool_hidden");
+ assert!(hidden["operations"][0].get("rpc_response").is_none(),"REMOVED_ROOT_RESULT_LEAKED_FROM_CACHE");
+ assert_eq!(ctx.current_policy_revision().unwrap(),1,"Root isolation is verified without relying on a policy change");
  let mut policy=ctx.for_request().unwrap().policy;policy.permission_mode="workspace-write".into();
  crate::tools::live_policy::commit_updates(vec![(ctx.clone(),policy,"advanced".into())],||Ok(())).unwrap();
  let restored=call(&client,&url,"server_info",json!({})).await;assert_eq!(restored["live_permissions"]["revision"],2);
  assert_eq!(restored["workspace_refresh"]["reconnect_required"],false);
  assert!(root.join("project-two/fresh.txt").is_file());
  let _=end.send(());server.await.unwrap();
- println!("LIVE_REFRESH_HTTP: same bearer listener and shared runtime; add/read/write, read-only revoke, mapping retirement and stale request rejection; no model or delete command");
+ println!("LIVE_REFRESH_HTTP: same bearer listener; add/read/write, permission revoke, mapping retirement, stale request and cached-result rejection; no model or delete command");
 }
