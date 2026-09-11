@@ -1,0 +1,80 @@
+name: Branch recovery and Quick Tunnel audit
+on:
+  push:
+    branches: [audit/branch-recovery-quicktunnel-20260911]
+    paths: [.github/workflows/branch-recovery-audit.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  audit:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - name: Inspect all live branches without executing their application or agent code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          python - <<'PY'
+          import json,subprocess,datetime
+          from pathlib import Path
+          repo='p90-lover/coding-tools-mcp';base='24396cc79475d477e1dee159f62ef1d660598911'
+          def git(*args):return subprocess.check_output(['git',*args],text=True).strip()
+          def pages(path):
+              result=[];page=1
+              while True:
+                  data=json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}{"&" if "?" in path else "?"}per_page=100&page={page}']))
+                  assert isinstance(data,list)
+                  result.extend(data)
+                  if len(data)<100:return result
+                  page+=1
+          branches=pages('branches');releases=pages('releases');prs=pages('pulls?state=all')
+          live=next(b['commit']['sha'] for b in branches if b['name']=='main');assert live==base,'Concurrent main changed'
+          production=['src','src-tauri/src','src-tauri/build.rs','native-helpers','package.json','package-lock.json','src-tauri/Cargo.toml','src-tauri/Cargo.lock','src-tauri/tauri.conf.json']
+          rows=[]
+          for branch in branches:
+              name=branch['name'];sha=branch['commit']['sha']
+              if subprocess.run(['git','cat-file','-e',sha+'^{commit}'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
+                  subprocess.run(['git','fetch','--no-tags','origin',sha],check=True)
+              common=subprocess.run(['git','merge-base',base,sha],capture_output=True,text=True)
+              if common.returncode:
+                  row={'branch':name,'sha':sha,'history':'unrelated','production_files':git('ls-tree','-r','--name-only',sha,*production).splitlines()}
+              else:
+                  merge_base=common.stdout.strip();behind,ahead=map(int,git('rev-list','--left-right','--count',base+'...'+sha).split())
+                  changes=git('diff','--name-status',merge_base,sha,'--',*production).splitlines()
+                  row={'branch':name,'sha':sha,'ahead':ahead,'behind':behind,'merge_base':merge_base,'history':'included' if ahead==0 else 'diverged',
+                      'production_changes_since_divergence':changes,
+                      'unique_commits':git('log','--format=%h %s','--max-count=12',base+'..'+sha).splitlines(),
+                      'patch_equivalence':git('cherry',base,sha).splitlines() if ahead else [],
+                      'pull_requests':[{'number':p['number'],'state':p['state'],'merged_at':p['merged_at'],'title':p['title'],'url':p['html_url']} for p in prs if p['head']['ref']==name]}
+              rows.append(row)
+              print(row['history'],name,'ahead='+str(row.get('ahead')),'production='+str(len(row.get('production_changes_since_divergence',row.get('production_files',[])))))
+          evidence=Path('aiTemp/evidence')
+          report={'base':base,'captured_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'branch_count':len(branches),'branches':rows,
+              'releases':[{'tag':r['tag_name'],'target':r['target_commitish'],'draft':r['draft'],'prerelease':r['prerelease'],'published_at':r['published_at'],'url':r['html_url']} for r in releases],
+              'all_branch_pages_read':True,'all_pr_pages_read':True,'application_code_executed':False,'model_requests':0}
+          (evidence/'branch-audit.json').write_text(json.dumps(report,indent=2)+'\n')
+          (evidence/'pull-requests.json').write_text(json.dumps(prs,indent=2)+'\n')
+          (evidence/'branches.json').write_text(json.dumps(branches,indent=2)+'\n')
+          subprocess.run(['git','bundle','create',str(evidence/'source.bundle'),'--all'],check=True)
+          print('TOTAL_BRANCHES',len(branches),'BASE',base)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: branch-recovery-audit-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
