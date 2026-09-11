@@ -22,17 +22,18 @@ jobs:
         with: {node-version: '22'}
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with: {toolchain: '1.98.1', components: rustfmt}
-      - name: Confirm baseline defects then materialize reviewed changes
+      - name: Confirm actual baseline regressions then materialize reviewed changes
         env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
           gh run download 34657052928 --repo "$GITHUB_REPOSITORY" --name live-refresh-red-34657052928 --dir aiTemp/evidence
+          gh run download 34658078350 --repo "$GITHUB_REPOSITORY" --name live-context-red-34658078350 --dir aiTemp/context-baseline
           grep -F BASELINE_SCAN_UNBOUNDED aiTemp/evidence/red.txt
           grep -F READ_HOLDS_PERMISSION_FENCE aiTemp/evidence/red.txt
-          python aiTemp/live-refresh/prepare.py
-          python aiTemp/live-refresh/refinements.py
-      - name: Test actual bounded harness without desktop dependencies
+          cp aiTemp/context-baseline/* aiTemp/evidence/
+          python aiTemp/live-refresh/finish_prepare.py
+      - name: Test actual bounded harness and context without desktop dependencies
         run: |
           set -euo pipefail
           mkdir -p aiTemp/probe/src
@@ -52,13 +53,15 @@ jobs:
           PY
           cargo test --manifest-path aiTemp/probe/Cargo.toml refresh_contract_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/preflight.txt
           grep -F '2 passed; 0 failed' aiTemp/evidence/preflight.txt
+          python aiTemp/live-refresh/context_probe.py 2>&1 | tee aiTemp/evidence/context-green.txt
+          grep -F '1 passed; 0 failed' aiTemp/evidence/context-green.txt
       - name: Validate refresh coalescing and Svelte compilation
         run: |
           set -euo pipefail
           npm ci > aiTemp/evidence/npm.txt 2>&1
           node --test aiTemp/live-refresh/refresh-ui.test.mjs 2>&1 | tee aiTemp/evidence/refresh-ui.txt
           npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
-      - name: Preserve source and complete diff for review, without changing main
+      - name: Preserve exact source and full diff for review without advancing main
         if: always()
         run: |
           set -euo pipefail
