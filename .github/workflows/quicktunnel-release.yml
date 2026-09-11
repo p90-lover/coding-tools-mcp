@@ -7,7 +7,7 @@ on:
 permissions: {contents: read}
 concurrency:
   group: quicktunnel-fast-control-044rc4
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   VERSION: 0.4.4-rc.4
   PYTHONUTF8: '1'
@@ -48,6 +48,7 @@ jobs:
           else
             python aiTemp/quicktunnel/prepare.py
           fi
+          python aiTemp/quicktunnel/fixture_order.py
           if [ ! -f docs/audits/branch-recovery-2026-09-11.md ]; then python aiTemp/quicktunnel/audit_report.py; fi
           git add -- docs/audits/branch-recovery-2026-09-11.md
       - name: Three focused production-code checks before a full Windows build
@@ -67,7 +68,7 @@ jobs:
           git diff --exit-code 24396cc79475d477e1dee159f62ef1d660598911 -- src-tauri/src/auth src-tauri/src/runtime src-tauri/src/tunnel/recovery.rs src-tauri/src/tunnel/supervisor.rs src-tauri/src/integrations native-helpers src-tauri/src/tools/native_sandbox.rs src-tauri/src/tools/sandbox_runner.rs src-tauri/src/tools/sandbox_snapshot.rs src-tauri/src/tools/policy.rs src-tauri/src/tools/live_policy.rs aiTemp/reliability aiTemp/timeout-recovery
           git config user.name 'p90-lover'
           git config user.email '146848721+p90-lover@users.noreply.github.com'
-          if ! git diff --cached --quiet; then git commit -m 'fix: preserve protocol responsiveness, pool discovery and restore selected branch schemas'; fi
+          if ! git diff --cached --quiet; then git commit -m 'test: retain exact Actions discovery routes with parallel request ordering'; fi
           test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)" = 24396cc79475d477e1dee159f62ef1d660598911
           test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
           gh auth setup-git
