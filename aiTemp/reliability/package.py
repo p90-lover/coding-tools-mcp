@@ -1,6 +1,6 @@
 """Add reliability evidence to the unchanged rc2 verifier; only its version literal changes."""
 from pathlib import Path
-import hashlib,json,os,re
+import hashlib,json,os,re,subprocess
 from jsonschema import Draft202012Validator
 assert os.environ['VERSION']=='0.4.4-rc.3'
 root=Path('aiTemp/evidence')
@@ -31,7 +31,10 @@ assert ui['source']==os.environ['SOURCE'] and ui['passed'] and ui['sources']==['
 assert ui['model_requests']==0 and not ui['console_errors'] and ui['screenshots_written']==0
 # Preserve all timeout/OAuth/native/installer assertions from the prior release.
 # Pin its bytes so future changes cannot silently weaken these reused gates.
-path=Path('aiTemp/timeout-recovery/package.py');original=path.read_bytes()
+path=Path('aiTemp/timeout-recovery/package.py')
+original=subprocess.check_output(['git','show','HEAD:'+path.as_posix()])
+# Git's canonical bytes stay pinned; only checkout CRLF translation is allowed.
+assert path.read_bytes().replace(b'\r\n',b'\n')==original, 'VERIFIER_WORKTREE_MODIFIED'
 assert hashlib.sha256(original).hexdigest()=='b23b5e444be07e80d2ed9b81072772c90827f442c3559a5de2abffbae1985387'
 source=original.decode('utf-8');old="proof['version']=='0.4.4-rc.2'"
 assert source.count(old)==1
