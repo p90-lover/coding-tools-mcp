@@ -32,7 +32,7 @@ text = Path(name).read_text(encoding='utf-8')
 text = once(text, '    Ok(json!({"task": task, "events": events, "truncated": false}))', '''    let limit = args.get("max_bytes").and_then(Value::as_u64).unwrap_or(32768).clamp(8192,131072) as usize;
     let task = serde_json::to_value(task).map_err(|error| tool_error("SERIALIZE_FAILED", error.to_string()))?;
     let events = serde_json::to_value(events).map_err(|error| tool_error("SERIALIZE_FAILED", error.to_string()))?;
-    Ok(super::context_view::render(task, events, limit))''')
+    Ok(crate::harness::context_view::render(task, events, limit))''')
 save(name, text)
 name = 'src-tauri/src/harness/mod.rs'
 text = Path(name).read_text(encoding='utf-8')
