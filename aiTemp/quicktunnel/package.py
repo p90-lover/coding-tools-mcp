@@ -34,6 +34,8 @@ assert audit['base']=='24396cc79475d477e1dee159f62ef1d660598911' and audit['bran
 assert audit['all_branch_pages_read'] and audit['all_pr_pages_read'] and not audit['application_code_executed']
 report=Path('docs/audits/branch-recovery-2026-09-11.md')
 assert sum(line.startswith('| `') for line in report.read_text().splitlines())==74
+canonical_report=subprocess.check_output(['git','show','HEAD:'+report.as_posix()])
+assert report.read_bytes().replace(b'\r\n',b'\n')==canonical_report
 # Pin Git bytes, allow only checkout newline conversion; do not weaken rc3 gates.
 path=Path('aiTemp/reliability/package.py')
 original=subprocess.check_output(['git','show','HEAD:'+path.as_posix()])
@@ -46,7 +48,7 @@ proof=json.loads(Path('aiTemp/installer/proof.json').read_text())
 proof.update({'scope':'reserved authenticated MCP control, pooled parallel public probes and selective branch schema recovery',
     'quick_groups_passed':3,'reserved_protocol_slots':2,'control_deadline_seconds':3,'ordinary_tool_slots':16,
     'quick_http':http,'quick_probe':probe,'recovered_output_schemas':['read_file','operation_log'],
-    'branch_audit_count':74,'branch_audit_run':34579727505,'branch_report_sha256':hashlib.sha256(report.read_bytes()).hexdigest(),
+    'branch_audit_count':74,'branch_audit_run':34579727505,'branch_report_sha256':hashlib.sha256(canonical_report).hexdigest(),
     'quick_tunnel_supported':True,'tunnel_recovery_changed':False,'intentional_stop_behavior_changed':False,
     'public_network_benchmarked':False,'application_code_deleted':False,'unreviewed_branches_merged':False})
 for directory in ['aiTemp/installer','aiTemp/evidence']:
