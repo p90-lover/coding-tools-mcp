@@ -41,3 +41,10 @@ include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../aiTemp/reliability/metadata_contract.rs"
 ));
+
+pub(crate) mod recovered_output_schema;
+#[cfg(test)]
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../aiTemp/quicktunnel/schema_contract.rs"
+));

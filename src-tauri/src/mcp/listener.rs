@@ -286,6 +286,44 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
     );
 
     let mcp = state.mcp.clone();
+    // Control availability must not depend on all ordinary execution slots being
+    // free. This exact method allowlist cannot dispatch a tool or auto-bootstrap.
+    // Auth, Origin, envelope and protocol-header validation above still apply.
+    if matches!(
+        method.as_str(),
+        "ping" | "initialize" | "tools/list" | "server/discover"
+    ) {
+        static CONTROL: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        let permit = CONTROL
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+            .clone()
+            .try_acquire_owned();
+        let Ok(permit) = permit else {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"jsonrpc":"2.0","id":request_id,
+                "error":{"code":-32009,"message":"Protocol control capacity reached; no tool was executed"}}))).into_response();
+        };
+        let profile = state.workspace_id.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let response = handle_request(&mcp, &body);
+            if method == "tools/list" {
+                if let Some(tools) = response.pointer("/result/tools").and_then(Value::as_array) {
+                    append_profile_log(
+                        &profile,
+                        "mcp-requests.log",
+                        &format!("[discovery] catalog_served tools_count={}", tools.len()),
+                    );
+                }
+            }
+            response
+        });
+        return match tokio::time::timeout(std::time::Duration::from_secs(3), worker).await {
+            Ok(Ok(response)) => Json(response).into_response(),
+            _ => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"jsonrpc":"2.0","id":request_id,
+                "error":{"code":-32009,"message":"Protocol control unavailable; no tool was executed"}}))).into_response(),
+        };
+    }
     if method == "tools/call" && tool_name == super::operation_store::TOOL {
         // Authentication/envelope checks above still apply. Recovery must not
         // queue behind occupied execution slots or create an automatic history.
@@ -605,3 +643,7 @@ mod live_permission_protocol_test {
 #[cfg(test)]
 #[path = "../../../aiTemp/oauth-popup/http_flow.rs"]
 mod oauth_popup_http_flow;
+
+#[cfg(test)]
+#[path = "../../../aiTemp/quicktunnel/http_contract.rs"]
+mod quick_control_contract;

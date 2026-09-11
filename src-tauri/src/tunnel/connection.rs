@@ -36,11 +36,61 @@ pub fn public_origin(value: &str) -> AppResult<String> {
     }
     Ok(u.origin().ascii_serialization())
 }
+struct PooledProbeClient {
+    mode: String,
+    url: String,
+    created: std::time::Instant,
+    client: reqwest::Client,
+}
 fn client(settings: &AppSettings) -> AppResult<reqwest::Client> {
+    // Reuse TLS/HTTP pools, not health results. Key by proxy policy and never log
+    // the URL (it may contain proxy credentials). System environment is reread
+    // on a fresh client at most 60 seconds later; cached clients are bounded.
+    static CLIENTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<PooledProbeClient>>,
+    > = std::sync::OnceLock::new();
+    let mode = match settings.proxy.mode.as_str() {
+        "manual" => "manual",
+        "system" => "system",
+        _ => "none",
+    };
+    let url = if mode == "manual" {
+        settings.proxy.url.trim()
+    } else {
+        ""
+    };
+    let mut clients = CLIENTS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| invalid("Discovery client pool unavailable"))?;
+    clients.retain(|entry| entry.created.elapsed() < Duration::from_secs(60));
+    if let Some(entry) = clients
+        .iter()
+        .find(|entry| entry.mode == mode && entry.url == url)
+    {
+        return Ok(entry.client.clone());
+    }
+    let created = build_client(settings)?;
+    if clients.len() >= 4 {
+        clients.pop_front();
+    }
+    clients.push_back(PooledProbeClient {
+        mode: mode.into(),
+        url: url.into(),
+        created: std::time::Instant::now(),
+        client: created.clone(),
+    });
+    Ok(created)
+}
+fn build_client(settings: &AppSettings) -> AppResult<reqwest::Client> {
     let mut b = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
-        .connect_timeout(Duration::from_secs(2));
+        .connect_timeout(Duration::from_secs(2))
+        .pool_idle_timeout(Duration::from_secs(20))
+        .pool_max_idle_per_host(3)
+        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_nodelay(true);
     match settings.proxy.mode.as_str() {
         "manual" => {
             let proxy = reqwest::Proxy::all(settings.proxy.url.trim())
@@ -138,42 +188,49 @@ async fn probe_with_client(
     oauth: bool,
     client: &reqwest::Client,
 ) -> AppResult<()> {
-    match kind {
-        TunnelServiceKind::Mcp => validate_mcp(&document(client, &format!("{origin}/mcp")).await?)?,
-        TunnelServiceKind::Actions => {
-            // Actions has a small, stable health document. Its full OpenAPI schema
-            // can legitimately exceed the discovery limit and is not a liveness probe.
-            let v = document(client, &format!("{origin}/health")).await?;
-            if v["ok"] != true
-                || v["service"] != "coding-tools-actions"
-                || !v["tools_loaded"].is_u64()
-            {
-                return Err(invalid(
-                    "Public address is not this app's Actions health endpoint",
-                ));
+    // Three independent credential-free documents share one deadline rather
+    // than paying three sequential round trips. Every identity check remains.
+    let status = async {
+        match kind {
+            TunnelServiceKind::Mcp => {
+                validate_mcp(&document(client, &format!("{origin}/mcp")).await?)
+            }
+            TunnelServiceKind::Actions => {
+                let value = document(client, &format!("{origin}/health")).await?;
+                if value["ok"] != true
+                    || value["service"] != "coding-tools-actions"
+                    || !value["tools_loaded"].is_u64()
+                {
+                    Err(invalid(
+                        "Public address is not this app's Actions health endpoint",
+                    ))
+                } else {
+                    Ok(())
+                }
             }
         }
+    };
+    if !oauth {
+        return status.await;
     }
-    if oauth {
-        let auth = document(
-            client,
-            &format!("{origin}/.well-known/oauth-authorization-server"),
-        )
-        .await?;
-        validate_authorization(origin, &auth)?;
-        // The Actions listener does not expose MCP protected-resource discovery;
-        // do not mistake the missing route for a connection failure.
-        if kind == TunnelServiceKind::Mcp {
-            let resource = document(
-                client,
-                &format!("{origin}/.well-known/oauth-protected-resource"),
-            )
-            .await?;
-            validate_oauth(origin, &auth, &resource)?;
+    let auth_url = format!("{origin}/.well-known/oauth-authorization-server");
+    match kind {
+        TunnelServiceKind::Mcp => {
+            let resource_url = format!("{origin}/.well-known/oauth-protected-resource");
+            let (_, auth, resource) = tokio::try_join!(
+                status,
+                document(client, &auth_url),
+                document(client, &resource_url)
+            )?;
+            validate_oauth(origin, &auth, &resource)
+        }
+        TunnelServiceKind::Actions => {
+            let (_, auth) = tokio::try_join!(status, document(client, &auth_url))?;
+            validate_authorization(origin, &auth)
         }
     }
-    Ok(())
 }
+
 pub async fn probe_public_service(
     base: &str,
     kind: TunnelServiceKind,
@@ -181,7 +238,22 @@ pub async fn probe_public_service(
     settings: &AppSettings,
 ) -> AppResult<()> {
     let origin = public_origin(base)?;
-    probe_with_client(&origin, kind, oauth, &client(settings)?).await
+    // At most two public probes (six metadata requests) can be active. Busy
+    // diagnostics never restart a tunnel, replay a tool or manufacture success.
+    static PROBES: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let _permit = PROBES
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| invalid("Public discovery busy; existing tunnel left unchanged"))?;
+    let client = client(settings)?;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        probe_with_client(&origin, kind, oauth, &client),
+    )
+    .await
+    .map_err(|_| invalid("Public discovery deadline exceeded; existing tunnel left unchanged"))?
 }
 #[cfg(test)]
 mod tests {
@@ -284,3 +356,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "../../../aiTemp/quicktunnel/probe_contract.rs"]
+mod quick_probe_contract;
