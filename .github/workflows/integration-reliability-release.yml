@@ -37,6 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
+          python aiTemp/reliability/verifier_guard_test.py 2>&1 | tee aiTemp/evidence/verifier-guard.txt
           gh run download 34553831049 --repo "$GITHUB_REPOSITORY" --name integration-reliability-red-34553831049 --dir aiTemp/baseline
           cp aiTemp/baseline/ui-red.txt aiTemp/baseline/rust-red.txt aiTemp/evidence/
           grep -F CLEARED_SNAPSHOT_RETURNED aiTemp/evidence/ui-red.txt
@@ -125,13 +126,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
+          python aiTemp/reliability/verifier_guard_test.py 2>&1 | tee aiTemp/evidence/verifier-guard.txt
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "reliability-preparation-$GITHUB_RUN_ID" --dir aiTemp/preparation
           cp aiTemp/preparation/ui-red.txt aiTemp/preparation/rust-red.txt aiTemp/evidence/
           gh run download 34550277930 --repo "$GITHUB_REPOSITORY" --name mcp-timeout-red-34550277930 --dir aiTemp/evidence
           cmake -S native-helpers/app-container -B aiTemp/native-build -A x64 -DCODING_TOOLS_BUILD_PROBE=ON
           cmake --build aiTemp/native-build --config Release 2>&1 | tee aiTemp/evidence/native-build.txt
           python aiTemp/completion/native_test.py 2>&1 | tee aiTemp/evidence/native-tests.txt
-      - name: Verify integration state and the actual rendered page
+      - name: Verify integration state and prepare browser checks
         run: |
           set -euo pipefail
           npm ci 2>&1 | tee aiTemp/evidence/npm.txt
@@ -139,7 +141,6 @@ jobs:
           npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
           npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
           python -m pip install playwright==1.57.0 jsonschema==4.25.1
-          python aiTemp/reliability/browser_test.py 2>&1 | tee aiTemp/evidence/integration-browser.txt
       - name: Verify real snapshot input and event contracts plus read-only adapters
         run: |
           set -euo pipefail
@@ -163,6 +164,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run tauri -- build --bundles nsis -- --locked --features native-snapshot 2>&1 | tee aiTemp/evidence/installer.txt
+          python aiTemp/reliability/browser_test.py 2>&1 | tee aiTemp/evidence/integration-browser.txt
           python aiTemp/reliability/package.py
           git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
