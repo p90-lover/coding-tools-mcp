@@ -29,13 +29,24 @@ fn tool_error(_: &str, message: impl Into<String>)->String{message.into()}
  let ctx=ToolContext{harness:harness::Harness::new(base.join("workspace"),base.join("store")).unwrap()};
  let task=ctx.harness.start_task("Synthetic context bound; no model or process").unwrap();
  let large="繁體中文".repeat(16000);
- ctx.harness.record_event(&task.id,"fixture",Some("read_file"),json!({"large":large}),json!({"ok":true})).unwrap();
+ let event=ctx.harness.record_event(&task.id,"fixture",Some("read_file"),json!({"large":large}),json!({"ok":true})).unwrap();
+ // record_event deliberately wraps caller data in input_summary.payload.
+ // Preserve the entire stored representation, not a guessed field location.
+ let events_before=serde_json::to_vec(&ctx.harness.list_events(&task.id,0,100).unwrap()).unwrap();
+ let task_before=serde_json::to_vec(&ctx.harness.task(&task.id).unwrap()).unwrap();
  let result=task_context(&ctx,&json!({"task_id":task.id,"max_bytes":8192})).unwrap();
- assert!(serde_json::to_vec(&result).unwrap().len()<=8192,"TASK_CONTEXT_IGNORES_MAX_BYTES");
+ let response_bytes=serde_json::to_vec(&result).unwrap().len();
+ assert!(response_bytes<=8192,"TASK_CONTEXT_IGNORES_MAX_BYTES");
  assert_eq!(result["truncated"],true);
  assert_eq!(result["task"]["id"],task.id);
- assert_eq!(ctx.harness.list_events(&task.id,1,1).unwrap()[0].input_summary["large"],large,"Stored evidence must not be truncated or deleted");
- println!("LIVE_CONTEXT: actual task_context body honors 8192-byte budget; original oversized event retained");
+ let retained=ctx.harness.list_events(&task.id,0,100).unwrap();
+ assert_eq!(serde_json::to_vec(&retained).unwrap(),events_before,"Stored events changed");
+ assert_eq!(serde_json::to_vec(&ctx.harness.task(&task.id).unwrap()).unwrap(),task_before,"Stored task changed");
+ let original=retained.iter().find(|e|e.id==event.id).unwrap();
+ assert_eq!(original.input_summary["payload"]["large"].as_str().unwrap().as_bytes(),large.as_bytes(),"Original payload changed");
+ let cursor=result["next_event_cursor"].as_u64().unwrap() as usize;
+ assert!(ctx.harness.list_events(&task.id,cursor,100).unwrap().iter().any(|e|e.id==event.id),"Omitted event must remain reachable by returned cursor");
+ println!("LIVE_CONTEXT: actual task_context body honors 8192-byte budget; original oversized event retained; response_bytes={response_bytes}");
 }
 '''
 (out/'src/lib.rs').write_text(code)
