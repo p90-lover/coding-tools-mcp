@@ -1,0 +1,190 @@
+name: Verified Quick Tunnel responsiveness and branch recovery
+on:
+  push:
+    branches: [fix/quicktunnel-fast-control-0.4.4-rc.4]
+    paths: [.github/workflows/quicktunnel-release.yml]
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: quicktunnel-fast-control-044rc4
+  cancel-in-progress: false
+env:
+  VERSION: 0.4.4-rc.4
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions: {contents: write, actions: read}
+    outputs: {source: '${{ steps.source.outputs.source }}'}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/quick-unit-target
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ github.sha }}', path: aiTemp/source, fetch-depth: 0, clean: false, persist-credentials: false}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with: {toolchain: '1.98.1', components: rustfmt}
+      - name: Require original failures and complete branch inventory before materializing
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download 34580420137 --repo "$GITHUB_REPOSITORY" --name quick-red-34580420137 --dir aiTemp/evidence
+          gh run download 34579727505 --repo "$GITHUB_REPOSITORY" --name branch-recovery-audit-34579727505 --dir aiTemp/branch-audit
+          for marker in CONTROL_BLOCKED_BY_BUSY_TOOL_WORKERS PROBE_REBUILDS_CLIENT_EVERY_CALL RECOVERABLE_SCHEMA_NOT_WIRED; do grep -F "$marker" aiTemp/evidence/quick-red.txt; done
+          cp aiTemp/branch-audit/branch-audit.json aiTemp/evidence/
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          for p in Path('aiTemp/quicktunnel').glob('*.py'):ast.parse(p.read_text(encoding='utf-8'))
+          PY
+          if python -c "import json; from pathlib import Path; assert json.loads(Path('package.json').read_text())['version']=='0.4.4-rc.4'"; then
+            git diff --exit-code
+          else
+            python aiTemp/quicktunnel/prepare.py
+          fi
+          if [ ! -f docs/audits/branch-recovery-2026-09-11.md ]; then python aiTemp/quicktunnel/audit_report.py; fi
+          git add -- docs/audits/branch-recovery-2026-09-11.md
+      - name: Three focused production-code checks before a full Windows build
+        run: |
+          set -euo pipefail
+          python aiTemp/quicktunnel/unit_probe.py
+          python aiTemp/quicktunnel/unit_schema.py
+          cargo test --manifest-path aiTemp/quick-unit/Cargo.toml quick_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/quick-unit.txt
+          grep -F '3 passed; 0 failed' aiTemp/evidence/quick-unit.txt
+      - name: Commit exact candidate without overwriting concurrent work
+        id: source
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git diff --exit-code 24396cc79475d477e1dee159f62ef1d660598911 -- src-tauri/src/auth src-tauri/src/runtime src-tauri/src/tunnel/recovery.rs src-tauri/src/tunnel/supervisor.rs src-tauri/src/integrations native-helpers src-tauri/src/tools/native_sandbox.rs src-tauri/src/tools/sandbox_runner.rs src-tauri/src/tools/sandbox_snapshot.rs src-tauri/src/tools/policy.rs src-tauri/src/tools/live_policy.rs aiTemp/reliability aiTemp/timeout-recovery
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then git commit -m 'fix: preserve protocol responsiveness, pool discovery and restore selected branch schemas'; fi
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)" = 24396cc79475d477e1dee159f62ef1d660598911
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git diff --stat 24396cc79475d477e1dee159f62ef1d660598911 HEAD > aiTemp/evidence/source-scope.txt
+          mkdir -p aiTemp/review-source
+          git bundle create aiTemp/review-source/candidate.bundle HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'quick-preparation-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: 'quick-source-${{ github.run_id }}', path: aiTemp/source/aiTemp/review-source/, if-no-files-found: error, retention-days: 14}
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions: {contents: read, actions: read}
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      PLATFORM: windows-x64
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/quick-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+      EXTENSION_SOURCE_DIR: ${{ github.workspace }}/aiTemp/extension
+      CODING_TOOLS_COMMAND_NATIVE_SHA256: 444a3f0008050605cae73cd9b7a2dcac61294062dfaab56dd20430fd6498518b
+      CODING_TOOLS_SNAPSHOT_HELPER: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-appcontainer.exe
+      CODING_TOOLS_SNAPSHOT_PROBE: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-sandbox-probe.exe
+      APP_CONTAINER_HELPER: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-appcontainer.exe
+      APP_CONTAINER_PROBE: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-sandbox-probe.exe
+      CI: 'true'
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ env.SOURCE }}', path: aiTemp/source, fetch-depth: 0, clean: false, persist-credentials: false}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {repository: p90-lover/coding-tools-mcp-fast-access-extension, ref: b0d4db553227fa3c7300050b8edff6e2eb9afee4, path: aiTemp/extension, clean: false, persist-credentials: false}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with: {toolchain: '1.98.1'}
+      - name: Preserve baseline evidence and native isolation verification
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "quick-preparation-$GITHUB_RUN_ID" --dir aiTemp/preparation
+          cp aiTemp/preparation/branch-audit.json aiTemp/preparation/quick-red.txt aiTemp/evidence/
+          gh run download 34553831049 --repo "$GITHUB_REPOSITORY" --name integration-reliability-red-34553831049 --dir aiTemp/reliability-baseline
+          cp aiTemp/reliability-baseline/ui-red.txt aiTemp/reliability-baseline/rust-red.txt aiTemp/evidence/
+          gh run download 34550277930 --repo "$GITHUB_REPOSITORY" --name mcp-timeout-red-34550277930 --dir aiTemp/evidence
+          python aiTemp/reliability/verifier_guard_test.py 2>&1 | tee aiTemp/evidence/verifier-guard.txt
+          cmake -S native-helpers/app-container -B aiTemp/native-build -A x64 -DCODING_TOOLS_BUILD_PROBE=ON
+          cmake --build aiTemp/native-build --config Release 2>&1 | tee aiTemp/evidence/native-build.txt
+          python aiTemp/completion/native_test.py 2>&1 | tee aiTemp/evidence/native-tests.txt
+      - name: Retain frontend and integration state behavior
+        run: |
+          set -euo pipefail
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          node --test aiTemp/reliability/integration-state.test.mjs 2>&1 | tee aiTemp/evidence/integration-state.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+          python -m pip install playwright==1.57.0 jsonschema==4.25.1
+      - name: Three focused real control, probe and restored-schema groups
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib quick_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/quick-tests.txt
+          grep -F '3 passed; 0 failed' aiTemp/evidence/quick-tests.txt
+      - name: Retain integration contracts, recovery and sandbox permissions
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib reliability_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/reliability-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib control_center_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/adapter-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib recovery_contract_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/recovery-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib snapshot_contract_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/snapshot-contract.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib core_catalog_exposes_chatgpt_compatible_tools_without_unreleased_claims -- --test-threads=1 2>&1 | tee aiTemp/evidence/registry.txt
+      - name: Retain real-browser OAuth, extension and connection behavior
+        env: {OAUTH_BROWSER_PROBE: aiTemp/origin-repair/browser_live.py}
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib oauth_popup_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/oauth-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib catalog_exposure_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/catalog-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/connection-tests.txt
+      - name: Build and inspect exact Windows installer with every retained check
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles nsis -- --locked --features native-snapshot 2>&1 | tee aiTemp/evidence/installer.txt
+          python aiTemp/reliability/browser_test.py 2>&1 | tee aiTemp/evidence/integration-browser.txt
+          python aiTemp/quicktunnel/package.py
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: 'quick-installer-${{ github.run_id }}', path: 'aiTemp/source/aiTemp/installer/*', if-no-files-found: error, retention-days: 14}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'quick-evidence-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
+  publish:
+    needs: [prepare,windows]
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions: {contents: write, actions: read}
+    env: {SOURCE: '${{ needs.prepare.outputs.source }}'}
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ env.SOURCE }}', path: aiTemp/source, fetch-depth: 0, clean: false, persist-credentials: false}
+      - name: Verify source and uploaded bytes before fast-forwarding main and publishing
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: python aiTemp/quicktunnel/publish.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: quick-publication-${{ github.run_id }}
+          path: |
+            aiTemp/source/aiTemp/quick-release-receipt.json
+            aiTemp/source/aiTemp/quick-release-draft.json
+          if-no-files-found: warn
+          retention-days: 14
