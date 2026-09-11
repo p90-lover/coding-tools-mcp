@@ -1,0 +1,88 @@
+name: Reproduce MCP abandoned-waiter completion gap
+on:
+  push:
+    branches: [fix/mcp-timeout-recovery-0.4.4-rc.2]
+    paths: [.github/workflows/mcp-timeout-red.yml]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/red-target
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '7a56e30a25f16e55805e9550d319233974f11765', path: aiTemp/source, clean: false, persist-credentials: false}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with: {toolchain: '1.98.1'}
+      - name: Exercise unchanged listener function with a synthetic non-idempotent worker
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/timeout-red/src aiTemp/evidence
+          python - <<'PY'
+          from pathlib import Path
+          source=Path('src-tauri/src/mcp/listener.rs').read_text()
+          function=source[source.index('async fn mcp_post('):source.index('\nfn require_mcp_auth(')]
+          Path('aiTemp/timeout-red/Cargo.toml').write_text('''[package]
+          name="timeout-red"
+          version="0.0.0"
+          edition="2021"
+          [dependencies]
+          axum="0.8"
+          serde_json="1"
+          tokio={version="1",features=["rt-multi-thread","macros","time","sync"]}
+          ''')
+          fixture='''use axum::{Json,extract::{State,Request,FromRequest},http::{HeaderMap,StatusCode},response::{Response,IntoResponse}};
+          use serde_json::{json,Value};
+          use std::sync::{Arc,Mutex,atomic::{AtomicUsize,Ordering}};
+          static EVENTS:Mutex<Vec<String>>=Mutex::new(Vec::new());
+          static EFFECTS:AtomicUsize=AtomicUsize::new(0);
+          #[derive(Clone)]struct ListenerState{mcp:Arc<()>,workspace_id:String}
+          fn require_mcp_auth(_: &ListenerState,_:&HeaderMap)->Option<Response>{None}
+          fn append_profile_log(_: &str,_:&str,line:&str){EVENTS.lock().unwrap().push(line.into());}
+          fn handle_request(_: &Arc<()>,body:&Value)->Value{
+              std::thread::sleep(std::time::Duration::from_millis(100));
+              EFFECTS.fetch_add(1,Ordering::SeqCst);
+              json!({"jsonrpc":"2.0","id":body["id"],"result":{"isError":false,"structuredContent":{"ok":true}}})
+          }
+          mod transport{
+              use super::*;
+              pub fn validate_protocol_headers(_:&HeaderMap,_:&Value)->Option<Response>{None}
+              pub fn early_response(_:&Value)->Option<Response>{None}
+          }
+          mod auth{pub mod http_security{
+              pub fn acquire_tool_worker()->Result<tokio::sync::OwnedSemaphorePermit,Box<axum::response::Response>>{
+                  Ok(std::sync::Arc::new(tokio::sync::Semaphore::new(1)).try_acquire_owned().unwrap())
+              }
+          }}
+          #[tokio::test]
+          async fn completion_survives_http_waiter_timeout(){
+              let body=json!({"jsonrpc":"2.0","id":"fixture-request","method":"tools/call","params":{"name":"fixture_effect"}});
+              let request=Request::builder().method("POST").uri("/mcp").header("content-type","application/json").body(axum::body::Body::from(body.to_string())).unwrap();
+              let state=ListenerState{mcp:Arc::new(()),workspace_id:"synthetic".into()};
+              let expired=tokio::time::timeout(std::time::Duration::from_millis(20),mcp_post(State(state),request)).await;
+              assert!(expired.is_err());
+              tokio::time::timeout(std::time::Duration::from_secs(2),async{
+                  while EFFECTS.load(Ordering::SeqCst)==0{tokio::time::sleep(std::time::Duration::from_millis(10)).await;}
+              }).await.unwrap();
+              assert_eq!(EFFECTS.load(Ordering::SeqCst),1);
+              tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+              assert!(EVENTS.lock().unwrap().iter().any(|e|e.contains("[rpc] completed")),"WORKER_FINISHED_BUT_COMPLETION_WAS_LOST");
+          }
+          '''
+          Path('aiTemp/timeout-red/src/lib.rs').write_text(fixture+'\n'+function)
+          PY
+          set +e
+          cargo test --manifest-path aiTemp/timeout-red/Cargo.toml -- --nocapture > aiTemp/evidence/timeout-red.txt 2>&1
+          result=$?
+          set -e
+          test "$result" -eq 101
+          grep -F WORKER_FINISHED_BUT_COMPLETION_WAS_LOST aiTemp/evidence/timeout-red.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'mcp-timeout-red-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
