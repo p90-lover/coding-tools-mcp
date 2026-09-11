@@ -136,7 +136,8 @@ jobs:
       - name: Three focused real control, probe and restored-schema groups
         run: |
           set -euo pipefail
-          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib quick_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/quick-tests.txt
+          # quick_add belongs to an unrelated linked-root suite, not these three new contracts.
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib quick_ -- --test-threads=1 --nocapture --skip quick_add_never_overwrites_an_existing_mapping 2>&1 | tee aiTemp/evidence/quick-tests.txt
           grep -F '3 passed; 0 failed' aiTemp/evidence/quick-tests.txt
       - name: Retain integration contracts, recovery and sandbox permissions
         run: |
