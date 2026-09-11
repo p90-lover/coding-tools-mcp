@@ -1,0 +1,48 @@
+name: Reproduce long-task and live-refresh blockers
+on:
+  push:
+    branches: [fix/live-refresh-long-tasks-0.4.4-rc.5]
+    paths: [.github/workflows/live-refresh-red.yml]
+permissions: {contents: read}
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/red-target
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ github.sha }}', path: aiTemp/source, clean: false, persist-credentials: false}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with: {toolchain: '1.98.1'}
+      - name: Run released harness code against sparse synthetic input
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/probe/src aiTemp/evidence
+          python - <<'PY'
+          from pathlib import Path
+          root=Path('.').resolve()
+          Path('aiTemp/probe/Cargo.toml').write_text('[package]\nname="live-refresh-red"\nversion="0.0.0"\nedition="2021"\n[dependencies]\nuuid={version="1",features=["v4"]}\nserde={version="1",features=["derive"]}\nserde_json="1"\nthiserror="2"\nsha2="0.10"\nwalkdir="2"\ndirs="6"\ntempfile="3"\n')
+          text='pub mod harness {\n'
+          for name in ['model','store','state']:
+              text+='#[path="'+(root/f'src-tauri/src/harness/{name}.rs').as_posix()+'"] pub mod '+name+';\n'
+          text+='pub use state::Harness; }\n'
+          text+='include!("'+(root/'aiTemp/live-refresh/scan_contract.rs').as_posix()+'");\n'
+          code=Path('src-tauri/src/tools/live_policy.rs').read_text()
+          text+=code[code.index('pub fn fence_entire_call('):code.index('/// Acquire all changed contexts')]
+          text+='\n#[test] fn refresh_contract_slow_observation_must_not_hold_permission_fence(){for name in ["project_state","harness_status","read_file","search_text"]{assert!(!fence_entire_call(name),"READ_HOLDS_PERMISSION_FENCE {name}");} assert!(fence_entire_call("apply_patch"));}\n'
+          Path('aiTemp/probe/src/lib.rs').write_text(text)
+          PY
+          set +e
+          cargo test --manifest-path aiTemp/probe/Cargo.toml refresh_contract_ -- --test-threads=1 --nocapture > aiTemp/evidence/red.txt 2>&1
+          code=$?
+          set -e
+          test "$code" -eq 101
+          grep -F BASELINE_SCAN_UNBOUNDED aiTemp/evidence/red.txt
+          grep -F READ_HOLDS_PERMISSION_FENCE aiTemp/evidence/red.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'live-refresh-red-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
