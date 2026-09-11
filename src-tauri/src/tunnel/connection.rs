@@ -314,7 +314,13 @@ mod tests {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let expected_origin = origin.clone();
         let server = tokio::spawn(async move {
-            for path in ["/health", "/.well-known/oauth-authorization-server"] {
+            // _seen_expected_routes: parallel requests may arrive in either order.
+            // Still require exactly these two routes, once each, without credentials.
+            let mut expected = std::collections::HashSet::from([
+                "/health",
+                "/.well-known/oauth-authorization-server",
+            ]);
+            for _ in 0..2 {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 loop {
@@ -327,7 +333,18 @@ mod tests {
                     }
                 }
                 let headers = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let path = headers
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
                 assert!(headers.starts_with(&format!("get {path} http/1.1\r\n")));
+                assert!(
+                    expected.remove(path),
+                    "Unexpected or duplicate discovery route"
+                );
                 assert!(!headers.contains("authorization:") && !headers.contains("cookie:"));
                 let value = if path == "/health" {
                     serde_json::json!({"ok":true,"service":"coding-tools-actions","tools_loaded":42})
@@ -338,6 +355,7 @@ mod tests {
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
+            assert!(expected.is_empty());
         });
         let client = reqwest::Client::builder()
             .no_proxy()
