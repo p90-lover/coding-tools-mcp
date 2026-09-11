@@ -4,7 +4,7 @@
 
 A local desktop control center for AI-assisted development: the human defines the goal and permissions, the connected AI reasons about the task, and the app executes approved local tools and returns evidence. Project history helps the next conversation continue from verified work rather than reconstructing it from memory.
 
-**Release line: `v0.4.4-rc.2` — scoped OAuth popup origin repair.** Read the [release notes](docs/releases/v0.4.4-rc.2.md) and the published release's validation evidence. A version in source code is not proof that a build passed. This is a release candidate, not a certified security sandbox.
+**Release line: `v0.4.4-rc.3` — scoped OAuth popup origin repair.** Read the [release notes](docs/releases/v0.4.4-rc.3.md) and the published release's validation evidence. A version in source code is not proof that a build passed. This is a release candidate, not a certified security sandbox.
 
 ## Optional native Codex bridge
 
@@ -12,7 +12,7 @@ The current candidate adds an explicitly opted-in native App Server bridge, sepa
 
 ## Download and start
 
-Get `Coding.Tools.MCP_0.4.4-rc.2_x64-setup.exe` from the [versioned release page](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.4-rc.2). This focused Windows release provides SHA-256 checksums, source provenance and validation logs. The prior `v0.4.3-rc.1` release retains the Apple Silicon `.dmg`. Windows is publisher-unsigned; macOS uses ad-hoc signing and is not notarized. Verify the source and checksum before opening a downloaded installer.
+Get `Coding.Tools.MCP_0.4.4-rc.3_x64-setup.exe` from the [versioned release page](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.4-rc.3). This focused Windows release provides SHA-256 checksums, source provenance and validation logs. The prior `v0.4.3-rc.1` release retains the Apple Silicon `.dmg`. Windows is publisher-unsigned; macOS uses ad-hoc signing and is not notarized. Verify the source and checksum before opening a downloaded installer.
 
 Install and open the app, add your project directory as a workspace, select its authentication and permission settings, and start MCP. For a remote client, configure the supported FRP or Cloudflare connection and copy the displayed HTTPS `/mcp` endpoint. Complete the client-side authorization and tool scan. Start with `server_info`, `codex_tools_status`, `get_default_cwd` and `git_status` before making changes.
 

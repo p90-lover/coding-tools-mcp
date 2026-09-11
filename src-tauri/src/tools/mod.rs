@@ -1,5 +1,5 @@
-pub mod catalog;
 pub mod approval;
+pub mod catalog;
 mod codex_runtime;
 pub mod computer;
 pub mod context;
@@ -34,3 +34,10 @@ pub mod workflow;
 #[cfg(test)]
 #[path = "../../../aiTemp/main-preservation/file_regressions.rs"]
 mod main_preservation_file_regressions;
+
+pub(crate) mod event_output_schema;
+#[cfg(test)]
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../aiTemp/reliability/metadata_contract.rs"
+));

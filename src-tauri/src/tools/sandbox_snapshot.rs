@@ -105,25 +105,20 @@ pub(super) fn prepare(root: &Path, home: &Path, files: &[String]) -> AppResult<S
             "32 snapshots retained. Archive them locally before another run; nothing was deleted",
         ));
     }
-    let id = uuid::Uuid::new_v4().to_string();
-    let directory = runs.join(&id);
-    fs::create_dir(&directory)?;
-    let input = directory.join("input");
-    let work = directory.join("work");
-    fs::create_dir(&input)?;
-    fs::create_dir(&work)?;
+    // Validate and read the bounded input set before allocating a retained run.
+    let mut inputs = Vec::new();
     let mut seen = HashSet::new();
     let mut bytes = 0u64;
     for name in files {
         let relative = relative(name)?;
-        if !seen.insert(name.to_lowercase()) {
-            return Err(err("Duplicate input path"));
-        }
         let source = root.join(&relative);
         safe_path(&source)?;
         let resolved = source.canonicalize()?;
         if !resolved.starts_with(root) {
             return Err(err("Input escaped the workspace"));
+        }
+        if !seen.insert(resolved.to_string_lossy().to_lowercase()) {
+            return Err(err("Duplicate input path"));
         }
         let mut options = OpenOptions::new();
         options.read(true);
@@ -144,6 +139,18 @@ pub(super) fn prepare(root: &Path, home: &Path, files: &[String]) -> AppResult<S
         if bytes > 16 * 1024 * 1024 {
             return Err(err("Input grew past the snapshot limit"));
         }
+        inputs.push((relative, content));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let directory = runs.join(&id);
+    fs::create_dir(&directory)?;
+    let input = directory.join("input");
+    let work = directory.join("work");
+    fs::create_dir(&input)?;
+    fs::create_dir(&work)?;
+    // Never reopen an input after validation. All copies come from these
+    // bounded buffers. A later destination-I/O failure remains retained evidence.
+    for (relative, content) in inputs {
         let destination = input.join(relative);
         create_safe_directory(destination.parent().unwrap())?;
         let mut output = OpenOptions::new()

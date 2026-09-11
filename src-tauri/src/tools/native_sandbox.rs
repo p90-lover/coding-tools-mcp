@@ -299,3 +299,9 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
 #[cfg(test)]
 #[path = "../../../aiTemp/sandbox-permissions/contract.rs"]
 mod tests;
+
+#[cfg(test)]
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../aiTemp/reliability/snapshot_contract.rs"
+));

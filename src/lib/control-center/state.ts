@@ -31,15 +31,43 @@ export async function changeBoard(change:Change) {
  catch(e) { boardError.set(String(e));return false; }
  finally {boardBusy.set(false);}
 }
+// Each source owns a generation; discarded reads may finish but cannot publish.
+const integrationGeneration:Record<Source,number>={paseo:0,anneal:0};
+function snapshotEndpoint(source:Source,value:string):string {
+ const u=new URL(value);
+ if(source==='paseo'&&(u.pathname===''||u.pathname==='/'))u.pathname='/ws';
+ return u.href;
+}
+export function clearIntegration(source:Source) {
+ integrationGeneration[source]++;
+ snapshots.update(v=>{const {[source]:_discarded,...next}=v;return next;});
+ integrationErrors.update(v=>({...v,[source]:''}));
+ integrationBusy.update(v=>({...v,[source]:false}));
+}
+let observedEndpoints=get(endpoints);
+endpoints.subscribe(next=>{
+ for(const source of ['paseo','anneal'] as const) {
+  if(next[source]!==observedEndpoints[source])clearIntegration(source);
+ }
+ observedEndpoints={...next};
+});
 export async function readIntegration(source:Source,endpoint:string,credential:string) {
- if(get(integrationBusy)[source])return;
+ if(get(integrationBusy)[source]||get(endpoints)[source]!==endpoint)return;
+ const ticket=++integrationGeneration[source];
+ const current=()=>ticket===integrationGeneration[source]&&get(endpoints)[source]===endpoint;
+ snapshots.update(v=>{const {[source]:_discarded,...next}=v;return next;});
  integrationBusy.update(v=>({...v,[source]:true}));
  integrationErrors.update(v=>({...v,[source]:''}));
- try { const result=await invoke<Snapshot>('integration_read',{source,endpoint,credential:credential||null});snapshots.update(v=>({...v,[source]:result})); }
- catch(e) { integrationErrors.update(v=>({...v,[source]:String(e)})); }
- finally {integrationBusy.update(v=>({...v,[source]:false}));}
+ try {
+  const result=await invoke<Snapshot>('integration_read',{source,endpoint,credential:credential||null});
+  if(!current())return;
+  if(result.source!==source||result.read_only!==true||snapshotEndpoint(source,result.endpoint)!==snapshotEndpoint(source,endpoint)) {
+   throw new Error('Integration response does not match this source/endpoint. / 整合回應與目前來源／端點不相符。');
+  }
+  snapshots.update(v=>({...v,[source]:result}));
+ } catch(e) { if(current())integrationErrors.update(v=>({...v,[source]:String(e)})); }
+ finally {if(current())integrationBusy.update(v=>({...v,[source]:false}));}
 }
-export function clearIntegration(source:Source) { snapshots.update(v=>{const next={...v};delete next[source];return next;});integrationErrors.update(v=>({...v,[source]:''})); }
 
 let boardRefreshing=false;
 /** Quiet refresh never resets a form or replaces an in-flight mutation with older data. */

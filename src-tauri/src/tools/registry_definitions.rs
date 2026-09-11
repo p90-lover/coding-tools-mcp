@@ -666,6 +666,9 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
                         "openWorldHint": open_world || matches!(name, "list_displays" | "list_windows" | "capture_screenshot" | "capture_window")
                     }
                 });
+                if name == "list_task_events" {
+                    definition["outputSchema"] = crate::tools::event_output_schema::schema();
+                }
                 if name == crate::mcp::operation_store::TOOL {
                     definition["outputSchema"] = crate::mcp::operation_store::output_schema();
                 }
