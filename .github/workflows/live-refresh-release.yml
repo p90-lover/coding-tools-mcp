@@ -2,7 +2,7 @@ name: Verified live refresh and bounded long-task reads
 on:
   push:
     branches: [fix/live-refresh-long-tasks-0.4.4-rc.5]
-    paths: [.github/workflows/live-refresh-release.yml]
+    paths: [.github/workflows/live-refresh-release.yml, aiTemp/live-refresh/context_probe.py]
   workflow_dispatch:
 permissions: {contents: read}
 concurrency:
@@ -134,6 +134,8 @@ jobs:
           grep -F '2 passed; 0 failed' aiTemp/evidence/live-tests.txt
           python aiTemp/live-refresh/context_probe.py 2>&1 | tee aiTemp/evidence/context-green.txt
           cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib tools::live_policy::tests -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/live-policy-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib quick_add_never_overwrites_an_existing_mapping -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/root-nonoverwrite.txt
+          grep -F '1 passed; 0 failed' aiTemp/evidence/root-nonoverwrite.txt
       - name: Retain protocol control, recovery and sandbox permission contracts
         run: |
           set -euo pipefail
