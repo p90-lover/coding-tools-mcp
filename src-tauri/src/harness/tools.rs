@@ -127,7 +127,16 @@ fn task_context(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError
         .harness
         .list_events(&task.id, 0, 100)
         .map_err(map_error)?;
-    Ok(json!({"task": task, "events": events, "truncated": false}))
+    let limit = args
+        .get("max_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(32768)
+        .clamp(8192, 131072) as usize;
+    let task = serde_json::to_value(task)
+        .map_err(|error| tool_error("SERIALIZE_FAILED", error.to_string()))?;
+    let events = serde_json::to_value(events)
+        .map_err(|error| tool_error("SERIALIZE_FAILED", error.to_string()))?;
+    Ok(crate::harness::context_view::render(task, events, limit))
 }
 
 fn list_task_events(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {

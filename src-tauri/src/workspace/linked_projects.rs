@@ -68,6 +68,7 @@ pub fn list_linked_projects_for_root(workspace_root: &Path) -> Vec<LinkedProject
         a.name
             .to_ascii_lowercase()
             .cmp(&b.name.to_ascii_lowercase())
+            .then_with(|| a.alias.cmp(&b.alias))
     });
     projects
 }
@@ -104,6 +105,11 @@ pub fn quick_add_linked_project_for_root(
         .unwrap_or(default_name)
         .to_string();
 
+    if name.contains(['\r', '\n']) || friendly_path(&target).contains(['\r', '\n']) {
+        return Err(AppError::Message(
+            "Linked project names and paths cannot contain newlines".into(),
+        ));
+    }
     let base_alias = slugify(&name);
     let mappings_dir = root.join(LINKED_PROJECTS_DIR);
     fs::create_dir_all(&mappings_dir)

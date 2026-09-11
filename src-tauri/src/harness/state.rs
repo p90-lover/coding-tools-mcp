@@ -1,17 +1,16 @@
 use std::collections::HashMap;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use walkdir::WalkDir;
 
 use super::model::{
-    BaselineEntry, CapabilityStatus, FileChangeRecord, HarnessEvent, HarnessStatus,
-    OperationRecord, ProjectBaseline, ProjectFileState, ProjectState, TaskSession, TaskStatus,
+    CapabilityStatus, FileChangeRecord, HarnessEvent, HarnessStatus, OperationRecord,
+    ProjectBaseline, ProjectFileState, ProjectState, TaskSession, TaskStatus,
     WorkspaceHarnessState, SCHEMA_VERSION,
 };
 use super::store::{HarnessError, HarnessResult, HarnessStore};
@@ -61,7 +60,7 @@ impl Harness {
                 format!("工作区已有活动任务 {}", task.id),
             ));
         }
-        let baseline = capture_baseline(&self.workspace_root);
+        let baseline = capture_baseline(&self.workspace_root)?;
         let now = timestamp();
         let task = TaskSession {
             id: Uuid::new_v4().simple().to_string(),
@@ -155,7 +154,7 @@ impl Harness {
 
     pub fn check_baseline(&self, task_id: &str) -> HarnessResult<()> {
         let task = self.task(task_id)?;
-        let current = capture_baseline(&self.workspace_root);
+        let current = capture_baseline(&self.workspace_root)?;
         if current.branch != task.baseline.branch || current.head != task.baseline.head {
             return Err(HarnessError::new(
                 "BASELINE_STALE",
@@ -173,7 +172,7 @@ impl Harness {
 
     pub fn refresh_expected_state(&self, task_id: &str) -> HarnessResult<TaskSession> {
         let mut task = self.task(task_id)?;
-        task.expected_fingerprint = capture_baseline(&self.workspace_root).worktree_fingerprint;
+        task.expected_fingerprint = capture_baseline(&self.workspace_root)?.worktree_fingerprint;
         task.updated_at = timestamp();
         self.store.save_task(&task)?;
         Ok(task)
@@ -257,7 +256,7 @@ impl Harness {
     }
 
     pub fn project_state(&self, max_files: usize) -> HarnessResult<ProjectState> {
-        let current = capture_baseline(&self.workspace_root);
+        let current = capture_baseline(&self.workspace_root)?;
         let task = self.current_task()?;
         let baseline_map = task
             .as_ref()
@@ -302,6 +301,7 @@ impl Harness {
                 }
             })
             .collect::<Vec<_>>();
+        let clean = files.iter().all(|f| f.status == "unchanged");
         let truncated = files.len() > max_files.max(1);
         let files = files.into_iter().take(max_files.max(1)).collect::<Vec<_>>();
         let active_task_id = task.as_ref().map(|t| t.id.clone());
@@ -315,7 +315,7 @@ impl Harness {
             workspace_id: self.workspace_id.clone(),
             branch: current.branch,
             head: current.head,
-            clean: files.iter().all(|f| f.status == "unchanged"),
+            clean,
             files,
             total_files,
             truncated,
@@ -326,7 +326,7 @@ impl Harness {
     }
 
     pub fn status(&self) -> HarnessResult<HarnessStatus> {
-        let current = capture_baseline(&self.workspace_root);
+        let current = capture_baseline(&self.workspace_root)?;
         let task = self.current_task()?;
         let (task_id, task_state, task_updated_at, writable, baseline_matches, reason) =
             match task.as_ref() {
@@ -481,85 +481,8 @@ impl Harness {
     }
 }
 
-pub fn capture_baseline(root: &Path) -> ProjectBaseline {
-    let mut entries = Vec::new();
-    for item in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        let path = item.path();
-        if path == root || should_skip(path, root) || !item.file_type().is_file() {
-            continue;
-        }
-        let Ok(bytes) = fs::read(path) else { continue };
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        entries.push(BaselineEntry {
-            path: rel,
-            exists: true,
-            is_binary: bytes.contains(&0),
-            sha256: format!("{:x}", hasher.finalize()),
-            bytes: bytes.len() as u64,
-        });
-    }
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut fingerprint = Sha256::new();
-    for entry in &entries {
-        fingerprint.update(entry.path.as_bytes());
-        fingerprint.update(entry.sha256.as_bytes());
-        fingerprint.update(entry.bytes.to_le_bytes());
-    }
-    ProjectBaseline {
-        branch: git_value(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        head: git_value(root, &["rev-parse", "HEAD"]),
-        worktree_fingerprint: format!("{:x}", fingerprint.finalize()),
-        entries,
-        captured_at: timestamp(),
-    }
-}
-
-fn should_skip(path: &Path, root: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .into_iter()
-        .flat_map(|p| p.components())
-        .filter_map(|component| component.as_os_str().to_str())
-        .any(|name| {
-            matches!(
-                name,
-                ".git"
-                    | ".mcp-probe-kit"
-                    | "node_modules"
-                    | "target"
-                    | "dist"
-                    | "build"
-                    | ".svelte-kit"
-            )
-        })
-}
-
-fn git_value(root: &Path, args: &[&str]) -> Option<String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(root).args(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    }
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!value.is_empty()).then_some(value)
+pub fn capture_baseline(root: &Path) -> HarnessResult<ProjectBaseline> {
+    super::bounded_scan::capture(root)
 }
 
 fn workspace_id(root: &Path) -> String {

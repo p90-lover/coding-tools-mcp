@@ -1,3 +1,4 @@
+import { workspaceChanged } from "$lib/workspace-refresh";
 import { invoke } from "@tauri-apps/api/core";
 import type { LinkedProject, RuntimeStatus, WorkspaceProfile } from "$lib/types";
 
@@ -9,7 +10,8 @@ export async function createWorkspace(
   path: string,
   name?: string,
 ): Promise<WorkspaceProfile> {
-  return invoke<WorkspaceProfile>("create_workspace", { path, name });
+  const result=await invoke<WorkspaceProfile>("create_workspace", { path, name });
+  workspaceChanged();return result;
 }
 
 export async function listLinkedProjects(id: string): Promise<LinkedProject[]> {
@@ -21,11 +23,13 @@ export async function quickAddLinkedProject(
   path: string,
   name?: string,
 ): Promise<LinkedProject> {
-  return invoke<LinkedProject>("quick_add_linked_project", { id, path, name });
+  const result=await invoke<LinkedProject>("quick_add_linked_project", { id, path, name });
+  workspaceChanged();return result;
 }
 
 export async function updateWorkspace(profile: WorkspaceProfile): Promise<void> {
-  return invoke("update_workspace", { profile });
+  await invoke("update_workspace", { profile });
+  workspaceChanged();
 }
 
 export async function openWorkspaceDirectory(path: string): Promise<void> {

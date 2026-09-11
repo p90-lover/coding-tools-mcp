@@ -421,6 +421,7 @@
 
   async function saveMcpPolicy(draft: RuntimePolicyDraft) {
     if (!profile) return;
+    const targetId=workspaceId;
     const next: WorkspaceProfile = {
       ...profile,
       runtime: {
@@ -435,8 +436,9 @@
       },
     };
     await updateWorkspace(next);
-    profile = next;
-    await load();
+    if(workspaceId!==targetId)return;
+    profile=next;
+    workspaces.update(items=>items.map(item=>item.id===targetId?next:item));
     showToast("Permissions applied live · 權限已即時生效；毋須重啟或重新連接 MCP", { kind: "success" });
   }
 

@@ -27,7 +27,7 @@ stub=r'''(() => {
   if(name==='update_workspace')return new Promise((resolve,reject)=>window.__saves.push({profile:structuredClone(args.profile),resolve:()=>{window.__profiles=window.__profiles.map(p=>p.id===args.profile.id?structuredClone(args.profile):p);resolve(null);},reject}));
   if(['get_secret','get_workspace_secret','get_shared_secret'].includes(name))return 'synthetic-only';
   if(name==='get_webview_memory_sample')return {supported:false};
-  if(name==='get_tool_catalog_status')return {registered_count:71,advertised_count:71,profile:'advanced',tools:[]};
+  if(name==='get_tool_catalog_status')return {registered_count:71,advertised_count:71,profile:'advanced',configured_profile:'advanced',server_version:'fixture',evidence_source:'synthetic',advertised_names:[],hidden_by_profile:[],advertised_but_unavailable:[],catalog_sha256:'fixture',read_only_hint_count:42,write_hint_count:29};
   if(name==='control_board_read')return {revision:0,tasks:[]};
   if(name.startsWith('plugin:'))return name.includes('is_minimized')?false:1;
   throw Error('Unexpected IPC '+name);

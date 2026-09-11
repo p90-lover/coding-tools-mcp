@@ -99,6 +99,15 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
         None
     };
     let mut result = call_tool_snapshot(ctx, name, args);
+    if crate::tools::live_policy::refreshable_observation(name)
+        && ctx.current_policy_revision().ok() != Some(ctx.policy_revision)
+    {
+        return tool_err_code("PERMISSION_CHANGED_DURING_READ","Live permissions changed during this observation; its result was withheld. Reassess under the new policy.","permission");
+    }
+    if let Err(error) = ctx.workspace.ensure_roots_current() {
+        return tool_err(error);
+    }
+
     if (name.starts_with("computer_")
         || matches!(
             name,
@@ -113,6 +122,8 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
         );
     }
     if name == "server_info" {
+        result["workspace_refresh"] = json!({"supported":true,"roots_revision":ctx.workspace.roots_revision(),"scope":"primary workspace and explicitly linked projects","reconnect_required":false,"new_root_access_inherits_live_policy":true,"external_process_revocation_on_manual_mapping_edit":false});
+        result["long_task_limits"] = json!({"baseline_file_bytes":33554432,"baseline_total_bytes":134217728,"baseline_entries":20000,"baseline_cooperative_deadline_seconds":8,"use_command_id_for_long_processes":true,"automatic_operation_replay":false});
         result["live_permissions"] = json!({"supported":true,"revision":ctx.policy_revision,
             "permission_mode":ctx.permission_mode,"approval_mode":ctx.policy.approval_mode,
             "screen_capture_allowed":ctx.policy.allow_screen_capture,"tool_profile":ctx.tool_profile,
@@ -221,10 +232,11 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
     let result = match name {
         "mcp_operation_status" => ctx
             .operations
-            .query(
+            .query_in_scope(
                 &effective_args,
                 ctx.policy_revision,
                 &crate::tools::registry::exposed_tool_names(&ctx.tool_profile),
+                &ctx.workspace.roots_revision(),
             )
             .map_err(|message| WorkspaceError::Tool {
                 code: "OPERATION_QUERY_REJECTED",
@@ -508,29 +520,15 @@ fn operation_input(args: &Value) -> Value {
 }
 
 fn attach_harness_status(ctx: &ToolContext, mut output: Value, standalone: bool) -> Value {
-    if let Ok(mut status) = ctx.harness.status() {
-        if standalone && status.task_id.is_none() {
-            status.next_actions.clear();
-        }
-        status.next_actions = filter_exposed_actions(ctx, status.next_actions);
-        if let Some(object) = output.as_object_mut() {
-            object.insert(
-                "harness".into(),
-                serde_json::to_value(status).unwrap_or_else(|_| {
-                    json!({
-                        "status": "unavailable",
-                        "reason": "无法序列化 Harness 状态"
-                    })
-                }),
-            );
-            if standalone {
-                attach_standalone_metadata(
-                    &mut output,
-                    "命令未成功；请检查 stderr、exit_code 或调整参数后重试。",
-                );
-            }
-        }
+    // Never turn a quick error or a baseline timeout into another full scan.
+    let task = ctx.harness.current_task().ok().flatten();
+    if let Some(object) = output.as_object_mut() {
+        object.insert("harness".into(),json!({"task_id":task.as_ref().map(|t|&t.id),"baseline_matches":null,"writable":null,"status":"not_rescanned","reason":"Error recovery does not rescan the entire project. Inspect the original error or existing operation receipt.","next_actions":filter_exposed_actions(ctx,vec!["task_context".into(),"mcp_operation_status".into()])}));
     }
+    if standalone {
+        attach_standalone_metadata(&mut output,"Inspect the recorded error or command output; do not repeat an unchanged failing operation.");
+    }
+
     output
 }
 

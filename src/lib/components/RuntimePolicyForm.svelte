@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { untrack, tick } from "svelte";
   import { TOOL_PROFILE_OPTIONS, normalizeToolProfile } from "$lib/tool-profile.js";
 
   export interface RuntimePolicyDraft {
@@ -60,6 +60,8 @@
   let draftExtensions = $state(".exe,.bat,.cmd,.ps1");
   let draftScreenCapture = $state(false);
   let saving = $state(false);
+  let saveError = $state("");
+  let applied = $state(false);
 
   const dirty = $derived(
     draftProfile !== normalizeToolProfile(toolProfile) || draftMode !== normalizePermissionMode(permissionMode) || draftApprovalMode !== normalizeApprovalMode(approvalMode) || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions || draftScreenCapture !== allowScreenCapture,
@@ -77,13 +79,17 @@
 
   async function save() {
     if (saving || !dirty) return;
-    saving = true;
+    saving = true;saveError="";applied=false;
     try {
       await onSave({ toolProfile: draftProfile, permissionMode: draftMode, approvalMode: draftApprovalMode, allowedCommands: draftCommands.trim(), workspaceLocalEntries: draftLocalEntries, workspaceScriptExtensions: draftExtensions.trim(), allowScreenCapture: draftScreenCapture });
+      applied=true;
+    } catch(error) {
+      saveError=String(error);
     } finally {
       saving = false;
     }
   }
+  async function changed(){ await tick(); await save(); }
 </script>
 
 <form
@@ -93,6 +99,7 @@
     void save();
   }}
 >
+  <fieldset disabled={saving} class="grid gap-3" onchange={() => void changed()}>
   <label class="grid gap-1">
     <span class="text-xs text-[var(--color-text-muted)]">Tool catalog / 工具目錄</span>
     <select
@@ -167,4 +174,7 @@
       {saving ? "保存中…" : "保存策略"}
     </button>
   </div>
+  </fieldset>
+  {#if saveError}<p role="alert">{saveError} · Save not confirmed; check current settings before retrying. / 儲存未確認，重試前先查看目前設定。</p>{/if}
+  <p role="status">{saving ? "Applying permissions… / 正在套用權限…" : applied ? "Applied live; no reconnect. / 已即時套用，毋須重連。" : "Changes apply automatically. / 修改後自動套用。"}</p>
 </form>

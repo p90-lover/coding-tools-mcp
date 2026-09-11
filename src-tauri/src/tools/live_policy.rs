@@ -30,6 +30,17 @@ impl ToolContext {
             request.tool_profile = value.tool_profile.clone();
             request.policy_revision = value.revision;
         }
+        drop(live); // Never hold the policy lock while reading filesystem mappings.
+        request.workspace = self.workspace.request_snapshot();
+        let cwd = request.default_cwd_path();
+        if cwd != request.workspace.root()
+            && request
+                .workspace
+                .resolve_existing(&cwd.to_string_lossy())
+                .is_err()
+        {
+            request.set_default_cwd(request.workspace.root().to_path_buf());
+        }
         request.permission_mode = request.policy.canonical_permission_mode().into();
         Ok(request)
     }
@@ -39,6 +50,7 @@ impl ToolContext {
     pub fn policy_execution_guard(
         &self,
     ) -> Result<RwLockReadGuard<'_, Option<LivePolicy>>, WorkspaceError> {
+        self.workspace.ensure_roots_current()?;
         let guard = self.live_policy.read().map_err(|_| unavailable())?;
         if guard.as_ref().map_or(0, |p| p.revision) != self.policy_revision {
             return Err(WorkspaceError::Tool {
@@ -58,8 +70,23 @@ impl ToolContext {
     }
 }
 
+pub fn refreshable_observation(name: &str) -> bool {
+    matches!(
+        name,
+        "project_state"
+            | "harness_status"
+            | "read_file"
+            | "search_text"
+            | "grep_text"
+            | "grep"
+            | "list_dir"
+            | "list_files"
+    )
+}
+
 pub fn fence_entire_call(name: &str) -> bool {
-    !name.starts_with("computer_")
+    !refreshable_observation(name)
+        && !name.starts_with("computer_")
         && !matches!(
             name,
             "codex_agent_control"

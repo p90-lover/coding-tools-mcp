@@ -151,6 +151,7 @@ pub type WorkspaceResult<T> = Result<T, WorkspaceError>;
 #[derive(Debug, Clone)]
 pub struct Workspace {
     root: PathBuf,
+    linked_snapshot: Option<Vec<LinkedProject>>,
 }
 
 impl Workspace {
@@ -163,7 +164,10 @@ impl Workspace {
                 "Workspace root must be a directory",
             ));
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            linked_snapshot: None,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -175,7 +179,40 @@ impl Workspace {
     }
 
     pub fn linked_projects(&self) -> Vec<LinkedProject> {
-        list_linked_projects_for_root(&self.root)
+        self.linked_snapshot
+            .clone()
+            .unwrap_or_else(|| list_linked_projects_for_root(&self.root))
+    }
+
+    pub fn request_snapshot(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            linked_snapshot: Some(list_linked_projects_for_root(&self.root)),
+        }
+    }
+
+    pub fn roots_revision(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(self.root.to_string_lossy().as_bytes());
+        for project in self.linked_projects() {
+            for value in [&project.alias, &project.name, &project.path, &project.mode] {
+                hash.update((value.len() as u64).to_le_bytes());
+                hash.update(value.as_bytes());
+            }
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    pub fn ensure_roots_current(&self) -> WorkspaceResult<()> {
+        if self
+            .linked_snapshot
+            .as_ref()
+            .is_some_and(|roots| *roots != list_linked_projects_for_root(&self.root))
+        {
+            return Err(WorkspaceError::Tool {code:"WORKSPACE_ROOTS_CHANGED",message:"Approved project mappings changed during this request. Inspect state before reassessing; an already-submitted effect cannot be undone and must not be automatically replayed.".into(),category:"permission",retryable:false});
+        }
+        Ok(())
     }
 
     fn linked_project_by_alias(&self, alias: &str) -> Option<LinkedProject> {
@@ -313,6 +350,7 @@ impl Workspace {
     /// Read paths retain the existing explicit-absolute-path behavior.
     /// `@alias/...` is additionally resolved through `.mcp-paths`.
     pub fn resolve_read_path(&self, raw_path: &str) -> WorkspaceResult<ResolvedPath> {
+        self.ensure_roots_current()?;
         let raw = if raw_path.is_empty() { "." } else { raw_path };
         self.validate_read_text(raw)?;
         let alias_address = raw.replace('\\', "/").starts_with('@');
@@ -347,6 +385,7 @@ impl Workspace {
         base: &Path,
         raw_path: &str,
     ) -> WorkspaceResult<ResolvedPath> {
+        self.ensure_roots_current()?;
         let raw = if raw_path.is_empty() { "." } else { raw_path };
         self.reject_unsafe_text(raw)?;
         let base = self.validate_base(base)?;
@@ -363,6 +402,7 @@ impl Workspace {
     }
 
     pub fn resolve_for_write(&self, raw_path: &str) -> WorkspaceResult<ResolvedPath> {
+        self.ensure_roots_current()?;
         self.reject_unsafe_text(raw_path)?;
         self.reject_protected_write_path(raw_path)?;
         let pure = Path::new(raw_path);

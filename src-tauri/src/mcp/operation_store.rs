@@ -21,6 +21,7 @@ struct Record {
     method: String,
     tool: String,
     revision: u64,
+    roots_revision: Option<String>,
     admitted_ms: u64,
     finished_ms: Option<u64>,
     finished: Option<Instant>,
@@ -73,6 +74,16 @@ impl OperationStore {
         if method.len() > 128 || tool.len() > 128 {
             return Err("RPC method/tool name exceeds 128 bytes".into());
         }
+        let roots_revision = match body.get("_workspace_roots_revision") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .ok_or("Invalid internal root revision")?
+                    .to_string(),
+            ),
+        };
         let mut records = self
             .records
             .lock()
@@ -95,6 +106,7 @@ impl OperationStore {
             method: method.into(),
             tool: tool.into(),
             revision,
+            roots_revision,
             admitted_ms: now_ms(),
             finished_ms: None,
             finished: None,
@@ -141,6 +153,24 @@ impl OperationStore {
         }
     }
     pub fn query(&self, args: &Value, revision: u64, permitted: &[&str]) -> Result<Value, String> {
+        self.query_scoped(args, revision, permitted, None)
+    }
+    pub fn query_in_scope(
+        &self,
+        args: &Value,
+        revision: u64,
+        permitted: &[&str],
+        roots_revision: &str,
+    ) -> Result<Value, String> {
+        self.query_scoped(args, revision, permitted, Some(roots_revision))
+    }
+    fn query_scoped(
+        &self,
+        args: &Value,
+        revision: u64,
+        permitted: &[&str],
+        roots_revision: Option<&str>,
+    ) -> Result<Value, String> {
         let object = args.as_object().ok_or("Arguments must be an object")?;
         if object.keys().any(|k| {
             !matches!(
@@ -189,7 +219,8 @@ impl OperationStore {
         let matches: Vec<Value> = records.iter().rev()
             .filter(|r| id.is_none_or(|id| id == r.id) && request_id.is_none_or(|wanted| wanted == &r.request_id))
             .take(limit).map(|r| {
-                let allowed = r.revision == revision && (r.method != "tools/call" || permitted.contains(&r.tool.as_str()));
+                let allowed = r.revision == revision
+                    && roots_revision.is_none_or(|expected| r.roots_revision.as_deref()==Some(expected)) && (r.method != "tools/call" || permitted.contains(&r.tool.as_str()));
                 let cache_state = if !allowed { "policy_changed_or_tool_hidden" } else { r.cache_state };
                 let mut row = json!({
                     "operation_id":r.id,"request_id":r.request_id,"method":r.method,"tool_name":r.tool,

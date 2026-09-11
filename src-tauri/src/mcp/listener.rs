@@ -344,7 +344,17 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
         Err(response) => return *response,
     };
     let store = mcp.operations.clone();
-    let recorded_body = json!({"id":request_id,"method":method,"params":{"name":tool_name}});
+    let roots_revision = match mcp.for_request() {
+        Ok(snapshot) => snapshot.workspace.roots_revision(),
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Workspace roots unavailable; operation not admitted",
+            )
+                .into_response()
+        }
+    };
+    let recorded_body = json!({"id":request_id,"method":method,"params":{"name":tool_name},"_workspace_roots_revision":roots_revision});
     let profile_id = state.workspace_id.clone();
     let log_profile = profile_id.clone();
     let recorder: super::tracked::Recorder = Arc::new(move |line| {
@@ -647,3 +657,7 @@ mod oauth_popup_http_flow;
 #[cfg(test)]
 #[path = "../../../aiTemp/quicktunnel/http_contract.rs"]
 mod quick_control_contract;
+
+#[cfg(test)]
+#[path = "../../../aiTemp/live-refresh/http_contract.rs"]
+mod live_refresh_contract;

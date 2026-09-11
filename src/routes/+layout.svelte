@@ -1,6 +1,7 @@
 <script lang="ts">
   import "../app.css";
   import { onMount } from "svelte";
+  import { createWorkspaceRefresh } from "$lib/workspace-refresh";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import { open } from "@tauri-apps/plugin-dialog";
@@ -31,21 +32,10 @@
   let { children } = $props();
   let closeConfirmOpen = $state(false);
 
-  async function refreshWorkspaces() {
-    const items = await listWorkspaces();
-    workspaces.set(items);
-
-    const linkedEntries = await Promise.all(
-      items.map(async (item) => {
-        try {
-          return [item.id, await listLinkedProjects(item.id)] as const;
-        } catch {
-          return [item.id, []] as const;
-        }
-      }),
-    );
-    linkedProjectsByWorkspace.set(Object.fromEntries(linkedEntries));
-
+  let registryRefresh: ((invalidate?:boolean)=>Promise<void>) | null = null;
+  async function refreshWorkspaces(){ await registryRefresh?.(true); }
+  async function refreshInitialRuntimeStatus(){
+    const items=$workspaces;
     const mcpStates: Record<string, RuntimeState> = {};
     const actionsStates: Record<string, RuntimeState> = {};
     await Promise.all(
@@ -115,15 +105,30 @@
 
   onMount(() => {
     if ($page.url.pathname === "/control") return;
+    const registry=createWorkspaceRefresh(async()=>{
+      const items=await listWorkspaces();
+      const linked=await Promise.all(items.map(async item=>[item.id,await listLinkedProjects(item.id)] as const));
+      return {items,linked};
+    },value=>{
+      workspaces.set(value.items);linkedProjectsByWorkspace.set(Object.fromEntries(value.linked));
+      workspaceLoaded.set(true);workspaceLoadError.set("");
+    },()=>{workspaceLoadError.set("Workspace refresh unavailable; last verified list retained. / 工作區刷新未成功，保留上次已驗證清單。");});
+    registryRefresh=registry.run;
+    const refresh=()=>{void registry.run(true);};
+    window.addEventListener('coding-tools-workspaces-changed',refresh);
+    window.addEventListener('focus',refresh);
+    const poll=setInterval(()=>{void registry.run(false);},5000);
     const stopGuard = startUiMemoryGuard();
     const stopClose = startCloseGuard(() => {
       closeConfirmOpen = true;
     });
     void (async () => {
-      try { await refreshWorkspaces(); workspaceLoaded.set(true); workspaceLoadError.set(""); }
+      try { await refreshWorkspaces(); await refreshInitialRuntimeStatus(); }
       catch { workspaceLoadError.set("Desktop service unavailable. Open the installed app to load your workspaces. / 桌面服務未連線，請在已安裝程式載入工作區。"); }
     })();
     return () => {
+      registryRefresh=null;registry.stop();clearInterval(poll);
+      window.removeEventListener("coding-tools-workspaces-changed",refresh);window.removeEventListener("focus",refresh);
       stopGuard();
       stopClose();
     };
