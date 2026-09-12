@@ -1,0 +1,66 @@
+diff --git a/src-tauri/src/codex_bridge/mod.rs b/src-tauri/src/codex_bridge/mod.rs
+--- a/src-tauri/src/codex_bridge/mod.rs
++++ b/src-tauri/src/codex_bridge/mod.rs
+@@ -1092,8 +1092,10 @@ mod tests {
+             request_limit: 0,
+             lifetime_seconds: 0,
+         };
+-        let mut memory = Memory::default();
+-        memory.requests_used = 25;
++        let mut memory = Memory {
++            requests_used: 25,
++            ..Default::default()
++        };
+         assert!(reserve(&mut memory, &request, true, &options, true, true)
+             .unwrap()
+             .is_none());
+diff --git a/src/lib/components/CodexRuntimePanel.svelte b/src/lib/components/CodexRuntimePanel.svelte
+--- a/src/lib/components/CodexRuntimePanel.svelte
++++ b/src/lib/components/CodexRuntimePanel.svelte
+@@ -27,6 +27,9 @@
+   let disposed = false;
+   let selectionGeneration = 0;
+   const active = new Set(['starting', 'inProgress', 'compacting', 'interrupt_requested']);
++  function validLifetime(value: number) {
++    return Number.isInteger(value) && (value === 0 || (value >= 30 && value <= 900));
++  }
+   function selectionChanged() {
+@@ -54,6 +57,10 @@
+   }
+   async function connect() {
+     if (busy || !workspaceId) return;
++    if (!validLifetime(lifetime)) {
++      error = t($locale, 'Consent lifetime must be 0 or 30–900 whole seconds.', '授權有效秒數必須為 0 或 30–900 的整數。');
++      return;
++    }
+     busy = true; error = '';
+@@ -91,7 +98,8 @@
+       if (disposed || generation !== selectionGeneration) return;
+       if (!result.ok) throw new Error(typeof result.error === 'string' ? result.error : JSON.stringify(result.error ?? result));
+-      if (result.thread_id) selectedThread = result.thread_id;
++      if (operation === 'close') { selectedThread = ''; answer = null; }
++      else if (result.thread_id) selectedThread = result.thread_id;
+       prompt = '';
+       await refresh();
+@@ -140,7 +148,7 @@
+       <label>{t($locale, 'Model ID from your native provider configuration', '原生供應商設定中的模型 ID')}<input bind:value={model} autocomplete="off" spellcheck="false" required={consent} disabled={busy || !!snapshot?.connected}/></label>
+       <label>{t($locale, 'Model-request limit · 0 = no app-side ceiling', '模型請求上限 · 0 = 應用程式不設上限')}<input type="number" bind:value={requestLimit} min="0" max="20" required disabled={busy || !!snapshot?.connected}/></label>
+-      <label>{t($locale, 'Consent lifetime seconds · 0 = until disconnect', '授權有效秒數 · 0 = 直到斷線')}<input type="number" bind:value={lifetime} min="0" max="900" required disabled={busy || !!snapshot?.connected}/></label>
++      <label>{t($locale, 'Consent lifetime seconds · 0 or 30–900', '授權有效秒數 · 0 或 30–900')}<input type="number" bind:value={lifetime} min="0" max="900" step="1" required disabled={busy || !!snapshot?.connected}/></label>
+@@ -151,7 +159,7 @@
+       'Select a trusted native binary, not a shell wrapper. Sign in to the dedicated home separately; no credentials are copied or requested here. Native configuration, logs and provider retention are outside the bridge’s RAM-only response handling. Read-only policy is requested, not an independently verified OS sandbox. Permission changes revoke this connection.',
+       '請選擇可信任的原生執行檔，而非 Shell 包裝程式。請另行登入專用主目錄；此處不會複製或索取憑證。原生設定、日誌及供應商保留政策，不屬於介接層僅用記憶體處理回應的保證。此處會要求唯讀權限，但不是獨立驗證的作業系統沙箱；權限變更會撤銷此連接。')}</p>
+-    <div class="cc-button-row"><button class="cc-button primary" disabled={busy || !!snapshot?.connected || !workspaceId}>{t($locale, busy ? 'Working…' : 'Connect selected native runtime', busy ? '處理中…' : '連接選定的原生執行環境')}</button>
++    <div class="cc-button-row"><button class="cc-button primary" disabled={busy || !!snapshot?.connected || !workspaceId || !validLifetime(lifetime)}>{t($locale, busy ? 'Working…' : 'Connect selected native runtime', busy ? '處理中…' : '連接選定的原生執行環境')}</button>
+       <button class="cc-button ghost" type="button" disabled={!workspaceId} onclick={() => void refresh()}>{t($locale, 'Refresh state', '重新讀取狀態')}</button></div>
+   </form>
+diff --git a/src-tauri/src/tools/registry_definitions.rs b/src-tauri/src/tools/registry_definitions.rs
+--- a/src-tauri/src/tools/registry_definitions.rs
++++ b/src-tauri/src/tools/registry_definitions.rs
+@@ -8,7 +8,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
+     ("workflow_update", "Update workspace workflow", "Create, move, edit, archive, restore or observe a task at an expected board revision. Cannot complete human review steps or access other workspaces; no model calls.", false, false, false),
+     ("codex_runtime_status", "Native Codex connection status", "Inspect the locally opted-in native App Server connection, request count, lifetime and owned threads. Does not start a process or model request.", true, false, false),
+     ("codex_agent_read", "Read owned native Codex response", "Read the latest bounded agent message and observed turn state from this listener's native connection. No inferred success, hidden reasoning, foreign thread or model request.", true, false, false),
+-    ("codex_agent_control", "Control opted-in native Codex agent", "Submit start/send/review/compact or interrupt/close to a locally enabled native App Server. Model operations can spend provider quota. Unique request_id is mandatory; repeats never replay. Only owned threads, no remote enable, approval escalation or arbitrary RPC. An acknowledgment is not task completion.", false, true, true),
++    ("codex_agent_control", "Control opted-in native Codex agent", "Submit start/send/review/compact or interrupt/close to a locally enabled native App Server. Model operations can spend provider quota. Unique request_id is mandatory. Identical retries return a stored result without resubmission only while the bounded receipt is retained (up to 90 minutes; completed receipts may be evicted oldest-first at 64 entries). After expiry or eviction the same ID can submit again, so use a fresh ID for every new operation and inspect unknown outcomes before retrying. Pending or unknown receipts are never evicted for capacity. Only owned threads, no remote enable, approval escalation or arbitrary RPC. An acknowledgment is not task completion.", false, true, true),
+     ("codex_tools_status", "Local coding tool capabilities", "Report implemented local Codex-style tools and explicit unsupported model/runtime features. Does not invoke Codex, an AI reviewer, or an inference API.", true, false, false),
