@@ -65,7 +65,8 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libxdo-dev
+            libxdo-dev \
+            libpipewire-0.3-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -159,7 +160,8 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libxdo-dev
+            libxdo-dev \
+            libpipewire-0.3-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
