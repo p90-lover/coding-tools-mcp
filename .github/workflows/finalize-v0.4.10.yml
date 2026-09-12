@@ -37,7 +37,7 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)" = "$SOURCE"
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > aiTemp/release-finalize/releases.json
           python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, pathlib
+          import json, pathlib
           releases=json.loads(pathlib.Path('aiTemp/release-finalize/releases.json').read_text())
           matches=[r for r in releases if r.get('tag_name')=='v0.4.10' and r.get('draft') is True]
           assert len(matches)==1, f'expected exactly one v0.4.10 draft, found {len(matches)}'
@@ -77,19 +77,22 @@ jobs:
           root=pathlib.Path('aiTemp/release-finalize')
           release=json.loads((root/'release.json').read_text())
           metadata={a['name']:a for a in release['assets']}
-          files=['Coding.Tools.MCP_0.4.10_x64-setup.exe','Coding.Tools.MCP_0.4.10_universal.dmg']
+          aliases={
+            'Coding Tools MCP_0.4.10_x64-setup.exe':'Coding.Tools.MCP_0.4.10_x64-setup.exe',
+            'Coding Tools MCP_0.4.10_universal.dmg':'Coding.Tools.MCP_0.4.10_universal.dmg',
+          }
           sums={}
           for line in (root/'SHA256SUMS.txt').read_text().splitlines():
             digest,name=line.split(None,1)
             sums[name.strip()]=digest
-          assert set(sums)==set(files), sums
-          for name in files:
-            path=root/name
+          assert set(sums)==set(aliases), sums
+          for checksum_name,upload_name in aliases.items():
+            path=root/upload_name
             digest=hashlib.sha256(path.read_bytes()).hexdigest()
-            assert sums[name]==digest, (name,sums[name],digest)
-            assert metadata[name]['size']==path.stat().st_size
-            assert metadata[name]['digest']=='sha256:'+digest
-          print('Uploaded EXE/DMG sizes and SHA-256 digests match SHA256SUMS.txt and release metadata.')
+            assert sums[checksum_name]==digest, (checksum_name,sums[checksum_name],digest)
+            assert metadata[upload_name]['size']==path.stat().st_size
+            assert metadata[upload_name]['digest']=='sha256:'+digest
+          print('Uploaded EXE/DMG sizes and SHA-256 digests match SHA256SUMS.txt and release metadata after explicit GitHub filename sanitization mapping.')
           PY
       - name: Publish the same verified draft and re-read by tag
         shell: bash
