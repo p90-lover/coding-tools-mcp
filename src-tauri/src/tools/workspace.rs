@@ -450,6 +450,12 @@ impl Workspace {
         if self.allowed_root_for_path(&resolved_parent).is_none() {
             return Err(WorkspaceError::path_outside_workspace());
         }
+        // Keep new linked targets in the same canonical spelling as their root.
+        // On Windows linked mappings intentionally show D:\... while canonical
+        // storage roots use the verbatim prefix. Existing targets were already
+        // canonicalized above; new targets need their existing ancestor resolved.
+        let candidate = Self::normalize_path_from_existing_ancestor(&candidate);
+        self.ensure_inside_workspace(&candidate, &candidate)?;
         Ok(ResolvedPath {
             display: self.display_path(&candidate),
             path: candidate,
