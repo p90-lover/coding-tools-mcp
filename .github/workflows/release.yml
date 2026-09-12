@@ -259,21 +259,53 @@ jobs:
             printf '\n' >> aiTemp/release-notes.md
             cat "docs/releases/$TAG-audit-notes.md" >> aiTemp/release-notes.md
           fi
-          gh release create "$TAG" --verify-tag --draft --title "Coding Tools MCP $TAG" --notes-file aiTemp/release-notes.md aiTemp/release-assets/*
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > aiTemp/release-meta/releases.json
-          RELEASE_ID="$(python - <<'PY'
+          RELEASE_STATE="$(python - <<'PY'
+          import json, os, pathlib
+          releases=json.loads(pathlib.Path('aiTemp/release-meta/releases.json').read_text())
+          matches=[r for r in releases if r.get('tag_name')==os.environ['TAG']]
+          assert len(matches)<=1, f"expected at most one release for {os.environ['TAG']}, found {len(matches)}"
+          if not matches:
+              print('missing')
+          else:
+              release=matches[0]
+              assert release.get('name')==f"Coding Tools MCP {os.environ['TAG']}", release.get('name')
+              assert release.get('prerelease') is False
+              kind='draft' if release.get('draft') is True else 'published'
+              if kind=='published':
+                  assert release.get('published_at'), 'published release is missing published_at'
+              print(f"{kind}:{release['id']}")
+          PY
+          )"
+          if [ "$RELEASE_STATE" = "missing" ]; then
+            gh release create "$TAG" --verify-tag --draft --title "Coding Tools MCP $TAG" --notes-file aiTemp/release-notes.md aiTemp/release-assets/*
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > aiTemp/release-meta/releases.json
+            RELEASE_STATE="$(python - <<'PY'
           import json, os, pathlib
           releases=json.loads(pathlib.Path('aiTemp/release-meta/releases.json').read_text())
           matches=[r for r in releases if r.get('tag_name')==os.environ['TAG'] and r.get('draft') is True]
-          assert len(matches)==1, f"expected exactly one draft for {os.environ['TAG']}, found {len(matches)}"
-          print(matches[0]['id'])
+          assert len(matches)==1, f"expected exactly one new draft for {os.environ['TAG']}, found {len(matches)}"
+          release=matches[0]
+          assert release.get('name')==f"Coding Tools MCP {os.environ['TAG']}", release.get('name')
+          assert release.get('prerelease') is False
+          print(f"draft:{release['id']}")
           PY
-          )"
+            )"
+          fi
+          case "$RELEASE_STATE" in
+            draft:*|published:*) ;;
+            *) echo "Unexpected release state: $RELEASE_STATE" >&2; exit 1 ;;
+          esac
+          RELEASE_KIND="${RELEASE_STATE%%:*}"
+          RELEASE_ID="${RELEASE_STATE#*:}"
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > aiTemp/release-meta/uploaded.json
           python - <<'PY'
-          import hashlib,json,pathlib
+          import hashlib,json,os,pathlib
           root=pathlib.Path('aiTemp/release-assets')
-          actual={p['name']:p for p in json.loads(pathlib.Path('aiTemp/release-meta/uploaded.json').read_text())['assets']}
+          release=json.loads(pathlib.Path('aiTemp/release-meta/uploaded.json').read_text())
+          assert release['tag_name']==os.environ['TAG']
+          assert release['name']==f"Coding Tools MCP {os.environ['TAG']}"
+          actual={p['name']:p for p in release['assets']}
           expected={p.name.replace(' ', '.'):p for p in root.iterdir()}
           assert set(actual)==set(expected), (set(actual),set(expected))
           for uploaded_name,path in expected.items():
@@ -283,7 +315,11 @@ jobs:
           PY
           git fetch --no-tags origin "refs/tags/$TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE"
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true > aiTemp/release-meta/published.json
+          if [ "$RELEASE_KIND" = "draft" ]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true > aiTemp/release-meta/published.json
+          else
+            cp aiTemp/release-meta/uploaded.json aiTemp/release-meta/published.json
+          fi
           python - <<'PY'
           import json,os,pathlib
           release=json.loads(pathlib.Path('aiTemp/release-meta/published.json').read_text())
