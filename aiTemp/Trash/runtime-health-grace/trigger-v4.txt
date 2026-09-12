@@ -1,0 +1,1 @@
+Capture focused library-test diagnostics for the runtime health patch. Preserve under aiTemp/Trash; do not merge to main.
