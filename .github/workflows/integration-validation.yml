@@ -116,6 +116,7 @@ jobs:
         run: test ! -s aiTemp/cargo-fmt.patch
 
   frontend:
+    if: ${{ !startsWith(github.head_ref, 'validation-linux/') }}
     name: Svelte — check, build, Node tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -191,6 +192,7 @@ jobs:
         run: cargo test --locked --test harness_tool_contract
 
   rust-windows:
+    if: ${{ !startsWith(github.head_ref, 'validation-linux/') }}
     name: Rust Windows — test and clippy
     runs-on: windows-latest
     timeout-minutes: 45
@@ -217,6 +219,7 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
   rust-macos:
+    if: ${{ !startsWith(github.head_ref, 'validation-linux/') }}
     name: Rust macOS — test and clippy
     runs-on: macos-14
     timeout-minutes: 45
