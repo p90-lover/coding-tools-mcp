@@ -450,11 +450,8 @@ pub fn validate_command_for_workspace(
         ));
     }
 
-    if let Some(timeout_ms) = arguments.get("timeout_ms").and_then(Value::as_u64) {
-        if timeout_ms > 600_000 {
-            return Err(PolicyError("Command timeout exceeds 10 minutes".into()));
-        }
-    }
+    // Timing profile is independent of command, root, network and approval restrictions above.
+    crate::tools::exec_profile::resolve(arguments).map_err(PolicyError)?;
 
     Ok(())
 }

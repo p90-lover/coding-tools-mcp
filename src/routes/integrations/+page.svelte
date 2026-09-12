@@ -1,5 +1,6 @@
 <script lang="ts">
  import CodexRuntimePanel from "$lib/components/CodexRuntimePanel.svelte";
+ import ProviderConfigPreview from "$lib/components/ProviderConfigPreview.svelte";
  import { Plug, RefreshCw, ShieldCheck, Unplug, ExternalLink } from '@lucide/svelte';
  import { locale,endpoints,snapshots,integrationErrors,integrationBusy,readIntegration,clearIntegration } from '$lib/control-center/state';
  import { translated as t,formatTime,type Source } from '$lib/control-center/model';
@@ -25,4 +26,5 @@
  </section>{/each}</div>
  <div class="cc-note-panel"><h3>{t($locale,'Before connecting','連接前須知')}</h3><p>{t($locale,'The external service must already be running. Anneal’s upstream release supports macOS and Linux, not native Windows. This app does not install or start it. Existing external agents can independently consume their provider quota; reading their status does not stop them.','外部服務須已在運行。Anneal 上游版本支援 macOS 與 Linux，不支援原生 Windows。本程式不會安裝或啟動它；外部 Agent 仍可能自行消耗配額，讀取狀態不會停止它們。')}</p></div>
  <CodexRuntimePanel/>
+ <ProviderConfigPreview/>
 </section>

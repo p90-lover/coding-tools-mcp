@@ -302,41 +302,6 @@ pub fn is_approved(root: &Path, target: &Target) -> Result<bool> {
     Ok(!grant.suspended && grant.allows(&native::process_identity(target.pid)?))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn computer_remembered_permission_requires_exact_scope_and_executable() {
-        let root = std::env::current_dir().unwrap();
-        let app = AppIdentity {
-            executable: root.join("fixture.exe"),
-            sha256: "a".repeat(64),
-        };
-        let mut g = SavedPermission {
-            root: root.clone(),
-            configuration: "auth-and-policy".into(),
-            apps: vec![app.clone()],
-            preferred_app: Some(app.clone()),
-            restore_on_start: true,
-            ..Default::default()
-        };
-        assert!(g.can_restore(&root, "auth-and-policy"));
-        assert!(!g.can_restore(&root, "different-auth"));
-        assert!(!g.can_restore(&root.join("other"), "auth-and-policy"));
-        assert!(g.allows(&app));
-        assert!(!g.allows(&AppIdentity {
-            sha256: "b".repeat(64),
-            ..app.clone()
-        }));
-        g.suspended = true;
-        assert!(!g.can_restore(&root, "auth-and-policy"));
-        let saved = serde_json::to_vec(&g).unwrap();
-        let restored: SavedPermission = serde_json::from_slice(&saved).unwrap();
-        assert!(restored.suspended && !restored.can_restore(&root, "auth-and-policy"));
-        assert!(!String::from_utf8(saved).unwrap().contains("base64"));
-    }
-}
-
 /// Read current handles each time. Never reuse a persisted PID/HWND or focus a candidate.
 pub fn restore_target(g: &SavedPermission) -> Result<Option<Target>> {
     native::require_unlocked_desktop()?;
@@ -383,4 +348,39 @@ pub fn login_startup(enabled: bool) -> AppResult<()> {
 
 pub fn revocation_saved() -> bool {
     REVOCATION_SAVED.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn computer_remembered_permission_requires_exact_scope_and_executable() {
+        let root = std::env::current_dir().unwrap();
+        let app = AppIdentity {
+            executable: root.join("fixture.exe"),
+            sha256: "a".repeat(64),
+        };
+        let mut g = SavedPermission {
+            root: root.clone(),
+            configuration: "auth-and-policy".into(),
+            apps: vec![app.clone()],
+            preferred_app: Some(app.clone()),
+            restore_on_start: true,
+            ..Default::default()
+        };
+        assert!(g.can_restore(&root, "auth-and-policy"));
+        assert!(!g.can_restore(&root, "different-auth"));
+        assert!(!g.can_restore(&root.join("other"), "auth-and-policy"));
+        assert!(g.allows(&app));
+        assert!(!g.allows(&AppIdentity {
+            sha256: "b".repeat(64),
+            ..app.clone()
+        }));
+        g.suspended = true;
+        assert!(!g.can_restore(&root, "auth-and-policy"));
+        let saved = serde_json::to_vec(&g).unwrap();
+        let restored: SavedPermission = serde_json::from_slice(&saved).unwrap();
+        assert!(restored.suspended && !restored.can_restore(&root, "auth-and-policy"));
+        assert!(!String::from_utf8(saved).unwrap().contains("base64"));
+    }
 }

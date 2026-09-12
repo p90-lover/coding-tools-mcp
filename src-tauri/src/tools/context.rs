@@ -27,6 +27,7 @@ pub struct ToolContext {
     pub tool_profile: String,
     pub permission_mode: String,
     pub harness: Harness,
+    pub(crate) execution_lease: Option<Arc<crate::harness::resource_lease::ResourceLease>>,
     default_cwd: Arc<Mutex<PathBuf>>,
     auto_history_sessions: Arc<Mutex<HashMap<String, Value>>>,
     pub sessions: Arc<SessionStore>,
@@ -94,6 +95,7 @@ impl ToolContext {
             tool_profile: crate::tools::registry::normalize_tool_profile(&tool_profile).into(),
             permission_mode,
             harness: Harness::new(root.clone(), harness_root).expect("无法初始化 Harness"),
+            execution_lease: None,
             default_cwd: Arc::new(Mutex::new(root)),
             auto_history_sessions: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(SessionStore::new()),
@@ -131,6 +133,12 @@ impl ToolContext {
 
     pub fn default_cwd_path(&self) -> PathBuf {
         self.default_cwd.lock().expect("cwd lock").clone()
+    }
+
+    pub(crate) fn with_request_cwd(&self, path: PathBuf) -> Self {
+        let mut request = self.clone();
+        request.default_cwd = Arc::new(Mutex::new(path));
+        request
     }
 
     pub fn cached_auto_history_session(&self, session_key: &str) -> Option<Value> {

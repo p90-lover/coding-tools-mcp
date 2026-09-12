@@ -3,17 +3,17 @@
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const TOOL: &str = "mcp_operation_status";
 pub const MAX_RECORDS: usize = 128;
 pub const MAX_RESULT_BYTES: usize = 256 * 1024;
-const RETENTION: Duration = Duration::from_secs(30 * 60);
+const RETENTION: Duration = Duration::from_secs(crate::tools::ram_cache::TTL_SECONDS);
 
 pub struct OperationStore {
     runtime_id: String,
-    records: Mutex<VecDeque<Record>>,
+    records: Arc<Mutex<VecDeque<Record>>>,
 }
 struct Record {
     id: String,
@@ -33,9 +33,20 @@ struct Record {
 
 impl Default for OperationStore {
     fn default() -> Self {
+        let records = Arc::new(Mutex::new(VecDeque::new()));
+        let weak = Arc::downgrade(&records);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let Some(records) = weak.upgrade() else { break };
+                if let Ok(mut rows) = records.lock() {
+                    prune(&mut rows);
+                };
+            }
+        });
         Self {
             runtime_id: uuid::Uuid::new_v4().to_string(),
-            records: Mutex::new(VecDeque::new()),
+            records,
         }
     }
 }
@@ -90,7 +101,12 @@ impl OperationStore {
             .map_err(|_| "Operation store is unavailable")?;
         prune(&mut records);
         if records.len() >= MAX_RECORDS {
-            let oldest_terminal = records.iter().position(|r| r.finished.is_some());
+            let oldest_terminal = records
+                .iter()
+                .enumerate()
+                .filter_map(|(index, record)| record.finished.map(|at| (index, at)))
+                .min_by_key(|(_, at)| *at)
+                .map(|(index, _)| index);
             if let Some(index) = oldest_terminal {
                 records.remove(index);
             } else {
@@ -152,6 +168,7 @@ impl OperationStore {
             }
         }
     }
+    #[cfg(test)]
     pub fn query(&self, args: &Value, revision: u64, permitted: &[&str]) -> Result<Value, String> {
         self.query_scoped(args, revision, permitted, None)
     }
@@ -238,7 +255,7 @@ impl OperationStore {
             }).collect();
         Ok(json!({
             "ok":true,"runtime_id":self.runtime_id,"found":!matches.is_empty(),"operations":matches,
-            "retention":{"scope":"this MCP listener instance","max_records":MAX_RECORDS,"max_result_bytes":MAX_RESULT_BYTES,"max_terminal_age_seconds":RETENTION.as_secs(),"results_persisted_to_disk":false},
+            "retention":{"scope":"this MCP listener instance","max_records":MAX_RECORDS,"max_result_bytes":MAX_RESULT_BYTES,"max_terminal_age_seconds":RETENTION.as_secs(),"results_persisted_to_disk":false,"eviction":"oldest_completed_first","expiry_extends_on_read":false},
             "safe_to_retry":false,
             "note":"Read-only lookup; never reruns an operation. Missing/expired/restarted records mean UNKNOWN, not never executed. RPC ids are not idempotency keys. Completed means tool dispatch returned; a returned command/task may still run. Results may be unavailable after policy changes or size limits."
         }))

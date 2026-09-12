@@ -71,8 +71,15 @@ fn start_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> 
         .get("objective")
         .and_then(Value::as_str)
         .ok_or_else(|| tool_error("INVALID_ARGUMENT", "objective 是必填项"))?;
-    let task = ctx.harness.start_task(objective).map_err(map_error)?;
-    Ok(json!({"task": task, "next": ["project_state", "task_context"]}))
+    let roots = string_list(args.get("baseline_roots"))?;
+    let task = ctx
+        .harness
+        .start_task_scoped(objective, roots.as_deref())
+        .map_err(map_error)?;
+    Ok(
+        json!({"task": task, "baseline_coverage": "selected source paths; not a filesystem permission grant",
+        "next": ["project_state", "task_context"]}),
+    )
 }
 
 fn update_task(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
@@ -163,7 +170,12 @@ fn change_summary(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceErr
             .map_err(map_error)?
             .ok_or_else(|| tool_error("TASK_STATE_REQUIRED", "没有可总结的活动任务"))?
     };
-    let state = ctx.harness.project_state(200).map_err(map_error)?;
+    let state = ctx
+        .harness
+        .select_task(&task.id)
+        .map_err(map_error)?
+        .project_state(200)
+        .map_err(map_error)?;
     let files = state
         .files
         .iter()

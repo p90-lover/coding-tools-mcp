@@ -1,7 +1,7 @@
 //! Explicitly opted-in native Codex App Server sessions. No hidden model calls or RPC proxy.
 mod native_command;
 mod process;
-pub use native_command::{CommandRequest, CommandTicket};
+pub use native_command::CommandRequest;
 use process::OwnedProcess;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -960,10 +960,8 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
                 thread.status = "idle".into();
             }
         }
-        "thread/compacted" => {
-            if thread.status == "compacting" {
-                thread.status = "idle".into();
-            }
+        "thread/compacted" if thread.status == "compacting" => {
+            thread.status = "idle".into();
         }
         _ => {}
     }

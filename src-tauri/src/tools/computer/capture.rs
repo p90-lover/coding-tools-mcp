@@ -1,23 +1,36 @@
 //! Native pixels only. No path, file, thumbnail, recorder, or persistent image cache.
+use super::{error, unix_ms, Bounds, Result, Target};
+use crate::tools::image_tool::{render_image, validate_dimensions, vision_guard, ViewOptions};
 use image::DynamicImage;
-use serde_json::{json,Value};
-use crate::tools::image_tool::{render_image,validate_dimensions,vision_guard,ViewOptions};
-use super::{error,unix_ms,Bounds,Result,Target};
+use serde_json::{json, Value};
 
-pub fn frame(target:&Target, bounds:Bounds, max_side:u32)->Result<Value> {
-    if !cfg!(target_os="windows") { return Err(error("COMPUTER_USE_UNSUPPORTED","Computer control capture is Windows-only")); }
-    let _permit=vision_guard()?;
-    validate_dimensions(bounds.width,bounds.height)?;
-    let pixels=super::native::capture_pixels(target,bounds)?;
-    if pixels.width()!=bounds.width||pixels.height()!=bounds.height {
-        return Err(error("TARGET_GEOMETRY_CHANGED","Window geometry changed during capture; request a fresh snapshot"));
+pub fn frame(target: &Target, bounds: Bounds, max_side: u32) -> Result<Value> {
+    if !cfg!(target_os = "windows") {
+        return Err(error(
+            "COMPUTER_USE_UNSUPPORTED",
+            "Computer control capture is Windows-only",
+        ));
     }
-    let args=json!({"max_width":max_side,"max_height":max_side,"max_bytes":3_500_000,"output":"mcp_image"});
-    render_image(DynamicImage::ImageRgba8(pixels),&args,ViewOptions::parse(&args)?,json!({
-        "snapshot_id":uuid::Uuid::new_v4().to_string(),"captured_at_unix_ms":unix_ms(),
-        "window_id":target.window_id,"pid":target.pid,"desktop_bounds":bounds,
-        "capture_storage":"memory_only","persisted":false,"disk_cache":false,
-        "coordinate_space":"image pixels for computer_action; transform and foreground checks are enforced locally",
-        "codex_invoked":false,"capture_backend":"windows_gdi_physical_dwm_crop"
-    }))
+    let _permit = vision_guard()?;
+    validate_dimensions(bounds.width, bounds.height)?;
+    let pixels = super::native::capture_pixels(target, bounds)?;
+    if pixels.width() != bounds.width || pixels.height() != bounds.height {
+        return Err(error(
+            "TARGET_GEOMETRY_CHANGED",
+            "Window geometry changed during capture; request a fresh snapshot",
+        ));
+    }
+    let args = json!({"max_width":max_side,"max_height":max_side,"max_bytes":3_500_000,"output":"mcp_image"});
+    render_image(
+        DynamicImage::ImageRgba8(pixels),
+        &args,
+        ViewOptions::parse(&args)?,
+        json!({
+            "snapshot_id":uuid::Uuid::new_v4().to_string(),"captured_at_unix_ms":unix_ms(),
+            "window_id":target.window_id,"pid":target.pid,"desktop_bounds":bounds,
+            "capture_storage":"memory_only","persisted":false,"disk_cache":false,
+            "coordinate_space":"image pixels for computer_action; transform and foreground checks are enforced locally",
+            "codex_invoked":false,"capture_backend":"windows_gdi_physical_dwm_crop"
+        }),
+    )
 }

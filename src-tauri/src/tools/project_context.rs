@@ -15,6 +15,32 @@ const AGENT_FILE_NAMES: &[&str] = &["agents.md", "agent.md", "claude.md"];
 /// Resolve bounded project instructions for the exact path/workdir addressed by a tool call.
 /// The primary workspace and each approved linked project form separate instruction scopes.
 pub fn for_tool(ctx: &ToolContext, tool_name: &str, args: &Value) -> Value {
+    use sha2::{Digest, Sha256};
+    let mut context = full_for_tool(ctx, tool_name, args);
+    let identity = json!({"scope":context.get("scope"),"root":context.get("root"),
+        "files":context.get("files"),"instructions":context.get("instructions"),"scopes":context.get("scopes"),
+        "warnings":context.get("warnings"),"truncated":context.get("truncated")});
+    let revision = format!("{:x}", Sha256::digest(identity.to_string().as_bytes()));
+    let acknowledged = args
+        .get("known_project_instructions_revision")
+        .and_then(Value::as_str)
+        == Some(revision.as_str());
+    let original_bytes = context
+        .get("instructions")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .len();
+    context["revision"] = json!(revision);
+    context["unchanged"] = json!(acknowledged);
+    context["original_instruction_bytes"] = json!(original_bytes);
+    if acknowledged && context.get("instructions").is_some() {
+        context["instructions"] = json!("");
+        context["instructions_omitted"] = json!(true);
+    }
+    context
+}
+
+fn full_for_tool(ctx: &ToolContext, tool_name: &str, args: &Value) -> Value {
     if tool_name == "compare_images" {
         let before = for_tool(ctx, "image_info", &json!({"path": args.get("before_path")}));
         let after = for_tool(ctx, "image_info", &json!({"path": args.get("after_path")}));

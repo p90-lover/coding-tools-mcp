@@ -20,6 +20,8 @@ pub struct Harness {
     workspace_root: PathBuf,
     workspace_id: String,
     store: HarnessStore,
+    selected_task_id: Option<String>,
+    session_key: Option<String>,
 }
 
 impl Harness {
@@ -32,6 +34,8 @@ impl Harness {
             workspace_root,
             workspace_id,
             store: HarnessStore::new(harness_root)?,
+            selected_task_id: None,
+            session_key: None,
         })
     }
 
@@ -50,21 +54,56 @@ impl Harness {
         self.store.root()
     }
 
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    /// Clone selection into this request only; never mutate another caller's task.
+    pub fn select_task(&self, task_id: &str) -> HarnessResult<Self> {
+        self.task(task_id)?;
+        let mut selected = self.clone();
+        selected.selected_task_id = Some(task_id.to_string());
+        Ok(selected)
+    }
+
+    pub fn for_project(&self, root: PathBuf) -> HarnessResult<Self> {
+        let mut selected = Self::new(root, self.store.root().to_path_buf())?;
+        selected.session_key = self.session_key.clone();
+        Ok(selected)
+    }
+
+    pub fn with_session(&self, session: Option<&str>) -> Self {
+        let mut selected = self.clone();
+        selected.selected_task_id = None;
+        selected.session_key =
+            session.map(|value| format!("{:x}", Sha256::digest(value.as_bytes())));
+        selected
+    }
+
+    pub fn tasks(&self) -> HarnessResult<Vec<TaskSession>> {
+        self.store.list_tasks(&self.workspace_id)
+    }
+
     pub fn start_task(&self, objective: &str) -> HarnessResult<TaskSession> {
+        self.start_task_scoped(objective, None)
+    }
+
+    pub fn start_task_scoped(
+        &self,
+        objective: &str,
+        source_roots: Option<&[String]>,
+    ) -> HarnessResult<TaskSession> {
         if objective.trim().is_empty() {
             return Err(HarnessError::new("INVALID_ARGUMENT", "任务目标不能为空"));
         }
-        if let Some(task) = self.current_task()? {
-            return Err(HarnessError::new(
-                "TASK_ALREADY_ACTIVE",
-                format!("工作区已有活动任务 {}", task.id),
-            ));
-        }
-        let baseline = capture_baseline(&self.workspace_root)?;
+        // Long I/O never holds the task metadata lock or silently replaces an existing task.
+        let baseline = capture_baseline_scoped(&self.workspace_root, source_roots)?;
+        let _metadata = self.store.lock_metadata(&self.workspace_id)?;
         let now = timestamp();
         let task = TaskSession {
             id: Uuid::new_v4().simple().to_string(),
             workspace_id: self.workspace_id.clone(),
+            session_key: self.session_key.clone(),
             objective: objective.trim().to_string(),
             status: TaskStatus::Active,
             expected_fingerprint: baseline.worktree_fingerprint.clone(),
@@ -89,11 +128,22 @@ impl Harness {
     }
 
     pub fn current_task(&self) -> HarnessResult<Option<TaskSession>> {
-        Ok(self
+        if let Some(id) = self.selected_task_id.as_deref() {
+            return self.task(id).map(Some);
+        }
+        let mut tasks = self
             .store
             .list_tasks(&self.workspace_id)?
             .into_iter()
-            .find(|task| task.status.is_writable()))
+            .filter(|task| task.status.is_open() && task.session_key == self.session_key);
+        let first = tasks.next();
+        if tasks.next().is_some() {
+            return Err(HarnessError::new(
+                "TASK_SELECTION_REQUIRED",
+                "Multiple tasks are open in this project/session. Specify task_id; unrelated tasks were not changed.",
+            ));
+        }
+        Ok(first)
     }
 
     pub fn task(&self, task_id: &str) -> HarnessResult<TaskSession> {
@@ -101,6 +151,7 @@ impl Harness {
     }
 
     pub fn transition(&self, task_id: &str, next: TaskStatus) -> HarnessResult<TaskSession> {
+        let _metadata = self.store.lock_metadata(&self.workspace_id)?;
         let mut task = self.task(task_id)?;
         if !task.status.can_transition_to(next) {
             return Err(HarnessError::new(
@@ -111,9 +162,7 @@ impl Harness {
         task.status = next;
         task.updated_at = timestamp();
         self.store.save_task(&task)?;
-        if !task.status.is_writable() {
-            self.save_workspace_state(None, &task.updated_at)?;
-        }
+        self.save_workspace_state(None, &task.updated_at)?;
         self.record_event(
             task_id,
             "task_status_changed",
@@ -130,6 +179,7 @@ impl Harness {
         completed_steps: Option<Vec<String>>,
         pending_steps: Option<Vec<String>>,
     ) -> HarnessResult<TaskSession> {
+        let _metadata = self.store.lock_metadata(&self.workspace_id)?;
         let mut task = self.task(task_id)?;
         if let Some(steps) = completed_steps {
             task.completed_steps = steps;
@@ -154,7 +204,14 @@ impl Harness {
 
     pub fn check_baseline(&self, task_id: &str) -> HarnessResult<()> {
         let task = self.task(task_id)?;
-        let current = capture_baseline(&self.workspace_root)?;
+        if !task.status.is_writable() {
+            return Err(HarnessError::new(
+                "TASK_NOT_EXECUTABLE",
+                "This task is paused, failed or closed. Explicitly resume it before executing; other tasks are unaffected.",
+            ));
+        }
+        let current =
+            capture_baseline_scoped(&self.workspace_root, task.baseline.source_roots.as_deref())?;
         if current.branch != task.baseline.branch || current.head != task.baseline.head {
             return Err(HarnessError::new(
                 "BASELINE_STALE",
@@ -171,8 +228,24 @@ impl Harness {
     }
 
     pub fn refresh_expected_state(&self, task_id: &str) -> HarnessResult<TaskSession> {
+        let previous = self.task(task_id)?;
+        let current = capture_baseline_scoped(
+            &self.workspace_root,
+            previous.baseline.source_roots.as_deref(),
+        )?;
+        let _metadata = self.store.lock_metadata(&self.workspace_id)?;
         let mut task = self.task(task_id)?;
-        task.expected_fingerprint = capture_baseline(&self.workspace_root)?.worktree_fingerprint;
+        if task.expected_fingerprint != previous.expected_fingerprint
+            || task.updated_at != previous.updated_at
+            || task.status != previous.status
+            || task.baseline.source_roots != previous.baseline.source_roots
+        {
+            return Err(HarnessError::new(
+                "TASK_CHANGED_DURING_SCAN",
+                "Task changed during verification; its expected state was not replaced",
+            ));
+        }
+        task.expected_fingerprint = current.worktree_fingerprint;
         task.updated_at = timestamp();
         self.store.save_task(&task)?;
         Ok(task)
@@ -256,8 +329,12 @@ impl Harness {
     }
 
     pub fn project_state(&self, max_files: usize) -> HarnessResult<ProjectState> {
-        let current = capture_baseline(&self.workspace_root)?;
         let task = self.current_task()?;
+        let current = capture_baseline_scoped(
+            &self.workspace_root,
+            task.as_ref()
+                .and_then(|t| t.baseline.source_roots.as_deref()),
+        )?;
         let baseline_map = task
             .as_ref()
             .map(|t| {
@@ -326,8 +403,26 @@ impl Harness {
     }
 
     pub fn status(&self) -> HarnessResult<HarnessStatus> {
-        let current = capture_baseline(&self.workspace_root)?;
         let task = self.current_task()?;
+        // Standalone status is lightweight. There is no task baseline to verify in this case.
+        let current = if let Some(task) = task.as_ref() {
+            capture_baseline_scoped(&self.workspace_root, task.baseline.source_roots.as_deref())?
+        } else {
+            ProjectBaseline {
+                source_roots: None,
+                branch: super::bounded_scan::git_metadata(
+                    &self.workspace_root,
+                    &["rev-parse", "--abbrev-ref", "HEAD"],
+                )?,
+                head: super::bounded_scan::git_metadata(
+                    &self.workspace_root,
+                    &["rev-parse", "HEAD"],
+                )?,
+                worktree_fingerprint: String::new(),
+                entries: Vec::new(),
+                captured_at: timestamp(),
+            }
+        };
         let (task_id, task_state, task_updated_at, writable, baseline_matches, reason) =
             match task.as_ref() {
                 Some(task) => {
@@ -460,21 +555,22 @@ impl Harness {
 
     fn save_workspace_state(
         &self,
-        active_task_id: Option<&str>,
+        _active_task_id: Option<&str>,
         updated_at: &str,
     ) -> HarnessResult<()> {
+        let tasks = self.store.list_tasks(&self.workspace_id)?;
+        let active_task_ids: Vec<_> = tasks
+            .iter()
+            .filter(|task| task.status.is_writable())
+            .map(|task| task.id.clone())
+            .collect();
         self.store.save_workspace_state(
             &self.workspace_id,
             &WorkspaceHarnessState {
                 schema_version: SCHEMA_VERSION,
-                active_task_id: active_task_id.map(str::to_string),
-                recent_task_ids: self
-                    .store
-                    .list_tasks(&self.workspace_id)?
-                    .into_iter()
-                    .take(20)
-                    .map(|t| t.id)
-                    .collect(),
+                active_task_id: (active_task_ids.len() == 1).then(|| active_task_ids[0].clone()),
+                active_task_ids,
+                recent_task_ids: tasks.into_iter().take(20).map(|t| t.id).collect(),
                 updated_at: updated_at.to_string(),
             },
         )
@@ -483,6 +579,41 @@ impl Harness {
 
 pub fn capture_baseline(root: &Path) -> HarnessResult<ProjectBaseline> {
     super::bounded_scan::capture(root)
+}
+
+pub fn capture_baseline_scoped(
+    root: &Path,
+    source_roots: Option<&[String]>,
+) -> HarnessResult<ProjectBaseline> {
+    let Some(roots) = source_roots else {
+        return capture_baseline(root);
+    };
+    let _admission = super::bounded_scan::acquire(root)?;
+    let branch = super::bounded_scan::git_metadata(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let head = super::bounded_scan::git_metadata(root, &["rev-parse", "HEAD"])?;
+    let scan = super::scan::capture(
+        root,
+        Some(roots),
+        &super::scan::ScanLimits::default(),
+        &std::sync::atomic::AtomicBool::new(false),
+        &mut |_| {},
+    )?;
+    if branch != super::bounded_scan::git_metadata(root, &["rev-parse", "--abbrev-ref", "HEAD"])?
+        || head != super::bounded_scan::git_metadata(root, &["rev-parse", "HEAD"])?
+    {
+        return Err(HarnessError::new(
+            "BASELINE_CHANGED_DURING_SCAN",
+            "Git identity changed during verification",
+        ));
+    }
+    Ok(ProjectBaseline {
+        source_roots: scan.source_roots,
+        branch,
+        head,
+        worktree_fingerprint: scan.fingerprint,
+        entries: scan.entries,
+        captured_at: timestamp(),
+    })
 }
 
 pub(super) fn workspace_id(root: &Path) -> String {

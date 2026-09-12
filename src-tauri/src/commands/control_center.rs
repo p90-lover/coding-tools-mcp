@@ -17,6 +17,17 @@ fn local(window: &WebviewWindow) -> AppResult<()> {
     }
     Ok(())
 }
+
+/// Local parsing only; never reads arbitrary files, changes permissions or invokes providers.
+#[tauri::command]
+pub fn provider_config_preview(
+    window: WebviewWindow,
+    provider: String,
+    content: String,
+) -> AppResult<serde_json::Value> {
+    local(&window)?;
+    crate::config_compat::preview(&provider, &content).map_err(AppError::Message)
+}
 #[tauri::command]
 pub async fn integration_read(
     window: WebviewWindow,

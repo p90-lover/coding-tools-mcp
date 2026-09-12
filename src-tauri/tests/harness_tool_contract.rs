@@ -115,8 +115,21 @@ fn 无任务时_exec_command不返回任务门禁错误() {
     assert_eq!(result["execution_mode"], "direct");
     assert_eq!(result["task_required"], false);
     assert_eq!(result["command"], "git status");
-    assert_eq!(result["status"], "exited");
-    assert!(result["exit_code"].is_i64() || result["exit_code"].is_u64());
+    let mut observed = result.clone();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while observed["status"] == "running" {
+        assert!(
+            std::time::Instant::now() < until,
+            "command failed to finish: {observed}"
+        );
+        observed = call_tool(
+            &ctx,
+            "write_stdin",
+            &json!({"command_id": result["command_id"], "chars":"", "yield_time_ms":100}),
+        );
+    }
+    assert_eq!(observed["status"], "exited");
+    assert!(observed["exit_code"].is_i64() || observed["exit_code"].is_u64());
     assert!(result["duration_ms"].is_u64());
     assert_eq!(result["duration_ms"], result["elapsed_ms"]);
     assert_eq!(result["next_actions"], json!([]));

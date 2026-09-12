@@ -19,7 +19,7 @@ const TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
 const DEADLINE: Duration = Duration::from_secs(8);
 static ACTIVE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-struct Lease(PathBuf);
+pub(super) struct Lease(PathBuf);
 impl Drop for Lease {
     fn drop(&mut self) {
         if let Ok(mut active) = ACTIVE.get_or_init(Default::default).lock() {
@@ -58,7 +58,7 @@ fn check(start: Instant) -> HarnessResult<()> {
         Ok(())
     }
 }
-pub fn capture(root: &Path) -> HarnessResult<ProjectBaseline> {
+pub(super) fn acquire(root: &Path) -> HarnessResult<Lease> {
     let mut active = ACTIVE
         .get_or_init(Default::default)
         .lock()
@@ -70,7 +70,13 @@ pub fn capture(root: &Path) -> HarnessResult<ProjectBaseline> {
         ));
     }
     drop(active);
-    let _lease = Lease(root.to_path_buf());
+    Ok(Lease(root.to_path_buf()))
+}
+pub(super) fn git_metadata(root: &Path, args: &[&str]) -> HarnessResult<Option<String>> {
+    git_value(root, args, Instant::now())
+}
+pub fn capture(root: &Path) -> HarnessResult<ProjectBaseline> {
+    let _lease = acquire(root)?;
     let started = Instant::now();
     let mut total = 0u64;
     let mut visited = 0usize;
@@ -181,6 +187,7 @@ pub fn capture(root: &Path) -> HarnessResult<ProjectBaseline> {
     let branch = git_value(root, &["rev-parse", "--abbrev-ref", "HEAD"], started)?;
     let head = git_value(root, &["rev-parse", "HEAD"], started)?;
     Ok(ProjectBaseline {
+        source_roots: None,
         branch,
         head,
         worktree_fingerprint: format!("{:x}", fingerprint.finalize()),

@@ -585,6 +585,7 @@ mod live_permission_protocol_test {
                 .json(&body)
                 .send()
         };
+        let selected_profile = ctx.for_request().unwrap().tool_profile.clone();
         let catalog_request = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
         let before: Value = request(catalog_request.clone())
             .await
@@ -599,14 +600,18 @@ mod live_permission_protocol_test {
             .any(|t| t["name"] == "apply_patch"));
         let mut restricted = ctx.for_request().unwrap().policy;
         restricted.permission_mode = "read-only".into();
-        commit_updates(vec![(ctx.clone(), restricted, "core".into())], || Ok(())).unwrap();
+        commit_updates(
+            vec![(ctx.clone(), restricted, selected_profile.clone())],
+            || Ok(()),
+        )
+        .unwrap();
         let patch = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"apply_patch","arguments":{"patch":"*** Begin Patch\n*** Add File: permission-live.txt\n+verified\n*** End Patch\n"}}});
         let denied: Value = request(patch.clone()).await.unwrap().json().await.unwrap();
         assert_eq!(denied["result"]["isError"], true, "{denied}");
         assert!(!root.join("permission-live.txt").exists());
         let mut writable = ctx.for_request().unwrap().policy;
         writable.permission_mode = "workspace-write".into();
-        commit_updates(vec![(ctx.clone(), writable, "core".into())], || Ok(())).unwrap();
+        commit_updates(vec![(ctx.clone(), writable, selected_profile)], || Ok(())).unwrap();
         let applied: Value = request(patch).await.unwrap().json().await.unwrap();
         assert_eq!(applied["result"]["isError"], false, "{applied}");
         assert_eq!(

@@ -104,7 +104,9 @@ pub fn apply(b: &mut Board, revision: u64, change: Change) -> AppResult<()> {
         ));
     }
     // Validate the revision before touching task state, including at the counter limit.
-    let next_revision = b.revision.checked_add(1)
+    let next_revision = b
+        .revision
+        .checked_add(1)
         .ok_or_else(|| err("Board revision exhausted"))?;
     let stamp = now();
     match change {
@@ -135,9 +137,16 @@ pub fn apply(b: &mut Board, revision: u64, change: Change) -> AppResult<()> {
                 evidence: vec![],
             });
         }
-        Change::Move { id, state, before_id } => {
+        Change::Move {
+            id,
+            state,
+            before_id,
+        } => {
             active_state(&state)?;
-            let from = b.tasks.iter().position(|t| t.id == id)
+            let from = b
+                .tasks
+                .iter()
+                .position(|t| t.id == id)
                 .ok_or_else(|| err("Task no longer exists"))?;
             if b.tasks[from].state == "archived" {
                 return Err(err("Restore the archived task before moving it"));
@@ -147,13 +156,22 @@ pub fn apply(b: &mut Board, revision: u64, change: Change) -> AppResult<()> {
                 if before == id {
                     return Err(err("A task cannot be placed before itself"));
                 }
-                Some(b.tasks.iter().position(|t| t.id == before && t.state == state)
-                    .ok_or_else(|| err("The destination card changed. Refresh before retrying."))?)
-            } else { None };
+                Some(
+                    b.tasks
+                        .iter()
+                        .position(|t| t.id == before && t.state == state)
+                        .ok_or_else(|| {
+                            err("The destination card changed. Refresh before retrying.")
+                        })?,
+                )
+            } else {
+                None
+            };
             let mut task = b.tasks.remove(from);
             task.state = state;
             task.updated_at = stamp;
-            let at = anchor.map(|i| if i > from { i - 1 } else { i })
+            let at = anchor
+                .map(|i| if i > from { i - 1 } else { i })
                 .unwrap_or(b.tasks.len());
             b.tasks.insert(at, task);
         }

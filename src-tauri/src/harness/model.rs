@@ -43,6 +43,10 @@ pub enum TaskStatus {
 
 impl TaskStatus {
     pub fn is_writable(self) -> bool {
+        matches!(self, Self::Active | Self::Verifying)
+    }
+
+    pub fn is_open(self) -> bool {
         matches!(
             self,
             Self::Active | Self::Paused | Self::Verifying | Self::Failed
@@ -75,6 +79,10 @@ pub struct BaselineEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectBaseline {
+    /// None preserves legacy coverage. Explicit roots are pinned for this task's lifetime.
+    /// This is verification coverage, not a filesystem access grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_roots: Option<Vec<String>>,
     pub branch: Option<String>,
     pub head: Option<String>,
     pub worktree_fingerprint: String,
@@ -86,6 +94,9 @@ pub struct ProjectBaseline {
 pub struct TaskSession {
     pub id: String,
     pub workspace_id: String,
+    /// Routing namespace only, not authentication or an authorization grant.
+    #[serde(default)]
+    pub session_key: Option<String>,
     pub objective: String,
     pub status: TaskStatus,
     pub baseline: ProjectBaseline,
@@ -200,6 +211,8 @@ pub struct ProjectState {
 pub struct WorkspaceHarnessState {
     pub schema_version: u32,
     pub active_task_id: Option<String>,
+    #[serde(default)]
+    pub active_task_ids: Vec<String>,
     #[serde(default)]
     pub recent_task_ids: Vec<String>,
     pub updated_at: String,

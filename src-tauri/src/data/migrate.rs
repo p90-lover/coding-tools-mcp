@@ -14,8 +14,37 @@ const LEGACY_SETTINGS_FILE: &str = "app_settings.json";
 
 #[cfg(test)]
 thread_local! { static TEST_DATA_FILE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
+
+// Fixtures that replace the process-wide trusted-origin registry or saturate
+// process-wide HTTP admission must own that shared resource, even when the Rust
+// runner schedules unrelated tests in parallel. Production admission is unchanged.
+#[cfg(test)]
+fn shared_test_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone()
+}
+#[cfg(test)]
+pub(crate) async fn shared_http_test_guard() -> tokio::sync::OwnedSemaphorePermit {
+    shared_test_slots()
+        .acquire_owned()
+        .await
+        .expect("shared fixture admission")
+}
 #[cfg(test)]
 pub(crate) fn with_test_file<R>(path: PathBuf, f: impl FnOnce() -> R) -> R {
+    let _shared = if TEST_DATA_FILE.with(|v| v.borrow().is_none()) {
+        Some(loop {
+            if let Ok(permit) = shared_test_slots().try_acquire_owned() {
+                break permit;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        })
+    } else {
+        None
+    };
     struct Restore(Option<PathBuf>);
     impl Drop for Restore {
         fn drop(&mut self) {

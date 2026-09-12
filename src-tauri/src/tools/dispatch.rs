@@ -76,7 +76,14 @@ pub fn call_tool_mcp(ctx: &ToolContext, name: &str, args: &Value) -> Value {
     call_current(ctx, name, args, true)
 }
 fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bool) -> Value {
-    let snapshot = match ctx.for_request() {
+    let request_started = std::time::Instant::now();
+    let snapshot = match ctx.for_request().and_then(|fresh| {
+        if matches!(name, "apply_patch" | "patch_check") {
+            Ok(fresh)
+        } else {
+            fresh.scope_request(name, args)
+        }
+    }) {
         Ok(value) => value,
         Err(error) => return tool_err(error),
     };
@@ -124,11 +131,46 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
     if name == "server_info" {
         result["workspace_refresh"] = json!({"supported":true,"roots_revision":ctx.workspace.roots_revision(),"scope":"primary workspace and explicitly linked projects","reconnect_required":false,"new_root_access_inherits_live_policy":true,"external_process_revocation_on_manual_mapping_edit":false});
         result["long_task_limits"] = json!({"baseline_file_bytes":33554432,"baseline_total_bytes":134217728,"baseline_entries":20000,"baseline_cooperative_deadline_seconds":8,"use_command_id_for_long_processes":true,"automatic_operation_replay":false});
+        result["long_task_limits"]["scoped_baseline"] = json!({"explicit_baseline_roots":true,"file_bytes":8589934592_u64,"total_bytes":68719476736_u64,"entries":100000,"read_chunk_bytes":262144});
+        result["long_task_limits"]["execution"] = json!({"default_timeout_ms":null,"maximum_timeout_ms":null,"separate_mode_required":false,"default_post_launch_wait_ms":1000,"survives_server_restart":false,"owned_process_tree_cancellation":true});
+        result["runtime_cache"] = super::ram_cache::output_cache().policy();
         result["live_permissions"] = json!({"supported":true,"revision":ctx.policy_revision,
             "permission_mode":ctx.permission_mode,"approval_mode":ctx.policy.approval_mode,
             "screen_capture_allowed":ctx.policy.allow_screen_capture,"tool_profile":ctx.tool_profile,
             "permission_restart_required":false,"permission_relink_required":false,
             "catalog_refresh_may_be_needed_for_tool_profile_change":true});
+    }
+    let instructions_revision = result.pointer("/project_instructions/revision").cloned();
+    let displayed_root = ctx.workspace.display_path(ctx.harness.workspace_root());
+    let project_root = if displayed_root.is_empty() {
+        ".".to_string()
+    } else {
+        displayed_root
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.insert(
+            "server_dispatch_ms".into(),
+            json!(request_started.elapsed().as_millis()),
+        );
+        object.entry("project_scope").or_insert_with(
+            || json!({"root":project_root,"workspace_id":ctx.harness.workspace_id()}),
+        );
+        if object.get("status").and_then(Value::as_str) == Some("running") {
+            if let Some(id) = object
+                .get("command_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                let mut arguments = json!({"command_id":id,"chars":"","yield_time_ms":1000,"max_output_bytes":4096,"project_root":project_root});
+                if let Some(revision) = instructions_revision {
+                    arguments["known_project_instructions_revision"] = revision;
+                }
+                object.insert(
+                    "next_action".into(),
+                    json!({"tool":"write_stdin","arguments":arguments,"relaunch":false}),
+                );
+            }
+        }
     }
     result
 }
@@ -187,8 +229,48 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         return attach_project_instructions(ctx, name, &effective_args, output);
     }
 
+    // Policy and scoped approval run before target resolution for patches.
+    let mut execution = if matches!(name, "apply_patch" | "patch_check") {
+        match ctx.scope_request(name, &effective_args) {
+            Ok(scoped) => scoped,
+            Err(error) => {
+                return attach_project_instructions(ctx, name, &effective_args, tool_err(error))
+            }
+        }
+    } else {
+        ctx.clone()
+    };
+    let lease_context = execution.clone();
+    let ctx = &lease_context;
+    if requires_write_baseline(name, &effective_args) {
+        match crate::harness::resource_lease::ResourceLease::acquire(
+            ctx.harness.store_root(),
+            ctx.harness.workspace_root(),
+        ) {
+            Ok(lease) => execution.execution_lease = Some(std::sync::Arc::new(lease)),
+            Err(error) => {
+                return attach_project_instructions(
+                    ctx,
+                    name,
+                    &effective_args,
+                    tool_err_code(error.code(), error.to_string(), "concurrency"),
+                )
+            }
+        }
+    }
+    let ctx = &execution;
     let task_id = if requires_write_baseline(name, &effective_args) {
-        let task = ctx.harness.current_task().ok().flatten();
+        let task = match ctx.harness.current_task() {
+            Ok(task) => task,
+            Err(error) => {
+                return attach_project_instructions(
+                    ctx,
+                    name,
+                    &effective_args,
+                    tool_err_code(error.code(), error.to_string(), "permission"),
+                )
+            }
+        };
         if let Some(task) = task {
             if let Err(error) = ctx.harness.check_baseline(&task.id) {
                 let output = attach_harness_status(
@@ -271,10 +353,9 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
         "patch_check" => patch::patch_check(ctx, &effective_args),
         "apply_patch" => patch::apply_patch(ctx, &effective_args),
         "exec_command" => exec::exec_command(ctx, &effective_args),
-        "read_output" => session::read_output(&ctx.sessions, &effective_args),
+        "read_output" => session::read_output_current(ctx, &effective_args),
         "write_stdin" => session::write_stdin_current(ctx, &effective_args),
-        "kill_command" => session::kill_command(&ctx.sessions, &effective_args),
-        "kill_session" => session::kill_session(&ctx.sessions, &effective_args),
+        "kill_command" | "kill_session" => session::kill_command_current(ctx, &effective_args),
         "git_status" => git::git_status(ws, &effective_args),
         "git_diff" => git::git_diff(ws, &effective_args),
         "git_log" => git::git_log(ws, &effective_args),
@@ -356,7 +437,7 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
             operation_input(args),
             json!({"ok": succeeded, "tool": name}),
         );
-        if succeeded {
+        if succeeded && name != "exec_command" {
             let _ = ctx.harness.refresh_expected_state(task_id);
         }
     }
@@ -375,6 +456,8 @@ fn call_tool_snapshot(ctx: &ToolContext, name: &str, args: &Value) -> Value {
             }),
         );
     }
+    let displayed_root = ctx.workspace.display_path(ctx.harness.workspace_root());
+    output["project_scope"] = json!({"root":if displayed_root.is_empty(){"."}else{&displayed_root},"workspace_id":ctx.harness.workspace_id()});
     attach_project_instructions(ctx, name, &effective_args, output)
 }
 
@@ -406,7 +489,7 @@ fn apply_default_cwd(ctx: &ToolContext, name: &str, args: &Value) -> Value {
     let mut effective = args.clone();
     match name {
         "exec_command" if effective.get("workdir").is_none() && effective.get("cwd").is_none() => {
-            effective["workdir"] = Value::String(base.clone());
+            effective["workdir"] = Value::String(".".into());
         }
         "list_dir" | "list_files" | "git_status" | "git_log" => {
             let path = effective.get("path").and_then(Value::as_str).unwrap_or(".");

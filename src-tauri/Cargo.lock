@@ -672,10 +672,11 @@ dependencies = [
 
 [[package]]
 name = "coding-tools-mcp-desktop"
-version = "0.4.5"
+version = "0.4.7"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "cc",
  "dirs",
  "flate2",
  "fs2",
@@ -700,6 +701,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
+ "toml 0.9.12+spec-1.1.0",
  "tower",
  "tower-http",
  "url",

@@ -41,7 +41,6 @@ pub fn redirect_uri_syntax_allowed(value: &str) -> bool {
     }
 }
 
-
 /// ChatGPT mints a unique callback id per connector Connect. Exact allowlists cannot keep up.
 pub fn is_trusted_chatgpt_oauth_redirect(value: &str) -> bool {
     if !redirect_uri_syntax_allowed(value) {
@@ -66,7 +65,9 @@ pub fn is_trusted_chatgpt_oauth_redirect(value: &str) -> bool {
                 && !rest.contains('/')
                 && !rest.contains('?')
                 && !rest.contains('#')
-                && rest.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+                && rest
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
             {
                 return true;
             }

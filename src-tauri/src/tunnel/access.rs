@@ -37,7 +37,7 @@ pub fn ensure_frp_health_loop() {
             let mut guard = supervisor().lock().await;
             let _ = guard.heal_exited_cloudflare(&settings).await;
             ticks = ticks.wrapping_add(1);
-            if ticks % 4 == 0 {
+            if ticks.is_multiple_of(4) {
                 let _ = guard.heal_unhealthy_frpc(&settings).await;
             }
         }

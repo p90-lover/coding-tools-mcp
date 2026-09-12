@@ -8,8 +8,10 @@ test("OAuth rejects unconfigured clients and unsafe redirects", async () => {
   const source = await read("src-tauri/src/auth/oauth_flow.rs");
   assert.match(source, /OAUTH_MAX_PENDING_CODES/);
   assert.match(source, /redirect_uri_allowed/);
-  assert.match(source, /if self\.client_id\.is_empty\(\)[\s\S]*?return false;/);
-  assert.doesNotMatch(source, /if self\.client_id\.is_empty\(\)[\s\S]*?return true;/);
+  const clientGuard = source.match(/pub fn client_id_allowed\([^]*?\n {4}\}/)?.[0];
+  assert.ok(clientGuard, "the concrete client-ID validation function must exist");
+  assert.match(clientGuard, /if self\.client_id\.is_empty\(\)\s*\{\s*return false;/);
+  assert.doesNotMatch(clientGuard, /return true;/);
 });
 
 test("listeners are bounded and do not expose permissive CORS", async () => {

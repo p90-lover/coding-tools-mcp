@@ -4,11 +4,9 @@ use crate::{
     data::with_test_file,
     tools::{approval::ApprovalStore, live_policy, policy::PolicySettings},
 };
-use std::{
-    fs,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+#[cfg(all(windows, feature = "native-snapshot"))]
+use std::time::{Duration, Instant};
+use std::{fs, sync::Arc};
 static TEST_SERIAL: Mutex<()> = Mutex::new(());
 fn fixture() -> (PathBuf, PathBuf, WorkspaceProfile, Arc<ToolContext>) {
     let base = std::env::current_dir()
@@ -158,8 +156,10 @@ fn snapshot_contract_shared_approval_and_readonly_cannot_enable_native_execution
         })
         .unwrap();
         assert!(local_setup(readonly, ctx.workspace.root().to_path_buf()).is_err());
-        let mut policy = PolicySettings::default();
-        policy.permission_mode = "read-only".into();
+        let policy = PolicySettings {
+            permission_mode: "read-only".into(),
+            ..Default::default()
+        };
         assert!(crate::tools::policy::validate_tool_arguments_for_workspace(
             "sandbox_exec",
             &args,

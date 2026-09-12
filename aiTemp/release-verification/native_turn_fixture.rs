@@ -246,7 +246,7 @@ fn diagnose(hub: &Hub) {
             result.get("error").unwrap_or(&Value::Null)
         );
     }
-    drop(rpc);
+    // The closure borrow ends at its last use; stop the owned fixture explicitly.
     process.lock().unwrap().stop();
 }
 #[test]

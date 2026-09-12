@@ -45,15 +45,27 @@ fn 任务创建会捕获基线并在重启后恢复() {
 }
 
 #[test]
-fn 同一工作区只允许一个可写任务且拒绝非法迁移() {
+fn 同一工作区允许多任务但要求明确选择且拒绝非法迁移() {
     let (_temp, workspace, harness_root) = fixture();
     let harness = Harness::new(workspace, harness_root).expect("创建 Harness");
     let task = harness.start_task("第一个任务").expect("启动任务");
 
-    let duplicate = harness
-        .start_task("第二个任务")
-        .expect_err("应拒绝第二个任务");
-    assert_eq!(duplicate.code(), "TASK_ALREADY_ACTIVE");
+    let second = harness.start_task("第二个任务").expect("允许独立任务记录");
+    assert_ne!(task.id, second.id);
+    assert_eq!(
+        harness.current_task().unwrap_err().code(),
+        "TASK_SELECTION_REQUIRED"
+    );
+    assert_eq!(
+        harness
+            .select_task(&task.id)
+            .unwrap()
+            .current_task()
+            .unwrap()
+            .unwrap()
+            .id,
+        task.id
+    );
 
     let invalid = harness
         .transition(&task.id, TaskStatus::Completed)

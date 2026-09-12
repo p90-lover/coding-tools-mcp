@@ -108,6 +108,7 @@ impl Fixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_repair_oauth_challenge_and_token_recovery() {
+    let _shared=crate::data::shared_http_test_guard().await;
     let f = Fixture::new(true).await;
     for token in [None, Some(f.expired.as_str()), Some("invalid-token")] {
         let mut r = f
@@ -166,6 +167,7 @@ async fn connection_repair_oauth_challenge_and_token_recovery() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_repair_handshake_notifications_catalog_and_live_policy() {
+    let _shared=crate::data::shared_http_test_guard().await;
     let f = Fixture::new(false).await;
     let init: Value = f.rpc(json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{
         "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"local-fixture","version":"1"}}})).await.json().await.unwrap();
@@ -218,6 +220,7 @@ async fn connection_repair_handshake_notifications_catalog_and_live_policy() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_repair_sse_get_and_legacy_probe_are_distinct() {
+    let _shared=crate::data::shared_http_test_guard().await;
     let f = Fixture::new(true).await;
     let denied = f
         .client
@@ -262,6 +265,7 @@ async fn connection_repair_sse_get_and_legacy_probe_are_distinct() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_dual_era_modern_discovery_and_full_catalog() {
+    let _shared=crate::data::shared_http_test_guard().await;
     let f = Fixture::new(false).await;
     let meta = json!({
         "io.modelcontextprotocol/protocolVersion":"2026-07-28",
@@ -383,6 +387,7 @@ async fn connection_dual_era_modern_discovery_and_full_catalog() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_legacy_version_negotiation_is_spec_compliant() {
+    let _shared=crate::data::shared_http_test_guard().await;
     let f = Fixture::new(false).await;
     for requested in ["2025-11-25", "2025-06-18"] {
         let response:Value=f.rpc(json!({"jsonrpc":"2.0","id":20,"method":"initialize","params":{

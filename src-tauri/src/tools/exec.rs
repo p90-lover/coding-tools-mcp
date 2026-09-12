@@ -14,6 +14,8 @@ use crate::tools::session::{ExecSession, SessionStore, COMPLETED_COMMAND_RETENTI
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
 pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceError> {
+    let profile =
+        crate::tools::exec_profile::resolve(args).map_err(WorkspaceError::invalid_argument)?;
     let cmd = args
         .get("cmd")
         .and_then(Value::as_str)
@@ -23,7 +25,21 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
         .or_else(|| args.get("cwd"))
         .and_then(Value::as_str)
         .unwrap_or(".");
-    let workdir = ctx.workspace.resolve_existing(workdir_raw)?;
+    let workdir = ctx
+        .workspace
+        .resolve_existing_at(&ctx.default_cwd_path(), workdir_raw)?;
+    if !workdir.path.starts_with(ctx.harness.workspace_root()) {
+        return Err(WorkspaceError::Tool {code:"TASK_PROJECT_MISMATCH",message:"The command workdir is outside its selected task project. Select the matching project explicitly.".into(),category:"validation",retryable:false});
+    }
+    if args
+        .get("stdin")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.len() > 1024 * 1024)
+    {
+        return Err(WorkspaceError::invalid_argument(
+            "stdin is limited to 1 MiB; use an approved input file",
+        ));
+    }
     if !workdir.path.is_dir() {
         return Err(WorkspaceError::not_a_directory(
             "workdir is not a directory",
@@ -53,19 +69,12 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
         }
         return Ok(tool_ok(result));
     }
-    let timeout_ms = args
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(30_000);
+    let timeout_ms = profile.timeout_ms;
     let max_output = args
         .get("max_output_bytes")
         .and_then(Value::as_u64)
         .unwrap_or(65_536) as usize;
-    let yield_ms = args
-        .get("yield_time_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(1000)
-        .min(30_000);
+    let yield_ms = profile.yield_time_ms;
     let tty = args.get("tty").and_then(Value::as_bool).unwrap_or(false);
     let stdin_text = args.get("stdin").and_then(Value::as_str).unwrap_or("");
 
@@ -74,7 +83,7 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
             ctx,
             cmd,
             &workdir.path,
-            Duration::from_millis(timeout_ms),
+            timeout_ms.map(Duration::from_millis),
             Duration::from_millis(yield_ms),
             max_output,
             tty,
@@ -85,7 +94,29 @@ pub fn exec_command(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceE
 
     match result {
         Ok(mut out) => {
+            let running_id = (out.get("status").and_then(Value::as_str) == Some("running"))
+                .then(|| {
+                    out.get("command_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .flatten();
             if let Some(object) = out.as_object_mut() {
+                object.insert("max_runtime_ms".into(), json!(profile.timeout_ms));
+                object.insert(
+                    "effective_yield_time_ms".into(),
+                    json!(profile.yield_time_ms),
+                );
+                object.insert("safe_to_retry".into(), json!(false));
+                object.insert(
+                    "supervision_scope".into(),
+                    json!("current server runtime; no automatic replay after restart"),
+                );
+                if let Some(id) = running_id {
+                    object.insert("next_action".into(), json!({"tool": "write_stdin", "arguments": {
+                        "command_id": id, "chars": "", "yield_time_ms": 1000, "max_output_bytes": 16384 },
+                        "instruction": "Poll this command handle. Do not relaunch the command merely because it is quiet or an HTTP call timed out."}));
+                }
                 object.insert("filesystem_scope".into(), Value::String(filesystem_scope));
                 object.insert("sandbox_enforced".into(), Value::Bool(false));
                 object.insert(
@@ -227,18 +258,29 @@ async fn run_command(
     ctx: &ToolContext,
     cmd: &str,
     cwd: &Path,
-    limit: Duration,
+    limit: Option<Duration>,
     yield_time: Duration,
     max_output: usize,
     tty: bool,
     stdin_text: &str,
 ) -> Result<Value, WorkspaceError> {
     let (program, args) = parse_and_resolve(cmd, cwd, &ctx.workspace, &ctx.policy)?;
+    let task_owner = ctx
+        .harness
+        .current_task()
+        .map_err(|e| WorkspaceError::Tool {
+            code: e.code(),
+            message: e.to_string(),
+            category: "validation",
+            retryable: false,
+        })?
+        .map(|task| task.id);
     let start = Instant::now();
 
     let mut command = command_for_program(&program, &args);
     command
         .current_dir(platform_command_path(cwd))
+        .kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -249,9 +291,18 @@ async fn run_command(
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONLEGACYWINDOWSSTDIO", "0");
 
-    let session = {
+    let mut process_tree =
+        super::process_tree::ProcessTree::prepare(&mut command).map_err(|e| {
+            WorkspaceError::Tool {
+                code: "COMMAND_CONTAINMENT_FAILED",
+                message: e.to_string(),
+                category: "runtime",
+                retryable: false,
+            }
+        })?;
+    let admitted = {
         let _policy = ctx.policy_execution_guard()?;
-        let child = command.spawn().map_err(|e| WorkspaceError::ToolDetails {
+        let mut child = command.spawn().map_err(|e| WorkspaceError::ToolDetails {
             code: "COMMAND_SPAWN_FAILED",
             message: format!("Failed to start command: {e}"),
             category: "runtime",
@@ -263,43 +314,61 @@ async fn run_command(
             }),
         })?;
 
-        ctx.sessions.insert(ExecSession::new_with_mode(child, tty))
+        if let Err(error) = process_tree.admit(&child) {
+            let _ = child.start_kill();
+            Err((child, error))
+        } else {
+            let mut session = ExecSession::new_with_mode(child, tty);
+            session.runtime_limit_ms = limit.map(|value| value.as_millis() as u64);
+            session.bind_tree(process_tree);
+            session.bind_owner(ctx.harness.clone(), task_owner, ctx.execution_lease.clone());
+            Ok(ctx.sessions.insert(session))
+        }
+    };
+    let session = match admitted {
+        Ok(session) => session,
+        Err((mut child, error)) => {
+            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+            return Err(WorkspaceError::Tool {
+                code: "COMMAND_CONTAINMENT_FAILED",
+                message: error.to_string(),
+                category: "runtime",
+                retryable: false,
+            });
+        }
     };
     session.spawn_readers().await;
-    let deadline = start + limit;
+    // Compare elapsed durations; no fabricated far-future Instant and no day cap.
+    // The owner watchdog is live before stdin, so a pipe error cannot abandon a child.
+    spawn_timeout_monitor(
+        ctx.sessions.clone(),
+        session.clone(),
+        start,
+        limit,
+        ctx.workspace.clone(),
+    );
+
+    if !tty && !stdin_text.is_empty() {
+        session.write_input(stdin_text, true, Some(ctx)).await?;
+    }
 
     if yield_time.is_zero() {
         let snapshot = session.snapshot(max_output);
-        spawn_timeout_monitor(ctx.sessions.clone(), session.clone(), deadline);
+        spawn_timeout_monitor(
+            ctx.sessions.clone(),
+            session.clone(),
+            start,
+            limit,
+            ctx.workspace.clone(),
+        );
         return Ok(merge_exec_result(snapshot, start, cmd, cwd, true));
-    }
-
-    if !tty && !stdin_text.is_empty() {
-        let _policy = ctx.policy_execution_guard()?;
-        let mut stdin_guard = session.stdin.lock().await;
-        if let Some(stdin) = stdin_guard.as_mut() {
-            use tokio::io::AsyncWriteExt;
-            if !stdin_text.is_empty() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
-                    .await
-                    .map_err(|_| WorkspaceError::Tool {
-                        code: "SESSION_CLOSED",
-                        message: "Failed to write stdin.".into(),
-                        category: "runtime",
-                        retryable: false,
-                    })?;
-            }
-            let _ = stdin.shutdown().await;
-        }
-        *stdin_guard = None;
-        session.mark_stdin_closed();
     }
 
     loop {
         session.refresh_status().await;
         if session.has_exited() {
             session.wait_for_readers().await;
+            session.finalize_owner().await;
             let snapshot = session.snapshot(max_output);
             schedule_session_eviction(
                 ctx.sessions.clone(),
@@ -308,12 +377,13 @@ async fn run_command(
             );
             return Ok(merge_exec_result(snapshot, start, cmd, cwd, false));
         }
-        if !tty && Instant::now() >= deadline {
+        if !tty && limit.is_some_and(|limit| start.elapsed() >= limit) {
             session.mark_termination_reason("timeout");
             session.kill_and_wait().await;
             session.refresh_status().await;
             session.wait_for_readers().await;
             let snapshot = session.snapshot(max_output);
+            session.finalize_owner().await;
             // Snapshot is embedded; schedule eviction so abandoned timeouts do not linger.
             schedule_session_eviction(
                 ctx.sessions.clone(),
@@ -324,11 +394,12 @@ async fn run_command(
                 code: "TIMEOUT",
                 message: "Command timed out.".into(),
                 category: "runtime",
-                retryable: true,
+                retryable: false,
                 details: json!({
                     "termination_reason": "timeout",
                     "recoverable": true,
-                    "suggestion": "读取 output_refs，调整 timeout_ms 后重试",
+                    "safe_to_retry": false,
+                    "suggestion": "Read retained output and inspect partial effects. A new execution requires an explicit new request; never automatically replay a timeout.",
                     "command": snapshot.clone(),
                     "session": snapshot
                 }),
@@ -336,7 +407,13 @@ async fn run_command(
         }
         if Instant::now() - start >= yield_time || tty {
             let snapshot = session.snapshot(max_output);
-            spawn_timeout_monitor(ctx.sessions.clone(), session.clone(), deadline);
+            spawn_timeout_monitor(
+                ctx.sessions.clone(),
+                session.clone(),
+                start,
+                limit,
+                ctx.workspace.clone(),
+            );
             return Ok(merge_exec_result(snapshot, start, cmd, cwd, true));
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -344,35 +421,79 @@ async fn run_command(
 }
 
 /// How long a timed-out / background session stays readable before map eviction.
-const COMMAND_EVICT_AFTER_TIMEOUT: Duration = Duration::from_secs(30);
+const COMMAND_EVICT_AFTER_TIMEOUT: Duration =
+    Duration::from_secs(COMPLETED_COMMAND_RETENTION_SECONDS);
 
 fn spawn_timeout_monitor(
     sessions: Arc<SessionStore>,
     session: Arc<ExecSession>,
-    deadline: Instant,
+    started: Instant,
+    limit: Option<Duration>,
+    workspace: Workspace,
 ) {
+    if !session.begin_monitor() {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        tokio::time::sleep(remaining).await;
-        session.refresh_status().await;
-        let retention = if !session.has_exited() {
-            session.mark_termination_reason("timeout");
-            session.kill_and_wait().await;
+        let mut roots_checked = Instant::now();
+        loop {
+            if roots_checked.elapsed() >= Duration::from_secs(1) {
+                let current = workspace.clone();
+                let valid =
+                    tokio::task::spawn_blocking(move || current.ensure_roots_current()).await;
+                if !matches!(valid, Ok(Ok(()))) {
+                    crate::tools::session::mark_roots_revoked(&session);
+                    session.kill_and_wait().await;
+                }
+                roots_checked = Instant::now();
+            }
             session.refresh_status().await;
-            session.wait_for_readers().await;
-            COMMAND_EVICT_AFTER_TIMEOUT
-        } else {
-            Duration::from_secs(COMPLETED_COMMAND_RETENTION_SECONDS)
-        };
-        schedule_session_eviction(sessions, session.session_id.clone(), retention);
+            if session.has_exited() {
+                session.wait_for_readers().await;
+                session.finalize_owner().await;
+                schedule_session_eviction(
+                    sessions,
+                    session.session_id.clone(),
+                    Duration::from_secs(COMPLETED_COMMAND_RETENTION_SECONDS),
+                );
+                break;
+            }
+            let remaining = limit.map(|limit| limit.saturating_sub(started.elapsed()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                session.mark_termination_reason("timeout");
+                session.kill_and_wait().await;
+                session.refresh_status().await;
+                session.wait_for_readers().await;
+                session.finalize_owner().await;
+                if !session.has_exited() {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                schedule_session_eviction(
+                    sessions,
+                    session.session_id.clone(),
+                    COMMAND_EVICT_AFTER_TIMEOUT,
+                );
+                break;
+            }
+            let interval = if started.elapsed() < Duration::from_secs(10) {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(1)
+            };
+            tokio::time::sleep(remaining.unwrap_or(interval).min(interval)).await;
+        }
     });
 }
 
-fn schedule_session_eviction(sessions: Arc<SessionStore>, command_id: String, retention: Duration) {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(retention).await;
-        sessions.remove(&command_id);
-    });
+fn schedule_session_eviction(
+    sessions: Arc<SessionStore>,
+    _command_id: String,
+    _retention: Duration,
+) {
+    // One weak maintenance task per store, not a 90-minute sleeper per command.
+    sessions.maintain_completed(Instant::now());
+    sessions.start_cache_maintenance();
 }
 
 pub fn exec_health_check(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
@@ -387,7 +508,7 @@ pub fn exec_health_check(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
         ctx,
         probe,
         &cwd,
-        Duration::from_secs(5),
+        Some(Duration::from_secs(5)),
         Duration::from_secs(5),
         16_384,
         false,
@@ -507,8 +628,16 @@ fn merge_exec_result(
         let duration_ms = start.elapsed().as_millis();
         obj.insert("command".into(), json!(command));
         obj.insert("resolved_cwd".into(), json!(cwd.display().to_string()));
-        obj.insert("duration_ms".into(), json!(duration_ms));
-        obj.insert("elapsed_ms".into(), json!(duration_ms));
+        obj.insert("exec_dispatch_ms".into(), json!(duration_ms));
+        let process_duration = obj
+            .get("elapsed_ms")
+            .cloned()
+            .unwrap_or_else(|| json!(duration_ms));
+        obj.insert("duration_ms".into(), process_duration);
+        // Keep the process clock supplied by ExecSession. Dispatch/reconciliation
+        // time must not overwrite a completed command's frozen elapsed time.
+        obj.entry("elapsed_ms")
+            .or_insert_with(|| json!(duration_ms));
         obj.insert("transport_ok".into(), Value::Bool(true));
         let command_ok = match obj
             .get("termination_reason")

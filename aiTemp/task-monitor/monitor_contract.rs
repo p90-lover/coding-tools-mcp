@@ -47,7 +47,17 @@ fn task_monitor_history_bounds_scope_and_preservation() {
     // never deleted; no mutation is performed by the monitor.
     let retained=base.join("Trash");fs::create_dir_all(&retained).unwrap();
     fs::rename(&events_path,retained.join("events.jsonl")).unwrap();
-    #[cfg(windows)] std::os::windows::fs::symlink_file(retained.join("events.jsonl"),&events_path).unwrap();
+    #[cfg(windows)] {
+        use std::os::windows::process::CommandExt;
+        let directory=events_path.parent().unwrap();
+        fs::rename(directory,retained.join("original-events-directory")).unwrap();
+        let destination=retained.join("redirected-events");fs::create_dir_all(&destination).unwrap();
+        fs::copy(retained.join("events.jsonl"),destination.join(events_path.file_name().unwrap())).unwrap();
+        let plain=|p: &std::path::Path|p.to_string_lossy().replace('/',r"\").trim_start_matches(r"\\?\").to_string();
+        let result=std::process::Command::new("cmd.exe").args(["/d","/c","mklink","/J"])
+            .arg(plain(directory)).arg(plain(&destination)).creation_flags(0x08000000).output().unwrap();
+        assert!(result.status.success(),"Non-admin junction fixture failed: {}",String::from_utf8_lossy(&result.stderr));
+    }
     #[cfg(unix)] std::os::unix::fs::symlink(retained.join("events.jsonl"),&events_path).unwrap();
     assert!(monitor::read(&history,&workspace,Some(&task.id),None).is_err());
     println!("TASK_MONITOR_HISTORY_PASS: real stored tasks/events, 50-event tail, older cursor, scope and byte bounds, no secrets or writes, append-tail and symlink handling");

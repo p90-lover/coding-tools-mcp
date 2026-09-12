@@ -26,7 +26,27 @@ fn audit_patch_must_not_follow_internal_staging_links() {
         let link = ctx.workspace.root().join(internal);
         fs::create_dir_all(link.parent().unwrap()).unwrap();
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&outside, &link).unwrap();
+        {
+            use std::os::windows::process::CommandExt;
+            let plain = |p: &std::path::Path| {
+                p.to_string_lossy()
+                    .replace('/', r"\")
+                    .trim_start_matches(r"\\?\")
+                    .to_string()
+            };
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(plain(&link))
+                .arg(plain(&outside))
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "Non-admin junction fixture failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         fs::write(ctx.workspace.root().join("ordinary.txt"), "original\n").unwrap();

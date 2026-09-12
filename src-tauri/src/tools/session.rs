@@ -11,12 +11,34 @@ use uuid::Uuid;
 use crate::tools::workspace::{tool_ok, WorkspaceError};
 use serde_json::{json, Value};
 
-pub const COMMAND_BUFFER_BYTES: usize = 1_048_576;
-pub const COMPLETED_COMMAND_RETENTION_SECONDS: u64 = 300;
+pub const COMMAND_BUFFER_BYTES: usize = super::ram_cache::STREAM_BYTES;
+pub const COMPLETED_COMMAND_RETENTION_SECONDS: u64 = super::ram_cache::TTL_SECONDS;
+
+fn authorized_poll<T>(
+    ctx: Option<&crate::tools::ToolContext>,
+    poll: impl FnOnce() -> std::task::Poll<std::io::Result<T>>,
+) -> std::task::Poll<std::io::Result<T>> {
+    let _policy = match ctx
+        .map(|context| context.policy_execution_guard())
+        .transpose()
+    {
+        Ok(guard) => guard,
+        Err(error) => {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                error.to_string(),
+            )))
+        }
+    };
+    // The authorization fence covers submission only; a pending pipe must not
+    // retain a synchronous policy lock while its future waits to be woken.
+    poll()
+}
 
 #[derive(Default)]
 pub struct SessionStore {
     sessions: Mutex<HashMap<String, Arc<ExecSession>>>,
+    maintenance_started: AtomicBool,
 }
 
 impl SessionStore {
@@ -25,6 +47,7 @@ impl SessionStore {
     }
 
     pub fn insert(&self, session: ExecSession) -> Arc<ExecSession> {
+        self.maintain_completed(Instant::now());
         let arc = Arc::new(session);
         self.sessions
             .lock()
@@ -34,6 +57,7 @@ impl SessionStore {
     }
 
     pub fn get(&self, session_id: &str) -> Result<Arc<ExecSession>, WorkspaceError> {
+        self.maintain_completed(Instant::now());
         self.sessions
             .lock()
             .expect("sessions lock")
@@ -45,6 +69,47 @@ impl SessionStore {
                 category: "not_found",
                 retryable: false,
             })
+    }
+
+    pub(crate) fn maintain_completed(&self, now: Instant) {
+        let mut sessions = self.sessions.lock().expect("sessions lock");
+        let mut terminal: Vec<_> = sessions
+            .iter()
+            .filter_map(|(id, session)| {
+                if !session.has_exited() || !session.finalized.load(Ordering::Acquire) {
+                    return None;
+                }
+                session
+                    .finished_at
+                    .lock()
+                    .expect("finished timestamp lock")
+                    .map(|at| (id.clone(), at))
+            })
+            .collect();
+        terminal.sort_by_key(|(_, at)| *at);
+        let excess = terminal.len().saturating_sub(128);
+        for (index, (id, at)) in terminal.into_iter().enumerate() {
+            if index < excess
+                || now.saturating_duration_since(at).as_secs()
+                    >= COMPLETED_COMMAND_RETENTION_SECONDS
+            {
+                sessions.remove(&id);
+            }
+        }
+    }
+
+    pub(crate) fn start_cache_maintenance(self: &Arc<Self>) {
+        if self.maintenance_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let Some(store) = weak.upgrade() else { break };
+                store.maintain_completed(Instant::now());
+            }
+        });
     }
 
     pub fn revoke_for_policy_change(&self) {
@@ -80,19 +145,68 @@ pub struct ExecSession {
     pub stdin: AsyncMutex<Option<ChildStdin>>,
     stdin_open: Mutex<bool>,
     interactive: bool,
-    stdout: Mutex<Vec<u8>>,
-    stderr: Mutex<Vec<u8>>,
-    stdout_total: Mutex<usize>,
-    stderr_total: Mutex<usize>,
+    output_cache: Arc<super::ram_cache::OutputCache>,
+    output_keys: [String; 2],
+    pub(crate) runtime_limit_ms: Option<u64>,
     pub started_at: Instant,
     pub exit_code: Mutex<Option<i32>>,
     exited: AtomicBool,
+    finished_elapsed_ms: Mutex<Option<u64>>,
+    finished_at: Mutex<Option<Instant>>,
+    task_owner: Mutex<Option<(crate::harness::Harness, String)>>,
+    project_root: Mutex<Option<std::path::PathBuf>>,
+    execution_lease: Mutex<Option<Arc<crate::harness::resource_lease::ResourceLease>>>,
+    finalizing: AtomicBool,
+    finalized: AtomicBool,
+    reconciliation_error: Mutex<Option<String>>,
+    process_tree: Mutex<Option<super::process_tree::ProcessTree>>,
+    monitor_started: AtomicBool,
     policy_revoked: AtomicBool,
     termination_reason: Mutex<Option<String>>,
     reader_tasks: AsyncMutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 impl ExecSession {
+    pub(crate) fn owner_project_root(&self) -> Option<std::path::PathBuf> {
+        self.project_root.lock().expect("project root lock").clone()
+    }
+
+    fn check_access(
+        &self,
+        ctx: &crate::tools::ToolContext,
+        writing: bool,
+    ) -> Result<(), WorkspaceError> {
+        if self.policy_revoked.load(Ordering::Acquire) {
+            return Err(WorkspaceError::Tool {
+                code: "COMMAND_PERMISSION_REVOKED",
+                message: "This command belongs to a revoked permission snapshot. Retained output and further input are not available through the new scope.".into(),
+                category: "permission", retryable: false,
+            });
+        }
+        if let Some(root) = self
+            .project_root
+            .lock()
+            .expect("project root lock")
+            .as_ref()
+        {
+            if ctx.workspace.approved_scope_root(root).is_none() {
+                return Err(WorkspaceError::path_outside_workspace());
+            }
+            let resolved = ctx
+                .workspace
+                .resolve_existing(&ctx.workspace.display_path(root))?;
+            if writing && ctx.workspace.is_read_only_path(&resolved.path) {
+                return Err(WorkspaceError::Tool {
+                    code: "READ_ONLY_PROJECT",
+                    message: "This command project is now read-only.".into(),
+                    category: "permission",
+                    retryable: false,
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(child: Child) -> Self {
         Self::new_with_mode(child, false)
     }
@@ -101,19 +215,32 @@ impl ExecSession {
         let session_id = Uuid::new_v4().to_string();
         let stdin = child.stdin.take();
         let stdin_open = stdin.is_some();
+        let output_keys = [
+            format!("{session_id}:stdout"),
+            format!("{session_id}:stderr"),
+        ];
         Self {
             session_id,
             child: AsyncMutex::new(child),
             stdin: AsyncMutex::new(stdin),
             stdin_open: Mutex::new(stdin_open),
             interactive,
-            stdout: Mutex::new(Vec::new()),
-            stderr: Mutex::new(Vec::new()),
-            stdout_total: Mutex::new(0),
-            stderr_total: Mutex::new(0),
+            output_cache: super::ram_cache::output_cache(),
+            output_keys,
+            runtime_limit_ms: None,
             started_at: Instant::now(),
             exit_code: Mutex::new(None),
             exited: AtomicBool::new(false),
+            finished_elapsed_ms: Mutex::new(None),
+            finished_at: Mutex::new(None),
+            task_owner: Mutex::new(None),
+            project_root: Mutex::new(None),
+            execution_lease: Mutex::new(None),
+            finalizing: AtomicBool::new(false),
+            finalized: AtomicBool::new(false),
+            reconciliation_error: Mutex::new(None),
+            process_tree: Mutex::new(None),
+            monitor_started: AtomicBool::new(false),
             policy_revoked: AtomicBool::new(false),
             termination_reason: Mutex::new(None),
             reader_tasks: AsyncMutex::new(Vec::new()),
@@ -162,17 +289,8 @@ impl ExecSession {
                 Ok(0) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    if is_stdout {
-                        let mut data = self.stdout.lock().expect("stdout lock");
-                        data.extend_from_slice(chunk);
-                        *self.stdout_total.lock().expect("stdout_total lock") += n;
-                        trim_buffer(&mut data, COMMAND_BUFFER_BYTES);
-                    } else {
-                        let mut data = self.stderr.lock().expect("stderr lock");
-                        data.extend_from_slice(chunk);
-                        *self.stderr_total.lock().expect("stderr_total lock") += n;
-                        trim_buffer(&mut data, COMMAND_BUFFER_BYTES);
-                    }
+                    self.output_cache
+                        .append(&self.output_keys[usize::from(!is_stdout)], chunk);
                 }
                 Err(_) => break,
             }
@@ -180,24 +298,118 @@ impl ExecSession {
     }
 
     pub async fn kill_and_wait(&self) {
+        if let Some(tree) = self
+            .process_tree
+            .lock()
+            .expect("process tree lock")
+            .as_ref()
+        {
+            let _ = tree.terminate();
+        }
         let status = {
             let mut child = self.child.lock().await;
             let _ = child.start_kill();
-            child.wait().await.ok()
+            tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok)
         };
         if let Some(status) = status {
-            self.record_exit_status(status);
+            if self.tree_empty() {
+                self.record_exit_status(status);
+            }
         }
     }
 
     pub async fn refresh_status(&self) {
         let mut child = self.child.lock().await;
         if let Ok(Some(status)) = child.try_wait() {
-            self.record_exit_status(status);
+            if self.tree_empty() {
+                self.record_exit_status(status);
+            }
         }
     }
 
+    fn tree_empty(&self) -> bool {
+        self.process_tree
+            .lock()
+            .expect("process tree lock")
+            .as_ref()
+            .map(|tree| tree.is_empty().unwrap_or(false))
+            .unwrap_or(true)
+    }
+    pub(crate) fn bind_tree(&self, tree: super::process_tree::ProcessTree) {
+        *self.process_tree.lock().expect("process tree lock") = Some(tree);
+    }
+    pub(crate) fn begin_monitor(&self) -> bool {
+        !self.monitor_started.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) async fn write_input(
+        &self,
+        text: &str,
+        close: bool,
+        ctx: Option<&crate::tools::ToolContext>,
+    ) -> Result<(), WorkspaceError> {
+        use std::{future::poll_fn, pin::Pin};
+        use tokio::io::AsyncWrite;
+        if text.len() > 1024 * 1024 {
+            return Err(WorkspaceError::invalid_argument(
+                "stdin is limited to 1 MiB per request; use an approved input file for large data",
+            ));
+        }
+        let write = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut guard = self.stdin.lock().await;
+            let stdin = guard
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("stdin closed"))?;
+            let mut remaining = text.as_bytes();
+            while !remaining.is_empty() {
+                let count = poll_fn(|cx| {
+                    authorized_poll(ctx, || Pin::new(&mut *stdin).poll_write(cx, remaining))
+                })
+                .await?;
+                if count == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "stdin accepted no bytes",
+                    ));
+                }
+                remaining = &remaining[count..];
+            }
+            poll_fn(|cx| authorized_poll(ctx, || Pin::new(&mut *stdin).poll_flush(cx))).await?;
+            if close {
+                poll_fn(|cx| authorized_poll(ctx, || Pin::new(&mut *stdin).poll_shutdown(cx)))
+                    .await?;
+                guard.take();
+                self.mark_stdin_closed();
+            }
+            Ok::<(), std::io::Error>(())
+        })
+        .await;
+        if matches!(write, Ok(Ok(()))) {
+            return Ok(());
+        }
+        self.mark_termination_reason("input_write_unconfirmed");
+        self.kill_and_wait().await;
+        self.stdin.lock().await.take();
+        self.mark_stdin_closed();
+        Err(WorkspaceError::ToolDetails {
+            code:"INPUT_WRITE_UNCONFIRMED",message:"Input delivery failed or exceeded two seconds. The owned process was stopped; partial input may have been consumed. Do not replay automatically.".into(),
+            category:"runtime",retryable:false,details:json!({"command":self.snapshot(4096),"safe_to_retry":false,"partial_input_possible":true})
+        })
+    }
+
     fn record_exit_status(&self, status: std::process::ExitStatus) {
+        let mut elapsed = self
+            .finished_elapsed_ms
+            .lock()
+            .expect("finished clock lock");
+        if elapsed.is_none() {
+            *self.finished_at.lock().expect("finished timestamp lock") = Some(Instant::now());
+            *elapsed = Some(self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        }
+        drop(elapsed);
         *self.exit_code.lock().expect("exit_code lock") = status.code();
         self.exited.store(true, Ordering::Release);
         *self.stdin_open.lock().expect("stdin_open lock") = false;
@@ -209,6 +421,47 @@ impl ExecSession {
 
     pub(crate) fn has_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn bind_owner(
+        &self,
+        harness: crate::harness::Harness,
+        task_id: Option<String>,
+        lease: Option<Arc<crate::harness::resource_lease::ResourceLease>>,
+    ) {
+        *self.project_root.lock().expect("project root lock") =
+            Some(harness.workspace_root().to_path_buf());
+        *self.execution_lease.lock().expect("execution lease lock") = lease;
+        *self.task_owner.lock().expect("task owner lock") = task_id.map(|id| (harness, id));
+    }
+
+    pub(crate) async fn finalize_owner(&self) {
+        if !self.has_exited() || self.finalizing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let owner = self.task_owner.lock().expect("task owner lock").clone();
+        if let Some((harness, id)) = owner {
+            let command_id = self.session_id.clone();
+            let snapshot = self.snapshot(0);
+            let result = tokio::task::spawn_blocking(move || {
+                let reconciled = if snapshot["command_ok"] == true { harness.refresh_expected_state(&id).map(|_| ()) } else { Ok(()) };
+                let _ = harness.record_event(&id,"command_finished",Some("exec_command"),json!({"command_id":command_id}),
+                    json!({"status":snapshot["status"],"command_ok":snapshot["command_ok"],"exit_code":snapshot["exit_code"],"elapsed_ms":snapshot["elapsed_ms"],"reconciled":snapshot["command_ok"] == true && reconciled.is_ok()}));
+                reconciled.map_err(|e|e.to_string())
+            }).await;
+            if let Err(error) = result.unwrap_or_else(|e| Err(e.to_string())) {
+                *self
+                    .reconciliation_error
+                    .lock()
+                    .expect("reconciliation lock") = Some(error);
+            }
+        }
+        self.process_tree.lock().expect("process tree lock").take();
+        self.execution_lease
+            .lock()
+            .expect("execution lease lock")
+            .take();
+        self.finalized.store(true, Ordering::Release);
     }
 
     pub fn mark_termination_reason(&self, reason: &str) {
@@ -225,23 +478,20 @@ impl ExecSession {
     }
 
     pub fn retained_stream_bytes(&self, stream: &str) -> (Vec<u8>, usize) {
-        match stream {
-            "stderr" => {
-                let data = self.stderr.lock().expect("stderr lock").clone();
-                let total = *self.stderr_total.lock().expect("stderr_total lock");
-                (data, total)
-            }
-            _ => {
-                let data = self.stdout.lock().expect("stdout lock").clone();
-                let total = *self.stdout_total.lock().expect("stdout_total lock");
-                (data, total)
-            }
-        }
+        self.output_cache.tail(
+            &self.output_keys[usize::from(stream == "stderr")],
+            COMMAND_BUFFER_BYTES,
+        )
     }
 
     pub fn snapshot(&self, max_output_bytes: usize) -> Value {
-        let stdout_bytes = self.stdout.lock().expect("stdout lock").clone();
-        let stderr_bytes = self.stderr.lock().expect("stderr lock").clone();
+        let max_output_bytes = max_output_bytes.min(COMMAND_BUFFER_BYTES);
+        let (stdout_bytes, stdout_total) = self
+            .output_cache
+            .tail(&self.output_keys[0], max_output_bytes);
+        let (stderr_bytes, stderr_total) = self
+            .output_cache
+            .tail(&self.output_keys[1], max_output_bytes);
         let stdout = truncate_tail(&stdout_bytes, max_output_bytes);
         let stderr = truncate_tail(&stderr_bytes, max_output_bytes);
         let exit_code = *self.exit_code.lock().expect("exit_code lock");
@@ -270,7 +520,7 @@ impl ExecSession {
             "termination_reason": reason,
             "recoverable": matches!(reason, "timeout" | "killed" | "spawn_failed" | "server_restart"),
             "suggestion": match reason {
-                "timeout" => "读取保留输出，调整 timeout_ms 后重试",
+                "timeout" => "Read retained output and inspect partial effects; never automatically replay the command.",
                 "killed" => "确认终止原因后重新执行命令",
                 "exited" => "检查 exit_code 和 stderr",
                 "crashed" => "检查 stderr 后重试或恢复工作区",
@@ -279,11 +529,22 @@ impl ExecSession {
             "exit_code": exit_code,
             "transport_ok": true,
             "command_ok": command_ok,
+            "finalization_pending": self.has_exited() && !self.finalized.load(Ordering::Acquire),
+            "reconciliation_error": self.reconciliation_error.lock().expect("reconciliation lock").clone(),
+            "process_tree_managed": self.process_tree.lock().expect("process tree lock").is_some(),
+            "survives_server_restart": false,
+            "max_runtime_ms": self.runtime_limit_ms,
+            "cache_storage": "ram_only",
+            "cache_max_age_seconds": super::ram_cache::TTL_SECONDS,
+            "output_may_expire_while_running": true,
             "stdout": stdout.content,
             "stderr": stderr.content,
-            "stdout_truncated": stdout.truncated,
-            "stderr_truncated": stderr.truncated,
-            "elapsed_ms": self.started_at.elapsed().as_millis(),
+            "stdout_truncated": stdout.truncated || stdout_total > stdout_bytes.len(),
+            "stderr_truncated": stderr.truncated || stderr_total > stderr_bytes.len(),
+            "stdout_total_bytes": stdout_total,
+            "stderr_total_bytes": stderr_total,
+            "elapsed_ms": self.finished_elapsed_ms.lock().expect("finished clock lock").unwrap_or_else(|| self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64),
+            "observation_age_ms": self.started_at.elapsed().as_millis(),
             "output_refs": {
                 "stdout": format!("command:{}:stdout", self.session_id),
                 "stderr": format!("command:{}:stderr", self.session_id)
@@ -297,10 +558,11 @@ impl ExecSession {
     }
 }
 
-fn trim_buffer(buf: &mut Vec<u8>, limit: usize) {
-    if buf.len() > limit {
-        let drop = buf.len() - limit;
-        buf.drain(..drop);
+impl Drop for ExecSession {
+    fn drop(&mut self) {
+        for key in &self.output_keys {
+            self.output_cache.forget(key);
+        }
     }
 }
 
@@ -355,10 +617,12 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         .and_then(Value::as_u64)
         .unwrap_or(4096)
         .clamp(1, 1_048_576) as usize;
-    let buffer_offset = requested_offset.min(data.len());
+    let retained_start = total_stream_bytes.saturating_sub(data.len());
+    let absolute_offset = requested_offset.max(retained_start).min(total_stream_bytes);
+    let buffer_offset = absolute_offset.saturating_sub(retained_start);
     let chunk = &data[buffer_offset..data.len().min(buffer_offset + limit)];
     let next_offset = if buffer_offset + chunk.len() < data.len() {
-        Some((buffer_offset + chunk.len()) as u64)
+        Some((absolute_offset + chunk.len()) as u64)
     } else {
         None
     };
@@ -384,7 +648,11 @@ pub fn read_output(store: &SessionStore, args: &Value) -> Result<Value, Workspac
         "stream_output_ref": format!("command:{command_id}:{stream}"),
         "legacy_stream_output_ref": format!("session:{command_id}:{stream}"),
         "stream": stream,
-        "offset": buffer_offset,
+        "offset": absolute_offset,
+        "retained_start_offset": retained_start,
+        "next_read_offset": absolute_offset + chunk.len(),
+        "dropped_before_offset": retained_start,
+        "output_gap": requested_offset < retained_start,
         "requested_offset": requested_offset,
         "limit": limit,
         "content": String::from_utf8_lossy(chunk),
@@ -419,6 +687,35 @@ pub fn write_stdin(store: &SessionStore, args: &Value) -> Result<Value, Workspac
     write_stdin_inner(store, args, None)
 }
 
+pub fn read_output_current(
+    ctx: &crate::tools::ToolContext,
+    args: &Value,
+) -> Result<Value, WorkspaceError> {
+    let id = args
+        .get("output_ref")
+        .and_then(Value::as_str)
+        .and_then(|r| r.split(':').nth(1))
+        .ok_or_else(|| {
+            WorkspaceError::invalid_argument("A command output reference is required")
+        })?;
+    ctx.sessions.get(id)?.check_access(ctx, false)?;
+    read_output(&ctx.sessions, args)
+}
+
+pub fn kill_command_current(
+    ctx: &crate::tools::ToolContext,
+    args: &Value,
+) -> Result<Value, WorkspaceError> {
+    let session = ctx.sessions.get(command_id_argument(args)?)?;
+    session.check_access(ctx, false)?;
+    kill_command(&ctx.sessions, args)
+}
+
+pub(crate) fn mark_roots_revoked(session: &ExecSession) {
+    session.policy_revoked.store(true, Ordering::Release);
+    session.mark_termination_reason("permission_changed");
+}
+
 pub fn write_stdin_current(
     ctx: &crate::tools::ToolContext,
     args: &Value,
@@ -434,6 +731,9 @@ fn write_stdin_inner(
     let command_id = command_id_argument(args)?;
     let session = store.get(command_id)?;
     let chars = args.get("chars").and_then(Value::as_str).unwrap_or("");
+    if let Some(ctx) = ctx {
+        session.check_access(ctx, !chars.is_empty())?;
+    }
     let max_output_bytes = args
         .get("max_output_bytes")
         .and_then(Value::as_u64)
@@ -453,30 +753,10 @@ fn write_stdin_inner(
     }
 
     if !chars.is_empty() {
-        let _policy = ctx.map(|c| c.policy_execution_guard()).transpose()?;
         if session.policy_revoked.load(Ordering::SeqCst) {
             return Err(WorkspaceError::Tool { code: "COMMAND_PERMISSION_REVOKED", message: "Permission changed; this command cannot receive further input. Do not replay its prior actions.".into(), category: "permission", retryable: false });
         }
-        let mut stdin_guard = tauri::async_runtime::block_on(session.stdin.lock());
-        let stdin = stdin_guard.as_mut().ok_or_else(|| WorkspaceError::Tool {
-            code: "SESSION_CLOSED",
-            message: "Session stdin is closed.".into(),
-            category: "runtime",
-            retryable: false,
-        })?;
-        use tokio::io::AsyncWriteExt;
-        tauri::async_runtime::block_on(async {
-            stdin
-                .write_all(chars.as_bytes())
-                .await
-                .map_err(|_| WorkspaceError::Tool {
-                    code: "SESSION_CLOSED",
-                    message: "Session stdin is closed.".into(),
-                    category: "runtime",
-                    retryable: false,
-                })
-        })?;
-        let _ = tauri::async_runtime::block_on(stdin.flush());
+        tauri::async_runtime::block_on(session.write_input(chars, false, ctx))?;
     }
 
     let yield_ms = args
@@ -484,7 +764,11 @@ fn write_stdin_inner(
         .and_then(Value::as_u64)
         .unwrap_or(1000)
         .min(30_000);
-    std::thread::sleep(std::time::Duration::from_millis(yield_ms));
+    let until = Instant::now() + std::time::Duration::from_millis(yield_ms.min(1000));
+    while !session.has_exited() && Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        tauri::async_runtime::block_on(session.refresh_status());
+    }
     tauri::async_runtime::block_on(session.refresh_status());
     Ok(tool_ok(session.snapshot(max_output_bytes)))
 }
@@ -506,11 +790,24 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
     let running = tauri::async_runtime::block_on(session.is_running());
     let mut killed = false;
     let mut status = "exited";
-    let mut evicted = true;
+    let mut evicted = false;
 
     if running {
         session.mark_termination_reason("killed");
         tauri::async_runtime::block_on(async {
+            if session
+                .process_tree
+                .lock()
+                .expect("process tree lock")
+                .is_some()
+            {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(wait_ms.max(100)),
+                    session.kill_and_wait(),
+                )
+                .await;
+                return;
+            }
             let pid = {
                 let child = session.child.lock().await;
                 child.id()
@@ -550,9 +847,8 @@ pub fn kill_session(store: &SessionStore, args: &Value) -> Result<Value, Workspa
         }
     }
 
-    if evicted {
-        store.remove(command_id);
-    }
+    // The existing command watcher owns bounded eviction. Cancellation must not
+    // discard the output required to investigate partial side effects.
 
     Ok(tool_ok(payload))
 }

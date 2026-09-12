@@ -12,6 +12,24 @@ const TEST_PYTHON: &str = "python";
 #[cfg(not(windows))]
 const TEST_PYTHON: &str = "python3";
 
+fn wait_terminal(ctx: &coding_tools_mcp_desktop_lib::tools::ToolContext, initial: &Value) -> Value {
+    let mut last = initial.clone();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while last["status"] == "running" || last["finalization_pending"] == true {
+        assert!(
+            std::time::Instant::now() < until,
+            "command did not terminate: {last}"
+        );
+        let response = invoke(
+            ctx,
+            "write_stdin",
+            json!({"command_id":initial["command_id"],"chars":"","yield_time_ms":100,"max_output_bytes":4096}),
+        );
+        last = assert_ok(&response).clone();
+    }
+    last
+}
+
 #[test]
 fn server_info_returns_workspace_and_tools() {
     let fx = tiny_js_fixture();
@@ -33,7 +51,7 @@ fn server_info_returns_workspace_and_tools() {
     );
     assert_eq!(
         payload["output_retention"]["completed_command_seconds"],
-        300
+        5400
     );
 }
 
@@ -238,7 +256,8 @@ fn core_profile_keeps_the_default_capabilities_and_adds_history_tools() {
         .copied()
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(names, expected);
-    assert_eq!(names.len(), 27);
+    assert_eq!(names.len(), 58);
+    assert_eq!(tools.len(), names.len(), "catalogue names must be unique");
     assert!(names.contains("grep_text"));
     assert!(names.contains("kill_command"));
     assert!(names.contains("kill_session"));
@@ -310,14 +329,16 @@ fn direct_exec_uses_the_same_result_contract() {
     assert_eq!(payload["execution_mode"], "direct");
     assert_eq!(payload["harness_mode"], "standalone");
     assert_eq!(payload["task_required"], false);
-    assert_eq!(payload["status"], "exited");
-    assert_eq!(payload["exit_code"], 0);
+
     assert!(payload["stdout"].is_string());
     assert!(payload["stderr"].is_string());
     assert!(payload["duration_ms"].is_u64());
     assert_eq!(payload["duration_ms"], payload["elapsed_ms"]);
     assert_eq!(payload["transport_ok"], true);
-    assert_eq!(payload["command_ok"], true);
+    let terminal = wait_terminal(&ctx, payload);
+    assert_eq!(terminal["status"], "exited");
+    assert_eq!(terminal["exit_code"], 0);
+    assert_eq!(terminal["command_ok"], true);
 }
 
 #[test]
@@ -388,7 +409,7 @@ fn nonzero_command_exit_keeps_transport_ok_but_sets_command_ok_false() {
             "filesystem_scope": "workspace"
         }),
     );
-    let payload = assert_ok(&result);
+    let payload = wait_terminal(&ctx, assert_ok(&result));
 
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["transport_ok"], true);

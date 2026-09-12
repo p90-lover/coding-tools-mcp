@@ -57,6 +57,7 @@ pub async fn computer_local_targets(
         .map_err(|e| AppError::Message(e.message()))
 }
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Existing named Tauri IPC arguments are a compatibility contract.
 pub async fn computer_local_start(
     app: AppHandle,
     window: WebviewWindow,

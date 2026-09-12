@@ -254,7 +254,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "exec_command",
         "Execute command",
-        "Run a bounded workspace command. Routine commands auto-run in on-request mode; sensitive network or destructive operations require request_permissions.",
+        "Run an owned workspace command with no automatic runtime deadline. Omit timeout_ms for multi-day jobs; poll command_id instead of relaunching. Output cache is RAM-only, bounded and oldest-first with a 90-minute maximum age. Routine commands auto-run in on-request mode; sensitive network or destructive operations require request_permissions.",
         false,
         false,
         false,
@@ -464,6 +464,9 @@ pub const CORE_READ_ONLY_TOOLS: &[&str] = &[
 ];
 
 pub const ALLOWED_TOOLS: &[&str] = &[
+    "workflow_list",
+    "workflow_update",
+    "codex_command_exec",
     "mcp_operation_status",
     "codex_runtime_status",
     "codex_agent_read",
@@ -642,10 +645,6 @@ pub fn exposed_tool_names(tool_profile: &str) -> Vec<&'static str> {
     }
 }
 
-pub fn list_tools() -> Vec<Value> {
-    list_tools_for_profile("full")
-}
-
 pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
     exposed_tool_names(tool_profile)
         .into_iter()
@@ -682,6 +681,37 @@ pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
 }
 
 pub fn input_schema(name: &str) -> Value {
+    let mut schema = base_input_schema(name);
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        if crate::harness::tools::TOOL_NAMES.contains(&name)
+            || matches!(
+                name,
+                "exec_command"
+                    | "apply_patch"
+                    | "patch_check"
+                    | "read_file"
+                    | "list_files"
+                    | "list_dir"
+                    | "search_text"
+                    | "grep_text"
+                    | "grep"
+                    | "git_status"
+                    | "git_diff"
+                    | "read_output"
+                    | "write_stdin"
+                    | "kill_command"
+                    | "kill_session"
+            )
+        {
+            properties.insert("known_project_instructions_revision".into(), json!({"type":"string","pattern":"^[a-f0-9]{64}$","description":"Optional exact revision previously received in project_instructions. Unchanged instructions are acknowledged without retransmitting their full text."}));
+            properties.entry("project_root").or_insert_with(|| json!({"type":"string","minLength":1,"description":"Approved project directory or @alias. Request-local: never changes another chat's project or task."}));
+            properties.entry("task_id").or_insert_with(|| json!({"type":"string","minLength":1,"description":"Exact task returned by start_task in this project. Required when multiple tasks are open; no unrelated task is selected implicitly."}));
+        }
+    }
+    schema
+}
+
+fn base_input_schema(name: &str) -> Value {
     if name == crate::mcp::operation_store::TOOL {
         return crate::mcp::operation_store::input_schema();
     }
@@ -797,7 +827,10 @@ pub fn input_schema(name: &str) -> Value {
         "start_task" => json!({
             "type": "object",
             "properties": {
-                "objective": { "type": "string", "minLength": 1 }
+                "objective": { "type": "string", "minLength": 1 },
+                "baseline_roots": { "type": "array", "minItems": 1, "maxItems": 128,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                    "description": "Optional exact relative code/config files or directories. Pinned to this task. Excludes unselected data/model/output paths from baseline verification, not from permissions. No globs or overlapping roots. Omit for legacy coverage." }
             },
             "required": ["objective"],
             "additionalProperties": false
@@ -936,7 +969,8 @@ pub fn input_schema(name: &str) -> Value {
             "properties": {
                 "cmd": { "type": "string", "minLength": 1 },
                 "workdir": { "type": "string", "default": "." },
-                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000, "default": 30000 },
+                "timeout_ms": { "type": ["integer", "null"], "minimum": 0, "default": null,
+                    "description": "Optional caller-requested process deadline in milliseconds. Omitted, null or 0 means no automatic deadline, including jobs lasting seven days or longer. No separate mode and no fixed maximum duration. HTTP response wait is independent; cancellation and live permission revocation still apply." },
                 "max_output_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 65536 },
                 "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
                 "tty": { "type": "boolean", "default": false },
@@ -1158,7 +1192,7 @@ mod tests {
 
         assert_eq!(
             tools.len(),
-            34 + crate::tools::computer::schema::NAMES.len()
+            35 + crate::tools::computer::schema::NAMES.len()
                 + crate::tools::native_sandbox::NAMES.len()
                 + crate::tools::local_tools::NAMES.len()
                 + crate::tools::codex_runtime::NAMES.len()

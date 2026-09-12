@@ -8,6 +8,71 @@ use uuid::Uuid;
 use crate::tools::context::ToolContext;
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
+fn request_path(ctx: &ToolContext, raw: &str) -> Result<String, WorkspaceError> {
+    ctx.workspace.reject_unsafe_text(raw)?;
+    if raw.starts_with('@') || std::path::Path::new(raw).is_absolute() {
+        Ok(raw.to_string())
+    } else {
+        Ok(ctx
+            .workspace
+            .display_path(&ctx.default_cwd_path().join(raw)))
+    }
+}
+
+pub(crate) fn request_project_root(
+    ctx: &ToolContext,
+    args: &Value,
+    explicit: Option<&std::path::Path>,
+) -> Result<PathBuf, WorkspaceError> {
+    let text = args
+        .get("patch")
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkspaceError::invalid_argument("patch is required"))?;
+    let mut selected: Option<PathBuf> = None;
+    for file in parse_unified_diff(text)? {
+        // Preserve hard/protected-file semantics before filesystem resolution.
+        if is_protected_repository_asset(&file.path) {
+            return Err(protected_repository_asset(format!(
+                "Protected repository asset: {}",
+                file.path
+            )));
+        }
+        if file.is_deleted
+            && is_critical_file(&file.path)
+            && !args
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        {
+            return Err(dangerous_operation(format!(
+                "Deleting a critical project file requires explicit confirmation: {}",
+                file.path
+            )));
+        }
+        let target = request_path(ctx, &file.path)?;
+        let resolved = if file.is_new_file {
+            ctx.workspace.resolve_for_write(&target)?
+        } else {
+            ctx.workspace.resolve_existing(&target)?
+        };
+        let root = if let Some(root) = explicit {
+            if !resolved.path.starts_with(root) {
+                return Err(WorkspaceError::Tool {code:"TASK_PROJECT_MISMATCH",message:"A patch target lies outside the selected task project. Split cross-project changes and select each project's task explicitly.".into(),category:"validation",retryable:false});
+            }
+            root.to_path_buf()
+        } else {
+            ctx.workspace
+                .approved_scope_root(&resolved.path)
+                .ok_or_else(WorkspaceError::path_outside_workspace)?
+        };
+        if selected.as_ref().is_some_and(|previous| previous != &root) {
+            return Err(WorkspaceError::Tool {code:"PATCH_PROJECT_SCOPE_REQUIRED",message:"A single patch cannot mix independently managed project roots. Split it by project so baselines and write leases cannot be misattributed.".into(),category:"validation",retryable:false});
+        }
+        selected = Some(root);
+    }
+    selected.ok_or_else(|| WorkspaceError::invalid_argument("patch contains no file targets"))
+}
+
 fn approved_storage_root(
     ws: &Workspace,
     display: &str,
@@ -178,12 +243,13 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> Result<Value, WorkspaceEr
 
     for fp in &file_patches {
         ws.reject_unsafe_text(&fp.path)?;
+        let target = request_path(ctx, &fp.path)?;
         let resolved = if fp.is_new_file {
-            ws.resolve_for_write(&fp.path)?
+            ws.resolve_for_write(&target)?
         } else {
-            ws.resolve_existing(&fp.path)?
+            ws.resolve_existing(&target)?
         };
-        ws.reject_write_symlink(&fp.path)?;
+        ws.reject_write_symlink(&target)?;
 
         let original = if fp.is_new_file {
             // An Add File envelope is replacement content even when an earlier
@@ -733,8 +799,9 @@ fn is_critical_file(path: &str) -> bool {
 
 fn is_protected_repository_asset(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    let first = normalized.split('/').next().unwrap_or("");
-    matches!(first, ".git" | ".github")
+    normalized
+        .split('/')
+        .any(|part| part.eq_ignore_ascii_case(".git") || part.eq_ignore_ascii_case(".github"))
 }
 
 fn dangerous_operation(message: impl Into<String>) -> WorkspaceError {

@@ -1,8 +1,10 @@
 pub mod model;
+pub(crate) mod monitor;
+pub mod resource_lease;
+pub mod scan;
 pub mod state;
 pub mod store;
 pub mod tools;
-pub(crate) mod monitor;
 
 pub use model::{ProjectState, TaskSession, TaskStatus};
 pub use state::Harness;
@@ -18,4 +20,7 @@ include!(concat!(
 pub(crate) mod context_view;
 
 #[cfg(test)]
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../aiTemp/task-monitor/monitor_contract.rs"));
+include!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../aiTemp/task-monitor/monitor_contract.rs"
+));

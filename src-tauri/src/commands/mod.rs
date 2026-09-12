@@ -13,7 +13,9 @@ pub use codex_runtime::{
 mod task_monitor;
 pub use task_monitor::task_monitor_read;
 mod control_center;
-pub use control_center::{control_board_change, control_board_read, integration_read};
+pub use control_center::{
+    control_board_change, control_board_read, integration_read, provider_config_preview,
+};
 mod computer;
 mod sandbox;
 pub use sandbox::{sandbox_local_disable, sandbox_local_prepare, sandbox_local_status};

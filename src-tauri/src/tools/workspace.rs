@@ -174,6 +174,10 @@ impl Workspace {
         &self.root
     }
 
+    pub(crate) fn approved_scope_root(&self, path: &Path) -> Option<PathBuf> {
+        self.allowed_root_for_path(path)
+    }
+
     pub fn root_display(&self) -> String {
         self.root.to_string_lossy().into_owned()
     }

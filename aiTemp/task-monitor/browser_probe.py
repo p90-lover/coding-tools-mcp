@@ -1,10 +1,16 @@
 """Compiled Desktop task monitor, synthetic IPC. No external services or image generation."""
 from pathlib import Path
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from http.client import HTTPConnection
 from playwright.sync_api import sync_playwright,expect
 import json,os,shutil,subprocess,sys,time
-root=Path('aiTemp/evidence');root.mkdir(parents=True,exist_ok=True)
+root=Path('aiTemp/evidence')/str(time.time_ns());root.mkdir(parents=True,exist_ok=True)
+def urlopen(url,timeout=1):
+ target=urlsplit(url)
+ assert target.scheme=='http' and target.netloc=='127.0.0.1:1438'
+ connection=HTTPConnection('127.0.0.1',1438,timeout=timeout)
+ connection.request('GET',target.path,headers={'Connection':'close'})
+ return connection.getresponse()
 chrome=os.environ.get('CHROME_PATH') or shutil.which('google-chrome') or shutil.which('chromium')
 if not chrome:
  for candidate in [r'C:\Program Files\Google\Chrome\Application\chrome.exe',r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe']:
@@ -32,7 +38,7 @@ stub=r'''(() => {
  }};
 })();'''
 log=(root/'monitor-preview.txt').open('w',encoding='utf-8')
-server=subprocess.Popen(['node','node_modules/vite/bin/vite.js','preview','--host','127.0.0.1','--port','1438','--strictPort'],stdout=log,stderr=subprocess.STDOUT)
+server=subprocess.Popen([sys.executable,'-u','aiTemp/task-monitor/http_preview.py'],stdout=log,stderr=subprocess.STDOUT)
 try:
  for _ in range(60):
   assert server.poll() is None
