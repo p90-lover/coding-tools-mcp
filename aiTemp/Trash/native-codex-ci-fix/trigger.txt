@@ -1,0 +1,1 @@
+Trigger the isolated PR #31 Clippy materializer. This marker is validation-only and must never be merged into main.
