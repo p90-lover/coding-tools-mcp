@@ -1,0 +1,3 @@
+Validation-only marker for v0.4.10 installer and audit prepublish verification.
+
+This branch is not for merge into main.
