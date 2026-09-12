@@ -101,7 +101,32 @@ fn snapshot_contract_grants_are_scoped_persisted_and_sensitive_input_is_rejected
         fs::create_dir(&target).unwrap();
         let link = base.join("storage-link");
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&target, &link).unwrap();
+        {
+            use std::os::windows::{fs::MetadataExt, process::CommandExt};
+            let plain = |path: &std::path::Path| {
+                path.to_string_lossy()
+                    .replace('/', r"\")
+                    .trim_start_matches(r"\\?\")
+                    .to_string()
+            };
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(plain(&link))
+                .arg(plain(&target))
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "Non-admin junction fixture failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_ne!(
+                fs::symlink_metadata(&link).unwrap().file_attributes() & 0x400,
+                0,
+                "The no-follow test must actually encounter a reparse point"
+            );
+        }
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(snapshot::prepare(ctx.workspace.root(), &link.join("new-child"), &[]).is_err());
@@ -181,7 +206,13 @@ fn snapshot_contract_actual_executor_and_live_revocation_stop_owned_descendants(
     let (base, file, p, ctx) = fixture();
     with_test_file(file.clone(), || {
         assert!(available());
-        let probe = PathBuf::from(std::env::var("CODING_TOOLS_SNAPSHOT_PROBE").unwrap());
+        let probe = std::env::var_os("CODING_TOOLS_SNAPSHOT_PROBE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CODING_TOOLS_BUILT_SNAPSHOT_PROBE")));
+        assert!(
+            probe.is_absolute() && probe.is_file(),
+            "native test probe must exist"
+        );
         fs::copy(probe, ctx.workspace.root().join("probe.exe")).unwrap();
         fs::write(
             ctx.workspace.root().join("source space.txt"),
@@ -209,6 +240,13 @@ fn snapshot_contract_actual_executor_and_live_revocation_stop_owned_descendants(
         // live-policy entry used by Desktop. No guessed timer is proof of launch.
         let child_ctx = ctx.clone();
         let thread_file = file.clone();
+        let runs = home().unwrap().join("runs");
+        let previous_runs: std::collections::HashSet<_> = fs::read_dir(&runs)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
         let start = Instant::now();
         let worker = std::thread::spawn(move || {
             with_test_file(thread_file, || {
@@ -221,11 +259,13 @@ fn snapshot_contract_actual_executor_and_live_revocation_stop_owned_descendants(
         });
         let mut marker = None;
         while start.elapsed() < Duration::from_secs(6) {
-            let runs = home().unwrap().join("runs");
-            if let Ok(entries) = fs::read_dir(runs) {
+            if let Ok(entries) = fs::read_dir(&runs) {
                 for e in entries.flatten() {
+                    if previous_runs.contains(&e.path()) {
+                        continue;
+                    }
                     let m = e.path().join("work/started.txt");
-                    if m.exists() {
+                    if fs::read_to_string(&m).is_ok_and(|text| text == "owned_child_started") {
                         marker = Some(m);
                         break;
                     }

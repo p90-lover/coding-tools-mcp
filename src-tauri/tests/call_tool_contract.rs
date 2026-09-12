@@ -358,7 +358,9 @@ fn completed_command_output_uses_command_id_and_keeps_legacy_aliases() {
     let payload = assert_ok(&result);
     let command_id = payload["command_id"].as_str().expect("command id");
     assert_eq!(payload["session_id"], command_id);
-    assert_eq!(payload["retention_seconds"], 300);
+    assert_eq!(payload["retention_seconds"], 5400);
+    let terminal = wait_terminal(&ctx, payload);
+    assert_eq!(terminal["command_ok"], true, "{terminal}");
 
     let canonical_ref = payload["output_refs"]["stdout"]
         .as_str()

@@ -1,6 +1,68 @@
 fn main() {
     embed_snapshot_helper();
+    prepare_snapshot_test_probe();
     tauri_build::build()
+}
+
+// Test fixture only: generated beside Cargo intermediates, never embedded in or
+// bundled with the application. Ordinary Windows builds must be testable without
+// relying on an environment variable exported by one bespoke release workflow.
+fn prepare_snapshot_test_probe() {
+    use std::{env, path::PathBuf};
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || env::var_os("CARGO_FEATURE_NATIVE_SNAPSHOT").is_none()
+    {
+        return;
+    }
+    let source = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo manifest"))
+        .join("../aiTemp/completion/native_probe.cpp");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
+    let exe = out.join("coding-tools-sandbox-test-probe.exe");
+    let compiler = cc::Build::new()
+        .cpp(true)
+        .static_crt(true)
+        .opt_level(2)
+        .get_compiler();
+    assert!(
+        compiler.is_like_msvc(),
+        "Windows test probe requires an MSVC-compatible compiler"
+    );
+    let status = compiler
+        .to_command()
+        .current_dir(&out)
+        .args([
+            "/nologo",
+            "/std:c++17",
+            "/EHsc",
+            "/DUNICODE",
+            "/D_UNICODE",
+            "/D_WIN32_WINNT=0x0A00",
+        ])
+        .arg(format!(
+            "/Fo{}",
+            out.join("snapshot-test-probe.obj").display()
+        ))
+        .arg(format!("/Fe{}", exe.display()))
+        .arg(source)
+        .args([
+            "/link",
+            "advapi32.lib",
+            "ws2_32.lib",
+            "/DYNAMICBASE",
+            "/NXCOMPAT",
+            "/HIGHENTROPYVA",
+        ])
+        .status()
+        .expect("launch the installed C++ compiler for the test probe");
+    assert!(
+        status.success() && exe.is_file(),
+        "snapshot test probe build failed"
+    );
+    println!(
+        "cargo:rustc-env=CODING_TOOLS_BUILT_SNAPSHOT_PROBE={}",
+        exe.display()
+    );
 }
 
 // Preserve the already-shipped Windows helper in ordinary release builds, not

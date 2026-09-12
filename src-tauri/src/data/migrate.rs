@@ -33,15 +33,36 @@ pub(crate) async fn shared_http_test_guard() -> tokio::sync::OwnedSemaphorePermi
         .await
         .expect("shared fixture admission")
 }
+
+#[cfg(test)]
+fn shared_test_file_guard(path: &Path) -> std::sync::Arc<tokio::sync::OwnedSemaphorePermit> {
+    use std::sync::{Arc, Mutex, Weak};
+    type ActiveScope = Option<(PathBuf, Weak<tokio::sync::OwnedSemaphorePermit>)>;
+    static ACTIVE: Mutex<ActiveScope> = Mutex::new(None);
+    loop {
+        {
+            let mut active = ACTIVE.lock().expect("test fixture scope lock");
+            if let Some((owner, weak)) = active.as_ref() {
+                if owner == path {
+                    if let Some(lease) = weak.upgrade() {
+                        return lease;
+                    }
+                }
+            }
+            if let Ok(permit) = shared_test_slots().try_acquire_owned() {
+                let lease = Arc::new(permit);
+                *active = Some((path.to_path_buf(), Arc::downgrade(&lease)));
+                return lease;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn with_test_file<R>(path: PathBuf, f: impl FnOnce() -> R) -> R {
     let _shared = if TEST_DATA_FILE.with(|v| v.borrow().is_none()) {
-        Some(loop {
-            if let Ok(permit) = shared_test_slots().try_acquire_owned() {
-                break permit;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        })
+        Some(shared_test_file_guard(&path))
     } else {
         None
     };
@@ -54,6 +75,48 @@ pub(crate) fn with_test_file<R>(path: PathBuf, f: impl FnOnce() -> R) -> R {
     let _restore = Restore(TEST_DATA_FILE.with(|v| v.replace(Some(path))));
     f()
 }
+
+#[cfg(test)]
+#[test]
+fn fixture_worker_can_share_parent_store_without_cross_fixture_admission() {
+    let base = std::env::current_dir()
+        .unwrap()
+        .join("aiTemp/fixture-lease")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&base).unwrap();
+    let file = base.join("profiles.json");
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let (other_tx, other_rx) = std::sync::mpsc::sync_channel(1);
+    let (worker, other, observed, crossed) = with_test_file(file.clone(), || {
+        let child_file = file.clone();
+        let worker = std::thread::spawn(move || {
+            with_test_file(child_file, || {
+                let _ = tx.send(data_file_path().unwrap());
+            });
+        });
+        let other_file = base.join("other-profiles.json");
+        let other = std::thread::spawn(move || {
+            with_test_file(other_file, || {
+                let _ = other_tx.send(());
+            });
+        });
+        let observed = rx.recv_timeout(std::time::Duration::from_millis(800));
+        let crossed = other_rx.try_recv().is_ok();
+        (worker, other, observed, crossed)
+    });
+    // Release the parent before joining even on failure: the regression must not hang.
+    worker.join().unwrap();
+    other.join().unwrap();
+    assert_eq!(
+        observed.expect("child fixture waited on its parent's own lease"),
+        file
+    );
+    assert!(
+        !crossed,
+        "a different fixture entered while the parent held its lease"
+    );
+}
+
 pub fn data_file_path() -> AppResult<PathBuf> {
     #[cfg(test)]
     if let Some(path) = TEST_DATA_FILE.with(|v| v.borrow().clone()) {
