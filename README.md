@@ -4,7 +4,7 @@
 
 協助 AI 開發工作的本機桌面控制中心：人類訂立目標與權限，已連接的 AI 思考任務，應用程式執行獲准的本機工具並回傳證據。專案歷史讓下一次對話接續已驗證的工作，而非憑記憶重建進度。
 
-**版本系列：`v0.4.5`——限定 OAuth 彈出視窗來源修正。** 請閱讀[版本說明](docs/releases/v0.4.5.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
+**原始碼版本：`v0.4.7`——一般任務無預設時限及 RAM 快取。** 請閱讀[版本說明](docs/releases/v0.4.7.md)及[指令／快取契約](docs/long-running-commands.md)。原始碼中的版本號不代表發佈建置已通過；只應安裝已公開且有驗證證據的檔案，本工具並非經認證的安全沙箱。
 
 ## 為何 ChatGPT 可能看不到全部工具
 
@@ -16,7 +16,7 @@
 
 ## 下載及開始使用
 
-從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.5)取得 `Coding.Tools.MCP_0.4.5_x64-setup.exe`。本次 Windows 修正版提供 SHA-256 校驗碼、原始碼來源及驗證紀錄；Apple Silicon `.dmg` 仍保留於前一版 `v0.4.3-rc.1`。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
+從[最新正式版](https://github.com/p90-lover/coding-tools-mcp/releases/latest)取得已公開的安裝程式及 `SHA256SUMS`。實際 Release 檔案清單會列出已完成驗證的平台。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。安裝前請先核對來源及校驗碼，並完成或保存運行中任務的檢查點；更新桌面程式後，重新整理用戶端工具目錄，以取得新的時限參數定義。
 
 安裝並開啟程式，把專案目錄加入工作區，選擇認證及權限設定，然後啟動 MCP。遠端用戶端需要設定支援的 FRP／Cloudflare 連線，再複製介面顯示的 HTTPS `/mcp` 網址。在用戶端完成授權及工具掃描；修改前先使用 `server_info`、`codex_tools_status`、`get_default_cwd` 及 `git_status`。
 

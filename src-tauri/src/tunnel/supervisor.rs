@@ -154,11 +154,22 @@ impl TunnelSupervisor {
                 TunnelServiceKind::Mcp => profile.runtime.local_port,
                 TunnelServiceKind::Actions => profile.actions.local_port,
             };
-            if platform().find_pid_listening_on_port(port).ok().flatten()
-                != Some(std::process::id())
-            {
-                budget.block("local_runtime_not_owned");
-                continue;
+            match platform().find_pid_listening_on_port(port) {
+                Ok(Some(owner)) if owner == std::process::id() => {}
+                Ok(_) => {
+                    // A completed lookup establishes no owned local listener.
+                    // Keep the fail-closed, explicit-start boundary unchanged.
+                    budget.block("local_runtime_not_owned");
+                    continue;
+                }
+                Err(_) => {
+                    // OS enumeration can fail transiently. Unknown is not proof
+                    // of a foreign owner: defer without starting any process,
+                    // consuming a restart attempt or permanently blocking healing.
+                    append_profile_log(&key.0, "connection-recovery.log",
+                        "[recovery] ownership check unavailable; deferred; no restart or permanent block");
+                    continue;
+                }
             }
             // Keep the backoff ledger across start(), which resets it for manual starts.
             let mut budget = self.cloudflare_recovery.remove(&key).unwrap_or_default();

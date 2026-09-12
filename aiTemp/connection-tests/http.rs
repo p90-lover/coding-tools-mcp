@@ -156,7 +156,20 @@ async fn connection_repair_oauth_challenge_and_token_recovery() {
         docs[0]["authorization_servers"],
         json!(["https://repair.example"])
     );
-    let log = std::fs::read_to_string(f.root.join("transport-logs/mcp-requests.log")).unwrap();
+    let log = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let value = std::fs::read_to_string(f.root.join("transport-logs/mcp-requests.log"))
+                .unwrap_or_default();
+            if value.contains("authentication_rejected status=401")
+                && value.contains("catalog_served tools_count=")
+            {
+                break value;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Expected diagnostic traces were not written");
     assert!(
         log.contains("authentication_rejected status=401")
             && log.contains("catalog_served tools_count=")
