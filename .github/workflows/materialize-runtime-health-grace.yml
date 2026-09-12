@@ -41,7 +41,7 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Apply and verify runtime-health patch
+      - name: Apply and verify finished-listener signal patch
         id: verify
         shell: bash
         run: |
@@ -50,7 +50,7 @@ jobs:
           mkdir -p "$(dirname "$log")"
           {
             set -x
-            python3 aiTemp/Trash/runtime-health-grace/apply.py
+            python3 aiTemp/Trash/runtime-health-grace/patch-finished-signal.py
             python_status=$?
             if [ "$python_status" -eq 0 ]; then
               cargo fmt --manifest-path src-tauri/Cargo.toml --all
@@ -117,6 +117,6 @@ jobs:
               echo 'Refusing to commit a deletion.'
               exit 1
             fi
-            git commit -m 'fix: tolerate transient listener port misses'
+            git commit -m 'fix: detect exited listener tasks before port grace'
           fi
           git push origin HEAD:automation/runtime-health-grace
