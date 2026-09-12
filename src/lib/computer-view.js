@@ -17,6 +17,7 @@ export function isFrameStale(frame, now = Date.now()) {
 }
 /** @param {Record<string, unknown> | null | undefined} status */
 export function controlLabel(status) {
+  if (status?.state === 'unavailable') return 'Status unavailable — use Stop to revoke · 狀態未確認，可按停止撤銷';
   if (status?.state === 'paused') return 'Paused · 已暫停';
   if (status?.state !== 'active') return 'Stopped · 已停止';
   return status.action ? 'ChatGPT / MCP is using your computer · 正在操作電腦' : 'Control enabled · 等待下一個操作';

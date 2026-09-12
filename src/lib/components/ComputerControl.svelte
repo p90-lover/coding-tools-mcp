@@ -100,6 +100,8 @@
   </div>
   <fieldset class="mt-4 grid gap-2 text-sm" disabled={busy || status.state !== 'stopped'}>
     <legend class="mb-2 font-medium">Local approval · 本機授權</legend>
+    <button type="button" class="tx-btn-secondary" onclick={()=>{alwaysEnabled=true;rememberApp=true;restoreOnStart=true;}}>Long-task preset · 長任務設定</button>
+    <p class="text-xs opacity-70">Preset selects Always enabled + Remember app + Restore after restart. Access is granted only after you select a window and confirm Enable. Stop/Pause still suspend restoration. · 設定會勾選持續啟用、記住程式及重啟恢復；選擇視窗並確認啟用後才授權。停止／暫停仍會阻止自動恢復。</p>
     <label><input type="checkbox" bind:checked={alwaysEnabled} /> Always enabled · 持續啟用</label>
     <label><input type="checkbox" bind:checked={rememberApp} /> Remember this exact app · 記住此程式</label>
     <label><input type="checkbox" bind:checked={restoreOnStart} disabled={!rememberApp || !alwaysEnabled} /> Restore after app restart · 重啟後恢復</label>

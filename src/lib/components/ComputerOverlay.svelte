@@ -5,7 +5,8 @@
   let status = $state(/** @type {any} */ ({ state: 'stopped' }));
   let agentFrame = $state(/** @type {any} */ (null));
   let liveFrame = $state(/** @type {any} */ (null));
-  let mode = $state('live');
+  let mode = $state('agent');
+  let previewEpoch = 0;
   let message = $state('');
   let now = $state(Date.now());
   let frame = $derived(mode === 'agent' ? agentFrame : liveFrame);
@@ -15,27 +16,28 @@
   async function pollStatus() {
     try {
       const result = /** @type {any} */ (await invoke('computer_local_poll', { lastSnapshotId: agentFrame?.snapshot_id ?? null }));
-      if (result.session_id !== status.session_id) { agentFrame = null; liveFrame = null; }
+      if (result.session_id !== status.session_id) { previewEpoch++; agentFrame = null; liveFrame = null; }
       status = result;
       now = Date.now();
       if (result.state === 'stopped') { agentFrame = null; liveFrame = null; }
       else if (result.agent_frame) agentFrame = result.agent_frame;
-    } catch (e) { status = { state: 'stopped' }; agentFrame = null; liveFrame = null; message = String(e); }
+    } catch (e) { previewEpoch++; status = { state: 'unavailable' }; agentFrame = null; liveFrame = null; message = String(e); }
   }
   async function preview() {
-    if (status.state !== 'active') return;
-    const sessionId = status.session_id;
+    if (mode !== 'live' || document.hidden || status.state !== 'active' || status.action) return;
+    const sessionId = status.session_id, epoch = previewEpoch;
     try {
       const result = await invoke('computer_local_preview');
-      if (status.state === 'active' && status.session_id === sessionId) { liveFrame = result; message = ''; }
+      if (mode === 'live' && !document.hidden && epoch === previewEpoch && status.state === 'active' && status.session_id === sessionId) { liveFrame = result; message = ''; }
     } catch (e) { if (!String(e).includes('COMPUTER_BUSY')) message = String(e); }
   }
   async function stop() {
+    previewEpoch++;agentFrame=null;liveFrame=null;
     try { await invoke('computer_local_stop'); message = ''; }
     catch (e) { message = String(e); }
     finally { agentFrame = null; liveFrame = null; await pollStatus(); }
   }
-  async function pause() { try { await invoke('computer_local_pause'); await pollStatus(); } catch (e) { message = String(e); } }
+  async function pause() { previewEpoch++;agentFrame=null;liveFrame=null;try { await invoke('computer_local_pause'); await pollStatus(); } catch (e) { message = String(e); } }
   async function resume() { try { await invoke('computer_local_resume'); await pollStatus(); } catch (e) { message = String(e); } }
   onMount(() => {
     let polling = false, capturing = false, disposed = false;
@@ -44,7 +46,7 @@
     void refresh();
     const heartbeat = setInterval(refresh, 400);
     const images = setInterval(capture, 1000);
-    return () => { disposed = true; clearInterval(heartbeat); clearInterval(images); };
+    return () => { previewEpoch++;disposed = true; clearInterval(heartbeat); clearInterval(images); };
   });
 </script>
 
