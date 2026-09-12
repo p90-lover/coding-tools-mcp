@@ -41,15 +41,69 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Apply runtime-health patch
+      - name: Apply and verify runtime-health patch
+        id: verify
         shell: bash
         run: |
+          set +e
+          log="aiTemp/Trash/runtime-health-grace/verification-${GITHUB_RUN_ID}.log"
+          mkdir -p "$(dirname "$log")"
+          {
+            set -x
+            python3 aiTemp/Trash/runtime-health-grace/apply.py
+            python_status=$?
+            if [ "$python_status" -eq 0 ]; then
+              cargo fmt --manifest-path src-tauri/Cargo.toml --all
+              fmt_status=$?
+            else
+              fmt_status=99
+            fi
+            if [ "$python_status" -eq 0 ] && [ "$fmt_status" -eq 0 ]; then
+              git diff --check -- src-tauri/src/runtime/supervisor.rs
+              diff_status=$?
+            else
+              diff_status=99
+            fi
+            if [ "$python_status" -eq 0 ] && [ "$fmt_status" -eq 0 ] && [ "$diff_status" -eq 0 ]; then
+              cargo test --manifest-path src-tauri/Cargo.toml --lib runtime::supervisor::tests --locked -- --nocapture
+              test_status=$?
+            else
+              test_status=99
+            fi
+            set +x
+            echo "python_status=$python_status"
+            echo "fmt_status=$fmt_status"
+            echo "diff_status=$diff_status"
+            echo "test_status=$test_status"
+          } >"$log" 2>&1
+          status=0
+          for value in "$python_status" "$fmt_status" "$diff_status" "$test_status"; do
+            if [ "$value" -ne 0 ]; then
+              status="$value"
+              break
+            fi
+          done
+          cat "$log"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "log=$log" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Preserve verification evidence
+        shell: bash
+        env:
+          VERIFY_STATUS: ${{ steps.verify.outputs.status }}
+          VERIFY_LOG: ${{ steps.verify.outputs.log }}
+        run: |
           set -euo pipefail
-          python3 aiTemp/Trash/runtime-health-grace/apply.py
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all
-          git diff --check -- src-tauri/src/runtime/supervisor.rs
-          cargo test --manifest-path src-tauri/Cargo.toml runtime::supervisor::tests --locked
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "$VERIFY_LOG"
+          git commit -m "test: preserve runtime health verification ${GITHUB_RUN_ID}"
+          if [ "$VERIFY_STATUS" != "0" ]; then
+            git push origin HEAD:automation/runtime-health-grace
+            exit 1
+          fi
       - name: Commit verified source only
+        if: steps.verify.outputs.status == '0'
         shell: bash
         run: |
           set -euo pipefail
@@ -58,11 +112,11 @@ jobs:
           git add -- src-tauri/src/runtime/supervisor.rs
           if git diff --cached --quiet; then
             echo 'No source change required.'
-            exit 0
+          else
+            if git diff --cached --name-status | grep -q '^D'; then
+              echo 'Refusing to commit a deletion.'
+              exit 1
+            fi
+            git commit -m 'fix: tolerate transient listener port misses'
           fi
-          if git diff --cached --name-status | grep -q '^D'; then
-            echo 'Refusing to commit a deletion.'
-            exit 1
-          fi
-          git commit -m 'fix: tolerate transient listener port misses'
           git push origin HEAD:automation/runtime-health-grace
