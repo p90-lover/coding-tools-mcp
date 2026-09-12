@@ -31,7 +31,7 @@ pub fn build(spec:&Spec,record:Option<&str>,run:Option<&str>,action:Action,key:&
     Action::Create=>(json!({"type":"create_agent_request","idempotencyKey":spec.mission_id,
       "config":{"provider":spec.provider,"cwd":spec.cwd,"modeId":spec.mode,"model":spec.model,"title":spec.title},
       "autoArchive":false,"labels":{"coding-tools-mission":spec.mission_id,"coding-tools-workspace":spec.workspace_id,"coding-tools-task":spec.task_id}}),"status",Some("agent_created")),
-    Action::Start|Action::Resume=>(json!({"type":"send_agent_message_request","agentId":id,"text":spec.brief,"messageId":key,"activeTurnBehavior":"reject"}),"send_agent_message_response",None),
+    Action::Start|Action::Resume=>(json!({"type":"send_agent_message_request","agentId":id,"text":spec.brief,"messageId":key}),"send_agent_message_response",None),
     Action::Inspect=>(json!({"type":"fetch_agent_request","agentId":id}),"fetch_agent_response",None),
     Action::Events=>(json!({"type":"fetch_agent_timeline_request","agentId":id,"direction":"tail","limit":50,"projection":"projected"}),"fetch_agent_timeline_response",None),
     Action::Hold|Action::Cancel=>(json!({"type":"cancel_agent_request","agentId":id}),"cancel_agent_response",None),
