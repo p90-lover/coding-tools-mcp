@@ -1,0 +1,14 @@
++ python3 aiTemp/Trash/release-v0.4.11/apply.py
++ patch_status=0
++ '[' 0 -eq 0 ']'
++ git diff --check -- package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json docs/releases/v0.4.11.md
++ diff_status=0
++ '[' 0 -eq 0 ']'
++ '[' 0 -eq 0 ']'
++ python3 -
+version parity ok: ['0.4.11', '0.4.11', '0.4.11', '0.4.11', '0.4.11', '0.4.11']
++ parity_status=0
++ set +x
+patch_status=0
+diff_status=0
+parity_status=0
