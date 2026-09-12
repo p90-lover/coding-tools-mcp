@@ -18,6 +18,9 @@ stub=r'''(() => {
  window.__profiles=[profile];window.__links={};window.__calls=[];window.__saves=[];
  window.__TAURI_INTERNALS__={metadata:{currentWindow:{label:'main'},currentWebview:{label:'main'}},transformCallback:()=>1,unregisterCallback:()=>{},convertFileSrc:p=>p,
  invoke:async(name,args={})=>{
+  // Tauri sends JSON across the boundary, not structured-cloned reactive proxies.
+  // Reject non-serializable fixture input here, exactly before dispatch/storage.
+  args=JSON.parse(JSON.stringify(args));
   window.__calls.push(name);
   if(name==='list_workspaces')return structuredClone(window.__profiles);
   if(name==='list_linked_projects')return structuredClone(window.__links[args.id]||[]);
@@ -85,7 +88,7 @@ try:
             assert not errors,errors
             proof={'source':os.environ['SOURCE'],'passed':True,'browser':browser.version,
                 'cases':['hydration never saves','explicit changes auto-save','inflight save serialized','failed save not reported applied','explicit retry','approved project metadata appears without reconnect'],
-                'boundary':'compiled Desktop page; synthetic Tauri IPC and profiles; external requests blocked',
+                'boundary':'compiled Desktop page; synthetic JSON-serialized Tauri IPC and profiles; external requests blocked',
                 'runtime_restarts':0,'model_requests':0,'screenshots_written':0,'console_errors':errors}
             (root/'refresh-browser.json').write_text(json.dumps(proof,indent=2)+'\n')
             print('LIVE_REFRESH_BROWSER: automatic policy save, failure honesty, metadata refresh and no restart verified on compiled page')
