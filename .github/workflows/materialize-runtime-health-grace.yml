@@ -1,0 +1,188 @@
+name: Materialize runtime health grace
+
+on:
+  push:
+    branches: [automation/runtime-health-grace]
+    paths:
+      - "aiTemp/Trash/runtime-health-grace/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-runtime-health-grace
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: automation/runtime-health-grace
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Apply runtime-health patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src-tauri/src/runtime/supervisor.rs')
+          text = path.read_text()
+
+          old = '''                if should_mark_runtime_error(entry, listening) {
+                    if let Some(handle) = entry.handle.take() {
+'''
+          new = '''                let listener_finished = entry
+                    .handle
+                    .as_ref()
+                    .is_some_and(|handle| handle.is_finished());
+                if should_mark_runtime_error(entry, listening, listener_finished) {
+                    if let Some(handle) = entry.handle.take() {
+'''
+          assert old in text, 'refresh health call site changed'
+          text = text.replace(old, new, 1)
+
+          old = '''fn should_mark_runtime_error(entry: &mut RuntimeEntry, listening: bool) -> bool {
+    if entry.phase != RuntimePhase::Running {
+        return false;
+    }
+    if listening {
+        entry.missing_port_checks = 0;
+        return false;
+    }
+
+    entry.missing_port_checks = entry.missing_port_checks.saturating_add(1);
+    entry.missing_port_checks >= 3
+        && entry
+            .started_at
+            .map(|started| started.elapsed() > Duration::from_millis(200))
+            .unwrap_or(true)
+}
+'''
+          new = '''const MISSING_PORT_CHECK_LIMIT: u8 = 6;
+const MISSING_PORT_GRACE: Duration = Duration::from_secs(15);
+
+fn should_mark_runtime_error(
+    entry: &mut RuntimeEntry,
+    listening: bool,
+    listener_finished: bool,
+) -> bool {
+    if entry.phase != RuntimePhase::Running {
+        return false;
+    }
+    if listening {
+        entry.missing_port_checks = 0;
+        return false;
+    }
+
+    entry.missing_port_checks = entry.missing_port_checks.saturating_add(1);
+    let age = entry.started_at.map(|started| started.elapsed());
+
+    // A completed listener task plus a missing socket is authoritative failure.
+    // Keep the short age floor so the initial bind/status handoff cannot race a
+    // task that exited immediately after start.
+    if listener_finished {
+        return age
+            .map(|elapsed| elapsed > Duration::from_millis(200))
+            .unwrap_or(true);
+    }
+
+    // Port enumeration can transiently miss on a heavily loaded desktop. Do not
+    // abort a still-live listener or tear down its tunnel from a few UI refreshes.
+    // Require both sustained misses and a wall-clock grace period before treating
+    // a live-but-portless task as stuck.
+    entry.missing_port_checks >= MISSING_PORT_CHECK_LIMIT
+        && age
+            .map(|elapsed| elapsed >= MISSING_PORT_GRACE)
+            .unwrap_or(true)
+}
+'''
+          assert old in text, 'health helper changed'
+          text = text.replace(old, new, 1)
+
+          text = text.replace(
+              'assert!(!should_mark_runtime_error(&mut runtime, true));',
+              'assert!(!should_mark_runtime_error(&mut runtime, true, false));',
+          )
+          text = text.replace(
+              'assert!(!should_mark_runtime_error(&mut runtime, false));',
+              'assert!(!should_mark_runtime_error(&mut runtime, false, false));',
+          )
+          text = text.replace(
+              'assert!(should_mark_runtime_error(&mut runtime, false));',
+              'assert!(should_mark_runtime_error(&mut runtime, false, false));',
+          )
+
+          old_test = '''    #[test]
+    fn refresh_cleans_up_only_after_running_runtime_is_confirmed_missing() {
+        let mut runtime = entry(
+            RuntimePhase::Running,
+            Some(std::time::Instant::now() - Duration::from_secs(1)),
+        );
+        assert!(!should_mark_runtime_error(&mut runtime, false, false));
+        assert!(!should_mark_runtime_error(&mut runtime, false, false));
+        assert!(should_mark_runtime_error(&mut runtime, false, false));
+    }
+'''
+          new_test = '''    #[test]
+    fn refresh_cleans_up_live_runtime_only_after_sustained_missing_port() {
+        let mut runtime = entry(
+            RuntimePhase::Running,
+            Some(std::time::Instant::now() - MISSING_PORT_GRACE - Duration::from_secs(1)),
+        );
+        for _ in 1..MISSING_PORT_CHECK_LIMIT {
+            assert!(!should_mark_runtime_error(&mut runtime, false, false));
+        }
+        assert!(should_mark_runtime_error(&mut runtime, false, false));
+    }
+
+    #[test]
+    fn refresh_keeps_live_runtime_during_grace_even_after_many_misses() {
+        let mut runtime = entry(RuntimePhase::Running, Some(std::time::Instant::now()));
+        for _ in 0..MISSING_PORT_CHECK_LIMIT.saturating_add(2) {
+            assert!(!should_mark_runtime_error(&mut runtime, false, false));
+        }
+    }
+
+    #[test]
+    fn finished_listener_with_missing_port_fails_after_startup_floor() {
+        let mut runtime = entry(
+            RuntimePhase::Running,
+            Some(std::time::Instant::now() - Duration::from_secs(1)),
+        );
+        assert!(should_mark_runtime_error(&mut runtime, false, true));
+    }
+'''
+          assert old_test in text, 'existing missing-port regression test changed'
+          text = text.replace(old_test, new_test, 1)
+
+          path.write_text(text)
+          PY
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git diff --check -- src-tauri/src/runtime/supervisor.rs
+          cargo test --manifest-path src-tauri/Cargo.toml runtime::supervisor::tests --locked
+      - name: Commit verified source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src-tauri/src/runtime/supervisor.rs
+          if git diff --cached --quiet; then
+            echo 'No source change required.'
+            exit 0
+          fi
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo 'Refusing to commit a deletion.'
+            exit 1
+          fi
+          git commit -m 'fix: tolerate transient listener port misses'
+          git push origin HEAD:automation/runtime-health-grace
