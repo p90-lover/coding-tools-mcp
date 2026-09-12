@@ -13,5 +13,5 @@ test('native Codex long-session UI keeps lifetime and close state honest', () =>
 test('native Codex control advertises bounded replay retention', () => {
   assert.doesNotMatch(registry, /repeats never replay/);
   assert.match(registry, /90-minute/);
-  assert.match(registry, /fresh UUID/);
+  assert.match(registry, /fresh request_id/);
 });
