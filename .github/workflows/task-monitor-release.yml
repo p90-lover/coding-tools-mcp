@@ -1,0 +1,196 @@
+name: Verified task monitor and stable Latest release
+on:
+  push:
+    branches: [fix/task-monitor-latest-0.4.4]
+    paths: [.github/workflows/task-monitor-release.yml]
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: task-monitor-stable-045
+  cancel-in-progress: false
+env:
+  VERSION: 0.4.5
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  prepare:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions: {contents: write, actions: read}
+    outputs: {source: '${{ steps.source.outputs.source }}'}
+    env:
+      SOURCE: ${{ github.sha }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/monitor-preflight-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ github.sha }}', path: aiTemp/source, fetch-depth: 0, clean: false, persist-credentials: false}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with: {toolchain: '1.98.1', components: rustfmt}
+      - name: Require baseline failures and verify the actual history and compiled pages
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download 34675865304 --repo "$GITHUB_REPOSITORY" --name task-monitor-red-34675865304 --dir aiTemp/red
+          cp aiTemp/red/update-red.txt aiTemp/red/monitor-red.txt aiTemp/evidence/
+          grep -F UPDATER_PRERELEASE_COLLISION aiTemp/evidence/update-red.txt
+          grep -F MONITOR_NAVIGATION_MISSING aiTemp/evidence/monitor-red.txt
+          python -m pip install playwright==1.57.0
+          python aiTemp/task-monitor/preflight.py
+      - name: Record tested candidate without overwriting concurrent source
+        id: source
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git diff --exit-code 2517b2e7fe0ae2038eb3b72caa8761756927feb4 -- src-tauri/src/auth src-tauri/src/runtime src-tauri/src/tunnel src-tauri/src/integrations native-helpers src-tauri/src/tools/native_sandbox.rs src-tauri/src/tools/sandbox_runner.rs src-tauri/src/tools/sandbox_snapshot.rs src-tauri/src/tools/policy.rs aiTemp/live-refresh aiTemp/quicktunnel aiTemp/reliability aiTemp/timeout-recovery
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then git commit -m 'feat: connect bounded task monitoring, provider details and stable update precedence'; fi
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)" = 2517b2e7fe0ae2038eb3b72caa8761756927feb4
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git diff --stat 2517b2e7fe0ae2038eb3b72caa8761756927feb4 HEAD > aiTemp/evidence/source-scope.txt
+      - name: Preserve candidate source and any failed preparation
+        if: always()
+        run: |
+          mkdir -p aiTemp/review
+          git bundle create aiTemp/review/source.bundle HEAD
+          git diff HEAD --binary > aiTemp/review/materialized.patch
+          git status --short > aiTemp/review/status.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'monitor-preparation-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'monitor-source-${{ github.run_id }}', path: aiTemp/source/aiTemp/review/, if-no-files-found: error, retention-days: 14}
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions: {contents: read, actions: read}
+    env:
+      SOURCE: ${{ needs.prepare.outputs.source }}
+      PLATFORM: windows-x64
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/monitor-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+      EXTENSION_SOURCE_DIR: ${{ github.workspace }}/aiTemp/extension
+      CODING_TOOLS_COMMAND_NATIVE_SHA256: 444a3f0008050605cae73cd9b7a2dcac61294062dfaab56dd20430fd6498518b
+      CODING_TOOLS_SNAPSHOT_HELPER: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-appcontainer.exe
+      CODING_TOOLS_SNAPSHOT_PROBE: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-sandbox-probe.exe
+      APP_CONTAINER_HELPER: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-appcontainer.exe
+      APP_CONTAINER_PROBE: ${{ github.workspace }}/aiTemp/source/aiTemp/native-build/Release/coding-tools-sandbox-probe.exe
+      CI: 'true'
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ env.SOURCE }}', path: aiTemp/source, fetch-depth: 0, clean: false, persist-credentials: false}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {repository: p90-lover/coding-tools-mcp-fast-access-extension, ref: b0d4db553227fa3c7300050b8edff6e2eb9afee4, path: aiTemp/extension, clean: false, persist-credentials: false}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with: {toolchain: '1.98.1'}
+      - name: Retain only baseline evidence and verify actual native isolation and paths
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "monitor-preparation-$GITHUB_RUN_ID" --dir aiTemp/preparation
+          cp aiTemp/preparation/update-red.txt aiTemp/preparation/monitor-red.txt aiTemp/preparation/source-details-red.txt aiTemp/evidence/
+          gh run download 34662554972 --repo "$GITHUB_REPOSITORY" --name live-evidence-34662554972 --dir aiTemp/previous
+          for name in red.txt context-red.txt linked-write-red.txt quick-red.txt branch-audit.json ui-red.txt rust-red.txt timeout-red.txt; do cp "aiTemp/previous/$name" aiTemp/evidence/; done
+          python aiTemp/live-refresh/linked_write_probe.py 2>&1 | tee aiTemp/evidence/linked-write-green.txt
+          python aiTemp/reliability/verifier_guard_test.py 2>&1 | tee aiTemp/evidence/verifier-guard.txt
+          cmake -S native-helpers/app-container -B aiTemp/native-build -A x64 -DCODING_TOOLS_BUILD_PROBE=ON
+          cmake --build aiTemp/native-build --config Release 2>&1 | tee aiTemp/evidence/native-build.txt
+          python aiTemp/completion/native_test.py 2>&1 | tee aiTemp/evidence/native-tests.txt
+      - name: Check actual frontend and retain refresh and source-state contracts
+        run: |
+          set -euo pipefail
+          npm ci 2>&1 | tee aiTemp/evidence/npm.txt
+          node --test aiTemp/live-refresh/refresh-ui.test.mjs 2>&1 | tee aiTemp/evidence/refresh-ui.txt
+          node --test aiTemp/reliability/integration-state.test.mjs 2>&1 | tee aiTemp/evidence/integration-state.txt
+          npm run check 2>&1 | tee aiTemp/evidence/frontend.txt
+          npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+          python -m pip install playwright==1.57.0 jsonschema==4.25.1
+          python aiTemp/task-monitor/update_probe.py 2>&1 | tee aiTemp/evidence/update-green.txt
+      - name: Real task monitor plus same-listener policy and approved-root checks
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib task_monitor_history_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/task-monitor-history.txt
+          grep -F '1 passed; 0 failed' aiTemp/evidence/task-monitor-history.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib refresh_contract_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/live-tests.txt
+          grep -F '2 passed; 0 failed' aiTemp/evidence/live-tests.txt
+          python aiTemp/live-refresh/context_probe.py 2>&1 | tee aiTemp/evidence/context-green.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib tools::live_policy::tests -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/live-policy-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib quick_add_never_overwrites_an_existing_mapping -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/root-nonoverwrite.txt
+          grep -F '1 passed; 0 failed' aiTemp/evidence/root-nonoverwrite.txt
+      - name: Retain protocol control, recovery, adapters and sandbox permission contracts
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib quick_ -- --test-threads=1 --nocapture --skip quick_add_never_overwrites_an_existing_mapping 2>&1 | tee aiTemp/evidence/quick-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib recovery_contract_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/recovery-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib snapshot_contract_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/snapshot-contract.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib reliability_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/reliability-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib control_center_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/adapter-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib core_catalog_exposes_chatgpt_compatible_tools_without_unreleased_claims -- --test-threads=1 2>&1 | tee aiTemp/evidence/registry.txt
+      - name: Retain browser OAuth and extension authorization
+        env: {OAUTH_BROWSER_PROBE: aiTemp/origin-repair/browser_live.py}
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib oauth_popup_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/oauth-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib catalog_exposure_ -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/catalog-tests.txt
+          cargo test --locked --release --features native-snapshot --manifest-path src-tauri/Cargo.toml --lib connection_ -- --test-threads=1 2>&1 | tee aiTemp/evidence/connection-tests.txt
+      - name: Build exact stable installer and verify compiled task and provider interfaces
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --bundles nsis -- --locked --features native-snapshot 2>&1 | tee aiTemp/evidence/installer.txt
+          python aiTemp/reliability/browser_test.py 2>&1 | tee aiTemp/evidence/integration-browser.txt
+          python aiTemp/live-refresh/browser_test.py 2>&1 | tee aiTemp/evidence/refresh-browser.txt
+          python aiTemp/task-monitor/browser_probe.py 2>&1 | tee aiTemp/evidence/task-monitor-browser.txt
+          python aiTemp/task-monitor/source_probe.py 2>&1 | tee aiTemp/evidence/source-details-browser.txt
+          python aiTemp/task-monitor/package.py
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: 'monitor-installer-${{ github.run_id }}', path: 'aiTemp/source/aiTemp/installer/*', if-no-files-found: error, retention-days: 14}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'monitor-evidence-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
+  publish:
+    needs: [prepare,windows]
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions: {contents: write, actions: read}
+    env: {SOURCE: '${{ needs.prepare.outputs.source }}'}
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ env.SOURCE }}', path: aiTemp/source, fetch-depth: 0, clean: false, persist-credentials: false}
+      - name: Verify uploaded bytes and exact refs then publish stable Latest
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: python aiTemp/task-monitor/publish.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: monitor-publication-${{ github.run_id }}
+          path: |
+            aiTemp/source/aiTemp/monitor-release-receipt.json
+            aiTemp/source/aiTemp/monitor-release-draft.json
+          if-no-files-found: warn
+          retention-days: 14
