@@ -15,16 +15,29 @@ if text!=path.read_text(encoding='utf-8'):
     backup.parent.mkdir(parents=True,exist_ok=True);assert not backup.exists();shutil.copy2(path,backup)
     path.write_text(text,encoding='utf-8');subprocess.run(['git','add','--',str(path)],check=True)
 
-def run(args,name):
+def run(args,name,expected=0):
     with (evidence/name).open('w',encoding='utf-8') as f:r=subprocess.run(args,stdout=f,stderr=subprocess.STDOUT)
     print((evidence/name).read_text(encoding='utf-8',errors='replace')[-14000:],flush=True)
-    assert r.returncode==0,(args,r.returncode)
+    assert r.returncode==expected,(args,r.returncode)
 run(['python','aiTemp/task-monitor/update_probe.py'],'update-green.txt')
 run(['python','aiTemp/task-monitor/history_probe.py'],'task-monitor-history.txt')
 run(['npm','ci'],'npm.txt')
 run(['npm','run','check'],'frontend.txt')
 run(['npm','run','build'],'frontend-build.txt')
 run(['python','aiTemp/task-monitor/browser_probe.py'],'task-monitor-browser.txt')
+if 'SourceDetail from' not in Path('src/routes/sessions/+page.svelte').read_text():
+    run(['python','aiTemp/task-monitor/source_probe.py','--baseline'],'source-details-red.txt',1)
+    assert 'SOURCE_DETAILS_MISSING' in (evidence/'source-details-red.txt').read_text()
+    runpy.run_path('aiTemp/task-monitor/source_details_prepare.py',run_name='__main__')
+    run(['npm','run','check'],'source-frontend.txt')
+    # Preserve the first build directory instead of cleaning an existing output.
+    for name in ['build','.svelte-kit']:
+        directory=Path(name)
+        if directory.exists():
+            dest=Path('aiTemp/Trash/pre-source-details-build')/os.environ['GITHUB_RUN_ID']/name
+            dest.parent.mkdir(parents=True,exist_ok=True);assert not dest.exists();shutil.move(directory,dest)
+    run(['npm','run','build'],'source-frontend-build.txt')
+run(['python','aiTemp/task-monitor/source_probe.py'],'source-details-browser.txt')
 subprocess.run(['git','diff','--cached','--check'],check=True)
 assert not subprocess.check_output(['git','diff','--cached','--diff-filter=D','--name-only']).strip()
-print('TASK_MONITOR_PREFLIGHT_PASS: real history, version precedence and compiled page interactions')
+print('TASK_MONITOR_PREFLIGHT_PASS: real history, version precedence, task details and Paseo/Anneal inspectors')
