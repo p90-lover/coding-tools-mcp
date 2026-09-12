@@ -54,7 +54,11 @@ try:
             form=page.locator('form').filter(has=page.get_by_label('Tool catalog / 工具目錄',exact=True))
             expect(form).to_be_visible()
             assert page.evaluate('window.__saves.length')==0,'Hydration must not save or grant permissions'
-            mode=form.get_by_label('权限模式',exact=True)
+            # An implicit label's text includes its nested select options. Match
+            # its exact visible caption, then the one select within that label.
+            # Do not select by index or remove any save/permission assertions.
+            mode=form.locator('label').filter(has=page.get_by_text('权限模式',exact=True)).locator('select')
+            expect(mode).to_have_count(1)
             mode.select_option('read-only')
             page.wait_for_function('window.__saves.length===1')
             expect(mode).to_be_disabled()
@@ -86,7 +90,11 @@ try:
             (root/'refresh-browser.json').write_text(json.dumps(proof,indent=2)+'\n')
             print('LIVE_REFRESH_BROWSER: automatic policy save, failure honesty, metadata refresh and no restart verified on compiled page')
         except Exception:
-            print(json.dumps({'errors':errors,'calls':page.evaluate('window.__calls'),'saved':page.evaluate('window.__saves.length')},indent=2),flush=True)
+            details={'errors':errors,'calls':page.evaluate('window.__calls'),'saved':page.evaluate('window.__saves.length'),
+                'controls':page.locator('form select').evaluate_all('(nodes)=>nodes.map(n=>({label:n.labels?.[0]?.textContent,value:n.value,disabled:n.disabled}))'),
+                'visible_status':page.locator('[role="status"],[role="alert"]').all_text_contents()}
+            (root/'refresh-browser-failure.json').write_text(json.dumps(details,indent=2)+'\n')
+            print(json.dumps(details,indent=2),flush=True)
             raise
         finally:browser.close()
 finally:
