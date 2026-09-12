@@ -20,6 +20,7 @@ on:
   pull_request:
     branches:
       - integration/xyTom-v0.3.0
+      - validation/v0.4.9-release-blockers
     paths:
       - "src-tauri/**"
       - "src/**"
