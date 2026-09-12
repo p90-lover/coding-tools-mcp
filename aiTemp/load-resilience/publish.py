@@ -8,6 +8,7 @@ head=os.environ['SOURCE']
 changed=subprocess.check_output(['git','diff','--name-only',base,head],text=True).splitlines()
 allowed={'src-tauri/src/mcp/mod.rs','src-tauri/src/mcp/listener.rs','src-tauri/src/mcp/request_log.rs',
  'src-tauri/src/commands/task_monitor.rs','src-tauri/src/tunnel/supervisor.rs','src/routes/tasks/+page.svelte',
+ 'aiTemp/connection-tests/http.rs',
  'package.json','package-lock.json','src-tauri/Cargo.toml','src-tauri/Cargo.lock','src-tauri/tauri.conf.json','README.md','README.en.md','docs/releases/v0.4.6.md'}
 assert all(p in allowed or p.startswith('aiTemp/load-resilience/') or p.startswith('.github/workflows/load-resilience') for p in changed),changed
 path=Path('aiTemp/task-monitor/publish.py');raw=subprocess.check_output(['git','show','HEAD:'+path.as_posix()])
