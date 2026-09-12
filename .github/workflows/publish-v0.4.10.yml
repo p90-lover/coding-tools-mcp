@@ -1,0 +1,66 @@
+name: Publish v0.4.10 through verified release gate
+
+on:
+  pull_request:
+    branches: [release-publish/v0.4.10]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: publish-v0410
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v0.4.10
+      EXPECTED_SOURCE: 948c14bc428f1c460c2f0bf14fe8fe14d253d023
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+          clean: false
+      - name: Verify immutable publication source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)" = "$EXPECTED_SOURCE"
+          python - <<'PY'
+          import json, pathlib, tomllib
+          root=pathlib.Path.cwd()
+          versions=[json.loads((root/p).read_text())['version'] for p in ['package.json','package-lock.json','src-tauri/tauri.conf.json']]
+          manifest=tomllib.loads((root/'src-tauri/Cargo.toml').read_text())['package']
+          versions.append(manifest['version'])
+          lock=tomllib.loads((root/'src-tauri/Cargo.lock').read_text())
+          versions.extend(p['version'] for p in lock['package'] if p['name']==manifest['name'])
+          versions.append(json.loads((root/'package-lock.json').read_text())['packages']['']['version'])
+          assert versions and all(v=='0.4.10' for v in versions), versions
+          assert (root/'docs/releases/v0.4.10.md').is_file()
+          print('Publication source verified:', versions)
+          PY
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing tag $TAG"
+            exit 1
+          fi
+      - name: Create immutable tag and dispatch verified release workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$TAG" \
+            -f "sha=$EXPECTED_SOURCE" >/dev/null
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)" = "$EXPECTED_SOURCE"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[release_tag]=$TAG"
+          echo "Created $TAG at $EXPECTED_SOURCE and dispatched release.yml"
