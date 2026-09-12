@@ -1,0 +1,62 @@
+name: Native Codex Clippy materializer
+
+on:
+  pull_request:
+    branches:
+      - automation/native-codex-clippy-base
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-native-codex-clippy
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          persist-credentials: true
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+
+      - name: Apply exact Clippy fix
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('src-tauri/src/codex_bridge/mod.rs')
+          text = path.read_text(encoding='utf-8')
+          old = '''        let mut memory = Memory::default();\n        memory.requests_used = 25;\n'''
+          new = '''        let mut memory = Memory {\n            requests_used: 25,\n            ..Default::default()\n        };\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one target, found {text.count(old)}')
+          path.write_text(text.replace(old, new), encoding='utf-8')
+
+      - name: Verify focused Rust and strict Clippy
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo test --locked --lib codex_bridge::tests::native_bridge_zero_request_limit_and_rotating_replay_ledger_are_long_lived -- --exact
+          cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Verify diff scope and commit source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          changed="$(git diff --name-only)"
+          test "$changed" = "src-tauri/src/codex_bridge/mod.rs"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/src/codex_bridge/mod.rs
+          git commit -m "test: satisfy strict Clippy for long-session fixture"
+          git push origin "HEAD:${HEAD_REF}"
