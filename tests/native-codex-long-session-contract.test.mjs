@@ -10,6 +10,7 @@ test('native Codex long-session UI keeps lifetime and close state honest', () =>
   assert.match(panel, /operation === 'close'[\s\S]*selectedThread = ''[\s\S]*answer = null/);
 });
 
+// Guard the public replay-safety contract so client retries match bounded receipt retention.
 test('native Codex control advertises bounded replay retention', () => {
   assert.doesNotMatch(registry, /repeats never replay/);
   assert.match(registry, /90-minute/);
