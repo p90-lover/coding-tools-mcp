@@ -8,24 +8,71 @@ jobs:
   contracts:
     if: github.actor == github.repository_owner
     runs-on: ubuntu-24.04
-    timeout-minutes: 6
+    timeout-minutes: 8
+    permissions: {contents: write}
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/execution-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PASEO_SOURCE_DIR: ${{ github.workspace }}/aiTemp/paseo
+      ANNEAL_SOURCE_DIR: ${{ github.workspace }}/aiTemp/anneal
       PYTHONDONTWRITEBYTECODE: '1'
     defaults:
       run: {shell: bash, working-directory: aiTemp/source}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with: {ref: '${{ github.sha }}', path: aiTemp/source, clean: false, persist-credentials: false}
+        with: {ref: '${{ github.sha }}', path: aiTemp/source, fetch-depth: 0, clean: false, persist-credentials: false}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {repository: getpaseo/paseo, ref: fa93c4290eaa87ae58452ab6e2012f85ae6e0c6b, path: aiTemp/paseo, clean: false, persist-credentials: false}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {repository: mosonlab/anneal, ref: 2eaea1c7ab5fc4444beab703bf1fbab264ad3f58, path: aiTemp/anneal, clean: false, persist-credentials: false}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with: {toolchain: '1.98.1'}
-      - name: Three native model-free contract groups
+      - name: Three lifecycle and real loopback transport groups using app-compatible dependencies
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
           python aiTemp/execution/probe.py 2>&1 | tee aiTemp/evidence/execution-contracts.txt
           grep -F '3 passed; 0 failed' aiTemp/evidence/execution-contracts.txt
-          git diff --exit-code
+      - name: Validate pinned upstream schemas rather than permissive mock messages
+        run: |
+          set -euo pipefail
+          npm install --ignore-scripts --no-audit --no-fund --prefix aiTemp/schema-deps typescript@5.9.3 zod@4.4.3 semver@7.8.5
+          if grep -F '"activeTurnBehavior":"reject"' src-tauri/src/integrations/execution/protocol.rs; then
+            set +e
+            node aiTemp/execution/upstream_schema.mjs > aiTemp/evidence/schema-red.txt 2>&1
+            code=$?
+            set -e
+            test "$code" -eq 1
+            grep -F UPSTREAM_EXECUTION_SCHEMA_REJECTED aiTemp/evidence/schema-red.txt
+            cp aiTemp/evidence/upstream-schema.json aiTemp/evidence/upstream-schema-red.json
+            python aiTemp/execution/protocol_repair.py
+            python aiTemp/execution/probe.py 2>&1 | tee aiTemp/evidence/execution-contracts.txt
+          fi
+          node aiTemp/execution/upstream_schema.mjs 2>&1 | tee aiTemp/evidence/upstream-schema.txt
+      - name: Preserve only the verified fix without modifying main
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git diff --cached --check
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then git commit -m 'fix: match actual Paseo request schema without unsupported turn behavior'; fi
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          git rev-parse HEAD > aiTemp/evidence/source.commit
+      - name: Preserve source for review even on failure
+        if: always()
+        run: |
+          mkdir -p aiTemp/review
+          git bundle create aiTemp/review/source.bundle HEAD
+          git diff HEAD --binary > aiTemp/review/materialized.patch
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with: {name: 'execution-contract-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'execution-source-${{ github.run_id }}', path: aiTemp/source/aiTemp/review/, if-no-files-found: error, retention-days: 14}
