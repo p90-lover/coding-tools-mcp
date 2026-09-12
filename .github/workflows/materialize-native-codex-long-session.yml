@@ -1,0 +1,114 @@
+name: Materialize native Codex long session
+
+on:
+  push:
+    branches: [automation/native-codex-long-session]
+    paths:
+      - "aiTemp/Trash/native-codex-long-session/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-native-codex-long-session
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/native-codex-target
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/native-codex-npm-cache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: automation/native-codex-long-session
+          fetch-depth: 0
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libpipewire-0.3-dev \
+            libgbm-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Apply and verify long-session patch
+        id: verify
+        shell: bash
+        run: |
+          set +e
+          log="aiTemp/Trash/native-codex-long-session/verification-${GITHUB_RUN_ID}.log"
+          mkdir -p "$(dirname "$log")"
+          {
+            set -x
+            python3 aiTemp/Trash/native-codex-long-session/apply.py
+            python_status=$?
+            if [ "$python_status" -eq 0 ]; then cargo fmt --manifest-path src-tauri/Cargo.toml --all; fmt_status=$?; else fmt_status=99; fi
+            if [ "$python_status" -eq 0 ] && [ "$fmt_status" -eq 0 ]; then git diff --check -- src-tauri/src/codex_bridge/mod.rs src/lib/components/CodexRuntimePanel.svelte docs/features/native-codex-runtime.md; diff_status=$?; else diff_status=99; fi
+            if [ "$python_status" -eq 0 ] && [ "$fmt_status" -eq 0 ] && [ "$diff_status" -eq 0 ]; then cargo test --manifest-path src-tauri/Cargo.toml --lib codex_bridge::tests --locked -- --nocapture; rust_status=$?; else rust_status=99; fi
+            if [ "$python_status" -eq 0 ]; then npm ci; npm_status=$?; else npm_status=99; fi
+            if [ "$npm_status" -eq 0 ]; then npm run check; frontend_status=$?; else frontend_status=99; fi
+            set +x
+            echo "python_status=$python_status"
+            echo "fmt_status=$fmt_status"
+            echo "diff_status=$diff_status"
+            echo "rust_status=$rust_status"
+            echo "npm_status=$npm_status"
+            echo "frontend_status=$frontend_status"
+          } >"$log" 2>&1
+          status=0
+          for value in "$python_status" "$fmt_status" "$diff_status" "$rust_status" "$npm_status" "$frontend_status"; do
+            if [ "$value" -ne 0 ]; then status="$value"; break; fi
+          done
+          cat "$log"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "log=$log" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Preserve verification evidence
+        shell: bash
+        env:
+          VERIFY_STATUS: ${{ steps.verify.outputs.status }}
+          VERIFY_LOG: ${{ steps.verify.outputs.log }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "$VERIFY_LOG"
+          git commit -m "test: preserve native long-session verification ${GITHUB_RUN_ID}"
+          if [ "$VERIFY_STATUS" != "0" ]; then
+            git push origin HEAD:automation/native-codex-long-session
+            exit 1
+          fi
+      - name: Commit verified source only
+        if: steps.verify.outputs.status == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src-tauri/src/codex_bridge/mod.rs src/lib/components/CodexRuntimePanel.svelte docs/features/native-codex-runtime.md
+          if git diff --cached --quiet; then
+            echo 'No source change required.'
+          else
+            if git diff --cached --name-status | grep -q '^D'; then
+              echo 'Refusing to commit a deletion.'
+              exit 1
+            fi
+            git commit -m 'feat: allow native Codex sessions to run until disconnect'
+          fi
+          git push origin HEAD:automation/native-codex-long-session
