@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Parse workflow YAML and check diff
         shell: bash
         run: |
@@ -28,7 +30,7 @@ jobs:
           set -euo pipefail
           mkdir -p aiTemp/release-contract/release-assets aiTemp/release-contract/release-meta
           python - <<'PY'
-          import hashlib, json, os, pathlib
+          import hashlib, os, pathlib
 
           workflow=pathlib.Path('.github/workflows/release.yml').read_text()
           assert 'releases?per_page=100' in workflow
