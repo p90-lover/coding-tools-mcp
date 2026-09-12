@@ -15,7 +15,7 @@ stub=r'''(() => {
  const profiles=['primary','secondary'].map(id=>({id,name:id==='primary'?'Primary project':'Second project',path:'C:/fixture/'+id,runtime:{tool_profile:'advanced',permission_mode:'workspace-write'},tunnel:{type:'none'},auth:{type:'bearer'}}));
  function result(args){const objective=args.workspaceId==='primary'?'Review real task details':'FOREIGN late task';
   const task={id,workspace_id:'f'.repeat(32),objective,status:'active',created_at:'1800000000000',updated_at:'1800000001000',completed_steps:['Read current source'],pending_steps:['Verify result'],latest_change_id:null,latest_verification_id:null};
-  return {workspace_id:args.workspaceId,requested_task_id:args.taskId||null,workspace_path:'C:/fixture/'+args.workspaceId,desktop_version:'0.4.4',checked_at_ms:Date.now(),listener_running:true,policy_revision:7,permission_mode:'workspace-write',runtime_id:'fixture-runtime',
+  return {workspace_id:args.workspaceId,requested_task_id:args.taskId||null,workspace_path:'C:/fixture/'+args.workspaceId,desktop_version:'0.4.5',checked_at_ms:Date.now(),listener_running:true,policy_revision:7,permission_mode:'workspace-write',runtime_id:'fixture-runtime',
    history:{tasks:[{...task,completed_count:1,pending_count:1}],task:args.taskId?task:null,events:args.taskId?[{id:'event-1',task_id:id,operation_id:'op-event',kind:'tool_returned',tool_name:'read_file',created_at:'1800000001000',ok:true,code:null,exit_code:null,command_id:null,files:[]}]:[],next_cursor:null,partial_tail:false,warnings:[],recent_limit:20},
    operations:[{operation_id:'fixture-operation',request_id:'rpc-1',tool_name:'exec_command',method:'tools/call',state:'completed',completion_kind:'returned',admitted_at_ms:1800000000000,finished_at_ms:1800000001000,result_state:'available',completion_is_dispatch_only:true,safe_to_retry:false}],retention_note:'Runtime receipts expire; dispatch completion does not prove a command finished.'};}
  window.__finishMonitor=i=>{const r=window.__monitorCalls[i];r.resolve(result(r.args));};
@@ -48,10 +48,13 @@ try:
   page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
   try:
    page.goto('http://127.0.0.1:1438/work',wait_until='networkidle')
-   try:expect(page.get_by_role('link',name='Task monitor',exact=True)).to_be_visible(timeout=5000)
+   # Both the board and sidebar now expose navigation. Require the exact board
+   # link instead of treating two valid entry points as a missing feature.
+   entry=page.get_by_role('main').get_by_role('link',name='Task monitor',exact=True)
+   try:expect(entry).to_be_visible(timeout=5000)
    except AssertionError as e:raise AssertionError('MONITOR_NAVIGATION_MISSING: work board has no live MCP task monitor') from e
    if '--baseline' in sys.argv:raise AssertionError('Expected baseline missing-monitor regression was not reproduced')
-   page.get_by_role('link',name='Task monitor',exact=True).click()
+   entry.click()
    expect(page.get_by_role('heading',name='Task monitor',exact=True)).to_be_visible()
    expect(page.get_by_role('button',name='Inspect task Review real task details',exact=True)).to_be_visible()
    page.get_by_role('checkbox',name='Auto-refresh',exact=True).uncheck()
