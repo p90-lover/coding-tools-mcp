@@ -1,0 +1,3 @@
+Trigger marker for verified v0.4.10 draft finalization after the release publish job's draft-by-tag lookup failed.
+
+Do not merge this trigger branch into main.
