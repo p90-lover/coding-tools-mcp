@@ -240,7 +240,7 @@ jobs:
           SOURCE: ${{ needs.identity.outputs.source }}
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/release-assets
+          mkdir -p aiTemp/release-assets aiTemp/release-meta
           gh run download "$GITHUB_RUN_ID" -n "installer-windows-$SOURCE" -D aiTemp/release-assets
           gh run download "$GITHUB_RUN_ID" -n "installer-macos-$SOURCE" -D aiTemp/release-assets
           git fetch --no-tags origin "refs/tags/$TAG"
@@ -260,15 +260,44 @@ jobs:
             cat "docs/releases/$TAG-audit-notes.md" >> aiTemp/release-notes.md
           fi
           gh release create "$TAG" --verify-tag --draft --title "Coding Tools MCP $TAG" --notes-file aiTemp/release-notes.md aiTemp/release-assets/*
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > aiTemp/release-assets/uploaded.json
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > aiTemp/release-meta/releases.json
+          RELEASE_ID="$(python - <<'PY'
+          import json, os, pathlib
+          releases=json.loads(pathlib.Path('aiTemp/release-meta/releases.json').read_text())
+          matches=[r for r in releases if r.get('tag_name')==os.environ['TAG'] and r.get('draft') is True]
+          assert len(matches)==1, f"expected exactly one draft for {os.environ['TAG']}, found {len(matches)}"
+          print(matches[0]['id'])
+          PY
+          )"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > aiTemp/release-meta/uploaded.json
           python - <<'PY'
           import hashlib,json,pathlib
           root=pathlib.Path('aiTemp/release-assets')
-          actual={p['name']:p for p in json.loads((root/'uploaded.json').read_text())['assets']}
-          expected=[p for p in root.iterdir() if p.name!='uploaded.json']
-          assert set(actual)=={p.name for p in expected}
-          assert all(actual[p.name]['size']==p.stat().st_size and actual[p.name]['digest']=='sha256:'+hashlib.sha256(p.read_bytes()).hexdigest() for p in expected)
+          actual={p['name']:p for p in json.loads(pathlib.Path('aiTemp/release-meta/uploaded.json').read_text())['assets']}
+          expected={p.name.replace(' ', '.'):p for p in root.iterdir()}
+          assert set(actual)==set(expected), (set(actual),set(expected))
+          for uploaded_name,path in expected.items():
+              digest=hashlib.sha256(path.read_bytes()).hexdigest()
+              assert actual[uploaded_name]['size']==path.stat().st_size, uploaded_name
+              assert actual[uploaded_name]['digest']=='sha256:'+digest, uploaded_name
           PY
           git fetch --no-tags origin "refs/tags/$TAG"
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE"
-          gh release edit "$TAG" --draft=false --latest
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true > aiTemp/release-meta/published.json
+          python - <<'PY'
+          import json,os,pathlib
+          release=json.loads(pathlib.Path('aiTemp/release-meta/published.json').read_text())
+          expected={p.name.replace(' ', '.') for p in pathlib.Path('aiTemp/release-assets').iterdir()}
+          assert release['tag_name']==os.environ['TAG']
+          assert release['draft'] is False and release['published_at']
+          assert {a['name'] for a in release['assets']}==expected
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > aiTemp/release-meta/by-tag.json
+          python - <<'PY'
+          import json,os,pathlib
+          release=json.loads(pathlib.Path('aiTemp/release-meta/by-tag.json').read_text())
+          expected={p.name.replace(' ', '.') for p in pathlib.Path('aiTemp/release-assets').iterdir()}
+          assert release['tag_name']==os.environ['TAG']
+          assert release['draft'] is False and release['published_at']
+          assert {a['name'] for a in release['assets']}==expected
+          PY
