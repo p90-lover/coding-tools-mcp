@@ -63,7 +63,7 @@ jobs:
 
       - name: Run focused native Codex tests
         working-directory: src-tauri
-        run: cargo test --locked codex_bridge::tests::
+        run: "cargo test --locked codex_bridge::tests::"
 
       - name: Run strict Clippy
         working-directory: src-tauri
