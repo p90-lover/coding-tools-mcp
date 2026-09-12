@@ -7,8 +7,14 @@ def save(name,text):
  if p.read_text(encoding='utf-8')==text:return
  backup=Path('aiTemp/Trash/load-before')/os.environ['GITHUB_RUN_ID']/name
  backup.parent.mkdir(parents=True,exist_ok=True)
- assert not backup.exists() and not p.is_symlink()
- shutil.copy2(p,backup);p.write_text(text,encoding='utf-8');changed.append(name)
+ assert not p.is_symlink()
+ if name not in changed:
+  assert not backup.exists()
+  shutil.copy2(p,backup)
+  changed.append(name)
+ # A second edit in this preparation keeps the first original, not an
+ # intermediate copy. An unrelated pre-existing backup is still rejected.
+ p.write_text(text,encoding='utf-8')
 def once(name,old,new):
  text=Path(name).read_text(encoding='utf-8')
  if new in text:return
@@ -47,6 +53,19 @@ once(name,'    <div class="metrics">','''    {#if snapshot.request_log_diagnosti
       <p class="cc-notice amber" role="status">{t($locale,'Diagnostic trace backlog','診斷追蹤積壓')}: {snapshot.request_log_diagnostics.pending} {t($locale,'pending','項等待')} · {snapshot.request_log_diagnostics.dropped} {t($locale,'omitted under backpressure. Tool outcomes must be checked in operation receipts, not inferred from missing logs.','項因佇列滿而未記錄。工具結果須查操作紀錄，不能從缺少日誌推斷。')}</p>
     {/if}
     <div class="metrics">''')
+# A diagnostic trace is now asynchronous. Preserve the original content and
+# credential-redaction assertions, with a bounded wait instead of a race.
+once('aiTemp/connection-tests/http.rs','''    let log = std::fs::read_to_string(f.root.join("transport-logs/mcp-requests.log")).unwrap();''','''    let log = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let value = std::fs::read_to_string(f.root.join("transport-logs/mcp-requests.log"))
+                .unwrap_or_default();
+            if value.contains("authentication_rejected status=401")
+                && value.contains("catalog_served tools_count=") {
+                break value;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("Expected diagnostic traces were not written");''')
 for name in ['package.json','package-lock.json','src-tauri/Cargo.toml','src-tauri/Cargo.lock','src-tauri/tauri.conf.json','README.md','README.en.md']:
  text=Path(name).read_text(encoding='utf-8')
  if '0.4.5' in text:save(name,text.replace('0.4.5','0.4.6'))
