@@ -47,7 +47,7 @@ diff --git a/src/lib/components/CodexRuntimePanel.svelte b/src/lib/components/Co
        <label>{t($locale, 'Model-request limit · 0 = no app-side ceiling', '模型請求上限 · 0 = 應用程式不設上限')}<input type="number" bind:value={requestLimit} min="0" max="20" required disabled={busy || !!snapshot?.connected}/></label>
 -      <label>{t($locale, 'Consent lifetime seconds · 0 = until disconnect', '授權有效秒數 · 0 = 直到斷線')}<input type="number" bind:value={lifetime} min="0" max="900" required disabled={busy || !!snapshot?.connected}/></label>
 +      <label>{t($locale, 'Consent lifetime seconds · 0 or 30–900', '授權有效秒數 · 0 或 30–900')}<input type="number" bind:value={lifetime} min="0" max="900" step="1" required disabled={busy || !!snapshot?.connected}/></label>
-@@ -151,6 +159,6 @@
+@@ -151,5 +159,5 @@
        'Select a trusted native binary, not a shell wrapper. Sign in to the dedicated home separately; no credentials are copied or requested here. Native configuration, logs and provider retention are outside the bridge’s RAM-only response handling. Read-only policy is requested, not an independently verified OS sandbox. Permission changes revoke this connection.',
        '請選擇可信任的原生執行檔，而非 Shell 包裝程式。請另行登入專用主目錄；此處不會複製或索取憑證。原生設定、日誌及供應商保留政策，不屬於介接層僅用記憶體處理回應的保證。此處會要求唯讀權限，但不是獨立驗證的作業系統沙箱；權限變更會撤銷此連接。')}</p>
 -    <div class="cc-button-row"><button class="cc-button primary" disabled={busy || !!snapshot?.connected || !workspaceId}>{t($locale, busy ? 'Working…' : 'Connect selected native runtime', busy ? '處理中…' : '連接選定的原生執行環境')}</button>
