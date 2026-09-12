@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "coding-tools-mcp-desktop"
-version = "0.4.4-rc.5"
+version = "0.4.5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -686,6 +686,7 @@ dependencies = [
  "libc",
  "regex",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

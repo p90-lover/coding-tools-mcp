@@ -485,7 +485,7 @@ pub fn capture_baseline(root: &Path) -> HarnessResult<ProjectBaseline> {
     super::bounded_scan::capture(root)
 }
 
-fn workspace_id(root: &Path) -> String {
+pub(super) fn workspace_id(root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(root.to_string_lossy().as_bytes());
     format!("{:x}", hasher.finalize())[..32].to_string()

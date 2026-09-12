@@ -10,6 +10,8 @@ pub use codex_runtime::{
     codex_local_command, codex_local_connect, codex_local_control, codex_local_disconnect,
     codex_local_read, codex_local_status,
 };
+mod task_monitor;
+pub use task_monitor::task_monitor_read;
 mod control_center;
 pub use control_center::{control_board_change, control_board_read, integration_read};
 mod computer;

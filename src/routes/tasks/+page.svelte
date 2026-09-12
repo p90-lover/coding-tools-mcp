@@ -87,7 +87,7 @@
         {#if detail}
           <h3>{detail.objective}</h3><p class="ids">{detail.id} · <Status state={detail.status}/></p>
           <p class="cc-muted">{t($locale,'Created','建立')} {time(detail.created_at)} · {t($locale,'Updated','更新')} {time(detail.updated_at)}</p>
-          <div class="steps"><section><h4>{t($locale,'Recorded completed steps','已記錄完成步驟')}</h4>{#each detail.completed_steps??[] as step}<p>✓ {step}</p>{/each}</section><section><h4>{t($locale,'Recorded pending steps','已記錄待辦步驟')}</h4>{#each detail.pending_steps??[] as step}<p>○ {step}</p>{/each}</section></div>
+          <div class="steps"><section><h4>{t($locale,'Recorded completed steps','已記錄完成步驟')}</h4>{#each detail.completed_steps??[] as step}<p><span aria-hidden="true">✓ </span><span>{step}</span></p>{/each}</section><section><h4>{t($locale,'Recorded pending steps','已記錄待辦步驟')}</h4>{#each detail.pending_steps??[] as step}<p><span aria-hidden="true">○ </span><span>{step}</span></p>{/each}</section></div>
           {#if detail.steps_truncated}<p class="cc-notice amber">{t($locale,'Displayed steps are shortened; original task remains unchanged.','顯示步驟已截短，原始任務保持不變。')}</p>{/if}
           <p class="ids">{t($locale,'Change receipt','變更紀錄')} {detail.latest_change_id??'—'} · {t($locale,'Verification receipt','驗證紀錄')} {detail.latest_verification_id??'—'}</p>
           <div class="timeline" aria-label={t($locale,'Recorded task events','任務事件紀錄')}>
@@ -101,7 +101,7 @@
       </section>
     </div>
     <section class="cc-panel receipts"><h2><Activity size={18}/>{t($locale,'Recent MCP dispatch receipts','最近 MCP 分派紀錄')}</h2><p class="cc-muted">{t($locale,'Workspace-wide, not automatically assigned to the selected task. A returned command handle may still be running.','涵蓋整個工作區，不會自動歸屬到所選任務。已回傳的命令 handle 可能仍在執行。')}</p>
-      <div class="cc-table-wrap"><table class="cc-table"><thead><tr><th>{t($locale,'Tool / operation ID','工具／操作 ID')}</th><th>{t($locale,'Observed state','觀察狀態')}</th><th>{t($locale,'Accepted','接受時間')}</th><th>{t($locale,'Dispatch returned','分派回傳時間')}</th></tr></thead><tbody>{#each snapshot.operations as op (op.operation_id)}<tr><td><strong>{op.tool_name||op.method}</strong><small class="ids">{op.operation_id}</small></td><td>{operationLabel(op)}<small class="ids">{op.result_state}</small></td><td>{time(op.admitted_at_ms)}</td><td>{time(op.finished_at_ms)}</td></tr>{/each}</tbody></table></div>
+      <div class="cc-table-wrap"><table class="cc-table"><thead><tr><th>{t($locale,'Tool / operation ID','工具／操作 ID')}</th><th>{t($locale,'Observed state','觀察狀態')}</th><th>{t($locale,'Accepted','接受時間')}</th><th>{t($locale,'Dispatch returned','分派回傳時間')}</th></tr></thead><tbody>{#each snapshot.operations as op (op.operation_id)}<tr><td><strong>{op.tool_name||op.method}</strong><small class="ids">{op.operation_id}</small></td><td><span>{operationLabel(op)}</span><small class="ids">{op.result_state}</small></td><td>{time(op.admitted_at_ms)}</td><td>{time(op.finished_at_ms)}</td></tr>{/each}</tbody></table></div>
       {#if !snapshot.operations.length}<p class="cc-quiet-empty">{t($locale,'No retained receipts. Missing records mean unknown, not never executed.','沒有保留的操作紀錄。紀錄缺失代表未知，不代表從未執行。')}</p>{/if}
       <p class="cc-muted">{t($locale,'Receipts are memory-only, bounded and expire. No automatic replay, raw arguments or output bodies are exposed here.','操作紀錄只存在記憶體、有數量及期限限制。此頁不會自動重做，也不顯示原始參數或輸出本文。')}</p><p class="ids">Runtime: {snapshot.runtime_id??'—'}</p>
     </section>

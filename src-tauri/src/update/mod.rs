@@ -41,27 +41,14 @@ pub fn normalize_tag(tag: &str) -> String {
     without_v.trim().to_string()
 }
 
-/// Compare two semver-like strings (major.minor.patch[+pre]).
-/// Returns None when either side cannot be parsed as numeric major.minor.patch.
+/// Compare release precedence, including numeric prerelease identifiers.
+/// Build metadata is not part of precedence; malformed versions are rejected.
 pub fn compare_versions(left: &str, right: &str) -> Option<Ordering> {
-    let left_parts = parse_version_tuple(&normalize_tag(left))?;
-    let right_parts = parse_version_tuple(&normalize_tag(right))?;
-    Some(left_parts.cmp(&right_parts))
-}
-
-fn parse_version_tuple(version: &str) -> Option<(u64, u64, u64)> {
-    let core = version.split(['-', '+']).next().unwrap_or(version).trim();
-    if core.is_empty() {
-        return None;
-    }
-    let mut parts = core.split('.');
-    let major = parts.next()?.parse::<u64>().ok()?;
-    let minor = parts.next().unwrap_or("0").parse::<u64>().ok()?;
-    let patch = parts.next().unwrap_or("0").parse::<u64>().ok()?;
-    if parts.next().is_some() {
-        // Extra numeric segments are ignored for comparison stability.
-    }
-    Some((major, minor, patch))
+    let mut left = semver::Version::parse(&normalize_tag(left)).ok()?;
+    let mut right = semver::Version::parse(&normalize_tag(right)).ok()?;
+    left.build = semver::BuildMetadata::EMPTY;
+    right.build = semver::BuildMetadata::EMPTY;
+    Some(left.cmp(&right))
 }
 
 pub fn parse_latest_release(body: &str, current_version: &str) -> AppResult<UpdateCheckResult> {

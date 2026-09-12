@@ -39,7 +39,7 @@ use commands::{
     save_frp_profile, set_download_config, set_last_workspace, set_proxy, set_shared_secret,
     set_workspace_secret, show_main_window, start_actions_runtime, start_runtime, start_tunnel,
     stop_actions_runtime, stop_runtime, stop_tunnel, test_tunnel, uninstall_software,
-    update_workspace,
+    task_monitor_read, update_workspace,
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -190,6 +190,7 @@ pub fn run() {
             integration_read,
             control_board_read,
             control_board_change,
+            task_monitor_read,
             sandbox_local_prepare,
             sandbox_local_status,
             sandbox_local_disable,
