@@ -18,6 +18,10 @@ const FILE_BYTES: u64 = 32 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
 const DEADLINE: Duration = Duration::from_secs(8);
+#[cfg(windows)]
+const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(3);
+#[cfg(not(windows))]
+const GIT_METADATA_DEADLINE: Duration = Duration::from_secs(1);
 static ACTIVE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 pub(super) struct Lease(PathBuf);
 impl Drop for Lease {
@@ -246,7 +250,7 @@ fn git_value(root: &Path, args: &[&str], started: Instant) -> HarnessResult<Opti
                     .filter(|v| !v.is_empty()));
             }
             Ok(None)
-                if git_started.elapsed() < Duration::from_secs(1)
+                if git_started.elapsed() < GIT_METADATA_DEADLINE
                     && started.elapsed() < DEADLINE =>
             {
                 std::thread::sleep(Duration::from_millis(10))

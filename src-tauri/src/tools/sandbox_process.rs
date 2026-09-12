@@ -42,7 +42,13 @@ mod native {
 #[cfg(windows)]
 pub use native::assign;
 #[cfg(not(windows))]
-pub fn assign(_child: &std::process::Child) -> AppResult<()> {
+pub struct Job;
+#[cfg(not(windows))]
+impl Drop for Job {
+    fn drop(&mut self) {}
+}
+#[cfg(not(windows))]
+pub fn assign(_child: &std::process::Child) -> AppResult<Job> {
     Err(AppError::Message(
         "Native sandbox lifecycle is Windows-only".into(),
     ))
