@@ -537,3 +537,726 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "capture_screenshot",
     "capture_window",
 ];
+
+pub const MUTATING_TOOLS: &[&str] = &[
+    "sandbox_exec",
+    "workflow_update",
+    "codex_command_exec",
+    "codex_agent_control",
+    "computer_action",
+    "computer_sequence",
+    "history_session_bootstrap",
+    "history_session_checkpoint",
+    "history_session_validate",
+    "apply_patch",
+    "exec_command",
+    "write_stdin",
+    "kill_command",
+    "kill_session",
+    "set_default_cwd",
+    "start_task",
+    "update_task",
+    "pause_task",
+    "resume_task",
+    "finish_task",
+];
+
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "mcp_operation_status",
+    "workflow_list",
+    "codex_runtime_status",
+    "codex_agent_read",
+    "codex_tools_status",
+    "tool_search",
+    "get_current_time",
+    "get_plan",
+    "update_plan",
+    "sandbox_status",
+    "computer_status",
+    "computer_route",
+    "computer_snapshot",
+    "computer_list_windows",
+    "computer_select_window",
+    "computer_find_control",
+    "computer_wait",
+    "computer_stop",
+    "harness_status",
+    "operation_log",
+    "server_info",
+    "history_session_search",
+    "history_session_read",
+    "check_exec_environment",
+    "exec_health_check",
+    "get_default_cwd",
+    "read_file",
+    "list_dir",
+    "list_files",
+    "search_text",
+    "grep_text",
+    "grep",
+    "read_output",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "request_permissions",
+    "view_image",
+    "vision_status",
+    "image_info",
+    "compare_images",
+    "list_displays",
+    "list_windows",
+    "capture_screenshot",
+    "capture_window",
+    "patch_check",
+    "project_state",
+    "task_context",
+    "list_task_events",
+    "change_summary",
+];
+
+pub fn is_allowed_tool(name: &str) -> bool {
+    ALLOWED_TOOLS.contains(&name)
+}
+
+pub fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "grep" => "grep_text",
+        "screenshot" | "take_screenshot" => "capture_screenshot",
+        _ => name,
+    }
+}
+
+pub fn normalize_tool_profile(profile: &str) -> &'static str {
+    match profile {
+        "advanced" | "full" => "advanced",
+        "read-only" => "read-only",
+        "compat-readonly-all" => "compat-readonly-all",
+        _ => "core",
+    }
+}
+
+pub fn exposed_tool_names(tool_profile: &str) -> Vec<&'static str> {
+    match normalize_tool_profile(tool_profile) {
+        "read-only" => CORE_READ_ONLY_TOOLS.to_vec(),
+        "advanced" | "compat-readonly-all" => P0_TOOLS.iter().map(|(name, ..)| *name).collect(),
+        _ => CORE_TOOLS.to_vec(),
+    }
+}
+
+pub fn list_tools_for_profile(tool_profile: &str) -> Vec<Value> {
+    exposed_tool_names(tool_profile)
+        .into_iter()
+        .filter_map(|name| {
+            P0_TOOLS.iter().find(|(n, ..)| *n == name).map(|entry| {
+                let (name, title, description, read_only, destructive, open_world) = *entry;
+                // A compatibility profile changes visibility, never the truth of side effects.
+                let mut definition = json!({
+                    "name": name,
+                    "title": title,
+                    "description": description,
+                    "inputSchema": input_schema(name),
+                    "annotations": {
+                        "title": title,
+                        "readOnlyHint": read_only,
+                        "destructiveHint": destructive,
+                        "idempotentHint": read_only && !matches!(name, "capture_screenshot" | "capture_window" | "computer_snapshot"),
+                        "openWorldHint": open_world || matches!(name, "list_displays" | "list_windows" | "capture_screenshot" | "capture_window")
+                    }
+                });
+                if let Some(schema) = crate::tools::recovered_output_schema::for_tool(name) {
+                    definition["outputSchema"] = schema;
+                }
+                if name == "list_task_events" {
+                    definition["outputSchema"] = crate::tools::event_output_schema::schema();
+                }
+                if name == crate::mcp::operation_store::TOOL {
+                    definition["outputSchema"] = crate::mcp::operation_store::output_schema();
+                }
+                definition
+            })
+        })
+        .collect()
+}
+
+pub fn input_schema(name: &str) -> Value {
+    let mut schema = base_input_schema(name);
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        if crate::harness::tools::TOOL_NAMES.contains(&name)
+            || matches!(
+                name,
+                "exec_command"
+                    | "apply_patch"
+                    | "patch_check"
+                    | "read_file"
+                    | "list_files"
+                    | "list_dir"
+                    | "search_text"
+                    | "grep_text"
+                    | "grep"
+                    | "git_status"
+                    | "git_diff"
+                    | "read_output"
+                    | "write_stdin"
+                    | "kill_command"
+                    | "kill_session"
+            )
+        {
+            properties.insert("known_project_instructions_revision".into(), json!({"type":"string","pattern":"^[a-f0-9]{64}$","description":"Optional exact revision previously received in project_instructions. Unchanged instructions are acknowledged without retransmitting their full text."}));
+            properties.entry("project_root").or_insert_with(|| json!({"type":"string","minLength":1,"description":"Approved project directory or @alias. Request-local: never changes another chat's project or task."}));
+            properties.entry("task_id").or_insert_with(|| json!({"type":"string","minLength":1,"description":"Exact task returned by start_task in this project. Required when multiple tasks are open; no unrelated task is selected implicitly."}));
+        }
+    }
+    schema
+}
+
+fn base_input_schema(name: &str) -> Value {
+    if name == crate::mcp::operation_store::TOOL {
+        return crate::mcp::operation_store::input_schema();
+    }
+    if crate::tools::workflow::NAMES.contains(&name) {
+        return crate::tools::workflow::input_schema(name);
+    }
+    if crate::tools::codex_runtime::NAMES.contains(&name) {
+        return crate::tools::codex_runtime::input_schema(name);
+    }
+    if crate::tools::local_tools::NAMES.contains(&name) {
+        return crate::tools::local_tools::input_schema(name);
+    }
+    if crate::tools::native_sandbox::NAMES.contains(&name) {
+        return crate::tools::native_sandbox::input(name);
+    }
+    if crate::tools::computer::schema::NAMES.contains(&name) {
+        return crate::tools::computer::schema::input(name);
+    }
+    match name {
+        "history_session_bootstrap" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "session_key": { "type": "string", "minLength": 1 },
+                "title": { "type": "string" },
+                "initial_user_input": { "type": "string" },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "create_if_missing": { "type": "boolean", "default": true }
+            },
+            "additionalProperties": false
+        }),
+        "history_session_checkpoint" => json!({
+            "type": "object",
+            "required": ["session_key", "expected_path"],
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "session_key": { "type": "string", "minLength": 1 },
+                "expected_path": { "type": "string", "minLength": 1 },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "turn_id": { "type": "string", "minLength": 1 },
+                "timestamp": { "type": "string" },
+                "user_intent": { "type": "string" },
+                "raw_user_input": { "type": "string" },
+                "findings": { "type": "array", "items": { "type": "string" } },
+                "decisions": { "type": "array", "items": { "type": "string" } },
+                "files_changed": { "type": "array", "items": { "type": "string" } },
+                "tests": { "type": "array", "items": { "type": "string" } },
+                "runtime_state": { "type": "array", "items": { "type": "string" } },
+                "remaining_issues": { "type": "array", "items": { "type": "string" } },
+                "next_actions": { "type": "array", "items": { "type": "string" } },
+                "notes": { "type": "string" }
+            },
+            "additionalProperties": false
+        }),
+        "history_session_validate" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "repair": { "type": "boolean", "default": false }
+            },
+            "additionalProperties": false
+        }),
+        "history_session_search" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "query": { "type": "string", "default": "" },
+                "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 }
+            },
+            "additionalProperties": false
+        }),
+        "history_session_read" => json!({
+            "type": "object",
+            "properties": {
+                "workspace_root": { "type": "string", "minLength": 1 },
+                "history_dir": { "type": "string", "default": "docs/history-session" },
+                "number": { "type": "integer", "minimum": 1 },
+                "path": { "type": "string", "minLength": 1 },
+                "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 65536, "default": 32768 },
+                "expected_hash": { "type": "string", "minLength": 64, "maxLength": 64 }
+            },
+            "additionalProperties": false
+        }),
+        "harness_status" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "exec_health_check" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        "operation_log" => json!({
+            "type": "object",
+            "properties": {
+                "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+            },
+            "additionalProperties": false
+        }),
+        "project_state" => json!({
+            "type": "object",
+            "properties": {
+                "max_files": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 200 }
+            },
+            "additionalProperties": false
+        }),
+        "start_task" => json!({
+            "type": "object",
+            "properties": {
+                "objective": { "type": "string", "minLength": 1 },
+                "baseline_roots": { "type": "array", "minItems": 1, "maxItems": 128,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                    "description": "Optional exact relative code/config files or directories. Pinned to this task. Excludes unselected data/model/output paths from baseline verification, not from permissions. No globs or overlapping roots. Omit for legacy coverage." }
+            },
+            "required": ["objective"],
+            "additionalProperties": false
+        }),
+        "update_task" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "minLength": 1 },
+                "completed_steps": { "type": "array", "items": { "type": "string" } },
+                "pending_steps": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "pause_task" | "resume_task" => json!({
+            "type": "object",
+            "properties": { "task_id": { "type": "string", "minLength": 1 } },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "finish_task" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "minLength": 1 },
+                "summary": { "type": "string" },
+                "allow_unverified": { "type": "boolean", "default": false }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "task_context" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string" },
+                "max_bytes": { "type": "integer", "minimum": 8192, "maximum": 131072, "default": 32768 }
+            },
+            "additionalProperties": false
+        }),
+        "list_task_events" => json!({
+            "type": "object",
+            "properties": {
+                "task_id": { "type": "string", "minLength": 1 },
+                "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+            },
+            "required": ["task_id"],
+            "additionalProperties": false
+        }),
+        "change_summary" => json!({
+            "type": "object",
+            "properties": { "task_id": { "type": "string" }, "change_id": { "type": "string" } },
+            "additionalProperties": false
+        }),
+        "read_file" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "start_line": { "type": "integer", "minimum": 1, "default": 1 },
+                "end_line": { "type": "integer", "minimum": 1 },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 131072 }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "list_dir" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." },
+                "recursive": { "type": "boolean", "default": false },
+                "max_depth": { "type": "integer", "minimum": 1, "maximum": 20, "default": 1 },
+                "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 },
+                "include_hidden": { "type": "boolean", "default": false },
+                "include_ignored": { "type": "boolean", "default": false }
+            },
+            "additionalProperties": false
+        }),
+        "list_files" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." },
+                "patterns": { "type": "array", "items": { "type": "string" } },
+                "glob": { "type": "string", "description": "Alias for a single patterns entry" },
+                "exclude_patterns": { "type": "array", "items": { "type": "string" } },
+                "include_hidden": { "type": "boolean", "default": false },
+                "include_ignored": { "type": "boolean", "default": false },
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 50000, "default": 5000 }
+            },
+            "additionalProperties": false
+        }),
+        "search_text" | "grep_text" | "grep" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "minLength": 1 },
+                "path": { "type": "string", "default": "." },
+                "glob": { "type": "string", "description": "Alias appended to include_globs" },
+                "include_globs": { "type": "array", "items": { "type": "string" } },
+                "exclude_globs": { "type": "array", "items": { "type": "string" } },
+                "regex": { "type": "boolean", "default": false },
+                "case_sensitive": { "type": "boolean", "default": false },
+                "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 0 },
+                "max_preview_bytes": { "type": "integer", "minimum": 64, "maximum": 4096, "default": 512 },
+                "max_results": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 },
+                "max_file_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 67108864,
+                    "default": 2097152,
+                    "description": "Skip files larger than this many bytes (default 2MiB) to avoid memory spikes"
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "apply_patch" => json!({
+            "type": "object",
+            "properties": {
+                "patch": { "type": "string", "minLength": 1 },
+                "dry_run": { "type": "boolean", "default": false },
+                "confirm": { "type": "boolean", "default": false },
+                "reason": { "type": "string", "default": "" },
+                "approval_token": { "type": "string", "minLength": 1 }
+            },
+            "required": ["patch"],
+            "additionalProperties": false
+        }),
+        "patch_check" => json!({
+            "type": "object",
+            "properties": {
+                "patch": { "type": "string", "minLength": 1 }
+            },
+            "required": ["patch"],
+            "additionalProperties": false
+        }),
+        "exec_command" => json!({
+            "type": "object",
+            "properties": {
+                "cmd": { "type": "string", "minLength": 1 },
+                "workdir": { "type": "string", "default": "." },
+                "timeout_ms": { "type": ["integer", "null"], "minimum": 0, "default": null,
+                    "description": "Optional caller-requested process deadline in milliseconds. Omitted, null or 0 means no automatic deadline, including jobs lasting seven days or longer. No separate mode and no fixed maximum duration. HTTP response wait is independent; cancellation and live permission revocation still apply." },
+                "max_output_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 65536 },
+                "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
+                "tty": { "type": "boolean", "default": false },
+                "stdin": { "type": "string", "default": "" },
+                "confirm": { "type": "boolean", "default": false },
+                "filesystem_scope": { "type": "string", "enum": ["workspace"], "default": "workspace" },
+                "reason": { "type": "string", "default": "" },
+                "approval_token": { "type": "string", "minLength": 1 }
+            },
+            "required": ["cmd"],
+            "additionalProperties": false
+        }),
+        "write_stdin" => json!({
+            "type": "object",
+            "properties": {
+                "command_id": { "type": "string", "minLength": 1, "description": "Canonical command handle returned by exec_command" },
+                "session_id": { "type": "string", "minLength": 1, "description": "Legacy alias for command_id" },
+                "chars": { "type": "string", "default": "" },
+                "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 1000 },
+                "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536 }
+            },
+            "additionalProperties": false
+        }),
+        "kill_command" | "kill_session" => json!({
+            "type": "object",
+            "properties": {
+                "command_id": { "type": "string", "minLength": 1, "description": "Canonical command handle returned by exec_command" },
+                "session_id": { "type": "string", "minLength": 1, "description": "Legacy alias for command_id" },
+                "signal": { "type": "string", "enum": ["TERM", "KILL", "INT"], "default": "TERM" },
+                "wait_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 5000 },
+                "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536 }
+            },
+            "additionalProperties": false
+        }),
+        "read_output" => json!({
+            "type": "object",
+            "properties": {
+                "output_ref": { "type": "string", "minLength": 1 },
+                "stream": { "type": "string", "enum": ["stdout", "stderr"] },
+                "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 4096 }
+            },
+            "required": ["output_ref"],
+            "additionalProperties": false
+        }),
+        "git_status" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." },
+                "include_untracked": { "type": "boolean", "default": true },
+                "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 }
+            },
+            "additionalProperties": false
+        }),
+        "git_diff" => json!({
+            "type": "object",
+            "properties": {
+                "paths": { "type": "array", "items": { "type": "string" }, "default": [] },
+                "staged": { "type": "boolean", "default": false },
+                "unstaged": { "type": "boolean", "default": true },
+                "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 3 },
+                "max_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144 }
+            },
+            "additionalProperties": false
+        }),
+        "git_log" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." },
+                "ref": { "type": "string", "default": "HEAD" },
+                "max_count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+                "skip": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 }
+            },
+            "additionalProperties": false
+        }),
+        "git_show" => json!({
+            "type": "object",
+            "properties": {
+                "rev": { "type": "string", "default": "HEAD" },
+                "path": { "type": "string" },
+                "paths": { "type": "array", "items": { "type": "string" } },
+                "include_diff": { "type": "boolean", "default": true },
+                "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 3 },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 262144 }
+            },
+            "additionalProperties": false
+        }),
+        "git_blame" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "rev": { "type": "string" },
+                "start_line": { "type": "integer", "minimum": 1, "default": 1 },
+                "end_line": { "type": "integer", "minimum": 1 },
+                "max_lines": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 200 }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "request_permissions" => json!({
+            "type": "object",
+            "properties": {
+                "request_id": { "type": "string", "minLength": 1 },
+                "scope": {
+                    "type": "string",
+                    "enum": ["once", "session"],
+                    "default": "once"
+                },
+                "confirm": { "type": "boolean", "default": false },
+                "reason": { "type": "string", "default": "" }
+            },
+            "required": ["request_id", "confirm"],
+            "additionalProperties": false
+        }),
+        "set_default_cwd" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "default": "." }
+            },
+            "additionalProperties": false
+        }),
+        "view_image" | "capture_screenshot" | "capture_window" => vision_schema(name),
+        "image_info" => json!({
+            "type": "object", "properties": {"path": {"type": "string", "minLength": 1}},
+            "required": ["path"], "additionalProperties": false
+        }),
+        "compare_images" => json!({
+            "type": "object", "properties": {
+                "before_path": {"type": "string", "minLength": 1},
+                "after_path": {"type": "string", "minLength": 1},
+                "threshold": {"type": "integer", "minimum": 0, "maximum": 255, "default": 0}
+            }, "required": ["before_path", "after_path"], "additionalProperties": false
+        }),
+        "list_windows" => json!({
+            "type": "object", "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+                "include_minimized": {"type": "boolean", "default": false}
+            }, "additionalProperties": false
+        }),
+        _ => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn vision_schema(name: &str) -> Value {
+    let region = json!({"type": "object", "properties": {
+        "x": {"type": "integer", "minimum": 0}, "y": {"type": "integer", "minimum": 0},
+        "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}
+    }, "required": ["x", "y", "width", "height"], "additionalProperties": false});
+    let mut properties = json!({
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 5242880, "default": 5242880},
+        "max_width": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
+        "max_height": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
+        "auto_resize": {"type": "boolean", "default": true},
+        "output": {"type": "string", "enum": ["mcp_image", "data_url"], "default": "mcp_image"},
+        "crop": region,
+        "redactions": {"type": "array", "maxItems": 32, "items": region,
+            "description": "Opaque rectangles, in physical pixels relative to the cropped image, applied before resizing."}
+    });
+    let required = match name {
+        "view_image" => {
+            properties["path"] = json!({"type": "string", "minLength": 1});
+            json!(["path"])
+        }
+        "capture_window" => {
+            properties["window_id"] =
+                json!({"type": "integer", "minimum": 0, "maximum": 4294967295u64});
+            properties["expected_pid"] =
+                json!({"type": "integer", "minimum": 1, "maximum": 4294967295u64});
+            json!(["window_id", "expected_pid"])
+        }
+        _ => {
+            properties["monitor_id"] = json!({"type": "integer", "minimum": 0, "maximum": 4294967295u64,
+                "description": "Selected display ID from list_displays; omitted selects the primary display only."});
+            json!([])
+        }
+    };
+    json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::{input_schema, list_tools_for_profile};
+
+    #[test]
+    fn full_profile_really_exposes_the_complete_catalog() {
+        let full = list_tools_for_profile("full");
+        let advanced = list_tools_for_profile("advanced");
+        assert_eq!(full, advanced);
+        let names: Vec<_> = full
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        for expected in [
+            "codex_tools_status",
+            "harness_status",
+            "start_task",
+            "update_plan",
+            "capture_screenshot",
+            "computer_action",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn core_catalog_exposes_chatgpt_compatible_tools() {
+        let tools = list_tools_for_profile("core");
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        let unique: HashSet<_> = names.iter().copied().collect();
+
+        assert_eq!(
+            tools.len(),
+            35 + crate::tools::computer::schema::NAMES.len()
+                + crate::tools::native_sandbox::NAMES.len()
+                + crate::tools::local_tools::NAMES.len()
+                + crate::tools::codex_runtime::NAMES.len()
+                + crate::tools::workflow::NAMES.len()
+        );
+        for profile in ["core", "advanced", "compat-readonly-all"] {
+            for name in [
+                "workflow_update",
+                "codex_command_exec",
+                "apply_patch",
+                "exec_command",
+            ] {
+                let tool = list_tools_for_profile(profile)
+                    .into_iter()
+                    .find(|t| t["name"] == name)
+                    .unwrap();
+                assert_eq!(
+                    tool["annotations"]["readOnlyHint"], false,
+                    "{profile}: {name}"
+                );
+            }
+        }
+        for name in crate::tools::codex_runtime::NAMES {
+            assert!(names.contains(name));
+        }
+        assert_eq!(
+            list_tools_for_profile("compat-readonly-all")
+                .into_iter()
+                .find(|t| t["name"] == "codex_agent_control")
+                .unwrap()["annotations"]["readOnlyHint"],
+            false
+        );
+        for name in crate::tools::local_tools::NAMES {
+            assert!(names.contains(name));
+        }
+        for name in crate::tools::computer::schema::NAMES {
+            assert!(names.contains(name));
+        }
+        for tool in list_tools_for_profile("compat-readonly-all") {
+            if crate::tools::computer::schema::WRITES.contains(&tool["name"].as_str().unwrap_or(""))
+            {
+                assert_eq!(tool["annotations"]["readOnlyHint"], false);
+            }
+        }
+        assert!(names.contains(&"capture_screenshot"));
+        assert!(names.contains(&"capture_window"));
+        assert_eq!(unique.len(), tools.len());
+        assert!(names.contains(&"history_session_bootstrap"));
+        assert!(names.contains(&"history_session_checkpoint"));
+        assert!(names.contains(&"history_session_validate"));
+        assert!(names.contains(&"history_session_search"));
+        assert!(names.contains(&"history_session_read"));
+        assert!(names.contains(&"grep_text"));
+        assert!(names.contains(&"kill_command"));
+        assert!(names.contains(&"kill_session"));
+        assert!(!names.contains(&"grep"));
+
+        for name in names {
+            let schema = input_schema(name);
+            assert_eq!(schema["type"], "object", "{name} schema type");
+            assert!(schema["properties"].is_object(), "{name} properties");
+            assert!(schema.get("oneOf").is_none(), "{name} oneOf");
+            assert!(schema.get("anyOf").is_none(), "{name} anyOf");
+            assert!(schema.get("$ref").is_none(), "{name} ref");
+        }
+    }
+}
