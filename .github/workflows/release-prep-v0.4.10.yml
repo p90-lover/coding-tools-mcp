@@ -1,0 +1,98 @@
+name: Prepare v0.4.10 release candidate
+
+on:
+  pull_request:
+    branches: [release-prep/v0.4.10]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-v0410-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: Update release version without dependency churn
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json, tomllib
+
+          old = '0.4.9'
+          new = '0.4.10'
+
+          def replace_exact(path, old_text, new_text, count=1):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              actual = text.count(old_text)
+              if actual != count:
+                  raise SystemExit(f'{path}: expected {count} occurrences, found {actual}')
+              p.write_text(text.replace(old_text, new_text), encoding='utf-8')
+
+          replace_exact('package.json', f'"version": "{old}"', f'"version": "{new}"')
+          replace_exact('src-tauri/tauri.conf.json', f'"version": "{old}"', f'"version": "{new}"')
+          replace_exact(
+              'src-tauri/Cargo.toml',
+              f'[package]\nname = "coding-tools-mcp-desktop"\nversion = "{old}"',
+              f'[package]\nname = "coding-tools-mcp-desktop"\nversion = "{new}"',
+          )
+          replace_exact(
+              'src-tauri/Cargo.lock',
+              f'name = "coding-tools-mcp-desktop"\nversion = "{old}"',
+              f'name = "coding-tools-mcp-desktop"\nversion = "{new}"',
+          )
+
+          lock = Path('package-lock.json')
+          text = lock.read_text(encoding='utf-8')
+          marker = '    "node_modules/'
+          prefix, sep, suffix = text.partition(marker)
+          if not sep:
+              raise SystemExit('package-lock.json: node_modules marker missing')
+          needle = f'"version": "{old}"'
+          if prefix.count(needle) != 2:
+              raise SystemExit(f'package-lock.json: expected 2 root version entries, found {prefix.count(needle)}')
+          lock.write_text(prefix.replace(needle, f'"version": "{new}"') + sep + suffix, encoding='utf-8')
+
+          package = json.loads(Path('package.json').read_text(encoding='utf-8'))
+          package_lock = json.loads(Path('package-lock.json').read_text(encoding='utf-8'))
+          tauri = json.loads(Path('src-tauri/tauri.conf.json').read_text(encoding='utf-8'))
+          cargo = tomllib.loads(Path('src-tauri/Cargo.toml').read_text(encoding='utf-8'))
+          cargo_lock = tomllib.loads(Path('src-tauri/Cargo.lock').read_text(encoding='utf-8'))
+          versions = [
+              package['version'],
+              package_lock['version'],
+              package_lock['packages']['']['version'],
+              tauri['version'],
+              cargo['package']['version'],
+          ]
+          versions.extend(p['version'] for p in cargo_lock['package'] if p['name'] == 'coding-tools-mcp-desktop')
+          assert versions and all(v == new for v in versions), versions
+          print('Verified release version fields:', versions)
+          PY
+          git diff --check
+      - name: Commit exact release-prep changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'Release version already prepared.'
+          else
+            git commit -m 'chore: prepare v0.4.10'
+            git push origin "HEAD:${GITHUB_HEAD_REF}"
+          fi
