@@ -57,6 +57,10 @@
   }
   async function connect() {
     if (busy || !workspaceId) return;
+    if (!Number.isInteger(lifetime) || lifetime < 0 || lifetime > 900 || (lifetime > 0 && lifetime < 30)) {
+      error = t($locale, 'Consent lifetime must be 0 or 30–900 seconds.', '授權有效期必須為 0 或 30–900 秒。');
+      return;
+    }
     busy = true; error = '';
     const id = workspaceId, generation = selectionGeneration;
     try {
@@ -88,7 +92,10 @@
       const result = await invoke<{ ok: boolean; thread_id?: string; error?: unknown }>('codex_local_control', { workspaceId: id, args });
       if (disposed || generation !== selectionGeneration) return;
       if (!result.ok) throw new Error(typeof result.error === 'string' ? result.error : JSON.stringify(result.error ?? result));
-      if (result.thread_id) selectedThread = result.thread_id;
+      if (operation === 'close') {
+        selectedThread = '';
+        answer = null;
+      } else if (result.thread_id) selectedThread = result.thread_id;
       prompt = '';
       await refresh();
     } catch (e) {
