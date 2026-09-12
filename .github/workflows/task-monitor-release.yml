@@ -2,7 +2,7 @@ name: Verified task monitor and stable Latest release
 on:
   push:
     branches: [fix/task-monitor-latest-0.4.4]
-    paths: [.github/workflows/task-monitor-release.yml]
+    paths: [.github/workflows/task-monitor-release.yml, aiTemp/task-monitor/source_probe.py]
   workflow_dispatch:
 permissions: {contents: read}
 concurrency:
