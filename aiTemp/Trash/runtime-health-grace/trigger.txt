@@ -1,0 +1,1 @@
+Trigger only. Preserve under aiTemp/Trash; do not merge to main.
