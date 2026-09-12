@@ -1,0 +1,1 @@
+Validation-only trigger for the exact PR #31 EOF-newline repair. Do not merge this branch into main.
