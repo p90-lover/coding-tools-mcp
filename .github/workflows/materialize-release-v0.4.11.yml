@@ -1,0 +1,112 @@
+name: Materialize release v0.4.11
+
+on:
+  push:
+    branches: [automation/release-v0.4.11]
+    paths:
+      - "aiTemp/Trash/release-v0.4.11/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-release-v0.4.11
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: automation/release-v0.4.11
+          fetch-depth: 0
+      - name: Apply and verify release metadata
+        id: verify
+        shell: bash
+        run: |
+          set +e
+          log="aiTemp/Trash/release-v0.4.11/verification-${GITHUB_RUN_ID}.log"
+          mkdir -p "$(dirname "$log")"
+          {
+            set -x
+            python3 aiTemp/Trash/release-v0.4.11/apply.py
+            patch_status=$?
+            if [ "$patch_status" -eq 0 ]; then
+              git diff --check -- package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json docs/releases/v0.4.11.md
+              diff_status=$?
+            else
+              diff_status=99
+            fi
+            if [ "$patch_status" -eq 0 ] && [ "$diff_status" -eq 0 ]; then
+              python3 - <<'PY'
+          import json, pathlib, tomllib
+          root = pathlib.Path('.')
+          expected = '0.4.11'
+          package = json.loads((root/'package.json').read_text())
+          lock_json = json.loads((root/'package-lock.json').read_text())
+          tauri = json.loads((root/'src-tauri/tauri.conf.json').read_text())
+          cargo = tomllib.loads((root/'src-tauri/Cargo.toml').read_text())
+          cargo_lock = tomllib.loads((root/'src-tauri/Cargo.lock').read_text())
+          app_lock = [p for p in cargo_lock['package'] if p['name'] == 'coding-tools-mcp-desktop']
+          assert len(app_lock) == 1
+          versions = [
+              package['version'],
+              lock_json['version'],
+              lock_json['packages']['']['version'],
+              tauri['version'],
+              cargo['package']['version'],
+              app_lock[0]['version'],
+          ]
+          assert versions == [expected] * len(versions), versions
+          assert (root/'docs/releases/v0.4.11.md').is_file()
+          print('version parity ok:', versions)
+          PY
+              parity_status=$?
+            else
+              parity_status=99
+            fi
+            set +x
+            echo "patch_status=$patch_status"
+            echo "diff_status=$diff_status"
+            echo "parity_status=$parity_status"
+          } >"$log" 2>&1
+          status=0
+          for value in "$patch_status" "$diff_status" "$parity_status"; do
+            if [ "$value" -ne 0 ]; then status="$value"; break; fi
+          done
+          cat "$log"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "log=$log" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Preserve verification evidence
+        shell: bash
+        env:
+          VERIFY_STATUS: ${{ steps.verify.outputs.status }}
+          VERIFY_LOG: ${{ steps.verify.outputs.log }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- "$VERIFY_LOG"
+          git commit -m "test: preserve v0.4.11 release verification ${GITHUB_RUN_ID}"
+          if [ "$VERIFY_STATUS" != "0" ]; then
+            git push origin HEAD:automation/release-v0.4.11
+            exit 1
+          fi
+      - name: Commit verified release files only
+        if: steps.verify.outputs.status == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json docs/releases/v0.4.11.md
+          if git diff --cached --name-status | grep -q '^D'; then
+            echo 'Refusing to commit a deletion.'
+            exit 1
+          fi
+          git commit -m 'release: prepare v0.4.11'
+          git push origin HEAD:automation/release-v0.4.11
