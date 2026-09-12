@@ -1,0 +1,1 @@
+Trigger only. Verify zero app-side ceilings, bounded 90-minute replay receipts, frontend fields, and documentation. Preserve under aiTemp/Trash; do not merge to main.
