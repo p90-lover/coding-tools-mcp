@@ -1,0 +1,2 @@
+Temporary automation trigger for rerun-safe release publisher materialization.
+Do not merge this marker into main.
