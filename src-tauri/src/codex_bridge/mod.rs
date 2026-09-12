@@ -1092,8 +1092,10 @@ mod tests {
             request_limit: 0,
             lifetime_seconds: 0,
         };
-        let mut memory = Memory::default();
-        memory.requests_used = 25;
+        let mut memory = Memory {
+            requests_used: 25,
+            ..Default::default()
+        };
         assert!(reserve(&mut memory, &request, true, &options, true, true)
             .unwrap()
             .is_none());

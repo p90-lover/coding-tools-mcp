@@ -43,6 +43,10 @@
       const value = await invoke<Snapshot>('codex_local_status', { workspaceId: id });
       if (disposed || generation !== selectionGeneration) return;
       snapshot = value;
+      if (selectedThread && !(value.threads ?? []).some((thread) => thread.id === selectedThread)) {
+        selectedThread = '';
+        answer = null;
+      }
       if (selectedThread) {
         const threadId = selectedThread;
         const result = await invoke<Answer>('codex_local_read', { workspaceId: id, threadId });
@@ -57,6 +61,10 @@
   }
   async function connect() {
     if (busy || !workspaceId) return;
+    if (!Number.isInteger(lifetime) || (lifetime !== 0 && (lifetime < 30 || lifetime > 900))) {
+      error = t($locale, 'Consent lifetime must be 0 or an integer from 30 to 900 seconds.', '授權有效秒數必須是 0，或 30 至 900 之間的整數。');
+      return;
+    }
     busy = true; error = '';
     const id = workspaceId, generation = selectionGeneration;
     try {
@@ -88,7 +96,10 @@
       const result = await invoke<{ ok: boolean; thread_id?: string; error?: unknown }>('codex_local_control', { workspaceId: id, args });
       if (disposed || generation !== selectionGeneration) return;
       if (!result.ok) throw new Error(typeof result.error === 'string' ? result.error : JSON.stringify(result.error ?? result));
-      if (result.thread_id) selectedThread = result.thread_id;
+      if (operation === 'close') {
+        selectedThread = '';
+        answer = null;
+      } else if (result.thread_id) selectedThread = result.thread_id;
       prompt = '';
       await refresh();
     } catch (e) {
@@ -138,7 +149,7 @@
       <label>{t($locale, 'Dedicated Codex home outside the workspace', '工作區以外的專用 Codex 主目錄')}<input bind:value={codexHome} autocomplete="off" spellcheck="false" required disabled={busy || !!snapshot?.connected}/></label>
       <label>{t($locale, 'Model ID from your native provider configuration', '原生供應商設定中的模型 ID')}<input bind:value={model} autocomplete="off" spellcheck="false" required={consent} disabled={busy || !!snapshot?.connected}/></label>
       <label>{t($locale, 'Model-request limit · 0 = no app-side ceiling', '模型請求上限 · 0 = 應用程式不設上限')}<input type="number" bind:value={requestLimit} min="0" max="20" required disabled={busy || !!snapshot?.connected}/></label>
-      <label>{t($locale, 'Consent lifetime seconds · 0 = until disconnect', '授權有效秒數 · 0 = 直到斷線')}<input type="number" bind:value={lifetime} min="0" max="900" required disabled={busy || !!snapshot?.connected}/></label>
+      <label>{t($locale, 'Consent lifetime seconds · 0 = until disconnect; otherwise 30–900', '授權有效秒數 · 0 = 直到斷線；其他值為 30–900')}<input type="number" bind:value={lifetime} min="0" max="900" step="1" required disabled={busy || !!snapshot?.connected}/></label>
     </div>
     <label class="native-consent"><input type="checkbox" bind:checked={consent} disabled={busy || !!snapshot?.connected}/><span>{t($locale, 'I authorize native model usage for this connection. Commands have a separate checkbox; leaving this unchecked prohibits model turns. A zero request/lifetime field removes only this app’s ceiling; provider quotas and local Stop still apply.', '我授權這次連接使用原生模型；命令有獨立勾選框；此處未勾選會禁止模型回合。請求／期限填 0 只代表本程式不設上限；供應商配額及本機停止仍然生效。')}</span></label>
     <label class="native-consent"><input type="checkbox" bind:checked={commandConsent} disabled={busy || !!snapshot?.connected}/><span>{t($locale, 'Allow standalone read-only commands without model usage. Read-only may read outside the workspace; only use trusted commands.', '允許不呼叫模型的獨立唯讀命令。唯讀仍可能讀取工作區外的資料，只應執行可信命令。')}</span></label>
