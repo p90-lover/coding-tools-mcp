@@ -1,0 +1,37 @@
+name: Live refresh compiled UI verification
+on:
+  push:
+    branches: [fix/live-refresh-long-tasks-0.4.4-rc.5]
+    paths: [.github/workflows/live-refresh-ui.yml, aiTemp/live-refresh/browser_test.py]
+permissions: {contents: read}
+jobs:
+  ui:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      SOURCE: ${{ github.sha }}
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {ref: '${{ github.sha }}', path: aiTemp/source, clean: false, persist-credentials: false}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - name: Compile the current application and exercise its real controls with synthetic IPC
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          npm ci > aiTemp/evidence/npm.txt 2>&1
+          npm run check > aiTemp/evidence/frontend.txt 2>&1
+          npm run build > aiTemp/evidence/frontend-build.txt 2>&1
+          python -m pip install playwright==1.57.0
+          python aiTemp/live-refresh/browser_test.py 2>&1 | tee aiTemp/evidence/refresh-browser.txt
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with: {name: 'live-ui-${{ github.run_id }}', path: aiTemp/source/aiTemp/evidence/, if-no-files-found: error, retention-days: 14}
