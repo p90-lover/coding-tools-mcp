@@ -1,0 +1,72 @@
+name: Validate release finalization contract
+
+on:
+  pull_request:
+    branches: [validation/release-draft-finalization]
+    paths: [.github/workflows/release.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse workflow YAML and check diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e "require 'yaml'; YAML.parse_file('.github/workflows/release.yml'); puts 'release.yml YAML parsed'"
+          git diff --check "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" -- .github/workflows/release.yml
+      - name: Exercise draft-id and sanitized-asset contract
+        shell: bash
+        env:
+          TAG: v9.9.9
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-contract/release-assets aiTemp/release-contract/release-meta
+          python - <<'PY'
+          import hashlib, json, os, pathlib
+
+          workflow=pathlib.Path('.github/workflows/release.yml').read_text()
+          assert 'releases?per_page=100' in workflow
+          assert 'releases/$RELEASE_ID' in workflow
+          assert ".replace(' ', '.')" in workflow
+          assert 'gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true' in workflow
+          assert workflow.index('releases?per_page=100') < workflow.index('releases/$RELEASE_ID')
+          assert workflow.index('-F draft=false -f make_latest=true') < workflow.index('releases/tags/$TAG')
+
+          root=pathlib.Path('aiTemp/release-contract/release-assets')
+          (root/'Coding Tools MCP_9.9.9_x64-setup.exe').write_bytes(b'windows-installer-fixture')
+          (root/'Coding Tools MCP_9.9.9_universal.dmg').write_bytes(b'macos-installer-fixture')
+          files=sorted(root.iterdir())
+          (root/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))
+
+          releases=[{'id':4321,'tag_name':os.environ['TAG'],'draft':True}]
+          matches=[r for r in releases if r.get('tag_name')==os.environ['TAG'] and r.get('draft') is True]
+          assert len(matches)==1 and matches[0]['id']==4321
+
+          actual={}
+          for p in root.iterdir():
+              uploaded=p.name.replace(' ', '.')
+              actual[uploaded]={
+                  'name':uploaded,
+                  'size':p.stat().st_size,
+                  'digest':'sha256:'+hashlib.sha256(p.read_bytes()).hexdigest(),
+              }
+          expected={p.name.replace(' ', '.'):p for p in root.iterdir()}
+          assert set(actual)==set(expected)
+          for uploaded_name,path in expected.items():
+              digest=hashlib.sha256(path.read_bytes()).hexdigest()
+              assert actual[uploaded_name]['size']==path.stat().st_size
+              assert actual[uploaded_name]['digest']=='sha256:'+digest
+
+          published={'tag_name':os.environ['TAG'],'draft':False,'published_at':'2026-09-13T00:00:00Z','assets':list(actual.values())}
+          expected_names={p.name.replace(' ', '.') for p in root.iterdir()}
+          assert published['tag_name']==os.environ['TAG']
+          assert published['draft'] is False and published['published_at']
+          assert {a['name'] for a in published['assets']}==expected_names
+          print('draft resolution, sanitized-name mapping, hash/size verification and post-publish contract passed')
+          PY
