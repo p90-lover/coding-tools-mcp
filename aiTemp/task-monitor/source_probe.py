@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 from playwright.sync_api import sync_playwright,expect
-import json,os,shutil,subprocess,sys,time
+import json,os,re,shutil,subprocess,sys,time
 root=Path('aiTemp/evidence');root.mkdir(parents=True,exist_ok=True)
 chrome=os.environ.get('CHROME_PATH') or shutil.which('google-chrome') or shutil.which('chromium')
 if not chrome:
@@ -50,7 +50,10 @@ try:
    expect(panel).to_contain_text('fixture-paseo');expect(panel).to_contain_text('C:/synthetic/provider-root')
    expect(panel).to_contain_text('Pending permissions');expect(panel).to_contain_text('Read-only source snapshot')
    nav.get_by_role('link',name='Work board',exact=True).click()
-   page.get_by_role('tab',name='Anneal').click()
+   # The source switch is an existing button; its accessible name includes the record count.
+   anneal=page.locator('.cc-tabs').get_by_role('button',name=re.compile(r'^Anneal'))
+   expect(anneal).to_have_count(1)
+   anneal.click()
    page.get_by_role('button',name='Inspect Anneal task Anneal fixture task',exact=True).click()
    panel=page.get_by_role('region',name='Anneal details',exact=True)
    expect(panel).to_contain_text('fixture-anneal');expect(panel).to_contain_text('chain-42');expect(panel).to_contain_text('Delivery chain')
