@@ -58,13 +58,15 @@ jobs:
             set -x
             python3 aiTemp/Trash/native-codex-long-session/apply.py
             python_status=$?
-            if [ "$python_status" -eq 0 ]; then cargo fmt --manifest-path src-tauri/Cargo.toml --all; fmt_status=$?; else fmt_status=99; fi
-            if [ "$python_status" -eq 0 ] && [ "$fmt_status" -eq 0 ]; then git diff --check -- src-tauri/src/codex_bridge/mod.rs src/lib/components/CodexRuntimePanel.svelte docs/features/native-codex-runtime.md; diff_status=$?; else diff_status=99; fi
-            if [ "$python_status" -eq 0 ] && [ "$fmt_status" -eq 0 ] && [ "$diff_status" -eq 0 ]; then cargo test --manifest-path src-tauri/Cargo.toml --lib codex_bridge::tests --locked -- --nocapture; rust_status=$?; else rust_status=99; fi
-            if [ "$python_status" -eq 0 ]; then npm ci; npm_status=$?; else npm_status=99; fi
+            if [ "$python_status" -eq 0 ]; then python3 aiTemp/Trash/native-codex-long-session/patch-native-command.py; command_patch_status=$?; else command_patch_status=99; fi
+            if [ "$python_status" -eq 0 ] && [ "$command_patch_status" -eq 0 ]; then cargo fmt --manifest-path src-tauri/Cargo.toml --all; fmt_status=$?; else fmt_status=99; fi
+            if [ "$python_status" -eq 0 ] && [ "$command_patch_status" -eq 0 ] && [ "$fmt_status" -eq 0 ]; then git diff --check -- src-tauri/src/codex_bridge/mod.rs src-tauri/src/codex_bridge/native_command.rs src/lib/components/CodexRuntimePanel.svelte docs/features/native-codex-runtime.md; diff_status=$?; else diff_status=99; fi
+            if [ "$python_status" -eq 0 ] && [ "$command_patch_status" -eq 0 ] && [ "$fmt_status" -eq 0 ] && [ "$diff_status" -eq 0 ]; then cargo test --manifest-path src-tauri/Cargo.toml --lib codex_bridge --locked -- --nocapture; rust_status=$?; else rust_status=99; fi
+            if [ "$python_status" -eq 0 ] && [ "$command_patch_status" -eq 0 ]; then npm ci; npm_status=$?; else npm_status=99; fi
             if [ "$npm_status" -eq 0 ]; then npm run check; frontend_status=$?; else frontend_status=99; fi
             set +x
             echo "python_status=$python_status"
+            echo "command_patch_status=$command_patch_status"
             echo "fmt_status=$fmt_status"
             echo "diff_status=$diff_status"
             echo "rust_status=$rust_status"
@@ -72,7 +74,7 @@ jobs:
             echo "frontend_status=$frontend_status"
           } >"$log" 2>&1
           status=0
-          for value in "$python_status" "$fmt_status" "$diff_status" "$rust_status" "$npm_status" "$frontend_status"; do
+          for value in "$python_status" "$command_patch_status" "$fmt_status" "$diff_status" "$rust_status" "$npm_status" "$frontend_status"; do
             if [ "$value" -ne 0 ]; then status="$value"; break; fi
           done
           cat "$log"
@@ -101,7 +103,7 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src-tauri/src/codex_bridge/mod.rs src/lib/components/CodexRuntimePanel.svelte docs/features/native-codex-runtime.md
+          git add -- src-tauri/src/codex_bridge/mod.rs src-tauri/src/codex_bridge/native_command.rs src/lib/components/CodexRuntimePanel.svelte docs/features/native-codex-runtime.md
           if git diff --cached --quiet; then
             echo 'No source change required.'
           else
