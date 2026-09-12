@@ -55,6 +55,11 @@ jobs:
 
           replace_once(
               'src/lib/components/CodexRuntimePanel.svelte',
+              "      snapshot = value;\n      if (selectedThread) {\n",
+              "      snapshot = value;\n      if (selectedThread && !(value.threads ?? []).some((thread) => thread.id === selectedThread)) {\n        selectedThread = '';\n        answer = null;\n      }\n      if (selectedThread) {\n",
+          )
+          replace_once(
+              'src/lib/components/CodexRuntimePanel.svelte',
               "  async function connect() {\n    if (busy || !workspaceId) return;\n    busy = true; error = '';\n",
               "  async function connect() {\n    if (busy || !workspaceId) return;\n    if (!Number.isInteger(lifetime) || (lifetime !== 0 && (lifetime < 30 || lifetime > 900))) {\n      error = t($locale, 'Consent lifetime must be 0 or an integer from 30 to 900 seconds.', '授權有效秒數必須是 0，或 30 至 900 之間的整數。');\n      return;\n    }\n    busy = true; error = '';\n",
           )
