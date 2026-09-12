@@ -2,7 +2,7 @@ name: Verified load resilience release
 on:
   push:
     branches: [fix/load-resilience-0.4.6]
-    paths: [.github/workflows/load-resilience-release.yml]
+    paths: [.github/workflows/load-resilience-release.yml, aiTemp/load-resilience/prepare.py]
   workflow_dispatch:
 permissions: {contents: read}
 concurrency:
