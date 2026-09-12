@@ -9,6 +9,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
+use super::request_log::append_profile_log;
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post_browser,
     protected_resource_metadata, token_exchange, trusted_external_base_url, verify_bearer_header,
@@ -18,7 +19,6 @@ use crate::mcp::server::{handle_request, new_state, SharedState};
 use crate::secret::SecretStore;
 use crate::tools::policy::PolicySettings;
 use crate::tools::Workspace;
-use crate::tunnel::append_profile_log;
 use crate::workspace::{AuthConfig, RuntimeConfig};
 
 #[path = "transport.rs"]

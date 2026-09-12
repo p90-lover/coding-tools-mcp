@@ -117,7 +117,7 @@ pub async fn task_monitor_read(
         json!({"workspace_id":workspace_id,"requested_task_id":task_id,"workspace_path":configured.path,
         "desktop_version":env!("CARGO_PKG_VERSION"),"checked_at_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
         "listener_running":!runtime["runtime_id"].is_null(),"runtime_id":runtime["runtime_id"],"policy_revision":revision,"permission_mode":mode,
-        "history":observed,"operations":runtime["operations"],"retention":runtime["retention"],
+        "history":observed,"request_log_diagnostics":crate::mcp::request_log::status(),"operations":runtime["operations"],"retention":runtime["retention"],
         "retention_note":"Receipts belong to this listener and may expire. Dispatch completion does not prove a command finished. History shows recorded evidence, not live process inspection."}),
     )
 }

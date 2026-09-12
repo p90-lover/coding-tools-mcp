@@ -11,7 +11,7 @@
   type Task = { id:string; objective:string; status:string; created_at:string; updated_at:string; completed_count:number; pending_count:number; completed_steps?:string[]; pending_steps?:string[]; steps_truncated?:boolean; latest_change_id?:string|null; latest_verification_id?:string|null };
   type Event = { id:string; operation_id:string; kind:string; tool_name:string|null; created_at:string; ok:boolean|null; code:string|null; exit_code:number|null; command_id:string|null; files:{path:string;status:string}[] };
   type Operation = { operation_id:string; request_id:unknown; tool_name:string; method:string; state:string; completion_kind:string|null; admitted_at_ms:number; finished_at_ms:number|null; result_state:string };
-  type Snapshot = { workspace_id:string; requested_task_id:string|null; workspace_path:string; desktop_version:string; checked_at_ms:number; listener_running:boolean; runtime_id:string|null; policy_revision:number|null; permission_mode:string; retention_note:string;
+  type Snapshot = { request_log_diagnostics?:{pending:number;dropped:number;truncated?:number;writer_available:boolean}; workspace_id:string; requested_task_id:string|null; workspace_path:string; desktop_version:string; checked_at_ms:number; listener_running:boolean; runtime_id:string|null; policy_revision:number|null; permission_mode:string; retention_note:string;
     history:{tasks:Task[];task:Task|null;events:Event[];next_cursor:Cursor|null;partial_tail:boolean;warnings:string[];recent_limit:number};operations:Operation[] };
   let workspace = $state(''), selected = $state(''), lookup = $state(''), filter = $state('');
   let cursor = $state<Cursor|null>(null), snapshot = $state<Snapshot|null>(null);
@@ -70,6 +70,9 @@
   {#if failure&&snapshot}<p class="cc-notice amber">{t($locale,'Last verified snapshot — stale','上次核實的快照 — 已過時')}</p>{/if}
   {#if !$workspaces.length}<div class="cc-empty tall"><Activity size={32}/><h2>{t($locale,'Add an approved workspace first','請先加入已批准的工作區')}</h2><p>{t($locale,'Observation does not authorize new folders or start a runtime.','監察不會授權新資料夾或啟動 runtime。')}</p></div>{/if}
   {#if snapshot}
+    {#if snapshot.request_log_diagnostics && (snapshot.request_log_diagnostics.pending > 32 || snapshot.request_log_diagnostics.dropped > 0)}
+      <p class="cc-notice amber" role="status">{t($locale,'Diagnostic trace backlog','診斷追蹤積壓')}: {snapshot.request_log_diagnostics.pending} {t($locale,'pending','項等待')} · {snapshot.request_log_diagnostics.dropped} {t($locale,'omitted under backpressure. Tool outcomes must be checked in operation receipts, not inferred from missing logs.','項因佇列滿而未記錄。工具結果須查操作紀錄，不能從缺少日誌推斷。')}</p>
+    {/if}
     <div class="metrics">
       <article class="cc-panel"><span>{t($locale,'Desktop / listener','Desktop／listener')}</span><strong>v{snapshot.desktop_version} · {snapshot.listener_running?t($locale,'Running','運行中'):t($locale,'Not running','未運行')}</strong><small>{snapshot.workspace_path}</small></article>
       <article class="cc-panel"><span>{t($locale,'Current permission','目前權限')}</span><strong>{snapshot.permission_mode}</strong><small>{t($locale,'Policy revision','策略版本')} {snapshot.policy_revision??'—'}</small></article>
