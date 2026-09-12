@@ -497,18 +497,26 @@ impl RuntimeSupervisor {
         let mut should_cleanup_tunnel = false;
         if let Some(entry) = self.entries.get_mut(&key) {
             if entry.phase == RuntimePhase::Running {
-                let listening = match platform().find_pid_listening_on_port(port) {
-                    Ok(pid) => pid.is_some(),
-                    Err(error) => {
-                        append_profile_log(
-                            &profile.id,
-                            stderr_log_name(kind),
-                            &format!("[refresh] 检查端口 {port} 失败，保留当前线路：{error}"),
-                        );
-                        return;
+                // A dropped shutdown receiver is authoritative: the listener task has
+                // already exited. Only a still-live listener is eligible for the
+                // transient port-table grace window below.
+                let listener_finished = listener_task_finished(entry);
+                let listening = if listener_finished {
+                    false
+                } else {
+                    match platform().find_pid_listening_on_port(port) {
+                        Ok(pid) => pid.is_some(),
+                        Err(error) => {
+                            append_profile_log(
+                                &profile.id,
+                                stderr_log_name(kind),
+                                &format!("[refresh] 检查端口 {port} 失败，保留当前线路：{error}"),
+                            );
+                            return;
+                        }
                     }
                 };
-                if should_mark_runtime_error(entry, listening) {
+                if listener_finished || should_mark_runtime_error(entry, listening) {
                     if let Some(handle) = entry.handle.take() {
                         handle.abort();
                         tauri::async_runtime::spawn(async move {
@@ -567,6 +575,13 @@ impl RuntimeSupervisor {
             }
         });
     }
+}
+
+fn listener_task_finished(entry: &RuntimeEntry) -> bool {
+    entry
+        .shutdown
+        .as_ref()
+        .is_some_and(|shutdown| shutdown.is_closed())
 }
 
 const MISSING_PORT_CHECK_LIMIT: u8 = 6;
@@ -678,6 +693,21 @@ mod tests {
             missing_port_checks: 0,
             missing_port_since: None,
         }
+    }
+
+    #[test]
+    fn closed_shutdown_receiver_is_authoritative_listener_completion() {
+        let (shutdown, receiver) = tokio::sync::oneshot::channel::<()>();
+        let mut runtime = entry(
+            RuntimePhase::Running,
+            Some(std::time::Instant::now() - Duration::from_secs(60)),
+        );
+        runtime.shutdown = Some(shutdown);
+        assert!(!listener_task_finished(&runtime));
+        drop(receiver);
+        assert!(listener_task_finished(&runtime));
+        assert_eq!(runtime.missing_port_checks, 0);
+        assert!(runtime.missing_port_since.is_none());
     }
 
     #[test]
