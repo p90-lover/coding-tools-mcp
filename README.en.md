@@ -4,7 +4,7 @@
 
 A local desktop control center for AI-assisted development: the human defines the goal and permissions, the connected AI reasons about the task, and the app executes approved local tools and returns evidence. Project history helps the next conversation continue from verified work rather than reconstructing it from memory.
 
-**Source version: `v0.4.9` — ordinary unbounded execution and RAM cache.** Read the [release notes](docs/releases/v0.4.9.md) and [command/cache contract](docs/long-running-commands.md). A version in source code is not proof that a release build passed. Only published assets with verification evidence should be installed; this is not a certified security sandbox.
+**Source version: `v0.4.10` — the v0.4.9 unbounded-command/RAM-cache behavior plus Windows/macOS release-validation portability repairs.** Read the [release notes](docs/releases/v0.4.10.md) and [command/cache contract](docs/long-running-commands.md). A version in source code is not proof that a release build passed. Only published assets with verification evidence should be installed; this is not a certified security sandbox.
 
 ## Optional native Codex bridge
 
