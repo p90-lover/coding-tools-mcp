@@ -1,0 +1,3 @@
+Publication-trigger marker for v0.4.10 after successful prepublish verification.
+
+Do not merge this validation/publish trigger branch into main.
