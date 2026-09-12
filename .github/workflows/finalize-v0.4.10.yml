@@ -1,0 +1,119 @@
+name: Finalize verified v0.4.10 draft release
+
+on:
+  pull_request:
+    branches: [release-finalize/v0.4.10]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-v0410
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v0.4.10
+      SOURCE: 948c14bc428f1c460c2f0bf14fe8fe14d253d023
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ env.SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: false
+      - name: Resolve exactly one verified draft
+        id: draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-finalize
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)" = "$SOURCE"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > aiTemp/release-finalize/releases.json
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, pathlib
+          releases=json.loads(pathlib.Path('aiTemp/release-finalize/releases.json').read_text())
+          matches=[r for r in releases if r.get('tag_name')=='v0.4.10' and r.get('draft') is True]
+          assert len(matches)==1, f'expected exactly one v0.4.10 draft, found {len(matches)}'
+          r=matches[0]
+          assert r.get('name')=='Coding Tools MCP v0.4.10', r.get('name')
+          assets={a['name']:a for a in r.get('assets',[])}
+          expected={'Coding.Tools.MCP_0.4.10_x64-setup.exe','Coding.Tools.MCP_0.4.10_universal.dmg','SHA256SUMS.txt'}
+          assert set(assets)==expected, set(assets)
+          assert assets['Coding.Tools.MCP_0.4.10_x64-setup.exe']['size']>100000
+          assert assets['Coding.Tools.MCP_0.4.10_universal.dmg']['size']>100000
+          print(f"release_id={r['id']}")
+          PY
+      - name: Download uploaded assets and verify checksums
+        shell: bash
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > aiTemp/release-finalize/release.json
+          python - <<'PY' > aiTemp/release-finalize/asset-ids.env
+          import json, pathlib
+          r=json.loads(pathlib.Path('aiTemp/release-finalize/release.json').read_text())
+          by_name={a['name']:a for a in r['assets']}
+          for key,name in [
+            ('EXE_ID','Coding.Tools.MCP_0.4.10_x64-setup.exe'),
+            ('DMG_ID','Coding.Tools.MCP_0.4.10_universal.dmg'),
+            ('SUMS_ID','SHA256SUMS.txt'),
+          ]:
+            print(f"{key}={by_name[name]['id']}")
+          PY
+          source aiTemp/release-finalize/asset-ids.env
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$EXE_ID" > aiTemp/release-finalize/Coding.Tools.MCP_0.4.10_x64-setup.exe
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$DMG_ID" > aiTemp/release-finalize/Coding.Tools.MCP_0.4.10_universal.dmg
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$SUMS_ID" > aiTemp/release-finalize/SHA256SUMS.txt
+          python - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('aiTemp/release-finalize')
+          release=json.loads((root/'release.json').read_text())
+          metadata={a['name']:a for a in release['assets']}
+          files=['Coding.Tools.MCP_0.4.10_x64-setup.exe','Coding.Tools.MCP_0.4.10_universal.dmg']
+          sums={}
+          for line in (root/'SHA256SUMS.txt').read_text().splitlines():
+            digest,name=line.split(None,1)
+            sums[name.strip()]=digest
+          assert set(sums)==set(files), sums
+          for name in files:
+            path=root/name
+            digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            assert sums[name]==digest, (name,sums[name],digest)
+            assert metadata[name]['size']==path.stat().st_size
+            assert metadata[name]['digest']=='sha256:'+digest
+          print('Uploaded EXE/DMG sizes and SHA-256 digests match SHA256SUMS.txt and release metadata.')
+          PY
+      - name: Publish the same verified draft and re-read by tag
+        shell: bash
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false \
+            -f make_latest=true > aiTemp/release-finalize/published.json
+          python - <<'PY'
+          import json,pathlib
+          r=json.loads(pathlib.Path('aiTemp/release-finalize/published.json').read_text())
+          assert r['tag_name']=='v0.4.10'
+          assert r['draft'] is False
+          assert r['published_at']
+          assert len(r['assets'])==3
+          print('Release published:', r['html_url'])
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > aiTemp/release-finalize/by-tag.json
+          python - <<'PY'
+          import json,pathlib
+          r=json.loads(pathlib.Path('aiTemp/release-finalize/by-tag.json').read_text())
+          assert r['tag_name']=='v0.4.10' and r['draft'] is False and r['published_at']
+          assert {a['name'] for a in r['assets']}=={'Coding.Tools.MCP_0.4.10_x64-setup.exe','Coding.Tools.MCP_0.4.10_universal.dmg','SHA256SUMS.txt'}
+          print('Published release is addressable by tag and contains the verified asset set.')
+          PY
