@@ -24,7 +24,8 @@ const MAX_FRAME: usize = 512 * 1024;
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_THREADS: usize = 4;
 const MAX_LEDGER: usize = 64;
-const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+const LEDGER_RETENTION: Duration = Duration::from_secs(90 * 60);
+const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Deserialize)]
@@ -59,10 +60,15 @@ struct ThreadState {
     #[serde(skip)]
     item_id: String,
 }
+struct LedgerEntry {
+    fingerprint: String,
+    result: Option<Value>,
+    completed_at: Option<Instant>,
+}
 #[derive(Default)]
 struct Memory {
     threads: BTreeMap<String, ThreadState>,
-    ledger: BTreeMap<String, (String, Option<Value>)>,
+    ledger: BTreeMap<String, LedgerEntry>,
     requests_used: u32,
     native_identity: String,
     stop_reason: Option<String>,
@@ -143,8 +149,8 @@ fn validate_control(request: &Control) -> Result<bool> {
 fn checked_options(root: &Path, mut options: Connection) -> Result<Connection> {
     if !options.executable.is_absolute()
         || !options.codex_home.is_absolute()
-        || !(1..=20).contains(&options.request_limit)
-        || !(30..=900).contains(&options.lifetime_seconds)
+        || options.request_limit > 20
+        || (options.lifetime_seconds != 0 && !(30..=900).contains(&options.lifetime_seconds))
         || !token(&options.model)
         || options.expected_sha256.len() != 64
         || !options
@@ -153,7 +159,7 @@ fn checked_options(root: &Path, mut options: Connection) -> Result<Connection> {
             .all(|c| c.is_ascii_hexdigit())
     {
         return Err(
-            "Use absolute native paths, a SHA-256, model ID, 1–20 requests and 30–900 seconds"
+            "Use absolute native paths, a SHA-256 and model ID; request_limit accepts 0 or 1–20, lifetime_seconds accepts 0 or 30–900"
                 .into(),
         );
     }
@@ -218,6 +224,33 @@ fn checked_options(root: &Path, mut options: Connection) -> Result<Connection> {
     options.expected_sha256.make_ascii_lowercase();
     Ok(options)
 }
+fn prune_ledger(memory: &mut Memory, now: Instant) {
+    memory.ledger.retain(|_, entry| {
+        entry
+            .completed_at
+            .is_none_or(|completed| now.saturating_duration_since(completed) < LEDGER_RETENTION)
+    });
+}
+
+fn make_ledger_room(memory: &mut Memory) -> Result<()> {
+    while memory.ledger.len() >= MAX_LEDGER {
+        let oldest = memory
+            .ledger
+            .iter()
+            .filter_map(|(id, entry)| entry.completed_at.map(|completed| (id.clone(), completed)))
+            .min_by_key(|(_, completed)| *completed)
+            .map(|(id, _)| id);
+        let Some(id) = oldest else {
+            return Err(
+                "Connection request ledger is full of pending outcomes; no request submitted"
+                    .into(),
+            );
+        };
+        memory.ledger.remove(&id);
+    }
+    Ok(())
+}
+
 fn reserve(
     memory: &mut Memory,
     request: &Control,
@@ -230,11 +263,12 @@ fn reserve(
         "{:x}",
         Sha256::digest(serde_json::to_vec(request).map_err(|_| "Invalid control request")?)
     );
-    if let Some((before, result)) = memory.ledger.get(&request.request_id) {
-        if before != &fingerprint {
+    prune_ledger(memory, Instant::now());
+    if let Some(entry) = memory.ledger.get(&request.request_id) {
+        if entry.fingerprint != fingerprint {
             return Err("request_id already belongs to different arguments".into());
         }
-        Ok(Some(result.clone().unwrap_or_else(
+        Ok(Some(entry.result.clone().unwrap_or_else(
             || json!({"state":"pending","request_id":request.request_id,"replayed":false}),
         )))
     } else {
@@ -244,9 +278,7 @@ fn reserve(
                     .into(),
             );
         }
-        if memory.ledger.len() >= MAX_LEDGER {
-            return Err("Connection request ledger is full; no request submitted".into());
-        }
+        make_ledger_room(memory)?;
         if let Some(id) = &request.thread_id {
             let thread = memory
                 .threads
@@ -273,14 +305,19 @@ fn reserve(
             if !options.allow_model_usage {
                 return Err("Model use has not been approved in the local UI".into());
             }
-            if memory.requests_used >= options.request_limit {
+            if options.request_limit != 0 && memory.requests_used >= options.request_limit {
                 return Err("Local model-request limit reached".into());
             }
-            memory.requests_used += 1;
+            memory.requests_used = memory.requests_used.saturating_add(1);
         }
-        memory
-            .ledger
-            .insert(request.request_id.clone(), (fingerprint, None));
+        memory.ledger.insert(
+            request.request_id.clone(),
+            LedgerEntry {
+                fingerprint,
+                result: None,
+                completed_at: None,
+            },
+        );
         Ok(None)
     }
 }
@@ -403,22 +440,24 @@ impl Hub {
                 }
             }
         });
-        let weak = Arc::downgrade(&bridge);
         let lifetime = bridge.options.lifetime_seconds;
-        std::thread::spawn(move || {
-            for _ in 0..lifetime {
-                std::thread::sleep(Duration::from_secs(1));
-                let Some(bridge) = weak.upgrade() else {
-                    return;
-                };
-                if !bridge.live.load(Ordering::SeqCst) {
-                    return;
+        if lifetime != 0 {
+            let weak = Arc::downgrade(&bridge);
+            std::thread::spawn(move || {
+                for _ in 0..lifetime {
+                    std::thread::sleep(Duration::from_secs(1));
+                    let Some(bridge) = weak.upgrade() else {
+                        return;
+                    };
+                    if !bridge.live.load(Ordering::SeqCst) {
+                        return;
+                    }
                 }
-            }
-            if let Some(bridge) = weak.upgrade() {
-                bridge.stop("local_consent_expired");
-            }
-        });
+                if let Some(bridge) = weak.upgrade() {
+                    bridge.stop("local_consent_expired");
+                }
+            });
+        }
         Ok(())
     }
     pub fn initialize(&self) -> Result<Value> {
@@ -466,12 +505,16 @@ impl Hub {
                 && native_command::COMMAND_RUNTIME_SHA256.is_some_and(|sha|sha.eq_ignore_ascii_case(&bridge.options.expected_sha256)),
             "command_runtime_sha256":native_command::COMMAND_RUNTIME_SHA256,
             "native_identity":memory.native_identity,"executable_sha256":bridge.options.expected_sha256,
-            "model":bridge.options.model,"requests_used":memory.requests_used,"request_limit":bridge.options.request_limit,
-            "seconds_remaining":bridge.options.lifetime_seconds.saturating_sub(bridge.started.elapsed().as_secs()),
+            "model":bridge.options.model,"requests_used":memory.requests_used,
+            "request_limit":if bridge.options.request_limit==0 { Value::Null } else { json!(bridge.options.request_limit) },
+            "request_limit_unbounded":bridge.options.request_limit==0,
+            "seconds_remaining":if bridge.options.lifetime_seconds==0 { Value::Null } else { json!(bridge.options.lifetime_seconds.saturating_sub(bridge.started.elapsed().as_secs())) },
+            "lifetime_unbounded":bridge.options.lifetime_seconds==0,
+            "replay_retention_seconds":LEDGER_RETENTION.as_secs(),"replay_capacity":MAX_LEDGER,
             "stop_reason":memory.stop_reason,"threads":memory.threads.values().map(|t|json!({"id":t.id,"status":t.status,"turn_id":t.turn_id})).collect::<Vec<_>>(),
             "requested_sandbox":"read-only","native_sandbox_verified":false,"protocol_source":PROTOCOL_SOURCE,
             "storage":"bounded_bridge_memory; native runtime and provider retention are separate",
-            "limits_note":"Request count and lifetime are not a token, cost or native subagent budget"}),
+            "limits_note":"Zero request/lifetime limits mean no app-side ceiling until disconnect; provider quotas still apply. Completed replay receipts are bounded RAM with 90-minute age expiry and oldest-first pressure eviction; pending outcomes are never evicted."}),
         )
     }
     pub fn read(&self, id: &str) -> Result<Value> {
@@ -543,7 +586,8 @@ impl Ticket {
         };
         if let Ok(mut memory) = self.bridge.memory.lock() {
             if let Some(entry) = memory.ledger.get_mut(&self.request.request_id) {
-                entry.1 = Some(stored.clone());
+                entry.result = Some(stored.clone());
+                entry.completed_at = Some(Instant::now());
             }
         }
         // Return the exact stored result on both the first call and retry, including failures.
@@ -552,7 +596,9 @@ impl Ticket {
 }
 impl Bridge {
     fn enqueue(&self, value: Value) -> Result<()> {
-        if self.started.elapsed() >= Duration::from_secs(self.options.lifetime_seconds) {
+        if self.options.lifetime_seconds != 0
+            && self.started.elapsed() >= Duration::from_secs(self.options.lifetime_seconds)
+        {
             self.stop("local_consent_expired");
         }
         if !self.live.load(Ordering::SeqCst) {
@@ -756,12 +802,12 @@ impl Bridge {
                 }
             }
             if request.operation == "close" {
-                // Unsubscribe removes no saved files. The shared process is stopped on local
-                // disconnect/expiry; no native thread archive/delete method is exposed.
+                // Unsubscribe removes no saved files. Once the native runtime confirms it,
+                // release this in-memory ownership slot so long-lived connections are not
+                // limited to four lifetime threads. The close request remains replay-safe
+                // through the bounded request ledger.
                 self.rpc("thread/unsubscribe", json!({"threadId":id}))?;
-                if let Some(thread) = lock(&self.memory)?.threads.get_mut(&id) {
-                    thread.status = "closed".into();
-                }
+                lock(&self.memory)?.threads.remove(&id);
             }
             return Ok(
                 json!({"ok":true,"thread_id":id,"operation":request.operation,"request_id":request.request_id,
@@ -1028,6 +1074,71 @@ mod tests {
         changed.request_id = "test-2".into();
         assert!(reserve(&mut memory, &changed, true, &options, true, true).is_err());
     }
+    #[test]
+    fn native_bridge_zero_request_limit_and_rotating_replay_ledger_are_long_lived() {
+        let request = Control {
+            operation: "start".into(),
+            request_id: "unbounded-1".into(),
+            thread_id: None,
+            text: Some("Review without edits".into()),
+        };
+        let options = Connection {
+            executable: PathBuf::new(),
+            expected_sha256: String::new(),
+            codex_home: PathBuf::new(),
+            allow_model_usage: true,
+            allow_command_execution: false,
+            model: "fixture".into(),
+            request_limit: 0,
+            lifetime_seconds: 0,
+        };
+        let mut memory = Memory::default();
+        memory.requests_used = 25;
+        assert!(reserve(&mut memory, &request, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        assert_eq!(memory.requests_used, 26);
+
+        let now = Instant::now();
+        memory.ledger.clear();
+        for index in 0..MAX_LEDGER {
+            memory.ledger.insert(
+                format!("old-{index:03}"),
+                LedgerEntry {
+                    fingerprint: format!("fp-{index}"),
+                    result: Some(json!({"ok":true})),
+                    completed_at: Some(now - LEDGER_RETENTION - Duration::from_secs(1)),
+                },
+            );
+        }
+        let fresh = Control {
+            request_id: "fresh-after-expiry".into(),
+            ..request.clone()
+        };
+        assert!(reserve(&mut memory, &fresh, true, &options, true, true)
+            .unwrap()
+            .is_none());
+        assert_eq!(memory.ledger.len(), 1);
+
+        memory.ledger.clear();
+        for index in 0..MAX_LEDGER {
+            memory.ledger.insert(
+                format!("pending-{index:03}"),
+                LedgerEntry {
+                    fingerprint: format!("pending-fp-{index}"),
+                    result: None,
+                    completed_at: None,
+                },
+            );
+        }
+        let blocked = Control {
+            request_id: "blocked-by-pending".into(),
+            ..request
+        };
+        assert!(reserve(&mut memory, &blocked, true, &options, true, true).is_err());
+        assert_eq!(memory.ledger.len(), MAX_LEDGER);
+    }
+
     #[test]
     fn native_bridge_notifications_preserve_completion_and_owned_scope() {
         let mut memory = Memory::default();

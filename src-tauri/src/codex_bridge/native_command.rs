@@ -43,11 +43,13 @@ fn reserve_command(
     // The slash cannot occur in normal Control IDs; the two ledgers cannot collide.
     let key = format!("command/{}", request.request_id);
     let fingerprint = serde_json::to_string(request).map_err(|_| "Cannot encode command")?;
-    if let Some((before, result)) = memory.ledger.get(&key) {
-        if before != &fingerprint {
+    prune_ledger(memory, Instant::now());
+    if let Some(entry) = memory.ledger.get(&key) {
+        if entry.fingerprint != fingerprint {
             return Err("Command request ID was reused with different arguments".into());
         }
-        return result
+        return entry
+            .result
             .clone()
             .map(Some)
             .ok_or_else(|| "Command outcome is pending or unknown; do not replay".into());
@@ -61,10 +63,15 @@ fn reserve_command(
                 .into(),
         );
     }
-    if memory.ledger.len() >= MAX_LEDGER {
-        return Err("Native request ledger is full; reconnect locally before new commands".into());
-    }
-    memory.ledger.insert(key, (fingerprint, None));
+    make_ledger_room(memory)?;
+    memory.ledger.insert(
+        key,
+        LedgerEntry {
+            fingerprint,
+            result: None,
+            completed_at: None,
+        },
+    );
     Ok(None)
 }
 pub struct CommandTicket {
@@ -82,7 +89,9 @@ impl Hub {
         if pinned.len() != 64 || !bridge.options.expected_sha256.eq_ignore_ascii_case(pinned) {
             return Err("Standalone commands require the exact official native executable verified for this release; no compatibility fallback".into());
         }
-        if bridge.started.elapsed() >= Duration::from_secs(bridge.options.lifetime_seconds) {
+        if bridge.options.lifetime_seconds != 0
+            && bridge.started.elapsed() >= Duration::from_secs(bridge.options.lifetime_seconds)
+        {
             bridge.stop("local_consent_expired");
         }
         let replay = {
@@ -119,7 +128,8 @@ impl CommandTicket {
                 .ledger
                 .get_mut(&format!("command/{}", self.request.request_id))
             {
-                entry.1 = Some(stored.clone());
+                entry.result = Some(stored.clone());
+                entry.completed_at = Some(Instant::now());
             }
         }
         Ok(stored)
@@ -186,8 +196,9 @@ mod tests {
         assert_eq!(memory.requests_used, 0);
         assert!(memory.threads.is_empty());
         assert!(reserve_command(&mut memory, &options, &r, true, true).is_err());
-        memory.ledger.get_mut("command/fixture-1").unwrap().1 =
-            Some(json!({"ok":true,"exit_code":0}));
+        let entry = memory.ledger.get_mut("command/fixture-1").unwrap();
+        entry.result = Some(json!({"ok":true,"exit_code":0}));
+        entry.completed_at = Some(Instant::now());
         assert_eq!(
             reserve_command(&mut memory, &options, &r, false, false)
                 .unwrap()
