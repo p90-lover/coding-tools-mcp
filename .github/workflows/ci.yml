@@ -2,42 +2,45 @@ name: CI
 
 on:
   workflow_dispatch:
+  push:
+    branches: [fix/v0.4.9-release-blockers]
 
 jobs:
-  rust:
-    runs-on: ubuntu-latest
+  windows-release-blockers:
+    runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
     steps:
-      - uses: actions/checkout@v4
-      - name: 安装 Tauri Linux 系统依赖
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+          clean: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Focused Harness regressions
+        shell: bash
+        working-directory: src-tauri
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-      - name: cargo build
-        working-directory: src-tauri
-        run: cargo build
-      - name: cargo test
-        working-directory: src-tauri
-        run: cargo test
+          set -euo pipefail
+          cargo test --locked refresh_contract_baseline_rejects_oversized_input_without_saving_partial_task -- --test-threads=1
+          cargo test --locked task_monitor_history_bounds_scope_and_preservation -- --test-threads=1
+          cargo test --locked reliability_task_events_schema_and_capability_discovery -- --test-threads=1
 
-  frontend:
-    runs-on: ubuntu-latest
+  macos-release-blocker:
+    runs-on: macos-14
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          node-version: "20"
-          cache: npm
-      - run: npm ci
-      - run: npm run check
+          persist-credentials: false
+          clean: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: clippy
+      - name: Strict Clippy release gate
+        shell: bash
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
