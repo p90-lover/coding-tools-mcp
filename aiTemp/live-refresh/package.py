@@ -6,6 +6,10 @@ root=Path('aiTemp/evidence')
 def text(name):return re.sub(r'\x1b\[[0-9;]*m','',(root/name).read_text(encoding='utf-8-sig'))
 assert '2 passed; 0 failed' in text('live-tests.txt')
 assert '1 passed; 0 failed' in text('context-green.txt')
+assert '1 passed; 0 failed' in text('linked-write-green.txt')
+assert 'LINKED_WRITE_PASS:' in text('linked-write-green.txt')
+assert 'LINKED_WRITE_PATH_REPRESENTATION_MISMATCH' in text('linked-write-red.txt')
+assert '1 passed; 0 failed' in text('root-nonoverwrite.txt')
 assert '# pass 1' in text('refresh-ui.txt') and '# fail 0' in text('refresh-ui.txt')
 assert 'LIVE_REFRESH_SCAN:' in text('live-tests.txt')
 assert 'LIVE_REFRESH_HTTP:' in text('live-tests.txt')
@@ -27,6 +31,7 @@ exec(compile(source,str(path)+' (rc5 version assertions)','exec'),{'__name__':'_
 proof=json.loads(Path('aiTemp/installer/proof.json').read_text())
 proof.update({'scope':'approved live policy/root refresh and bounded baseline/task-context observations',
     'live_refresh_http_and_scan_groups_passed':2,'context_budget_group_passed':True,
+    'canonical_linked_write_group_passed':True,'root_nonoverwrite_verified':True,
     'workspace_refresh_coalescing_passed':True,'live_refresh_browser':ui,
     'listener_reconnect_for_permission_change':False,'new_linked_roots_inherit_current_policy':True,
     'operation_cache_bound_to_root_revision':True,'automatic_linking_of_all_profiles':False,
@@ -39,4 +44,4 @@ proof.update({'scope':'approved live policy/root refresh and bounded baseline/ta
     'existing_absolute_read_policy_changed':False,'manual_link_edit_cancels_external_process':False})
 for directory in ['aiTemp/installer','aiTemp/evidence']:
     Path(directory,'proof.json').write_text(json.dumps(proof,indent=2)+'\n')
-print('PASS: same-listener policy/roots, bounded scanner/context, compiled autosave UI and all retained OAuth/native/timeout/installer gates')
+print('PASS: same-listener policy/roots, canonical linked writes, bounded scanner/context, compiled autosave UI and all retained OAuth/native/timeout/installer gates')
