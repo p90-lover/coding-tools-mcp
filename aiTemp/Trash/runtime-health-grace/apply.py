@@ -35,6 +35,24 @@ old = """fn should_mark_runtime_error(entry: &mut RuntimeEntry, listening: bool)
 """
 new = """const MISSING_PORT_CHECK_LIMIT: u8 = 6;
 const MISSING_PORT_GRACE: Duration = Duration::from_secs(15);
+const FINISHED_LISTENER_STARTUP_FLOOR: Duration = Duration::from_millis(200);
+
+fn missing_port_is_stale(
+    missing_port_checks: u8,
+    age: Option<Duration>,
+    listener_finished: bool,
+) -> bool {
+    if listener_finished {
+        return age
+            .map(|elapsed| elapsed > FINISHED_LISTENER_STARTUP_FLOOR)
+            .unwrap_or(true);
+    }
+
+    missing_port_checks >= MISSING_PORT_CHECK_LIMIT
+        && age
+            .map(|elapsed| elapsed >= MISSING_PORT_GRACE)
+            .unwrap_or(true)
+}
 
 fn should_mark_runtime_error(
     entry: &mut RuntimeEntry,
@@ -53,22 +71,9 @@ fn should_mark_runtime_error(
     let age = entry.started_at.map(|started| started.elapsed());
 
     // A completed listener task plus a missing socket is authoritative failure.
-    // Keep the short age floor so the initial bind/status handoff cannot race a
-    // task that exited immediately after start.
-    if listener_finished {
-        return age
-            .map(|elapsed| elapsed > Duration::from_millis(200))
-            .unwrap_or(true);
-    }
-
-    // Port enumeration can transiently miss on a heavily loaded desktop. Do not
-    // abort a still-live listener or tear down its tunnel from a few UI refreshes.
-    // Require both sustained misses and a wall-clock grace period before treating
-    // a live-but-portless task as stuck.
-    entry.missing_port_checks >= MISSING_PORT_CHECK_LIMIT
-        && age
-            .map(|elapsed| elapsed >= MISSING_PORT_GRACE)
-            .unwrap_or(true)
+    // A still-live task receives a wider grace window because Windows port-table
+    // enumeration can transiently miss under heavy desktop load.
+    missing_port_is_stale(entry.missing_port_checks, age, listener_finished)
 }
 """
 assert old in text, "health helper changed"
@@ -99,32 +104,37 @@ old_test = """    #[test]
     }
 """
 new_test = """    #[test]
-    fn refresh_cleans_up_live_runtime_only_after_sustained_missing_port() {
-        let mut runtime = entry(
-            RuntimePhase::Running,
-            Some(std::time::Instant::now() - MISSING_PORT_GRACE - Duration::from_secs(1)),
-        );
-        for _ in 1..MISSING_PORT_CHECK_LIMIT {
-            assert!(!should_mark_runtime_error(&mut runtime, false, false));
-        }
-        assert!(should_mark_runtime_error(&mut runtime, false, false));
+    fn live_listener_missing_port_requires_both_count_and_grace() {
+        let old_enough = Some(MISSING_PORT_GRACE + Duration::from_secs(1));
+        assert!(!missing_port_is_stale(
+            MISSING_PORT_CHECK_LIMIT - 1,
+            old_enough,
+            false
+        ));
+        assert!(!missing_port_is_stale(
+            MISSING_PORT_CHECK_LIMIT,
+            Some(MISSING_PORT_GRACE - Duration::from_millis(1)),
+            false
+        ));
+        assert!(missing_port_is_stale(
+            MISSING_PORT_CHECK_LIMIT,
+            Some(MISSING_PORT_GRACE),
+            false
+        ));
     }
 
     #[test]
-    fn refresh_keeps_live_runtime_during_grace_even_after_many_misses() {
-        let mut runtime = entry(RuntimePhase::Running, Some(std::time::Instant::now()));
-        for _ in 0..MISSING_PORT_CHECK_LIMIT.saturating_add(2) {
-            assert!(!should_mark_runtime_error(&mut runtime, false, false));
-        }
-    }
-
-    #[test]
-    fn finished_listener_with_missing_port_fails_after_startup_floor() {
-        let mut runtime = entry(
-            RuntimePhase::Running,
-            Some(std::time::Instant::now() - Duration::from_secs(1)),
-        );
-        assert!(should_mark_runtime_error(&mut runtime, false, true));
+    fn finished_listener_missing_port_uses_short_startup_floor() {
+        assert!(!missing_port_is_stale(
+            1,
+            Some(FINISHED_LISTENER_STARTUP_FLOOR),
+            true
+        ));
+        assert!(missing_port_is_stale(
+            1,
+            Some(FINISHED_LISTENER_STARTUP_FLOOR + Duration::from_millis(1)),
+            true
+        ));
     }
 """
 assert old_test in text, "existing missing-port regression test changed"
