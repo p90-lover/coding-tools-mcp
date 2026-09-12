@@ -241,7 +241,7 @@ pub(super) fn pixels(t: &Target, expected: Bounds) -> Result<RgbaImage> {
             "Windows returned an incomplete capture",
         ));
     }
-    for pixel in data.chunks_exact_mut(4) {
+    for pixel in data.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
         pixel[3] = 255;
     }

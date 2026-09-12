@@ -333,16 +333,23 @@ mod tests {
 
     #[test]
     fn workspace_secret_roundtrip() {
-        let id = uuid::Uuid::new_v4().to_string().replace('-', "");
-        let mut store = DataStore::load().expect("load");
-        store
-            .set_workspace_secret(&id, "oauth_client_secret", "roundtrip-secret")
-            .expect("set");
-        let loaded = store
-            .get_workspace_secret(&id, "oauth_client_secret")
-            .expect("get");
-        assert_eq!(loaded.as_deref(), Some("roundtrip-secret"));
-        store.remove_workspace_secrets(&id).expect("remove");
+        let fixture = std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/isolated-store-tests")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("profiles.json");
+        crate::data::with_test_file(fixture, || {
+            let id = uuid::Uuid::new_v4().to_string().replace('-', "");
+            let mut store = DataStore::load().expect("load");
+            store
+                .set_workspace_secret(&id, "oauth_client_secret", "roundtrip-secret")
+                .expect("set");
+            let loaded = store
+                .get_workspace_secret(&id, "oauth_client_secret")
+                .expect("get");
+            assert_eq!(loaded.as_deref(), Some("roundtrip-secret"));
+            store.remove_workspace_secrets(&id).expect("remove");
+        });
     }
 
     #[test]
@@ -358,19 +365,26 @@ mod release_finalization_regressions {
     use super::*;
     #[test]
     fn release_finalization_desktop_save_preserves_background_credentials() {
-        let key = format!("release-regression-{}", uuid::Uuid::new_v4());
-        let mut desktop = DataStore::load().expect("desktop snapshot");
-        DataStore::update_file(|data| {
-            data.shared_secrets
-                .insert(key.clone(), "newly-rotated-secret".into());
-            Ok(())
-        })
-        .expect("background rotation");
-        desktop
-            .update_settings(desktop.settings())
-            .expect("desktop settings save");
-        let actual =
-            DataStore::read_file(|data| Ok(data.shared_secrets.get(&key).cloned())).unwrap();
-        assert_eq!(actual.as_deref(), Some("newly-rotated-secret"));
+        let fixture = std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/isolated-store-tests")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("profiles.json");
+        crate::data::with_test_file(fixture, || {
+            let key = format!("release-regression-{}", uuid::Uuid::new_v4());
+            let mut desktop = DataStore::load().expect("desktop snapshot");
+            DataStore::update_file(|data| {
+                data.shared_secrets
+                    .insert(key.clone(), "newly-rotated-secret".into());
+                Ok(())
+            })
+            .expect("background rotation");
+            desktop
+                .update_settings(desktop.settings())
+                .expect("desktop settings save");
+            let actual =
+                DataStore::read_file(|data| Ok(data.shared_secrets.get(&key).cloned())).unwrap();
+            assert_eq!(actual.as_deref(), Some("newly-rotated-secret"));
+        });
     }
 }

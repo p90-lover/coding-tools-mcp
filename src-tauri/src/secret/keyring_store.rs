@@ -108,25 +108,39 @@ mod tests {
 
     #[test]
     fn missing_workspace_secret_is_regenerated_and_persisted() {
-        let id = uuid::Uuid::new_v4().to_string().replace('-', "");
-        let value =
-            SecretStore::get_or_regenerate(&id, "oauth_token_secret", false).expect("regenerate");
-        assert!(!value.is_empty());
-        assert_eq!(
-            SecretStore::get(&id, "oauth_token_secret")
-                .expect("read")
-                .as_deref(),
-            Some(value.as_str())
-        );
-        let _ = SecretStore::remove_workspace_secrets(&id);
+        let fixture = std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/isolated-store-tests")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("profiles.json");
+        crate::data::with_test_file(fixture, || {
+            let id = uuid::Uuid::new_v4().to_string().replace('-', "");
+            let value = SecretStore::get_or_regenerate(&id, "oauth_token_secret", false)
+                .expect("regenerate");
+            assert!(!value.is_empty());
+            assert_eq!(
+                SecretStore::get(&id, "oauth_token_secret")
+                    .expect("read")
+                    .as_deref(),
+                Some(value.as_str())
+            );
+            let _ = SecretStore::remove_workspace_secrets(&id);
+        });
     }
 
     #[test]
     fn workspace_secret_roundtrip() {
-        let id = uuid::Uuid::new_v4().to_string().replace('-', "");
-        SecretStore::set(&id, "oauth_client_secret", "roundtrip-secret").expect("set");
-        let loaded = SecretStore::get(&id, "oauth_client_secret").expect("get");
-        assert_eq!(loaded.as_deref(), Some("roundtrip-secret"));
-        let _ = SecretStore::remove_workspace_secrets(&id);
+        let fixture = std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/isolated-store-tests")
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("profiles.json");
+        crate::data::with_test_file(fixture, || {
+            let id = uuid::Uuid::new_v4().to_string().replace('-', "");
+            SecretStore::set(&id, "oauth_client_secret", "roundtrip-secret").expect("set");
+            let loaded = SecretStore::get(&id, "oauth_client_secret").expect("get");
+            assert_eq!(loaded.as_deref(), Some("roundtrip-secret"));
+            let _ = SecretStore::remove_workspace_secrets(&id);
+        });
     }
 }

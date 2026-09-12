@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "coding-tools-mcp-desktop"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "axum",
  "base64 0.22.1",
