@@ -1,4 +1,4 @@
-name: Native Codex Clippy materializer
+name: Native Codex review-fix materializer
 
 on:
   pull_request:
@@ -11,9 +11,10 @@ permissions:
 jobs:
   materialize:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-native-codex-clippy
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-native-codex-review
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache-native-codex-review
       HEAD_REF: ${{ github.event.pull_request.head.ref }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -27,19 +28,54 @@ jobs:
           toolchain: '1.98.1'
           components: rustfmt,clippy
 
-      - name: Apply exact Clippy fix
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Apply exact review and Clippy fixes
         shell: python
         run: |
           from pathlib import Path
-          path = Path('src-tauri/src/codex_bridge/mod.rs')
-          text = path.read_text(encoding='utf-8')
-          old = '''        let mut memory = Memory::default();\n        memory.requests_used = 25;\n'''
-          new = '''        let mut memory = Memory {\n            requests_used: 25,\n            ..Default::default()\n        };\n'''
-          if text.count(old) != 1:
-              raise SystemExit(f'expected exactly one target, found {text.count(old)}')
-          path.write_text(text.replace(old, new), encoding='utf-8')
 
-      - name: Verify focused Rust and strict Clippy
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if new in text:
+                  return
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one target, found {count}')
+              p.write_text(text.replace(old, new), encoding='utf-8')
+
+          replace_once(
+              'src-tauri/src/codex_bridge/mod.rs',
+              '        let mut memory = Memory::default();\n        memory.requests_used = 25;\n',
+              '        let mut memory = Memory {\n            requests_used: 25,\n            ..Default::default()\n        };\n',
+          )
+
+          replace_once(
+              'src/lib/components/CodexRuntimePanel.svelte',
+              "  async function connect() {\n    if (busy || !workspaceId) return;\n    busy = true; error = '';\n",
+              "  async function connect() {\n    if (busy || !workspaceId) return;\n    if (!Number.isInteger(lifetime) || (lifetime !== 0 && (lifetime < 30 || lifetime > 900))) {\n      error = t($locale, 'Consent lifetime must be 0 or an integer from 30 to 900 seconds.', '授權有效秒數必須是 0，或 30 至 900 之間的整數。');\n      return;\n    }\n    busy = true; error = '';\n",
+          )
+          replace_once(
+              'src/lib/components/CodexRuntimePanel.svelte',
+              "      if (result.thread_id) selectedThread = result.thread_id;\n      prompt = '';\n      await refresh();\n",
+              "      if (operation === 'close') {\n        selectedThread = '';\n        answer = null;\n      } else if (result.thread_id) selectedThread = result.thread_id;\n      prompt = '';\n      await refresh();\n",
+          )
+          replace_once(
+              'src/lib/components/CodexRuntimePanel.svelte',
+              "      <label>{t($locale, 'Consent lifetime seconds · 0 = until disconnect', '授權有效秒數 · 0 = 直到斷線')}<input type=\"number\" bind:value={lifetime} min=\"0\" max=\"900\" required disabled={busy || !!snapshot?.connected}/></label>\n",
+              "      <label>{t($locale, 'Consent lifetime seconds · 0 = until disconnect; otherwise 30–900', '授權有效秒數 · 0 = 直到斷線；其他值為 30–900')}<input type=\"number\" bind:value={lifetime} min=\"0\" max=\"900\" step=\"1\" required disabled={busy || !!snapshot?.connected}/></label>\n",
+          )
+
+          replace_once(
+              'src-tauri/src/tools/registry_definitions.rs',
+              'Unique request_id is mandatory; repeats never replay. Only owned threads, no remote enable, approval escalation or arbitrary RPC. An acknowledgment is not task completion.',
+              'Unique request_id is mandatory. Matching completed receipts replay only while retained in bounded RAM (90-minute age retention with oldest-first pressure eviction); after expiry or eviction the same ID may submit again, so use a fresh request_id for every new intended operation. Pending or unknown outcomes are never evicted to make room. Only owned threads, no remote enable, approval escalation or arbitrary RPC. An acknowledgment is not task completion.',
+          )
+
+      - name: Verify Rust fixture and strict Clippy
         shell: bash
         working-directory: src-tauri
         run: |
@@ -48,15 +84,28 @@ jobs:
           cargo test --locked --lib codex_bridge::tests::native_bridge_zero_request_limit_and_rotating_replay_ledger_are_long_lived -- --exact
           cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Verify diff scope and commit source only
+      - name: Verify Svelte types and accessibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check
+
+      - name: Verify diff scope and commit product source only
         shell: bash
         run: |
           set -euo pipefail
           git diff --check
-          changed="$(git diff --name-only)"
-          test "$changed" = "src-tauri/src/codex_bridge/mod.rs"
+          mapfile -t changed < <(git diff --name-only)
+          test ${#changed[@]} -gt 0
+          for path in "${changed[@]}"; do
+            case "$path" in
+              src-tauri/src/codex_bridge/mod.rs|src-tauri/src/tools/registry_definitions.rs|src/lib/components/CodexRuntimePanel.svelte) ;;
+              *) echo "Unexpected changed path: $path" >&2; exit 1 ;;
+            esac
+          done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src-tauri/src/codex_bridge/mod.rs
-          git commit -m "test: satisfy strict Clippy for long-session fixture"
+          git add src-tauri/src/codex_bridge/mod.rs src-tauri/src/tools/registry_definitions.rs src/lib/components/CodexRuntimePanel.svelte
+          git commit -m "fix: align native Codex long-session contracts"
           git push origin "HEAD:${HEAD_REF}"
