@@ -1,0 +1,3 @@
+Validation-only marker to rerun the release draft finalization contract after correcting the shallow checkout in the isolated validator.
+
+Do not merge this validation branch into main.
