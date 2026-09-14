@@ -1,3 +1,5 @@
+// The workflow reruns this materialization after each verifier repair so only
+// a dependency set that passes the complete pinned harness can be committed.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
