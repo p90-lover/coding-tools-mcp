@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/install.txt
           bun audit --cwd runtime-web 2>&1 | tee aiTemp/evidence/audit-green.txt
-          grep -F '0 vulnerabilities' aiTemp/evidence/audit-green.txt
+          grep -F 'No vulnerabilities found' aiTemp/evidence/audit-green.txt
           bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify-green.txt
           bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
           node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
