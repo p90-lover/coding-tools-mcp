@@ -155,8 +155,8 @@ impl Drop for TestToolWorkersReset {
 
 #[cfg(test)]
 pub fn with_test_tool_workers<T>(slots: usize, run: impl FnOnce() -> T) -> T {
-    let previous = TEST_TOOL_WORKERS
-        .with(|workers| workers.replace(Some(Arc::new(Semaphore::new(slots)))));
+    let previous =
+        TEST_TOOL_WORKERS.with(|workers| workers.replace(Some(Arc::new(Semaphore::new(slots)))));
     let _reset = TestToolWorkersReset(previous);
     run()
 }
@@ -168,9 +168,7 @@ fn tool_workers() -> Arc<Semaphore> {
     }
 
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    WORKERS
-        .get_or_init(|| Arc::new(Semaphore::new(16)))
-        .clone()
+    WORKERS.get_or_init(|| Arc::new(Semaphore::new(16))).clone()
 }
 
 pub fn acquire_tool_worker() -> Result<OwnedSemaphorePermit, Box<Response>> {
