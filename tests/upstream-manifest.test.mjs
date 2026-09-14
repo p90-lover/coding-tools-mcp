@@ -17,7 +17,11 @@ test('rejects a changed pinned upstream byte', async () => {
   const source = path.join(root, 'source');
   const manifest = path.join(source, 'UPSTREAM_MANIFEST.json');
   await fs.mkdir(source, { recursive: true });
-  await fs.writeFile(path.join(source, 'LICENSE'), 'MIT fixture\n', 'utf8');
+  await fs.writeFile(
+    path.join(source, 'LICENSE'),
+    'MIT License\n\nCopyright (c) 2026 codex-chatgpt-web contributors\n',
+    'utf8',
+  );
   await fs.mkdir(path.join(source, 'src'), { recursive: true });
   await fs.writeFile(path.join(source, 'src', 'tunnel.ts'), 'export const TUNNEL_VERSION = "0.0.12";\n', 'utf8');
   await fs.writeFile(path.join(source, 'README.md'), 'before\n', 'utf8');
