@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
+// PR review validates this contract only; release matrices run on push or workflow_dispatch.
 const root = path.resolve(import.meta.dirname, '..');
 const workflowPath = path.join(
   root,
