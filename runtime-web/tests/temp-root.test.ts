@@ -1,45 +1,37 @@
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { validateTemporaryRoot } from "../scripts/temp-root";
 
 describe("verification temporary-root boundary", () => {
-  test("accepts a short external alias only when its real storage is under aiTemp", () => {
-    expect(
-      validateTemporaryRoot(
-        "/tmp/ctm-short-alias",
-        "/workspace/coding-tools-mcp/aiTemp/tmp",
-      ),
-    ).toEqual({
-      requested: "/tmp/ctm-short-alias",
-      storage: "/workspace/coding-tools-mcp/aiTemp/tmp",
+  const alias = resolve("aiTemp", "fixtures", "short-alias");
+  const approvedStorage = resolve("workspace", "coding-tools-mcp", "aiTemp", "tmp");
+  const unapprovedStorage = resolve("outside", "not-approved-storage");
+
+  test("accepts a short alias only when its real storage is under aiTemp", () => {
+    expect(validateTemporaryRoot(alias, approvedStorage)).toEqual({
+      requested: alias,
+      storage: approvedStorage,
     });
   });
 
   test("accepts a direct aiTemp path", () => {
-    expect(
-      validateTemporaryRoot(
-        "/workspace/coding-tools-mcp/aiTemp/tmp",
-        "/workspace/coding-tools-mcp/aiTemp/tmp",
-      ),
-    ).toEqual({
-      requested: "/workspace/coding-tools-mcp/aiTemp/tmp",
-      storage: "/workspace/coding-tools-mcp/aiTemp/tmp",
+    expect(validateTemporaryRoot(approvedStorage, approvedStorage)).toEqual({
+      requested: approvedStorage,
+      storage: approvedStorage,
     });
   });
 
   test("rejects aliases whose real storage is outside aiTemp", () => {
-    expect(() =>
-      validateTemporaryRoot(
-        "/tmp/ctm-short-alias",
-        "/tmp/not-approved-storage",
-      ),
-    ).toThrow("Verification temporary storage must stay under aiTemp");
+    expect(() => validateTemporaryRoot(alias, unapprovedStorage)).toThrow(
+      "Verification temporary storage must stay under aiTemp",
+    );
   });
 
   test("rejects an aiTemp-looking alias whose real storage is outside aiTemp", () => {
     expect(() =>
       validateTemporaryRoot(
-        "/workspace/aiTemp/fake-alias",
-        "/tmp/not-approved-storage",
+        resolve("workspace", "aiTemp", "fake-alias"),
+        unapprovedStorage,
       ),
     ).toThrow("Verification temporary storage must stay under aiTemp");
   });
