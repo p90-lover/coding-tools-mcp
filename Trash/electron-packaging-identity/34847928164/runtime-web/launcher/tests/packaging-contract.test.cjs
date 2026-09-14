@@ -9,9 +9,6 @@ const launcherRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(launcherRoot, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));
 const repositoryManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
-const primaryLauncherManifest = JSON.parse(
-  fs.readFileSync(path.join(repositoryRoot, "..", "desktop-electron", "package.json"), "utf8"),
-);
 
 test("the public launcher command uses the Electron bootstrap", () => {
   assert.equal(repositoryManifest.scripts.launcher, "bun run scripts/start-launcher.ts");
@@ -96,11 +93,7 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.equal(fullyQualifiedWindowsPath.test("\\Codex Web GPT"), false);
   assert.equal(fullyQualifiedWindowsPath.test("Codex Web GPT"), false);
   assert.ok(windowsInstaller.includes(`HKCU:\\Software\\${manifest.build.nsis.guid}`));
-  assert.ok(
-    devProfile.includes(
-      `WINDOWS_LAUNCHER_GUID = "${primaryLauncherManifest.build.nsis.guid}"`,
-    ),
-  );
+  assert.ok(devProfile.includes(`WINDOWS_LAUNCHER_GUID = "${manifest.build.nsis.guid}"`));
   assert.match(windowsInstaller, /Get-ItemPropertyValue[\s\S]*InstallLocation/);
   assert.ok(windowsInstaller.includes(`Join-Path $InstallLocation "${manifest.build.productName}.exe"`));
   assert.match(windowsInstaller, /-ArgumentList "\/S", "\/currentuser"/);
