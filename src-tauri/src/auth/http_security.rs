@@ -134,22 +134,54 @@ pub fn secure_response(mut response: Response) -> Response {
     response
 }
 
-pub fn acquire_tool_worker() -> Result<OwnedSemaphorePermit, Box<Response>> {
+#[cfg(test)]
+std::thread_local! {
+    static TEST_TOOL_WORKERS: std::cell::RefCell<Option<Arc<Semaphore>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct TestToolWorkersReset(Option<Arc<Semaphore>>);
+
+#[cfg(test)]
+impl Drop for TestToolWorkersReset {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        TEST_TOOL_WORKERS.with(|workers| {
+            let _ = workers.replace(previous);
+        });
+    }
+}
+
+#[cfg(test)]
+pub fn with_test_tool_workers<T>(slots: usize, run: impl FnOnce() -> T) -> T {
+    let previous =
+        TEST_TOOL_WORKERS.with(|workers| workers.replace(Some(Arc::new(Semaphore::new(slots)))));
+    let _reset = TestToolWorkersReset(previous);
+    run()
+}
+
+fn tool_workers() -> Arc<Semaphore> {
+    #[cfg(test)]
+    if let Some(workers) = TEST_TOOL_WORKERS.with(|workers| workers.borrow().clone()) {
+        return workers;
+    }
+
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    WORKERS
-        .get_or_init(|| Arc::new(Semaphore::new(16)))
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| {
-            Box::new(secure_response(
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    [("retry-after", "1")],
-                    "Tool worker capacity reached",
-                )
-                    .into_response(),
-            ))
-        })
+    WORKERS.get_or_init(|| Arc::new(Semaphore::new(16))).clone()
+}
+
+pub fn acquire_tool_worker() -> Result<OwnedSemaphorePermit, Box<Response>> {
+    tool_workers().try_acquire_owned().map_err(|_| {
+        Box::new(secure_response(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "1")],
+                "Tool worker capacity reached",
+            )
+                .into_response(),
+        ))
+    })
 }
 
 pub async fn guard(State(security): State<HttpSecurity>, request: Request, next: Next) -> Response {
@@ -237,5 +269,28 @@ mod tests {
         }
         assert!(!budget(&guard.login, 30));
         assert!(budget(&guard.token, 120));
+    }
+
+    #[test]
+    fn test_tool_worker_override_is_scoped_and_nested() {
+        with_test_tool_workers(2, || {
+            let first = acquire_tool_worker().unwrap();
+            let second = acquire_tool_worker().unwrap();
+            assert!(acquire_tool_worker().is_err());
+            drop(first);
+            drop(second);
+
+            with_test_tool_workers(1, || {
+                let only = acquire_tool_worker().unwrap();
+                assert!(acquire_tool_worker().is_err());
+                drop(only);
+            });
+
+            let first = acquire_tool_worker().unwrap();
+            let second = acquire_tool_worker().unwrap();
+            assert!(acquire_tool_worker().is_err());
+            drop(first);
+            drop(second);
+        });
     }
 }
