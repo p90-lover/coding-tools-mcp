@@ -47,6 +47,15 @@ impl DataStore {
         Ok(store)
     }
 
+    /// Construct an isolated store for tests and migration probes.
+    ///
+    /// This constructor performs no disk IO and never synchronizes trusted
+    /// origins. Persisting it still requires an explicit ordinary store path.
+    pub fn from_data(data: AppData) -> AppResult<Self> {
+        let baseline = serde_json::to_value(&data)?;
+        Ok(Self { data, baseline })
+    }
+
     pub fn read_file<R>(f: impl FnOnce(&AppData) -> AppResult<R>) -> AppResult<R> {
         let _guard = lock_data_file()?;
         let data = load_or_migrate()?;
