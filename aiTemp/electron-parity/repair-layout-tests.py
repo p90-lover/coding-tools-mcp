@@ -53,6 +53,9 @@ const repositoryManifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, "pa
 assert text.count(old)==1
 text=text.replace(old,new,1)
 text=text.replace('path.join(repositoryRoot, ', 'path.join(runtimeRoot, ')
+# The broad path replacement above must not rewrite runtimeRoot's own base.
+text=text.replace('const runtimeRoot = path.join(runtimeRoot, "runtime-web");',
+                  'const runtimeRoot = path.join(repositoryRoot, "runtime-web");')
 text=text.replace('assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");',
                   'assert.equal(manifest.build.appId, "dev.codingtools.fullharness");')
 text=text.replace('assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");',
