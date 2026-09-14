@@ -1,9 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { mkdirSync, mkdtempSync, renameSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
-const scratch = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-verify-"));
+const tempRoot = join(root, "aiTemp", "verify");
+const retainedRoot = join(root, "aiTemp", "Trash", "verify");
+mkdirSync(tempRoot, { recursive: true });
+const scratch = mkdtempSync(join(tempRoot, "run-"));
 const runtimeBundle = join(scratch, "runtime");
 
 async function run(args: string[]): Promise<void> {
@@ -35,5 +37,6 @@ try {
   ]);
   await run(["run", "scripts/smoke-release.ts", runtimeBundle]);
 } finally {
-  rmSync(scratch, { recursive: true, force: true });
+  mkdirSync(retainedRoot, { recursive: true });
+  renameSync(scratch, join(retainedRoot, basename(scratch)));
 }
