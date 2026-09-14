@@ -51,12 +51,17 @@ jobs:
       - name: Prepare retained temporary and evidence roots
         run: |
           set -euo pipefail
-          # Relative TMPDIR values keep Unix-domain broker paths below the
-          # platform limit while every backing directory remains under aiTemp.
-          mkdir -p \
-            aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite \
-            runtime-web/aiTemp/tmp runtime-web/launcher/aiTemp/tmp \
-            desktop-electron/aiTemp/tmp
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite
+          short_tmp="$PWD/aiTemp/tmp"
+          if [[ "$RUNNER_OS" != "Windows" ]]; then
+            short_tmp="/tmp/ctm-${GITHUB_RUN_ID}-${RUNNER_OS,,}"
+            test ! -e "$short_tmp" && test ! -L "$short_tmp"
+            ln -s "$PWD/aiTemp/tmp" "$short_tmp"
+            test "$(realpath "$short_tmp")" = "$PWD/aiTemp/tmp"
+            test "${#short_tmp}" -lt 60
+          fi
+          echo "CODING_TOOLS_SHORT_TMP=$short_tmp" >> "$GITHUB_ENV"
+          printf 'short_tmp=%s\nbacking=%s\n' "$short_tmp" "$PWD/aiTemp/tmp" > aiTemp/evidence/temp-paths.txt
       - name: Install exact locked dependencies
         run: |
           set -euo pipefail
@@ -76,11 +81,11 @@ jobs:
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           if [[ "$RUNNER_OS" == "Windows" ]]; then preload="$(cygpath -w "$preload")"; fi
           export NODE_OPTIONS="--import=$preload"
-          TMPDIR=aiTemp/tmp TMP=aiTemp/tmp TEMP=aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests.txt
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd desktop-electron build:renderer 2>&1 | tee aiTemp/evidence/desktop-renderer-build.txt
           grep -F '# fail 0' aiTemp/evidence/desktop-tests.txt
       - name: Run the complete pinned upstream verifier
@@ -89,7 +94,7 @@ jobs:
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           if [[ "$RUNNER_OS" == "Windows" ]]; then preload="$(cygpath -w "$preload")"; fi
           export NODE_OPTIONS="--import=$preload"
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify.txt
           grep -F 'All verification steps passed' aiTemp/evidence/runtime-verify.txt || \
             grep -F 'smoke release passed' aiTemp/evidence/runtime-verify.txt || \
@@ -100,9 +105,9 @@ jobs:
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           if [[ "$RUNNER_OS" == "Windows" ]]; then preload="$(cygpath -w "$preload")"; fi
           export NODE_OPTIONS="--import=$preload"
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
-          TMPDIR=aiTemp/tmp TMP=aiTemp/tmp TEMP=aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
           grep -F UPSTREAM_VENDOR_PASS aiTemp/evidence/vendor-verify.txt
       - name: Prove retained cleanup and no repository deletion
