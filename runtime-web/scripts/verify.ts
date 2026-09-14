@@ -9,19 +9,31 @@ mkdirSync(tempRoot, { recursive: true });
 const scratch = mkdtempSync(join(tempRoot, "run-"));
 const runtimeBundle = join(scratch, "runtime");
 
+function bunCommand(args: string[]): string[] {
+  if (args[0] === "run") {
+    return [process.execPath, "run", "--preload", noDeletePreload, ...args.slice(1)];
+  }
+  return [process.execPath, "--preload", noDeletePreload, ...args];
+}
+
 async function run(args: string[]): Promise<void> {
-  const child = Bun.spawn([process.execPath, "--preload", noDeletePreload, ...args], {
+  const environment = {
+    ...process.env,
+    TMPDIR: join(root, "aiTemp", "tmp"),
+    TMP: join(root, "aiTemp", "tmp"),
+    TEMP: join(root, "aiTemp", "tmp"),
+    CODING_TOOLS_RETENTION_ROOT: join(root, "aiTemp", "Trash", "upstream-suite"),
+  };
+  // The parent workflow may use NODE_OPTIONS to protect its own scratch work.
+  // Each child receives one explicit Bun preload in the correct `bun run`
+  // position so the module is not imported twice and no script name is lost.
+  delete environment.NODE_OPTIONS;
+  const child = Bun.spawn(bunCommand(args), {
     cwd: root,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
-    env: {
-      ...process.env,
-      TMPDIR: join(root, "aiTemp", "tmp"),
-      TMP: join(root, "aiTemp", "tmp"),
-      TEMP: join(root, "aiTemp", "tmp"),
-      CODING_TOOLS_RETENTION_ROOT: join(root, "aiTemp", "Trash", "upstream-suite"),
-    },
+    env: environment,
   });
   const exitCode = await child.exited;
   if (exitCode !== 0) throw new Error(`Verification command failed (${exitCode}): bun ${args.join(" ")}`);
