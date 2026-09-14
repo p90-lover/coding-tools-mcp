@@ -21,7 +21,7 @@ export interface DevProfilePaths {
   configPath: string;
 }
 
-const WINDOWS_LAUNCHER_GUID = "d1a6026a-6210-588e-9a2b-da3936f94e02";
+const WINDOWS_LAUNCHER_GUID = "3cb2ea96-3319-55b8-95a5-7f180a5f3ed4";
 
 function registeredWindowsLauncherInstallLocation(): string | undefined {
   try {
@@ -45,13 +45,13 @@ export function resolveDevProfilePaths({
   homeDirectory?: string;
 } = {}): DevProfilePaths {
   const home = resolve(expandUserPath(
-    environment.CODEX_WEB_GPT_DEV_HOME?.trim() || join(homeDirectory, ".codex-chatgpt-web-dev"),
+    environment.CODING_TOOLS_DEV_HOME?.trim() || join(homeDirectory, ".coding-tools-dev"),
   ));
   const productionHome = resolve(expandUserPath(
-    environment.CODEX_CHATGPT_WEB_HOME?.trim() || join(homeDirectory, ".codex-chatgpt-web"),
+    environment.CODING_TOOLS_HOME?.trim() || join(homeDirectory, ".coding-tools"),
   ));
   if (home === productionHome) {
-    throw new Error("DEV profile home must differ from the production codex-chatgpt-web home");
+    throw new Error("DEV profile home must differ from the production Coding Tools home");
   }
   const launcherUserData = join(home, "launcher");
   return {
@@ -94,6 +94,10 @@ export function readDevChatExperimentalFeatures(
 }
 
 export function activateDevProfileEnvironment(paths = resolveDevProfilePaths()): DevProfilePaths {
+  process.env.CODING_TOOLS_DEV_HOME = paths.home;
+  // The pinned runtime still consumes its internal configuration variables.
+  // They point at the already-isolated Coding Tools DEV home and never authorize
+  // production storage or connector reuse.
   process.env.CODEX_WEB_GPT_DEV_HOME = paths.home;
   process.env.CODEX_CHATGPT_WEB_HOME = paths.home;
   process.env.CODEX_HOME = paths.codexHome;
@@ -123,30 +127,30 @@ export function installedLauncherCandidates({
   platform?: NodeJS.Platform;
   windowsInstallLocation?: string;
 } = {}): string[] {
-  const override = environment.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE?.trim();
+  const override = environment.CODING_TOOLS_LAUNCHER_EXECUTABLE?.trim();
   const candidates = override ? [expandUserPath(override)] : [];
   const targetPath = platform === "win32" ? win32 : posix;
   if (platform === "darwin") {
     candidates.push(
-      "/Applications/Codex Web GPT.app/Contents/MacOS/Codex Web GPT",
-      posix.join(homeDirectory, "Applications", "Codex Web GPT.app", "Contents", "MacOS", "Codex Web GPT"),
+      "/Applications/Coding Tools.app/Contents/MacOS/Coding Tools",
+      posix.join(homeDirectory, "Applications", "Coding Tools.app", "Contents", "MacOS", "Coding Tools"),
     );
   } else if (platform === "win32") {
     const registeredLocation = windowsInstallLocation?.trim()
       || (process.platform === "win32" && environment === process.env
         ? registeredWindowsLauncherInstallLocation() : undefined);
     if (registeredLocation && win32.isAbsolute(registeredLocation)) {
-      candidates.push(win32.join(registeredLocation, "Codex Web GPT.exe"));
+      candidates.push(win32.join(registeredLocation, "Coding Tools.exe"));
     } else {
       const localAppData = environment.LOCALAPPDATA?.trim();
       if (localAppData) {
-        candidates.push(win32.join(localAppData, "Programs", "Codex Web GPT", "Codex Web GPT.exe"));
+        candidates.push(win32.join(localAppData, "Programs", "Coding Tools", "Coding Tools.exe"));
       }
     }
   } else if (platform === "linux") {
-    candidates.push(posix.join(homeDirectory, ".local", "bin", "codex-web-gpt"));
+    candidates.push(posix.join(homeDirectory, ".local", "bin", "coding-tools"));
     for (const entry of (environment.PATH || "").split(":").filter(Boolean)) {
-      candidates.push(posix.join(entry, "codex-web-gpt"));
+      candidates.push(posix.join(entry, "coding-tools"));
     }
   }
   return [...new Set(candidates.map(candidate => targetPath.resolve(candidate)))];
@@ -157,7 +161,7 @@ export function findInstalledLauncherExecutable(options: Parameters<typeof insta
   const executable = candidates.find(executableFile);
   if (executable) return executable;
   throw new Error(
-    "Installed Codex Web GPT launcher was not found. Install it first or set CODEX_WEB_GPT_LAUNCHER_EXECUTABLE to its absolute executable path."
+    "Installed Coding Tools launcher was not found. Install it first or set CODING_TOOLS_LAUNCHER_EXECUTABLE to its absolute executable path."
       + ` Checked: ${candidates.join(", ") || "no platform candidates"}`,
   );
 }
@@ -167,9 +171,14 @@ export function devLauncherEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const childEnvironment = { ...environment };
+  delete childEnvironment.CODING_TOOLS_HOME;
+  delete childEnvironment.CODING_TOOLS_LAUNCHER_DATA_DIR;
   delete childEnvironment.CODEX_CHATGPT_WEB_HOME;
   delete childEnvironment.CODEX_HOME;
   delete childEnvironment.CODEX_WEB_GPT_LAUNCHER_DATA_DIR;
+  childEnvironment.CODING_TOOLS_DEV_HOME = paths.home;
+  // Compatibility input consumed by the pinned upstream main process after the
+  // Coding Tools profile resolver has already selected the isolated DEV path.
   childEnvironment.CODEX_WEB_GPT_DEV_HOME = paths.home;
   return childEnvironment;
 }
