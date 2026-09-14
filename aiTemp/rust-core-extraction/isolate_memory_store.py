@@ -76,6 +76,13 @@ replace_once(
     """        let mut guard = self\n            .data\n            .lock()\n            .map_err(|_| AppError::Message(\"data store poisoned\".into()))?;\n        guard.refresh()?;\n        f(&mut guard)\n""",
 )
 
+workflow = ".github/workflows/rust-core-cross-platform.yml"
+replace_once(
+    workflow,
+    """    paths: [.github/workflows/rust-core-cross-platform.yml]\n""",
+    """    paths:\n      - .github/workflows/rust-core-cross-platform.yml\n      - rust-core/coding-tools-core/**\n      - src-tauri/src/lib.rs\n      - src-tauri/src/data/store.rs\n""",
+)
+
 for path in changed:
     if path.suffix == ".rs":
         subprocess.run(
