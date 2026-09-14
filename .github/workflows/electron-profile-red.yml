@@ -1,0 +1,48 @@
+name: Electron profile isolation baseline
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-profile-red.yml
+permissions: {contents: read}
+jobs:
+  red:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Require old launcher and DEV profile identities to fail the new contract
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          set +e
+          node --test desktop-electron/tests/dev-profile-isolation.test.cjs desktop-electron/tests/upstream-parity.test.cjs > aiTemp/evidence/desktop-profile-red.txt 2>&1
+          desktop_code=$?
+          bun test --cwd runtime-web tests/coding-tools-upstream-smoke.test.ts > aiTemp/evidence/runtime-profile-red.txt 2>&1
+          runtime_code=$?
+          set -e
+          test "$desktop_code" -ne 0
+          test "$runtime_code" -ne 0
+          grep -E 'Codex Web GPT|codex-chatgpt-web|Codex Native2' aiTemp/evidence/desktop-profile-red.txt
+          grep -E 'codex-chatgpt-web-dev|Codex Web GPT' aiTemp/evidence/runtime-profile-red.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-profile-red-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
