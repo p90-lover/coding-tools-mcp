@@ -17,7 +17,7 @@ function bunCommand(args: string[]): string[] {
 }
 
 async function run(args: string[]): Promise<void> {
-  const environment = {
+  const environment: NodeJS.ProcessEnv = {
     ...process.env,
     TMPDIR: join(root, "aiTemp", "tmp"),
     TMP: join(root, "aiTemp", "tmp"),
