@@ -63,11 +63,12 @@ jobs:
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           if [[ "$RUNNER_OS" == "Windows" ]]; then preload="$(cygpath -w "$preload")"; fi
           export NODE_OPTIONS="--import=$preload"
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          absolute_tmp="$PWD/aiTemp/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --frozen-lockfile --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
-          TMPDIR=../../aiTemp/tmp TMP=../../aiTemp/tmp TEMP=../../aiTemp/tmp \
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --frozen-lockfile --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/runtime-launcher-install.txt
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
       - name: Run adapted Electron tests and build
         run: |
