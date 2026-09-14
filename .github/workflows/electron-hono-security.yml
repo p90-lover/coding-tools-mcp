@@ -64,11 +64,14 @@ jobs:
           set -euo pipefail
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           export NODE_OPTIONS="--import=$preload"
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          # Dependency installers may chdir into node_modules. Give them one
+          # existing absolute aiTemp directory; no Unix broker is created here.
+          absolute_tmp="$PWD/aiTemp/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
-          TMPDIR=../../aiTemp/tmp TMP=../../aiTemp/tmp TEMP=../../aiTemp/tmp \
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/upstream-launcher-install.txt
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
       - name: Require clean audits for runtime and both launcher trees
         run: |
@@ -84,6 +87,8 @@ jobs:
           set -euo pipefail
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           export NODE_OPTIONS="--import=$preload"
+          # Runtime tests keep TMPDIR relative so Unix-domain socket names stay
+          # below 103 bytes; the backing directories are still under aiTemp.
           TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
             bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify-green.txt
           TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
