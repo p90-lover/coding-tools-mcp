@@ -35,7 +35,7 @@ jobs:
         with: {node-version: '22'}
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with: {bun-version: '1.4.0'}
-      - name: Require the current Hono and js-yaml audit failures
+      - name: Require the retained Hono and js-yaml audit failures
         env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
@@ -57,6 +57,11 @@ jobs:
       - name: Resolve every integrated dependency tree
         run: |
           set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          export TMPDIR="$PWD/aiTemp/tmp"
+          export TMP="$PWD/aiTemp/tmp"
+          export TEMP="$PWD/aiTemp/tmp"
           bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
           bun install --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/upstream-launcher-install.txt
           bun install --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
@@ -72,6 +77,11 @@ jobs:
       - name: Run the complete harness and adapted desktop verification
         run: |
           set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          export TMPDIR="$PWD/aiTemp/tmp"
+          export TMP="$PWD/aiTemp/tmp"
+          export TEMP="$PWD/aiTemp/tmp"
           bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify-green.txt
           bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
           node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests.txt
