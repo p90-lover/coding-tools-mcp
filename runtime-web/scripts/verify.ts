@@ -3,6 +3,7 @@ import { basename, join, resolve } from "node:path";
 import { resolveTemporaryRoot } from "./temp-root";
 
 const root = resolve(import.meta.dir, "..");
+const repositoryRoot = resolve(root, "..");
 const tempRoot = join(root, "aiTemp", "verify");
 const retainedRoot = join(root, "aiTemp", "Trash", "verify");
 const noDeletePreload = join(root, "scripts", "no-delete-preload.mjs");
@@ -10,6 +11,7 @@ const configuredShortTempRoot = process.env.CODING_TOOLS_SHORT_TMP?.trim();
 const requestedShortTempRoot = resolve(
   configuredShortTempRoot || join(root, "aiTemp", "tmp"),
 );
+const allowedTempRoots = [join(root, "aiTemp"), join(repositoryRoot, "aiTemp")];
 mkdirSync(tempRoot, { recursive: true });
 if (configuredShortTempRoot) {
   if (!existsSync(requestedShortTempRoot)) {
@@ -20,7 +22,10 @@ if (configuredShortTempRoot) {
 } else {
   mkdirSync(requestedShortTempRoot, { recursive: true });
 }
-const { requested: shortTempRoot } = resolveTemporaryRoot(requestedShortTempRoot);
+const { requested: shortTempRoot } = resolveTemporaryRoot(
+  requestedShortTempRoot,
+  allowedTempRoots,
+);
 const scratch = mkdtempSync(join(tempRoot, "run-"));
 const runtimeBundle = join(scratch, "runtime");
 
