@@ -11,6 +11,7 @@ on:
       - runtime-web/src/cli.ts
       - runtime-web/tests/cli.test.ts
       - runtime-web/tests/temp-root.test.ts
+      - runtime-web/launcher/tests/packaging-contract.test.cjs
       - desktop-electron/tests/no-delete-preload.test.cjs
   workflow_dispatch:
 permissions: {contents: read}
