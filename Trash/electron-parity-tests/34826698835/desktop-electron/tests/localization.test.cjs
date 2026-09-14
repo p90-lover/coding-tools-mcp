@@ -6,8 +6,7 @@ const ts = require("typescript");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(launcherRoot, "..");
-const runtimeRoot = path.join(repositoryRoot, "runtime-web");
-const read = (...parts) => fs.readFileSync(path.join(runtimeRoot, ...parts), "utf8");
+const read = (...parts) => fs.readFileSync(path.join(repositoryRoot, ...parts), "utf8");
 
 const englishReadme = read("README.md");
 const chineseReadme = read("README.zh-CN.md");

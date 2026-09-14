@@ -7,10 +7,8 @@ const { spawnSync } = require("node:child_process");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(launcherRoot, "..");
-const runtimeRoot = path.join(repositoryRoot, "runtime-web");
 const manifest = JSON.parse(fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"));
-const upstreamManifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, "launcher", "package.json"), "utf8"));
-const repositoryManifest = JSON.parse(fs.readFileSync(path.join(runtimeRoot, "package.json"), "utf8"));
+const repositoryManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf8"));
 
 test("the public launcher command uses the Electron bootstrap", () => {
   assert.equal(repositoryManifest.scripts.launcher, "bun run scripts/start-launcher.ts");
@@ -18,15 +16,15 @@ test("the public launcher command uses the Electron bootstrap", () => {
 });
 
 test("the full verification gate audits launcher dependencies", () => {
-  const verify = fs.readFileSync(path.join(runtimeRoot, "scripts", "verify.ts"), "utf8");
+  const verify = fs.readFileSync(path.join(repositoryRoot, "scripts", "verify.ts"), "utf8");
   assert.equal(manifest.scripts.audit, "bun audit");
   assert.equal(repositoryManifest.scripts["launcher:audit"], "bun run --cwd launcher audit");
   assert.match(verify, /await run\(\["run", "launcher:audit"\]\);/);
 });
 
 test("launcher publishes native packages for all supported desktop operating systems", () => {
-  assert.equal(manifest.build.appId, "dev.codingtools.fullharness");
-  assert.equal(manifest.build.artifactName, "Coding.Tools_${version}_${os}_${arch}.${ext}");
+  assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
+  assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");
   assert.deepEqual(manifest.build.mac.target, ["dmg", "zip"]);
   assert.deepEqual(
     manifest.build.mac.signIgnore,
@@ -48,9 +46,9 @@ test("launcher publishes native packages for all supported desktop operating sys
 });
 
 test("release installers resolve checksummed native launcher assets", () => {
-  const shellInstaller = fs.readFileSync(path.join(runtimeRoot, "scripts", "install-launcher.sh"), "utf8");
-  const windowsInstaller = fs.readFileSync(path.join(runtimeRoot, "scripts", "install-launcher.ps1"), "utf8");
-  const devProfile = fs.readFileSync(path.join(runtimeRoot, "src", "dev-chat", "profile.ts"), "utf8");
+  const shellInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install-launcher.sh"), "utf8");
+  const windowsInstaller = fs.readFileSync(path.join(repositoryRoot, "scripts", "install-launcher.ps1"), "utf8");
+  const devProfile = fs.readFileSync(path.join(repositoryRoot, "src", "dev-chat", "profile.ts"), "utf8");
   const packager = fs.readFileSync(path.join(launcherRoot, "scripts", "package.cjs"), "utf8");
   for (const installer of [shellInstaller, windowsInstaller]) {
     assert.match(installer, /checksums\.txt/);
@@ -94,10 +92,10 @@ test("release installers resolve checksummed native launcher assets", () => {
   assert.equal(fullyQualifiedWindowsPath.test("C:Codex Web GPT"), false);
   assert.equal(fullyQualifiedWindowsPath.test("\\Codex Web GPT"), false);
   assert.equal(fullyQualifiedWindowsPath.test("Codex Web GPT"), false);
-  assert.ok(windowsInstaller.includes(`HKCU:\\Software\\${upstreamManifest.build.nsis.guid}`));
+  assert.ok(windowsInstaller.includes(`HKCU:\\Software\\${manifest.build.nsis.guid}`));
   assert.ok(devProfile.includes(`WINDOWS_LAUNCHER_GUID = "${manifest.build.nsis.guid}"`));
   assert.match(windowsInstaller, /Get-ItemPropertyValue[\s\S]*InstallLocation/);
-  assert.ok(windowsInstaller.includes(`Join-Path $InstallLocation "${upstreamManifest.build.productName}.exe"`));
+  assert.ok(windowsInstaller.includes(`Join-Path $InstallLocation "${manifest.build.productName}.exe"`));
   assert.match(windowsInstaller, /-ArgumentList "\/S", "\/currentuser"/);
   const packageSmoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
   assert.match(packageSmoke, /run\(installer, \["\/S", "\/currentuser"\]/);
@@ -119,8 +117,8 @@ test("packaged launcher owns a detached checksummed updater for every release pl
 });
 
 test("CI packages and smoke-launches on macOS, Windows, and Linux", () => {
-  const ci = fs.readFileSync(path.join(runtimeRoot, ".github", "workflows", "ci.yml"), "utf8");
-  const release = fs.readFileSync(path.join(runtimeRoot, ".github", "workflows", "release.yml"), "utf8");
+  const ci = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "ci.yml"), "utf8");
+  const release = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
   assert.match(ci, /macos-15, ubuntu-latest, windows-latest/);
   assert.match(ci, /bun run app:package/);
   assert.match(ci, /bun run app:smoke/);
@@ -201,10 +199,10 @@ test("Linux AppImage fallback uses one owned extraction and removes it on exit",
 
 test("Linux packaging replaces libnotify in an owned AppImage toolset before assembly", () => {
   const source = fs.readFileSync(path.join(launcherRoot, "scripts", "prepare-linux-appimage-tools.cjs"), "utf8");
-  const prepare = fs.readFileSync(path.join(runtimeRoot, "scripts", "prepare-linux-libnotify.sh"), "utf8");
+  const prepare = fs.readFileSync(path.join(repositoryRoot, "scripts", "prepare-linux-libnotify.sh"), "utf8");
   const smoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-linux-appimage-symbols.sh"), "utf8");
   const license = fs.readFileSync(
-    path.join(runtimeRoot, "LICENSES", "libnotify-0.8.7-LGPL-2.1.md"),
+    path.join(repositoryRoot, "LICENSES", "libnotify-0.8.7-LGPL-2.1.md"),
     "utf8",
   );
   for (const contract of [source, prepare, smoke]) {
@@ -231,15 +229,15 @@ test("macOS package smoke unregisters its staged app from LaunchServices", () =>
 });
 
 test("release does not publish demo or screenshot assets", () => {
-  const release = fs.readFileSync(path.join(runtimeRoot, ".github", "workflows", "release.yml"), "utf8");
+  const release = fs.readFileSync(path.join(repositoryRoot, ".github", "workflows", "release.yml"), "utf8");
   assert.doesNotMatch(release, /assets\/demo\.gif/);
   assert.doesNotMatch(release, /release-assets\/[^\n]*(?:demo|screenshot)/i);
 });
 
 test("Windows packages embed the checksummed Bun baseline runtime for CPUs without AVX2", () => {
-  const builder = fs.readFileSync(path.join(runtimeRoot, "scripts", "build-runtime-bundle.ts"), "utf8");
+  const builder = fs.readFileSync(path.join(repositoryRoot, "scripts", "build-runtime-bundle.ts"), "utf8");
   const baseline = fs.readFileSync(
-    path.join(runtimeRoot, "scripts", "prepare-windows-baseline-bun.ps1"),
+    path.join(repositoryRoot, "scripts", "prepare-windows-baseline-bun.ps1"),
     "utf8",
   );
   assert.match(builder, /CODEX_CHATGPT_WEB_EMBEDDED_BUN/);

@@ -32,7 +32,7 @@ test("manual prompt handoff keeps ordinary turns at thirty seconds and compactio
 
 test("Electron and Bun agree on the exact launcher idle surface", () => {
   const clientSource = fs.readFileSync(
-    resolve(__dirname, "../../runtime-web/src/launcher-browser-host.ts"),
+    resolve(__dirname, "../../src/launcher-browser-host.ts"),
     "utf8",
   );
   assert.ok(clientSource.includes(

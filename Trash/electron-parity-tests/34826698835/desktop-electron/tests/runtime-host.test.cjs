@@ -61,7 +61,7 @@ function devHostFor(existingConfig, interactionMode = "automatic") {
 }
 
 test("core setup preserves an existing full-harness installation", async () => {
-  const fixture = hostFor({ mode: "full", appName: CURRENT_CONNECTOR_NAME });
+  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
   const result = await fixture.host.setupCore();
   assert.equal(result.mode, "full");
   assert.deepEqual(fixture.invocation().args, [
@@ -118,7 +118,7 @@ test("browser interaction mode changes reuse the transactional setup and refresh
   const config = {
     mode: "full",
     browserHost: "launcher",
-    appName: CURRENT_CONNECTOR_NAME,
+    appName: "Codex Native2",
     experimentalBiggerContext: true,
   };
   const manual = hostFor(config);
@@ -173,7 +173,7 @@ test("DEV core setup configures only the isolated harness contract", async () =>
 });
 
 test("Bigger Context uses the setup transaction and refreshes the production Codex catalog", async () => {
-  const fixture = hostFor({ mode: "full", appName: CURRENT_CONNECTOR_NAME });
+  const fixture = hostFor({ mode: "full", appName: "Codex Native2" });
   const result = await fixture.host.setBiggerContext(true);
   assert.equal(result.enabled, true);
   assert.deepEqual(fixture.invocation(), {
@@ -281,7 +281,7 @@ test("DEV MCP setup reuses only DEV-home credentials and targets its distinct co
     purpose: "dev-harness",
     mode: "full",
     browserHost: "launcher",
-    appName: CURRENT_CONNECTOR_NAME,
+    appName: "Codex Native2",
     tunnel: {
       tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
       runtimeKeyFile,
@@ -367,7 +367,7 @@ test("launcher update transaction upgrades its owned full runtime with saved con
   const fixture = hostFor({
     mode: "full",
     browserHost: "launcher",
-    appName: CURRENT_CONNECTOR_NAME,
+    appName: "Codex Native2",
     releaseVersion: "1.1.1",
     solAvailable: true,
     proAvailable: false,
@@ -457,7 +457,7 @@ test("launcher update transaction leaves current and externally owned runtimes u
   const currentFull = hostFor({
     mode: "full",
     browserHost: "launcher",
-    appName: CURRENT_CONNECTOR_NAME,
+    appName: "Codex Native2",
     releaseVersion: "1.1.3",
   });
   const external = hostFor({ mode: "browser-only", browserHost: "managed-chrome", releaseVersion: "1.1.1" });
@@ -476,7 +476,7 @@ test("MCP setup reuses valid private credentials without exposing or rewriting t
   fs.writeFileSync(keyPath, "saved-private-runtime-key\n", { mode: 0o600 });
   const fixture = hostFor({
     mode: "full",
-    appName: CURRENT_CONNECTOR_NAME,
+    appName: "Codex Native2",
     tunnel: {
       tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
       runtimeKeyFile: keyPath,
@@ -732,24 +732,24 @@ test("integration removal rejects a command that leaves an inactive journal behi
 });
 
 test("connector verification uses the current identity and rejects a legacy local runtime", () => {
-  const full = hostFor({ mode: "full", appName: CURRENT_CONNECTOR_NAME });
-  assert.equal(full.host.mcpConnectorName(), CURRENT_CONNECTOR_NAME);
-  assert.equal(full.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
+  const full = hostFor({ mode: "full", appName: "Codex Native2" });
+  assert.equal(full.host.mcpConnectorName(), "Codex Native2");
+  assert.equal(full.host.browserConnectorName(), "Codex Native2");
   const defaultName = hostFor(null);
   assert.equal(defaultName.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
   const legacyFull = hostFor({ mode: "full", appName: "Codex Native" });
-  assert.equal(legacyFull.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
+  assert.equal(legacyFull.host.browserConnectorName(), "Codex Native2");
   assert.throws(
     () => legacyFull.host.mcpConnectorName(),
-    /legacy ChatGPT connector.*Coding Tools Native2.*new ChatGPT app/,
+    /still targets legacy ChatGPT connector.*create that connector as a new ChatGPT plugin/,
   );
   const invalidFull = hostFor({ mode: "full", appName: "   " });
   assert.throws(() => invalidFull.host.mcpConnectorName(), /Connector name is invalid/);
   assert.throws(() => invalidFull.host.browserConnectorName(), /Connector name is invalid/);
   const browserOnly = hostFor({ mode: "browser-only", appName: "Codex Native" });
-  assert.equal(browserOnly.host.browserConnectorName(), CURRENT_CONNECTOR_NAME);
+  assert.equal(browserOnly.host.browserConnectorName(), "Codex Native2");
   assert.throws(() => browserOnly.host.mcpConnectorName(), /MCP runtime is not configured/);
-  const dev = devHostFor({ mode: "full", appName: CURRENT_CONNECTOR_NAME });
+  const dev = devHostFor({ mode: "full", appName: "Codex Native2" });
   assert.equal(dev.host.browserConnectorName(), DEV_CONNECTOR_NAME);
   assert.equal(dev.host.mcpConnectorName(), DEV_CONNECTOR_NAME);
 });
