@@ -20,6 +20,8 @@ test("DEV launcher profile isolates every durable home from production", () => {
 
   assert.equal(production.kind, "production");
   assert.equal(development.kind, "development");
+  assert.equal(production.displayName, "Coding Tools");
+  assert.equal(development.displayName, "Coding Tools DEV");
   assert.notEqual(development.coreHome, production.coreHome);
   assert.notEqual(development.codexHome, production.codexHome);
   assert.notEqual(development.userData, production.userData);
@@ -34,23 +36,26 @@ test("DEV launcher refuses an explicit home collision with production", () => {
   assert.throws(() => resolveLauncherProfile({
     argv: ["electron", ".", "--dev-profile"],
     env: {
-      CODEX_WEB_GPT_DEV_HOME: shared,
-      CODEX_CHATGPT_WEB_HOME: shared,
+      CODING_TOOLS_DEV_HOME: shared,
+      CODING_TOOLS_HOME: shared,
     },
     homeDir,
     appData: path.join(homeDir, "Library", "Application Support"),
-  }), /must differ from the production/);
+  }), /must differ from the production Coding Tools home/);
 });
 
-test("DEV launcher ignores generic production path overrides", () => {
+test("DEV launcher ignores generic production and legacy path overrides", () => {
   const homeDir = path.resolve("/Users/tester");
   const development = resolveLauncherProfile({
     argv: ["electron", ".", "--dev-profile"],
     env: {
-      CODEX_CHATGPT_WEB_HOME: path.join(homeDir, "production-core"),
+      CODING_TOOLS_HOME: path.join(homeDir, "production-core"),
+      CODING_TOOLS_LAUNCHER_DATA_DIR: path.join(homeDir, "production-launcher"),
+      CODING_TOOLS_DEV_HOME: path.join(homeDir, "isolated-dev"),
+      CODEX_CHATGPT_WEB_HOME: path.join(homeDir, "legacy-production-core"),
       CODEX_HOME: path.join(homeDir, "production-codex"),
-      CODEX_WEB_GPT_LAUNCHER_DATA_DIR: path.join(homeDir, "production-launcher"),
-      CODEX_WEB_GPT_DEV_HOME: path.join(homeDir, "isolated-dev"),
+      CODEX_WEB_GPT_LAUNCHER_DATA_DIR: path.join(homeDir, "legacy-production-launcher"),
+      CODEX_WEB_GPT_DEV_HOME: path.join(homeDir, "legacy-dev"),
     },
     homeDir,
     appData: path.join(homeDir, "Library", "Application Support"),
