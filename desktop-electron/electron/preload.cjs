@@ -57,3 +57,40 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
 });
+
+const { invokeContract } = require("./ipc-schema.cjs");
+
+const codingToolsApi = Object.freeze({
+  runtime: Object.freeze({
+    status: () => invokeContract(ipcRenderer, "runtime.status"),
+  }),
+  workspaces: Object.freeze({
+    list: (input = {}) => invokeContract(ipcRenderer, "workspaces.list", input),
+  }),
+  permissions: Object.freeze({
+    snapshot: (input) => invokeContract(ipcRenderer, "permissions.snapshot", input),
+  }),
+  computer: Object.freeze({
+    status: () => invokeContract(ipcRenderer, "computer.status"),
+  }),
+  tasks: Object.freeze({
+    list: (input = {}) => invokeContract(ipcRenderer, "tasks.list", input),
+  }),
+  history: Object.freeze({
+    search: (input) => invokeContract(ipcRenderer, "history.search", input),
+  }),
+  nativeCodex: Object.freeze({
+    status: () => invokeContract(ipcRenderer, "nativeCodex.status"),
+  }),
+  integrations: Object.freeze({
+    snapshot: () => invokeContract(ipcRenderer, "integrations.snapshot"),
+  }),
+  updates: Object.freeze({
+    status: () => invokeContract(ipcRenderer, "updates.status"),
+  }),
+  diagnostics: Object.freeze({
+    snapshot: () => invokeContract(ipcRenderer, "diagnostics.snapshot"),
+  }),
+});
+
+contextBridge.exposeInMainWorld("codingTools", codingToolsApi);
