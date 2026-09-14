@@ -181,7 +181,7 @@ test('dedicated release workflow is exact-source, Windows-first, and opt-in publ
   assert.doesNotMatch(workflow, /npm run tauri -- build/);
 });
 
-test('publisher uploads and reads back every asset before creating the non-forced tag', async () => {
+test('publisher creates the exact tag before a draft, reads assets back, and re-verifies the tag before publish', async () => {
   const { publishVerifiedPrerelease } = await load('scripts/release/publish-v0.6.0-rc.1.mjs');
   const crypto = await import('node:crypto');
   const fixture = path.join(root, 'aiTemp', 'publisher-assets');
@@ -234,6 +234,7 @@ test('publisher uploads and reads back every asset before creating the non-force
   let release = null;
   let nextAssetId = 1;
   let tagCreated = false;
+  let draftPayload = null;
   const json = (value, status = 200) => new Response(JSON.stringify(value), {
     status,
     headers: { 'content-type': 'application/json' },
@@ -249,13 +250,18 @@ test('publisher uploads and reads back every asset before creating the non-force
       return release ? json(release) : json({ message: 'Not Found' }, 404);
     }
     if (method === 'POST' && pathname.endsWith('/releases')) {
+      draftPayload = JSON.parse(String(options.body));
+      if (!tagCreated) return json({ message: 'exact tag must exist before draft creation' }, 422);
+      if (Object.hasOwn(draftPayload, 'target_commitish')) {
+        return json({ message: 'target_commitish is forbidden once the exact tag exists' }, 422);
+      }
       release = {
         id: 77,
         tag_name: tag,
         name: `Coding Tools ${tag}`,
         draft: true,
         prerelease: true,
-        target_commitish: sourceSha,
+        target_commitish: 'main',
         upload_url: 'https://uploads.github.test/repos/p90-lover/coding-tools-mcp/releases/77/assets{?name,label}',
         assets: [],
       };
@@ -302,12 +308,38 @@ test('publisher uploads and reads back every asset before creating the non-force
   });
   assert.equal(result.published, true);
   assert.equal(result.reused, false);
+  assert.equal(result.tagCreated, true);
   assert.equal(calls.some((entry) => entry.startsWith('DELETE ')), false);
-  const tagIndex = calls.findIndex((entry) => entry.includes('POST https://api.github.com/repos/p90-lover/coding-tools-mcp/git/refs'));
-  const publishIndex = calls.findIndex((entry) => entry.includes('PATCH https://api.github.com/repos/p90-lover/coding-tools-mcp/releases/77'));
-  const preTagReadbacks = calls.slice(0, tagIndex).filter((entry) => entry.includes('/releases/assets/'));
-  assert.equal(preTagReadbacks.length, files.size, calls);
-  assert.ok(tagIndex < publishIndex, calls);
+  assert.equal(Object.hasOwn(draftPayload, 'target_commitish'), false);
+
+  const tagCreateIndex = calls.findIndex((entry) => entry.includes(
+    'POST https://api.github.com/repos/p90-lover/coding-tools-mcp/git/refs',
+  ));
+  const draftIndex = calls.findIndex((entry) => entry ===
+    'POST https://api.github.com/repos/p90-lover/coding-tools-mcp/releases');
+  const publishIndex = calls.findIndex((entry) => entry.includes(
+    'PATCH https://api.github.com/repos/p90-lover/coding-tools-mcp/releases/77',
+  ));
+  const uploadIndices = calls
+    .map((entry, index) => entry.includes('POST https://uploads.github.test/') ? index : -1)
+    .filter((index) => index >= 0);
+  const prePublishReadbackIndices = calls
+    .map((entry, index) => entry.includes('/releases/assets/') && index < publishIndex ? index : -1)
+    .filter((index) => index >= 0);
+  const finalPrePublishReadback = Math.max(...prePublishReadbackIndices);
+  const tagReverifyIndex = calls.findIndex((entry, index) =>
+    index > finalPrePublishReadback
+      && index < publishIndex
+      && entry.includes(`GET https://api.github.com/repos/p90-lover/coding-tools-mcp/git/ref/tags/${tag}`));
+
+  assert.ok(tagCreateIndex >= 0, calls);
+  assert.ok(tagCreateIndex < draftIndex, calls);
+  assert.ok(draftIndex < publishIndex, calls);
+  assert.equal(uploadIndices.length, files.size, calls);
+  assert.equal(prePublishReadbackIndices.length, files.size, calls);
+  assert.ok(uploadIndices.every((index) => index > draftIndex && index < publishIndex), calls);
+  assert.ok(prePublishReadbackIndices.every((index) => index > draftIndex && index < publishIndex), calls);
+  assert.ok(tagReverifyIndex > finalPrePublishReadback, calls);
 });
 
 async function writeReleaseAssetFixture({
