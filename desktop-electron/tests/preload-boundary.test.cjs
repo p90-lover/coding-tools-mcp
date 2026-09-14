@@ -96,6 +96,12 @@ test("schema-invalid and oversized requests fail before Electron IPC", async () 
     api.history.search({ workspaceRoot: "C:\\fixture", query: "x".repeat(70_000) }),
     /IPC_REQUEST_TOO_LARGE/,
   );
+  const cyclic = { workspaceId: "workspace-1" };
+  cyclic.self = cyclic;
+  await assert.rejects(
+    api.permissions.snapshot(cyclic),
+    /IPC_REQUEST_SCHEMA_INVALID/,
+  );
   assert.equal(invocations.length, 0);
 });
 
