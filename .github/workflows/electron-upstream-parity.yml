@@ -1,0 +1,102 @@
+name: Verify pinned full harness parity
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-upstream-parity.yml
+      - runtime-web/scripts/no-delete-preload.mjs
+      - runtime-web/scripts/verify.ts
+      - desktop-electron/electron/profile.cjs
+      - desktop-electron/electron/connector-identity.cjs
+      - desktop-electron/tests/profile.test.cjs
+      - desktop-electron/tests/dev-profile-isolation.test.cjs
+      - desktop-electron/tests/upstream-parity.test.cjs
+      - runtime-web/src/dev-chat/profile.ts
+      - runtime-web/tests/dev-profile.test.ts
+      - runtime-web/tests/coding-tools-upstream-smoke.test.ts
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-upstream-parity-v506
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/upstream-suite
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Prepare retained temporary and evidence roots
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            preload="$(cygpath -w "$preload")"
+          fi
+          echo "NODE_OPTIONS=--import=$preload" >> "$GITHUB_ENV"
+          echo "TMPDIR=$PWD/aiTemp/tmp" >> "$GITHUB_ENV"
+          echo "TMP=$PWD/aiTemp/tmp" >> "$GITHUB_ENV"
+          echo "TEMP=$PWD/aiTemp/tmp" >> "$GITHUB_ENV"
+      - name: Install exact locked dependencies
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
+          bun install --frozen-lockfile --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/runtime-launcher-install.txt
+          bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
+      - name: Run adapted Electron tests and build
+        run: |
+          set -euo pipefail
+          node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests.txt
+          bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
+          bun run --cwd desktop-electron build:renderer 2>&1 | tee aiTemp/evidence/desktop-renderer-build.txt
+          grep -F '# fail 0' aiTemp/evidence/desktop-tests.txt
+      - name: Run the complete pinned upstream verifier
+        run: |
+          set -euo pipefail
+          bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify.txt
+          grep -F 'All verification steps passed' aiTemp/evidence/runtime-verify.txt || \
+            grep -F 'smoke release passed' aiTemp/evidence/runtime-verify.txt || \
+            grep -F 'Smoke test passed' aiTemp/evidence/runtime-verify.txt
+      - name: Verify subagent compatibility and exact source pin
+        run: |
+          set -euo pipefail
+          bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
+          node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
+          grep -F UPSTREAM_VENDOR_PASS aiTemp/evidence/vendor-verify.txt
+      - name: Prove retained cleanup and no repository deletion
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git diff --diff-filter=D --name-only)"
+          find aiTemp/Trash -type f -o -type d | sort > aiTemp/evidence/retained-paths.txt
+          test -s aiTemp/evidence/retained-paths.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-upstream-parity-${{ matrix.os }}-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
