@@ -6,6 +6,9 @@ on:
       - .github/workflows/electron-hono-security.yml
       - aiTemp/electron-security/patch-hono.mjs
       - runtime-web/scripts/no-delete-preload.mjs
+      - runtime-web/scripts/temp-root.ts
+      - runtime-web/scripts/verify.ts
+      - runtime-web/tests/temp-root.test.ts
       - desktop-electron/tests/no-delete-preload.test.cjs
   workflow_dispatch:
 permissions: {contents: read}
