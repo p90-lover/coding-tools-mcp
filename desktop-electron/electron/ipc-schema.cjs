@@ -1,5 +1,6 @@
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_JSON_DEPTH = 32;
 
 function codedError(code, detail) {
   const error = new Error(`${code}: ${detail}`);
@@ -13,26 +14,40 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-function assertJsonValue(value, code, path = "$") {
+function assertJsonValue(value, code, path = "$", ancestors = new Set(), depth = 0) {
+  if (depth > MAX_JSON_DEPTH) throw codedError(code, `${path} exceeds the maximum JSON depth`);
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number" && Number.isFinite(value)) return;
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertJsonValue(item, code, `${path}[${index}]`));
-    return;
+
+  if (!Array.isArray(value) && !isPlainObject(value)) {
+    throw codedError(code, `${path} must be a JSON value`);
   }
-  if (isPlainObject(value)) {
-    for (const [key, item] of Object.entries(value)) {
-      assertJsonValue(item, code, `${path}.${key}`);
+  if (ancestors.has(value)) throw codedError(code, `${path} contains a cyclic reference`);
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => assertJsonValue(item, code, `${path}[${index}]`, ancestors, depth + 1));
+      return;
     }
-    return;
+    for (const [key, item] of Object.entries(value)) {
+      assertJsonValue(item, code, `${path}.${key}`, ancestors, depth + 1);
+    }
+  } finally {
+    ancestors.delete(value);
   }
-  throw codedError(code, `${path} must be a JSON value`);
 }
 
-function assertSerializedSize(value, limit, code) {
-  assertJsonValue(value, code);
-  const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
-  if (bytes > limit) throw codedError(code, `${bytes} bytes exceeds ${limit}`);
+function assertSerializedSize(value, limit, sizeCode, valueCode) {
+  assertJsonValue(value, valueCode);
+  let serialized;
+  try {
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    throw codedError(valueCode, error instanceof Error ? error.message : String(error));
+  }
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes > limit) throw codedError(sizeCode, `${bytes} bytes exceeds ${limit}`);
 }
 
 function assertSchema(value, schema, code, path = "$") {
@@ -266,11 +281,21 @@ async function invokeContract(ipcRenderer, name, payload = {}) {
   const contract = CONTRACTS[name];
   if (!contract) throw codedError("IPC_CONTRACT_UNKNOWN", name);
 
-  assertSerializedSize(payload, MAX_REQUEST_BYTES, "IPC_REQUEST_TOO_LARGE");
+  assertSerializedSize(
+    payload,
+    MAX_REQUEST_BYTES,
+    "IPC_REQUEST_TOO_LARGE",
+    "IPC_REQUEST_SCHEMA_INVALID",
+  );
   assertSchema(payload, contract.request, "IPC_REQUEST_SCHEMA_INVALID");
 
   const response = await ipcRenderer.invoke(contract.channel, payload);
-  assertSerializedSize(response, MAX_RESPONSE_BYTES, "IPC_RESPONSE_TOO_LARGE");
+  assertSerializedSize(
+    response,
+    MAX_RESPONSE_BYTES,
+    "IPC_RESPONSE_TOO_LARGE",
+    "IPC_RESPONSE_SCHEMA_INVALID",
+  );
   assertSchema(response, contract.response, "IPC_RESPONSE_SCHEMA_INVALID");
   return response;
 }
@@ -279,5 +304,6 @@ module.exports = Object.freeze({
   CONTRACTS,
   MAX_REQUEST_BYTES,
   MAX_RESPONSE_BYTES,
+  MAX_JSON_DEPTH,
   invokeContract,
 });
