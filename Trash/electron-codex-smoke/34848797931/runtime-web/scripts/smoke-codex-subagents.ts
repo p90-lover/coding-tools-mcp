@@ -6,16 +6,12 @@ import { bridgeToResponsesSSE } from "../src/bridge";
 import { defaultConfig } from "../src/config";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 import type { AdapterEvent } from "../src/types";
-import { resolveCodexSmokeExecutable } from "./codex-smoke-path";
 
 const protocol = process.argv.includes("--v1") ? "v1" : "v2";
 const explicitChildModel = "gpt-5.6-sol";
 const explicitChildReasoningEffort = "max";
-const codex = resolveCodexSmokeExecutable(
-  process.argv.slice(2),
-  process.env,
-  process.platform,
-);
+const codexArg = process.argv.slice(2).find(argument => argument !== "--v1" && argument !== "--v2");
+const codex = resolve(codexArg ?? "/Applications/ChatGPT.app/Contents/Resources/codex");
 if (!existsSync(codex)) throw new Error(`Codex executable is missing: ${codex}`);
 
 const bundled = spawnSync(codex, ["debug", "models", "--bundled"], {
