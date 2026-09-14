@@ -1,9 +1,9 @@
 {
-  "name": "codex-web-gpt-launcher",
-  "version": "5.0.6",
+  "name": "coding-tools-full-harness-desktop",
+  "version": "0.6.0-rc.1",
   "private": true,
-  "description": "Desktop control center for Codex ChatGPT Web",
-  "author": "miuuyy",
+  "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
+  "author": "Coding Tools MCP Contributors",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -38,13 +38,12 @@
   },
   "overrides": {
     "@xmldom/xmldom": "0.8.15",
-    "fast-uri": "3.1.6",
-    "js-yaml": "4.3.2"
+    "fast-uri": "3.1.6"
   },
   "build": {
-    "appId": "dev.codexwebgpt.launcher",
-    "productName": "Codex Web GPT",
-    "artifactName": "codex-web-gpt-${version}-${os}-${arch}.${ext}",
+    "appId": "dev.codingtools.fullharness",
+    "productName": "Coding Tools",
+    "artifactName": "Coding.Tools_${version}_${os}_${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
       "assets/linux-appimage-runner.sh"
@@ -92,7 +91,7 @@
       ]
     },
     "nsis": {
-      "guid": "d1a6026a-6210-588e-9a2b-da3936f94e02",
+      "guid": "3cb2ea96-3319-55b8-95a5-7f180a5f3ed4",
       "oneClick": false,
       "perMachine": false,
       "allowElevation": false,

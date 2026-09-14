@@ -38,8 +38,7 @@
   },
   "overrides": {
     "@xmldom/xmldom": "0.8.15",
-    "fast-uri": "3.1.6",
-    "js-yaml": "4.3.2"
+    "fast-uri": "3.1.6"
   },
   "build": {
     "appId": "dev.codexwebgpt.launcher",
@@ -73,23 +72,16 @@
       "signIgnore": [
         "[/\\\\]Contents[/\\\\]Resources[/\\\\]runtime[/\\\\]runtime[/\\\\]bun$"
       ],
-      "target": [
-        "dmg",
-        "zip"
-      ]
+      "target": ["dmg", "zip"]
     },
     "win": {
       "icon": "assets/icon.ico",
-      "target": [
-        "nsis"
-      ]
+      "target": ["nsis"]
     },
     "linux": {
       "category": "Development",
       "icon": "assets/icon.png",
-      "target": [
-        "AppImage"
-      ]
+      "target": ["AppImage"]
     },
     "nsis": {
       "guid": "d1a6026a-6210-588e-9a2b-da3936f94e02",
