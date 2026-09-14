@@ -5,11 +5,15 @@ on:
     paths:
       - .github/workflows/electron-hono-security.yml
       - aiTemp/electron-security/patch-hono.mjs
+      - aiTemp/electron-codex-smoke/install.py
+      - runtime-web/scripts/codex-smoke-path.ts
       - runtime-web/scripts/no-delete-preload.mjs
+      - runtime-web/scripts/smoke-codex-subagents.ts
       - runtime-web/scripts/temp-root.ts
       - runtime-web/scripts/verify.ts
       - runtime-web/src/cli.ts
       - runtime-web/tests/cli.test.ts
+      - runtime-web/tests/codex-smoke-path.test.ts
       - runtime-web/tests/temp-root.test.ts
       - runtime-web/launcher/tests/packaging-contract.test.cjs
       - desktop-electron/tests/no-delete-preload.test.cjs
@@ -27,6 +31,7 @@ jobs:
     env:
       BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
       CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/upstream-suite
+      PYTHONDONTWRITEBYTECODE: '1'
     defaults:
       run:
         shell: bash
@@ -90,6 +95,18 @@ jobs:
           grep -F 'No vulnerabilities found' aiTemp/evidence/runtime-audit-green.txt
           grep -F 'No vulnerabilities found' aiTemp/evidence/upstream-launcher-audit-green.txt
           grep -F 'No vulnerabilities found' aiTemp/evidence/desktop-audit-green.txt
+      - name: Install the pinned official Codex fixture for local-only subagent verification
+        run: |
+          set -euo pipefail
+          python aiTemp/electron-codex-smoke/install.py \
+            > aiTemp/evidence/codex-path.txt 2> aiTemp/evidence/codex-install.txt
+          codex="$(cat aiTemp/evidence/codex-path.txt)"
+          test -x "$codex"
+          echo "CODEX_SMOKE_BIN=$codex" >> "$GITHUB_ENV"
+          "$codex" --version | tee aiTemp/evidence/codex-version.txt
+          grep -F 'codex-cli 0.154.0' aiTemp/evidence/codex-version.txt
+          grep -F 'PINNED_CODEX_SMOKE rust-v0.154.0 d7e18b2597ae8f242f5f31ee9e90deef48dbc9edd634d9868fb6435d08c07f02' \
+            aiTemp/evidence/codex-install.txt
       - name: Run the complete harness and adapted desktop verification
         run: |
           set -euo pipefail
@@ -98,7 +115,11 @@ jobs:
           TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify-green.txt
           TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
+          OPENAI_API_KEY="local-scripted-responses-only" \
             bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
+          grep -F 'CODEX_SUBAGENT_V1_LIFECYCLE_SMOKE_OK' aiTemp/evidence/subagents.txt
+          grep -F 'CODEX_SUBAGENT_V2_LIFECYCLE_SMOKE_OK' aiTemp/evidence/subagents.txt
+          test -z "$(grep -Ei 'api.openai.com|chatgpt.com|platform.openai.com' aiTemp/evidence/subagents.txt || true)"
           TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests.txt
           TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
