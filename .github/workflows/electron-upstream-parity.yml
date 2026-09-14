@@ -6,6 +6,12 @@ on:
       - .github/workflows/electron-upstream-parity.yml
       - desktop-electron/electron/**
       - desktop-electron/tests/**
+      - desktop-electron/package.json
+      - desktop-electron/bun.lock
+      - runtime-web/package.json
+      - runtime-web/bun.lock
+      - runtime-web/launcher/package.json
+      - runtime-web/launcher/bun.lock
       - runtime-web/scripts/**
       - runtime-web/src/**
       - runtime-web/tests/**
@@ -46,23 +52,24 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite
-          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            preload="$(cygpath -w "$preload")"
-          fi
-          echo "NODE_OPTIONS=--import=$preload" >> "$GITHUB_ENV"
           echo "TMPDIR=$PWD/aiTemp/tmp" >> "$GITHUB_ENV"
           echo "TMP=$PWD/aiTemp/tmp" >> "$GITHUB_ENV"
           echo "TEMP=$PWD/aiTemp/tmp" >> "$GITHUB_ENV"
       - name: Install exact locked dependencies
         run: |
           set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then preload="$(cygpath -w "$preload")"; fi
+          export NODE_OPTIONS="--import=$preload"
           bun install --frozen-lockfile --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
           bun install --frozen-lockfile --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/runtime-launcher-install.txt
           bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
       - name: Run adapted Electron tests and build
         run: |
           set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then preload="$(cygpath -w "$preload")"; fi
+          export NODE_OPTIONS="--import=$preload"
           node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests.txt
           bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
           bun run --cwd desktop-electron build:renderer 2>&1 | tee aiTemp/evidence/desktop-renderer-build.txt
@@ -70,6 +77,9 @@ jobs:
       - name: Run the complete pinned upstream verifier
         run: |
           set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then preload="$(cygpath -w "$preload")"; fi
+          export NODE_OPTIONS="--import=$preload"
           bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify.txt
           grep -F 'All verification steps passed' aiTemp/evidence/runtime-verify.txt || \
             grep -F 'smoke release passed' aiTemp/evidence/runtime-verify.txt || \
@@ -77,6 +87,9 @@ jobs:
       - name: Verify subagent compatibility and exact source pin
         run: |
           set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then preload="$(cygpath -w "$preload")"; fi
+          export NODE_OPTIONS="--import=$preload"
           bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
           node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
           grep -F UPSTREAM_VENDOR_PASS aiTemp/evidence/vendor-verify.txt
@@ -86,7 +99,7 @@ jobs:
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git diff --diff-filter=D --name-only)"
-          find aiTemp/Trash -type f -o -type d | sort > aiTemp/evidence/retained-paths.txt
+          find aiTemp/Trash \( -type f -o -type d \) | sort > aiTemp/evidence/retained-paths.txt
           test -s aiTemp/evidence/retained-paths.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
