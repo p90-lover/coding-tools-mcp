@@ -81,6 +81,9 @@ export async function verifyReleaseAssets({
   for (const name of required) {
     if (!names.includes(name)) fail('REQUIRED_ASSET_MISSING', name);
   }
+  if (names.length !== required.length || names.some((name) => !required.includes(name))) {
+    fail('ASSET_INVENTORY_MISMATCH', JSON.stringify({ expected: [...required].sort(), actual: names }));
+  }
   if (names.some((name) => name.includes('/') || name.includes('\\'))) {
     fail('ASSET_NAME_INVALID', 'asset names must be flat');
   }
@@ -104,6 +107,22 @@ export async function verifyReleaseAssets({
   }
   if (validation.live_account_acceptance !== 'pending_manual') {
     fail('LIVE_ACCOUNT_GATE_DISCLOSURE_MISMATCH', String(validation.live_account_acceptance));
+  }
+  if (validation.source_sha !== sourceSha) {
+    fail('VALIDATION_SOURCE_MISMATCH', String(validation.source_sha));
+  }
+  if (!Number.isSafeInteger(validation.validation_run_id) || validation.validation_run_id < 1) {
+    fail('VALIDATION_RUN_ID_INVALID', String(validation.validation_run_id));
+  }
+  if (validation.validation_workflow !== '.github/workflows/electron-full-harness-ci.yml') {
+    fail('VALIDATION_WORKFLOW_MISMATCH', String(validation.validation_workflow));
+  }
+  if (validation.validation_conclusion !== 'success') {
+    fail('VALIDATION_CONCLUSION_MISMATCH', String(validation.validation_conclusion));
+  }
+  if (provenance.validation_run?.id !== validation.validation_run_id
+      || provenance.validation_run?.workflow !== validation.validation_workflow) {
+    fail('PROVENANCE_VALIDATION_RUN_MISMATCH', JSON.stringify(provenance.validation_run ?? null));
   }
 
   const expectedChecksums = parseChecksums(await fs.readFile(path.join(root, 'SHA256SUMS.txt'), 'utf8'));
