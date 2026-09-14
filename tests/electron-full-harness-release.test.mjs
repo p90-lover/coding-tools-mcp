@@ -78,11 +78,20 @@ test('asset verifier rejects a checksum mismatch before publication', async () =
       version: 'v5.0.6',
       commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
     },
+    validation_run: {
+      id: 321,
+      url: 'https://github.com/p90-lover/coding-tools-mcp/actions/runs/321',
+      workflow: '.github/workflows/electron-full-harness-ci.yml',
+    },
     assets: [],
   }));
   const mismatchValidation = Buffer.from(JSON.stringify({
     automated_gates: 'passed',
     live_account_acceptance: 'pending_manual',
+    source_sha: 'c'.repeat(40),
+    validation_run_id: 321,
+    validation_workflow: '.github/workflows/electron-full-harness-ci.yml',
+    validation_conclusion: 'success',
   }));
   await fs.writeFile(path.join(fixture, 'provenance.json'), mismatchProvenance);
   await fs.writeFile(path.join(fixture, 'validation-evidence.json'), mismatchValidation);
@@ -103,6 +112,48 @@ test('asset verifier rejects a checksum mismatch before publication', async () =
       minInstallerBytes: 1,
     }),
     /ASSET_CHECKSUM_MISMATCH/,
+  );
+});
+
+test('asset verifier rejects any file outside the exact four-asset release inventory', async () => {
+  const { verifyReleaseAssets } = await load('scripts/release/verify-assets.mjs');
+  const sourceSha = 'e'.repeat(40);
+  const fixture = await writeReleaseAssetFixture({
+    name: 'unexpected-asset',
+    sourceSha,
+    extraFiles: new Map([['unexpected.txt', Buffer.from('not part of the approved release')]]),
+  });
+
+  await assert.rejects(
+    verifyReleaseAssets({
+      directory: fixture,
+      tag: 'v0.6.0-rc.1',
+      version: '0.6.0-rc.1',
+      sourceSha,
+      minInstallerBytes: 1,
+    }),
+    /ASSET_INVENTORY_MISMATCH/,
+  );
+});
+
+test('asset verifier binds validation evidence to the exact source and CI workflow', async () => {
+  const { verifyReleaseAssets } = await load('scripts/release/verify-assets.mjs');
+  const sourceSha = 'f'.repeat(40);
+  const fixture = await writeReleaseAssetFixture({
+    name: 'validation-source-mismatch',
+    sourceSha,
+    validationSourceSha: '0'.repeat(40),
+  });
+
+  await assert.rejects(
+    verifyReleaseAssets({
+      directory: fixture,
+      tag: 'v0.6.0-rc.1',
+      version: '0.6.0-rc.1',
+      sourceSha,
+      minInstallerBytes: 1,
+    }),
+    /VALIDATION_SOURCE_MISMATCH/,
   );
 });
 
@@ -151,11 +202,20 @@ test('publisher uploads and reads back every asset before creating the non-force
       version: 'v5.0.6',
       commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
     },
+    validation_run: {
+      id: 456,
+      url: 'https://github.com/p90-lover/coding-tools-mcp/actions/runs/456',
+      workflow: '.github/workflows/electron-full-harness-ci.yml',
+    },
     assets: [{ name: installer, sha256: installerHash, size: installerBytes.length }],
   };
   const validation = {
     automated_gates: 'passed',
     live_account_acceptance: 'pending_manual',
+    source_sha: sourceSha,
+    validation_run_id: 456,
+    validation_workflow: '.github/workflows/electron-full-harness-ci.yml',
+    validation_conclusion: 'success',
   };
   const files = new Map([
     [installer, installerBytes],
@@ -249,3 +309,58 @@ test('publisher uploads and reads back every asset before creating the non-force
   assert.equal(preTagReadbacks.length, files.size, calls);
   assert.ok(tagIndex < publishIndex, calls);
 });
+
+async function writeReleaseAssetFixture({
+  name,
+  sourceSha,
+  validationSourceSha = sourceSha,
+  extraFiles = new Map(),
+}) {
+  const crypto = await import('node:crypto');
+  const fixture = path.join(root, 'aiTemp', `${name}-${process.pid}-${Date.now()}`);
+  await fs.mkdir(fixture, { recursive: true });
+  const installer = 'Coding.Tools_0.6.0-rc.1_windows_x64_setup.exe';
+  const installerBytes = Buffer.from(`fixture-installer-${name}`);
+  const installerHash = crypto.createHash('sha256').update(installerBytes).digest('hex');
+  const provenance = {
+    schema: 1,
+    release_tag: 'v0.6.0-rc.1',
+    version: '0.6.0-rc.1',
+    source_sha: sourceSha,
+    product: { name: 'Coding Tools', app_id: 'dev.codingtools.fullharness' },
+    upstream: {
+      repository: 'miuuyy/codex-chatgpt-web',
+      version: 'v5.0.6',
+      commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+    },
+    validation_run: {
+      id: 123,
+      url: 'https://github.com/p90-lover/coding-tools-mcp/actions/runs/123',
+      workflow: '.github/workflows/electron-full-harness-ci.yml',
+    },
+    assets: [{ name: installer, sha256: installerHash, size: installerBytes.length }],
+  };
+  const validation = {
+    automated_gates: 'passed',
+    live_account_acceptance: 'pending_manual',
+    source_sha: validationSourceSha,
+    validation_run_id: 123,
+    validation_workflow: '.github/workflows/electron-full-harness-ci.yml',
+    validation_conclusion: 'success',
+  };
+  const files = new Map([
+    [installer, installerBytes],
+    ['provenance.json', Buffer.from(`${JSON.stringify(provenance, null, 2)}\n`)],
+    ['validation-evidence.json', Buffer.from(`${JSON.stringify(validation, null, 2)}\n`)],
+    ...extraFiles,
+  ]);
+  const checksumText = [...files]
+    .map(([fileName, bytes]) => `${crypto.createHash('sha256').update(bytes).digest('hex')}  ${fileName}`)
+    .sort()
+    .join('\n') + '\n';
+  files.set('SHA256SUMS.txt', Buffer.from(checksumText));
+  for (const [fileName, bytes] of files) {
+    await fs.writeFile(path.join(fixture, fileName), bytes);
+  }
+  return fixture;
+}
