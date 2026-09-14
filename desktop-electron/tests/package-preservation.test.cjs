@@ -39,6 +39,10 @@ test("packaging and smoke scripts use repository aiTemp preservation without del
 
   assert.match(packager, /replaceDirectory/, "artifact publication must preserve the prior directory");
   assert.doesNotMatch(packager, /process\.exit\s*\(/, "builder failures must unwind through preservation");
+  const unregisterIndex = smoke.indexOf('["-u", macAppBundle]');
+  const preserveIndex = smoke.indexOf('preservation.preservePath(scratch, "smoke-evidence")');
+  assert.ok(unregisterIndex >= 0 && preserveIndex > unregisterIndex,
+    "macOS smoke must unregister its staged app before preserving the evidence directory");
 });
 
 test("preservation sessions keep work and Trash inside repository aiTemp", () => {
