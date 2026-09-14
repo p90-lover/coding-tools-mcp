@@ -1,6 +1,6 @@
-const CURRENT_CONNECTOR_NAME = "Codex Native2";
+const CURRENT_CONNECTOR_NAME = "Coding Tools Native2";
 const DEV_CONNECTOR_NAME = `${CURRENT_CONNECTOR_NAME} DEV`;
-const LEGACY_CONNECTOR_NAMES = Object.freeze(["Codex Native"]);
+const LEGACY_CONNECTOR_NAMES = Object.freeze(["Codex Native", "Codex Native2"]);
 
 function validateConnectorName(value) {
   if (typeof value !== "string" || !value.trim() || value.length > 80) {
@@ -31,9 +31,9 @@ function requireCurrentRuntimeConnectorName(value) {
   const configured = validateConnectorName(value);
   if (isLegacyConnectorName(configured)) {
     throw new Error(
-      `The local runtime still targets legacy ChatGPT connector ${JSON.stringify(configured)}. Reconnect the harness`
-      + ` so it targets ${JSON.stringify(CURRENT_CONNECTOR_NAME)}, then create that connector as a new ChatGPT plugin;`
-      + ` do not rename or refresh the legacy connector.`,
+      `The local runtime still targets an incompatible legacy ChatGPT connector ${JSON.stringify(configured)}. Reconnect the harness`
+      + ` so it targets ${JSON.stringify(CURRENT_CONNECTOR_NAME)}, then create that connector as a new ChatGPT app;`
+      + ` do not rename, refresh, or delete the legacy connector.`,
     );
   }
   return configured;
