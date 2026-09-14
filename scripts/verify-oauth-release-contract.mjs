@@ -37,7 +37,7 @@ export function auditOAuthReleaseContract({
     || /\b(?:bun|npm|pnpm|yarn)\b[^\n]*\bdesktop-electron\b[^\n]*\bpackage(?::(?:win|mac|linux))?\b/i.test(workflow);
   const buildsTauri = /\btauri\b[^\n]*\bbuild\b/i.test(workflow);
   const publishesElectron =
-    /desktop-electron[\\/]+release/i.test(workflow)
+    /desktop-electron[\\/]+(?:artifacts|release)(?:[\\/]|\b)/i.test(workflow)
     || /\bCoding\.Tools_\$\{?version\}?/i.test(workflow);
   const publishesTauri =
     /src-tauri[\\/]+target[\\/]+release[\\/]+bundle/i.test(workflow)
@@ -81,7 +81,7 @@ export function auditOAuthReleaseContract({
   if (!publishesElectron && publishesTauri) {
     errors.push({
       code: 'RELEASE_ARTIFACT_WRONG_PRODUCT',
-      message: 'Release workflow publishes Tauri bundle artifacts instead of desktop-electron/release artifacts.',
+      message: 'Release workflow publishes Tauri bundle artifacts instead of packaged desktop-electron artifacts.',
     });
   }
 
