@@ -1,19 +1,26 @@
-import { mkdirSync, mkdtempSync, renameSync } from "node:fs";
-import { basename, join, parse, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, renameSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import { resolveTemporaryRoot } from "./temp-root";
 
 const root = resolve(import.meta.dir, "..");
 const tempRoot = join(root, "aiTemp", "verify");
 const retainedRoot = join(root, "aiTemp", "Trash", "verify");
 const noDeletePreload = join(root, "scripts", "no-delete-preload.mjs");
-const shortTempRoot = resolve(
-  process.env.CODING_TOOLS_SHORT_TMP?.trim() || join(root, "aiTemp", "tmp"),
+const configuredShortTempRoot = process.env.CODING_TOOLS_SHORT_TMP?.trim();
+const requestedShortTempRoot = resolve(
+  configuredShortTempRoot || join(root, "aiTemp", "tmp"),
 );
-const shortTempParts = shortTempRoot.slice(parse(shortTempRoot).root.length).split(sep);
-if (!shortTempParts.includes("aiTemp")) {
-  throw new Error(`Verification temporary path must stay under aiTemp: ${shortTempRoot}`);
-}
 mkdirSync(tempRoot, { recursive: true });
-mkdirSync(shortTempRoot, { recursive: true });
+if (configuredShortTempRoot) {
+  if (!existsSync(requestedShortTempRoot)) {
+    throw new Error(
+      `Configured verification temporary alias does not exist: ${requestedShortTempRoot}`,
+    );
+  }
+} else {
+  mkdirSync(requestedShortTempRoot, { recursive: true });
+}
+const { requested: shortTempRoot } = resolveTemporaryRoot(requestedShortTempRoot);
 const scratch = mkdtempSync(join(tempRoot, "run-"));
 const runtimeBundle = join(scratch, "runtime");
 
