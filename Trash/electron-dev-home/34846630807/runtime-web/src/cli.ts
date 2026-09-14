@@ -550,7 +550,7 @@ async function main(): Promise<void> {
   }
   const command = args.shift() ?? "help";
   if (command === "dev" && home) {
-    throw new Error("--home does not apply to DEV mode; use CODING_TOOLS_DEV_HOME for an explicit isolated DEV profile");
+    throw new Error("--home does not apply to DEV mode; use CODEX_WEB_GPT_DEV_HOME for an explicit isolated DEV profile");
   }
   if (command === "help") stdout.write(HELP);
   else if (command === "setup") await setupCommand(args);

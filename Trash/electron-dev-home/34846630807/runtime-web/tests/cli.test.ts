@@ -33,7 +33,7 @@ test("production and DEV setup reject the removed connector-name option before c
       ...process.env,
       CODEX_HOME: join(root, "codex"),
       CODEX_CHATGPT_WEB_HOME: join(root, "app"),
-      CODING_TOOLS_DEV_HOME: join(root, "dev"),
+      CODEX_CHATGPT_WEB_DEV_HOME: join(root, "dev"),
     };
     for (const command of [["setup"], ["dev", "setup"]]) {
       const result = await runCli([
@@ -180,7 +180,7 @@ test("DEV chat list works without starting launcher, broker, or Responses servic
   try {
     const result = await runCli(["dev", "list"], {
       ...process.env,
-      CODING_TOOLS_DEV_HOME: join(root, "dev"),
+      CODEX_WEB_GPT_DEV_HOME: join(root, "dev"),
       CODEX_CHATGPT_WEB_HOME: join(root, "app"),
       CODEX_HOME: join(root, "codex"),
     });
@@ -196,7 +196,7 @@ test("DEV help exposes separate history-fill and live composer-fill operations",
   try {
     const result = await runCli(["dev", "help"], {
       ...process.env,
-      CODING_TOOLS_DEV_HOME: join(root, "dev"),
+      CODEX_WEB_GPT_DEV_HOME: join(root, "dev"),
       CODEX_CHATGPT_WEB_HOME: join(root, "app"),
       CODEX_HOME: join(root, "codex"),
     });
@@ -215,7 +215,7 @@ test("DEV status reports the isolated home without creating a Codex route", asyn
   try {
     const result = await runCli(["dev", "status", "--json"], {
       ...process.env,
-      CODING_TOOLS_DEV_HOME: devHome,
+      CODEX_WEB_GPT_DEV_HOME: devHome,
       CODEX_CHATGPT_WEB_HOME: join(root, "production"),
       CODEX_HOME: join(root, "production-codex"),
     });
@@ -242,7 +242,7 @@ test("DEV chat explains the isolated launcher setup when its profile is empty", 
   try {
     const result = await runCli(["dev", "chat", "smoke", "hello"], {
       ...process.env,
-      CODING_TOOLS_DEV_HOME: join(root, "dev"),
+      CODEX_WEB_GPT_DEV_HOME: join(root, "dev"),
       CODEX_CHATGPT_WEB_HOME: join(root, "production"),
     });
     expect(result.exitCode).toBe(1);
@@ -258,7 +258,7 @@ test("generic --home cannot collapse DEV mode into another runtime home", async 
   try {
     const result = await runCli(["--home", join(root, "shared"), "dev", "status"], {
       ...process.env,
-      CODING_TOOLS_DEV_HOME: join(root, "dev"),
+      CODEX_WEB_GPT_DEV_HOME: join(root, "dev"),
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("--home does not apply to DEV mode");
@@ -323,7 +323,7 @@ test("DEV browser-only setup persists only the isolated harness profile", async 
       "--acknowledge-unofficial",
     ], {
       ...process.env,
-      CODING_TOOLS_DEV_HOME: devHome,
+      CODEX_WEB_GPT_DEV_HOME: devHome,
       CODEX_CHATGPT_WEB_HOME: join(root, "production"),
       CODEX_HOME: join(root, "production-codex"),
     });
@@ -376,7 +376,7 @@ test("DEV setup accepts explicit browser-interaction flags and preserves manual 
     })}\n`, { mode: 0o600 });
     const env = {
       ...process.env,
-      CODING_TOOLS_DEV_HOME: devHome,
+      CODEX_WEB_GPT_DEV_HOME: devHome,
       CODEX_CHATGPT_WEB_HOME: join(root, "production"),
       CODEX_HOME: join(root, "production-codex"),
     };
