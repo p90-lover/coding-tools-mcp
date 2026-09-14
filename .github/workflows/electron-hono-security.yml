@@ -5,6 +5,8 @@ on:
     paths:
       - .github/workflows/electron-hono-security.yml
       - aiTemp/electron-security/patch-hono.mjs
+      - runtime-web/scripts/no-delete-preload.mjs
+      - desktop-electron/tests/no-delete-preload.test.cjs
   workflow_dispatch:
 permissions: {contents: read}
 concurrency:
