@@ -1,11 +1,19 @@
 import { mkdirSync, mkdtempSync, renameSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, parse, resolve, sep } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const tempRoot = join(root, "aiTemp", "verify");
 const retainedRoot = join(root, "aiTemp", "Trash", "verify");
 const noDeletePreload = join(root, "scripts", "no-delete-preload.mjs");
+const shortTempRoot = resolve(
+  process.env.CODING_TOOLS_SHORT_TMP?.trim() || join(root, "aiTemp", "tmp"),
+);
+const shortTempParts = shortTempRoot.slice(parse(shortTempRoot).root.length).split(sep);
+if (!shortTempParts.includes("aiTemp")) {
+  throw new Error(`Verification temporary path must stay under aiTemp: ${shortTempRoot}`);
+}
 mkdirSync(tempRoot, { recursive: true });
+mkdirSync(shortTempRoot, { recursive: true });
 const scratch = mkdtempSync(join(tempRoot, "run-"));
 const runtimeBundle = join(scratch, "runtime");
 
@@ -19,9 +27,9 @@ function bunCommand(args: string[]): string[] {
 async function run(args: string[]): Promise<void> {
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
-    TMPDIR: join(root, "aiTemp", "tmp"),
-    TMP: join(root, "aiTemp", "tmp"),
-    TEMP: join(root, "aiTemp", "tmp"),
+    TMPDIR: shortTempRoot,
+    TMP: shortTempRoot,
+    TEMP: shortTempRoot,
     CODING_TOOLS_RETENTION_ROOT: join(root, "aiTemp", "Trash", "upstream-suite"),
   };
   // The parent workflow may use NODE_OPTIONS to protect its own scratch work.
@@ -39,7 +47,6 @@ async function run(args: string[]): Promise<void> {
   if (exitCode !== 0) throw new Error(`Verification command failed (${exitCode}): bun ${args.join(" ")}`);
 }
 
-mkdirSync(join(root, "aiTemp", "tmp"), { recursive: true });
 try {
   await run(["run", "check-version"]);
   await run(["run", "audit"]);
