@@ -26,13 +26,16 @@ function loadHelper() {
 }
 
 test("packaging and smoke scripts use repository aiTemp preservation without deletion", () => {
+  const helper = fs.readFileSync(helperPath, "utf8");
   const packager = fs.readFileSync(packagePath, "utf8");
   const smoke = fs.readFileSync(smokePath, "utf8");
 
-  for (const [name, source] of [["package", packager], ["smoke", smoke]]) {
+  for (const [name, source] of [["preservation helper", helper], ["package", packager], ["smoke", smoke]]) {
     assert.doesNotMatch(source, /require\(["']node:os["']\)/, `${name} must not use node:os temp roots`);
     assert.doesNotMatch(source, /os\.tmpdir\s*\(/, `${name} must not use the system temp directory`);
     assert.doesNotMatch(source, /fs\.(?:rm|rmSync|unlink|unlinkSync)\s*\(/, `${name} must not delete files`);
+  }
+  for (const [name, source] of [["package", packager], ["smoke", smoke]]) {
     assert.match(source, /createPreservationSession/, `${name} must use the preservation session`);
     assert.match(source, /preservePath/, `${name} must preserve completed or failed scratch state`);
   }
