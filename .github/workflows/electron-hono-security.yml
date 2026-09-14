@@ -1,0 +1,85 @@
+name: Patch integrated Hono security resolution
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-hono-security.yml
+      - aiTemp/electron-security/patch-hono.mjs
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-hono-security-060rc1
+  cancel-in-progress: false
+jobs:
+  patch:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions: {contents: write, actions: read}
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/upstream-suite
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Require the current audit failure and all three advisories
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite
+          gh run download 34827026474 --repo "$GITHUB_REPOSITORY" \
+            --name electron-upstream-parity-ubuntu-24.04-34827026474 --dir aiTemp/red
+          cp aiTemp/red/runtime-verify.txt aiTemp/evidence/runtime-audit-red.txt
+          grep -F 'hono@4.12.34' aiTemp/evidence/runtime-audit-red.txt
+          grep -F 'GHSA-gqvv-2mrq-wpjv' aiTemp/evidence/runtime-audit-red.txt
+          grep -F 'GHSA-g6gw-c38x-mqfc' aiTemp/evidence/runtime-audit-red.txt
+          grep -F 'GHSA-crvj-82cr-hjcx' aiTemp/evidence/runtime-audit-red.txt
+      - name: Retain the old package and lock then apply the minimum patched override
+        run: node aiTemp/electron-security/patch-hono.mjs 2>&1 | tee aiTemp/evidence/patch.txt
+      - name: Resolve and verify the integrated runtime
+        run: |
+          set -euo pipefail
+          bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/install.txt
+          bun audit --cwd runtime-web 2>&1 | tee aiTemp/evidence/audit-green.txt
+          grep -F '0 vulnerabilities' aiTemp/evidence/audit-green.txt
+          bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify-green.txt
+          bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
+          node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
+          grep -F UPSTREAM_VENDOR_PASS aiTemp/evidence/vendor-verify.txt
+      - name: Record only the audited integrated resolution
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          git add -- runtime-web/package.json runtime-web/bun.lock Trash/electron-security
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: resolve integrated Hono advisories without changing the pinned source'
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          git rev-parse HEAD > aiTemp/evidence/source.commit
+          git diff --stat "$GITHUB_SHA" HEAD > aiTemp/evidence/change-stat.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-hono-security-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
