@@ -101,6 +101,11 @@ pub fn authorization_server_metadata(base_url: &str, client_secret: Option<&str>
         "token_endpoint": format!("{base}/oauth/token"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
+        // OpenAI custom apps inspect authorization-server metadata before
+        // requesting durable access. Advertise offline_access here, not in
+        // protected-resource metadata, because it controls refresh issuance
+        // rather than access to the MCP resource itself.
+        "scopes_supported": ["mcp", "offline_access"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": methods,
     })
@@ -140,6 +145,7 @@ mod tests {
             meta["grant_types_supported"],
             json!(["authorization_code", "refresh_token"])
         );
+        assert_eq!(meta["scopes_supported"], json!(["mcp", "offline_access"]));
         let meta = authorization_server_metadata("https://example.com", Some("secret"));
         assert_eq!(
             meta["token_endpoint_auth_methods_supported"],
@@ -154,6 +160,7 @@ mod tests {
             meta["authorization_servers"],
             json!(["https://example.com"])
         );
+        assert!(meta.get("scopes_supported").is_none());
     }
 
     #[test]
