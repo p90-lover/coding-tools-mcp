@@ -1,0 +1,5 @@
+branch reservation: subagent/headless-rust-service-0.6.0-20260914
+base: 46317ee8940ab4ddb9702d85461eb6b32055b8b9
+scope: Task 5 headless lifecycle/control API contracts and implementation only
+requires before implementation: merge verified Task 4 reusable-core facade
+protected: Task 18 release lane; OAuth connector refresh lanes; Electron browser/Responses parity files; existing Tauri UI
