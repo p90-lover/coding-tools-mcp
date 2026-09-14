@@ -1,4 +1,4 @@
-name: Patch integrated Hono security resolution
+name: Patch integrated JavaScript security resolutions
 on:
   push:
     branches: [feature/electron-full-codex-harness-0.6.0]
@@ -8,13 +8,13 @@ on:
   workflow_dispatch:
 permissions: {contents: read}
 concurrency:
-  group: electron-hono-security-060rc1
+  group: electron-js-security-060rc1
   cancel-in-progress: false
 jobs:
   patch:
     if: github.actor == github.repository_owner
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     permissions: {contents: write, actions: read}
     env:
       BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
@@ -35,42 +35,67 @@ jobs:
         with: {node-version: '22'}
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with: {bun-version: '1.4.0'}
-      - name: Require the current audit failure and all three advisories
+      - name: Require the current Hono and js-yaml audit failures
         env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite
           gh run download 34827026474 --repo "$GITHUB_REPOSITORY" \
-            --name electron-upstream-parity-ubuntu-24.04-34827026474 --dir aiTemp/red
-          cp aiTemp/red/runtime-verify.txt aiTemp/evidence/runtime-audit-red.txt
+            --name electron-upstream-parity-ubuntu-24.04-34827026474 --dir aiTemp/hono-red
+          cp aiTemp/hono-red/runtime-verify.txt aiTemp/evidence/runtime-audit-red.txt
           grep -F 'hono@4.12.34' aiTemp/evidence/runtime-audit-red.txt
           grep -F 'GHSA-gqvv-2mrq-wpjv' aiTemp/evidence/runtime-audit-red.txt
           grep -F 'GHSA-g6gw-c38x-mqfc' aiTemp/evidence/runtime-audit-red.txt
           grep -F 'GHSA-crvj-82cr-hjcx' aiTemp/evidence/runtime-audit-red.txt
-      - name: Retain the old package and lock then apply the minimum patched override
+          gh run download 34827370581 --repo "$GITHUB_REPOSITORY" \
+            --name electron-hono-security-34827370581 --dir aiTemp/js-yaml-red
+          cp aiTemp/js-yaml-red/runtime-verify-green.txt aiTemp/evidence/launcher-audit-red.txt
+          grep -F 'js-yaml@4.3.1' aiTemp/evidence/launcher-audit-red.txt
+          grep -F 'GHSA-2883-xcg3-v3hh' aiTemp/evidence/launcher-audit-red.txt
+      - name: Retain all package and lock inputs then apply minimum patched resolutions
         run: node aiTemp/electron-security/patch-hono.mjs 2>&1 | tee aiTemp/evidence/patch.txt
-      - name: Resolve and verify the integrated runtime
+      - name: Resolve every integrated dependency tree
         run: |
           set -euo pipefail
-          bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/install.txt
-          bun audit --cwd runtime-web 2>&1 | tee aiTemp/evidence/audit-green.txt
-          grep -F 'No vulnerabilities found' aiTemp/evidence/audit-green.txt
+          bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
+          bun install --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/upstream-launcher-install.txt
+          bun install --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
+      - name: Require clean audits for runtime and both launcher trees
+        run: |
+          set -euo pipefail
+          bun audit --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-audit-green.txt
+          bun audit --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/upstream-launcher-audit-green.txt
+          bun audit --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-audit-green.txt
+          grep -F 'No vulnerabilities found' aiTemp/evidence/runtime-audit-green.txt
+          grep -F 'No vulnerabilities found' aiTemp/evidence/upstream-launcher-audit-green.txt
+          grep -F 'No vulnerabilities found' aiTemp/evidence/desktop-audit-green.txt
+      - name: Run the complete harness and adapted desktop verification
+        run: |
+          set -euo pipefail
           bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify-green.txt
           bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
+          node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests.txt
+          bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
+          bun run --cwd desktop-electron build:renderer 2>&1 | tee aiTemp/evidence/desktop-build.txt
+          grep -F '# fail 0' aiTemp/evidence/desktop-tests.txt
           node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
           grep -F UPSTREAM_VENDOR_PASS aiTemp/evidence/vendor-verify.txt
-      - name: Record only the audited integrated resolution
+      - name: Record only the audited integrated resolutions
         env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
           test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
-          git add -- runtime-web/package.json runtime-web/bun.lock Trash/electron-security
+          git add -- \
+            runtime-web/package.json runtime-web/bun.lock \
+            runtime-web/launcher/package.json runtime-web/launcher/bun.lock \
+            desktop-electron/package.json desktop-electron/bun.lock \
+            Trash/electron-security
           git diff --cached --check
           test -z "$(git diff --cached --diff-filter=D --name-only)"
           git config user.name 'p90-lover'
           git config user.email '146848721+p90-lover@users.noreply.github.com'
           if ! git diff --cached --quiet; then
-            git commit -m 'fix: resolve integrated Hono advisories without changing the pinned source'
+            git commit -m 'fix: resolve integrated JavaScript advisories without changing pinned source'
             gh auth setup-git
             git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
           fi
@@ -79,7 +104,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: electron-hono-security-${{ github.run_id }}
+          name: electron-js-security-${{ github.run_id }}
           path: aiTemp/source/aiTemp/evidence/
           if-no-files-found: error
           retention-days: 14
