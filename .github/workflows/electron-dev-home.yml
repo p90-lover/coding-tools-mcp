@@ -1,0 +1,84 @@
+name: Verify isolated Coding Tools DEV home
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-dev-home.yml
+      - aiTemp/electron-dev-home/repair.py
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-dev-home-060rc1
+  cancel-in-progress: false
+jobs:
+  dev_home:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    permissions: {contents: write}
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/upstream-suite
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Retain the failing contract and apply the scoped adaptation
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite
+          grep -n 'CODEX_WEB_GPT_DEV_HOME\|CODEX_CHATGPT_WEB_DEV_HOME' runtime-web/tests/cli.test.ts \
+            | tee aiTemp/evidence/dev-home-red.txt
+          test -s aiTemp/evidence/dev-home-red.txt
+          python aiTemp/electron-dev-home/repair.py 2>&1 | tee aiTemp/evidence/repair.txt
+      - name: Install pinned dependencies without destructive cleanup
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          NODE_OPTIONS="--import=$preload" \
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/install.txt
+      - name: Run CLI and profile isolation contracts
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun test --cwd runtime-web tests/cli.test.ts tests/dev-profile.test.ts 2>&1 \
+            | tee aiTemp/evidence/dev-home-green.txt
+          grep -F '0 fail' aiTemp/evidence/dev-home-green.txt
+          test -z "$(grep -n 'CODEX_WEB_GPT_DEV_HOME:\|CODEX_CHATGPT_WEB_DEV_HOME:' runtime-web/tests/cli.test.ts || true)"
+          grep -F 'CODING_TOOLS_DEV_HOME' runtime-web/src/cli.ts
+      - name: Commit only the verified rebranding repair to the feature branch
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: align isolated DEV CLI fixtures with Coding Tools home overrides'
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          git rev-parse HEAD > aiTemp/evidence/source.commit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-dev-home-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
