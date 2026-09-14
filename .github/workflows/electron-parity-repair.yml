@@ -62,9 +62,10 @@ jobs:
             runtime-web/aiTemp/tmp desktop-electron/aiTemp/tmp
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           export NODE_OPTIONS="--import=$preload"
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          absolute_tmp="$PWD/aiTemp/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --frozen-lockfile --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
           TMPDIR=aiTemp/tmp TMP=aiTemp/tmp TEMP=aiTemp/tmp \
             node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests-green.txt
