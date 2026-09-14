@@ -37,14 +37,18 @@ jobs:
         with: {node-version: '22'}
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with: {bun-version: '1.4.0'}
-      - name: Require the retained Hono and js-yaml audit failures
+      - name: Require retained audit failures and prepare a short broker alias
         env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
-          mkdir -p \
-            aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite \
-            runtime-web/aiTemp/tmp runtime-web/launcher/aiTemp/tmp \
-            desktop-electron/aiTemp/tmp
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/upstream-suite
+          short_tmp="/tmp/ctm-${GITHUB_RUN_ID}-security"
+          test ! -e "$short_tmp" && test ! -L "$short_tmp"
+          ln -s "$PWD/aiTemp/tmp" "$short_tmp"
+          test "$(realpath "$short_tmp")" = "$PWD/aiTemp/tmp"
+          test "${#short_tmp}" -lt 60
+          echo "CODING_TOOLS_SHORT_TMP=$short_tmp" >> "$GITHUB_ENV"
+          printf 'short_tmp=%s\nbacking=%s\n' "$short_tmp" "$PWD/aiTemp/tmp" > aiTemp/evidence/temp-paths.txt
           gh run download 34827026474 --repo "$GITHUB_REPOSITORY" \
             --name electron-upstream-parity-ubuntu-24.04-34827026474 --dir aiTemp/hono-red
           cp aiTemp/hono-red/runtime-verify.txt aiTemp/evidence/runtime-audit-red.txt
@@ -64,8 +68,6 @@ jobs:
           set -euo pipefail
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           export NODE_OPTIONS="--import=$preload"
-          # Dependency installers may chdir into node_modules. Give them one
-          # existing absolute aiTemp directory; no Unix broker is created here.
           absolute_tmp="$PWD/aiTemp/tmp"
           TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
@@ -87,20 +89,18 @@ jobs:
           set -euo pipefail
           preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
           export NODE_OPTIONS="--import=$preload"
-          # Runtime tests keep TMPDIR relative so Unix-domain socket names stay
-          # below 103 bytes; the backing directories are still under aiTemp.
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd runtime-web verify 2>&1 | tee aiTemp/evidence/runtime-verify-green.txt
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents.txt
-          TMPDIR=aiTemp/tmp TMP=aiTemp/tmp TEMP=aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests.txt
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
-          TMPDIR=../aiTemp/tmp TMP=../aiTemp/tmp TEMP=../aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             bun run --cwd desktop-electron build:renderer 2>&1 | tee aiTemp/evidence/desktop-build.txt
           grep -F '# fail 0' aiTemp/evidence/desktop-tests.txt
-          TMPDIR=aiTemp/tmp TMP=aiTemp/tmp TEMP=aiTemp/tmp \
+          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
             node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
           grep -F UPSTREAM_VENDOR_PASS aiTemp/evidence/vendor-verify.txt
       - name: Record only the audited integrated resolutions
