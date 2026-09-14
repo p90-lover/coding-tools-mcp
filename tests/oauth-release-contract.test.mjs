@@ -48,7 +48,7 @@ test('rejects a Tauri-only release path for the Electron OAuth product', () => {
   assert.equal(result.facts.shippedAppId, 'com.codingtools.mcp.desktop');
 });
 
-test('accepts an aligned Electron release contract through the CLI', () => {
+test('accepts the actual Electron artifacts directory through the CLI', () => {
   const testDir = path.dirname(fileURLToPath(import.meta.url));
   const fixture = path.join(
     path.dirname(testDir),
@@ -87,7 +87,7 @@ test('accepts an aligned Electron release contract through the CLI', () => {
         run: bun run package:win
       - uses: actions/upload-artifact@v4
         with:
-          path: desktop-electron/release/*.exe
+          path: desktop-electron/artifacts/*.exe
     `,
   );
 
@@ -112,6 +112,7 @@ test('accepts an aligned Electron release contract through the CLI', () => {
   assert.equal(result.ok, true);
   assert.equal(result.facts.releaseTarget, 'electron');
   assert.equal(result.facts.shippedAppId, 'dev.codingtools.fullharness');
+  assert.equal(result.facts.publishesElectron, true);
 });
 
 test('rejects an Electron package with the wrong OAuth app identity', () => {
@@ -136,7 +137,7 @@ test('rejects an Electron package with the wrong OAuth app identity', () => {
         run: bun run package:win
       - uses: actions/upload-artifact@v4
         with:
-          path: desktop-electron/release/*.exe
+          path: desktop-electron/artifacts/*.exe
     `,
   });
 
