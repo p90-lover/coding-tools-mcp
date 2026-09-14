@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import fs, { syncBuiltinESMExports } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
 
 const original = Object.freeze({
