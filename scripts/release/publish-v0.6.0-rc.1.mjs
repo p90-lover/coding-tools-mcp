@@ -64,7 +64,7 @@ async function findRelease(fetchImpl, token, repository, tag) {
   return matches[0] ?? null;
 }
 
-async function createDraftRelease(fetchImpl, token, repository, { tag, sourceSha, notes }) {
+async function createDraftRelease(fetchImpl, token, repository, { tag, notes }) {
   return requestJson(
     fetchImpl,
     token,
@@ -74,7 +74,6 @@ async function createDraftRelease(fetchImpl, token, repository, { tag, sourceSha
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         tag_name: tag,
-        target_commitish: sourceSha,
         name: RELEASE_NAME,
         body: notes,
         draft: true,
@@ -124,19 +123,12 @@ async function localAssets(directory) {
   return assets;
 }
 
-function validateReleaseRecord(release, { tag, sourceSha, requireDraft = null }) {
+function validateReleaseRecord(release, { tag, requireDraft = null }) {
   assertValue(release?.tag_name === tag, 'RELEASE_TAG_MISMATCH', String(release?.tag_name));
   assertValue(release?.name === RELEASE_NAME, 'RELEASE_NAME_MISMATCH', String(release?.name));
   assertValue(release?.prerelease === true, 'RELEASE_NOT_PRERELEASE', String(release?.prerelease));
   if (requireDraft !== null) {
     assertValue(release?.draft === requireDraft, 'RELEASE_DRAFT_STATE_MISMATCH', String(release?.draft));
-  }
-  if (release?.draft === true && release?.target_commitish) {
-    assertValue(
-      String(release.target_commitish).toLowerCase() === sourceSha.toLowerCase(),
-      'RELEASE_TARGET_MISMATCH',
-      String(release.target_commitish),
-    );
   }
 }
 
@@ -270,26 +262,32 @@ export async function publishVerifiedPrerelease({
 
   let release = await findRelease(fetchImpl, token, repository, tag);
   const reused = Boolean(release);
+  const initialTagState = await ensureTag(fetchImpl, token, repository, tag, sourceSha);
   if (!release) {
-    release = await createDraftRelease(fetchImpl, token, repository, { tag, sourceSha, notes });
+    release = await createDraftRelease(fetchImpl, token, repository, { tag, notes });
   }
-  validateReleaseRecord(release, { tag, sourceSha });
+  validateReleaseRecord(release, { tag });
 
   if (release.draft === false) {
     await verifyRemoteAssets(fetchImpl, token, repository, release, assets);
-    const tagState = await ensureTag(fetchImpl, token, repository, tag, sourceSha);
+    await ensureTag(fetchImpl, token, repository, tag, sourceSha);
     assertValue(Boolean(release.published_at), 'PUBLISHED_AT_MISSING', tag);
-    return { published: true, reused: true, releaseId: release.id, tagCreated: tagState.created };
+    return {
+      published: true,
+      reused: true,
+      releaseId: release.id,
+      tagCreated: initialTagState.created,
+    };
   }
 
   await uploadMissingAssets(fetchImpl, token, release, assets);
   release = await getRelease(fetchImpl, token, repository, release.id);
-  validateReleaseRecord(release, { tag, sourceSha, requireDraft: true });
+  validateReleaseRecord(release, { tag, requireDraft: true });
   await verifyRemoteAssets(fetchImpl, token, repository, release, assets);
 
-  const tagState = await ensureTag(fetchImpl, token, repository, tag, sourceSha);
+  await ensureTag(fetchImpl, token, repository, tag, sourceSha);
   const published = await publishDraft(fetchImpl, token, repository, release, notes);
-  validateReleaseRecord(published, { tag, sourceSha, requireDraft: false });
+  validateReleaseRecord(published, { tag, requireDraft: false });
   assertValue(Boolean(published.published_at), 'PUBLISHED_AT_MISSING', tag);
 
   const byTag = await requestJson(
@@ -299,14 +297,15 @@ export async function publishVerifiedPrerelease({
     {},
     'READBACK_RELEASE_BY_TAG',
   );
-  validateReleaseRecord(byTag, { tag, sourceSha, requireDraft: false });
+  validateReleaseRecord(byTag, { tag, requireDraft: false });
   await verifyRemoteAssets(fetchImpl, token, repository, byTag, assets);
+  await ensureTag(fetchImpl, token, repository, tag, sourceSha);
 
   return {
     published: true,
     reused,
     releaseId: byTag.id,
-    tagCreated: tagState.created,
+    tagCreated: initialTagState.created,
     assetNames: assets.map((asset) => asset.name),
   };
 }
