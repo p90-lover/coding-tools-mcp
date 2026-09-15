@@ -17,6 +17,7 @@ on:
       - "runtime-web/src/native-passthrough.ts"
       - "runtime-web/src/router-web-ingress.ts"
       - "runtime-web/src/server.ts"
+      - "runtime-web/tests/browser-personalization-latency.test.ts"
       - "runtime-web/tests/browser-connector-latency.test.ts"
       - "runtime-web/tests/browser-effort-latency.test.ts"
       - "runtime-web/tests/browser-send-latency.test.ts"
@@ -39,6 +40,7 @@ on:
       - "runtime-web/src/native-passthrough.ts"
       - "runtime-web/src/router-web-ingress.ts"
       - "runtime-web/src/server.ts"
+      - "runtime-web/tests/browser-personalization-latency.test.ts"
       - "runtime-web/tests/browser-connector-latency.test.ts"
       - "runtime-web/tests/browser-effort-latency.test.ts"
       - "runtime-web/tests/browser-send-latency.test.ts"
@@ -72,6 +74,6 @@ jobs:
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
       - name: Run focused goal and request-path regressions
-        run: bun test tests/browser-connector-latency.test.ts tests/browser-effort-latency.test.ts tests/browser-send-latency.test.ts tests/chatgpt-web-goal.test.ts tests/request-body-fast-path.test.ts tests/router-web-ingress.test.ts
+        run: bun test tests/browser-personalization-latency.test.ts tests/browser-connector-latency.test.ts tests/browser-effort-latency.test.ts tests/browser-send-latency.test.ts tests/chatgpt-web-goal.test.ts tests/request-body-fast-path.test.ts tests/router-web-ingress.test.ts
       - name: Typecheck Runtime Web
         run: bun run typecheck
