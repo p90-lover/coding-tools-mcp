@@ -23,6 +23,16 @@ replacements = [
         "unused oneshot import",
     ),
     (
+        "fn restrict_file(path: &Path) -> Result<(), String> {",
+        "fn restrict_file(_path: &Path) -> Result<(), String> {",
+        "platform-neutral restricted-file argument",
+    ),
+    (
+        "fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(text_error)?;",
+        "fs::set_permissions(_path, fs::Permissions::from_mode(0o600)).map_err(text_error)?;",
+        "Unix restricted-file argument use",
+    ),
+    (
         "        let join = tokio::spawn(async move {\n            let app = router(state);",
         "        let service_shutdown_tx = shutdown_tx.clone();\n        let join = tokio::spawn(async move {\n            let app = router(state);",
         "shutdown sender ownership",
@@ -103,5 +113,5 @@ if removed:
     raise RuntimeError(f"deletions are forbidden: {removed}")
 print(
     "HEADLESS_COMPILE_REPAIRS: canonical dispatcher, bounded shutdown sender, "
-    "boxed error responses and clean imports; original retained"
+    "boxed error responses, platform-safe permissions and clean imports; original retained"
 )
