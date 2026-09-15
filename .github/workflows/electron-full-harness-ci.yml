@@ -336,14 +336,14 @@ jobs:
       - name: Validate reusable core and headless service
         run: |
           set -euo pipefail
-          cargo test --manifest-path rust-core/coding-tools-core/Cargo.toml \
+          cargo test --locked --manifest-path rust-core/coding-tools-core/Cargo.toml \
             2>&1 | tee aiTemp/evidence/rust-core-tests.txt
-          cargo clippy --manifest-path rust-core/coding-tools-core/Cargo.toml \
+          cargo clippy --locked --manifest-path rust-core/coding-tools-core/Cargo.toml \
             --all-targets -- -D warnings \
             2>&1 | tee aiTemp/evidence/rust-core-clippy.txt
-          cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+          cargo test --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
             2>&1 | tee aiTemp/evidence/rust-headless-tests.txt
-          cargo clippy --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+          cargo clippy --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
             --all-targets -- -D warnings \
             2>&1 | tee aiTemp/evidence/rust-headless-clippy.txt
 
@@ -544,8 +544,7 @@ jobs:
       - name: Build the exact Rust sidecar and Electron installer
         run: |
           set -euo pipefail
-          cargo build --release \
-            --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+          cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
             2>&1 | tee aiTemp/evidence/rust-headless-release.txt
           preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
           export NODE_OPTIONS="--import=$preload"
