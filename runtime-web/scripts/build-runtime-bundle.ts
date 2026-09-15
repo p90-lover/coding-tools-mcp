@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   chmodSync,
   copyFileSync,
@@ -8,12 +9,16 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { VERSION } from "../src/version";
+
+const require = createRequire(import.meta.url);
+const { prepareFreshRuntimeOutput } = require("./runtime-output.cjs") as {
+  prepareFreshRuntimeOutput(output: string): string;
+};
 
 const root = resolve(import.meta.dir, "..");
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
@@ -48,7 +53,7 @@ const appDir = join(output, "app");
 const runtimeDir = join(output, "runtime");
 const binDir = join(output, "bin");
 
-rmSync(output, { recursive: true, force: true });
+prepareFreshRuntimeOutput(output);
 mkdirSync(appDir, { recursive: true });
 mkdirSync(runtimeDir, { recursive: true });
 mkdirSync(binDir, { recursive: true });
