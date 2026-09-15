@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
+      - ".github/workflows/codex-web-goal-latency-apply.yml"
       - "runtime-web/src/http-body.ts"
       - "runtime-web/src/native-passthrough.ts"
       - "runtime-web/src/router-web-ingress.ts"
@@ -14,6 +16,8 @@ on:
       - ".github/workflows/runtime-web-goal-ci.yml"
   pull_request:
     paths:
+      - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
+      - ".github/workflows/codex-web-goal-latency-apply.yml"
       - "runtime-web/src/http-body.ts"
       - "runtime-web/src/native-passthrough.ts"
       - "runtime-web/src/router-web-ingress.ts"
