@@ -32,7 +32,7 @@ function fixtureLayout(label) {
   fs.mkdirSync(path.join(desktopRoot, "scripts"), { recursive: true });
   fs.mkdirSync(path.join(runtimeRoot, "scripts"), { recursive: true });
   fs.writeFileSync(path.join(runtimeRoot, "scripts", "build-runtime-bundle.ts"), "// fixture\n");
-  fs.writeFileSync(path.join(desktopRoot, "package.json"), JSON.stringify({ version: "0.6.0-rc.1" }));
+  fs.writeFileSync(path.join(desktopRoot, "package.json"), JSON.stringify({ version: "0.6.0" }));
   return {
     desktopRoot,
     repositoryRoot: root,
@@ -42,7 +42,7 @@ function fixtureLayout(label) {
     trashRoot: path.join(root, "aiTemp", "Trash", "runtime-bundle"),
     buildScript: "scripts/build-runtime-bundle.ts",
     bun: "fixture-bun",
-    version: "0.6.0-rc.1",
+    version: "0.6.0",
     platform: "win32",
     arch: "x64",
   };
@@ -53,7 +53,7 @@ test("resolves the materialized runtime-web tree instead of the repository root"
   const desktopRoot = path.join(root, "desktop-electron");
   const scriptDirectory = path.join(desktopRoot, "scripts");
   fs.mkdirSync(scriptDirectory, { recursive: true });
-  fs.writeFileSync(path.join(desktopRoot, "package.json"), JSON.stringify({ version: "0.6.0-rc.1" }));
+  fs.writeFileSync(path.join(desktopRoot, "package.json"), JSON.stringify({ version: "0.6.0" }));
   const layout = resolveRuntimeLayout({ scriptDirectory, env: {} });
   assert.equal(layout.runtimeRoot, path.join(root, "runtime-web"));
   assert.equal(layout.output, path.join(root, "desktop-electron", "build", "runtime"));
@@ -78,7 +78,7 @@ test("builds once from runtime-web and preserves the previous published runtime"
     },
     validateRuntimeBundle(staged, identity) {
       assert.equal(staged, path.join(layout.workRoot, "success-session"));
-      assert.deepEqual(identity, { version: "0.6.0-rc.1", platform: "win32", arch: "x64" });
+      assert.deepEqual(identity, { version: "0.6.0", platform: "win32", arch: "x64" });
     },
   });
 

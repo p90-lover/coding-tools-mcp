@@ -9,6 +9,9 @@ const files = [
   'scripts/release/verify-source-scope.mjs',
   'scripts/release/verify-assets.mjs',
   'scripts/release/publish-v0.6.0-rc.1.mjs',
+  'scripts/release/verify-source-scope-v0.6.0.mjs',
+  'scripts/release/verify-assets-v0.6.0.mjs',
+  'scripts/release/publish-v0.6.0.mjs',
 ];
 
 const forbidden = [

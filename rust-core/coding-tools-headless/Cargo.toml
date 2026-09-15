@@ -1,6 +1,6 @@
 [package]
 name = "coding-tools-headless"
-version = "0.6.0-rc.1"
+version = "0.6.0"
 description = "Authenticated loopback control service for the Electron-first Coding Tools desktop"
 authors = ["Coding Tools MCP Contributors"]
 edition = "2021"

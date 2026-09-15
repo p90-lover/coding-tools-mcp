@@ -14,7 +14,7 @@ test('adapted launcher retains all pinned upstream verification entrypoints', ()
     'package', 'package:mac', 'package:win', 'package:linux', 'smoke:package', 'test', 'start',
   ];
   for (const script of required) assert.equal(typeof product.scripts?.[script], 'string', script);
-  assert.equal(product.version, '0.6.0-rc.1');
+  assert.equal(product.version, '0.6.0');
   assert.equal(product.build.appId, 'dev.codingtools.fullharness');
   assert.equal(product.build.productName, 'Coding Tools');
 });

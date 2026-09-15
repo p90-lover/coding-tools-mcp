@@ -1,6 +1,6 @@
 [package]
 name = "coding-tools-core"
-version = "0.6.0-rc.1"
+version = "0.6.0"
 description = "Reusable Coding Tools state and tool-contract facade during Electron migration"
 authors = ["Coding Tools MCP Contributors"]
 edition = "2021"

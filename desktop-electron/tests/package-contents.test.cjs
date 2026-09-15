@@ -14,7 +14,7 @@ const {
   findWindowsInstaller,
 } = require("../scripts/verify-package.cjs");
 
-const PRODUCT_VERSION = "0.6.0-rc.1";
+const PRODUCT_VERSION = "0.6.0";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
@@ -301,8 +301,8 @@ test("requires exactly one versioned Windows x64 installer", () => {
     safeStamp("installers"),
   );
   fs.mkdirSync(root, { recursive: true });
-  writeFile(path.join(root, "Coding.Tools_0.6.0-rc.1_win_x64.exe"), Buffer.from("MZone"));
-  assert.match(findWindowsInstaller(root), /Coding\.Tools_0\.6\.0-rc\.1_win_x64\.exe$/);
-  writeFile(path.join(root, "Coding.Tools_0.6.0-rc.1_windows_x64_setup.exe"), Buffer.from("MZtwo"));
+  writeFile(path.join(root, "Coding.Tools_0.6.0_win_x64.exe"), Buffer.from("MZone"));
+  assert.match(findWindowsInstaller(root), /Coding\.Tools_0\.6\.0_win_x64\.exe$/);
+  writeFile(path.join(root, "Coding.Tools_0.6.0_windows_x64_setup.exe"), Buffer.from("MZtwo"));
   assert.throws(() => findWindowsInstaller(root), /PACKAGE_INSTALLER_COUNT_MISMATCH/);
 });

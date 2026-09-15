@@ -678,14 +678,14 @@ dependencies = [
 
 [[package]]
 name = "coding-tools-core"
-version = "0.6.0-rc.1"
+version = "0.6.0"
 dependencies = [
  "coding-tools-mcp-desktop",
 ]
 
 [[package]]
 name = "coding-tools-headless"
-version = "0.6.0-rc.1"
+version = "0.6.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
