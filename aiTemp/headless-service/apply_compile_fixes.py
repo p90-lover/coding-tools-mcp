@@ -32,6 +32,26 @@ replacements = [
         "            let reason = service_shutdown_tx\n                .borrow()",
         "shutdown sender readback",
     ),
+    (
+        "fn auth(headers: &HeaderMap, state: &ServiceState) -> Result<(), Response> {",
+        "fn auth(headers: &HeaderMap, state: &ServiceState) -> Result<(), Box<Response>> {",
+        "boxed authentication error",
+    ),
+    (
+        ".map_err(|status| json_error(status, \"UNAUTHORIZED\", \"A valid local control token is required\"))",
+        ".map_err(|status| {\n            Box::new(json_error(\n                status,\n                \"UNAUTHORIZED\",\n                \"A valid local control token is required\",\n            ))\n        })",
+        "boxed authentication response",
+    ),
+    (
+        "fn admit(state: &ServiceState, kind: &str) -> Result<RequestLease, Response> {",
+        "fn admit(state: &ServiceState, kind: &str) -> Result<RequestLease, Box<Response>> {",
+        "boxed admission error",
+    ),
+    (
+        "        json_error(status, \"HEADLESS_NOT_ACCEPTING\", message)\n    })",
+        "        Box::new(json_error(status, \"HEADLESS_NOT_ACCEPTING\", message))\n    })",
+        "boxed admission response",
+    ),
 ]
 
 updated = text
@@ -44,6 +64,14 @@ for old, new, label in replacements:
         raise RuntimeError(f"expected one {label} pattern, found {count}")
     updated = updated.replace(old, new, 1)
     changed = True
+
+for old, new in [
+    ("        return response;\n", "        return *response;\n"),
+    ("        Err(response) => return response,\n", "        Err(response) => return *response,\n"),
+]:
+    if old in updated:
+        updated = updated.replace(old, new)
+        changed = True
 
 if changed:
     backup = (
@@ -75,5 +103,5 @@ if removed:
     raise RuntimeError(f"deletions are forbidden: {removed}")
 print(
     "HEADLESS_COMPILE_REPAIRS: canonical dispatcher, bounded shutdown sender, "
-    "and clean imports; original retained"
+    "boxed error responses and clean imports; original retained"
 )
