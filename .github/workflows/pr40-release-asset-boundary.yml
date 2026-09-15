@@ -1,4 +1,4 @@
-name: PR40 release asset entry boundary
+name: PR40 release policy verification
 
 on:
   push:
@@ -6,18 +6,21 @@ on:
       - subagent/electron-prerelease-gate-0.6.0-rc.1-20260914
     paths:
       - .github/workflows/pr40-release-asset-boundary.yml
-      - scripts/release/verify-assets.mjs
+      - .github/workflows/electron-full-harness-release.yml
+      - scripts/release/**
+      - tests/electron-full-harness-release.test.mjs
       - tests/electron-release-asset-entry-boundary.test.mjs
+      - tests/no-delete-policy.test.mjs
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr40-release-asset-entry-boundary-${{ github.ref }}
+  group: pr40-release-policy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  asset-entry-boundary:
+  release-policy:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -28,16 +31,24 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '22'
-      - name: Run focused release asset boundary tests
+      - name: Check release scripts and run the complete prerelease policy suite
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence
-          node --test tests/electron-release-asset-entry-boundary.test.mjs \
-            2>&1 | tee aiTemp/evidence/pr40-release-asset-boundary.txt
+          node --check scripts/release/verify-source-scope.mjs
+          node --check scripts/release/verify-assets.mjs
+          node --check scripts/release/publish-v0.6.0-rc.1.mjs
+          node --check tests/electron-full-harness-release.test.mjs
+          node --check tests/electron-release-asset-entry-boundary.test.mjs
+          node --test \
+            tests/electron-full-harness-release.test.mjs \
+            tests/electron-release-asset-entry-boundary.test.mjs \
+            tests/no-delete-policy.test.mjs \
+            2>&1 | tee aiTemp/evidence/pr40-release-policy.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: pr40-release-asset-boundary-${{ github.sha }}
+          name: pr40-release-policy-${{ github.sha }}
           path: aiTemp/evidence/
           if-no-files-found: error
           retention-days: 14
