@@ -2,7 +2,7 @@
 """Fail-closed credential screening for reachable Git history.
 
 The scanner reports Git blob IDs and credential categories only. It never emits
-matched secret bytes. Three historical package-verifier test blobs are accepted
+matched secret bytes. Four historical package-verifier test blobs are accepted
 as exact synthetic OpenAI-key fixtures; every other finding remains blocking.
 """
 
@@ -28,6 +28,7 @@ KNOWN_SYNTHETIC_FINDINGS: Final[frozenset[str]] = frozenset(
         "ca6aace6e2e7e236ffe18a8b3447f4b6e4d8e168",
         "79f44f0363fbca255525cbb5efbe3062625cfdfc",
         "f3137dc08c41bb9d5d4e273aa54b79d2a9d7c355",
+        "a9ba427524ed0dcc9b1934e448533c1101d8feb0",
     }
 )
 KNOWN_SYNTHETIC_KIND: Final[str] = "openai-key"
