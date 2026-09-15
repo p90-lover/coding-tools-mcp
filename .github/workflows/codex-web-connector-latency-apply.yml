@@ -1,0 +1,79 @@
+name: Apply Runtime Web Connector Latency Patch
+
+on:
+  push:
+    branches:
+      - "subagent/codex-web-connector-latency-0.7.0-20260915"
+    paths:
+      - "aiTemp/codex-web-connector-latency/apply-connector-mention-fast-path.py"
+      - ".github/workflows/codex-web-connector-latency-apply.yml"
+      - "runtime-web/src/adapters/chatgpt-web/browser-worker.ts"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-web-connector-latency-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.0
+      - name: Apply exact connector mention fast path
+        run: |
+          mkdir -p aiTemp/codex-web-connector-latency/evidence
+          python aiTemp/codex-web-connector-latency/apply-connector-mention-fast-path.py \
+            | tee aiTemp/codex-web-connector-latency/evidence/apply.log
+          grep -q "CONNECTOR_MENTION_FAST_PATH_OK" \
+            aiTemp/codex-web-connector-latency/evidence/apply.log
+      - name: Enforce narrow no-delete patch
+        shell: bash
+        run: |
+          test -z "$(git diff --diff-filter=D --name-only)"
+          unexpected="$(git diff --name-only | grep -Ev '^runtime-web/src/adapters/chatgpt-web/browser-worker\.ts$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected tracked changes:"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          git diff --check
+      - name: Install locked Runtime Web dependencies
+        working-directory: runtime-web
+        run: bun install --frozen-lockfile
+      - name: Run focused Goal and latency regressions
+        working-directory: runtime-web
+        run: bun test tests/browser-connector-latency.test.ts tests/browser-effort-latency.test.ts tests/browser-send-latency.test.ts tests/chatgpt-web-goal.test.ts tests/request-body-fast-path.test.ts tests/router-web-ingress.test.ts
+      - name: Typecheck Runtime Web
+        working-directory: runtime-web
+        run: bun run typecheck
+      - name: Commit verified source patch
+        shell: bash
+        env:
+          TARGET_BRANCH: subagent/codex-web-connector-latency-0.7.0-20260915
+        run: |
+          remote_head="$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')"
+          if [ "$remote_head" != "$GITHUB_SHA" ]; then
+            echo "::error::Branch advanced while validation was running; refusing to overwrite it."
+            exit 1
+          fi
+          git add runtime-web/src/adapters/chatgpt-web/browser-worker.ts
+          if git diff --cached --quiet; then
+            echo "Source patch is already applied."
+            exit 0
+          fi
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git diff --cached --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "perf(runtime-web): skip ready connector mention settle delay"
+          git push origin "HEAD:$TARGET_BRANCH"
