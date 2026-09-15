@@ -261,11 +261,13 @@ test("rejects an installer contract that permits elevation", () => {
   );
 });
 
-test("rejects a package that omits sidecar or migration integration modules", () => {
-  const { appRoot } = createPackageFixture("missing-integration");
+test("rejects a package that omits a required desktop ASAR module", () => {
+  const { appRoot } = createPackageFixture("missing-required-asar");
+  const requiredModule = "electron/runtime-supervisor.cjs";
+  assert.ok(REQUIRED_ASAR_FILES.includes(requiredModule));
   assert.throws(
     () => inspectExtractedApplication(appRoot, packageOptions({
-      asarEntries: REQUIRED_ASAR_FILES.filter((entry) => entry !== "electron/migration-manager.cjs"),
+      asarEntries: REQUIRED_ASAR_FILES.filter((entry) => entry !== requiredModule),
     })),
     /PACKAGE_ASAR_REQUIRED_FILE_MISSING/,
   );
@@ -301,8 +303,10 @@ test("requires exactly one versioned Windows x64 installer", () => {
     safeStamp("installers"),
   );
   fs.mkdirSync(root, { recursive: true });
-  writeFile(path.join(root, "Coding.Tools_0.6.0-rc.1_win_x64.exe"), Buffer.from("MZone"));
-  assert.match(findWindowsInstaller(root), /Coding\.Tools_0\.6\.0-rc\.1_win_x64\.exe$/);
-  writeFile(path.join(root, "Coding.Tools_0.6.0-rc.1_windows_x64_setup.exe"), Buffer.from("MZtwo"));
+  const builderInstaller = `Coding.Tools_${PRODUCT_VERSION}_win_x64.exe`;
+  const releaseInstaller = `Coding.Tools_${PRODUCT_VERSION}_windows_x64_setup.exe`;
+  writeFile(path.join(root, builderInstaller), Buffer.from("MZone"));
+  assert.equal(path.basename(findWindowsInstaller(root)), builderInstaller);
+  writeFile(path.join(root, releaseInstaller), Buffer.from("MZtwo"));
   assert.throws(() => findWindowsInstaller(root), /PACKAGE_INSTALLER_COUNT_MISMATCH/);
 });
