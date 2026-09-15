@@ -43,31 +43,39 @@ jobs:
           path = Path('.github/workflows/electron-full-harness-ci.yml')
           text = path.read_text(encoding='utf-8')
 
-          portable_old = '''          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            preload="$(cygpath -w "$preload")"
-          fi
-          export NODE_OPTIONS="--import=$preload"
-'''
-          portable_new = '''          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            preload="$(cygpath -w "$preload")"
-          fi
-          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
-          export NODE_OPTIONS="--import=$preload"
-'''
+          portable_old = '\n'.join([
+              '          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"',
+              '          if [[ "$RUNNER_OS" == "Windows" ]]; then',
+              '            preload="$(cygpath -w "$preload")"',
+              '          fi',
+              '          export NODE_OPTIONS="--import=$preload"',
+              '',
+          ])
+          portable_new = '\n'.join([
+              '          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"',
+              '          if [[ "$RUNNER_OS" == "Windows" ]]; then',
+              '            preload="$(cygpath -w "$preload")"',
+              '          fi',
+              '          preload="$(node -e \'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);\' "$preload")"',
+              '          export NODE_OPTIONS="--import=$preload"',
+              '',
+          ])
           portable_count = text.count(portable_old)
           if portable_count != 3:
               raise SystemExit(f'Expected 3 portable preload blocks, found {portable_count}')
           text = text.replace(portable_old, portable_new)
 
-          windows_old = '''          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
-          export NODE_OPTIONS="--import=$preload"
-'''
-          windows_new = '''          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
-          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
-          export NODE_OPTIONS="--import=$preload"
-'''
+          windows_old = '\n'.join([
+              '          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"',
+              '          export NODE_OPTIONS="--import=$preload"',
+              '',
+          ])
+          windows_new = '\n'.join([
+              '          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"',
+              '          preload="$(node -e \'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);\' "$preload")"',
+              '          export NODE_OPTIONS="--import=$preload"',
+              '',
+          ])
           windows_count = text.count(windows_old)
           if windows_count != 3:
               raise SystemExit(f'Expected 3 Windows package preload blocks, found {windows_count}')
@@ -77,20 +85,22 @@ jobs:
           end_marker = '      - name: Audit every Rust release lockfile against RustSec\n'
           start = text.index(start_marker)
           end = text.index(end_marker, start)
-          replacement = '''      - name: Screen reachable Git history for credential patterns
-        run: |
-          set -euo pipefail
-          mkdir -p aiTemp/audit-evidence aiTemp/audit-tool
-          git rev-list --objects --all > aiTemp/audit-evidence/reachable-objects.txt
-          test -s aiTemp/audit-evidence/reachable-objects.txt
-          python tests/test_release_credential_history_scan.py -v \\
-            2>&1 | tee aiTemp/audit-evidence/credential-screen-tests.txt
-          python scripts/release/scan_credential_history.py \\
-            --output aiTemp/audit-evidence/credential-screen.json \\
-            > aiTemp/audit-evidence/credential-screen.stdout.json
-          cat aiTemp/audit-evidence/credential-screen.json
-
-'''
+          replacement = '\n'.join([
+              '      - name: Screen reachable Git history for credential patterns',
+              '        run: |',
+              '          set -euo pipefail',
+              '          mkdir -p aiTemp/audit-evidence aiTemp/audit-tool',
+              '          git rev-list --objects --all > aiTemp/audit-evidence/reachable-objects.txt',
+              '          test -s aiTemp/audit-evidence/reachable-objects.txt',
+              '          python tests/test_release_credential_history_scan.py -v \\',
+              '            2>&1 | tee aiTemp/audit-evidence/credential-screen-tests.txt',
+              '          python scripts/release/scan_credential_history.py \\',
+              '            --output aiTemp/audit-evidence/credential-screen.json \\',
+              '            > aiTemp/audit-evidence/credential-screen.stdout.json',
+              '          cat aiTemp/audit-evidence/credential-screen.json',
+              '',
+              '',
+          ])
           text = text[:start] + replacement + text[end:]
           path.write_text(text, encoding='utf-8')
           PY
