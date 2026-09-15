@@ -29,6 +29,7 @@ import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions 
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
+import { codexRouterIntegrationMain } from "../scripts/codex-router-integration";
 import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `codex-chatgpt-web ${VERSION}
@@ -42,6 +43,7 @@ Usage:
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web subagents <status|compatibility-v1|native>
+  codex-chatgpt-web router integrate [--apply] [--with-commandcode-proxy] [options]
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
   codex-chatgpt-web dev status [--json]
@@ -558,6 +560,13 @@ async function main(): Promise<void> {
   else if (command === "doctor" || command === "status") await doctorCommand(args);
   else if (command === "route") await routeCommand(args);
   else if (command === "subagents") await subagentsCommand(args);
+  else if (command === "router") {
+    const action = args.shift();
+    if (action !== "integrate") {
+      throw new Error("Router command must be: router integrate");
+    }
+    codexRouterIntegrationMain(args);
+  }
   else if (command === "browser") {
     const action = args.shift();
     assertNoArgs(args);
