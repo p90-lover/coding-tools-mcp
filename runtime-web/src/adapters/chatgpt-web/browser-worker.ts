@@ -2357,7 +2357,8 @@ export class ChatGptBrowserWorker {
     } finally {
       effortWaitAbort.abort();
     }
-    await settleChatGptUi();
+    // Activation owns ghost-state cleanup plus bounded click/pointer surface readiness.
+    // Avoid a fixed delay when the visible control is already interactive.
     await throwIfChatGptRateLimitDialog(page);
     await captureDiagnostic?.("effort-control-ready");
     await throwIfChatGptRateLimitDialog(page);
