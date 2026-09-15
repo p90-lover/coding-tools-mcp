@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
+import { readJsonRequestBody } from "../src/http-body";
 import {
   routeRouterWebResponse,
   routerWebModelCatalog,
@@ -62,7 +63,8 @@ describe("restricted Coding Tools Web router ingress", () => {
     const encoder = new TextEncoder();
     const handler = async (request: Request): Promise<Response> => {
       calls += 1;
-      expect((await request.clone().json() as { model: string }).model).toBe("chatgpt-web/high");
+      expect((await readJsonRequestBody(request) as { model: string }).model).toBe("chatgpt-web/high");
+      expect(request.bodyUsed).toBe(false);
       return new Response(new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(encoder.encode("data: {\"type\":\"response.completed\"}\n\n"));
@@ -88,6 +90,50 @@ describe("restricted Coding Tools Web router ingress", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(response.headers.get("x-web-ingress")).toBe("ok");
     expect(await response.text()).toContain("response.completed");
+  });
+
+  test("preserves native /goal context after replacing the decoded request body", async () => {
+    const goalText = [
+      '<codex_internal_context source="goal">',
+      "Continue working toward the active objective.",
+      "</codex_internal_context>",
+    ].join("\n");
+    const body = {
+      model: "chatgpt-web/high",
+      input: [{
+        type: "message",
+        role: "user",
+        id: "goal-context-1",
+        content_item_kinds: ["goal.internal_context"],
+        content: [{ type: "input_text", text: goalText }],
+      }],
+      stream: true,
+    };
+    const request = new Request("http://127.0.0.1/router/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(JSON.stringify(body).length),
+      },
+      body: JSON.stringify(body),
+    });
+
+    const response = await routeRouterWebResponse(request, async validatedRequest => {
+      expect(validatedRequest).not.toBe(request);
+      expect(request.bodyUsed).toBe(true);
+      expect(validatedRequest.bodyUsed).toBe(false);
+      expect(validatedRequest.headers.get("content-length")).toBeNull();
+      expect(validatedRequest.headers.get("content-encoding")).toBeNull();
+      const parsed = await readJsonRequestBody(validatedRequest) as typeof body;
+      expect(validatedRequest.bodyUsed).toBe(false);
+      expect(parsed).toEqual(body);
+      expect(parsed.input[0]!.content_item_kinds).toEqual(["goal.internal_context"]);
+      expect(parsed.input[0]!.content[0]!.text).toBe(goalText);
+      return Response.json({ ok: true });
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
   });
 
   test("serves bearer-free Web discovery and rejects router recursion on the real listener", async () => {
