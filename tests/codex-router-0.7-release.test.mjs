@@ -123,9 +123,9 @@ test('Windows packaging keeps electron-builder cache on the retained aiTemp volu
     'utf8',
   );
   for (const required of [
-    'ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/electron-builder-cache',
-    'aiTemp/electron-builder-cache',
-    'test -d aiTemp/electron-builder-cache',
+    'ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/cache/electron-builder',
+    'aiTemp/cache/electron-builder',
+    'test -d aiTemp/cache/electron-builder',
     'electron_builder_cache=%s',
   ]) {
     assert.match(workflow, new RegExp(escapeRegex(required)));
