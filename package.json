@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-mcp-desktop",
-  "version": "0.4.10",
+  "version": "0.4.11",
   "description": "Coding Tools MCP desktop client",
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "start": "tauri dev",
     "build": "vite build",
     "preview": "vite preview",
+    "precheck": "npm run check:version",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:version": "node scripts/check-version-alignment.mjs",
     "tauri": "tauri"

@@ -2,7 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const STABLE_VERSION = /^\d+\.\d+\.\d+$/;
+const STABLE_COMPONENT = '(?:0|[1-9]\\d*)';
+const STABLE_VERSION = new RegExp(
+  `^${STABLE_COMPONENT}\\.${STABLE_COMPONENT}\\.${STABLE_COMPONENT}$`,
+);
+const STABLE_TAG = new RegExp(
+  `^v${STABLE_COMPONENT}\\.${STABLE_COMPONENT}\\.${STABLE_COMPONENT}$`,
+);
 
 function requiredMatch(value, expression, label) {
   const match = value.match(expression);
@@ -10,6 +16,77 @@ function requiredMatch(value, expression, label) {
     throw new Error(`Unable to read ${label}`);
   }
   return match[1];
+}
+
+function stripHtmlComments(text) {
+  let visible = '';
+  let cursor = 0;
+  while (cursor < text.length) {
+    const start = text.indexOf('<!--', cursor);
+    if (start < 0) {
+      visible += text.slice(cursor);
+      break;
+    }
+    visible += text.slice(cursor, start);
+    const end = text.indexOf('-->', start + 4);
+    if (end < 0) {
+      break;
+    }
+    cursor = end + 3;
+  }
+  return visible;
+}
+
+export function compareStableVersions(left, right) {
+  for (const [label, value] of [
+    ['requested version', left],
+    ['current version', right],
+  ]) {
+    if (!STABLE_VERSION.test(value)) {
+      throw new Error(`${label} must be stable X.Y.Z; received ${JSON.stringify(value)}`);
+    }
+  }
+
+  const leftParts = left.split('.').map(BigInt);
+  const rightParts = right.split('.').map(BigInt);
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] < rightParts[index]) return -1;
+    if (leftParts[index] > rightParts[index]) return 1;
+  }
+  return 0;
+}
+
+export function validateBilingualReleaseNotes(text, tag) {
+  if (typeof text !== 'string') {
+    throw new Error(`Release notes for ${tag} must be UTF-8 text`);
+  }
+  const visibleText = stripHtmlComments(text);
+
+  const section = (heading) => {
+    const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const matches = [...visibleText.matchAll(new RegExp(`^## ${escaped}\\s*$`, 'gm'))];
+    if (matches.length !== 1) {
+      throw new Error(
+        `Release notes for ${tag} must contain exactly one "## ${heading}" section`,
+      );
+    }
+    const start = matches[0].index + matches[0][0].length;
+    const remainder = visibleText.slice(start);
+    const nextHeading = /^##\s+/m.exec(remainder);
+    const end = nextHeading ? start + nextHeading.index : visibleText.length;
+    const body = visibleText.slice(start, end).trim();
+    if (!body) {
+      throw new Error(`Release notes for ${tag} have an empty "## ${heading}" section`);
+    }
+    return { index: matches[0].index, body };
+  };
+
+  const english = section('English');
+  const traditionalChinese = section('繁體中文');
+  if (english.index > traditionalChinese.index) {
+    throw new Error(`Release notes for ${tag} must list English before 繁體中文`);
+  }
+  return { english: english.body, traditionalChinese: traditionalChinese.body };
 }
 
 export function parseCargoTomlPackage(text) {
@@ -48,7 +125,12 @@ export function parseCargoLockVersion(text, packageName) {
   throw new Error(`Unable to find ${packageName} in src-tauri/Cargo.lock`);
 }
 
-export function validateVersionAlignment({ versions, expectedTag, releaseNotesExists }) {
+export function validateVersionAlignment({
+  versions,
+  expectedTag,
+  releaseNotesExists,
+  releaseNotesContent,
+}) {
   const entries = Object.entries(versions);
   if (entries.length === 0) {
     throw new Error('No version observations were supplied');
@@ -68,15 +150,16 @@ export function validateVersionAlignment({ versions, expectedTag, releaseNotesEx
   }
 
   const canonicalTag = `v${canonical}`;
+  if (expectedTag && !STABLE_TAG.test(expectedTag)) {
+    throw new Error(`Release tag must be stable vX.Y.Z; received ${expectedTag}`);
+  }
   if (expectedTag && expectedTag !== canonicalTag) {
     throw new Error(`Tag mismatch: expected ${canonicalTag}, received ${expectedTag}`);
-  }
-  if (expectedTag && !/^v\d+\.\d+\.\d+$/.test(expectedTag)) {
-    throw new Error(`Release tag must be stable vX.Y.Z; received ${expectedTag}`);
   }
   if (!releaseNotesExists) {
     throw new Error(`Missing release notes: docs/releases/${canonicalTag}.md`);
   }
+  validateBilingualReleaseNotes(releaseNotesContent, canonicalTag);
 
   return { version: canonical, tag: canonicalTag };
 }
@@ -91,6 +174,13 @@ export function collectVersionObservations(root = process.cwd()) {
     readText('src-tauri/Cargo.lock'),
     cargoPackage.name,
   );
+  const releaseNotesPath = path.join(
+    root,
+    'docs',
+    'releases',
+    `v${packageJson.version}.md`,
+  );
+  const releaseNotesExists = fs.existsSync(releaseNotesPath);
 
   return {
     versions: {
@@ -101,9 +191,8 @@ export function collectVersionObservations(root = process.cwd()) {
       'src-tauri/Cargo.toml': cargoPackage.version,
       'src-tauri/Cargo.lock': cargoLockVersion,
     },
-    releaseNotesExists: fs.existsSync(
-      path.join(root, 'docs', 'releases', `v${packageJson.version}.md`),
-    ),
+    releaseNotesExists,
+    releaseNotesContent: releaseNotesExists ? fs.readFileSync(releaseNotesPath, 'utf8') : '',
   };
 }
 
