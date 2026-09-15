@@ -1,16 +1,21 @@
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
+const { createPreservationSession } = require("./preservation.cjs");
 
 const launcherRoot = path.resolve(__dirname, "..");
+const repositoryRoot = path.resolve(launcherRoot, "..");
 const artifactsDirectory = path.join(launcherRoot, "artifacts");
 const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
 );
 const expectedVersion = launcherManifest.version;
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-package-smoke-"));
+const preservation = createPreservationSession({
+  repositoryRoot,
+  label: `electron-package-smoke-${process.platform}`,
+});
+const scratch = preservation.createWorkDirectory("smoke");
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
 let macAppBundle;
@@ -64,6 +69,8 @@ function smokeEnvironment() {
   return {
     ...process.env,
     TMPDIR: scratch,
+    TMP: scratch,
+    TEMP: scratch,
     CODEX_WEB_GPT_LAUNCHER_DATA_DIR: path.join(scratch, "launcher-data"),
     CODEX_CHATGPT_WEB_HOME: coreHome,
     CODEX_HOME: path.join(scratch, "codex-home"),
@@ -71,7 +78,7 @@ function smokeEnvironment() {
   };
 }
 
-try {
+function runSmoke() {
   let executable;
   let command;
   let args;
@@ -138,19 +145,40 @@ try {
     || !/^[a-f0-9]{64}$/.test(installedManifest.bundleId)) {
     throw new Error(`Packaged launcher installed the wrong durable runtime: ${JSON.stringify(installedManifest)}`);
   }
-  process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);
-} finally {
+}
+
+let smokeError = null;
+try {
+  runSmoke();
+} catch (error) {
+  smokeError = error;
+}
+
+const finalizationErrors = [];
+if (macAppBundle) {
   try {
-    if (macAppBundle) {
-      const launchServices =
-        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
-      run(
-        launchServices,
-        ["-u", macAppBundle],
-      );
-      run(launchServices, ["-gc"]);
-    }
-  } finally {
-    fs.rmSync(scratch, { recursive: true, force: true });
+    const launchServices =
+      "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    run(launchServices, ["-u", macAppBundle]);
+    run(launchServices, ["-gc"]);
+  } catch (error) {
+    finalizationErrors.push(error);
   }
 }
+try {
+  if (fs.existsSync(scratch)) preservation.preservePath(scratch, "smoke-evidence");
+} catch (error) {
+  finalizationErrors.push(error);
+}
+
+if (smokeError && finalizationErrors.length > 0) {
+  throw new AggregateError(
+    [smokeError, ...finalizationErrors],
+    "Packaged launcher smoke failed and evidence finalization also failed",
+  );
+}
+if (smokeError) throw smokeError;
+if (finalizationErrors.length > 0) {
+  throw new AggregateError(finalizationErrors, "Packaged launcher smoke evidence could not be preserved");
+}
+process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);

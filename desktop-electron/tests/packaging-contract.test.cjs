@@ -220,13 +220,14 @@ test("Linux packaging replaces libnotify in an owned AppImage toolset before ass
   assert.match(license, /libnotify-0\.8\.7\.tar\.xz/);
 });
 
-test("macOS package smoke unregisters its staged app from LaunchServices", () => {
+test("macOS package smoke unregisters its staged app before preserving smoke evidence", () => {
   const smoke = fs.readFileSync(path.join(launcherRoot, "scripts", "smoke-package.cjs"), "utf8");
   assert.match(smoke, /Frameworks\/LaunchServices\.framework\/Support\/lsregister/);
   assert.match(smoke, /\["-u", macAppBundle\]/);
   assert.ok(
-    smoke.indexOf('["-u", macAppBundle]') < smoke.indexOf("fs.rmSync(scratch"),
-    "the staged app must be unregistered before its bundle is deleted",
+    smoke.indexOf('["-u", macAppBundle]')
+      < smoke.indexOf('preservation.preservePath(scratch, "smoke-evidence")'),
+    "the staged app must be unregistered before its evidence directory is preserved",
   );
 });
 
