@@ -3115,7 +3115,8 @@ export class ChatGptBrowserWorker {
         composer = await this.activeComposer(page, 30_000, abortSignal);
         await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
-        await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
+        // The focused composer plus the exact bounded menu wait own readiness here.
+        // Avoid a fixed delay when the mention trigger is already accepted.
         await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
           delay: 25,
           signal: abortSignal,
