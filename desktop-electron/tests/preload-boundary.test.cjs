@@ -201,6 +201,15 @@ test("an invalid workspace response is rejected before reaching the renderer", a
   await assert.rejects(api.workspaces.list(), /IPC_RESPONSE_SCHEMA_INVALID/);
 });
 
+test("secret-bearing response keys never cross the preload boundary", async () => {
+  const { api } = loadPreload(() => ({
+    ready: true,
+    credentials: { access_token: "must-not-reach-renderer" },
+  }));
+
+  await assert.rejects(api.diagnostics.snapshot(), /IPC_RESPONSE_SCHEMA_INVALID/);
+});
+
 test("prototype-pollution keys are rejected from main-process responses", async () => {
   const response = Object.create(null);
   Object.defineProperty(response, "__proto__", {
