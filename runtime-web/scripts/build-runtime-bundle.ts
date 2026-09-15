@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { resolveRuntimeBundleAppVersion } from "../src/runtime-bundle-version";
 import { VERSION } from "../src/version";
 
 const require = createRequire(import.meta.url);
@@ -26,6 +27,7 @@ const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
   packageManager?: string;
 };
 if (packageJson.version !== VERSION) throw new Error("package.json and runtime version are out of sync");
+const bundleAppVersion = resolveRuntimeBundleAppVersion();
 const packageManagerMatch = /^bun@(\d+\.\d+\.\d+)$/.exec(packageJson.packageManager ?? "");
 if (!packageManagerMatch) throw new Error("package.json must pin an exact Bun packageManager version");
 const expectedBunVersion = packageManagerMatch[1];
@@ -204,7 +206,7 @@ const playwrightPackage = join(appDir, "node_modules", "playwright-core", "packa
 const files = runtimeManifestFiles();
 writeFileSync(join(output, "manifest.json"), `${JSON.stringify({
   schemaVersion: 2,
-  appVersion: VERSION,
+  appVersion: bundleAppVersion,
   bundleId: bundleIdFor(files),
   bunVersion: Bun.version,
   platform: process.platform,
