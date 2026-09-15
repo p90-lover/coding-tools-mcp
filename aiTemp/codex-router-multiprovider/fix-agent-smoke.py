@@ -8,5 +8,13 @@ if old in text:
     text = text.replace(old, new, 1)
 elif new not in text:
     raise SystemExit("routed agent smoke diagnostics anchor missing")
+
+root_provider_old = '''  'env_key = "OPENAI_API_KEY"',\n  'wire_api = "responses"',\n  "supports_websockets = false",\n'''
+root_provider_new = '''  'env_key = "OPENAI_API_KEY"',\n  'wire_api = "responses"',\n  "requires_openai_auth = false",\n  "supports_websockets = false",\n'''
+if root_provider_old in text:
+    text = text.replace(root_provider_old, root_provider_new, 1)
+elif root_provider_new not in text:
+    raise SystemExit("model-free root provider auth anchor missing")
+
 path.write_text(text, encoding="utf-8")
 print("ROUTED_AGENT_SMOKE_DIAGNOSTICS_PATCH_OK")
