@@ -9,6 +9,8 @@ on:
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
       - .github/workflows/codex-router-multiprovider-release.yml
+      - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/package-contents.test.cjs
       - docs/releases/v0.7.0-rc.1.md
       - scripts/release/**
       - tests/codex-router-0.7-release.test.mjs
@@ -21,6 +23,8 @@ on:
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
       - .github/workflows/codex-router-multiprovider-release.yml
+      - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/package-contents.test.cjs
       - docs/releases/v0.7.0-rc.1.md
       - scripts/release/**
       - tests/codex-router-0.7-release.test.mjs
@@ -69,6 +73,13 @@ jobs:
             tests/no-delete-policy.test.mjs \
             2>&1 | tee aiTemp/release-tooling-evidence/tests.txt
           grep -F '# fail 0' aiTemp/release-tooling-evidence/tests.txt
+
+      - name: Run Windows package verifier contracts
+        run: |
+          set -euo pipefail
+          node --test desktop-electron/tests/package-contents.test.cjs \
+            2>&1 | tee aiTemp/release-tooling-evidence/package-contents.txt
+          grep -F '# fail 0' aiTemp/release-tooling-evidence/package-contents.txt
 
       - name: Enforce no file deletion
         run: |
