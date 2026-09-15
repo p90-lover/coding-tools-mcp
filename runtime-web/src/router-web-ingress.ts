@@ -3,10 +3,10 @@ import {
   availableChatGptWebModelRoutes,
   isChatGptWebModelSlug,
 } from "./chatgpt-web-models";
-import { primeJsonRequestBody, readJsonRequestBody } from "./http-body";
+import { readJsonRequestBody } from "./http-body";
 
 type JsonObject = Record<string, unknown>;
-type ResponseHandler = (request: Request) => Promise<Response>;
+type ResponseHandler = (request: Request, decodedBody: JsonObject) => Promise<Response>;
 
 export interface RouterWebModelEntry {
   id: string;
@@ -55,9 +55,10 @@ export async function routeRouterWebResponse(
 ): Promise<Response> {
   let raw: unknown;
   try {
-    // Validate through the same bounded/encoding-aware decoder as the main Responses handler, then
-    // prime the original Request so every Coding Tools Web action pays this decode/parse cost once.
-    raw = await readJsonRequestBody(request.clone());
+    // Decode through the same bounded and encoding-aware path as the main Responses handler. The
+    // validated object is passed downstream directly, so large Codex histories are never cloned,
+    // decompressed, decoded, or JSON-parsed a second time at this ingress boundary.
+    raw = await readJsonRequestBody(request);
   } catch {
     return invalidRequest("Coding Tools Web router ingress requires a JSON object with a chatgpt-web/* model");
   }
@@ -70,6 +71,5 @@ export async function routeRouterWebResponse(
       "Coding Tools Web router ingress accepts only explicitly selected chatgpt-web/* models",
     );
   }
-  primeJsonRequestBody(request, raw);
-  return handler(request);
+  return handler(request, raw as JsonObject);
 }
