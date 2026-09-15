@@ -7,9 +7,11 @@ runtime_build = Path("runtime-web/scripts/build-runtime-bundle.ts")
 text = runtime_build.read_text(encoding="utf-8")
 old_import = 'import { VERSION } from "../src/version";\n'
 new_import = 'import { resolveRuntimeBundleAppVersion } from "../src/runtime-bundle-version";\nimport { VERSION } from "../src/version";\n'
-if old_import in text:
+if new_import in text:
+    pass
+elif old_import in text:
     text = text.replace(old_import, new_import, 1)
-elif new_import not in text:
+else:
     raise SystemExit("runtime bundle version import anchor missing")
 
 old_check = 'if (packageJson.version !== VERSION) throw new Error("package.json and runtime version are out of sync");\n'
