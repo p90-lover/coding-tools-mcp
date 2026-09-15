@@ -23,24 +23,38 @@ type OriginMap = std::collections::HashMap<(String, bool), String>;
 static TRUSTED_ORIGINS: std::sync::OnceLock<std::sync::RwLock<OriginMap>> =
     std::sync::OnceLock::new();
 
-// Data-store fixtures run on independent Rust test threads but production owns
-// one process-wide store. Keep each fixture's latest synchronized view local to
-// its thread so an unrelated parallel fixture cannot erase an in-flight HTTP
-// flow's issuer. The production registry and behavior remain unchanged.
+// Production owns one process-wide data store. Rust tests can run several
+// independent fixture stores in one process, so retain each fixture's latest
+// synchronized origin map by its active data-file identity. A refresh from
+// another thread using the same fixture updates the same shared entry, while a
+// nested or unrelated fixture selects a different entry. Production behavior is
+// unchanged because this registry exists only in test builds.
 #[cfg(test)]
-thread_local! {
-    static TEST_TRUSTED_ORIGINS: std::cell::RefCell<Option<OriginMap>> =
-        const { std::cell::RefCell::new(None) };
+type TestOriginMaps = std::collections::HashMap<std::path::PathBuf, OriginMap>;
+#[cfg(test)]
+static TEST_TRUSTED_ORIGINS: std::sync::OnceLock<std::sync::RwLock<TestOriginMaps>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn sync_test_trusted_origins(origins: &OriginMap) {
+    let Some(path) = crate::data::test_data_file_path() else {
+        return;
+    };
+    let lock = TEST_TRUSTED_ORIGINS.get_or_init(Default::default);
+    if let Ok(mut fixtures) = lock.write() {
+        fixtures.insert(path, origins.clone());
+    }
 }
 
 #[cfg(test)]
-fn test_trusted_origin(id: &str, actions: bool) -> Option<Option<String>> {
-    TEST_TRUSTED_ORIGINS.with(|current| {
-        current
-            .borrow()
-            .as_ref()
-            .map(|origins| origins.get(&(id.to_owned(), actions)).cloned())
-    })
+fn test_trusted_origin(id: &str, actions: bool) -> Result<Option<String>, ()> {
+    let path = crate::data::test_data_file_path().ok_or(())?;
+    let lock = TEST_TRUSTED_ORIGINS.get_or_init(Default::default);
+    let fixtures = lock.read().map_err(|_| ())?;
+    Ok(fixtures
+        .get(&path)
+        .and_then(|origins| origins.get(&(id.to_owned(), actions)))
+        .cloned())
 }
 
 pub fn sync_trusted_origins(data: &crate::data::AppData) {
@@ -57,7 +71,7 @@ pub fn sync_trusted_origins(data: &crate::data::AppData) {
         );
     }
     #[cfg(test)]
-    TEST_TRUSTED_ORIGINS.with(|current| *current.borrow_mut() = Some(origins.clone()));
+    sync_test_trusted_origins(&origins);
     let lock = TRUSTED_ORIGINS.get_or_init(Default::default);
     if let Ok(mut current) = lock.write() {
         *current = origins;
@@ -66,7 +80,7 @@ pub fn sync_trusted_origins(data: &crate::data::AppData) {
 
 pub fn trusted_external_base_url(id: &str, actions: bool, port: u16, configured: &str) -> String {
     #[cfg(test)]
-    if let Some(test_configured) = test_trusted_origin(id, actions) {
+    if let Ok(test_configured) = test_trusted_origin(id, actions) {
         return external_base_url(
             &HeaderMap::new(),
             port,
@@ -155,6 +169,24 @@ pub fn protected_resource_metadata(base_url: &str) -> Value {
 mod tests {
     use super::*;
 
+    fn fixture_data(profile_id: &str, public_url: &str) -> crate::data::AppData {
+        let mut data = crate::data::AppData::default();
+        let mut profile =
+            crate::workspace::WorkspaceProfile::new("fixture-workspace".into(), None);
+        profile.id = profile_id.into();
+        profile.tunnel.public_url = public_url.into();
+        data.profiles.push(profile);
+        data
+    }
+
+    fn fixture_path(label: &str) -> std::path::PathBuf {
+        std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/oauth-origin-isolation")
+            .join(format!("{label}-{}", uuid::Uuid::new_v4()))
+            .join("profiles.json")
+    }
+
     #[test]
     fn oauth_enabled_only_for_oauth_type() {
         let mut auth = AuthConfig::default();
@@ -226,42 +258,94 @@ mod tests {
 
     #[test]
     fn fixture_origin_survives_unrelated_parallel_sync() {
-        let root = std::env::current_dir()
-            .unwrap()
-            .join("aiTemp/oauth-origin-isolation")
-            .join(uuid::Uuid::new_v4().to_string());
-        crate::data::with_test_file(root.join("profiles.json"), || {
-            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-            let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(1);
-            let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
+        let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
+        crate::data::with_test_file(fixture_path("outer"), || {
+            sync_trusted_origins(&fixture_data(
+                &profile_id,
+                "https://new-popup.example",
+            ));
+            let worker = std::thread::spawn(|| {
+                sync_trusted_origins(&crate::data::AppData::default());
+            });
+            worker.join().unwrap();
+            assert_eq!(
+                trusted_external_base_url(
+                    &profile_id,
+                    false,
+                    28767,
+                    "https://old-popup.example",
+                ),
+                "https://new-popup.example"
+            );
+        });
+    }
+
+    #[test]
+    fn same_fixture_cross_thread_refresh_is_visible() {
+        let file = fixture_path("shared");
+        let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
+        crate::data::with_test_file(file.clone(), || {
+            sync_trusted_origins(&fixture_data(
+                &profile_id,
+                "https://old-popup.example",
+            ));
+            let worker_file = file.clone();
             let worker_id = profile_id.clone();
             let worker = std::thread::spawn(move || {
-                let mut data = crate::data::AppData::default();
-                let mut profile =
-                    crate::workspace::WorkspaceProfile::new("fixture-workspace".into(), None);
-                profile.id = worker_id.clone();
-                profile.tunnel.public_url = "https://new-popup.example".into();
-                data.profiles.push(profile);
-                sync_trusted_origins(&data);
-                ready_tx.send(()).unwrap();
-                continue_rx.recv().unwrap();
+                crate::data::with_test_file(worker_file, || {
+                    sync_trusted_origins(&fixture_data(
+                        &worker_id,
+                        "https://new-popup.example",
+                    ));
+                });
+            });
+            worker.join().unwrap();
+            assert_eq!(
+                trusted_external_base_url(
+                    &profile_id,
+                    false,
+                    28767,
+                    "https://old-popup.example",
+                ),
+                "https://new-popup.example"
+            );
+        });
+    }
+
+    #[test]
+    fn nested_fixture_scope_restores_outer_origin_view() {
+        let outer_file = fixture_path("outer-nested");
+        let inner_file = fixture_path("inner-nested");
+        let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
+        crate::data::with_test_file(outer_file, || {
+            sync_trusted_origins(&fixture_data(
+                &profile_id,
+                "https://outer-popup.example",
+            ));
+            crate::data::with_test_file(inner_file, || {
+                sync_trusted_origins(&fixture_data(
+                    &profile_id,
+                    "https://inner-popup.example",
+                ));
                 assert_eq!(
                     trusted_external_base_url(
-                        &worker_id,
+                        &profile_id,
                         false,
                         28767,
-                        "https://old-popup.example",
+                        "https://configured.example",
                     ),
-                    "https://new-popup.example"
+                    "https://inner-popup.example"
                 );
             });
-
-            ready_rx.recv().unwrap();
-            // Deterministically erase the process-wide map from another thread.
-            // The worker must retain its own fixture view until its HTTP flow ends.
-            sync_trusted_origins(&crate::data::AppData::default());
-            continue_tx.send(()).unwrap();
-            worker.join().unwrap();
+            assert_eq!(
+                trusted_external_base_url(
+                    &profile_id,
+                    false,
+                    28767,
+                    "https://configured.example",
+                ),
+                "https://outer-popup.example"
+            );
         });
     }
 }
