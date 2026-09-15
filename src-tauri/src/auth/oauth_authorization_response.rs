@@ -94,9 +94,7 @@ fn append_authorization_server_issuer(location: &str, issuer: &str) -> Option<St
 }
 
 fn query_segment_key_is_issuer(segment: &str) -> bool {
-    let raw_key = segment
-        .split_once('=')
-        .map_or(segment, |(key, _value)| key);
+    let raw_key = segment.split_once('=').map_or(segment, |(key, _value)| key);
     let bytes = raw_key.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len().min(4));
     let mut index = 0;
