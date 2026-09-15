@@ -3355,7 +3355,7 @@ export class ChatGptBrowserWorker {
       .locator("xpath=ancestor::form[1]")
       .getByTestId("send-button");
     await sendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
-    await settleChatGptUi();
+    // Check readiness immediately; only back off when the control is still disabled.
     const sendEnableDeadline = Date.now() + CHATGPT_SEND_ENABLE_GRACE_MS;
     for (;;) {
       if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
