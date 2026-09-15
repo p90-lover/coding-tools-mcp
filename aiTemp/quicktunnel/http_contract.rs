@@ -7,12 +7,14 @@ fn quick_live_control_under_load_keeps_auth_and_execution_limits() {
         .join("aiTemp/quick-http")
         .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(root.join("workspace")).unwrap();
-    crate::data::with_test_file(root.join("config/profiles.json"), || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(check(root));
+    crate::auth::http_security::with_test_tool_workers(16, || {
+        crate::data::with_test_file(root.join("config/profiles.json"), || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(check(root));
+        });
     });
 }
 async fn check(root: PathBuf) {
