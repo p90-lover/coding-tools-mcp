@@ -132,3 +132,24 @@ test('Windows packaging keeps electron-builder cache on the retained aiTemp volu
   }
   assert.doesNotMatch(workflow, /ELECTRON_BUILDER_CACHE:\s*["\']?[A-Za-z]:\\/);
 });
+
+test('Windows package smoke selects the configured Electron Builder artifact exactly', async () => {
+  const [manifestSource, smoke] = await Promise.all([
+    fs.readFile(path.join(root, 'desktop-electron', 'package.json'), 'utf8'),
+    fs.readFile(path.join(root, 'desktop-electron', 'scripts', 'smoke-package.cjs'), 'utf8'),
+  ]);
+  const manifest = JSON.parse(manifestSource);
+  const expectedInstaller = manifest.build.artifactName
+    .replaceAll('${version}', manifest.version)
+    .replaceAll('${os}', 'win')
+    .replaceAll('${arch}', 'x64')
+    .replaceAll('${ext}', 'exe');
+  assert.equal(expectedInstaller, 'Coding.Tools_0.7.0-rc.1_win_x64.exe');
+  for (const required of [
+    'function artifactNameFor(osName, arch, extension)',
+    'artifact(artifactNameFor("win", process.arch, "exe"), "Windows installer")',
+  ]) {
+    assert.match(smoke, new RegExp(escapeRegex(required)));
+  }
+  assert.doesNotMatch(smoke, /-win-x64\\\.exe/);
+});
