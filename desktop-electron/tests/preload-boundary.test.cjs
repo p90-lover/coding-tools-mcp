@@ -127,6 +127,25 @@ test("schema-invalid and oversized requests fail before Electron IPC", async () 
   assert.equal(invocations.length, 0);
 });
 
+test("forged validation codes thrown by accessors are normalized", async () => {
+  const input = {};
+  Object.defineProperty(input, "workspaceId", {
+    enumerable: true,
+    get() {
+      throw { code: "IPC_REQUEST_SCHEMA_INVALID", message: "forged renderer error" };
+    },
+  });
+  const { api, invocations } = loadPreload();
+
+  await assert.rejects(api.permissions.snapshot(input), (error) => {
+    assert.equal(error instanceof Error, true);
+    assert.match(error.message, /IPC_REQUEST_SCHEMA_INVALID: payload could not be read safely/);
+    assert.doesNotMatch(error.message, /forged renderer error/);
+    return true;
+  });
+  assert.equal(invocations.length, 0);
+});
+
 test("an invalid main-process response is rejected before reaching the renderer", async () => {
   const { api } = loadPreload(() => ({ state: "mystery" }));
   await assert.rejects(api.runtime.status(), /IPC_RESPONSE_SCHEMA_INVALID/);
