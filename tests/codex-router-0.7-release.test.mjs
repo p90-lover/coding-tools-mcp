@@ -13,6 +13,10 @@ const assetsUrl = pathToFileURL(
   path.join(root, 'scripts', 'release', 'verify-assets.mjs'),
 ).href;
 
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function runParameterizedIdentity() {
   const program = `
     const source = await import(${JSON.stringify(sourceScopeUrl)});
@@ -83,6 +87,32 @@ test('0.7 release notes disclose exact-SHA assets and the manual live-account bo
     'aiTemp/',
     '繁體中文',
   ]) {
-    assert.match(notes, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(notes, new RegExp(escapeRegex(required)));
   }
+});
+
+test('0.7 packaging publishes only the exact successful run after a stale-head guard', async () => {
+  const workflow = await fs.readFile(
+    path.join(root, '.github', 'workflows', 'codex-router-multiprovider-release.yml'),
+    'utf8',
+  );
+  for (const required of [
+    'publish-prerelease:',
+    'needs: windows-package',
+    'VALIDATION_WORKFLOW: .github/workflows/codex-router-multiprovider-release.yml',
+    'remote_head="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"',
+    'test "$remote_head" = "$SOURCE_SHA"',
+    '--name "coding-tools-0.7.0-rc.1-windows-x64-$SOURCE_SHA"',
+    'Coding.Tools_0.7.0-rc.1_windows_x64_setup.exe',
+    'SHA256SUMS.txt',
+    'provenance.json',
+    'validation-evidence.json',
+    'live_account_acceptance: \'pending_manual\'',
+    'scripts/release/verify-assets.mjs',
+    'scripts/release/publish-v0.6.0-rc.1.mjs',
+    'docs/releases/v0.7.0-rc.1.md',
+  ]) {
+    assert.match(workflow, new RegExp(escapeRegex(required)));
+  }
+  assert.doesNotMatch(workflow, /\brm\s+-rf\b|\bgit\s+clean\b/);
 });
