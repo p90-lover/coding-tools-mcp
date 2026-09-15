@@ -130,7 +130,9 @@ jobs:
             desktop-electron/tests/package-contents.test.cjs
             docs/releases/v0.6.0-rc.1.md
             rust-core/coding-tools-core/Cargo.toml
+            rust-core/coding-tools-core/Cargo.lock
             rust-core/coding-tools-headless/Cargo.toml
+            rust-core/coding-tools-headless/Cargo.lock
             third_party/THIRD_PARTY_NOTICES.md
           )
           for path in "${required[@]}"; do
