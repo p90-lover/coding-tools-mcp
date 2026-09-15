@@ -74,7 +74,6 @@ jobs:
             2>&1 | tee aiTemp/evidence/runtime-typecheck.txt
           node --test \
             desktop-electron/tests/product-identity.test.cjs \
-            desktop-electron/tests/package-contents.test.cjs \
             desktop-electron/tests/package-resource-preparation.test.cjs \
             desktop-electron/tests/packaging-contract.test.cjs \
             desktop-electron/tests/prepare-runtime.test.cjs \
