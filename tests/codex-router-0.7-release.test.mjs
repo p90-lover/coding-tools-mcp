@@ -116,3 +116,22 @@ test('0.7 packaging publishes only the exact successful run after a stale-head g
   }
   assert.doesNotMatch(workflow, /\brm\s+-rf\b|\bgit\s+clean\b/);
 });
+
+test('Windows packaging keeps electron-builder cache on the retention volume', async () => {
+  const workflow = await fs.readFile(
+    path.join(root, '.github', 'workflows', 'codex-router-multiprovider-release.yml'),
+    'utf8',
+  );
+  const match = workflow.match(/\n  windows-package:\n[\s\S]*?(?=\n  publish-prerelease:\n)/);
+  assert.ok(match, 'windows-package job must precede publish-prerelease');
+  const windowsJob = match[0];
+  assert.match(
+    windowsJob,
+    /ELECTRON_BUILDER_CACHE: \$\{\{ github\.workspace \}\}\/aiTemp\/cache\/electron-builder/,
+  );
+  assert.match(windowsJob, /aiTemp\/cache\/electron-builder/);
+  assert.match(
+    windowsJob,
+    /CODING_TOOLS_RETENTION_ROOT: \$\{\{ github\.workspace \}\}\/aiTemp\/Trash\//,
+  );
+});
