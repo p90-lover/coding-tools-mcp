@@ -528,12 +528,17 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
   const unpersonalized = page
     .getByRole("button", { name: /^(?:Unpersonalized|非个性化)$/, exact: true, includeHidden: true })
     .filter({ visible: true });
-  let personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
-  let unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
+  // These labels describe one UI state and can be observed independently under the same deadline.
+  let [personalizedCount, unpersonalizedCount] = await Promise.all([
+    runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal),
+    runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal),
+  ]);
   if (personalizedCount === 0 && unpersonalizedCount === 0) {
     await runChatGptPersonalizationStep(settleChatGptUi, deadline, abortSignal);
-    personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
-    unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
+    [personalizedCount, unpersonalizedCount] = await Promise.all([
+      runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal),
+      runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal),
+    ]);
     if (personalizedCount === 0 && unpersonalizedCount === 0) {
       if (!proveConfiguredConnectorAccess) {
         await capture("personalization-control-missing");
