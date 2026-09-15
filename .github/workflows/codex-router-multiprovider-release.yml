@@ -173,15 +173,20 @@ jobs:
             aiTemp/tmp \
             aiTemp/Trash/release-0.7.0-rc.1-windows \
             aiTemp/release-output
-          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          printf 'source=%s\nrunner=%s\n' "$SOURCE_SHA" "$RUNNER_OS" \
+            > aiTemp/evidence/windows-run-identity.txt
+          preload="$(node -e 'const {pathToFileURL}=require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href)' "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
           export NODE_OPTIONS="--import=$preload"
           absolute_tmp="$PWD/aiTemp/tmp"
           TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
-            bun install --frozen-lockfile --cwd runtime-web
+            bun install --frozen-lockfile --cwd runtime-web \
+            2>&1 | tee aiTemp/evidence/runtime-install-windows.txt
           TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
-            bun install --frozen-lockfile --cwd runtime-web/launcher
+            bun install --frozen-lockfile --cwd runtime-web/launcher \
+            2>&1 | tee aiTemp/evidence/launcher-install-windows.txt
           TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
-            bun install --frozen-lockfile --cwd desktop-electron
+            bun install --frozen-lockfile --cwd desktop-electron \
+            2>&1 | tee aiTemp/evidence/desktop-install-windows.txt
 
       - name: Acquire checksum-pinned official tunnel-client archive
         run: |
@@ -215,7 +220,7 @@ jobs:
           set -euo pipefail
           cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
             2>&1 | tee aiTemp/evidence/rust-headless-release.txt
-          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          preload="$(node -e 'const {pathToFileURL}=require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href)' "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
           export NODE_OPTIONS="--import=$preload"
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun run --cwd desktop-electron package:win \
@@ -239,7 +244,7 @@ jobs:
           test -s aiTemp/evidence/package-verification.json
           node --test desktop-electron/tests/package-contents.test.cjs \
             2>&1 | tee aiTemp/evidence/package-contents-tests.txt
-          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          preload="$(node -e 'const {pathToFileURL}=require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href)' "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
           export NODE_OPTIONS="--import=$preload"
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun run --cwd desktop-electron smoke:package \
