@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::Notify;
 
 const CONTROL_PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -235,11 +235,11 @@ struct Descriptor<'a> {
     shutdown_reason: Option<&'a str>,
 }
 
-fn restrict_file(path: &Path) -> Result<(), String> {
+fn restrict_file(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(text_error)?;
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o600)).map_err(text_error)?;
     }
     Ok(())
 }
@@ -685,7 +685,7 @@ async fn tool_call(
     let workspace_id = body.workspace_id.clone();
     let tool = body.tool.clone();
     let arguments = body.arguments.clone();
-    let outcome = tokio::task::spawn_blocking(move || tools::call_tool_mcp(&context, &tool, &arguments)).await;
+    let outcome = tokio::task::spawn_blocking(move || tools::dispatch::call_tool_mcp(&context, &tool, &arguments)).await;
     let (state_name, result, error) = match outcome {
         Ok(value) => match serde_json::to_vec(&value) {
             Ok(bytes) if bytes.len() <= MAX_RESULT_BYTES => ("completed", Some(value), None),
@@ -814,6 +814,7 @@ impl HeadlessService {
         let service_endpoint = endpoint.clone();
         let service_token_file = token_file.clone();
         let token_hash = auth.token_sha256.clone();
+        let shutdown_reason_tx = shutdown_tx.clone();
         let join = tokio::spawn(async move {
             let app = router(state);
             let result = axum::serve(listener, app)
@@ -826,7 +827,7 @@ impl HeadlessService {
                 })
                 .await
                 .map_err(text_error);
-            let reason = shutdown_tx
+            let reason = shutdown_reason_tx
                 .borrow()
                 .clone()
                 .unwrap_or_else(|| "listener-stopped".into());
