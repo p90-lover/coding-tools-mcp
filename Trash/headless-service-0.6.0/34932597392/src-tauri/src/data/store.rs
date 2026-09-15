@@ -26,7 +26,6 @@ const SHARED_KEYS: &[&str] = &[
 pub struct DataStore {
     data: AppData,
     baseline: serde_json::Value,
-    persistent: bool,
 }
 
 impl DataStore {
@@ -37,11 +36,7 @@ impl DataStore {
         let mut data = load_or_migrate()?;
         let imported = import_legacy_profiles_if_empty(&mut data)?;
         let baseline = serde_json::to_value(&data)?;
-        let store = Self {
-            data,
-            baseline,
-            persistent: true,
-        };
+        let store = Self { data, baseline };
         if !existed_before || imported > 0 {
             save(&store.data)?;
         }
@@ -54,15 +49,11 @@ impl DataStore {
 
     /// Construct an isolated store for tests and migration probes.
     ///
-    /// This constructor performs no disk IO, never synchronizes trusted
-    /// origins, and keeps later save/refresh calls inside this in-memory state.
+    /// This constructor performs no disk IO and never synchronizes trusted
+    /// origins. Persisting it still requires an explicit ordinary store path.
     pub fn from_data(data: AppData) -> AppResult<Self> {
         let baseline = serde_json::to_value(&data)?;
-        Ok(Self {
-            data,
-            baseline,
-            persistent: false,
-        })
+        Ok(Self { data, baseline })
     }
 
     pub fn read_file<R>(f: impl FnOnce(&AppData) -> AppResult<R>) -> AppResult<R> {
@@ -87,16 +78,7 @@ impl DataStore {
         &self.data
     }
 
-    /// True only for a store loaded from the configured application-data file.
-    pub fn is_persistent(&self) -> bool {
-        self.persistent
-    }
-
     pub fn refresh(&mut self) -> AppResult<()> {
-        if !self.persistent {
-            self.baseline = serde_json::to_value(&self.data)?;
-            return Ok(());
-        }
         let _guard = lock_data_file()?;
         let data = load_or_migrate()?;
         self.baseline = serde_json::to_value(&data)?;
@@ -106,10 +88,6 @@ impl DataStore {
     }
 
     pub fn save(&mut self) -> AppResult<()> {
-        if !self.persistent {
-            self.baseline = serde_json::to_value(&self.data)?;
-            return Ok(());
-        }
         let _guard = lock_data_file()?;
         let latest = load_or_migrate()?;
         let latest_value = serde_json::to_value(&latest)?;
