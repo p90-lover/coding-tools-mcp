@@ -405,7 +405,12 @@ async function invokeContract(ipcRenderer, name, payload = {}) {
   );
   assertSchema(requestSnapshot, contract.request, "IPC_REQUEST_SCHEMA_INVALID");
 
-  const response = await ipcRenderer.invoke(contract.channel, requestSnapshot);
+  let response;
+  try {
+    response = await ipcRenderer.invoke(contract.channel, requestSnapshot);
+  } catch {
+    throw codedError("IPC_TRANSPORT_FAILED", `${name} failed`);
+  }
   const responseSnapshot = snapshotJsonPayload(
     response,
     "IPC_RESPONSE_SCHEMA_INVALID",
