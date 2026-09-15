@@ -449,9 +449,11 @@ jobs:
           )
           test "${#installers[@]}" -eq 1
           printf '%s\n' "${installers[0]}" > aiTemp/evidence/original-installer-path.txt
-          cp "${installers[0]}" "aiTemp/release-output/$WINDOWS_INSTALLER"
-          test -s "aiTemp/release-output/$WINDOWS_INSTALLER"
-          sha256sum "aiTemp/release-output/$WINDOWS_INSTALLER" \
+          release_installer="aiTemp/release-output/$WINDOWS_INSTALLER"
+          test ! -e "$release_installer"
+          cp --no-clobber "${installers[0]}" "$release_installer"
+          test -s "$release_installer"
+          sha256sum "$release_installer" \
             > aiTemp/evidence/windows-installer.sha256
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
