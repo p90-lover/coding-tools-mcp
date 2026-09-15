@@ -2,7 +2,6 @@ use axum::{
     http::{header::LOCATION, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
-use std::str::FromStr;
 
 use super::oauth_flow::{self, AuthorizeForm, OAuthRuntime};
 
