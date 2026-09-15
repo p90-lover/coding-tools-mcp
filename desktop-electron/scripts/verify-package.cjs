@@ -15,7 +15,7 @@ const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const PRODUCT = Object.freeze({
   name: "Coding Tools",
   packageName: "coding-tools-full-harness-desktop",
-  version: "0.6.0-rc.1",
+  version: "0.7.0-rc.1",
   appId: "dev.codingtools.fullharness",
   platform: "win32",
   arch: "x64",
