@@ -193,10 +193,8 @@ jobs:
           mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/full-harness-runtime
           short_tmp="$PWD/aiTemp/tmp"
           if [[ "$RUNNER_OS" != "Windows" ]]; then
-            short_tmp="/tmp/ct-full-${GITHUB_RUN_ID}-${RUNNER_OS,,}"
-            test ! -e "$short_tmp" && test ! -L "$short_tmp"
-            ln -s "$PWD/aiTemp/tmp" "$short_tmp"
-            test "$(realpath "$short_tmp")" = "$PWD/aiTemp/tmp"
+            short_tmp="$GITHUB_WORKSPACE/aiTemp/t"
+            mkdir -p "$short_tmp"
           fi
           echo "CODING_TOOLS_SHORT_TMP=$short_tmp" >> "$GITHUB_ENV"
 
