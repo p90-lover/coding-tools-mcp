@@ -5,9 +5,7 @@ use axum::http::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sha2::{Digest, Sha256};
 
-use super::{
-    authorize_get, authorize_post_browser, AuthorizeForm, AuthorizeParams, OAuthRuntime,
-};
+use super::{authorize_get, authorize_post_browser, AuthorizeForm, AuthorizeParams, OAuthRuntime};
 
 #[test]
 fn authorization_response_identifies_the_public_issuer() {
