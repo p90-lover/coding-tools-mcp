@@ -116,3 +116,19 @@ test('0.7 packaging publishes only the exact successful run after a stale-head g
   }
   assert.doesNotMatch(workflow, /\brm\s+-rf\b|\bgit\s+clean\b/);
 });
+
+test('Windows packaging keeps electron-builder cache on the retained aiTemp volume', async () => {
+  const workflow = await fs.readFile(
+    path.join(root, '.github', 'workflows', 'codex-router-multiprovider-release.yml'),
+    'utf8',
+  );
+  for (const required of [
+    'ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/cache/electron-builder',
+    'aiTemp/cache/electron-builder',
+    'test -d aiTemp/cache/electron-builder',
+    'electron_builder_cache=%s',
+  ]) {
+    assert.match(workflow, new RegExp(escapeRegex(required)));
+  }
+  assert.doesNotMatch(workflow, /ELECTRON_BUILDER_CACHE:\s*["\']?[A-Za-z]:\\/);
+});
