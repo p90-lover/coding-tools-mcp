@@ -72,6 +72,15 @@ function storedZip(entries) {
   return Buffer.concat([...localParts, centralDirectory, end]);
 }
 
+function cloudflaredManifest(platform = "windows/amd64") {
+  return `${JSON.stringify({
+    version: "2026.7.2",
+    release_url: "https://github.com/cloudflare/cloudflared/releases/tag/2026.7.2",
+    release_commit: "8679787525edc8575b2948a7c4a50b6292c6d426",
+    platforms: [platform],
+  })}\n`;
+}
+
 function writeFile(filePath, bytes) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, bytes);
@@ -101,6 +110,8 @@ function createFixture(label, overrides = {}) {
   const tunnelBytes = Buffer.from("MZfixture-tunnel-client-0.0.12");
   const archiveBytes = storedZip([
     ["tunnel-client.exe", tunnelBytes],
+    ["cloudflared.exe", "MZfixture-cloudflared"],
+    ["cloudflared-manifest.json", cloudflaredManifest()],
     ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
     ["NOTICE", "OpenAI tunnel-client\n"],
     [licenseName, "tunnel-client dependency licenses include Apache-2.0 components.\n"],
@@ -163,7 +174,7 @@ function componentBytes(outputRoot, component) {
   return fs.readFileSync(path.join(outputRoot, ...component.path.split("/")));
 }
 
-test("composes the exact Windows payload from a checksum-pinned tunnel archive and preserves prior resources", () => {
+test("composes the exact Windows payload from the official seven-member client archive and preserves prior resources", () => {
   const options = createFixture("complete");
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "retain this prior output\n");
 
@@ -200,6 +211,22 @@ test("composes the exact Windows payload from a checksum-pinned tunnel archive a
     repository: "miuuyy/codex-chatgpt-web",
     version: "v5.0.6",
     commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
+  });
+  assert.deepEqual(manifest.supply_chain.tunnel_client.archive.members, [
+    "LICENSE",
+    "NOTICE",
+    "cloudflared-manifest.json",
+    "cloudflared.exe",
+    "tunnel-client-v0.0.12-windows-amd64-licenses.txt",
+    "tunnel-client-v0.0.12-windows-amd64.spdx.json",
+    "tunnel-client.exe",
+  ]);
+  assert.deepEqual(manifest.supply_chain.tunnel_client.cloudflared, {
+    binaryName: "cloudflared.exe",
+    binarySha256: sha256(Buffer.from("MZfixture-cloudflared")),
+    manifestSha256: sha256(Buffer.from(cloudflaredManifest())),
+    version: "2026.7.2",
+    releaseCommit: "8679787525edc8575b2948a7c4a50b6292c6d426",
   });
   assert.deepEqual(
     manifest.components.map((component) => component.id),
@@ -259,6 +286,8 @@ test("rejects any unexpected member in the tunnel archive before replacing prior
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
   const archiveBytes = storedZip([
     ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.12"],
+    ["cloudflared.exe", "MZfixture-cloudflared"],
+    ["cloudflared-manifest.json", cloudflaredManifest()],
     ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
     ["NOTICE", "OpenAI tunnel-client\n"],
     [options.tunnelRelease.licenseName, "Apache-2.0\n"],
@@ -271,6 +300,55 @@ test("rejects any unexpected member in the tunnel archive before replacing prior
   assert.throws(
     () => preparePackageResources(options),
     /PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVENTORY_MISMATCH/,
+  );
+  assert.equal(fs.readFileSync(path.join(options.outputRoot, "old-resource.txt"), "utf8"), "still active\n");
+});
+
+test("rejects a client archive missing the pinned cloudflared manifest before replacing prior output", () => {
+  const options = createFixture("tunnel-missing-cloudflared-manifest");
+  writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
+  const archiveBytes = storedZip([
+    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.12"],
+    ["cloudflared.exe", "MZfixture-cloudflared"],
+    ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
+    ["NOTICE", "OpenAI tunnel-client\n"],
+    [options.tunnelRelease.licenseName, "Apache-2.0\n"],
+    [options.tunnelRelease.spdxName, "{\"spdxVersion\":\"SPDX-2.3\"}\n"],
+  ]);
+  writeFile(options.tunnelArchive, archiveBytes);
+  options.tunnelRelease = { ...options.tunnelRelease, archiveSha256: sha256(archiveBytes) };
+
+  assert.throws(
+    () => preparePackageResources(options),
+    /PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVENTORY_MISMATCH/,
+  );
+  assert.equal(fs.readFileSync(path.join(options.outputRoot, "old-resource.txt"), "utf8"), "still active\n");
+});
+
+test("rejects a client archive with a forged cloudflared identity before replacing prior output", () => {
+  const options = createFixture("tunnel-cloudflared-identity");
+  writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
+  const forgedManifest = JSON.stringify({
+    version: "2026.6.0",
+    release_url: "https://github.com/cloudflare/cloudflared/releases/tag/2026.6.0",
+    release_commit: "0".repeat(40),
+    platforms: ["windows/amd64"],
+  }, null, 2) + "\n";
+  const archiveBytes = storedZip([
+    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.12"],
+    ["cloudflared.exe", "MZfixture-cloudflared"],
+    ["cloudflared-manifest.json", forgedManifest],
+    ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
+    ["NOTICE", "OpenAI tunnel-client\n"],
+    [options.tunnelRelease.licenseName, "Apache-2.0\n"],
+    [options.tunnelRelease.spdxName, "{\"spdxVersion\":\"SPDX-2.3\"}\n"],
+  ]);
+  writeFile(options.tunnelArchive, archiveBytes);
+  options.tunnelRelease = { ...options.tunnelRelease, archiveSha256: sha256(archiveBytes) };
+
+  assert.throws(
+    () => preparePackageResources(options),
+    /PACKAGE_RESOURCE_CLOUDFLARED_IDENTITY_MISMATCH/,
   );
   assert.equal(fs.readFileSync(path.join(options.outputRoot, "old-resource.txt"), "utf8"), "still active\n");
 });
@@ -317,6 +395,7 @@ test("package and runtime preparation use repository aiTemp retention without de
   assert.match(composer, /Trash/);
   assert.match(composer, /2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356/);
   assert.match(composer, /7d85227df86c38a689fca913d6f4a0b49ad030d6e056155a6832312cf7fb4bad/);
+  assert.match(composer, /cloudflared-manifest\.json/);
   assert.match(runtimePreparation, /aiTemp/);
   assert.match(runtimePreparation, /Trash/);
   assert.equal(manifest.scripts["build:package-resources"], "node scripts/prepare-package-resources.cjs");
