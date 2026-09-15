@@ -537,7 +537,13 @@ function validateTunnelArchive(archivePath, release, platform) {
   return {
     archivePath: archive.path,
     archiveDigest,
-    archiveMembers: [...members.keys()].sort(compareText),
+    archiveMembers: [...members.entries()]
+      .sort(([left], [right]) => compareText(left, right))
+      .map(([name, memberBytes]) => ({
+        name,
+        size: memberBytes.length,
+        sha256: sha256(memberBytes),
+      })),
     members,
     licenseDigest,
     spdxDigest,
@@ -762,12 +768,15 @@ function preparePackageResources(options = {}) {
     fs.mkdirSync(path.dirname(headlessTarget), { recursive: true, mode: 0o700 });
     fs.copyFileSync(headlessSource.path, headlessTarget, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(headlessTarget, platform === "win32" ? 0o600 : (headlessSource.metadata.mode & 0o777) || 0o755);
-    writeComponent(
-      stagingRoot,
-      paths["tunnel-client"],
-      tunnel.members.get(tunnel.release.binaryName),
-      platform === "win32" ? 0o600 : 0o755,
-    );
+    for (const [name, memberBytes] of [...tunnel.members.entries()].sort(([left], [right]) => compareText(left, right))) {
+      const executable = name === tunnel.release.binaryName || name === cloudflaredName(platform);
+      writeComponent(
+        stagingRoot,
+        `native/${name}`,
+        memberBytes,
+        executable && platform !== "win32" ? 0o755 : 0o600,
+      );
+    }
 
     writeJson(path.join(stagingRoot, ...paths["migration-manifest"].split("/")), {
       schema: 1,
