@@ -50,6 +50,14 @@ function readMarker(markerPath) {
   }
 }
 
+function packagedLauncherEnvironment(environment) {
+  if (!environment) return environment;
+  return Object.fromEntries(
+    Object.entries(environment)
+      .filter(([name]) => name.toUpperCase() !== "NODE_OPTIONS"),
+  );
+}
+
 async function waitForExit(child, milliseconds) {
   if (child.exitCode !== null || child.signalCode !== null) return true;
   let settled = false;
@@ -100,7 +108,7 @@ async function runPackagedLauncherProcess({
 
   const child = spawn(command, args, {
     cwd,
-    env,
+    env: packagedLauncherEnvironment(env),
     detached: DETACH_OWNED_CHILD,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
