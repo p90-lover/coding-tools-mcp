@@ -3,16 +3,16 @@ import {
   chmodSync,
   copyFileSync,
   cpSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { VERSION } from "../src/version";
 
 const root = resolve(import.meta.dir, "..");
@@ -48,10 +48,14 @@ const appDir = join(output, "app");
 const runtimeDir = join(output, "runtime");
 const binDir = join(output, "bin");
 
-rmSync(output, { recursive: true, force: true });
-mkdirSync(appDir, { recursive: true });
-mkdirSync(runtimeDir, { recursive: true });
-mkdirSync(binDir, { recursive: true });
+mkdirSync(dirname(output), { recursive: true });
+if (existsSync(output)) {
+  throw new Error(`Runtime bundle output already exists and must be preserved before rebuilding: ${output}`);
+}
+mkdirSync(output, { recursive: false });
+mkdirSync(appDir, { recursive: false });
+mkdirSync(runtimeDir, { recursive: false });
+mkdirSync(binDir, { recursive: false });
 
 const build = await Bun.build({
   entrypoints: [join(root, "src", "cli.ts")],
