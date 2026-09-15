@@ -169,15 +169,20 @@ fn validate_authorization(origin: &str, auth: &Value) -> AppResult<()> {
     }
     Ok(())
 }
-fn validate_oauth(origin: &str, auth: &Value, resource: &Value) -> AppResult<()> {
+fn validate_oauth(
+    origin: &str,
+    expected_resource: &str,
+    auth: &Value,
+    resource: &Value,
+) -> AppResult<()> {
     validate_authorization(origin, auth)?;
-    if resource["resource"] != origin
+    if resource["resource"] != expected_resource
         || resource["authorization_servers"]
             .as_array()
             .is_none_or(|v| v != &[Value::String(origin.into())])
     {
         return Err(invalid(
-            "OAuth resource metadata does not match the current tunnel origin",
+            "OAuth resource metadata does not match the current tunnel resource",
         ));
     }
     Ok(())
@@ -216,13 +221,15 @@ async fn probe_with_client(
     let auth_url = format!("{origin}/.well-known/oauth-authorization-server");
     match kind {
         TunnelServiceKind::Mcp => {
-            let resource_url = format!("{origin}/.well-known/oauth-protected-resource");
+            let expected_resource = format!("{origin}/mcp");
+            let resource_url =
+                format!("{origin}/.well-known/oauth-protected-resource/mcp");
             let (_, auth, resource) = tokio::try_join!(
                 status,
                 document(client, &auth_url),
                 document(client, &resource_url)
             )?;
-            validate_oauth(origin, &auth, &resource)
+            validate_oauth(origin, &expected_resource, &auth, &resource)
         }
         TunnelServiceKind::Actions => {
             let (_, auth) = tokio::try_join!(status, document(client, &auth_url))?;
@@ -278,10 +285,18 @@ mod tests {
             assert!(public_origin(value).is_err(), "{value}");
         }
         let origin = "https://new.example.com";
+        let expected_resource = format!("{origin}/mcp");
         let a = crate::auth::authorization_server_metadata(origin, None);
-        let resource = crate::auth::protected_resource_metadata(origin);
-        assert!(validate_oauth(origin, &a, &resource).is_ok());
-        assert!(validate_oauth("https://old.example.com", &a, &resource).is_err());
+        let resource = crate::auth::mcp_protected_resource_metadata(origin);
+        assert!(validate_oauth(origin, &expected_resource, &a, &resource).is_ok());
+        assert!(validate_oauth(origin, origin, &a, &resource).is_err());
+        assert!(validate_oauth(
+            "https://old.example.com",
+            "https://old.example.com/mcp",
+            &a,
+            &resource
+        )
+        .is_err());
         assert!(validate_mcp(&serde_json::json!({"name":"other-service","version":"1","protocolVersion":"2025-06-18"})).is_err());
     }
     #[tokio::test]
