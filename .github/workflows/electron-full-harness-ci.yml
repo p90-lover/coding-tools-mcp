@@ -347,6 +347,22 @@ jobs:
             --all-targets -- -D warnings \
             2>&1 | tee aiTemp/evidence/rust-headless-clippy.txt
 
+      - name: Verify shipped Windows headless dependency boundary
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          dependency_evidence="aiTemp/evidence/dependencies-x86_64-pc-windows-msvc.txt"
+          cargo tree --locked \
+            --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+            --target x86_64-pc-windows-msvc \
+            --prefix none \
+            --format '{p}' \
+            > "$dependency_evidence"
+          if grep -Eq '^glib v' "$dependency_evidence"; then
+            echo 'Release blocked: affected GLib present in the shipped Windows headless target'
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -460,7 +476,7 @@ jobs:
               and item['package']['name'] == 'glib'
               for item in warnings.get('unsound', [])
           ), 'Unreviewed soundness warning'
-          print('RustSec vulnerability and yanked-crate gates passed.')
+          print('RustSec vulnerability/yanked gates passed; GLib exclusion is checked in the Windows headless job.')
           PYAUDIT
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
