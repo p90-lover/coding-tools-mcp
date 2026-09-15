@@ -5,7 +5,9 @@ on:
   push:
     paths:
       - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
+      - "aiTemp/codex-web-send-latency/apply-send-readiness-fast-path.py"
       - ".github/workflows/codex-web-goal-latency-apply.yml"
+      - ".github/workflows/codex-web-send-latency-apply.yml"
       - "runtime-web/src/adapters/chatgpt-web/browser-worker.ts"
       - "runtime-web/src/http-body.ts"
       - "runtime-web/src/native-passthrough.ts"
@@ -19,7 +21,9 @@ on:
   pull_request:
     paths:
       - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
+      - "aiTemp/codex-web-send-latency/apply-send-readiness-fast-path.py"
       - ".github/workflows/codex-web-goal-latency-apply.yml"
+      - ".github/workflows/codex-web-send-latency-apply.yml"
       - "runtime-web/src/adapters/chatgpt-web/browser-worker.ts"
       - "runtime-web/src/http-body.ts"
       - "runtime-web/src/native-passthrough.ts"
