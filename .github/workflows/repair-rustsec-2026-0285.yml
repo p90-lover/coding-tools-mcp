@@ -1,0 +1,244 @@
+name: Repair RUSTSEC-2026-0285 and release audit
+
+on:
+  push:
+    branches:
+      - fix/rustls-rustsec-2026-0285-v0.4.12
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-rustsec-2026-0285
+  cancel-in-progress: false
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/rustsec-target
+  NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          clean: false
+
+      - name: Install Tauri Linux dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libpipewire-0.3-dev \
+            libgbm-dev
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+
+      - name: Reproduce advisory regression test in RED state
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rustsec-evidence
+          set +e
+          python tests/test_rustls_advisory_gate.py -v \
+            > aiTemp/rustsec-evidence/rustls-red.txt 2>&1
+          result=$?
+          set -e
+          cat aiTemp/rustsec-evidence/rustls-red.txt
+          if [ "$result" -eq 0 ]; then
+            echo 'Expected the regression test to fail before the dependency repair.' >&2
+            exit 1
+          fi
+          grep -F 'RUSTSEC-2026-0285 requires rustls >= 0.23.45' \
+            aiTemp/rustsec-evidence/rustls-red.txt
+
+      - name: Upgrade only the vulnerable rustls lock entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo update \
+            --manifest-path src-tauri/Cargo.toml \
+            -p rustls@0.23.41 \
+            --precise 0.23.45
+          git diff -- src-tauri/Cargo.lock \
+            > aiTemp/rustsec-evidence/cargo-lock.diff
+          test -s aiTemp/rustsec-evidence/cargo-lock.diff
+
+      - name: Replace inline credential scan with tested fail-closed scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+
+          path = pathlib.Path('.github/workflows/release.yml')
+          text = path.read_text(encoding='utf-8')
+          start_marker = '      - name: Screen reachable Git history for credential patterns\n'
+          end_marker = '      - name: Audit Rust dependencies against RustSec\n'
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          replacement = '''      - name: Screen reachable Git history for credential patterns
+              shell: bash
+              run: |
+                set -euo pipefail
+                mkdir -p aiTemp/audit-evidence
+                python tests/test_release_credential_history_scan.py -v \\
+                  2>&1 | tee aiTemp/audit-evidence/credential-screen-tests.txt
+                python scripts/release/scan_credential_history.py \\
+                  --output aiTemp/audit-evidence/credential-screen.json \\
+                  > aiTemp/audit-evidence/credential-screen.stdout.json
+                cat aiTemp/audit-evidence/credential-screen.json
+          '''
+          path.write_text(text[:start] + replacement + text[end:], encoding='utf-8')
+          PY
+          git diff -- .github/workflows/release.yml \
+            > aiTemp/rustsec-evidence/release-workflow.diff
+          test -s aiTemp/rustsec-evidence/release-workflow.diff
+
+      - name: Run focused GREEN regression and credential tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/test_rustls_advisory_gate.py -v \
+            2>&1 | tee aiTemp/rustsec-evidence/rustls-green.txt
+          python tests/test_release_credential_history_scan.py -v \
+            2>&1 | tee aiTemp/rustsec-evidence/credential-tests.txt
+          python scripts/release/scan_credential_history.py \
+            --output aiTemp/rustsec-evidence/credential-screen.json \
+            > aiTemp/rustsec-evidence/credential-screen.stdout.json
+          python - <<'PY'
+          import json
+          import pathlib
+
+          report = json.loads(
+              pathlib.Path('aiTemp/rustsec-evidence/credential-screen.json').read_text()
+          )
+          assert len(report['accepted_synthetic_fixtures']) == 4
+          assert not report['unexpected_findings'], report['unexpected_findings']
+          print('Credential scan accepted only four exact synthetic fixture blobs.')
+          PY
+
+      - name: Prove RustSec vulnerability is removed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --version 0.22.2 \
+            --root "$PWD/aiTemp/audit-tool"
+          aiTemp/audit-tool/bin/cargo-audit audit \
+            --file src-tauri/Cargo.lock \
+            2>&1 | tee aiTemp/rustsec-evidence/rustsec.txt
+          aiTemp/audit-tool/bin/cargo-audit audit \
+            --file src-tauri/Cargo.lock \
+            --json > aiTemp/rustsec-evidence/rustsec.json
+          python - <<'PY'
+          import json
+          import pathlib
+
+          report = json.loads(
+              pathlib.Path('aiTemp/rustsec-evidence/rustsec.json').read_text()
+          )
+          assert not report['vulnerabilities']['found'], 'RustSec vulnerability remains'
+          warnings = report.get('warnings', {})
+          assert not warnings.get('yanked', []), 'A locked crate was yanked'
+          assert all(
+              item['advisory']['id'] == 'RUSTSEC-2024-0429'
+              and item['package']['name'] == 'glib'
+              for item in warnings.get('unsound', [])
+          ), 'Unreviewed soundness warning'
+          print('RustSec vulnerability and yanked-crate gates passed.')
+          PY
+
+      - name: Run complete Linux and frontend validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+          cargo build --locked --manifest-path src-tauri/Cargo.toml
+          cargo test --locked --manifest-path src-tauri/Cargo.toml \
+            2>&1 | tee aiTemp/rustsec-evidence/rust-tests.txt
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml \
+            --all-targets -- -D warnings \
+            2>&1 | tee aiTemp/rustsec-evidence/clippy.txt
+          npm ci
+          npm run check 2>&1 | tee aiTemp/rustsec-evidence/frontend-check.txt
+          npm run build 2>&1 | tee aiTemp/rustsec-evidence/frontend-build.txt
+          node --test tests/*.test.mjs \
+            2>&1 | tee aiTemp/rustsec-evidence/node-contracts.txt
+          npm audit --audit-level=low \
+            2>&1 | tee aiTemp/rustsec-evidence/npm-audit.txt
+
+      - name: Archive this one-shot workflow instead of deleting it
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p Trash/security-rustsec-2026-0285/20260915
+          git mv \
+            .github/workflows/repair-rustsec-2026-0285.yml \
+            Trash/security-rustsec-2026-0285/20260915/repair-rustsec-2026-0285.yml
+
+      - name: Commit only the verified repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git add -- \
+            src-tauri/Cargo.lock \
+            .github/workflows/release.yml \
+            scripts/release/scan_credential_history.py \
+            tests/test_release_credential_history_scan.py \
+            tests/test_rustls_advisory_gate.py \
+            .github/workflows/repair-rustsec-2026-0285.yml \
+            Trash/security-rustsec-2026-0285/20260915/repair-rustsec-2026-0285.yml
+          python - <<'PY'
+          import subprocess
+
+          expected = {
+              'src-tauri/Cargo.lock',
+              '.github/workflows/release.yml',
+              '.github/workflows/repair-rustsec-2026-0285.yml',
+              'Trash/security-rustsec-2026-0285/20260915/repair-rustsec-2026-0285.yml',
+          }
+          actual = set(
+              subprocess.check_output(
+                  ['git', 'diff', '--cached', '--name-only'], text=True
+              ).splitlines()
+          )
+          if actual != expected:
+              raise SystemExit(f'Unexpected staged paths: {sorted(actual)}')
+          PY
+          test -z "$(git diff --cached --diff-filter=D --name-only -- ':!/.github/workflows/repair-rustsec-2026-0285.yml')"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'security: patch rustls for RUSTSEC-2026-0285'
+          git push origin "HEAD:$GITHUB_REF_NAME"
+          git rev-parse HEAD > aiTemp/rustsec-evidence/source.commit
+
+      - name: Preserve repair evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rustsec-2026-0285-${{ github.run_id }}
+          path: aiTemp/rustsec-evidence/
+          if-no-files-found: error
+          retention-days: 14
