@@ -2,43 +2,29 @@
 
 ## Goal
 
-Make Coding Tools' native Codex subagent surface provider-agnostic. A root agent keeps Codex's real `spawn_agent`, `wait_agent`, follow-up and interrupt semantics while routed children can run through many Codex Router providers, including CommandCode Proxy, without collapsing the system into one hard-coded provider or a small model-override roster.
+Make Coding Tools' native Codex V2 subagents usable with many model providers while preserving Codex's real `spawn_agent`, `wait_agent`, follow-up and interrupt semantics. CommandCode Proxy is a first-class provider, and existing Coding Tools ChatGPT-Web models remain available through the same routed tree.
+
+## Verified Codex constraint
+
+Official Codex 0.154.0 applies a bounded whitelist from user `agent_type` files: model, reasoning, personality/service-tier settings, capability reductions and skills. `model_provider` is intentionally not applied from a role file. A model-free CI probe proved the consequence: the child accepted the role's model but inherited the parent's provider.
+
+Therefore a scalable multi-provider tree cannot switch Codex provider per child. The supported topology is one global Codex Router provider for the entire tree; each `agent_type` changes only its model slug, and Codex Router selects the real upstream provider behind that slug.
+
+A pinned Codex 0.154.0 model-free smoke verified this topology:
+
+```text
+root:  gpt-5.6-sol
+child: commandcode-proxy/claude-sonnet-4-6
+provider for both: codex-router
+```
+
+No external model endpoint was contacted during that proof.
 
 ## Architecture
 
-The next version uses two complementary routed surfaces.
+### Global native V2 provider
 
-### Direct routed model path
-
-Coding Tools remains the root Codex route and exposes its existing local Responses endpoint. It augments the native model catalog with `codex-router/<router-slug>` rows and forwards those requests to Codex Router after removing exactly one namespace prefix. This path is useful for direct/root model selection and preserves the existing ChatGPT Web/native routing split:
-
-- `chatgpt-web/*` -> existing browser bridge;
-- native OpenAI rows -> existing native passthrough;
-- `codex-router/*` -> authenticated local Codex Router Responses endpoint.
-
-### Scalable routed subagent path
-
-Native V2 subagents do not depend on the bounded model override roster. Coding Tools creates a managed `agent_type` definition for each eligible routed model. Each agent definition has a stable generated name and contains:
-
-```toml
-model_provider = "codex-router"
-model = "<router-slug>"
-```
-
-The root remains on Coding Tools while the child switches provider through the agent definition. This matches Codex Router's own V2 architecture and scales across a large catalog of providers/models.
-
-Compatibility V1 remains supported for the existing bounded surface, but Coding Tools does not displace native/ChatGPT Web entries just to expose hundreds of routed models through V1. The multi-provider next-generation path is native V2 `agent_type` delegation.
-
-## Codex Router connection
-
-The integration is opt-in and local-only. Runtime configuration is supplied by environment variables and never committed:
-
-- `CODING_TOOLS_CODEX_ROUTER_URL` — router origin, default `http://127.0.0.1:4202` when a caller key is present.
-- `CODING_TOOLS_CODEX_ROUTER_CALLER_KEY` — router caller capability; it must never appear in logs, errors, model IDs, generated agent files or documentation output.
-
-Coding Tools' internal forwarding client may use Codex Router's authenticated path capability. Persistent native subagent provider configuration uses the safer bearer form: the provider base URL is plain loopback `/v1` and Codex obtains the caller key from `CODING_TOOLS_CODEX_ROUTER_CALLER_KEY` through its environment-key mechanism. The caller key therefore does not need to be embedded in `config.toml`.
-
-The managed provider contract is equivalent to:
+Codex runs with one provider:
 
 ```toml
 [model_providers.codex-router]
@@ -50,49 +36,93 @@ requires_openai_auth = false
 supports_websockets = false
 ```
 
-The exact table is installed transactionally with Coding Tools' Codex integration and must not overwrite a user-owned provider of the same name unless it matches the managed contract.
+The caller capability is supplied through the environment and is never embedded in `config.toml` or an agent file.
 
-## Model catalog and agent definitions
+Managed routed `agent_type` files contain only the selected routed model plus bounded instructions. A deterministic name includes a short hash of the complete slug so provider/model names cannot collide after filename normalization.
 
-Router models are exposed for direct selection as `codex-router/<router-slug>`. The underlying router slug remains unchanged when forwarded. This permits DeepSeek, Kimi, Anthropic, Gemini, Grok, OpenRouter, local runtimes and future Codex Router providers without adding provider-specific routing code to Coding Tools.
+Compatibility V1 remains available for the existing bounded roster; the scalable next-generation path is native V2 agent types behind the single Codex Router provider.
 
-For V2 subagents, Coding Tools generates deterministic managed agent definitions from the router's eligible routed catalog. A generated name is derived from the complete router slug so models from different providers cannot collide. Agent files are owner-private and contain no credentials.
+### Coding Tools Web back-provider
 
-Coding Tools owns only files carrying its dedicated routed-agent filename prefix. When a routed model is no longer eligible, the old managed definition is moved into repository/user retention Trash rather than deleted. User-authored agent definitions are never read, modified, replaced or moved by this synchronizer.
+To preserve the existing authenticated ChatGPT-Web adapter without causing a routing loop, Coding Tools exposes a dedicated restricted loopback ingress separate from its ordinary `/v1` surface:
+
+- `GET /router/v1/models` — returns only eligible `chatgpt-web/*` models;
+- `POST /router/v1/responses` — accepts only `chatgpt-web/*` and delegates directly to the existing Web adapter;
+- native OpenAI models, `codex-router/*`, missing models and unknown namespaces fail closed.
+
+Codex Router registers this ingress as a credentialless private generic provider:
+
+```text
+id: coding-tools-web
+adapter: openai-responses
+base URL: http://127.0.0.1:17841/router/v1
+private endpoint: explicitly allowed
+```
+
+This yields the supported flow:
+
+```text
+Codex root/child
+  -> single Codex Router provider
+    -> DeepSeek / Anthropic / Kimi / Gemini / Grok / CommandCode Proxy / ...
+    -> coding-tools-web
+       -> Coding Tools restricted Web ingress
+          -> authenticated ChatGPT Web adapter
+```
+
+Codex Router owns provider translation, selection, health and upstream credentials. Coding Tools does not duplicate that registry or credential store.
+
+### Direct compatibility path
+
+The existing Coding Tools endpoint may still import router models as `codex-router/<router-slug>` and forward those direct requests after removing exactly one prefix. This compatibility path is useful outside global-router mode but is not the mechanism used for scalable V2 subagents.
+
+## Codex Router connection
+
+Runtime configuration is opt-in and local-only:
+
+- `CODING_TOOLS_CODEX_ROUTER_URL` — router origin, default `http://127.0.0.1:4202` when a caller key is present;
+- `CODING_TOOLS_CODEX_ROUTER_CALLER_KEY` — URL-safe caller capability of at least 32 characters.
+
+Internal compatibility forwarding may use Codex Router's authenticated caller path. Persistent Codex configuration uses the plain loopback `/v1` base plus the environment key, keeping the capability out of files and logs.
+
+## Routed agent catalog
+
+Coding Tools generates owner-private managed agent definitions from eligible routed model slugs. Each file contains a model lock and bounded developer instructions; it does not contain provider credentials or a `model_provider` override.
+
+Coding Tools owns only files with its dedicated managed prefix. Stale or replaced managed definitions are moved to retention Trash, never deleted. User-authored agent definitions are untouched.
 
 ## CommandCode Proxy provider
 
-`MAXeaglet/commandcode-proxy` is a first-class Codex Router generic-provider profile:
+`MAXeaglet/commandcode-proxy` is registered through Codex Router's generic-provider API:
 
 - id: `commandcode-proxy`
 - adapter: `openai-chat`
-- base URL: configurable; recommended local default `http://127.0.0.1:3050/v1`
-- dynamic model discovery: `GET /v1/models`
-- authentication: CommandCode `user_*` key, stored by Codex Router rather than Coding Tools
+- default local base URL: `http://127.0.0.1:3050/v1`
+- model discovery: provider `/models`
+- authentication: CommandCode `user_*` key stored by Codex Router
 
-The bootstrap sequence uses Codex Router's supported generic-provider CLI. Loopback/private endpoints add `--allow-private`; the key is entered only through Codex Router's hidden credential prompt and is never accepted as a Coding Tools command-line argument. After enable + curation, eligible models automatically become direct routed rows and V2 routed agent types.
+Loopback registration uses `--allow-private`. The key is entered only through Codex Router's hidden credential prompt and is never accepted as a Coding Tools command-line argument. After enable + curation, its models participate in the same global routed tree as every other eligible provider.
 
 ## Failure behavior
 
-No silent cross-provider substitution is performed by Coding Tools. If Codex Router is absent, unauthenticated, returns an invalid catalog or rejects a request, routed models/agents are unavailable or the routed request fails with a sanitized upstream error. Native and ChatGPT Web paths remain usable.
+No silent cross-provider substitution is performed by Coding Tools. An unavailable router, invalid catalog, unsupported Web-ingress model or upstream rejection fails closed with sanitized errors. The restricted Web ingress cannot route back into Codex Router and therefore cannot form a loop.
 
-Caller-key-bearing URLs are never emitted. Unknown routed namespaces are not guessed. A `codex-router/*` request cannot silently fall back to native OpenAI or ChatGPT Web. A routed `agent_type` cannot silently switch to a different provider/model.
+Caller capabilities and CommandCode credentials must never appear in generated files, errors, evidence or documentation output.
 
 ## Testing
 
 Focused verification covers:
 
-1. caller connection construction and caller-key redaction;
-2. router catalog rows becoming namespaced direct models;
-3. collision/idempotency behavior;
-4. outgoing model de-namespacing and streaming Responses forwarding;
-5. CommandCode Proxy generic-provider bootstrap without credential leakage;
-6. deterministic V2 routed-agent definitions and owner-only file behavior;
-7. model-free native Codex lifecycle proof where the root stays on Coding Tools and a named child runs through a separate local `codex-router` provider;
-8. retained/no-delete cleanup for lifecycle evidence.
-
-The existing model-catalog and native subagent lifecycle tests remain regression gates. No live paid provider call is required for the model-free architecture proof.
+1. caller connection construction and secret redaction;
+2. direct router catalog namespace/forwarding compatibility;
+3. CommandCode Proxy generic-provider bootstrap without credential leakage;
+4. deterministic routed agent definitions with Trash preservation;
+5. negative proof that Codex role files cannot switch provider;
+6. official Codex 0.154.0 model-free proof that one global router provider can run a native root model and a different routed child model;
+7. restricted Coding Tools Web catalog filtering and Responses dispatch;
+8. Coding Tools Web generic-provider bootstrap;
+9. typecheck and the smallest relevant regression set.
 
 ## Safety and repository constraints
 
-No files are deleted. Temporary/evidence files stay under `aiTemp/`; recoverable obsolete managed artifacts move to `aiTemp/Trash` or the corresponding user retention Trash. Existing OAuth, browser, native Codex, release and active Electron migration behavior are not replaced by this slice.
+No files are deleted. Temporary/evidence paths remain under `aiTemp/`; recoverable obsolete managed artifacts move to `aiTemp/Trash` or the corresponding user retention Trash. Existing OAuth, browser, native Codex, release and active Electron migration behavior are preserved.
