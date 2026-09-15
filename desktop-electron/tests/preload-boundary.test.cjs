@@ -27,8 +27,9 @@ function loadPreload(respond = () => null) {
     },
     ipcRenderer: {
       async invoke(channel, payload) {
-        invocations.push({ channel, payload });
-        return respond(channel, payload);
+        const clonedPayload = structuredClone(payload);
+        invocations.push({ channel, payload: clonedPayload });
+        return respond(channel, clonedPayload);
       },
       on() {},
       removeListener() {},
@@ -83,6 +84,27 @@ test("a typed workspace list call uses its exact channel and validates its respo
     channel: "coding-tools:workspaces:list",
     payload: { cursor: 0, limit: 25 },
   }]);
+});
+
+test("validated requests are snapshotted before IPC so accessors cannot change them", async () => {
+  let reads = 0;
+  const input = { cursor: 0 };
+  Object.defineProperty(input, "limit", {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return reads <= 3 ? 25 : 1000;
+    },
+  });
+  const { api, invocations } = loadPreload(() => ({ items: [], nextCursor: null }));
+
+  await api.workspaces.list(input);
+
+  assert.deepEqual(invocations, [{
+    channel: "coding-tools:workspaces:list",
+    payload: { cursor: 0, limit: 25 },
+  }]);
+  assert.equal(reads, 1, "validation must read each accessor only once");
 });
 
 test("schema-invalid and oversized requests fail before Electron IPC", async () => {
