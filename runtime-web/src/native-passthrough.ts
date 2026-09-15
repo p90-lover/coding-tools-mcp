@@ -1,4 +1,4 @@
-import { readJsonRequestBody } from "./http-body";
+import { cachedEncodedJsonRequestBody, readJsonRequestBody } from "./http-body";
 import {
   BRIDGE_COMPACTION_PREFIX,
   SUMMARY_PREFIX,
@@ -231,9 +231,14 @@ export async function forwardNativeCodexRequest(
     // Standalone image requests use their own schema; never interpret them as Responses history.
     body = await request.arrayBuffer();
   } else if (method === "POST") {
-    const parseRequest = decodedBody === undefined ? request.clone() : undefined;
-    const originalBody = await request.arrayBuffer();
-    const parsedBody = decodedBody === undefined ? await readJsonRequestBody(parseRequest!) : decodedBody;
+    let parsedBody = decodedBody;
+    let originalBody = cachedEncodedJsonRequestBody(request);
+    if (parsedBody === undefined) {
+      parsedBody = await readJsonRequestBody(request);
+      originalBody = cachedEncodedJsonRequestBody(request);
+    } else if (originalBody === undefined && request.body !== null && !request.bodyUsed) {
+      originalBody = await request.arrayBuffer();
+    }
     if (isObject(parsedBody)) {
       if (typeof parsedBody.model === "string" && /^[A-Za-z0-9_./:-]{1,128}$/.test(parsedBody.model)) {
         model = parsedBody.model;
@@ -245,8 +250,14 @@ export async function forwardNativeCodexRequest(
     if (scrubbed.changed) {
       headers.delete("content-encoding");
       body = JSON.stringify(scrubbed.value);
-    } else {
+    } else if (originalBody !== undefined && originalBody.byteLength > 0) {
       body = originalBody;
+    } else {
+      // A bodyless request can carry a request-scoped decoded cache. Re-encode it rather than
+      // forwarding an empty body with a stale compression header.
+      headers.delete("content-encoding");
+      headers.set("content-type", "application/json");
+      body = JSON.stringify(parsedBody);
     }
   }
   const upstreamRequest = new Request(`${CODEX_BACKEND}/${endpoint}${incomingUrl.search}`, {
