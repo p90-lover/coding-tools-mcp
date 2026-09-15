@@ -1,6 +1,7 @@
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 32;
+const MAX_JSON_ARRAY_ITEMS = 10_000;
 
 function codedError(code, detail) {
   const error = new Error(`${code}: ${detail}`);
@@ -12,6 +13,64 @@ function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function snapshotJsonValue(value, code, path = "$", ancestors = new Set(), depth = 0) {
+  if (depth > MAX_JSON_DEPTH) throw codedError(code, `${path} exceeds the maximum JSON depth`);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+
+  if (!Array.isArray(value) && !isPlainObject(value)) {
+    throw codedError(code, `${path} must be a JSON value`);
+  }
+  if (ancestors.has(value)) throw codedError(code, `${path} contains a cyclic reference`);
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const length = value.length;
+      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_JSON_ARRAY_ITEMS) {
+        throw codedError(code, `${path} has an invalid or excessive array length`);
+      }
+      const keys = Object.keys(value);
+      if (keys.length !== length || keys.some((key, index) => key !== String(index))) {
+        throw codedError(code, `${path} must be a dense JSON array without extra properties`);
+      }
+      const snapshot = new Array(length);
+      for (let index = 0; index < length; index += 1) {
+        snapshot[index] = snapshotJsonValue(
+          value[index],
+          code,
+          `${path}[${index}]`,
+          ancestors,
+          depth + 1,
+        );
+      }
+      return Object.freeze(snapshot);
+    }
+
+    const snapshot = Object.create(null);
+    for (const [key, item] of Object.entries(value)) {
+      Object.defineProperty(snapshot, key, {
+        value: snapshotJsonValue(item, code, `${path}.${key}`, ancestors, depth + 1),
+        enumerable: true,
+        configurable: false,
+        writable: false,
+      });
+    }
+    return Object.freeze(snapshot);
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function snapshotJsonPayload(value, code) {
+  try {
+    return snapshotJsonValue(value, code);
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === code) throw error;
+    throw codedError(code, "payload could not be read safely");
+  }
 }
 
 function assertJsonValue(value, code, path = "$", ancestors = new Set(), depth = 0) {
@@ -281,23 +340,25 @@ async function invokeContract(ipcRenderer, name, payload = {}) {
   const contract = CONTRACTS[name];
   if (!contract) throw codedError("IPC_CONTRACT_UNKNOWN", name);
 
+  const requestSnapshot = snapshotJsonPayload(payload, "IPC_REQUEST_SCHEMA_INVALID");
   assertSerializedSize(
-    payload,
+    requestSnapshot,
     MAX_REQUEST_BYTES,
     "IPC_REQUEST_TOO_LARGE",
     "IPC_REQUEST_SCHEMA_INVALID",
   );
-  assertSchema(payload, contract.request, "IPC_REQUEST_SCHEMA_INVALID");
+  assertSchema(requestSnapshot, contract.request, "IPC_REQUEST_SCHEMA_INVALID");
 
-  const response = await ipcRenderer.invoke(contract.channel, payload);
+  const response = await ipcRenderer.invoke(contract.channel, requestSnapshot);
+  const responseSnapshot = snapshotJsonPayload(response, "IPC_RESPONSE_SCHEMA_INVALID");
   assertSerializedSize(
-    response,
+    responseSnapshot,
     MAX_RESPONSE_BYTES,
     "IPC_RESPONSE_TOO_LARGE",
     "IPC_RESPONSE_SCHEMA_INVALID",
   );
-  assertSchema(response, contract.response, "IPC_RESPONSE_SCHEMA_INVALID");
-  return response;
+  assertSchema(responseSnapshot, contract.response, "IPC_RESPONSE_SCHEMA_INVALID");
+  return responseSnapshot;
 }
 
 module.exports = Object.freeze({
@@ -305,5 +366,6 @@ module.exports = Object.freeze({
   MAX_REQUEST_BYTES,
   MAX_RESPONSE_BYTES,
   MAX_JSON_DEPTH,
+  MAX_JSON_ARRAY_ITEMS,
   invokeContract,
 });
