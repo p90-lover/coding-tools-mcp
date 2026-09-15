@@ -28,7 +28,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           clean: false
-          persist-credentials: false
+          persist-credentials: true
 
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with:
@@ -38,6 +38,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/tmp aiTemp/evidence aiTemp/Trash/release-0.7.0-rc.1
+
+      - name: Apply exact release identity patch
+        run: |
+          set -euo pipefail
+          python aiTemp/codex-router-multiprovider/apply-release-identity.py \
+            | tee aiTemp/evidence/release-identity-patch.txt
+          grep -F CODEX_ROUTER_RELEASE_IDENTITY_PATCH_OK aiTemp/evidence/release-identity-patch.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
 
       - name: Install runtime dependencies
         run: |
@@ -53,6 +62,37 @@ jobs:
             bun test --cwd runtime-web tests/runtime-bundle-version.test.ts \
             2>&1 | tee aiTemp/evidence/release-identity-test.txt
           grep -F '0 fail' aiTemp/evidence/release-identity-test.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd runtime-web typecheck \
+            2>&1 | tee aiTemp/evidence/runtime-typecheck.txt
+          node --input-type=module <<'NODE' | tee aiTemp/evidence/desktop-release-version.txt
+          import fs from 'node:fs';
+          const desktop = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
+          if (desktop.version !== process.env.RELEASE_VERSION) {
+            throw new Error(`DESKTOP_RELEASE_VERSION_MISMATCH:${desktop.version}`);
+          }
+          process.stdout.write(`DESKTOP_RELEASE_VERSION_OK ${desktop.version}\n`);
+          NODE
+
+      - name: Commit only verified release identity files
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+          remote_head="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote_head" = "$GITHUB_SHA"
+          git add \
+            desktop-electron/package.json \
+            desktop-electron/scripts/runtime-preparation.cjs \
+            runtime-web/scripts/build-runtime-bundle.ts \
+            runtime-web/src/runtime-bundle-version.ts \
+            runtime-web/tests/runtime-bundle-version.test.ts
+          if ! git diff --cached --quiet; then
+            git config user.name 'p90-lover'
+            git config user.email '146848721+p90-lover@users.noreply.github.com'
+            git commit -m 'build: align Coding Tools 0.7 runtime identity'
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
