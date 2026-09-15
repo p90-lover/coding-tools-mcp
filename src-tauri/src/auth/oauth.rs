@@ -171,8 +171,7 @@ mod tests {
 
     fn fixture_data(profile_id: &str, public_url: &str) -> crate::data::AppData {
         let mut data = crate::data::AppData::default();
-        let mut profile =
-            crate::workspace::WorkspaceProfile::new("fixture-workspace".into(), None);
+        let mut profile = crate::workspace::WorkspaceProfile::new("fixture-workspace".into(), None);
         profile.id = profile_id.into();
         profile.tunnel.public_url = public_url.into();
         data.profiles.push(profile);
@@ -260,21 +259,13 @@ mod tests {
     fn fixture_origin_survives_unrelated_parallel_sync() {
         let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
         crate::data::with_test_file(fixture_path("outer"), || {
-            sync_trusted_origins(&fixture_data(
-                &profile_id,
-                "https://new-popup.example",
-            ));
+            sync_trusted_origins(&fixture_data(&profile_id, "https://new-popup.example"));
             let worker = std::thread::spawn(|| {
                 sync_trusted_origins(&crate::data::AppData::default());
             });
             worker.join().unwrap();
             assert_eq!(
-                trusted_external_base_url(
-                    &profile_id,
-                    false,
-                    28767,
-                    "https://old-popup.example",
-                ),
+                trusted_external_base_url(&profile_id, false, 28767, "https://old-popup.example",),
                 "https://new-popup.example"
             );
         });
@@ -285,28 +276,17 @@ mod tests {
         let file = fixture_path("shared");
         let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
         crate::data::with_test_file(file.clone(), || {
-            sync_trusted_origins(&fixture_data(
-                &profile_id,
-                "https://old-popup.example",
-            ));
+            sync_trusted_origins(&fixture_data(&profile_id, "https://old-popup.example"));
             let worker_file = file.clone();
             let worker_id = profile_id.clone();
             let worker = std::thread::spawn(move || {
                 crate::data::with_test_file(worker_file, || {
-                    sync_trusted_origins(&fixture_data(
-                        &worker_id,
-                        "https://new-popup.example",
-                    ));
+                    sync_trusted_origins(&fixture_data(&worker_id, "https://new-popup.example"));
                 });
             });
             worker.join().unwrap();
             assert_eq!(
-                trusted_external_base_url(
-                    &profile_id,
-                    false,
-                    28767,
-                    "https://old-popup.example",
-                ),
+                trusted_external_base_url(&profile_id, false, 28767, "https://old-popup.example",),
                 "https://new-popup.example"
             );
         });
@@ -318,15 +298,9 @@ mod tests {
         let inner_file = fixture_path("inner-nested");
         let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
         crate::data::with_test_file(outer_file, || {
-            sync_trusted_origins(&fixture_data(
-                &profile_id,
-                "https://outer-popup.example",
-            ));
+            sync_trusted_origins(&fixture_data(&profile_id, "https://outer-popup.example"));
             crate::data::with_test_file(inner_file, || {
-                sync_trusted_origins(&fixture_data(
-                    &profile_id,
-                    "https://inner-popup.example",
-                ));
+                sync_trusted_origins(&fixture_data(&profile_id, "https://inner-popup.example"));
                 assert_eq!(
                     trusted_external_base_url(
                         &profile_id,
@@ -338,12 +312,7 @@ mod tests {
                 );
             });
             assert_eq!(
-                trusted_external_base_url(
-                    &profile_id,
-                    false,
-                    28767,
-                    "https://configured.example",
-                ),
+                trusted_external_base_url(&profile_id, false, 28767, "https://configured.example",),
                 "https://outer-popup.example"
             );
         });
