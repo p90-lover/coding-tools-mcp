@@ -42,6 +42,34 @@ test("accepts a verified readiness marker and reaps a launcher that stays reside
   assert.equal(result.forcedTermination, true);
 });
 
+test("strips NODE_OPTIONS before launching a packaged application", async () => {
+  const directory = testDirectory("node-options");
+  const markerPath = path.join(directory, "ready.json");
+  const result = await runPackagedLauncherProcess({
+    command: process.execPath,
+    args: ["-e", [
+      "const fs = require('node:fs');",
+      "fs.writeFileSync(process.env.SMOKE_MARKER, JSON.stringify({",
+      "nodeOptions: Object.hasOwn(process.env, 'NODE_OPTIONS') ? process.env.NODE_OPTIONS : null,",
+      "preserved: process.env.SMOKE_PRESERVED",
+      "}) + '\\n');",
+    ].join("")],
+    cwd: directory,
+    env: {
+      ...process.env,
+      NODE_OPTIONS: "--definitely-invalid-node-option",
+      SMOKE_MARKER: markerPath,
+      SMOKE_PRESERVED: "yes",
+    },
+    markerPath,
+    timeoutMs: 5_000,
+    exitGraceMs: 100,
+    pollIntervalMs: 20,
+  });
+  assert.equal(result.marker.nodeOptions, null);
+  assert.equal(result.marker.preserved, "yes");
+});
+
 test("reports bounded child diagnostics when the launcher exits before readiness", async () => {
   const directory = testDirectory("early-exit");
   const markerPath = path.join(directory, "ready.json");
