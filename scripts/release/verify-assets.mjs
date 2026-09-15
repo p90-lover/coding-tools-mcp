@@ -13,6 +13,9 @@ import {
 } from './verify-source-scope.mjs';
 
 export const WINDOWS_INSTALLER = `Coding.Tools_${RELEASE_VERSION}_windows_x64_setup.exe`;
+export const VALIDATION_WORKFLOW = String(
+  process.env.VALIDATION_WORKFLOW ?? '.github/workflows/electron-full-harness-ci.yml',
+).trim();
 
 const SECRET_PATTERNS = Object.freeze([
   ['github-token', /\bgh[pousr]_[A-Za-z0-9]{36,255}\b/g],
@@ -120,7 +123,7 @@ export async function verifyReleaseAssets({
   if (!Number.isSafeInteger(validation.validation_run_id) || validation.validation_run_id < 1) {
     fail('VALIDATION_RUN_ID_INVALID', String(validation.validation_run_id));
   }
-  if (validation.validation_workflow !== '.github/workflows/electron-full-harness-ci.yml') {
+  if (validation.validation_workflow !== VALIDATION_WORKFLOW) {
     fail('VALIDATION_WORKFLOW_MISMATCH', String(validation.validation_workflow));
   }
   if (validation.validation_conclusion !== 'success') {
