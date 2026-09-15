@@ -18,6 +18,60 @@ function sha256(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
+function crc32(bytes) {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+    }
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function storedZip(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  for (const [name, source] of entries) {
+    const nameBytes = Buffer.from(name, "utf8");
+    const bytes = Buffer.isBuffer(source) ? source : Buffer.from(source);
+    const checksum = crc32(bytes);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(checksum, 14);
+    local.writeUInt32LE(bytes.length, 18);
+    local.writeUInt32LE(bytes.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    localParts.push(local, nameBytes, bytes);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(checksum, 16);
+    central.writeUInt32LE(bytes.length, 20);
+    central.writeUInt32LE(bytes.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, nameBytes);
+    offset += local.length + nameBytes.length + bytes.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localParts, centralDirectory, end]);
+}
+
 function writeFile(filePath, bytes) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, bytes);
@@ -40,8 +94,18 @@ function createFixture(label, overrides = {}) {
   const outputRoot = path.join(desktopRoot, "build", "package-resources");
   const inputs = path.join(root, "aiTemp", "input");
   const headlessBinary = path.join(inputs, "coding-tools-headless.exe");
-  const tunnelBinary = path.join(inputs, "tunnel-client.exe");
+  const tunnelArchive = path.join(inputs, "tunnel-client-v0.0.12-windows-amd64.zip");
   const noticesPath = path.join(root, "third_party", "THIRD_PARTY_NOTICES.md");
+  const licenseName = "tunnel-client-v0.0.12-windows-amd64-licenses.txt";
+  const spdxName = "tunnel-client-v0.0.12-windows-amd64.spdx.json";
+  const tunnelBytes = Buffer.from("MZfixture-tunnel-client-0.0.12");
+  const archiveBytes = storedZip([
+    ["tunnel-client.exe", tunnelBytes],
+    ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
+    ["NOTICE", "OpenAI tunnel-client\n"],
+    [licenseName, "tunnel-client dependency licenses include Apache-2.0 components.\n"],
+    [spdxName, "{\"spdxVersion\":\"SPDX-2.3\"}\n"],
+  ]);
 
   writeFile(path.join(runtimeRoot, "manifest.json"), `${JSON.stringify({
     schemaVersion: 2,
@@ -53,9 +117,11 @@ function createFixture(label, overrides = {}) {
     path.join(runtimeRoot, "THIRD_PARTY_NOTICES.txt"),
     "codex-chatgpt-web dependencies include MIT and Apache-2.0 components.\n",
   );
+  writeFile(path.join(runtimeRoot, "LICENSE"), "MIT License\n");
+  writeFile(path.join(runtimeRoot, "LICENSES", "fixture.txt"), "Apache-2.0\n");
   writeFile(path.join(runtimeRoot, "app", "cli.js"), "console.log('fixture runtime');\n");
   writeFile(headlessBinary, Buffer.from("MZfixture-headless"));
-  writeFile(tunnelBinary, Buffer.from("MZfixture-tunnel-client-0.0.12"));
+  writeFile(tunnelArchive, archiveBytes);
   writeFile(noticesPath, [
     "# Third-party notices",
     "",
@@ -71,7 +137,18 @@ function createFixture(label, overrides = {}) {
     runtimeRoot,
     outputRoot,
     headlessBinary,
-    tunnelBinary,
+    tunnelArchive,
+    tunnelRelease: {
+      repository: "openai/tunnel-client",
+      version: "v0.0.12",
+      platform: "windows",
+      arch: "amd64",
+      archiveName: path.basename(tunnelArchive),
+      archiveSha256: sha256(archiveBytes),
+      binaryName: "tunnel-client.exe",
+      licenseName,
+      spdxName,
+    },
     noticesPath,
     sourceSha: SOURCE_SHA,
     platform: "win32",
@@ -86,7 +163,7 @@ function componentBytes(outputRoot, component) {
   return fs.readFileSync(path.join(outputRoot, ...component.path.split("/")));
 }
 
-test("composes the exact Windows payload and preserves the prior resource directory", () => {
+test("composes the exact Windows payload from a checksum-pinned tunnel archive and preserves prior resources", () => {
   const options = createFixture("complete");
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "retain this prior output\n");
 
@@ -158,12 +235,47 @@ test("composes the exact Windows payload and preserves the prior resource direct
     sha256: "3c3f60262672556ae113a8cccbc671e7b559bb7106392333cd4a0628471427d1",
   });
   const notices = fs.readFileSync(path.join(options.outputRoot, "coding-tools", "THIRD_PARTY_NOTICES.md"), "utf8");
-  for (const marker of ["codex-chatgpt-web", "MIT", "Apache-2.0"]) assert.match(notices, new RegExp(marker));
+  for (const marker of ["codex-chatgpt-web", "MIT", "Apache-2.0", "OpenAI tunnel-client"]) {
+    assert.match(notices, new RegExp(marker));
+  }
   assert.equal(fs.readFileSync(path.join(options.outputRoot, "coding-tools", "coding-tools-headless.exe")).subarray(0, 2).toString("ascii"), "MZ");
   assert.equal(fs.readFileSync(path.join(options.outputRoot, "native", "tunnel-client.exe")).subarray(0, 2).toString("ascii"), "MZ");
 });
 
-test("fails closed on a non-Windows binary before replacing prior output", () => {
+test("rejects a tunnel archive digest mismatch before replacing prior output", () => {
+  const options = createFixture("tunnel-digest");
+  writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
+  options.tunnelRelease = { ...options.tunnelRelease, archiveSha256: "0".repeat(64) };
+
+  assert.throws(
+    () => preparePackageResources(options),
+    /PACKAGE_RESOURCE_TUNNEL_ARCHIVE_DIGEST_MISMATCH/,
+  );
+  assert.equal(fs.readFileSync(path.join(options.outputRoot, "old-resource.txt"), "utf8"), "still active\n");
+});
+
+test("rejects any unexpected member in the tunnel archive before replacing prior output", () => {
+  const options = createFixture("tunnel-inventory");
+  writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
+  const archiveBytes = storedZip([
+    ["tunnel-client.exe", "MZfixture-tunnel-client-0.0.12"],
+    ["LICENSE", "Apache License\nVersion 2.0, January 2004\n"],
+    ["NOTICE", "OpenAI tunnel-client\n"],
+    [options.tunnelRelease.licenseName, "Apache-2.0\n"],
+    [options.tunnelRelease.spdxName, "{\"spdxVersion\":\"SPDX-2.3\"}\n"],
+    ["unexpected.dll", "not allowed\n"],
+  ]);
+  writeFile(options.tunnelArchive, archiveBytes);
+  options.tunnelRelease = { ...options.tunnelRelease, archiveSha256: sha256(archiveBytes) };
+
+  assert.throws(
+    () => preparePackageResources(options),
+    /PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVENTORY_MISMATCH/,
+  );
+  assert.equal(fs.readFileSync(path.join(options.outputRoot, "old-resource.txt"), "utf8"), "still active\n");
+});
+
+test("fails closed on a non-Windows headless binary before replacing prior output", () => {
   const options = createFixture("invalid-binary");
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
   writeFile(options.headlessBinary, Buffer.from("not-a-windows-executable"));
@@ -203,6 +315,8 @@ test("package and runtime preparation use repository aiTemp retention without de
   }
   assert.match(composer, /aiTemp/);
   assert.match(composer, /Trash/);
+  assert.match(composer, /2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356/);
+  assert.match(composer, /7d85227df86c38a689fca913d6f4a0b49ad030d6e056155a6832312cf7fb4bad/);
   assert.match(runtimePreparation, /aiTemp/);
   assert.match(runtimePreparation, /Trash/);
   assert.equal(manifest.scripts["build:package-resources"], "node scripts/prepare-package-resources.cjs");
