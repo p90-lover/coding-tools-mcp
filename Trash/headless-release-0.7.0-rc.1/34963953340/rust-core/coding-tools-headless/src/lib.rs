@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subtle::ConstantTimeEq;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 const CONTROL_PROTOCOL_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -102,11 +102,7 @@ impl Lifecycle {
     }
 
     pub fn admit(&self, _kind: &str) -> Result<RequestLease, String> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| "lifecycle unavailable")?;
+        let mut state = self.inner.state.lock().map_err(|_| "lifecycle unavailable")?;
         if !state.accepting {
             return Err("HEADLESS_DRAINING: new work is not accepted".into());
         }
@@ -125,11 +121,7 @@ impl Lifecycle {
         if reason.is_empty() || reason.len() > 256 {
             return Err("Drain reason must contain 1..256 characters".into());
         }
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| "lifecycle unavailable")?;
+        let mut state = self.inner.state.lock().map_err(|_| "lifecycle unavailable")?;
         state.accepting = false;
         state.drain_reason = Some(reason.to_string());
         self.inner.notify.notify_waiters();
@@ -137,11 +129,7 @@ impl Lifecycle {
     }
 
     pub fn resume(&self) -> Result<(), String> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| "lifecycle unavailable")?;
+        let mut state = self.inner.state.lock().map_err(|_| "lifecycle unavailable")?;
         state.accepting = true;
         state.drain_reason = None;
         self.inner.notify.notify_waiters();
@@ -197,7 +185,9 @@ impl ControlAuth {
             .ok_or(StatusCode::UNAUTHORIZED)?;
         let expected = self.token.as_bytes();
         let supplied = supplied.as_bytes();
-        if expected.len() != supplied.len() || expected.ct_eq(supplied).unwrap_u8() != 1 {
+        if expected.len() != supplied.len()
+            || expected.ct_eq(supplied).unwrap_u8() != 1
+        {
             return Err(StatusCode::UNAUTHORIZED);
         }
         Ok(())
@@ -246,8 +236,6 @@ struct Descriptor<'a> {
 }
 
 fn restrict_file(path: &Path) -> Result<(), String> {
-    #[cfg(not(unix))]
-    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -265,10 +253,7 @@ fn preserve_existing(path: &Path, app_data_dir: &Path, label: &str) -> Result<()
         return Ok(());
     };
     if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "Refusing to replace linked {label}: {}",
-            path.display()
-        ));
+        return Err(format!("Refusing to replace linked {label}: {}", path.display()));
     }
     let retained = app_data_dir
         .join("Trash")
@@ -372,17 +357,15 @@ impl ServiceState {
             .core
             .with_data(|store| {
                 store.refresh()?;
-                store.get(workspace_id).cloned().ok_or_else(|| {
-                    coding_tools_core::error::AppError::Message("workspace not found".into())
-                })
+                store
+                    .get(workspace_id)
+                    .cloned()
+                    .ok_or_else(|| coding_tools_core::error::AppError::Message("workspace not found".into()))
             })
             .map_err(text_error)?;
         let bytes = serde_json::to_vec(&profile).map_err(text_error)?;
         let fingerprint = format!("{:x}", Sha256::digest(bytes));
-        let mut contexts = self
-            .contexts
-            .lock()
-            .map_err(|_| "context cache unavailable")?;
+        let mut contexts = self.contexts.lock().map_err(|_| "context cache unavailable")?;
         if let Some(entry) = contexts.get(workspace_id) {
             if entry.fingerprint == fingerprint {
                 return Ok(entry.context.clone());
@@ -391,8 +374,7 @@ impl ServiceState {
         let mut context = tools::ToolContext::new(PathBuf::from(&profile.path))?;
         context.auth = profile.auth.clone();
         context.policy = tools::PolicySettings::from_runtime(&profile.runtime);
-        context.tool_profile =
-            tools::registry::normalize_tool_profile(&profile.runtime.tool_profile).into();
+        context.tool_profile = tools::registry::normalize_tool_profile(&profile.runtime.tool_profile).into();
         context.permission_mode = context.policy.canonical_permission_mode().to_string();
         let context = Arc::new(context);
         contexts.insert(
@@ -459,34 +441,31 @@ fn json_error(status: StatusCode, code: &str, message: impl Into<String>) -> Res
         .into_response()
 }
 
-fn auth(headers: &HeaderMap, state: &ServiceState) -> Result<(), Box<Response>> {
-    state.auth.require(headers).map_err(|status| {
-        Box::new(json_error(
-            status,
-            "UNAUTHORIZED",
-            "A valid local control token is required",
-        ))
-    })
+fn auth(headers: &HeaderMap, state: &ServiceState) -> Result<(), Response> {
+    state
+        .auth
+        .require(headers)
+        .map_err(|status| json_error(status, "UNAUTHORIZED", "A valid local control token is required"))
 }
 
-fn admit(state: &ServiceState, kind: &str) -> Result<RequestLease, Box<Response>> {
+fn admit(state: &ServiceState, kind: &str) -> Result<RequestLease, Response> {
     state.lifecycle.admit(kind).map_err(|message| {
         let status = if message.starts_with("HEADLESS_DRAINING") {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
             StatusCode::TOO_MANY_REQUESTS
         };
-        Box::new(json_error(status, "HEADLESS_NOT_ACCEPTING", message))
+        json_error(status, "HEADLESS_NOT_ACCEPTING", message)
     })
 }
 
 async fn health(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     let _lease = match admit(&state, "health") {
         Ok(lease) => lease,
-        Err(response) => return *response,
+        Err(response) => return response,
     };
     let snapshot = state.lifecycle.snapshot();
     Json(json!({
@@ -508,7 +487,7 @@ async fn drain(
     Json(body): Json<DrainRequest>,
 ) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     if let Err(error) = state.lifecycle.drain(&body.reason) {
         return json_error(StatusCode::BAD_REQUEST, "INVALID_DRAIN", error);
@@ -527,7 +506,7 @@ async fn drain(
 
 async fn resume(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     match state.lifecycle.resume() {
         Ok(()) => Json(json!({"ok":true,"accepting":true})).into_response(),
@@ -541,7 +520,7 @@ async fn shutdown(
     Json(body): Json<DrainRequest>,
 ) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     if let Err(error) = state.lifecycle.drain(&body.reason) {
         return json_error(StatusCode::BAD_REQUEST, "INVALID_SHUTDOWN", error);
@@ -559,11 +538,11 @@ async fn shutdown(
 
 async fn state_view(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     let _lease = match admit(&state, "state") {
         Ok(lease) => lease,
-        Err(response) => return *response,
+        Err(response) => return response,
     };
     match state.safe_workspaces() {
         Ok(workspaces) => Json(json!({
@@ -574,29 +553,21 @@ async fn state_view(State(state): State<ServiceState>, headers: HeaderMap) -> Re
             "automatic_replay": false,
         }))
         .into_response(),
-        Err(error) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "STATE_READ_FAILED",
-            error,
-        ),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "STATE_READ_FAILED", error),
     }
 }
 
 async fn workspace_list(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     let _lease = match admit(&state, "workspaces") {
         Ok(lease) => lease,
-        Err(response) => return *response,
+        Err(response) => return response,
     };
     match state.safe_workspaces() {
         Ok(workspaces) => Json(json!({"ok":true,"workspaces":workspaces})).into_response(),
-        Err(error) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "WORKSPACE_READ_FAILED",
-            error,
-        ),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "WORKSPACE_READ_FAILED", error),
     }
 }
 
@@ -606,11 +577,11 @@ async fn tool_catalog(
     Query(query): Query<WorkspaceQuery>,
 ) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     let _lease = match admit(&state, "catalog") {
         Ok(lease) => lease,
-        Err(response) => return *response,
+        Err(response) => return response,
     };
     match state.context(&query.workspace_id) {
         Ok(context) => Json(json!({
@@ -630,29 +601,19 @@ async fn operation_read(
     AxumPath(request_id): AxumPath<String>,
 ) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     let _lease = match admit(&state, "operation_read") {
         Ok(lease) => lease,
-        Err(response) => return *response,
+        Err(response) => return response,
     };
     let operations = match state.operations.lock() {
         Ok(operations) => operations,
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "OPERATIONS_UNAVAILABLE",
-                "Operation store unavailable",
-            )
-        }
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "OPERATIONS_UNAVAILABLE", "Operation store unavailable"),
     };
     match operations.records.get(&request_id) {
         Some(receipt) => Json(json!({"ok":true,"operation":receipt})).into_response(),
-        None => json_error(
-            StatusCode::NOT_FOUND,
-            "OPERATION_NOT_FOUND",
-            "No retained operation has this request ID",
-        ),
+        None => json_error(StatusCode::NOT_FOUND, "OPERATION_NOT_FOUND", "No retained operation has this request ID"),
     }
 }
 
@@ -669,18 +630,14 @@ async fn tool_call(
     Json(body): Json<ToolCallRequest>,
 ) -> Response {
     if let Err(response) = auth(&headers, &state) {
-        return *response;
+        return response;
     }
     let _lease = match admit(&state, "tool_call") {
         Ok(lease) => lease,
-        Err(response) => return *response,
+        Err(response) => return response,
     };
     if !valid_request_id(&body.request_id) || body.workspace_id.is_empty() || body.tool.is_empty() {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_TOOL_REQUEST",
-            "Request ID, workspace and tool are required",
-        );
+        return json_error(StatusCode::BAD_REQUEST, "INVALID_TOOL_REQUEST", "Request ID, workspace and tool are required");
     }
     let fingerprint = format!(
         "{:x}",
@@ -692,45 +649,24 @@ async fn tool_call(
     {
         let operations = match state.operations.lock() {
             Ok(operations) => operations,
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "OPERATIONS_UNAVAILABLE",
-                    "Operation store unavailable",
-                )
-            }
+            Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "OPERATIONS_UNAVAILABLE", "Operation store unavailable"),
         };
         if let Some(existing) = operations.records.get(&body.request_id) {
             if existing.fingerprint != fingerprint {
-                return json_error(
-                    StatusCode::CONFLICT,
-                    "REQUEST_ID_REUSED",
-                    "Request ID already identifies different arguments",
-                );
+                return json_error(StatusCode::CONFLICT, "REQUEST_ID_REUSED", "Request ID already identifies different arguments");
             }
-            return Json(
-                json!({"ok":true,"operation":existing,"replayed":false,"redispatched":false}),
-            )
-            .into_response();
+            return Json(json!({"ok":true,"operation":existing,"replayed":false,"redispatched":false})).into_response();
         }
     }
     let context = match state.context(&body.workspace_id) {
         Ok(context) => context,
-        Err(error) => {
-            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
-        }
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error),
     };
     let admitted_at_ms = now_ms();
     {
         let mut operations = match state.operations.lock() {
             Ok(operations) => operations,
-            Err(_) => {
-                return json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "OPERATIONS_UNAVAILABLE",
-                    "Operation store unavailable",
-                )
-            }
+            Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "OPERATIONS_UNAVAILABLE", "Operation store unavailable"),
         };
         operations.insert(OperationReceipt {
             request_id: body.request_id.clone(),
@@ -749,18 +685,11 @@ async fn tool_call(
     let workspace_id = body.workspace_id.clone();
     let tool = body.tool.clone();
     let arguments = body.arguments.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        tools::dispatch::call_tool_mcp(&context, &tool, &arguments)
-    })
-    .await;
+    let outcome = tokio::task::spawn_blocking(move || tools::call_tool_mcp(&context, &tool, &arguments)).await;
     let (state_name, result, error) = match outcome {
         Ok(value) => match serde_json::to_vec(&value) {
             Ok(bytes) if bytes.len() <= MAX_RESULT_BYTES => ("completed", Some(value), None),
-            Ok(_) => (
-                "failed",
-                None,
-                Some("Tool result exceeded the retained response limit".into()),
-            ),
+            Ok(_) => ("failed", None, Some("Tool result exceeded the retained response limit".into())),
             Err(error) => ("failed", None, Some(text_error(error))),
         },
         Err(error) => ("unknown", None, Some(text_error(error))),
@@ -780,8 +709,7 @@ async fn tool_call(
     if let Ok(mut operations) = state.operations.lock() {
         operations.insert(receipt.clone());
     }
-    Json(json!({"ok":true,"operation":receipt,"replayed":false,"redispatched":false}))
-        .into_response()
+    Json(json!({"ok":true,"operation":receipt,"replayed":false,"redispatched":false})).into_response()
 }
 
 fn router(state: ServiceState) -> Router {
@@ -827,10 +755,7 @@ impl HeadlessService {
         Self::start_with_core(config, core).await
     }
 
-    pub async fn start_with_core(
-        config: ServiceConfig,
-        core: Arc<CoreState>,
-    ) -> Result<Self, String> {
+    pub async fn start_with_core(config: ServiceConfig, core: Arc<CoreState>) -> Result<Self, String> {
         fs::create_dir_all(&config.app_data_dir).map_err(text_error)?;
         let auth = ControlAuth::generate();
         let token_file = std::env::var_os("CODING_TOOLS_CONTROL_TOKEN_FILE")
@@ -889,7 +814,6 @@ impl HeadlessService {
         let service_endpoint = endpoint.clone();
         let service_token_file = token_file.clone();
         let token_hash = auth.token_sha256.clone();
-        let service_shutdown_tx = shutdown_tx.clone();
         let join = tokio::spawn(async move {
             let app = router(state);
             let result = axum::serve(listener, app)
@@ -902,7 +826,7 @@ impl HeadlessService {
                 })
                 .await
                 .map_err(text_error);
-            let reason = service_shutdown_tx
+            let reason = shutdown_tx
                 .borrow()
                 .clone()
                 .unwrap_or_else(|| "listener-stopped".into());
@@ -931,9 +855,7 @@ impl HeadlessService {
             endpoint,
             token_file,
             descriptor_path,
-            shutdown: ShutdownHandle {
-                sender: shutdown_tx,
-            },
+            shutdown: ShutdownHandle { sender: shutdown_tx },
             join,
         })
     }
