@@ -1,0 +1,226 @@
+name: Repair Codex Router 0.7 Windows launcher smoke exit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/codex-router-0.7-windows-smoke-exit
+    paths:
+      - .github/workflows/codex-router-0.7-windows-smoke-exit-fix.yml
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: codex-router-0.7-windows-smoke-exit-fix
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  repair:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: fix/codex-router-0.7-windows-smoke-exit
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Add a failing smoke-exit contract first
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/Trash/codex-router-0.7-windows-smoke-exit
+          cat > desktop-electron/tests/launcher-smoke-exit.test.cjs <<'TEST'
+          "use strict";
+
+          const test = require("node:test");
+          const assert = require("node:assert/strict");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { terminateLauncherSmoke } = require("../electron/smoke-exit.cjs");
+
+          test("launcher smoke cleanup force-exits only after local resources close", async () => {
+            const events = [];
+            await terminateLauncherSmoke({
+              app: { exit(code) { events.push(`app.exit:${code}`); } },
+              browserHost: { destroy() { events.push("browser.destroy"); } },
+              browserControl: { async close() { events.push("control.close"); } },
+              mainWindow: {
+                isDestroyed() { return false; },
+                destroy() { events.push("window.destroy"); },
+              },
+            });
+            assert.deepEqual(events, [
+              "browser.destroy",
+              "control.close",
+              "window.destroy",
+              "app.exit:0",
+            ]);
+          });
+
+          test("launcher smoke cleanup tolerates an already-destroyed window", async () => {
+            const events = [];
+            await terminateLauncherSmoke({
+              app: { exit(code) { events.push(`app.exit:${code}`); } },
+              browserHost: { destroy() { events.push("browser.destroy"); } },
+              browserControl: { async close() { events.push("control.close"); } },
+              mainWindow: {
+                isDestroyed() { return true; },
+                destroy() { events.push("unexpected-window-destroy"); },
+              },
+            });
+            assert.deepEqual(events, ["browser.destroy", "control.close", "app.exit:0"]);
+          });
+
+          test("main launcher delegates packaged smoke termination to the force-exit helper", () => {
+            const source = fs.readFileSync(
+              path.join(__dirname, "..", "electron", "main.cjs"),
+              "utf8",
+            );
+            assert.match(
+              source,
+              /const \{ terminateLauncherSmoke \} = require\("\.\/smoke-exit\.cjs"\);/,
+            );
+            assert.match(
+              source,
+              /await terminateLauncherSmoke\(\{ app, browserHost, browserControl, mainWindow \}\);/,
+            );
+            assert.doesNotMatch(
+              source,
+              /browserHost\.destroy\(\);\s+await browserControl\.close\(\);\s+mainWindow\.destroy\(\);\s+app\.quit\(\);/,
+            );
+          });
+          TEST
+          set +e
+          node --test desktop-electron/tests/launcher-smoke-exit.test.cjs \
+            > aiTemp/evidence/red-test.txt 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -F 'smoke-exit.cjs' aiTemp/evidence/red-test.txt
+
+      - name: Implement the minimal force-exit helper and wire it into the smoke path
+        run: |
+          set -euo pipefail
+          cat > desktop-electron/electron/smoke-exit.cjs <<'SOURCE'
+          "use strict";
+
+          async function terminateLauncherSmoke({ app, browserHost, browserControl, mainWindow }) {
+            if (!app || typeof app.exit !== "function") {
+              throw new TypeError("Launcher smoke exit requires Electron app.exit");
+            }
+            if (!browserHost || typeof browserHost.destroy !== "function") {
+              throw new TypeError("Launcher smoke exit requires browser host cleanup");
+            }
+            if (!browserControl || typeof browserControl.close !== "function") {
+              throw new TypeError("Launcher smoke exit requires browser control cleanup");
+            }
+            browserHost.destroy();
+            await browserControl.close();
+            if (mainWindow
+              && typeof mainWindow.isDestroyed === "function"
+              && !mainWindow.isDestroyed()) {
+              mainWindow.destroy();
+            }
+            // This path is exclusively for packaged CI smoke verification. app.quit() can leave
+            // Chromium utility processes alive on Windows; app.exit(0) makes the verified marker
+            // and cleanup the terminal state instead of waiting until the outer smoke command times out.
+            app.exit(0);
+          }
+
+          module.exports = { terminateLauncherSmoke };
+          SOURCE
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('desktop-electron/electron/main.cjs')
+          text = path.read_text(encoding='utf-8')
+          replacements = [
+              (
+                  'const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");',
+                  'const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");\n'
+                  'const { terminateLauncherSmoke } = require("./smoke-exit.cjs");',
+              ),
+              (
+                  '    browserHost.destroy();\n'
+                  '    await browserControl.close();\n'
+                  '    mainWindow.destroy();\n'
+                  '    app.quit();',
+                  '    await terminateLauncherSmoke({ app, browserHost, browserControl, mainWindow });',
+              ),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one match for {old!r}, found {count}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Run focused green verification
+        run: |
+          set -euo pipefail
+          node --test desktop-electron/tests/launcher-smoke-exit.test.cjs \
+            2>&1 | tee aiTemp/evidence/green-smoke-exit-test.txt
+          node --test desktop-electron/tests/package-contents.test.cjs \
+            2>&1 | tee aiTemp/evidence/package-contents-test.txt
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/smoke-exit.cjs
+          grep -F '# fail 0' aiTemp/evidence/green-smoke-exit-test.txt
+          grep -F '# fail 0' aiTemp/evidence/package-contents-test.txt
+
+      - name: Commit the verified source repair
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess
+
+          expected = {
+              'desktop-electron/electron/main.cjs',
+              'desktop-electron/electron/smoke-exit.cjs',
+              'desktop-electron/tests/launcher-smoke-exit.test.cjs',
+          }
+          output = subprocess.check_output(
+              ['git', 'status', '--short'],
+              text=True,
+          )
+          actual = {line[3:] for line in output.splitlines() if line}
+          if actual != expected:
+              raise SystemExit(f'Unexpected changed files: {sorted(actual)}')
+          PY
+          git add -- \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/smoke-exit.cjs \
+            desktop-electron/tests/launcher-smoke-exit.test.cjs
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix: force packaged launcher smoke to exit on Windows'
+          gh auth setup-git
+          git push origin HEAD:refs/heads/fix/codex-router-0.7-windows-smoke-exit
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: codex-router-0.7-windows-smoke-exit-${{ github.run_id }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
