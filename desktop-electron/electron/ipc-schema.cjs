@@ -168,7 +168,7 @@ function assertSchema(value, schema, code, path = "$") {
       }
       return;
     case "integer":
-      if (!Number.isInteger(value)) throw codedError(code, `${path} must be an integer`);
+      if (!Number.isSafeInteger(value)) throw codedError(code, `${path} must be a safe integer`);
       if (schema.minimum !== undefined && value < schema.minimum) {
         throw codedError(code, `${path} is below the minimum`);
       }
