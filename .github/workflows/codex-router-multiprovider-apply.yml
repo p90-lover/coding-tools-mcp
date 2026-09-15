@@ -9,8 +9,10 @@ on:
       - aiTemp/codex-router-multiprovider/apply-server.py
       - aiTemp/codex-router-multiprovider/fix-fetch-types.py
       - runtime-web/src/routed-providers.ts
+      - runtime-web/src/routed-agent-catalog.ts
       - runtime-web/scripts/commandcode-proxy-provider.ts
       - runtime-web/tests/routed-providers.test.ts
+      - runtime-web/tests/routed-agent-catalog.test.ts
       - runtime-web/tests/commandcode-proxy-provider.test.ts
   workflow_dispatch:
 
@@ -64,6 +66,7 @@ jobs:
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun test --cwd runtime-web \
               tests/routed-providers.test.ts \
+              tests/routed-agent-catalog.test.ts \
               tests/commandcode-proxy-provider.test.ts \
               tests/model-catalog.test.ts \
             2>&1 | tee aiTemp/evidence/tests.txt
