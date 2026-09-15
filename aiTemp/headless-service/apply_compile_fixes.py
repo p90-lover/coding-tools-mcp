@@ -1,4 +1,4 @@
-"""Apply the focused compile repair after RED evidence has been loaded.
+"""Apply focused compile repairs after RED evidence has been loaded.
 
 The existing source is retained under Trash before replacement. No path is
 removed and no result-unknown operation is replayed.
@@ -11,12 +11,41 @@ import subprocess
 root = Path.cwd()
 path = root / "rust-core/coding-tools-headless/src/lib.rs"
 text = path.read_text(encoding="utf-8")
-old = "tools::call_tool_mcp(&context, &tool, &arguments)"
-new = "tools::dispatch::call_tool_mcp(&context, &tool, &arguments)"
+replacements = [
+    (
+        "tools::call_tool_mcp(&context, &tool, &arguments)",
+        "tools::dispatch::call_tool_mcp(&context, &tool, &arguments)",
+        "canonical dispatcher",
+    ),
+    (
+        "use tokio::sync::{oneshot, Notify};",
+        "use tokio::sync::Notify;",
+        "unused oneshot import",
+    ),
+    (
+        "        let join = tokio::spawn(async move {\n            let app = router(state);",
+        "        let service_shutdown_tx = shutdown_tx.clone();\n        let join = tokio::spawn(async move {\n            let app = router(state);",
+        "shutdown sender ownership",
+    ),
+    (
+        "            let reason = shutdown_tx\n                .borrow()",
+        "            let reason = service_shutdown_tx\n                .borrow()",
+        "shutdown sender readback",
+    ),
+]
 
-if new not in text:
-    if text.count(old) != 1:
-        raise RuntimeError(f"expected one headless dispatcher call, found {text.count(old)}")
+updated = text
+changed = False
+for old, new, label in replacements:
+    if new in updated:
+        continue
+    count = updated.count(old)
+    if count != 1:
+        raise RuntimeError(f"expected one {label} pattern, found {count}")
+    updated = updated.replace(old, new, 1)
+    changed = True
+
+if changed:
     backup = (
         root
         / "Trash/headless-service-0.6.0"
@@ -27,7 +56,7 @@ if new not in text:
     if backup.exists() or path.is_symlink():
         raise RuntimeError(f"refusing to overwrite retained source: {backup}")
     shutil.copy2(path, backup)
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    path.write_text(updated, encoding="utf-8")
     subprocess.run(
         ["git", "add", "--", str(path.relative_to(root)), str(backup.relative_to(root))],
         check=True,
@@ -44,4 +73,7 @@ removed = subprocess.check_output(
 ).strip()
 if removed:
     raise RuntimeError(f"deletions are forbidden: {removed}")
-print("HEADLESS_DISPATCH_REPAIR: canonical dispatcher selected; original retained")
+print(
+    "HEADLESS_COMPILE_REPAIRS: canonical dispatcher, bounded shutdown sender, "
+    "and clean imports; original retained"
+)
