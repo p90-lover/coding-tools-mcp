@@ -92,7 +92,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          allowed='^(rust-core/coding-tools-headless/(Cargo.lock|src/.*\.rs|tests/.*\.rs)|rust-core/coding-tools-core/(Cargo.lock|src/lib\.rs)|src-tauri/src/data/store\.rs|Trash/headless-service-0\.6\.0/[0-9]+/rust-core/coding-tools-headless/src/lib\.rs)$'
+          allowed='^(rust-core/coding-tools-headless/(Cargo\.toml|Cargo\.lock|src/.*\.rs|tests/.*\.rs)|rust-core/coding-tools-core/(Cargo\.lock|src/lib\.rs)|src-tauri/src/data/store\.rs|Trash/headless-service-0\.6\.0/[0-9]+/rust-core/coding-tools-headless/src/lib\.rs)$'
           git add -- \
             rust-core/coding-tools-headless \
             rust-core/coding-tools-core/Cargo.lock \
@@ -102,7 +102,9 @@ jobs:
           staged="$(git diff --cached --name-only)"
           if [ -n "$staged" ]; then
             while IFS= read -r path; do
-              test -z "$path" || printf '%s\n' "$path" | grep -Eq "$allowed"
+              test -z "$path" && continue
+              printf 'STAGED_PATH: %s\n' "$path"
+              printf '%s\n' "$path" | grep -Eq "$allowed"
             done <<< "$staged"
             git diff --cached --check
             test -z "$(git diff --cached --diff-filter=D --name-only)"
