@@ -75,7 +75,7 @@ jobs:
             appId: 'dev.codingtools.fullharness',
             productName: 'Coding Tools',
             electron: '41.10.7',
-            upstreamVersion: 'v5.0.6',
+            upstreamTag: 'v5.0.6',
             upstreamCommit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
           };
           const actual = {
@@ -83,7 +83,7 @@ jobs:
             appId: desktop.build?.appId,
             productName: desktop.build?.productName,
             electron: desktop.devDependencies?.electron,
-            upstreamVersion: integration.upstream?.version,
+            upstreamTag: integration.upstream?.tag,
             upstreamCommit: integration.upstream?.commit,
           };
           if (JSON.stringify(actual) !== JSON.stringify(expected)) {
