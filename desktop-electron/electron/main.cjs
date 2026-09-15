@@ -27,6 +27,7 @@ const {
 const { RuntimeHost } = require("./runtime.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
+const { terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
@@ -1080,10 +1081,7 @@ async function start() {
       packaged: app.isPackaged,
       runtimeVerified: true,
     })}\n`);
-    browserHost.destroy();
-    await browserControl.close();
-    mainWindow.destroy();
-    app.quit();
+    await terminateLauncherSmoke({ app, browserHost, browserControl, mainWindow });
     return;
   }
   if (IS_DEV_PROFILE) {
