@@ -86,6 +86,22 @@ test("a typed workspace list call uses its exact channel and validates its respo
   }]);
 });
 
+test("runtime status remains bounded without freezing the producer-owned DTO", async () => {
+  const response = {
+    ready: true,
+    accepting: true,
+    active_requests: 1,
+    automatic_replay: false,
+  };
+  const { api, invocations } = loadPreload(() => response);
+
+  assert.deepEqual(await api.runtime.status(), response);
+  assert.deepEqual(invocations, [{
+    channel: "coding-tools:runtime:status",
+    payload: {},
+  }]);
+});
+
 test("validated requests are snapshotted before IPC so accessors cannot change them", async () => {
   let reads = 0;
   const input = { cursor: 0 };
@@ -169,9 +185,20 @@ test("excessive object entries are rejected before reading accessors", async () 
   assert.equal(reads, 0, "entry-count rejection must happen before getter evaluation");
 });
 
-test("an invalid main-process response is rejected before reaching the renderer", async () => {
-  const { api } = loadPreload(() => ({ state: "mystery" }));
-  await assert.rejects(api.runtime.status(), /IPC_RESPONSE_SCHEMA_INVALID/);
+test("an invalid workspace response is rejected before reaching the renderer", async () => {
+  const response = {
+    items: [{
+      id: "workspace-1",
+      name: "Fixture",
+      path: "C:\\fixture",
+      mcpState: "mystery",
+      policyRevision: 7,
+    }],
+    nextCursor: null,
+  };
+  const { api } = loadPreload(() => response);
+
+  await assert.rejects(api.workspaces.list(), /IPC_RESPONSE_SCHEMA_INVALID/);
 });
 
 test("prototype-pollution keys are rejected from main-process responses", async () => {
