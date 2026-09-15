@@ -12,6 +12,57 @@ function requiredMatch(value, expression, label) {
   return match[1];
 }
 
+export function compareStableVersions(left, right) {
+  for (const [label, value] of [
+    ['requested version', left],
+    ['current version', right],
+  ]) {
+    if (!STABLE_VERSION.test(value)) {
+      throw new Error(`${label} must be stable X.Y.Z; received ${JSON.stringify(value)}`);
+    }
+  }
+
+  const leftParts = left.split('.').map(Number);
+  const rightParts = right.split('.').map(Number);
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] < rightParts[index]) return -1;
+    if (leftParts[index] > rightParts[index]) return 1;
+  }
+  return 0;
+}
+
+export function validateBilingualReleaseNotes(text, tag) {
+  if (typeof text !== 'string') {
+    throw new Error(`Release notes for ${tag} must be UTF-8 text`);
+  }
+
+  const section = (heading) => {
+    const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const matches = [...text.matchAll(new RegExp(`^## ${escaped}\\s*$`, 'gm'))];
+    if (matches.length !== 1) {
+      throw new Error(
+        `Release notes for ${tag} must contain exactly one "## ${heading}" section`,
+      );
+    }
+    const start = matches[0].index + matches[0][0].length;
+    const remainder = text.slice(start);
+    const nextHeading = /^##\s+/m.exec(remainder);
+    const end = nextHeading ? start + nextHeading.index : text.length;
+    const body = text.slice(start, end).trim();
+    if (!body) {
+      throw new Error(`Release notes for ${tag} have an empty "## ${heading}" section`);
+    }
+    return { index: matches[0].index, body };
+  };
+
+  const english = section('English');
+  const traditionalChinese = section('繁體中文');
+  if (english.index > traditionalChinese.index) {
+    throw new Error(`Release notes for ${tag} must list English before 繁體中文`);
+  }
+  return { english: english.body, traditionalChinese: traditionalChinese.body };
+}
+
 export function parseCargoTomlPackage(text) {
   const lines = text.split(/\r?\n/);
   const start = lines.findIndex((line) => line.trim() === '[package]');
@@ -48,7 +99,12 @@ export function parseCargoLockVersion(text, packageName) {
   throw new Error(`Unable to find ${packageName} in src-tauri/Cargo.lock`);
 }
 
-export function validateVersionAlignment({ versions, expectedTag, releaseNotesExists }) {
+export function validateVersionAlignment({
+  versions,
+  expectedTag,
+  releaseNotesExists,
+  releaseNotesContent,
+}) {
   const entries = Object.entries(versions);
   if (entries.length === 0) {
     throw new Error('No version observations were supplied');
@@ -77,6 +133,7 @@ export function validateVersionAlignment({ versions, expectedTag, releaseNotesEx
   if (!releaseNotesExists) {
     throw new Error(`Missing release notes: docs/releases/${canonicalTag}.md`);
   }
+  validateBilingualReleaseNotes(releaseNotesContent, canonicalTag);
 
   return { version: canonical, tag: canonicalTag };
 }
@@ -91,6 +148,13 @@ export function collectVersionObservations(root = process.cwd()) {
     readText('src-tauri/Cargo.lock'),
     cargoPackage.name,
   );
+  const releaseNotesPath = path.join(
+    root,
+    'docs',
+    'releases',
+    `v${packageJson.version}.md`,
+  );
+  const releaseNotesExists = fs.existsSync(releaseNotesPath);
 
   return {
     versions: {
@@ -101,9 +165,8 @@ export function collectVersionObservations(root = process.cwd()) {
       'src-tauri/Cargo.toml': cargoPackage.version,
       'src-tauri/Cargo.lock': cargoLockVersion,
     },
-    releaseNotesExists: fs.existsSync(
-      path.join(root, 'docs', 'releases', `v${packageJson.version}.md`),
-    ),
+    releaseNotesExists,
+    releaseNotesContent: releaseNotesExists ? fs.readFileSync(releaseNotesPath, 'utf8') : '',
   };
 }
 

@@ -41,6 +41,24 @@ jobs:
             exit 1
           fi
           version="${BASH_REMATCH[1]}"
+          current_version="$(node -p "require('./package.json').version")"
+          VERSION="$version" CURRENT_VERSION="$current_version" node --input-type=module <<'NODE'
+          import {
+            compareStableVersions,
+            runVersionAlignmentCheck,
+          } from './scripts/check-version-alignment.mjs';
+
+          const requested = process.env.VERSION;
+          const current = process.env.CURRENT_VERSION;
+          const comparison = compareStableVersions(requested, current);
+          if (comparison < 0) {
+            throw new Error(`Refusing release version downgrade from ${current} to ${requested}`);
+          }
+          if (comparison === 0) {
+            runVersionAlignmentCheck({ expectedTag: `v${requested}` });
+            console.log(`Release branch is already aligned at ${requested}`);
+          }
+          NODE
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
@@ -150,8 +168,12 @@ jobs:
               'src-tauri/Cargo.lock',
           }
           actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
-          if actual != expected:
+          if actual and actual != expected:
               raise SystemExit(f'Unexpected release-preparation paths: {sorted(actual)}')
           PY
+          if git diff --cached --quiet; then
+            echo "Version files are already aligned; no preparation commit is needed."
+            exit 0
+          fi
           git commit -m "release: prepare v$VERSION"
           git push origin "HEAD:$GITHUB_REF_NAME"
