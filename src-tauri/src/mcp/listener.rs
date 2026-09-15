@@ -12,8 +12,9 @@ use tokio::sync::oneshot;
 use super::request_log::append_profile_log;
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post_browser,
-    protected_resource_metadata, token_exchange, trusted_external_base_url, verify_bearer_header,
-    verify_oauth_bearer_header, AuthorizeForm, AuthorizeParams, OAuthRuntime, TokenForm,
+    mcp_protected_resource_metadata, protected_resource_metadata, token_exchange,
+    trusted_external_base_url, verify_bearer_header, verify_oauth_bearer_header, AuthorizeForm,
+    AuthorizeParams, OAuthRuntime, TokenForm,
 };
 use crate::mcp::server::{handle_request, new_state, SharedState};
 use crate::secret::SecretStore;
@@ -166,7 +167,7 @@ async fn serve(
         )
         .route(
             "/.well-known/oauth-protected-resource/mcp",
-            get(oauth_protected_resource_metadata),
+            get(oauth_mcp_protected_resource_metadata),
         )
         .route(
             "/oauth/authorize",
@@ -459,6 +460,19 @@ async fn oauth_protected_resource_metadata(
         return oauth_not_configured();
     }
     Json(protected_resource_metadata(&resolve_oauth_base(
+        &state, &headers,
+    )))
+    .into_response()
+}
+
+async fn oauth_mcp_protected_resource_metadata(
+    State(state): State<ListenerState>,
+    headers: HeaderMap,
+) -> Response {
+    if !state.auth.oauth_enabled() {
+        return oauth_not_configured();
+    }
+    Json(mcp_protected_resource_metadata(&resolve_oauth_base(
         &state, &headers,
     )))
     .into_response()
