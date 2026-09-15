@@ -11,18 +11,18 @@ pub fn authorize_post_browser(
     form: AuthorizeForm,
     server_url: &str,
 ) -> Response {
-    let response = oauth_flow::authorize_post_browser(oauth, headers, form, server_url);
-    with_authorization_server_issuer(response, server_url)
+    let Some(issuer) = canonical_issuer(server_url) else {
+        return invalid_issuer_response();
+    };
+    let response = oauth_flow::authorize_post_browser(oauth, headers, form, &issuer);
+    with_authorization_server_issuer(response, &issuer)
 }
 
-fn with_authorization_server_issuer(mut response: Response, server_url: &str) -> Response {
+fn with_authorization_server_issuer(mut response: Response, issuer: &str) -> Response {
     if response.status() != StatusCode::SEE_OTHER {
         return response;
     }
 
-    let Some(issuer) = canonical_issuer(server_url) else {
-        return invalid_issuer_response();
-    };
     let Some(location) = response
         .headers()
         .get(LOCATION)
@@ -47,7 +47,7 @@ fn with_authorization_server_issuer(mut response: Response, server_url: &str) ->
         for (key, value) in query {
             pairs.append_pair(&key, &value);
         }
-        pairs.append_pair("iss", &issuer);
+        pairs.append_pair("iss", issuer);
     }
 
     let Ok(location) = HeaderValue::from_str(redirect.as_str()) else {
