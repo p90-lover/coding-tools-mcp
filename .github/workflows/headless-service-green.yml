@@ -93,17 +93,23 @@ jobs:
         run: |
           set -euo pipefail
           allowed='^(rust-core/coding-tools-headless/(Cargo.lock|src/.*\.rs|tests/.*\.rs)|rust-core/coding-tools-core/(Cargo.lock|src/lib\.rs)|src-tauri/src/data/store\.rs|Trash/headless-service-0\.6\.0/[0-9]+/rust-core/coding-tools-headless/src/lib\.rs)$'
-          changed="$(git status --short | sed -E 's/^.. //')"
-          if [ -n "$changed" ]; then
+          tracked_changed="$(git diff --name-only)"
+          if [ -n "$tracked_changed" ]; then
             while IFS= read -r path; do
               test -z "$path" || printf '%s\n' "$path" | grep -Eq "$allowed"
-            done <<< "$changed"
-            git add -- \
-              rust-core/coding-tools-headless \
-              rust-core/coding-tools-core/Cargo.lock \
-              rust-core/coding-tools-core/src/lib.rs \
-              src-tauri/src/data/store.rs \
-              Trash/headless-service-0.6.0
+            done <<< "$tracked_changed"
+          fi
+          git add -- \
+            rust-core/coding-tools-headless \
+            rust-core/coding-tools-core/Cargo.lock \
+            rust-core/coding-tools-core/src/lib.rs \
+            src-tauri/src/data/store.rs \
+            Trash/headless-service-0.6.0
+          staged="$(git diff --cached --name-only)"
+          if [ -n "$staged" ]; then
+            while IFS= read -r path; do
+              test -z "$path" || printf '%s\n' "$path" | grep -Eq "$allowed"
+            done <<< "$staged"
             git diff --cached --check
             test -z "$(git diff --cached --diff-filter=D --name-only)"
             git config user.name 'p90-lover'
