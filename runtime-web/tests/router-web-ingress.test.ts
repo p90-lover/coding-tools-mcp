@@ -63,7 +63,8 @@ describe("restricted Coding Tools Web router ingress", () => {
     const encoder = new TextEncoder();
     const handler = async (request: Request): Promise<Response> => {
       calls += 1;
-      expect((await request.clone().json() as { model: string }).model).toBe("chatgpt-web/high");
+      expect((await readJsonRequestBody(request) as { model: string }).model).toBe("chatgpt-web/high");
+      expect(request.bodyUsed).toBe(false);
       return new Response(new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(encoder.encode("data: {\"type\":\"response.completed\"}\n\n"));
@@ -91,7 +92,7 @@ describe("restricted Coding Tools Web router ingress", () => {
     expect(await response.text()).toContain("response.completed");
   });
 
-  test("preserves native /goal context while priming one decoded body for the Web action", async () => {
+  test("preserves native /goal context after replacing the decoded request body", async () => {
     const goalText = [
       '<codex_internal_context source="goal">',
       "Continue working toward the active objective.",
@@ -110,13 +111,19 @@ describe("restricted Coding Tools Web router ingress", () => {
     };
     const request = new Request("http://127.0.0.1/router/v1/responses", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(JSON.stringify(body).length),
+      },
       body: JSON.stringify(body),
     });
 
     const response = await routeRouterWebResponse(request, async validatedRequest => {
-      expect(validatedRequest).toBe(request);
+      expect(validatedRequest).not.toBe(request);
+      expect(request.bodyUsed).toBe(true);
       expect(validatedRequest.bodyUsed).toBe(false);
+      expect(validatedRequest.headers.get("content-length")).toBeNull();
+      expect(validatedRequest.headers.get("content-encoding")).toBeNull();
       const parsed = await readJsonRequestBody(validatedRequest) as typeof body;
       expect(validatedRequest.bodyUsed).toBe(false);
       expect(parsed).toEqual(body);
