@@ -469,7 +469,6 @@ export async function responseRequest(
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
   options: ResponseRequestOptions = {},
 ): Promise<Response> {
-  const nativeRequest = req.clone();
   let raw: unknown;
   try {
     raw = await readJsonRequestBody(req);
@@ -525,7 +524,7 @@ export async function responseRequest(
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
+      return await forwardNativeCodexRequest(req, "responses", undefined, raw);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -708,7 +707,6 @@ export async function compactRequest(
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
   options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
 ): Promise<Response> {
-  const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
   try {
     const parsed = await readJsonRequestBody(req);
@@ -750,7 +748,7 @@ export async function compactRequest(
   }
   if (!isChatGptWebModelSlug(raw.model)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
+      return await forwardNativeCodexRequest(req, "responses/compact", undefined, raw);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }

@@ -1,7 +1,12 @@
 const MAX_ENCODED_REQUEST_BYTES = 64 * 1024 * 1024;
 const MAX_DECODED_REQUEST_BYTES = 128 * 1024 * 1024;
 
-const decodedJsonBodies = new WeakMap<Request, unknown>();
+interface JsonRequestBodySnapshot {
+  body: unknown;
+  encoded?: ArrayBuffer;
+}
+
+const jsonRequestBodySnapshots = new WeakMap<Request, JsonRequestBodySnapshot>();
 
 function assertWithinLimit(bytes: number, limit: number, label: string): void {
   if (bytes > limit) throw new Error(`${label} exceeds ${limit} bytes`);
@@ -12,26 +17,33 @@ function assertWithinLimit(bytes: number, limit: number, label: string): void {
  * scoped and disappears automatically when the replacement Request is collected.
  */
 export function primeJsonRequestBody(request: Request, body: unknown): void {
-  decodedJsonBodies.set(request, body);
+  jsonRequestBodySnapshots.set(request, { body });
+}
+
+/** Original request bytes retained after decoding so native forwarding never needs a stream tee. */
+export function cachedEncodedJsonRequestBody(request: Request): ArrayBuffer | undefined {
+  return jsonRequestBodySnapshots.get(request)?.encoded;
 }
 
 export async function readJsonRequestBody(request: Request): Promise<unknown> {
-  if (decodedJsonBodies.has(request)) return decodedJsonBodies.get(request);
+  const cached = jsonRequestBodySnapshots.get(request);
+  if (cached) return cached.body;
 
   const declaredLength = Number(request.headers.get("content-length"));
   if (Number.isFinite(declaredLength)) {
     assertWithinLimit(declaredLength, MAX_ENCODED_REQUEST_BYTES, "Encoded request body");
   }
 
-  const encoded = new Uint8Array(await request.arrayBuffer());
+  const encoded = await request.arrayBuffer();
   assertWithinLimit(encoded.byteLength, MAX_ENCODED_REQUEST_BYTES, "Encoded request body");
+  const encodedBytes = new Uint8Array(encoded);
 
   const contentEncoding = (request.headers.get("content-encoding") ?? "identity").trim().toLowerCase();
   let decoded: Uint8Array;
   if (contentEncoding === "" || contentEncoding === "identity") {
-    decoded = encoded;
+    decoded = encodedBytes;
   } else if (contentEncoding === "zstd") {
-    decoded = await Bun.zstdDecompress(encoded);
+    decoded = await Bun.zstdDecompress(encodedBytes);
   } else {
     throw new Error(`Unsupported Content-Encoding: ${contentEncoding}`);
   }
@@ -39,6 +51,6 @@ export async function readJsonRequestBody(request: Request): Promise<unknown> {
 
   const text = new TextDecoder("utf-8", { fatal: true }).decode(decoded);
   const body = JSON.parse(text) as unknown;
-  decodedJsonBodies.set(request, body);
+  jsonRequestBodySnapshots.set(request, { body, encoded });
   return body;
 }
