@@ -115,6 +115,10 @@ test("schema-invalid and oversized requests fail before Electron IPC", async () 
     /IPC_REQUEST_SCHEMA_INVALID/,
   );
   await assert.rejects(
+    api.workspaces.list({ cursor: Number.MAX_SAFE_INTEGER + 1 }),
+    /IPC_REQUEST_SCHEMA_INVALID/,
+  );
+  await assert.rejects(
     api.history.search({ workspaceRoot: "C:\\fixture", query: "x".repeat(70_000) }),
     /IPC_REQUEST_TOO_LARGE/,
   );
