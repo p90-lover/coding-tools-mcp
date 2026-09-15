@@ -1,0 +1,81 @@
+name: Codex Router 0.7 release tooling
+
+on:
+  push:
+    branches:
+      - feature/0.7-exact-sha-prerelease-promotion
+      - integration/0.7-goal-headless-release-20260915
+    paths:
+      - .github/workflows/codex-router-0.7-release-tooling-ci.yml
+      - docs/releases/v0.7.0-rc.1.md
+      - scripts/release/**
+      - tests/codex-router-0.7-release.test.mjs
+      - tests/electron-full-harness-release.test.mjs
+      - tests/no-delete-policy.test.mjs
+  pull_request:
+    branches:
+      - integration/0.7-goal-headless-release-20260915
+    paths:
+      - .github/workflows/codex-router-0.7-release-tooling-ci.yml
+      - docs/releases/v0.7.0-rc.1.md
+      - scripts/release/**
+      - tests/codex-router-0.7-release.test.mjs
+      - tests/electron-full-harness-release.test.mjs
+      - tests/no-delete-policy.test.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-router-0.7-release-tooling-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Exact-SHA promotion contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Check release helper syntax
+        run: |
+          set -euo pipefail
+          node --check scripts/release/verify-source-scope.mjs
+          node --check scripts/release/verify-assets.mjs
+          node --check scripts/release/publish-v0.6.0-rc.1.mjs
+
+      - name: Run legacy and 0.7 release contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-tooling-evidence
+          node --test \
+            tests/electron-full-harness-release.test.mjs \
+            tests/codex-router-0.7-release.test.mjs \
+            tests/no-delete-policy.test.mjs \
+            2>&1 | tee aiTemp/release-tooling-evidence/tests.txt
+          grep -F '# fail 0' aiTemp/release-tooling-evidence/tests.txt
+
+      - name: Enforce no file deletion
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: codex-router-0.7-release-tooling-${{ github.sha }}
+          path: aiTemp/release-tooling-evidence/
+          if-no-files-found: error
+          retention-days: 14

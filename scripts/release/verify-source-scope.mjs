@@ -4,8 +4,8 @@ import process from 'node:process';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-export const RELEASE_VERSION = '0.6.0-rc.1';
-export const RELEASE_TAG = `v${RELEASE_VERSION}`;
+export const RELEASE_VERSION = String(process.env.RELEASE_VERSION ?? '0.6.0-rc.1').trim();
+export const RELEASE_TAG = String(process.env.RELEASE_TAG ?? `v${RELEASE_VERSION}`).trim();
 export const PRODUCT_NAME = 'Coding Tools';
 export const APP_ID = 'dev.codingtools.fullharness';
 export const UPSTREAM = Object.freeze({
