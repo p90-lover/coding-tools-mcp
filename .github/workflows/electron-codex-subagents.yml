@@ -1,0 +1,105 @@
+name: Verify model-free Codex subagent lifecycle
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-codex-subagents.yml
+      - aiTemp/electron-codex-smoke/install.py
+      - aiTemp/electron-codex-smoke/repair.py
+      - runtime-web/scripts/codex-smoke-path.ts
+      - runtime-web/tests/codex-smoke-path.test.ts
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-codex-subagents-060rc1
+  cancel-in-progress: false
+jobs:
+  subagents:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    permissions: {contents: write, actions: read}
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/subagent-smoke
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Verify the retained missing-executable failure
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/subagent-smoke
+          gh run download 34848068707 --repo "$GITHUB_REPOSITORY" \
+            --name electron-js-security-34848068707 --dir aiTemp/red
+          cp aiTemp/red/subagents.txt aiTemp/evidence/subagents-red.txt
+          grep -F 'Codex executable is missing: /Applications/ChatGPT.app/Contents/Resources/codex' \
+            aiTemp/evidence/subagents-red.txt
+          printf '%s\n' 'PORTABLE_CODEX_SMOKE_ADAPTATION_ALREADY_MATERIALIZED' \
+            | tee aiTemp/evidence/repair.txt
+      - name: Install pinned dependencies without destructive cleanup
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          NODE_OPTIONS="--import=$preload" \
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/install.txt
+      - name: Verify path selection before fetching a native binary
+        run: |
+          set -euo pipefail
+          bun test --cwd runtime-web tests/codex-smoke-path.test.ts 2>&1 \
+            | tee aiTemp/evidence/path-contract.txt
+          grep -F '4 pass' aiTemp/evidence/path-contract.txt
+          grep -F '0 fail' aiTemp/evidence/path-contract.txt
+      - name: Fetch the pinned official Codex test binary into aiTemp
+        run: |
+          set -euo pipefail
+          python aiTemp/electron-codex-smoke/install.py \
+            > aiTemp/evidence/codex-path.txt 2> aiTemp/evidence/codex-install.txt
+          codex="$(cat aiTemp/evidence/codex-path.txt)"
+          test -x "$codex"
+          echo "CODEX_SMOKE_BIN=$codex" >> "$GITHUB_ENV"
+          "$codex" --version | tee aiTemp/evidence/codex-version.txt
+          grep -F 'codex-cli 0.154.0' aiTemp/evidence/codex-version.txt
+          grep -F 'PINNED_CODEX_SMOKE rust-v0.154.0 d7e18b2597ae8f242f5f31ee9e90deef48dbc9edd634d9868fb6435d08c07f02' \
+            aiTemp/evidence/codex-install.txt
+      - name: Run V1 and V2 through the real Codex CLI and local scripted Responses server
+        run: |
+          set -euo pipefail
+          short_tmp="/tmp/ctm-${GITHUB_RUN_ID}-subagents"
+          test ! -e "$short_tmp" && test ! -L "$short_tmp"
+          ln -s "$PWD/aiTemp/tmp" "$short_tmp"
+          test "$(realpath "$short_tmp")" = "$PWD/aiTemp/tmp"
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          NODE_OPTIONS="--import=$preload" \
+          TMPDIR="$short_tmp" TMP="$short_tmp" TEMP="$short_tmp" \
+          OPENAI_API_KEY="local-scripted-responses-only" \
+            bun run --cwd runtime-web smoke:subagents 2>&1 | tee aiTemp/evidence/subagents-green.txt
+          grep -F 'CODEX_SUBAGENT_V1_LIFECYCLE_SMOKE_OK' aiTemp/evidence/subagents-green.txt
+          grep -F 'CODEX_SUBAGENT_V2_LIFECYCLE_SMOKE_OK' aiTemp/evidence/subagents-green.txt
+          test -z "$(grep -Ei 'api.openai.com|chatgpt.com|platform.openai.com' aiTemp/evidence/subagents-green.txt || true)"
+      - name: Record the verified portable smoke source
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git rev-parse HEAD > aiTemp/evidence/source.commit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-codex-subagents-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

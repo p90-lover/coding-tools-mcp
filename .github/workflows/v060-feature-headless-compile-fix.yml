@@ -1,0 +1,100 @@
+name: v0.6 feature headless compile repair
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/electron-full-codex-harness-0.6.0
+    paths:
+      - .github/workflows/v060-feature-headless-compile-fix.yml
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: v060-feature-headless-compile-repair
+  cancel-in-progress: false
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/v060-feature-headless-repair-target
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  repair:
+    if: github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: feature/electron-full-codex-harness-0.6.0
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - name: Apply exact compile repair without destructive cleanup
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/v060-feature-headless-repair-target
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('rust-core/coding-tools-headless/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          replacements = [
+              ('use tokio::sync::{oneshot, Notify};', 'use tokio::sync::Notify;'),
+              ('fn restrict_file(path: &Path) -> Result<(), String> {', 'fn restrict_file(_path: &Path) -> Result<(), String> {'),
+              ('fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(text_error)?;', 'fs::set_permissions(_path, fs::Permissions::from_mode(0o600)).map_err(text_error)?;'),
+              ('tools::call_tool_mcp(&context, &tool, &arguments)', 'tools::dispatch::call_tool_mcp(&context, &tool, &arguments)'),
+              ('        let join = tokio::spawn(async move {\n', '        let shutdown_reason_tx = shutdown_tx.clone();\n        let join = tokio::spawn(async move {\n'),
+              ('            let reason = shutdown_tx\n', '            let reason = shutdown_reason_tx\n'),
+              ('fn auth(headers: &HeaderMap, state: &ServiceState) -> Result<(), Response> {', '// Returning an Axum response keeps handler failures uniform; this path is local and bounded.\n#[allow(clippy::result_large_err)]\nfn auth(headers: &HeaderMap, state: &ServiceState) -> Result<(), Response> {'),
+              ('fn admit(state: &ServiceState, kind: &str) -> Result<RequestLease, Response> {', '// Admission failures carry the complete bounded HTTP response expected by every handler.\n#[allow(clippy::result_large_err)]\nfn admit(state: &ServiceState, kind: &str) -> Result<RequestLease, Response> {'),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one match for {old!r}, found {count}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+      - name: Verify headless service tests and strict Clippy
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml -- --test-threads=1 --nocapture \
+            2>&1 | tee aiTemp/evidence/headless-tests.txt
+          cargo clippy --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml --all-targets -- -D warnings \
+            2>&1 | tee aiTemp/evidence/headless-clippy.txt
+          grep -F 'test result: ok' aiTemp/evidence/headless-tests.txt
+      - name: Commit verified compile repair
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          changed="$(git status --short | sed -E 's/^.. //')"
+          test "$changed" = 'rust-core/coding-tools-headless/src/lib.rs'
+          git add -- rust-core/coding-tools-headless/src/lib.rs
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix: compile authenticated headless service on Windows'
+          gh auth setup-git
+          git push origin HEAD:refs/heads/feature/electron-full-codex-harness-0.6.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: v060-feature-headless-compile-repair-${{ github.run_id }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

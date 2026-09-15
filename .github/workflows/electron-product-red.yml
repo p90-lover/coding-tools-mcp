@@ -1,0 +1,43 @@
+name: Electron product identity baseline
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-product-red.yml
+permissions: {contents: read}
+jobs:
+  red:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - name: Require missing product module to fail for the expected reason
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          set +e
+          node --test desktop-electron/tests/product-identity.test.cjs > aiTemp/evidence/product-red.txt 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -F 'electron/product.cjs' aiTemp/evidence/product-red.txt
+          grep -E 'MODULE_NOT_FOUND|Cannot find module' aiTemp/evidence/product-red.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-product-red-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
