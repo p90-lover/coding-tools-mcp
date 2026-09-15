@@ -153,11 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
-          git add -A -- \
-            src-tauri/Cargo.lock \
-            .github/workflows/release.yml \
-            .github/workflows/repair-rustsec-2026-0285.yml \
-            Trash/security-rustsec-2026-0285/20260915/repair-rustsec-2026-0285.yml
+          git add -A
           python - <<'PY'
           import subprocess
 
