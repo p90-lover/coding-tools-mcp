@@ -26,6 +26,12 @@ const UPSTREAM = Object.freeze({
   version: "v5.0.6",
   commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
 });
+const STABLE_ROLLBACK = Object.freeze({
+  releaseTag: "v0.4.10",
+  assetName: "Coding.Tools.MCP_0.4.10_x64-setup.exe",
+  size: 6461938,
+  sha256: "3c3f60262672556ae113a8cccbc671e7b559bb7106392333cd4a0628471427d1",
+});
 const REQUIRED_COMPONENTS = Object.freeze({
   "migration-manifest": "migration/manifest.json",
   "rollback-manifest": "rollback/manifest.json",
@@ -226,8 +232,17 @@ function validateMigrationRollback(resourcesRoot) {
   if (!plain(rollback) || rollback.schema !== 1 || rollback.stableVersion !== "0.4.10"
     || !["reference", "bundled"].includes(rollback.mode)) fail("PACKAGE_ROLLBACK_IDENTITY_MISMATCH", JSON.stringify(rollback));
   if (rollback.mode === "reference") {
-    if (rollback.releaseTag !== "v0.4.10" || typeof rollback.assetName !== "string" || !rollback.assetName
-      || !SHA256.test(rollback.sha256)) fail("PACKAGE_ROLLBACK_REFERENCE_INVALID", JSON.stringify(rollback));
+    if (rollback.releaseTag !== STABLE_ROLLBACK.releaseTag
+      || rollback.assetName !== STABLE_ROLLBACK.assetName
+      || rollback.size !== STABLE_ROLLBACK.size
+      || rollback.sha256 !== STABLE_ROLLBACK.sha256) {
+      fail("PACKAGE_ROLLBACK_REFERENCE_INVALID", JSON.stringify({
+        releaseTag: rollback.releaseTag,
+        assetName: rollback.assetName,
+        size: rollback.size,
+        sha256: rollback.sha256,
+      }));
+    }
   } else {
     const asset = safePath(rollback.asset, "PACKAGE_ROLLBACK_ASSET_PATH_UNSAFE");
     const current = regularFile(path.join(resourcesRoot, "rollback"), asset, "PACKAGE_ROLLBACK_ASSET");
