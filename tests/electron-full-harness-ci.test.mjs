@@ -44,6 +44,8 @@ test('full-harness CI is cross-platform, exact-source, and fail-closed on missin
     'bun install --frozen-lockfile',
     'cargo clippy',
     '-- -D warnings',
+    '--source "$SOURCE_SHA"',
+    '--json-out aiTemp/evidence/package-verification.json',
     'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09',
     'actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444',
     'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
