@@ -131,3 +131,14 @@ test("an invalid main-process response is rejected before reaching the renderer"
   const { api } = loadPreload(() => ({ state: "mystery" }));
   await assert.rejects(api.runtime.status(), /IPC_RESPONSE_SCHEMA_INVALID/);
 });
+
+test("prototype-pollution keys are rejected from main-process responses", async () => {
+  const response = Object.create(null);
+  Object.defineProperty(response, "__proto__", {
+    value: { polluted: true },
+    enumerable: true,
+  });
+  const { api } = loadPreload(() => response);
+
+  await assert.rejects(api.diagnostics.snapshot(), /IPC_RESPONSE_SCHEMA_INVALID/);
+});
