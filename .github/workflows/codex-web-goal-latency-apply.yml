@@ -1,44 +1,31 @@
-name: Apply Runtime Web Goal Latency Patch
+name: Reproduce Runtime Web Goal Latency Patch
 
 on:
-  push:
-    branches:
-      - "subagent/codex-web-goal-latency-0.7.0-20260915"
-    paths:
-      - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
-      - ".github/workflows/codex-web-goal-latency-apply.yml"
-      - "runtime-web/src/http-body.ts"
-      - "runtime-web/src/native-passthrough.ts"
-      - "runtime-web/src/server.ts"
+  workflow_dispatch:
 
 permissions:
-  contents: write
-
-concurrency:
-  group: codex-web-goal-latency-${{ github.ref }}
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  apply-and-verify:
+  reproduce-and-verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          fetch-depth: 0
           clean: false
-          persist-credentials: true
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.4.0
-      - name: Apply exact request-body fast path
+      - name: Reproduce exact request-body fast path
         run: |
           mkdir -p aiTemp/codex-web-goal-latency/evidence
           python aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py \
-            | tee aiTemp/codex-web-goal-latency/evidence/apply.log
+            | tee aiTemp/codex-web-goal-latency/evidence/reproduce.log
           grep -q "REQUEST_BODY_FAST_PATH_PATCH_OK" \
-            aiTemp/codex-web-goal-latency/evidence/apply.log
-      - name: Enforce narrow no-delete patch
+            aiTemp/codex-web-goal-latency/evidence/reproduce.log
+      - name: Enforce narrow no-delete reproduction
         shell: bash
         run: |
           test -z "$(git diff --diff-filter=D --name-only)"
@@ -58,27 +45,3 @@ jobs:
       - name: Typecheck Runtime Web
         working-directory: runtime-web
         run: bun run typecheck
-      - name: Commit verified source patch
-        shell: bash
-        env:
-          TARGET_BRANCH: subagent/codex-web-goal-latency-0.7.0-20260915
-        run: |
-          remote_head="$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')"
-          if [ "$remote_head" != "$GITHUB_SHA" ]; then
-            echo "::error::Branch advanced while validation was running; refusing to overwrite it."
-            exit 1
-          fi
-          git add \
-            runtime-web/src/http-body.ts \
-            runtime-web/src/native-passthrough.ts \
-            runtime-web/src/server.ts
-          if git diff --cached --quiet; then
-            echo "Source patch is already applied."
-            exit 0
-          fi
-          test -z "$(git diff --cached --diff-filter=D --name-only)"
-          git diff --cached --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "perf(runtime-web): reuse decoded request bytes"
-          git push origin "HEAD:$TARGET_BRANCH"
