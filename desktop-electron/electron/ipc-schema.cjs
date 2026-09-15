@@ -2,6 +2,7 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 32;
 const MAX_JSON_ARRAY_ITEMS = 10_000;
+const DISALLOWED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 function codedError(code, detail) {
   const error = new Error(`${code}: ${detail}`);
@@ -49,8 +50,11 @@ function snapshotJsonValue(value, code, path = "$", ancestors = new Set(), depth
       return Object.freeze(snapshot);
     }
 
-    const snapshot = Object.create(null);
+    const snapshot = {};
     for (const [key, item] of Object.entries(value)) {
+      if (DISALLOWED_JSON_KEYS.has(key)) {
+        throw codedError(code, `${path}.${key} is not allowed`);
+      }
       Object.defineProperty(snapshot, key, {
         value: snapshotJsonValue(item, code, `${path}.${key}`, ancestors, depth + 1),
         enumerable: true,
