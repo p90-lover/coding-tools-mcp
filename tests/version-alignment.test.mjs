@@ -41,7 +41,29 @@ test('compares stable versions without allowing lexical ordering errors', () => 
   );
 });
 
-test('requires one nonempty English and Traditional Chinese release-note section', () => {
+test('rejects non-canonical stable version components before release preparation', () => {
+  for (const invalid of ['0.04.12', '01.0.0', '0.4.01']) {
+    assert.throws(
+      () => compareStableVersions(invalid, '0.4.10'),
+      /requested version must be stable X\.Y\.Z/,
+      invalid,
+    );
+  }
+  assert.throws(
+    () =>
+      validateVersionAlignment({
+        versions: Object.fromEntries(
+          Object.keys(alignedVersions).map((source) => [source, '0.04.10']),
+        ),
+        expectedTag: 'v0.04.10',
+        releaseNotesExists: true,
+        releaseNotesContent: bilingualNotes,
+      }),
+    /package\.json version must be a stable X\.Y\.Z release version/,
+  );
+});
+
+test('requires one visible English and Traditional Chinese release-note section', () => {
   assert.deepEqual(validateBilingualReleaseNotes(bilingualNotes, 'v0.4.10'), {
     english: 'English release details.',
     traditionalChinese: '繁體中文發佈內容。',
@@ -61,6 +83,22 @@ test('requires one nonempty English and Traditional Chinese release-note section
         'v0.4.10',
       ),
     /empty "## English" section/,
+  );
+  assert.throws(
+    () =>
+      validateBilingualReleaseNotes(
+        '# v0.4.10\n\n## English\n\n<!-- TODO: write English notes -->\n\n## 繁體中文\n\n繁體中文內容。\n',
+        'v0.4.10',
+      ),
+    /empty "## English" section/,
+  );
+  assert.throws(
+    () =>
+      validateBilingualReleaseNotes(
+        '# v0.4.10\n\n<!--\n## English\nHidden text.\n-->\n\n## 繁體中文\n\n繁體中文內容。\n',
+        'v0.4.10',
+      ),
+    /exactly one "## English" section/,
   );
 });
 
