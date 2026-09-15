@@ -188,7 +188,7 @@ export function renderCodexRouterIntegrationPlan(plan: CodexRouterIntegrationPla
   if (plan.ensureCommandCodeCredential) {
     lines.push(
       "",
-      "CommandCode credential status is checked first. If unconfigured, Codex Router opens its hidden local prompt; Coding Tools never receives the user_* key.",
+      "CommandCode credential status is checked first. If unconfigured, Codex Router opens its hidden local prompt; Coding Tools never receives or prints the provider API key.",
     );
   }
   return lines.join("\n");
