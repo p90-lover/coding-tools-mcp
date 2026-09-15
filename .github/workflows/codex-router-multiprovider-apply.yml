@@ -1,0 +1,89 @@
+name: Apply multi-provider Codex Router wiring
+
+on:
+  push:
+    branches:
+      - subagent/codex-router-multiprovider-0.7.0-20260915
+    paths:
+      - .github/workflows/codex-router-multiprovider-apply.yml
+      - aiTemp/codex-router-multiprovider/apply-server.py
+      - runtime-web/src/routed-providers.ts
+      - runtime-web/tests/routed-providers.test.ts
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-router-multiprovider-apply
+  cancel-in-progress: false
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Apply exact idempotent server patch
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp
+          python aiTemp/codex-router-multiprovider/apply-server.py \
+            | tee aiTemp/evidence/routed-provider-server-patch.txt
+          grep -F ROUTED_PROVIDER_SERVER_PATCH_OK aiTemp/evidence/routed-provider-server-patch.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+
+      - name: Install runtime dependencies
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd runtime-web --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/install.txt
+
+      - name: Run focused provider and catalog contracts
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun test --cwd runtime-web \
+              tests/routed-providers.test.ts \
+              tests/model-catalog.test.ts \
+            2>&1 | tee aiTemp/evidence/tests.txt
+          grep -F '0 fail' aiTemp/evidence/tests.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd runtime-web typecheck \
+            2>&1 | tee aiTemp/evidence/typecheck.txt
+
+      - name: Commit only verified server integration
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+          remote_head="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote_head" = "$GITHUB_SHA"
+          git add runtime-web/src/server.ts
+          if ! git diff --cached --quiet; then
+            git config user.name 'p90-lover'
+            git config user.email '146848721+p90-lover@users.noreply.github.com'
+            git commit -m 'feat: route Codex subagents through local model router'
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: codex-router-multiprovider-${{ github.run_id }}
+          path: aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14
