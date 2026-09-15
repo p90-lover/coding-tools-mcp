@@ -33,10 +33,6 @@ fn listener_routes_the_path_derived_location_to_the_mcp_metadata_handler() {
 #[test]
 fn bearer_challenge_advertises_the_path_derived_metadata_location() {
     let source = include_str!("../../src-tauri/src/mcp/transport.rs");
-    assert!(source.contains(
-        "{}/.well-known/oauth-protected-resource/mcp\\\", scope=\\\"mcp\\\""
-    ));
-    assert!(!source.contains(
-        "{}/.well-known/oauth-protected-resource\\\", scope=\\\"mcp\\\""
-    ));
+    assert!(source.contains("{}/.well-known/oauth-protected-resource/mcp\\\", scope=\\\"mcp\\\""));
+    assert!(!source.contains("{}/.well-known/oauth-protected-resource\\\", scope=\\\"mcp\\\""));
 }
