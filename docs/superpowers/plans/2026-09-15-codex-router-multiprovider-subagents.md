@@ -2,97 +2,116 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Route native Codex subagents through a shared Coding Tools endpoint to many Codex Router providers, including a first-class CommandCode Proxy profile.
+**Goal:** Run native Codex V2 subagents through one global Codex Router provider so each agent type can select a different routed model/provider, including CommandCode Proxy and Coding Tools ChatGPT Web.
 
-**Architecture:** Keep Coding Tools as the only Codex model provider. Add a focused router client that discovers authenticated local Codex Router models, namespaces them into the existing native model catalog, and forwards `codex-router/*` Responses requests back to Codex Router after removing exactly one namespace prefix. CommandCode Proxy is registered with Codex Router as an `openai-chat` generic provider so Coding Tools never stores its `user_*` credential or implements a second tool-protocol translator.
+**Architecture:** Codex 0.154.0 does not apply `model_provider` from user role files, so provider switching happens inside Codex Router, not inside `agent_type`. The whole Codex tree uses `model_provider = "codex-router"`; managed agent definitions lock only a routed model slug. Coding Tools exposes a restricted `openai-responses` back-provider for its ChatGPT-Web models so those models can join the same router catalog without recursive routing.
 
-**Tech Stack:** Bun/TypeScript, Codex Responses protocol, Codex Router authenticated loopback API, Bun tests.
+**Tech Stack:** Bun/TypeScript, Codex Responses protocol, Codex Router authenticated loopback API, Codex V2 agent roles, Bun tests.
 
 **Spec:** `docs/superpowers/specs/2026-09-15-codex-router-multiprovider-subagents-design.md`
 
 ## Global Constraints
 
-- Do not delete files; retain temporary/evidence output under `aiTemp/`.
-- Do not mutate native OpenAI or `chatgpt-web/*` routing behavior.
-- Never log or return the Codex Router caller key or CommandCode Proxy API key.
-- Unknown external namespaces fail closed; no silent provider fallback in Coding Tools.
+- Do not delete files; retain temporary/evidence output under `aiTemp/` and preserve obsolete managed state in Trash.
+- Never embed/log the Codex Router caller key or CommandCode `user_*` key.
+- Global V2 subagents use one Codex Router provider; agent files change model only.
+- The Coding Tools Web back-provider accepts only `chatgpt-web/*`; it must never route native or `codex-router/*` models.
 - CommandCode Proxy credentials remain owned by Codex Router.
 
 ---
 
-### Task 1: Router contract and provider profile
+### Task 1: Router compatibility contract — COMPLETE
+
+**Files:** `runtime-web/src/routed-providers.ts`, `runtime-web/tests/routed-providers.test.ts`, `runtime-web/src/server.ts`
+
+- [x] Caller connection validation and redaction.
+- [x] Direct `codex-router/*` model namespace and streaming forwarding.
+- [x] Dynamic router catalog augmentation without breaking native/Web discovery.
+- [x] Focused tests + typecheck.
+
+### Task 2: CommandCode Proxy provider — COMPLETE
+
+**Files:** `runtime-web/scripts/commandcode-proxy-provider.ts`, `runtime-web/tests/commandcode-proxy-provider.test.ts`
+
+- [x] Generate Codex Router generic-provider `openai-chat` registration.
+- [x] Add `--allow-private` for loopback endpoints.
+- [x] Keep `user_*` credential entry in Codex Router's hidden prompt.
+- [x] Test command sequence and secret non-disclosure.
+
+### Task 3: Scalable routed agent definitions — COMPLETE
+
+**Files:** `runtime-web/src/routed-agent-catalog.ts`, `runtime-web/tests/routed-agent-catalog.test.ts`
+
+- [x] Deterministic hashed agent names/files.
+- [x] Model-only role files compatible with Codex's role whitelist.
+- [x] Owner-private permissions.
+- [x] Preserve stale/replaced managed files to Trash; never touch user roles.
+
+### Task 4: Official Codex architecture proof — COMPLETE
+
+**Files:** `runtime-web/scripts/smoke-codex-router-agent-types.ts`, `runtime-web/scripts/smoke-codex-router-global-agents.ts`
+
+- [x] Retain the failed per-agent-provider probe as evidence that provider inheritance exists.
+- [x] Verify from Codex source that user roles do not apply `model_provider`.
+- [x] Prove supported topology using pinned Codex 0.154.0: one global router provider, root `gpt-5.6-sol`, child `commandcode-proxy/claude-sonnet-4-6`.
+- [x] Make zero paid/external model calls and preserve smoke state under `aiTemp/Trash`.
+
+### Task 5: Restricted Coding Tools Web router ingress
 
 **Files:**
-- Create: `runtime-web/src/routed-providers.ts`
-- Create: `runtime-web/tests/routed-providers.test.ts`
-
-**Interfaces:**
-- Produces: `resolveCodexRouterConnection(env)`, `codexRouterModelId(slug)`, `parseCodexRouterModelId(model)`, `commandCodeProxyProviderProfile(baseUrl)`, `redactRouterError(text, connection)`.
-
-- [ ] **Step 1: Write failing tests** for caller-path construction, namespace round trips, caller-key redaction, and the `commandcode-proxy`/`openai-chat` profile.
-- [ ] **Step 2: Run** `bun test --cwd runtime-web tests/routed-providers.test.ts` and require failures caused by the missing module/exports.
-- [ ] **Step 3: Implement the minimal pure contract**. Accept only loopback `http:` router origins, require a caller key of at least 32 URL-safe characters, normalize the CommandCode Proxy base URL, and never include secrets in thrown messages.
-- [ ] **Step 4: Re-run** the focused test and require `0 fail`.
-
-### Task 2: Dynamic routed model catalog
-
-**Files:**
-- Modify: `runtime-web/src/routed-providers.ts`
+- Create: `runtime-web/src/router-web-ingress.ts`
+- Create: `runtime-web/tests/router-web-ingress.test.ts`
 - Modify: `runtime-web/src/server.ts`
-- Modify: `runtime-web/tests/routed-providers.test.ts`
 
 **Interfaces:**
-- Produces: `augmentWithCodexRouterModels(catalog, config, connection, fetchImpl)` returning a cloned Codex catalog.
+- Produce a catalog filter that returns only `chatgpt-web/*` rows.
+- Produce a request validator/dispatcher that accepts only `chatgpt-web/*` Responses requests and delegates directly to the existing Web adapter path.
 
-- [ ] **Step 1: Add failing tests** proving router model IDs become `codex-router/<slug>`, native/Web rows remain unchanged, duplicate imported rows are ignored deterministically, and a malformed/failed external catalog leaves the base catalog intact.
-- [ ] **Step 2: Run the focused test** and require failures on the missing augmentation behavior.
-- [ ] **Step 3: Implement catalog fetch/augmentation** using authenticated `GET <caller-base>/models`. Synthesize routed rows from a list-visible, tool-capable native template, clear service tiers/compaction hash, set `tool_mode: null`, preserve the configured v1/v2 subagent surface, and append rows without mutating the source catalog.
-- [ ] **Step 4: Wire `modelsRequest()`** to augment the existing native + ChatGPT Web result only when router configuration is valid; router discovery failure must not break native model discovery.
-- [ ] **Step 5: Run** `bun test --cwd runtime-web tests/routed-providers.test.ts tests/model-catalog.test.ts`.
+- [ ] Write failing tests for Web-only catalog filtering, invalid/native/router model rejection, and streaming dispatch.
+- [ ] Implement pure filtering/validation helpers.
+- [ ] Add `GET /router/v1/models` and `POST /router/v1/responses` to the server before ordinary `/v1` routing.
+- [ ] Prove the back-provider cannot recurse into `codex-router/*`.
+- [ ] Run the focused ingress tests, existing routed-provider/model-catalog tests and typecheck.
 
-### Task 3: Routed Responses forwarding
-
-**Files:**
-- Modify: `runtime-web/src/routed-providers.ts`
-- Modify: `runtime-web/src/server.ts`
-- Modify: `runtime-web/tests/routed-providers.test.ts`
-
-**Interfaces:**
-- Produces: `forwardCodexRouterResponse(req, rawBody, connection, fetchImpl)`.
-
-- [ ] **Step 1: Add failing tests** proving `codex-router/deepseek/deepseek-v4-pro` is forwarded as `deepseek/deepseek-v4-pro`, the caller capability authenticates the local request, streaming headers/body are preserved, and connection/error text is sanitized.
-- [ ] **Step 2: Run the focused test** and require failures on missing forwarding.
-- [ ] **Step 3: Implement forwarding** by cloning the parsed raw body, replacing only `model`, POSTing to `<caller-base>/responses`, and returning the upstream body/status/headers without buffering SSE.
-- [ ] **Step 4: Update `responseRequest()`** so `codex-router/*` routes before native passthrough. Native and ChatGPT Web branches remain byte-for-byte behaviorally unchanged.
-- [ ] **Step 5: Run focused tests plus the existing server/subagent tests selected by repository scripts.**
-
-### Task 4: CommandCode Proxy bootstrap contract
+### Task 6: Coding Tools Web generic-provider bootstrap
 
 **Files:**
-- Create: `runtime-web/scripts/commandcode-proxy-provider.ts`
-- Create: `runtime-web/tests/commandcode-proxy-provider.test.ts`
+- Create: `runtime-web/scripts/codex-router-coding-tools-web-provider.ts`
+- Create: `runtime-web/tests/codex-router-coding-tools-web-provider.test.ts`
 - Modify: `runtime-web/package.json`
 
 **Interfaces:**
-- Produces: a dry-run-first helper that prints/executes the exact Codex Router generic-provider registration sequence for provider id `commandcode-proxy` with adapter `openai-chat`; raw credentials are read from environment/stdin and never emitted.
+- Dry-run-first command plan for provider `coding-tools-web`, adapter `openai-responses`, default base `http://127.0.0.1:17841/router/v1`, `--allow-private`, no credential prompt.
 
-- [ ] **Step 1: Add failing tests** for the generated argv: `providers generic add commandcode-proxy --name "CommandCode Proxy" --base-url <url> --adapter openai-chat`, followed by enable/curation guidance; ensure credential values never occur in output.
-- [ ] **Step 2: Run the focused test** and require the missing helper failure.
-- [ ] **Step 3: Implement the helper** with `--dry-run` as the default and an explicit `--apply` mode. It must not delete/replace provider state and must reject non-loopback HTTP CommandCode Proxy URLs unless the user explicitly supplies an HTTPS URL.
-- [ ] **Step 4: Add package script** `provider:commandcode-proxy` and re-run focused tests.
+- [ ] Write failing command-plan tests.
+- [ ] Implement the helper without any credential argument or destructive mutation.
+- [ ] Add package scripts for CommandCode Proxy, Coding Tools Web and the global-router smoke.
+- [ ] Re-run focused tests + typecheck.
 
-### Task 5: Native subagent lifecycle proof and release boundary
+### Task 7: Production integration helper
 
 **Files:**
-- Modify: `runtime-web/scripts/smoke-codex-subagents.ts`
-- Create: `runtime-web/tests/routed-subagent-lifecycle.test.ts`
-- Create: `docs/releases/v0.7.0-next.md`
+- Create: `runtime-web/scripts/codex-router-integration.ts`
+- Create: `runtime-web/tests/codex-router-integration.test.ts`
 
 **Interfaces:**
-- Extends the existing local scripted lifecycle smoke so a parent selects one routed child slug while the root remains native/Web.
+- Detect/use an installed Codex Router CLI.
+- Register/enable `coding-tools-web` and optionally `commandcode-proxy` through supported router commands.
+- Keep Codex Router responsible for global Codex provider config, caller-key lifecycle, provider state, credentials and doctor checks.
 
-- [ ] **Step 1: Add a focused model-free lifecycle fixture** whose fake router records root/child/grandchild model IDs and returns the existing collaboration tool sequence.
-- [ ] **Step 2: Verify the fixture fails before routed catalog/forwarding integration.**
-- [ ] **Step 3: Run the lifecycle after Tasks 1-4 and require child requests to reach the fake router with de-namespaced model IDs while `spawn_agent`/`wait_agent`/follow-up complete.**
-- [ ] **Step 4: Run `bun run --cwd runtime-web typecheck` and the smallest relevant existing test set; then use hosted CI for the full platform matrix.**
-- [ ] **Step 5: Document the `v0.7.0-next` boundary in English and Traditional Chinese, including that CommandCode Proxy is transported through Codex Router generic-provider support and no credentials are bundled.**
+- [ ] Write tests for dry-run command ordering and secret-free output.
+- [ ] Implement `--dry-run` default and explicit `--apply`.
+- [ ] Reject ambiguous/non-loopback local routes and avoid rewriting router state directly.
+- [ ] Verify idempotent re-run behavior relies on router CLI rather than deleting/recreating state.
+
+### Task 8: Release boundary and final validation
+
+**Files:**
+- Create: `docs/releases/v0.7.0-next.md`
+- Update: PR #62 description after final evidence.
+
+- [ ] Document architecture, CommandCode Proxy, Coding Tools Web back-provider, V2 scalability, V1 bounded compatibility, credential boundaries and no-delete policy in English + Traditional Chinese.
+- [ ] Run the smallest relevant focused suite and typecheck on the final head.
+- [ ] Run the pinned official-Codex global-router smoke on the final head.
+- [ ] Confirm branch comparison contains no deleted files.
+- [ ] Keep PR draft; do not merge/tag/release without a separate user instruction.
