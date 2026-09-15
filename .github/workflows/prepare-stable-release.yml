@@ -146,6 +146,7 @@ jobs:
           set -euo pipefail
           git diff --check
           node scripts/check-version-alignment.mjs --tag "$TAG"
+          node --test tests/stable-release-workflows.test.mjs
           node --test tests/version-alignment.test.mjs
           git diff -- package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock > aiTemp/release-preparation/version.diff
 
