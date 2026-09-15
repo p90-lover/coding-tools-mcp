@@ -22,6 +22,13 @@ const SENSITIVE_RESPONSE_KEYS = new Set([
   "authorization",
   "cookie",
   "set_cookie",
+  "id_token",
+  "auth_token",
+  "oauth_token",
+  "bearer_token",
+  "csrf_token",
+  "xsrf_token",
+  "secret_key",
   "password",
   "secret",
   "token",
@@ -43,7 +50,10 @@ function isPlainObject(value) {
 }
 
 function normalizedJsonKey(key) {
-  return key.toLowerCase().replace(/[-.\s]+/g, "_");
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[-.\s]+/g, "_");
 }
 
 function jsonKeyIsDisallowed(key, rejectSensitiveKeys) {
