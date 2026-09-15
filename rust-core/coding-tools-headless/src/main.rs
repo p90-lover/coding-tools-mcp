@@ -9,7 +9,7 @@ fn main() {
         .expect("failed to create headless runtime");
     if let Err(error) = runtime.block_on(run()) {
         eprintln!("HEADLESS_START_FAILED: {error}");
-        std::process::exit_code().set(1);
+        std::process::exit(1);
     }
 }
 
