@@ -20,6 +20,8 @@ const UPSTREAM = Object.freeze({
 });
 const TUNNEL_VERSION = "0.0.12";
 const TUNNEL_REPOSITORY = "openai/tunnel-client";
+const CLOUDFLARED_VERSION = "2026.7.2";
+const CLOUDFLARED_RELEASE_COMMIT = "8679787525edc8575b2948a7c4a50b6292c6d426";
 const MAX_TUNNEL_ARCHIVE_BYTES = 80 * 1024 * 1024;
 const MAX_TUNNEL_MEMBER_BYTES = 64 * 1024 * 1024;
 const MAX_TUNNEL_MEMBERS = 16;
@@ -229,6 +231,10 @@ function copyTree(sourcePath, destinationPath) {
 
 function executableName(baseName, platform) {
   return platform === "win32" ? `${baseName}.exe` : baseName;
+}
+
+function cloudflaredName(platform) {
+  return executableName("cloudflared", platform);
 }
 
 function binaryFormat(bytes, platform) {
@@ -483,12 +489,15 @@ function validateTunnelArchive(archivePath, release, platform) {
   }
   const members = readTunnelZip(bytes, [
     release.binaryName,
+    cloudflaredName(platform),
+    "cloudflared-manifest.json",
     "LICENSE",
     "NOTICE",
     release.licenseName,
     release.spdxName,
   ]);
   validateBinaryBytes(members.get(release.binaryName), "tunnel-client", platform);
+  validateBinaryBytes(members.get(cloudflaredName(platform)), "cloudflared", platform);
   const licenseDigest = sha256(members.get(release.licenseName));
   const spdxDigest = sha256(members.get(release.spdxName));
   if (release.licenseSha256 !== undefined && licenseDigest !== release.licenseSha256) {
@@ -506,12 +515,39 @@ function validateTunnelArchive(archivePath, release, platform) {
   if (spdx?.spdxVersion !== "SPDX-2.3") {
     fail("PACKAGE_RESOURCE_TUNNEL_SPDX_INVALID", String(spdx?.spdxVersion));
   }
+  let cloudflaredManifest;
+  const cloudflaredManifestBytes = members.get("cloudflared-manifest.json");
+  try {
+    cloudflaredManifest = JSON.parse(UTF8.decode(cloudflaredManifestBytes));
+  } catch (error) {
+    fail("PACKAGE_RESOURCE_CLOUDFLARED_MANIFEST_INVALID", error instanceof Error ? error.message : String(error));
+  }
+  const requiredPlatform = `${release.platform}/${release.arch}`;
+  if (cloudflaredManifest?.version !== CLOUDFLARED_VERSION
+      || cloudflaredManifest?.release_commit !== CLOUDFLARED_RELEASE_COMMIT
+      || !Array.isArray(cloudflaredManifest?.platforms)
+      || !cloudflaredManifest.platforms.includes(requiredPlatform)) {
+    fail("PACKAGE_RESOURCE_CLOUDFLARED_IDENTITY_MISMATCH", JSON.stringify({
+      version: cloudflaredManifest?.version,
+      release_commit: cloudflaredManifest?.release_commit,
+      requiredPlatform,
+      platforms: cloudflaredManifest?.platforms,
+    }));
+  }
   return {
     archivePath: archive.path,
     archiveDigest,
+    archiveMembers: [...members.keys()].sort(compareText),
     members,
     licenseDigest,
     spdxDigest,
+    cloudflared: {
+      binaryName: cloudflaredName(platform),
+      binarySha256: sha256(members.get(cloudflaredName(platform))),
+      manifestSha256: sha256(cloudflaredManifestBytes),
+      version: cloudflaredManifest.version,
+      releaseCommit: cloudflaredManifest.release_commit,
+    },
     release,
   };
 }
@@ -778,7 +814,9 @@ function preparePackageResources(options = {}) {
           archive: {
             name: tunnel.release.archiveName,
             sha256: tunnel.archiveDigest,
+            members: tunnel.archiveMembers,
           },
+          cloudflared: tunnel.cloudflared,
           license_report: {
             name: tunnel.release.licenseName,
             sha256: tunnel.licenseDigest,
