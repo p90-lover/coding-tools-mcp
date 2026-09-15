@@ -210,6 +210,28 @@ test("secret-bearing response keys never cross the preload boundary", async () =
   await assert.rejects(api.diagnostics.snapshot(), /IPC_RESPONSE_SCHEMA_INVALID/);
 });
 
+test("camelCase credential response keys never cross the preload boundary", async () => {
+  for (const key of [
+    "setCookie",
+    "idToken",
+    "authToken",
+    "oauthToken",
+    "bearerToken",
+    "secretKey",
+  ]) {
+    const { api } = loadPreload(() => ({
+      ready: true,
+      credentials: { [key]: "must-not-reach-renderer" },
+    }));
+
+    await assert.rejects(
+      api.diagnostics.snapshot(),
+      /IPC_RESPONSE_SCHEMA_INVALID/,
+      `${key} must be rejected`,
+    );
+  }
+});
+
 test("prototype-pollution keys are rejected from main-process responses", async () => {
   const response = Object.create(null);
   Object.defineProperty(response, "__proto__", {
