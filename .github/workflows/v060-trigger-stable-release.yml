@@ -9,14 +9,12 @@ on:
       - .github/workflows/v060-trigger-stable-release.yml
 
 permissions:
-  contents: write
+  actions: write
+  contents: read
 
 concurrency:
   group: v060-trigger-stable-release
   cancel-in-progress: false
-
-env:
-  PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
   trigger:
@@ -24,41 +22,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          ref: release/v0.6.0
-          fetch-depth: 0
-          clean: false
-          persist-credentials: false
-      - name: Touch only the stable release workflow
-        env:
-          RELEASE_TRIGGER_ID: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          path = Path('.github/workflows/electron-full-harness-ci.yml')
-          text = path.read_text(encoding='utf-8')
-          marker = f"# stable-release-trigger: {os.environ['RELEASE_TRIGGER_ID']}\n"
-          if marker in text:
-              raise SystemExit('Trigger marker already exists')
-          path.write_text(text.rstrip() + '\n\n' + marker, encoding='utf-8')
-          PY
-          git diff --check
-          test "$(git diff --name-only)" = '.github/workflows/electron-full-harness-ci.yml'
-          test -z "$(git diff --diff-filter=D --name-only)"
-      - name: Commit stable release trigger
+      - name: Dispatch exact stable release workflow on the release branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git add -- .github/workflows/electron-full-harness-ci.yml
-          git diff --cached --check
-          test -z "$(git diff --cached --diff-filter=D --name-only)"
-          git config user.name 'p90-lover'
-          git config user.email '146848721+p90-lover@users.noreply.github.com'
-          git commit -m 'ci: run verified v0.6 stable release pipeline'
-          gh auth setup-git
-          git push origin HEAD:refs/heads/release/v0.6.0
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/electron-full-harness-ci.yml/dispatches" \
+            -f ref='release/v0.6.0'
+          echo 'DISPATCH_ACCEPTED'
