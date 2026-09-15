@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type { Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 
-test("an already-ready effort menu has no unconditional pre-activation delay", async () => {
+test("an already-ready effort control has no unconditional pre-activation delay", async () => {
   const neverVisible = new Promise<void>(() => {});
   const hiddenSurface = {
     filter() { return this; },
@@ -27,27 +27,38 @@ test("an already-ready effort menu has no unconditional pre-activation delay", a
       return sliderControl;
     },
   };
+  let menuOpen = false;
+  let activationClicks = 0;
   const sliderContainer = {
     filter() { return this; },
     last() { return this; },
-    isVisible: async () => true,
-    waitFor: async () => {},
+    isVisible: async () => menuOpen,
+    waitFor: async () => {
+      expect(menuOpen).toBeTrue();
+    },
     locator: (selector: string) => {
       expect(selector).toBe('[role="slider"]');
       return slider;
     },
   };
   const effortMenu = {
-    isVisible: async () => true,
+    isVisible: async () => menuOpen,
   };
   const effortControl = {
     last() { return this; },
     waitFor: async () => {},
     getAttribute: async (name: string) => ({
       "aria-controls": "effort-menu",
-      "aria-expanded": "true",
-      "data-state": "open",
+      "aria-expanded": menuOpen ? "true" : "false",
+      "data-state": menuOpen ? "open" : "closed",
     })[name] ?? null,
+    click: async () => {
+      activationClicks += 1;
+      menuOpen = true;
+    },
+    dispatchEvent: async () => {
+      throw new Error("the ready effort control must not require pointerdown fallback");
+    },
   };
   const composerForm = {
     locator: () => effortControl,
@@ -69,6 +80,7 @@ test("an already-ready effort menu has no unconditional pre-activation delay", a
       press: async (key: string) => {
         expect(key).toBe("Escape");
         escapePresses += 1;
+        menuOpen = false;
       },
     },
   } as unknown as Page;
@@ -92,7 +104,9 @@ test("an already-ready effort menu has no unconditional pre-activation delay", a
   const elapsedMs = performance.now() - startedAt;
 
   expect(mode).toMatchObject({ displayLabel: "High", uiEffortIndex: 2 });
+  expect(activationClicks).toBe(1);
   expect(escapePresses).toBe(1);
+  expect(menuOpen).toBeFalse();
   // The fake page performs no I/O. Crossing this bound means model selection inserted a fixed wait.
   expect(elapsedMs).toBeLessThan(200);
 });
