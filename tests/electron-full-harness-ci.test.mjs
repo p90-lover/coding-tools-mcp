@@ -69,11 +69,14 @@ test('full-harness CI preserves files and keeps temporary state under aiTemp', (
     'aiTemp/Trash/full-harness-package',
     'runtime-web/scripts/no-delete-preload.mjs',
     'git diff --diff-filter=D',
+    'test ! -e "$release_installer"',
+    'cp --no-clobber "${installers[0]}" "$release_installer"',
   ]) {
     assert.ok(workflow.includes(required), required);
   }
   for (const forbidden of [
     '/tmp/ct-full-',
+    'cp "${installers[0]}" "aiTemp/release-output/$WINDOWS_INSTALLER"',
     'git reset --hard',
     'git clean',
     'rm -rf',
