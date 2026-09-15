@@ -1,0 +1,33 @@
+name: Dispatch exact v0.6 release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release/v0.6.0
+    paths:
+      - .github/workflows/v060-dispatch-final-release.yml
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: v060-dispatch-final-release
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Dispatch the exact-source integrated release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run electron-full-harness-ci.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref release/v0.6.0
+          echo "Dispatched Electron Full Harness CI for release/v0.6.0 at $GITHUB_SHA"

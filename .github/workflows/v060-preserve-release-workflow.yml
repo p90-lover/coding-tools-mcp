@@ -1,0 +1,60 @@
+name: Preserve superseded v0.6 release workflow
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release/v0.6.0
+    paths:
+      - .github/workflows/v060-preserve-release-workflow.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: v060-preserve-release-workflow
+  cancel-in-progress: false
+
+jobs:
+  preserve:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: release/v0.6.0
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Retain the exact superseded workflow under Trash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence Trash/replaced-workflows
+          retained='Trash/replaced-workflows/electron-full-harness-ci.pre-final-v0.6.0.yml'
+          if [ ! -e "$retained" ]; then
+            cp --no-clobber .github/workflows/electron-full-harness-ci.yml "$retained"
+            git add -- "$retained"
+            git diff --cached --check
+            test -z "$(git diff --cached --diff-filter=D --name-only)"
+            git config user.name 'p90-lover'
+            git config user.email '146848721+p90-lover@users.noreply.github.com'
+            git commit -m 'chore: retain superseded v0.6 release workflow'
+            gh auth setup-git
+            git push origin HEAD:refs/heads/release/v0.6.0
+          fi
+          git rev-parse HEAD | tee aiTemp/evidence/preservation-source-sha.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: v060-workflow-preservation-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

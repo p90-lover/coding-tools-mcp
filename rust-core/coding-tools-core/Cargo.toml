@@ -1,0 +1,15 @@
+[package]
+name = "coding-tools-core"
+version = "0.6.0"
+description = "Reusable Coding Tools state and tool-contract facade during Electron migration"
+authors = ["Coding Tools MCP Contributors"]
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "coding_tools_core"
+path = "src/lib.rs"
+
+[dependencies]
+coding-tools-mcp-desktop = { path = "../../src-tauri", default-features = false }

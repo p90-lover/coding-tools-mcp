@@ -1,0 +1,4 @@
+# The vendored codex-chatgpt-web snapshot is verified byte-for-byte against
+# UPSTREAM_MANIFEST.json. Disable text conversion so Windows checkouts retain
+# the exact LF and binary bytes recorded by that manifest.
+vendor/codex-chatgpt-web-v5.0.6/** -text

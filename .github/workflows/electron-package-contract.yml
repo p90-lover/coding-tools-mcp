@@ -1,0 +1,68 @@
+name: Electron package contract
+
+on:
+  push:
+    branches:
+      - subagent/electron-package-verifier-0.6.0-rc.1-20260915
+    paths:
+      - .github/workflows/electron-package-contract.yml
+      - desktop-electron/package.json
+      - desktop-electron/scripts/prepare-package-resources.cjs
+      - desktop-electron/scripts/prepare-runtime.cjs
+      - desktop-electron/scripts/runtime-preparation.cjs
+      - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/package-contents.test.cjs
+      - desktop-electron/tests/package-preservation.test.cjs
+      - desktop-electron/tests/package-resource-preparation.test.cjs
+      - desktop-electron/tests/prepare-runtime.test.cjs
+      - desktop-electron/tests/tunnel-supply-chain-verification.test.cjs
+      - runtime-web/scripts/build-runtime-bundle.ts
+      - runtime-web/scripts/runtime-output.cjs
+      - runtime-web/tests/runtime-output.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: electron-package-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Verify exact reconciled package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          {
+            node --check desktop-electron/scripts/prepare-package-resources.cjs
+            node --check desktop-electron/scripts/prepare-runtime.cjs
+            node --check desktop-electron/scripts/runtime-preparation.cjs
+            node --check desktop-electron/scripts/verify-package.cjs
+            node --test \
+              desktop-electron/tests/package-contents.test.cjs \
+              desktop-electron/tests/package-preservation.test.cjs \
+              desktop-electron/tests/package-resource-preparation.test.cjs \
+              desktop-electron/tests/prepare-runtime.test.cjs \
+              desktop-electron/tests/tunnel-supply-chain-verification.test.cjs \
+              runtime-web/tests/runtime-output.test.cjs
+            git diff --check
+          } 2>&1 | tee aiTemp/evidence/electron-package-contract.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-package-contract-${{ github.run_id }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

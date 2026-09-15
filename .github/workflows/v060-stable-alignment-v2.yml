@@ -1,0 +1,266 @@
+name: Finish stable v0.6.0 alignment
+
+on:
+  push:
+    branches:
+      - release/v0.6.0
+    paths:
+      - .github/workflows/v060-stable-alignment-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: v060-stable-alignment-v2
+  cancel-in-progress: false
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/v060-stable-v2-target
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  align:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      stable_sha: ${{ steps.commit.outputs.stable_sha }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+
+      - name: Materialize stable identity and publisher
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/v060-stable-v2-evidence aiTemp/tmp aiTemp/Trash/v060-stable-v2
+          python - <<'PY'
+          from pathlib import Path
+
+          old = '0.6.0-rc.1'
+          new = '0.6.0'
+          old_escaped = r'0\.6\.0-rc\.1'
+          new_escaped = r'0\.6\.0'
+          active = [
+              'desktop-electron/electron/product.cjs',
+              'desktop-electron/package.json',
+              'desktop-electron/scripts/prepare-package-resources.cjs',
+              'desktop-electron/scripts/verify-package.cjs',
+              'desktop-electron/tests/package-contents.test.cjs',
+              'desktop-electron/tests/package-resource-preparation.test.cjs',
+              'desktop-electron/tests/prepare-runtime.test.cjs',
+              'desktop-electron/tests/product-identity.test.cjs',
+              'desktop-electron/tests/upstream-parity.test.cjs',
+              'desktop-electron/upstream/MATERIALIZATION.json',
+              'runtime-web/CODING_TOOLS_INTEGRATION.json',
+              'rust-core/coding-tools-core/Cargo.toml',
+              'rust-core/coding-tools-headless/Cargo.toml',
+              'scripts/materialize-electron-base.mjs',
+          ]
+
+          for name in active:
+              path = Path(name)
+              text = path.read_text(encoding='utf-8')
+              updated = text.replace(old, new).replace(old_escaped, new_escaped)
+              if updated == text and new not in text and new_escaped not in text:
+                  raise SystemExit(f'Neither release-candidate nor stable identity found in {name}')
+              path.write_text(updated, encoding='utf-8')
+
+          scope_source = Path('scripts/release/verify-source-scope.mjs').read_text(encoding='utf-8')
+          scope_stable = scope_source.replace('v0.6.0-rc.1', 'v0.6.0').replace(old, new)
+          Path('scripts/release/verify-source-scope-v0.6.0.mjs').write_text(scope_stable, encoding='utf-8')
+
+          publisher_source = Path('scripts/release/publish-v0.6.0-rc.1.mjs').read_text(encoding='utf-8')
+          publisher = publisher_source.replace(
+              "from './verify-source-scope.mjs'",
+              "from './verify-source-scope-v0.6.0.mjs'",
+          )
+          publisher = publisher.replace('v0.6.0-rc.1', 'v0.6.0').replace(old, new)
+          publisher = publisher.replace('publishVerifiedPrerelease', 'publishVerifiedRelease')
+          publisher = publisher.replace('prerelease: true', 'prerelease: false')
+          publisher = publisher.replace("make_latest: 'false'", "make_latest: 'true'")
+          publisher = publisher.replace(
+              "release?.prerelease === true, 'RELEASE_NOT_PRERELEASE'",
+              "release?.prerelease === false, 'RELEASE_IS_PRERELEASE'",
+          )
+          publisher = publisher.replace("'PUBLISH_PRERELEASE'", "'PUBLISH_RELEASE'")
+          Path('scripts/release/publish-v0.6.0.mjs').write_text(publisher, encoding='utf-8')
+
+          policy = Path('tests/no-delete-policy.test.mjs')
+          policy_text = policy.read_text(encoding='utf-8')
+          marker = "  'scripts/release/publish-v0.6.0-rc.1.mjs',\n"
+          if marker not in policy_text:
+              raise SystemExit('No-delete policy insertion marker missing')
+          entries = [
+              "  'scripts/release/verify-source-scope-v0.6.0.mjs',\n",
+              "  'scripts/release/publish-v0.6.0.mjs',\n",
+          ]
+          insertion = ''.join(entry for entry in entries if entry not in policy_text)
+          if insertion:
+              policy_text = policy_text.replace(marker, marker + insertion, 1)
+              policy.write_text(policy_text, encoding='utf-8')
+
+          Path('tests/v060-stable-release.test.mjs').write_text("""import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const root = path.resolve(import.meta.dirname, '..');
+          const read = (name) => fs.readFileSync(path.join(root, name), 'utf8');
+
+          test('v0.6.0 stable identity is aligned across shipped components', () => {
+            const desktop = JSON.parse(read('desktop-electron/package.json'));
+            const materialization = JSON.parse(read('desktop-electron/upstream/MATERIALIZATION.json'));
+            const integration = JSON.parse(read('runtime-web/CODING_TOOLS_INTEGRATION.json'));
+            assert.equal(desktop.version, '0.6.0');
+            assert.equal(desktop.build.appId, 'dev.codingtools.fullharness');
+            assert.equal(materialization.targetVersion, '0.6.0');
+            assert.equal(integration.targetVersion, '0.6.0');
+            assert.match(read('rust-core/coding-tools-core/Cargo.toml'), /version = "0\\.6\\.0"/);
+            assert.match(read('rust-core/coding-tools-headless/Cargo.toml'), /version = "0\\.6\\.0"/);
+          });
+
+          test('stable publisher is non-prerelease, latest, readback-verified, and non-destructive', () => {
+            const publisher = read('scripts/release/publish-v0.6.0.mjs');
+            const scope = read('scripts/release/verify-source-scope-v0.6.0.mjs');
+            const notes = read('docs/releases/v0.6.0.md');
+            assert.match(scope, /RELEASE_VERSION = '0\\.6\\.0'/);
+            assert.match(scope, /RELEASE_TAG = `v\\$\\{RELEASE_VERSION\\}`/);
+            assert.match(publisher, /prerelease: false/);
+            assert.match(publisher, /make_latest: 'true'/);
+            assert.match(publisher, /publishVerifiedRelease/);
+            assert.match(publisher, /verifyRemoteAssets/);
+            assert.match(notes, /Coding\\.Tools_0\\.6\\.0_windows_x64_setup\\.exe/);
+            for (const forbidden of [/method\\s*:\\s*['"]DELETE['"]/, /git\\s+push\\s+--force/i, /rm\\s+-rf/i]) {
+              assert.doesNotMatch(publisher, forbidden);
+            }
+          });
+          """.replace(/^          /gm, ''), encoding='utf-8')
+          PY
+
+      - name: Generate exact stable Rust lockfiles
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile --manifest-path rust-core/coding-tools-core/Cargo.toml
+          cargo generate-lockfile --manifest-path rust-core/coding-tools-headless/Cargo.toml
+          cargo metadata --locked --manifest-path rust-core/coding-tools-core/Cargo.toml --format-version 1 \
+            > aiTemp/v060-stable-v2-evidence/core-metadata.json
+          cargo metadata --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml --format-version 1 \
+            > aiTemp/v060-stable-v2-evidence/headless-metadata.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          versions = []
+          for name in ('core-metadata.json', 'headless-metadata.json'):
+              data = json.loads(Path('aiTemp/v060-stable-v2-evidence', name).read_text(encoding='utf-8'))
+              versions.extend(p['version'] for p in data['packages'] if p['name'] == 'rustls')
+          if '0.23.45' not in versions or '0.23.41' in versions:
+              raise SystemExit(f'Unexpected rustls versions: {versions}')
+          print('RUSTLS_PATCHED', sorted(set(versions)))
+          PY
+
+      - name: Verify stable identity and package contracts
+        run: |
+          set -euo pipefail
+          node --check scripts/release/publish-v0.6.0.mjs
+          node --check scripts/release/verify-source-scope-v0.6.0.mjs
+          node scripts/verify-vendored-upstream.mjs \
+            2>&1 | tee aiTemp/v060-stable-v2-evidence/upstream-verification.txt
+          node --test \
+            tests/v060-stable-release.test.mjs \
+            tests/no-delete-policy.test.mjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/upstream-parity.test.cjs \
+            desktop-electron/tests/prepare-runtime.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            2>&1 | tee aiTemp/v060-stable-v2-evidence/stable-tests.txt
+          grep -F '# fail 0' aiTemp/v060-stable-v2-evidence/stable-tests.txt
+          active=(
+            desktop-electron/electron/product.cjs
+            desktop-electron/package.json
+            desktop-electron/scripts/prepare-package-resources.cjs
+            desktop-electron/scripts/verify-package.cjs
+            desktop-electron/tests/package-contents.test.cjs
+            desktop-electron/tests/package-resource-preparation.test.cjs
+            desktop-electron/tests/prepare-runtime.test.cjs
+            desktop-electron/tests/product-identity.test.cjs
+            desktop-electron/tests/upstream-parity.test.cjs
+            desktop-electron/upstream/MATERIALIZATION.json
+            runtime-web/CODING_TOOLS_INTEGRATION.json
+            rust-core/coding-tools-core/Cargo.toml
+            rust-core/coding-tools-headless/Cargo.toml
+            scripts/materialize-electron-base.mjs
+            scripts/release/verify-source-scope-v0.6.0.mjs
+            scripts/release/publish-v0.6.0.mjs
+            tests/v060-stable-release.test.mjs
+            docs/releases/v0.6.0.md
+          )
+          if grep -n -I -e '0\.6\.0-rc\.1' -e 'v0\.6\.0-rc\.1' "${active[@]}"; then
+            echo 'Stable active files retain release-candidate identity' >&2
+            exit 1
+          fi
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit verified stable product inputs
+        id: commit
+        run: |
+          set -euo pipefail
+          git add -- \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/package.json \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/prepare-runtime.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/upstream-parity.test.cjs \
+            desktop-electron/upstream/MATERIALIZATION.json \
+            runtime-web/CODING_TOOLS_INTEGRATION.json \
+            rust-core/coding-tools-core/Cargo.toml \
+            rust-core/coding-tools-core/Cargo.lock \
+            rust-core/coding-tools-headless/Cargo.toml \
+            rust-core/coding-tools-headless/Cargo.lock \
+            scripts/materialize-electron-base.mjs \
+            scripts/release/verify-source-scope-v0.6.0.mjs \
+            scripts/release/publish-v0.6.0.mjs \
+            tests/no-delete-policy.test.mjs \
+            tests/v060-stable-release.test.mjs
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          remote_sha="$(git ls-remote origin refs/heads/release/v0.6.0 | cut -f1)"
+          test "$remote_sha" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'release: align integrated Full Harness product to v0.6.0'
+            git push origin 'HEAD:refs/heads/release/v0.6.0'
+          fi
+          stable_sha="$(git rev-parse HEAD)"
+          echo "stable_sha=$stable_sha" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$stable_sha" | tee aiTemp/v060-stable-v2-evidence/source.commit
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: v060-stable-alignment-v2-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/v060-stable-v2-evidence/
+          if-no-files-found: error
+          retention-days: 14
