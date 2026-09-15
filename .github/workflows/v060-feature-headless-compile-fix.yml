@@ -55,6 +55,8 @@ jobs:
               ('tools::call_tool_mcp(&context, &tool, &arguments)', 'tools::dispatch::call_tool_mcp(&context, &tool, &arguments)'),
               ('        let join = tokio::spawn(async move {\n', '        let shutdown_reason_tx = shutdown_tx.clone();\n        let join = tokio::spawn(async move {\n'),
               ('            let reason = shutdown_tx\n', '            let reason = shutdown_reason_tx\n'),
+              ('fn auth(headers: &HeaderMap, state: &ServiceState) -> Result<(), Response> {', '// Returning an Axum response keeps handler failures uniform; this path is local and bounded.\n#[allow(clippy::result_large_err)]\nfn auth(headers: &HeaderMap, state: &ServiceState) -> Result<(), Response> {'),
+              ('fn admit(state: &ServiceState, kind: &str) -> Result<RequestLease, Response> {', '// Admission failures carry the complete bounded HTTP response expected by every handler.\n#[allow(clippy::result_large_err)]\nfn admit(state: &ServiceState, kind: &str) -> Result<RequestLease, Response> {'),
           ]
           for old, new in replacements:
               count = text.count(old)
