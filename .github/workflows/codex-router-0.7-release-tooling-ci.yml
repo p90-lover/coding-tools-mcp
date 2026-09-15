@@ -5,20 +5,27 @@ on:
     branches:
       - feature/0.7-exact-sha-prerelease-promotion
       - integration/0.7-goal-headless-release-20260915
+      - release/codex-router-0.7-beta-publish-20260915
+      - release/codex-router-multiprovider-0.7.0-rc.1
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
+      - .github/workflows/codex-router-multiprovider-release.yml
       - docs/releases/v0.7.0-rc.1.md
       - scripts/release/**
+      - tests/codex-router-0.7-beta-publish.test.mjs
       - tests/codex-router-0.7-release.test.mjs
       - tests/electron-full-harness-release.test.mjs
       - tests/no-delete-policy.test.mjs
   pull_request:
     branches:
       - integration/0.7-goal-headless-release-20260915
+      - release/codex-router-multiprovider-0.7.0-rc.1
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
+      - .github/workflows/codex-router-multiprovider-release.yml
       - docs/releases/v0.7.0-rc.1.md
       - scripts/release/**
+      - tests/codex-router-0.7-beta-publish.test.mjs
       - tests/codex-router-0.7-release.test.mjs
       - tests/electron-full-harness-release.test.mjs
       - tests/no-delete-policy.test.mjs
@@ -62,6 +69,7 @@ jobs:
           node --test \
             tests/electron-full-harness-release.test.mjs \
             tests/codex-router-0.7-release.test.mjs \
+            tests/codex-router-0.7-beta-publish.test.mjs \
             tests/no-delete-policy.test.mjs \
             2>&1 | tee aiTemp/release-tooling-evidence/tests.txt
           grep -F '# fail 0' aiTemp/release-tooling-evidence/tests.txt
