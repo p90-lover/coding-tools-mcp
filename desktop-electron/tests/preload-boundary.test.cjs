@@ -232,6 +232,19 @@ test("camelCase credential response keys never cross the preload boundary", asyn
   }
 });
 
+test("main-process transport failures do not leak raw credential-bearing errors", async () => {
+  const { api } = loadPreload(() => {
+    throw new Error("Authorization: Bearer must-not-reach-renderer");
+  });
+
+  await assert.rejects(api.diagnostics.snapshot(), (error) => {
+    assert.equal(error instanceof Error, true);
+    assert.match(error.message, /IPC_TRANSPORT_FAILED/);
+    assert.doesNotMatch(error.message, /Authorization|Bearer|must-not-reach-renderer/);
+    return true;
+  });
+});
+
 test("prototype-pollution keys are rejected from main-process responses", async () => {
   const response = Object.create(null);
   Object.defineProperty(response, "__proto__", {
