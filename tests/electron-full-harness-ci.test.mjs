@@ -63,6 +63,7 @@ test('full-harness CI preserves files and keeps temporary state under aiTemp', (
   for (const required of [
     'clean: false',
     'aiTemp/tmp',
+    '$GITHUB_WORKSPACE/aiTemp/t',
     'aiTemp/Trash/full-harness-ci',
     'aiTemp/Trash/full-harness-runtime',
     'aiTemp/Trash/full-harness-package',
@@ -72,6 +73,7 @@ test('full-harness CI preserves files and keeps temporary state under aiTemp', (
     assert.ok(workflow.includes(required), required);
   }
   for (const forbidden of [
+    '/tmp/ct-full-',
     'git reset --hard',
     'git clean',
     'rm -rf',
