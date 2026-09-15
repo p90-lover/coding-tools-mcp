@@ -222,8 +222,7 @@ async fn probe_with_client(
     match kind {
         TunnelServiceKind::Mcp => {
             let expected_resource = format!("{origin}/mcp");
-            let resource_url =
-                format!("{origin}/.well-known/oauth-protected-resource/mcp");
+            let resource_url = format!("{origin}/.well-known/oauth-protected-resource/mcp");
             let (_, auth, resource) = tokio::try_join!(
                 status,
                 document(client, &auth_url),
