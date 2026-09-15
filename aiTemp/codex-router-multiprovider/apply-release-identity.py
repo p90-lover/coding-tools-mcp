@@ -52,6 +52,7 @@ desktop_manifest.write_text(text, encoding="utf-8")
 for target in [
     Path("desktop-electron/scripts/prepare-package-resources.cjs"),
     Path("desktop-electron/tests/package-contents.test.cjs"),
+    Path("desktop-electron/tests/package-resource-preparation.test.cjs"),
 ]:
     text = target.read_text(encoding="utf-8")
     old = f'const PRODUCT_VERSION = "{OLD_RELEASE}";'
@@ -61,5 +62,35 @@ for target in [
     elif new not in text:
         raise SystemExit(f"release product version anchor missing: {target}")
     target.write_text(text, encoding="utf-8")
+
+verify_package = Path("desktop-electron/scripts/verify-package.cjs")
+text = verify_package.read_text(encoding="utf-8")
+old = f'  version: "{OLD_RELEASE}",'
+new = f'  version: "{NEW_RELEASE}",'
+if old in text:
+    text = text.replace(old, new, 1)
+elif new not in text:
+    raise SystemExit("package verifier product version anchor missing")
+verify_package.write_text(text, encoding="utf-8")
+
+product_identity = Path("desktop-electron/electron/product.cjs")
+text = product_identity.read_text(encoding="utf-8")
+old = f'  version: "{OLD_RELEASE}",'
+new = f'  version: "{NEW_RELEASE}",'
+if old in text:
+    text = text.replace(old, new, 1)
+elif new not in text:
+    raise SystemExit("desktop product identity version anchor missing")
+product_identity.write_text(text, encoding="utf-8")
+
+product_test = Path("desktop-electron/tests/product-identity.test.cjs")
+text = product_test.read_text(encoding="utf-8")
+old = f"    version: '{OLD_RELEASE}',"
+new = f"    version: '{NEW_RELEASE}',"
+if old in text:
+    text = text.replace(old, new, 1)
+elif new not in text:
+    raise SystemExit("desktop product identity test version anchor missing")
+product_test.write_text(text, encoding="utf-8")
 
 print("CODEX_ROUTER_RELEASE_IDENTITY_PATCH_OK")
