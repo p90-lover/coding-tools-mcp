@@ -1,0 +1,94 @@
+name: Headless Rust service GREEN
+
+on:
+  push:
+    branches:
+      - feature/headless-rust-service-0.6.0
+    paths:
+      - .github/workflows/headless-service-green.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: headless-rust-service-green
+  cancel-in-progress: false
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/headless-target
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  verify:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - name: Require the recorded missing-service RED evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/red
+          gh run download 34863637333 --repo "$GITHUB_REPOSITORY" --dir aiTemp/red
+          find aiTemp/red -type f -maxdepth 3 -print -exec grep -H -E 'coding-tools-headless|No such file|could not find' {} \; > aiTemp/evidence/red-evidence.txt || true
+          test -s aiTemp/evidence/red-evidence.txt
+      - name: Format and materialize exact lockfiles
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml
+          cargo generate-lockfile --manifest-path rust-core/coding-tools-core/Cargo.toml
+          cargo generate-lockfile --manifest-path rust-core/coding-tools-headless/Cargo.toml
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+      - name: Verify the real service and compatibility facade
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          cargo test --locked --manifest-path rust-core/coding-tools-core/Cargo.toml -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/core-tests.txt
+          cargo test --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/headless-tests.txt
+          cargo clippy --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml --all-targets -- -D warnings 2>&1 | tee aiTemp/evidence/headless-clippy.txt
+          grep -F 'test result: ok' aiTemp/evidence/headless-tests.txt
+      - name: Commit only formatted source and generated lockfiles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          allowed='^(rust-core/coding-tools-headless/(Cargo.lock|src/.*\.rs|tests/.*\.rs)|rust-core/coding-tools-core/Cargo.lock)$'
+          changed="$(git status --short | sed -E 's/^.. //')"
+          if [ -n "$changed" ]; then
+            while IFS= read -r path; do
+              test -z "$path" || printf '%s\n' "$path" | grep -Eq "$allowed"
+            done <<< "$changed"
+            git add -- rust-core/coding-tools-headless rust-core/coding-tools-core/Cargo.lock
+            git diff --cached --check
+            test -z "$(git diff --cached --diff-filter=D --name-only)"
+            git config user.name 'p90-lover'
+            git config user.email '146848721+p90-lover@users.noreply.github.com'
+            git commit -m 'build: retain verified headless service lockfiles and formatting'
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          git rev-parse HEAD > aiTemp/evidence/source.commit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: headless-service-${{ github.run_id }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
