@@ -34,6 +34,9 @@ env:
   RELEASE_VERSION: '0.6.0-rc.1'
   SOURCE_SHA: ${{ github.sha }}
   WINDOWS_INSTALLER: Coding.Tools_0.6.0-rc.1_windows_x64_setup.exe
+  TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip
+  TUNNEL_ARCHIVE_SHA256: '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'
+  TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
   CARGO_TERM_COLOR: always
   PYTHONDONTWRITEBYTECODE: '1'
 
@@ -554,6 +557,33 @@ jobs:
             bun install --frozen-lockfile --cwd runtime-web/launcher
           TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
             bun install --frozen-lockfile --cwd desktop-electron
+
+      - name: Acquire checksum-pinned official tunnel-client archive
+        run: |
+          set -euo pipefail
+          input_dir="aiTemp/input/tunnel-client/v0.0.12/windows-amd64"
+          archive="$input_dir/$TUNNEL_ARCHIVE"
+          partial_archive="$archive.partial"
+          asset_url="$TUNNEL_RELEASE_URL/$TUNNEL_ARCHIVE"
+          test ! -e "$archive"
+          test ! -e "$partial_archive"
+          mkdir -p "$input_dir"
+          command -v curl.exe >/dev/null
+          curl.exe --fail --location --proto '=https' --tlsv1.2 \
+            --retry 5 --retry-all-errors --connect-timeout 30 \
+            --output "$partial_archive" "$asset_url"
+          test -s "$partial_archive"
+          actual_sha256="$(sha256sum "$partial_archive" | awk '{print $1}')"
+          test "$actual_sha256" = "$TUNNEL_ARCHIVE_SHA256"
+          mv --no-clobber "$partial_archive" "$archive"
+          test ! -e "$partial_archive"
+          test -s "$archive"
+          final_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          test "$final_sha256" = "$TUNNEL_ARCHIVE_SHA256"
+          echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$archive" >> "$GITHUB_ENV"
+          printf 'archive=%s\nsha256=%s\nurl=%s\n' \
+            "$archive" "$final_sha256" "$asset_url" \
+            > aiTemp/evidence/tunnel-client-archive.txt
 
       - name: Build the exact Rust sidecar and Electron installer
         run: |
