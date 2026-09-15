@@ -1,20 +1,3 @@
-export type RuntimeState =
-  | "stopped"
-  | "starting"
-  | "running"
-  | "draining"
-  | "stopping"
-  | "blocked"
-  | "error";
-
-export interface RuntimeStatus {
-  readonly protocolVersion: number;
-  readonly state: RuntimeState;
-  readonly version: string;
-  readonly activeOperations: number;
-  readonly reason?: string;
-}
-
 export type WorkspaceMcpState = "stopped" | "starting" | "running" | "stopping" | "error";
 
 export interface WorkspaceSummary {
@@ -43,7 +26,7 @@ export interface JsonObject {
 
 export interface CodingToolsApi {
   readonly runtime: {
-    status(): Promise<RuntimeStatus>;
+    status(): Promise<JsonObject>;
   };
   readonly workspaces: {
     list(input?: PageRequest): Promise<Page<WorkspaceSummary>>;

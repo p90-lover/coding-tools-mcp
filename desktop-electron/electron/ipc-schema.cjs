@@ -206,22 +206,6 @@ const genericObject = Object.freeze({
   additionalProperties: true,
 });
 
-const runtimeStatus = Object.freeze({
-  type: "object",
-  required: Object.freeze(["protocolVersion", "state", "version", "activeOperations"]),
-  properties: Object.freeze({
-    protocolVersion: Object.freeze({ type: "integer", minimum: 1 }),
-    state: Object.freeze({
-      type: "string",
-      enum: Object.freeze(["stopped", "starting", "running", "draining", "stopping", "blocked", "error"]),
-    }),
-    version: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
-    activeOperations: Object.freeze({ type: "integer", minimum: 0 }),
-    reason: Object.freeze({ type: "string", minLength: 1, maxLength: 1000 }),
-  }),
-  additionalProperties: false,
-});
-
 const workspaceSummary = Object.freeze({
   type: "object",
   required: Object.freeze(["id", "name", "path", "mcpState", "policyRevision"]),
@@ -302,7 +286,7 @@ const CONTRACTS = Object.freeze({
   "runtime.status": Object.freeze({
     channel: "coding-tools:runtime:status",
     request: emptyObject,
-    response: runtimeStatus,
+    response: genericObject,
   }),
   "workspaces.list": Object.freeze({
     channel: "coding-tools:workspaces:list",
