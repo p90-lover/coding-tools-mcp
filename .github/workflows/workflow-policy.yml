@@ -1,0 +1,58 @@
+name: Workflow policy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - subagent/electron-full-harness-ci-0.6.0-rc.1-20260914
+    paths:
+      - .github/workflows/electron-full-harness-ci.yml
+      - .github/workflows/workflow-policy.yml
+      - tests/electron-full-harness-ci.test.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-policy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+          clean: false
+          path: aiTemp/source
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Validate workflow schema and repository contract
+        working-directory: aiTemp/source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          go version | tee aiTemp/evidence/go-version.txt
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 \
+            -format '{{json .}}' \
+            .github/workflows/electron-full-harness-ci.yml \
+            2>&1 | tee aiTemp/evidence/actionlint.jsonl
+          node --test tests/electron-full-harness-ci.test.mjs \
+            2>&1 | tee aiTemp/evidence/full-harness-ci-contract.txt
+
+      - name: Retain workflow-policy evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workflow-policy-${{ github.sha }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
