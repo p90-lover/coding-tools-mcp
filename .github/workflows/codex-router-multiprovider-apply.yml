@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/codex-router-multiprovider-apply.yml
       - aiTemp/codex-router-multiprovider/apply-server.py
+      - aiTemp/codex-router-multiprovider/fix-fetch-types.py
       - runtime-web/src/routed-providers.ts
       - runtime-web/tests/routed-providers.test.ts
   workflow_dispatch:
@@ -35,13 +36,16 @@ jobs:
         with:
           bun-version: '1.4.0'
 
-      - name: Apply exact idempotent server patch
+      - name: Apply exact idempotent integration patches
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence aiTemp/tmp
           python aiTemp/codex-router-multiprovider/apply-server.py \
             | tee aiTemp/evidence/routed-provider-server-patch.txt
+          python aiTemp/codex-router-multiprovider/fix-fetch-types.py \
+            | tee aiTemp/evidence/routed-provider-type-patch.txt
           grep -F ROUTED_PROVIDER_SERVER_PATCH_OK aiTemp/evidence/routed-provider-server-patch.txt
+          grep -F ROUTED_PROVIDER_FETCH_TYPES_PATCH_OK aiTemp/evidence/routed-provider-type-patch.txt
           test -z "$(git diff --diff-filter=D --name-only)"
           git diff --check
 
@@ -65,14 +69,17 @@ jobs:
             bun run --cwd runtime-web typecheck \
             2>&1 | tee aiTemp/evidence/typecheck.txt
 
-      - name: Commit only verified server integration
+      - name: Commit only verified integration files
         run: |
           set -euo pipefail
           test -z "$(git diff --diff-filter=D --name-only)"
           git diff --check
           remote_head="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
           test "$remote_head" = "$GITHUB_SHA"
-          git add runtime-web/src/server.ts
+          git add \
+            runtime-web/src/server.ts \
+            runtime-web/src/routed-providers.ts \
+            runtime-web/tests/routed-providers.test.ts
           if ! git diff --cached --quiet; then
             git config user.name 'p90-lover'
             git config user.email '146848721+p90-lover@users.noreply.github.com'
