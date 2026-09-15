@@ -1,5 +1,8 @@
 from pathlib import Path
 
+OLD_RELEASE = "0.6.0-rc.1"
+NEW_RELEASE = "0.7.0-rc.1"
+
 runtime_build = Path("runtime-web/scripts/build-runtime-bundle.ts")
 text = runtime_build.read_text(encoding="utf-8")
 old_import = 'import { VERSION } from "../src/version";\n'
@@ -36,12 +39,25 @@ runtime_preparation.write_text(text, encoding="utf-8")
 
 desktop_manifest = Path("desktop-electron/package.json")
 text = desktop_manifest.read_text(encoding="utf-8")
-old_version = '  "version": "0.6.0-rc.1",\n'
-new_version = '  "version": "0.7.0-rc.1",\n'
+old_version = f'  "version": "{OLD_RELEASE}",\n'
+new_version = f'  "version": "{NEW_RELEASE}",\n'
 if old_version in text:
     text = text.replace(old_version, new_version, 1)
 elif new_version not in text:
     raise SystemExit("desktop release version anchor missing")
 desktop_manifest.write_text(text, encoding="utf-8")
+
+for target in [
+    Path("desktop-electron/scripts/prepare-package-resources.cjs"),
+    Path("desktop-electron/tests/package-contents.test.cjs"),
+]:
+    text = target.read_text(encoding="utf-8")
+    old = f'const PRODUCT_VERSION = "{OLD_RELEASE}";'
+    new = f'const PRODUCT_VERSION = "{NEW_RELEASE}";'
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif new not in text:
+        raise SystemExit(f"release product version anchor missing: {target}")
+    target.write_text(text, encoding="utf-8")
 
 print("CODEX_ROUTER_RELEASE_IDENTITY_PATCH_OK")
