@@ -198,10 +198,14 @@ jobs:
               'desktop-electron/tests/launcher-smoke-exit.test.cjs',
           }
           output = subprocess.check_output(
-              ['git', 'status', '--short', '--untracked-files=all'],
-              text=True,
+              ['git', 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
           )
-          actual = {line[3:] for line in output.splitlines() if line}
+          entries = [
+              entry.decode('utf-8', 'surrogateescape')
+              for entry in output.split(b'\0')
+              if entry
+          ]
+          actual = {entry[3:] for entry in entries}
           missing = expected - actual
           unexpected = {
               item for item in actual
