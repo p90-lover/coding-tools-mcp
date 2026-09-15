@@ -47,6 +47,16 @@ import { expandPreviousResponseInput, flushResponseState, rememberResponseState 
 import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
+import {
+  augmentWithCodexRouterModels,
+  forwardCodexRouterResponse,
+  parseCodexRouterModelId,
+  resolveCodexRouterConnection,
+} from "./routed-providers";
+import {
+  routeRouterWebResponse,
+  routerWebModelsResponse,
+} from "./router-web-ingress";
 import { VERSION } from "./version";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
@@ -388,6 +398,16 @@ export async function modelsRequest(
   let catalog: Record<string, unknown>;
   try {
     catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
+    const routerConnection = (() => {
+      try {
+        return resolveCodexRouterConnection();
+      } catch {
+        return undefined;
+      }
+    })();
+    if (routerConnection) {
+      catalog = await augmentWithCodexRouterModels(catalog, config, routerConnection);
+    }
   } catch (error) {
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
   }
@@ -449,7 +469,6 @@ export async function responseRequest(
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
   options: ResponseRequestOptions = {},
 ): Promise<Response> {
-  const nativeRequest = req.clone();
   let raw: unknown;
   try {
     raw = await readJsonRequestBody(req);
@@ -471,9 +490,41 @@ export async function responseRequest(
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
+  if (typeof requestedModel === "string" && parseCodexRouterModelId(requestedModel)) {
+    let routerConnection;
+    try {
+      routerConnection = resolveCodexRouterConnection();
+    } catch (error) {
+      return formatErrorResponse(
+        400,
+        "invalid_request_error",
+        error instanceof Error ? error.message : "Invalid Codex Router configuration",
+      );
+    }
+    if (!routerConnection) {
+      return formatErrorResponse(
+        503,
+        "upstream_error",
+        "Codex Router is not configured for this Coding Tools runtime",
+      );
+    }
+    try {
+      return await forwardCodexRouterResponse(
+        req,
+        raw as Record<string, unknown>,
+        routerConnection,
+      );
+    } catch (error) {
+      return formatErrorResponse(
+        502,
+        "upstream_error",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
+      return await forwardNativeCodexRequest(req, "responses", undefined, raw);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -656,7 +707,6 @@ export async function compactRequest(
   adapterFactory: ChatGptWebAdapterFactory = createChatGptWebAdapter,
   options: Pick<ResponseRequestOptions, "onTurnIdentity"> = {},
 ): Promise<Response> {
-  const nativeRequest = req.clone();
   let raw: Record<string, unknown>;
   try {
     const parsed = await readJsonRequestBody(req);
@@ -698,7 +748,7 @@ export async function compactRequest(
   }
   if (!isChatGptWebModelSlug(raw.model)) {
     try {
-      return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
+      return await forwardNativeCodexRequest(req, "responses/compact", undefined, raw);
     } catch (error) {
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
@@ -942,6 +992,47 @@ export function startServer(
         }
         setTimeout(shutdown, 0);
         return Response.json({ status: "ok", accepting_turns: false, ...current });
+      }
+      if (req.method === "GET" && url.pathname === "/router/v1/models") {
+        if (draining) {
+          return formatErrorResponse(
+            503,
+            "server_error",
+            "codex-chatgpt-web is draining for a requested service operation",
+          );
+        }
+        try {
+          return routerWebModelsResponse(config);
+        } catch (error) {
+          return formatErrorResponse(
+            500,
+            "server_error",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+      if (req.method === "POST" && url.pathname === "/router/v1/responses") {
+        if (draining) {
+          return formatErrorResponse(
+            503,
+            "server_error",
+            "codex-chatgpt-web is draining for a requested service operation",
+          );
+        }
+        return httpTurns.track(
+          (signal, bindIdentity) => routeRouterWebResponse(
+            new Request(req, { signal }),
+            routedRequest => responseRequest(
+              routedRequest,
+              config,
+              dependencies.adapterFactory,
+              { onTurnIdentity: bindIdentity },
+            ),
+          ),
+          req.signal,
+          process.platform,
+          "responses",
+        );
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
         if (draining) {

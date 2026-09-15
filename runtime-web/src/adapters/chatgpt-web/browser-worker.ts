@@ -528,12 +528,17 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
   const unpersonalized = page
     .getByRole("button", { name: /^(?:Unpersonalized|非个性化)$/, exact: true, includeHidden: true })
     .filter({ visible: true });
-  let personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
-  let unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
+  // These labels describe one UI state and can be observed independently under the same deadline.
+  let [personalizedCount, unpersonalizedCount] = await Promise.all([
+    runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal),
+    runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal),
+  ]);
   if (personalizedCount === 0 && unpersonalizedCount === 0) {
     await runChatGptPersonalizationStep(settleChatGptUi, deadline, abortSignal);
-    personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
-    unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
+    [personalizedCount, unpersonalizedCount] = await Promise.all([
+      runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal),
+      runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal),
+    ]);
     if (personalizedCount === 0 && unpersonalizedCount === 0) {
       if (!proveConfiguredConnectorAccess) {
         await capture("personalization-control-missing");
@@ -2357,7 +2362,8 @@ export class ChatGptBrowserWorker {
     } finally {
       effortWaitAbort.abort();
     }
-    await settleChatGptUi();
+    // Activation owns ghost-state cleanup plus bounded click/pointer surface readiness.
+    // Avoid a fixed delay when the visible control is already interactive.
     await throwIfChatGptRateLimitDialog(page);
     await captureDiagnostic?.("effort-control-ready");
     await throwIfChatGptRateLimitDialog(page);
@@ -3114,7 +3120,8 @@ export class ChatGptBrowserWorker {
         composer = await this.activeComposer(page, 30_000, abortSignal);
         await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
         await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
-        await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
+        // The focused composer plus the exact bounded menu wait own readiness here.
+        // Avoid a fixed delay when the mention trigger is already accepted.
         await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
           delay: 25,
           signal: abortSignal,
@@ -3355,7 +3362,7 @@ export class ChatGptBrowserWorker {
       .locator("xpath=ancestor::form[1]")
       .getByTestId("send-button");
     await sendButton.waitFor({ state: "visible", timeout: browserStageTimeouts.send });
-    await settleChatGptUi();
+    // Check readiness immediately; only back off when the control is still disabled.
     const sendEnableDeadline = Date.now() + CHATGPT_SEND_ENABLE_GRACE_MS;
     for (;;) {
       if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
