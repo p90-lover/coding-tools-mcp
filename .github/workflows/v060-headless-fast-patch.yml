@@ -62,7 +62,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          changed="$(git status --short | sed -E 's/^.. //')"
+          changed="$(git diff --name-only)"
           test "$changed" = 'rust-core/coding-tools-headless/src/lib.rs'
           git add -- rust-core/coding-tools-headless/src/lib.rs
           git diff --cached --check
