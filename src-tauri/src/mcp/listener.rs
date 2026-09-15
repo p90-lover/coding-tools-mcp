@@ -12,8 +12,9 @@ use tokio::sync::oneshot;
 use super::request_log::append_profile_log;
 use crate::auth::{
     authorization_server_metadata, authorize_get, authorize_post_browser,
-    protected_resource_metadata, token_exchange, trusted_external_base_url, verify_bearer_header,
-    verify_oauth_bearer_header, AuthorizeForm, AuthorizeParams, OAuthRuntime, TokenForm,
+    mcp_protected_resource_metadata, protected_resource_metadata, token_exchange,
+    trusted_external_base_url, verify_bearer_header, verify_oauth_bearer_header, AuthorizeForm,
+    AuthorizeParams, OAuthRuntime, TokenForm,
 };
 use crate::mcp::server::{handle_request, new_state, SharedState};
 use crate::secret::SecretStore;
@@ -166,7 +167,7 @@ async fn serve(
         )
         .route(
             "/.well-known/oauth-protected-resource/mcp",
-            get(oauth_protected_resource_metadata),
+            get(oauth_mcp_protected_resource_metadata),
         )
         .route(
             "/oauth/authorize",
@@ -464,6 +465,19 @@ async fn oauth_protected_resource_metadata(
     .into_response()
 }
 
+async fn oauth_mcp_protected_resource_metadata(
+    State(state): State<ListenerState>,
+    headers: HeaderMap,
+) -> Response {
+    if !state.auth.oauth_enabled() {
+        return oauth_not_configured();
+    }
+    Json(mcp_protected_resource_metadata(&resolve_oauth_base(
+        &state, &headers,
+    )))
+    .into_response()
+}
+
 async fn oauth_authorize_get(
     State(state): State<ListenerState>,
     Query(params): Query<AuthorizeParams>,
@@ -538,131 +552,3 @@ mod tests {
         assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
     }
 }
-
-#[cfg(test)]
-mod live_permission_protocol_test {
-    use super::*;
-    use crate::tools::{live_policy::commit_updates, ToolContext};
-    use std::time::Duration;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn live_policy_protocol_permission_updates_keep_same_listener_and_token() {
-        let root = std::env::current_dir()
-            .unwrap()
-            .join("aiTemp/live-http-tests")
-            .join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&root).unwrap();
-        let mut context = ToolContext::for_test(root.clone(), root.join("harness")).unwrap();
-        context.auth.auth_type = "bearer".into();
-        let ctx = Arc::new(context);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let state = ListenerState {
-            mcp: ctx.clone(),
-            auth: ctx.auth.clone(),
-            workspace_id: uuid::Uuid::new_v4().to_string(),
-            bind_port: port,
-            configured_public_url: String::new(),
-            bearer_token: Some("isolated-fixture-token-not-a-real-secret".into()),
-            oauth: None,
-            oauth_client_secret: None,
-        };
-        let (stop, shutdown) = oneshot::channel();
-        let worker = tokio::spawn(async move {
-            serve(listener, port, state, shutdown).await.unwrap();
-        });
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap();
-        let endpoint = format!("http://127.0.0.1:{port}/mcp");
-        let request = |body: Value| {
-            client
-                .post(&endpoint)
-                .bearer_auth("isolated-fixture-token-not-a-real-secret")
-                .header("Accept", "application/json, text/event-stream")
-                .json(&body)
-                .send()
-        };
-        let selected_profile = ctx.for_request().unwrap().tool_profile.clone();
-        let catalog_request = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
-        let before: Value = request(catalog_request.clone())
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert!(before["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t["name"] == "apply_patch"));
-        let mut restricted = ctx.for_request().unwrap().policy;
-        restricted.permission_mode = "read-only".into();
-        commit_updates(
-            vec![(ctx.clone(), restricted, selected_profile.clone())],
-            || Ok(()),
-        )
-        .unwrap();
-        let patch = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"apply_patch","arguments":{"patch":"*** Begin Patch\n*** Add File: permission-live.txt\n+verified\n*** End Patch\n"}}});
-        let denied: Value = request(patch.clone()).await.unwrap().json().await.unwrap();
-        assert_eq!(denied["result"]["isError"], true, "{denied}");
-        assert!(!root.join("permission-live.txt").exists());
-        let mut writable = ctx.for_request().unwrap().policy;
-        writable.permission_mode = "workspace-write".into();
-        commit_updates(vec![(ctx.clone(), writable, selected_profile)], || Ok(())).unwrap();
-        let applied: Value = request(patch).await.unwrap().json().await.unwrap();
-        assert_eq!(applied["result"]["isError"], false, "{applied}");
-        assert_eq!(
-            std::fs::read_to_string(root.join("permission-live.txt"))
-                .unwrap()
-                .trim(),
-            "verified"
-        );
-        let after: Value = request(catalog_request)
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(
-            before["result"]["tools"], after["result"]["tools"],
-            "Permission changes must not change tool schemas"
-        );
-        let info: Value = request(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"server_info","arguments":{}}})).await.unwrap().json().await.unwrap();
-        assert_eq!(
-            info["result"]["structuredContent"]["live_permissions"]["revision"], 2,
-            "{info}"
-        );
-        let unauthorized = client
-            .post(&endpoint)
-            .json(&json!({"jsonrpc":"2.0","id":4,"method":"ping"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(unauthorized.status().as_u16(), 401);
-        assert!(
-            !worker.is_finished(),
-            "No listener restart or exit occurred"
-        );
-        stop.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), worker)
-            .await
-            .unwrap()
-            .unwrap();
-        println!("PASS: same HTTP listener + same bearer token + unchanged tool schemas; live read-only deny then workspace-write allow; no restart or relink");
-    }
-}
-
-#[cfg(test)]
-#[path = "../../../aiTemp/oauth-popup/http_flow.rs"]
-mod oauth_popup_http_flow;
-
-#[cfg(test)]
-#[path = "../../../aiTemp/quicktunnel/http_contract.rs"]
-mod quick_control_contract;
-
-#[cfg(test)]
-#[path = "../../../aiTemp/live-refresh/http_contract.rs"]
-mod live_refresh_contract;
