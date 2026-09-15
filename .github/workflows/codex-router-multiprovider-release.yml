@@ -145,7 +145,7 @@ jobs:
     timeout-minutes: 75
     env:
       CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/Trash/release-0.7.0-rc.1-windows
-      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/cache/electron-builder
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/electron-builder-cache
     defaults:
       run:
         shell: bash
@@ -173,12 +173,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p \
-            aiTemp/cache/electron-builder \
+            aiTemp/electron-builder-cache \
             aiTemp/evidence \
             aiTemp/tmp \
             aiTemp/Trash/release-0.7.0-rc.1-windows \
             aiTemp/release-output
-          test -d aiTemp/cache/electron-builder
+          test -d aiTemp/electron-builder-cache
           printf 'source=%s\nrunner=%s\nelectron_builder_cache=%s\n' \
             "$SOURCE_SHA" "$RUNNER_OS" "$ELECTRON_BUILDER_CACHE" \
             > aiTemp/evidence/windows-run-identity.txt
