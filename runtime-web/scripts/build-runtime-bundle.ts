@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   chmodSync,
   copyFileSync,
   cpSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -12,8 +12,13 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { VERSION } from "../src/version";
+
+const require = createRequire(import.meta.url);
+const { prepareFreshRuntimeOutput } = require("./runtime-output.cjs") as {
+  prepareFreshRuntimeOutput(output: string): string;
+};
 
 const root = resolve(import.meta.dir, "..");
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
@@ -48,14 +53,10 @@ const appDir = join(output, "app");
 const runtimeDir = join(output, "runtime");
 const binDir = join(output, "bin");
 
-mkdirSync(dirname(output), { recursive: true });
-if (existsSync(output)) {
-  throw new Error(`Runtime bundle output already exists and must be preserved before rebuilding: ${output}`);
-}
-mkdirSync(output, { recursive: false });
-mkdirSync(appDir, { recursive: false });
-mkdirSync(runtimeDir, { recursive: false });
-mkdirSync(binDir, { recursive: false });
+prepareFreshRuntimeOutput(output);
+mkdirSync(appDir, { recursive: true });
+mkdirSync(runtimeDir, { recursive: true });
+mkdirSync(binDir, { recursive: true });
 
 const build = await Bun.build({
   entrypoints: [join(root, "src", "cli.ts")],
