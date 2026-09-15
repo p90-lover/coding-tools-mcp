@@ -1,0 +1,63 @@
+name: Codex Router multi-provider release candidate
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.1
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-router-multiprovider-release-0.7.0-rc.1
+  cancel-in-progress: false
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+  PYTHONDONTWRITEBYTECODE: '1'
+  RELEASE_VERSION: '0.7.0-rc.1'
+
+jobs:
+  release-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Prepare retained work roots
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/tmp aiTemp/evidence aiTemp/Trash/release-0.7.0-rc.1
+
+      - name: Install runtime dependencies
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd runtime-web --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/runtime-install.txt
+
+      - name: Run release identity contract
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun test --cwd runtime-web tests/runtime-bundle-version.test.ts \
+            2>&1 | tee aiTemp/evidence/release-identity-test.txt
+          grep -F '0 fail' aiTemp/evidence/release-identity-test.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: codex-router-release-contract-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
