@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/codex-router-multiprovider-apply.yml
       - aiTemp/codex-router-multiprovider/apply-server.py
+      - aiTemp/codex-router-multiprovider/apply-router-web-ingress.py
       - aiTemp/codex-router-multiprovider/fix-fetch-types.py
       - aiTemp/codex-router-multiprovider/fix-agent-smoke.py
       - aiTemp/codex-router-multiprovider/fix-global-router-agent-definition.py
@@ -53,6 +54,8 @@ jobs:
           mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/routed-agent-smoke
           python aiTemp/codex-router-multiprovider/apply-server.py \
             | tee aiTemp/evidence/routed-provider-server-patch.txt
+          python aiTemp/codex-router-multiprovider/apply-router-web-ingress.py \
+            | tee aiTemp/evidence/router-web-ingress-server-patch.txt
           python aiTemp/codex-router-multiprovider/fix-fetch-types.py \
             | tee aiTemp/evidence/routed-provider-type-patch.txt
           python aiTemp/codex-router-multiprovider/fix-agent-smoke.py \
@@ -60,6 +63,7 @@ jobs:
           python aiTemp/codex-router-multiprovider/fix-global-router-agent-definition.py \
             | tee aiTemp/evidence/global-router-agent-definition-patch.txt
           grep -F ROUTED_PROVIDER_SERVER_PATCH_OK aiTemp/evidence/routed-provider-server-patch.txt
+          grep -F ROUTER_WEB_INGRESS_SERVER_PATCH_OK aiTemp/evidence/router-web-ingress-server-patch.txt
           grep -F ROUTED_PROVIDER_FETCH_TYPES_PATCH_OK aiTemp/evidence/routed-provider-type-patch.txt
           grep -F ROUTED_AGENT_SMOKE_DIAGNOSTICS_PATCH_OK aiTemp/evidence/routed-agent-smoke-patch.txt
           grep -F GLOBAL_ROUTER_AGENT_DEFINITION_PATCH_OK aiTemp/evidence/global-router-agent-definition-patch.txt
