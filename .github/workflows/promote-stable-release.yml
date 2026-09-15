@@ -42,25 +42,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/stable-promotion
-          ids_file="aiTemp/stable-promotion/legacy-macos-workflow-ids.txt"
-          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows?per_page=100" \
-            --jq '.workflows[] | select(.path == ".github/workflows/macos-release.yml") | .id' \
-            > "$ids_file"
-          mapfile -t workflow_ids < <(grep -E '^[0-9]+$' "$ids_file" || true)
-          if [ "${#workflow_ids[@]}" -ne 1 ]; then
-            echo "Expected exactly one legacy macOS workflow ID, found ${#workflow_ids[@]}" >&2
-            exit 1
-          fi
-          workflow_id="${workflow_ids[0]}"
-          gh api --method PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/disable"
-          state="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" --jq .state)"
-          if [ "$state" != "disabled_manually" ]; then
-            echo "Legacy macOS workflow $workflow_id was not disabled globally: $state" >&2
-            exit 1
-          fi
-          printf '%s\n' "$workflow_id" > aiTemp/stable-promotion/legacy-macos-workflow-id.txt
-          printf '%s\n' "$state" > aiTemp/stable-promotion/legacy-macos-workflow-state.txt
+          python scripts/retire_legacy_macos_workflow.py aiTemp/stable-promotion
 
       - name: Verify exact green main source and stable version transition
         id: identity
