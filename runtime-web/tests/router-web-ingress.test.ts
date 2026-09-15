@@ -1,51 +1,35 @@
 import { describe, expect, test } from "bun:test";
+import { defaultConfig } from "../src/config";
 import {
-  filterRouterWebCatalog,
   routeRouterWebResponse,
+  routerWebModelCatalog,
   routerWebModelsResponse,
 } from "../src/router-web-ingress";
 
 describe("restricted Coding Tools Web router ingress", () => {
-  test("publishes only chatgpt-web models without mutating the source catalog", async () => {
-    const source = {
-      object: "list",
-      revision: "fixture",
-      models: [
-        { slug: "gpt-5.6-sol", display_name: "Native Sol" },
-        { slug: "chatgpt-web/high", display_name: "Web High" },
-        { slug: "codex-router/deepseek/deepseek-v4-pro", display_name: "Routed DeepSeek" },
-        { slug: "chatgpt-web/pro", display_name: "Web Pro" },
-      ],
-    };
-    const before = structuredClone(source);
+  test("builds a standard provider catalog directly from enabled chatgpt-web routes", async () => {
+    const config = defaultConfig("full");
+    config.solAvailable = true;
+    config.proAvailable = true;
+    const catalog = routerWebModelCatalog(config);
 
-    const filtered = filterRouterWebCatalog(source);
-    expect(source).toEqual(before);
-    expect(filtered).toEqual({
-      object: "list",
-      revision: "fixture",
-      models: [
-        { slug: "chatgpt-web/high", display_name: "Web High" },
-        { slug: "chatgpt-web/pro", display_name: "Web Pro" },
-      ],
-    });
+    expect(catalog.object).toBe("list");
+    expect(Array.isArray(catalog.data)).toBe(true);
+    const ids = catalog.data.map(model => model.id);
+    expect(ids.length).toBeGreaterThan(1);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.every(id => id.startsWith("chatgpt-web/"))).toBe(true);
+    expect(ids.some(id => id.startsWith("codex-router/"))).toBe(false);
+    expect(ids).not.toContain("gpt-5.6-sol");
+    expect(catalog.data.every(model => model.object === "model" && model.owned_by === "coding-tools-web"))
+      .toBe(true);
 
-    const response = await routerWebModelsResponse(new Response(JSON.stringify(source), {
-      status: 200,
-      headers: {
-        "content-type": "application/json",
-        "content-encoding": "gzip",
-        "content-length": "999",
-        "x-source": "native-plus-web",
-      },
-    }));
+    const response = routerWebModelsResponse(config);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
-    expect(response.headers.get("content-encoding")).toBeNull();
-    expect(response.headers.get("content-length")).toBeNull();
-    expect(response.headers.get("x-source")).toBe("native-plus-web");
-    expect((await response.json() as { models: Array<{ slug: string }> }).models.map(model => model.slug))
-      .toEqual(["chatgpt-web/high", "chatgpt-web/pro"]);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const responseCatalog = await response.json() as typeof catalog;
+    expect(responseCatalog).toEqual(catalog);
   });
 
   test("rejects native, router, missing, and malformed model selections before dispatch", async () => {
