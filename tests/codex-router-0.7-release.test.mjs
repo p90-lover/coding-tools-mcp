@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const root = path.resolve(import.meta.dirname, '..');
+const require = createRequire(import.meta.url);
 const sourceScopeUrl = pathToFileURL(
   path.join(root, 'scripts', 'release', 'verify-source-scope.mjs'),
 ).href;
@@ -152,4 +154,15 @@ test('Windows package smoke selects the configured Electron Builder artifact exa
     assert.match(smoke, new RegExp(escapeRegex(required)));
   }
   assert.doesNotMatch(smoke, /-win-x64\\\.exe/);
+});
+
+test('every required ASAR entry is backed by a real desktop source file', async () => {
+  const { REQUIRED_ASAR_FILES } = require('../desktop-electron/scripts/verify-package.cjs');
+  assert.ok(Array.isArray(REQUIRED_ASAR_FILES) && REQUIRED_ASAR_FILES.length > 0);
+  for (const relativePath of REQUIRED_ASAR_FILES) {
+    const sourcePath = path.join(root, 'desktop-electron', ...relativePath.split('/'));
+    const stat = await fs.stat(sourcePath);
+    assert.equal(stat.isFile(), true, `Required ASAR entry is not a file: ${relativePath}`);
+  }
+  assert.equal(REQUIRED_ASAR_FILES.includes('electron/migration-manager.cjs'), false);
 });
