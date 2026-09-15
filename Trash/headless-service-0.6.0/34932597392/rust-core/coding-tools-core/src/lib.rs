@@ -48,7 +48,6 @@ impl CoreState {
             .data
             .lock()
             .map_err(|_| AppError::Message("data store poisoned".into()))?;
-        guard.refresh()?;
         f(&mut guard)
     }
 
