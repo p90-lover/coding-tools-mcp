@@ -41,7 +41,7 @@ pub(super) fn oauth_challenge(mut response: Response, server_url: &str) -> Respo
         return response;
     }
     let challenge = format!(
-        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\", scope=\"mcp\"",
+        "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\", scope=\"mcp\"",
         server_url.trim_end_matches('/')
     );
     let Ok(value) = HeaderValue::from_str(&challenge) else {

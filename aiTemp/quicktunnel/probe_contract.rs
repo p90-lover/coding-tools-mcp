@@ -39,8 +39,8 @@ async fn fixture_doc(
         "/.well-known/oauth-authorization-server" => {
             json!({"issuer":s.origin,"authorization_endpoint":format!("{}/oauth/authorize",s.origin),"token_endpoint":format!("{}/oauth/token",s.origin),"grant_types_supported":["refresh_token"],"code_challenge_methods_supported":["S256"]})
         }
-        "/.well-known/oauth-protected-resource" => {
-            json!({"resource":s.origin,"authorization_servers":[s.origin]})
+        "/.well-known/oauth-protected-resource/mcp" => {
+            json!({"resource":format!("{}/mcp",s.origin),"authorization_servers":[s.origin]})
         }
         _ => json!({"ok":true,"service":"coding-tools-actions","tools_loaded":71}),
     };
@@ -60,7 +60,10 @@ async fn quick_connection_pool_parallelism_and_credential_boundaries() {
         .route("/mcp", get(fixture_doc))
         .route("/health", get(fixture_doc))
         .route("/.well-known/oauth-authorization-server", get(fixture_doc))
-        .route("/.well-known/oauth-protected-resource", get(fixture_doc))
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(fixture_doc),
+        )
         .with_state(fixture.clone());
     let server = tokio::spawn(async move {
         axum::serve(
@@ -94,7 +97,7 @@ async fn quick_connection_pool_parallelism_and_credential_boundaries() {
         for path in [
             "/mcp",
             "/.well-known/oauth-authorization-server",
-            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
         ] {
             document(&c, &format!("{origin}{path}")).await.unwrap();
         }
