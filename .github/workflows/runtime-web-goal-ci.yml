@@ -6,10 +6,12 @@ on:
     paths:
       - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
       - ".github/workflows/codex-web-goal-latency-apply.yml"
+      - "runtime-web/src/adapters/chatgpt-web/browser-worker.ts"
       - "runtime-web/src/http-body.ts"
       - "runtime-web/src/native-passthrough.ts"
       - "runtime-web/src/router-web-ingress.ts"
       - "runtime-web/src/server.ts"
+      - "runtime-web/tests/browser-send-latency.test.ts"
       - "runtime-web/tests/chatgpt-web-goal.test.ts"
       - "runtime-web/tests/request-body-fast-path.test.ts"
       - "runtime-web/tests/router-web-ingress.test.ts"
@@ -18,10 +20,12 @@ on:
     paths:
       - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
       - ".github/workflows/codex-web-goal-latency-apply.yml"
+      - "runtime-web/src/adapters/chatgpt-web/browser-worker.ts"
       - "runtime-web/src/http-body.ts"
       - "runtime-web/src/native-passthrough.ts"
       - "runtime-web/src/router-web-ingress.ts"
       - "runtime-web/src/server.ts"
+      - "runtime-web/tests/browser-send-latency.test.ts"
       - "runtime-web/tests/chatgpt-web-goal.test.ts"
       - "runtime-web/tests/request-body-fast-path.test.ts"
       - "runtime-web/tests/router-web-ingress.test.ts"
@@ -52,6 +56,6 @@ jobs:
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
       - name: Run focused goal and request-path regressions
-        run: bun test tests/chatgpt-web-goal.test.ts tests/request-body-fast-path.test.ts tests/router-web-ingress.test.ts
+        run: bun test tests/browser-send-latency.test.ts tests/chatgpt-web-goal.test.ts tests/request-body-fast-path.test.ts tests/router-web-ingress.test.ts
       - name: Typecheck Runtime Web
         run: bun run typecheck
