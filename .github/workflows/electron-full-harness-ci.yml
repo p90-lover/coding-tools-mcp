@@ -435,7 +435,10 @@ jobs:
           package_root="${package_roots[0]}"
           printf '%s\n' "$package_root" > aiTemp/evidence/package-root.txt
           node desktop-electron/scripts/verify-package.cjs "$package_root" \
+            --source "$SOURCE_SHA" \
+            --json-out aiTemp/evidence/package-verification.json \
             2>&1 | tee aiTemp/evidence/package-verification.txt
+          test -s aiTemp/evidence/package-verification.json
           node --test desktop-electron/tests/package-contents.test.cjs \
             2>&1 | tee aiTemp/evidence/package-contents-tests.txt
           preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
