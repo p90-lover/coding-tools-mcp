@@ -198,12 +198,20 @@ jobs:
               'desktop-electron/tests/launcher-smoke-exit.test.cjs',
           }
           output = subprocess.check_output(
-              ['git', 'status', '--short'],
+              ['git', 'status', '--short', '--untracked-files=all'],
               text=True,
           )
           actual = {line[3:] for line in output.splitlines() if line}
-          if actual != expected:
-              raise SystemExit(f'Unexpected changed files: {sorted(actual)}')
+          missing = expected - actual
+          unexpected = {
+              item for item in actual
+              if item not in expected and not item.startswith('aiTemp/')
+          }
+          if missing or unexpected:
+              raise SystemExit(
+                  f'Missing expected files: {sorted(missing)}; '
+                  f'unexpected non-aiTemp files: {sorted(unexpected)}'
+              )
           PY
           git add -- \
             desktop-electron/electron/main.cjs \
