@@ -70,6 +70,18 @@ test("strips NODE_OPTIONS before launching a packaged application", async () => 
   assert.equal(result.marker.preserved, "yes");
 });
 
+test("package smoke isolates the current Coding Tools production profile", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "smoke-package.cjs"),
+    "utf8",
+  );
+  assert.match(source, /CODING_TOOLS_HOME:\s*coreHome/);
+  assert.match(source, /CODING_TOOLS_LAUNCHER_DATA_DIR:\s*path\.join\(scratch, "launcher-data"\)/);
+  assert.match(source, /env\.CODING_TOOLS_LAUNCHER_DATA_DIR/);
+  assert.doesNotMatch(source, /CODEX_CHATGPT_WEB_HOME:/);
+  assert.doesNotMatch(source, /CODEX_WEB_GPT_LAUNCHER_DATA_DIR:/);
+});
+
 test("reports bounded child diagnostics when the launcher exits before readiness", async () => {
   const directory = testDirectory("early-exit");
   const markerPath = path.join(directory, "ready.json");
