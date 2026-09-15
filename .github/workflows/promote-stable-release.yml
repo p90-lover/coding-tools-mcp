@@ -1,0 +1,152 @@
+name: Promote verified stable release
+
+on:
+  workflow_run:
+    workflows: ['CI']
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: stable-release-promotion-main
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      SOURCE: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: true
+          clean: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Verify exact green main source and stable version transition
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/stable-promotion
+          git fetch --no-tags origin main
+          current_main="$(git rev-parse origin/main)"
+          if [ "$current_main" != "$SOURCE" ]; then
+            echo "Release promotion refused: green source $SOURCE is no longer current main $current_main" >&2
+            exit 1
+          fi
+          if ! git rev-parse "$SOURCE^" >/dev/null 2>&1; then
+            echo "Release promotion refused: source has no parent for version-transition verification" >&2
+            exit 1
+          fi
+          new_version="$(node -p "require('./package.json').version")"
+          old_version="$(git show "$SOURCE^:package.json" | node -e "let value='';process.stdin.on('data',chunk=>value+=chunk);process.stdin.on('end',()=>process.stdout.write(JSON.parse(value).version))")"
+          if [ "$new_version" = "$old_version" ]; then
+            echo "No stable version transition in $SOURCE; release promotion is not required."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION="$new_version" PREVIOUS_VERSION="$old_version" node --input-type=module <<'NODE'
+          import {
+            compareStableVersions,
+            runVersionAlignmentCheck,
+          } from './scripts/check-version-alignment.mjs';
+
+          const version = process.env.VERSION;
+          const previous = process.env.PREVIOUS_VERSION;
+          if (compareStableVersions(version, previous) <= 0) {
+            throw new Error(`Stable release version must increase: ${previous} -> ${version}`);
+          }
+          runVersionAlignmentCheck({ expectedTag: `v${version}` });
+          NODE
+          tag="v$new_version"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$SOURCE" > aiTemp/stable-promotion/source.txt
+          printf '%s\n' "$tag" > aiTemp/stable-promotion/tag.txt
+
+      - name: Create immutable tag and dispatch verified release
+        if: steps.identity.outputs.skip == 'false'
+        shell: bash
+        env:
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > aiTemp/stable-promotion/releases.json
+          release_state="$(TAG="$TAG" python - <<'PY'
+          import json, os, pathlib
+          releases = json.loads(pathlib.Path('aiTemp/stable-promotion/releases.json').read_text())
+          matches = [release for release in releases if release.get('tag_name') == os.environ['TAG']]
+          if len(matches) > 1:
+              raise SystemExit(f"Expected at most one release for {os.environ['TAG']}, found {len(matches)}")
+          if not matches:
+              print('missing')
+          else:
+              print('draft' if matches[0].get('draft') else 'published')
+          PY
+          )"
+
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            tag_source="$(git rev-list -n 1 "$TAG")"
+            if [ "$tag_source" != "$SOURCE" ]; then
+              echo "Release promotion refused: $TAG already points to $tag_source, not $SOURCE" >&2
+              exit 1
+            fi
+            echo "$TAG already points to the exact green source $SOURCE."
+          else
+            if [ "$release_state" != "missing" ]; then
+              echo "Release promotion refused: release state is $release_state but tag $TAG does not exist" >&2
+              exit 1
+            fi
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a "$TAG" "$SOURCE" -m "Coding Tools MCP $TAG"
+            git push origin "refs/tags/$TAG"
+            echo "Created immutable annotated tag $TAG at $SOURCE."
+          fi
+
+          if [ "$release_state" = "published" ]; then
+            echo "Verified release $TAG is already published; no dispatch is required."
+            exit 0
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?head_sha=$SOURCE&per_page=100" > aiTemp/stable-promotion/release-runs.json
+          active_runs="$(python - <<'PY'
+          import json, pathlib
+          runs = json.loads(pathlib.Path('aiTemp/stable-promotion/release-runs.json').read_text())
+          print(sum(run.get('status') in {'queued', 'in_progress', 'waiting', 'pending'} for run in runs.get('workflow_runs', [])))
+          PY
+          )"
+          if [ "$active_runs" != "0" ]; then
+            echo "A verified release run for $SOURCE is already active; refusing a duplicate dispatch."
+            exit 0
+          fi
+
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f release_tag="$TAG"
+          echo "Dispatched verified desktop release for $TAG from $SOURCE."
+
+      - name: Preserve promotion evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: stable-promotion-${{ github.event.workflow_run.head_sha }}
+          path: aiTemp/stable-promotion/
+          if-no-files-found: warn
+          retention-days: 14
