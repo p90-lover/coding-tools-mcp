@@ -1,0 +1,78 @@
+name: Allow verified release dispatch from repository automation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release/v0.6.0
+    paths:
+      - .github/workflows/v060-allow-dispatch-bot.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: v060-allow-dispatch-bot
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: release/v0.6.0
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Permit only the repository owner or GitHub Actions bot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/Trash/v060-release-guard
+          python - <<'PY'
+          from pathlib import Path
+          workflow = Path('.github/workflows/electron-full-harness-ci.yml')
+          text = workflow.read_text(encoding='utf-8')
+          old = """    if: >-
+              github.repository == 'p90-lover/coding-tools-mcp' &&
+              github.ref == 'refs/heads/release/v0.6.0' &&
+              github.actor == github.repository_owner
+          """
+          new = """    if: >-
+              github.repository == 'p90-lover/coding-tools-mcp' &&
+              github.ref == 'refs/heads/release/v0.6.0' &&
+              (github.actor == github.repository_owner || github.actor == 'github-actions[bot]')
+          """
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one exact release guard, found {text.count(old)}')
+          workflow.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git add -- .github/workflows/electron-full-harness-ci.yml
+          git diff --cached --check
+          mapfile -t staged < <(git diff --cached --name-only)
+          test "${#staged[@]}" -eq 1
+          test "${staged[0]}" = '.github/workflows/electron-full-harness-ci.yml'
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'ci: allow repository automation to run v0.6 release gate'
+          gh auth setup-git
+          git push origin HEAD:refs/heads/release/v0.6.0
+          git rev-parse HEAD | tee aiTemp/evidence/release-source-sha.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: v060-release-guard-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
