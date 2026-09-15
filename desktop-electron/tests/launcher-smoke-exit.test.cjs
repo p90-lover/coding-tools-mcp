@@ -57,3 +57,22 @@ test("main launcher delegates packaged smoke termination to the force-exit helpe
     /browserHost\.destroy\(\);\s+await browserControl\.close\(\);\s+mainWindow\.destroy\(\);\s+app\.quit\(\);/,
   );
 });
+
+test("packaged smoke startup failures never block on a native error dialog", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "electron", "main.cjs"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /const LAUNCHER_SMOKE_TEST = process\.argv\.includes\("--launcher-smoke-test"\);/,
+  );
+  assert.match(
+    source,
+    /if \(!LAUNCHER_SMOKE_TEST\)\s*\{\s*dialog\.showErrorBox\("Codex Web GPT could not start", message\);\s*\}/,
+  );
+  assert.equal(
+    (source.match(/process\.argv\.includes\("--launcher-smoke-test"\)/g) || []).length,
+    1,
+  );
+});
