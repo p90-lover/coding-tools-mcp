@@ -1,0 +1,43 @@
+name: PR40 release asset entry boundary
+
+on:
+  push:
+    branches:
+      - subagent/electron-prerelease-gate-0.6.0-rc.1-20260914
+    paths:
+      - .github/workflows/pr40-release-asset-boundary.yml
+      - scripts/release/verify-assets.mjs
+      - tests/electron-release-asset-entry-boundary.test.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr40-release-asset-entry-boundary-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  asset-entry-boundary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Run focused release asset boundary tests
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          node --test tests/electron-release-asset-entry-boundary.test.mjs \
+            2>&1 | tee aiTemp/evidence/pr40-release-asset-boundary.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr40-release-asset-boundary-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
