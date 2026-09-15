@@ -6,9 +6,12 @@ on:
       - feature/0.7-exact-sha-prerelease-promotion
       - integration/0.7-goal-headless-release-20260915
       - fix/codex-router-0.7-exact-sha-publish
+      - release/codex-router-multiprovider-0.7.0-rc.1
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
       - .github/workflows/codex-router-multiprovider-release.yml
+      - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/package-contents.test.cjs
       - docs/releases/v0.7.0-rc.1.md
       - scripts/release/**
       - tests/codex-router-0.7-release.test.mjs
@@ -21,6 +24,8 @@ on:
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
       - .github/workflows/codex-router-multiprovider-release.yml
+      - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/package-contents.test.cjs
       - docs/releases/v0.7.0-rc.1.md
       - scripts/release/**
       - tests/codex-router-0.7-release.test.mjs
@@ -58,12 +63,15 @@ jobs:
           node --check scripts/release/verify-source-scope.mjs
           node --check scripts/release/verify-assets.mjs
           node --check scripts/release/publish-v0.6.0-rc.1.mjs
+          node --check desktop-electron/scripts/verify-package.cjs
+          node --check desktop-electron/tests/package-contents.test.cjs
 
       - name: Run legacy and 0.7 release contracts
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/release-tooling-evidence
+          mkdir -p aiTemp/release-tooling-evidence aiTemp/Trash/package-verifier-tests
           node --test \
+            desktop-electron/tests/package-contents.test.cjs \
             tests/electron-full-harness-release.test.mjs \
             tests/codex-router-0.7-release.test.mjs \
             tests/no-delete-policy.test.mjs \
