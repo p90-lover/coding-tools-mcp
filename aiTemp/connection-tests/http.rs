@@ -123,7 +123,7 @@ async fn connection_repair_oauth_challenge_and_token_recovery() {
         assert_eq!(response.status().as_u16(), 401);
         assert_eq!(
             response.headers()["www-authenticate"],
-            "Bearer resource_metadata=\"https://repair.example/.well-known/oauth-protected-resource\", scope=\"mcp\""
+            "Bearer resource_metadata=\"https://repair.example/.well-known/oauth-protected-resource/mcp\", scope=\"mcp\""
         );
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
@@ -151,9 +151,14 @@ async fn connection_repair_oauth_challenge_and_token_recovery() {
                 .unwrap(),
         );
     }
-    assert_eq!(docs[0], docs[1]);
+    assert_eq!(docs[0]["resource"], json!("https://repair.example"));
+    assert_eq!(docs[1]["resource"], json!("https://repair.example/mcp"));
     assert_eq!(
         docs[0]["authorization_servers"],
+        json!(["https://repair.example"])
+    );
+    assert_eq!(
+        docs[1]["authorization_servers"],
         json!(["https://repair.example"])
     );
     let log = tokio::time::timeout(std::time::Duration::from_secs(2), async {
