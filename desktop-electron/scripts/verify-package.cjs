@@ -65,14 +65,9 @@ const REQUIRED_COMPONENTS = Object.freeze({
 });
 const REQUIRED_ASAR_FILES = Object.freeze([
   "electron/main.cjs",
-  "electron/migration-manager.cjs",
   "electron/preload.cjs",
   "electron/product.cjs",
-  "electron/rollback-manager.cjs",
   "electron/runtime-supervisor.cjs",
-  "electron/rust-core-client.cjs",
-  "electron/rust-core-state.cjs",
-  "electron/rust-core-supervisor.cjs",
 ]);
 const COMPONENT_VERSIONS = Object.freeze({
   "migration-manifest": PRODUCT.version,
