@@ -10,7 +10,10 @@ on:
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
       - .github/workflows/codex-router-multiprovider-release.yml
+      - desktop-electron/scripts/launcher-process-smoke.cjs
+      - desktop-electron/scripts/smoke-package.cjs
       - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/launcher-process-smoke.test.cjs
       - desktop-electron/tests/package-contents.test.cjs
       - docs/releases/v0.7.0-rc.1.md
       - scripts/release/**
@@ -24,7 +27,10 @@ on:
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
       - .github/workflows/codex-router-multiprovider-release.yml
+      - desktop-electron/scripts/launcher-process-smoke.cjs
+      - desktop-electron/scripts/smoke-package.cjs
       - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/launcher-process-smoke.test.cjs
       - desktop-electron/tests/package-contents.test.cjs
       - docs/releases/v0.7.0-rc.1.md
       - scripts/release/**
@@ -63,14 +69,21 @@ jobs:
           node --check scripts/release/verify-source-scope.mjs
           node --check scripts/release/verify-assets.mjs
           node --check scripts/release/publish-v0.6.0-rc.1.mjs
+          node --check desktop-electron/scripts/launcher-process-smoke.cjs
+          node --check desktop-electron/scripts/smoke-package.cjs
           node --check desktop-electron/scripts/verify-package.cjs
+          node --check desktop-electron/tests/launcher-process-smoke.test.cjs
           node --check desktop-electron/tests/package-contents.test.cjs
 
       - name: Run legacy and 0.7 release contracts
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/release-tooling-evidence aiTemp/Trash/package-verifier-tests
+          mkdir -p \
+            aiTemp/release-tooling-evidence \
+            aiTemp/Trash/launcher-process-smoke-tests \
+            aiTemp/Trash/package-verifier-tests
           node --test \
+            desktop-electron/tests/launcher-process-smoke.test.cjs \
             desktop-electron/tests/package-contents.test.cjs \
             tests/electron-full-harness-release.test.mjs \
             tests/codex-router-0.7-release.test.mjs \
