@@ -5,16 +5,22 @@ on:
   push:
     paths:
       - "runtime-web/src/http-body.ts"
+      - "runtime-web/src/native-passthrough.ts"
       - "runtime-web/src/router-web-ingress.ts"
-      - "runtime-web/tests/router-web-ingress.test.ts"
+      - "runtime-web/src/server.ts"
       - "runtime-web/tests/chatgpt-web-goal.test.ts"
+      - "runtime-web/tests/request-body-fast-path.test.ts"
+      - "runtime-web/tests/router-web-ingress.test.ts"
       - ".github/workflows/runtime-web-goal-ci.yml"
   pull_request:
     paths:
       - "runtime-web/src/http-body.ts"
+      - "runtime-web/src/native-passthrough.ts"
       - "runtime-web/src/router-web-ingress.ts"
-      - "runtime-web/tests/router-web-ingress.test.ts"
+      - "runtime-web/src/server.ts"
       - "runtime-web/tests/chatgpt-web-goal.test.ts"
+      - "runtime-web/tests/request-body-fast-path.test.ts"
+      - "runtime-web/tests/router-web-ingress.test.ts"
       - ".github/workflows/runtime-web-goal-ci.yml"
 
 permissions:
@@ -41,7 +47,7 @@ jobs:
           bun-version: 1.4.0
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
-      - name: Run focused goal and ingress regressions
-        run: bun test tests/router-web-ingress.test.ts tests/chatgpt-web-goal.test.ts
+      - name: Run focused goal and request-path regressions
+        run: bun test tests/chatgpt-web-goal.test.ts tests/request-body-fast-path.test.ts tests/router-web-ingress.test.ts
       - name: Typecheck Runtime Web
         run: bun run typecheck
