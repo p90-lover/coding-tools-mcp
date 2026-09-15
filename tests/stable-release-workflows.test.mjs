@@ -27,12 +27,21 @@ test('legacy manual macOS publication is retired globally before stable tagging'
 
   const preparation = read('.github/workflows/prepare-stable-release.yml');
   const promotion = read('.github/workflows/promote-stable-release.yml');
-  const disable = 'actions/workflows/macos-release.yml/disable';
+  const list = 'actions/workflows?per_page=100';
+  const disable = 'actions/workflows/$workflow_id/disable';
   const tag = 'git tag -a "$TAG"';
   for (const workflow of [preparation, promotion]) {
     assert.ok(workflow.includes('actions: write'));
-    assert.ok(workflow.includes(disable), 'workflow must disable the historical workflow ID');
+    assert.ok(workflow.includes('--paginate'));
+    assert.ok(workflow.includes(list));
+    assert.ok(workflow.includes('.github/workflows/macos-release.yml'));
+    assert.ok(workflow.includes('workflow_id'));
+    assert.ok(workflow.includes(disable), 'workflow must disable the resolved numeric workflow ID');
     assert.ok(workflow.includes('disabled_manually'), 'workflow must verify global disabled state');
+    assert.ok(
+      workflow.indexOf(list) < workflow.indexOf(disable),
+      'workflow ID resolution must happen before the disable request',
+    );
   }
   assert.ok(
     promotion.indexOf(disable) < promotion.indexOf(tag),
