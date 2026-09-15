@@ -3,19 +3,27 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
+const { TextDecoder } = require("node:util");
 
 const PRODUCT_VERSION = "0.6.0-rc.1";
 const PRODUCT_NAME = "Coding Tools";
 const APP_ID = "dev.codingtools.fullharness";
 const SOURCE_REPOSITORY = "p90-lover/coding-tools-mcp";
 const SOURCE_SHA = /^[a-f0-9]{40}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 const UPSTREAM = Object.freeze({
   repository: "miuuyy/codex-chatgpt-web",
   version: "v5.0.6",
   commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
 });
 const TUNNEL_VERSION = "0.0.12";
+const TUNNEL_REPOSITORY = "openai/tunnel-client";
+const MAX_TUNNEL_ARCHIVE_BYTES = 80 * 1024 * 1024;
+const MAX_TUNNEL_MEMBER_BYTES = 64 * 1024 * 1024;
+const MAX_TUNNEL_MEMBERS = 16;
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
 const STABLE_ROLLBACK = Object.freeze({
   schema: 1,
   stableVersion: "0.4.10",
@@ -27,6 +35,86 @@ const STABLE_ROLLBACK = Object.freeze({
 });
 const SUPPORTED_PLATFORMS = new Set(["win32", "linux", "darwin"]);
 const SUPPORTED_ARCHES = new Set(["x64", "arm64"]);
+const OFFICIAL_TUNNEL_RELEASES = Object.freeze({
+  "darwin/arm64": Object.freeze({
+    repository: TUNNEL_REPOSITORY,
+    version: `v${TUNNEL_VERSION}`,
+    platform: "darwin",
+    arch: "arm64",
+    archiveName: "tunnel-client-v0.0.12-darwin-arm64.zip",
+    archiveSha256: "42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02",
+    binaryName: "tunnel-client",
+    licenseName: "tunnel-client-v0.0.12-darwin-arm64-licenses.txt",
+    licenseSha256: "961dd697f068eeba060699ebcda2318779fe952831c45e2743b773a776d697a3",
+    spdxName: "tunnel-client-v0.0.12-darwin-arm64.spdx.json",
+    spdxSha256: "b3cf00f998d7137335969c2f78811561afaca6094686b9824808ad5286f3df4d",
+  }),
+  "darwin/x64": Object.freeze({
+    repository: TUNNEL_REPOSITORY,
+    version: `v${TUNNEL_VERSION}`,
+    platform: "darwin",
+    arch: "amd64",
+    archiveName: "tunnel-client-v0.0.12-darwin-amd64.zip",
+    archiveSha256: "33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009",
+    binaryName: "tunnel-client",
+    licenseName: "tunnel-client-v0.0.12-darwin-amd64-licenses.txt",
+    licenseSha256: "661df2b81de81ec60df1820e2f152f120ad9fd14455c116c159b3bc9041d0ba2",
+    spdxName: "tunnel-client-v0.0.12-darwin-amd64.spdx.json",
+    spdxSha256: "cbed744781fd63f2def30322a2ae41feb3bd16f15c03c127a006ce734bb7001c",
+  }),
+  "linux/arm64": Object.freeze({
+    repository: TUNNEL_REPOSITORY,
+    version: `v${TUNNEL_VERSION}`,
+    platform: "linux",
+    arch: "arm64",
+    archiveName: "tunnel-client-v0.0.12-linux-arm64.zip",
+    archiveSha256: "6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6",
+    binaryName: "tunnel-client",
+    licenseName: "tunnel-client-v0.0.12-linux-arm64-licenses.txt",
+    licenseSha256: "2504135d0ddc2965429044fe06ea93d72582c3694f83b02eebe6cbc515dc9aaa",
+    spdxName: "tunnel-client-v0.0.12-linux-arm64.spdx.json",
+    spdxSha256: "0c8c84a40e9b96d5c87d35ab650d6cb33671176d1cbb81846a1f52ed401bbed6",
+  }),
+  "linux/x64": Object.freeze({
+    repository: TUNNEL_REPOSITORY,
+    version: `v${TUNNEL_VERSION}`,
+    platform: "linux",
+    arch: "amd64",
+    archiveName: "tunnel-client-v0.0.12-linux-amd64.zip",
+    archiveSha256: "2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81",
+    binaryName: "tunnel-client",
+    licenseName: "tunnel-client-v0.0.12-linux-amd64-licenses.txt",
+    licenseSha256: "fbe3d5c7d3a6a14317915d4c058f97342c9a533654f533adcba3261acc821a33",
+    spdxName: "tunnel-client-v0.0.12-linux-amd64.spdx.json",
+    spdxSha256: "f2c5548c7bff0aff2a3fbd00cf936cf96071d88110ec078837370f468c6b313d",
+  }),
+  "win32/arm64": Object.freeze({
+    repository: TUNNEL_REPOSITORY,
+    version: `v${TUNNEL_VERSION}`,
+    platform: "windows",
+    arch: "arm64",
+    archiveName: "tunnel-client-v0.0.12-windows-arm64.zip",
+    archiveSha256: "65ab54221554481bb1c23b6015b99abe0b7f79b08593f4fb17a9e2e25532281d",
+    binaryName: "tunnel-client.exe",
+    licenseName: "tunnel-client-v0.0.12-windows-arm64-licenses.txt",
+    licenseSha256: "d2cd87a75bc8121e1579e67cf8f011d55d91d358436be101c0992f3cfb0f1e95",
+    spdxName: "tunnel-client-v0.0.12-windows-arm64.spdx.json",
+    spdxSha256: "d125eeec8b308cf20550d1e74658285f0211e909143942f6c5743f801219c01c",
+  }),
+  "win32/x64": Object.freeze({
+    repository: TUNNEL_REPOSITORY,
+    version: `v${TUNNEL_VERSION}`,
+    platform: "windows",
+    arch: "amd64",
+    archiveName: "tunnel-client-v0.0.12-windows-amd64.zip",
+    archiveSha256: "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356",
+    binaryName: "tunnel-client.exe",
+    licenseName: "tunnel-client-v0.0.12-windows-amd64-licenses.txt",
+    licenseSha256: "7d85227df86c38a689fca913d6f4a0b49ad030d6e056155a6832312cf7fb4bad",
+    spdxName: "tunnel-client-v0.0.12-windows-amd64.spdx.json",
+    spdxSha256: "4c6b46a645b71853d55f50cfb4b2c51324422a57f007984ba113d3edcfeb4f2c",
+  }),
+});
 
 function fail(code, detail) {
   throw new Error(`${code}: ${detail}`);
@@ -110,6 +198,17 @@ function sha256(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
+function crc32(bytes) {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+    }
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
 function copyTree(sourcePath, destinationPath) {
   const source = path.resolve(sourcePath);
   const destination = path.resolve(destinationPath);
@@ -143,13 +242,17 @@ function binaryFormat(bytes, platform) {
   return false;
 }
 
-function validateBinary(filePath, label, platform) {
-  const input = regularFile(filePath, label);
-  const bytes = fs.readFileSync(input.path);
+function validateBinaryBytes(bytes, label, platform) {
   if (!binaryFormat(bytes, platform)) {
     fail("PACKAGE_RESOURCE_BINARY_FORMAT_MISMATCH", `${label}: ${platform}`);
   }
-  return input.path;
+  return bytes;
+}
+
+function validateBinary(filePath, label, platform) {
+  const input = regularFile(filePath, label);
+  validateBinaryBytes(fs.readFileSync(input.path), label, platform);
+  return input;
 }
 
 function validatePlatform(platform, arch) {
@@ -194,14 +297,223 @@ function defaultHeadlessCandidates(repositoryRoot, platform) {
   ];
 }
 
-function defaultTunnelCandidates(repositoryRoot, platform, arch) {
-  const name = executableName("tunnel-client", platform);
+function expectedReleaseIdentity(platform, arch) {
+  const mappedPlatform = platform === "win32" ? "windows" : platform;
+  const mappedArch = arch === "x64" ? "amd64" : arch;
+  return { mappedPlatform, mappedArch };
+}
+
+function validateTunnelRelease(release, platform, arch) {
+  const { mappedPlatform, mappedArch } = expectedReleaseIdentity(platform, arch);
+  if (!release || typeof release !== "object"
+      || release.repository !== TUNNEL_REPOSITORY
+      || release.version !== `v${TUNNEL_VERSION}`
+      || release.platform !== mappedPlatform
+      || release.arch !== mappedArch
+      || release.binaryName !== executableName("tunnel-client", platform)
+      || !SHA256.test(release.archiveSha256)
+      || typeof release.archiveName !== "string"
+      || typeof release.licenseName !== "string"
+      || typeof release.spdxName !== "string") {
+    fail("PACKAGE_RESOURCE_TUNNEL_RELEASE_INVALID", JSON.stringify(release ?? null));
+  }
+  const prefix = `tunnel-client-v${TUNNEL_VERSION}-${mappedPlatform}-${mappedArch}`;
+  if (release.archiveName !== `${prefix}.zip`
+      || release.licenseName !== `${prefix}-licenses.txt`
+      || release.spdxName !== `${prefix}.spdx.json`) {
+    fail("PACKAGE_RESOURCE_TUNNEL_RELEASE_ASSET_MISMATCH", JSON.stringify(release));
+  }
+  for (const field of ["licenseSha256", "spdxSha256"]) {
+    if (release[field] !== undefined && !SHA256.test(release[field])) {
+      fail("PACKAGE_RESOURCE_TUNNEL_RELEASE_INVALID", `${field}: ${release[field]}`);
+    }
+  }
+  return Object.freeze({ ...release });
+}
+
+function resolveTunnelRelease(platform, arch, override) {
+  return validateTunnelRelease(override || OFFICIAL_TUNNEL_RELEASES[`${platform}/${arch}`], platform, arch);
+}
+
+function defaultTunnelArchiveCandidates(repositoryRoot, release) {
+  const platformArch = `${release.platform}-${release.arch}`;
   return [
-    process.env.CODING_TOOLS_TUNNEL_CLIENT,
-    path.join(repositoryRoot, "third_party", "tunnel-client", TUNNEL_VERSION, `${platform}-${arch}`, name),
-    path.join(repositoryRoot, "third_party", "tunnel-client", TUNNEL_VERSION, name),
-    path.join(repositoryRoot, "aiTemp", "input", "tunnel-client", TUNNEL_VERSION, `${platform}-${arch}`, name),
+    process.env.CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE,
+    path.join(repositoryRoot, "third_party", "tunnel-client", release.version, platformArch, release.archiveName),
+    path.join(repositoryRoot, "third_party", "tunnel-client", release.version, release.archiveName),
+    path.join(repositoryRoot, "aiTemp", "input", "tunnel-client", release.version, platformArch, release.archiveName),
+    path.join(repositoryRoot, "aiTemp", "input", release.archiveName),
   ];
+}
+
+function ensureRange(bytes, offset, length, code) {
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length)
+      || offset < 0 || length < 0 || offset + length > bytes.length) {
+    fail(code, JSON.stringify({ offset, length, total: bytes.length }));
+  }
+}
+
+function findZipEnd(bytes) {
+  if (bytes.length < 22) fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", "archive is shorter than an end record");
+  const minimum = Math.max(0, bytes.length - 22 - 0xffff);
+  for (let offset = bytes.length - 22; offset >= minimum; offset -= 1) {
+    if (bytes.readUInt32LE(offset) !== 0x06054b50) continue;
+    ensureRange(bytes, offset, 22, "PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID");
+    const commentLength = bytes.readUInt16LE(offset + 20);
+    if (offset + 22 + commentLength !== bytes.length) continue;
+    const disk = bytes.readUInt16LE(offset + 4);
+    const centralDisk = bytes.readUInt16LE(offset + 6);
+    const diskEntries = bytes.readUInt16LE(offset + 8);
+    const totalEntries = bytes.readUInt16LE(offset + 10);
+    const centralSize = bytes.readUInt32LE(offset + 12);
+    const centralOffset = bytes.readUInt32LE(offset + 16);
+    if (disk !== 0 || centralDisk !== 0 || diskEntries !== totalEntries
+        || totalEntries < 1 || totalEntries > MAX_TUNNEL_MEMBERS
+        || centralOffset + centralSize !== offset) {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", "unsupported multi-disk, ZIP64, or central-directory layout");
+    }
+    ensureRange(bytes, centralOffset, centralSize, "PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID");
+    return { offset, totalEntries, centralOffset, centralSize };
+  }
+  fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", "end-of-central-directory record is missing");
+}
+
+function decodeZipName(bytes, label) {
+  try {
+    const name = UTF8.decode(bytes);
+    if (!name || name.includes("/") || name.includes("\\") || name.includes("\0") || name === "." || name === "..") {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_PATH_UNSAFE", `${label}: ${JSON.stringify(name)}`);
+    }
+    return name;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("PACKAGE_RESOURCE_")) throw error;
+    fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_NAME_INVALID", label);
+  }
+}
+
+function readTunnelZip(bytes, expectedNames) {
+  if (!Buffer.isBuffer(bytes) || bytes.length > MAX_TUNNEL_ARCHIVE_BYTES) {
+    fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_SIZE_INVALID", String(bytes?.length ?? "not-buffer"));
+  }
+  const end = findZipEnd(bytes);
+  const members = new Map();
+  let cursor = end.centralOffset;
+  for (let index = 0; index < end.totalEntries; index += 1) {
+    ensureRange(bytes, cursor, 46, "PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID");
+    if (bytes.readUInt32LE(cursor) !== 0x02014b50) {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", `central record ${index} has the wrong signature`);
+    }
+    const flags = bytes.readUInt16LE(cursor + 8);
+    const method = bytes.readUInt16LE(cursor + 10);
+    const checksum = bytes.readUInt32LE(cursor + 16);
+    const compressedSize = bytes.readUInt32LE(cursor + 20);
+    const uncompressedSize = bytes.readUInt32LE(cursor + 24);
+    const nameLength = bytes.readUInt16LE(cursor + 28);
+    const extraLength = bytes.readUInt16LE(cursor + 30);
+    const commentLength = bytes.readUInt16LE(cursor + 32);
+    const diskStart = bytes.readUInt16LE(cursor + 34);
+    const localOffset = bytes.readUInt32LE(cursor + 42);
+    const recordLength = 46 + nameLength + extraLength + commentLength;
+    ensureRange(bytes, cursor, recordLength, "PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID");
+    if ((flags & 0x0001) !== 0 || ![0, 8].includes(method) || diskStart !== 0
+        || compressedSize === 0xffffffff || uncompressedSize === 0xffffffff
+        || localOffset === 0xffffffff || uncompressedSize > MAX_TUNNEL_MEMBER_BYTES
+        || compressedSize > MAX_TUNNEL_MEMBER_BYTES) {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", `unsupported central record for member ${index}`);
+    }
+    const name = decodeZipName(bytes.subarray(cursor + 46, cursor + 46 + nameLength), `central member ${index}`);
+    if (members.has(name)) fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_DUPLICATE_MEMBER", name);
+
+    ensureRange(bytes, localOffset, 30, "PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID");
+    if (bytes.readUInt32LE(localOffset) !== 0x04034b50) {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", `${name} has no matching local record`);
+    }
+    const localFlags = bytes.readUInt16LE(localOffset + 6);
+    const localMethod = bytes.readUInt16LE(localOffset + 8);
+    const localNameLength = bytes.readUInt16LE(localOffset + 26);
+    const localExtraLength = bytes.readUInt16LE(localOffset + 28);
+    ensureRange(bytes, localOffset + 30, localNameLength + localExtraLength, "PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID");
+    const localName = decodeZipName(
+      bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength),
+      `local member ${index}`,
+    );
+    if (localName !== name || localMethod !== method || (localFlags & 0x0001) !== 0) {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", `${name} central/local metadata mismatch`);
+    }
+    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+    ensureRange(bytes, dataOffset, compressedSize, "PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID");
+    if (dataOffset + compressedSize > end.centralOffset) {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", `${name} overlaps the central directory`);
+    }
+    const compressed = bytes.subarray(dataOffset, dataOffset + compressedSize);
+    let output;
+    try {
+      output = method === 0
+        ? Buffer.from(compressed)
+        : zlib.inflateRawSync(compressed, { maxOutputLength: MAX_TUNNEL_MEMBER_BYTES });
+    } catch (error) {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_DECOMPRESSION_FAILED", `${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (output.length !== uncompressedSize || crc32(output) !== checksum) {
+      fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_MEMBER_MISMATCH", name);
+    }
+    members.set(name, output);
+    cursor += recordLength;
+  }
+  if (cursor !== end.centralOffset + end.centralSize) {
+    fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVALID", "central directory size mismatch");
+  }
+  const actualNames = [...members.keys()].sort(compareText);
+  const wantedNames = [...expectedNames].sort(compareText);
+  if (JSON.stringify(actualNames) !== JSON.stringify(wantedNames)) {
+    fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_INVENTORY_MISMATCH", JSON.stringify({ wantedNames, actualNames }));
+  }
+  return members;
+}
+
+function validateTunnelArchive(archivePath, release, platform) {
+  const archive = regularFile(archivePath, "tunnel-client archive");
+  if (path.basename(archive.path) !== release.archiveName) {
+    fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_NAME_MISMATCH", path.basename(archive.path));
+  }
+  const bytes = fs.readFileSync(archive.path);
+  const archiveDigest = sha256(bytes);
+  if (archiveDigest !== release.archiveSha256) {
+    fail("PACKAGE_RESOURCE_TUNNEL_ARCHIVE_DIGEST_MISMATCH", `${release.archiveName}: ${archiveDigest}`);
+  }
+  const members = readTunnelZip(bytes, [
+    release.binaryName,
+    "LICENSE",
+    "NOTICE",
+    release.licenseName,
+    release.spdxName,
+  ]);
+  validateBinaryBytes(members.get(release.binaryName), "tunnel-client", platform);
+  const licenseDigest = sha256(members.get(release.licenseName));
+  const spdxDigest = sha256(members.get(release.spdxName));
+  if (release.licenseSha256 !== undefined && licenseDigest !== release.licenseSha256) {
+    fail("PACKAGE_RESOURCE_TUNNEL_LICENSE_DIGEST_MISMATCH", `${release.licenseName}: ${licenseDigest}`);
+  }
+  if (release.spdxSha256 !== undefined && spdxDigest !== release.spdxSha256) {
+    fail("PACKAGE_RESOURCE_TUNNEL_SPDX_DIGEST_MISMATCH", `${release.spdxName}: ${spdxDigest}`);
+  }
+  let spdx;
+  try {
+    spdx = JSON.parse(UTF8.decode(members.get(release.spdxName)));
+  } catch (error) {
+    fail("PACKAGE_RESOURCE_TUNNEL_SPDX_INVALID", error instanceof Error ? error.message : String(error));
+  }
+  if (spdx?.spdxVersion !== "SPDX-2.3") {
+    fail("PACKAGE_RESOURCE_TUNNEL_SPDX_INVALID", String(spdx?.spdxVersion));
+  }
+  return {
+    archivePath: archive.path,
+    archiveDigest,
+    members,
+    licenseDigest,
+    spdxDigest,
+    release,
+  };
 }
 
 function validateRuntime(runtimeRoot, platform, arch) {
@@ -219,7 +531,11 @@ function validateRuntime(runtimeRoot, platform, arch) {
       arch: manifest?.arch,
     }));
   }
-  regularFile(path.join(root, "THIRD_PARTY_NOTICES.txt"), "runtime third-party notices");
+  for (const required of ["THIRD_PARTY_NOTICES.txt", "LICENSE", "LICENSES"]) {
+    const target = path.join(root, required);
+    if (required === "LICENSES") regularDirectory(target, "runtime license inventory");
+    else regularFile(target, `runtime ${required}`);
+  }
   return { root, manifest };
 }
 
@@ -245,12 +561,23 @@ function componentVersions() {
   });
 }
 
-function combinedNotices(noticesPath, runtimeRoot) {
+function memberText(tunnel, name) {
+  try {
+    return UTF8.decode(tunnel.members.get(name)).trim();
+  } catch (error) {
+    fail("PACKAGE_RESOURCE_TUNNEL_NOTICE_INVALID", `${name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function combinedNotices(noticesPath, runtimeRoot, tunnel) {
   const integrationNotices = fs.readFileSync(regularFile(noticesPath, "repository third-party notices").path, "utf8").trim();
   const runtimeNotices = fs.readFileSync(
     regularFile(path.join(runtimeRoot, "THIRD_PARTY_NOTICES.txt"), "runtime third-party notices").path,
     "utf8",
   ).trim();
+  const tunnelLicense = memberText(tunnel, "LICENSE");
+  const tunnelNotice = memberText(tunnel, "NOTICE");
+  const tunnelLicenseReport = memberText(tunnel, tunnel.release.licenseName);
   const combined = [
     "# Coding Tools combined third-party notices",
     "",
@@ -262,8 +589,23 @@ function combinedNotices(noticesPath, runtimeRoot) {
     "",
     runtimeNotices,
     "",
+    `## OpenAI tunnel-client ${tunnel.release.version}`,
+    "",
+    `Release archive: ${tunnel.release.archiveName}`,
+    `Release archive SHA-256: ${tunnel.archiveDigest}`,
+    `SPDX document: ${tunnel.release.spdxName}`,
+    `SPDX SHA-256: ${tunnel.spdxDigest}`,
+    "",
+    tunnelNotice,
+    "",
+    tunnelLicense,
+    "",
+    `### ${tunnel.release.licenseName}`,
+    "",
+    tunnelLicenseReport,
+    "",
   ].join("\n");
-  for (const marker of ["codex-chatgpt-web", "MIT", "Apache-2.0"]) {
+  for (const marker of ["codex-chatgpt-web", "MIT", "Apache-2.0", "OpenAI tunnel-client"]) {
     if (!combined.includes(marker)) fail("PACKAGE_RESOURCE_NOTICES_INCOMPLETE", marker);
   }
   return combined;
@@ -331,10 +673,11 @@ function createRetentionSession({ repositoryRoot, label, now = () => new Date(),
   return { aiTempRoot, workRoot, trashRoot, preservePath, publishDirectory };
 }
 
-function writeComponent(stagingRoot, relativePath, bytes) {
+function writeComponent(stagingRoot, relativePath, bytes, mode = 0o600) {
   const target = path.join(stagingRoot, ...relativePath.split("/"));
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(target, bytes, { flag: "wx", mode: 0o600 });
+  fs.writeFileSync(target, bytes, { flag: "wx", mode });
+  fs.chmodSync(target, mode);
   return target;
 }
 
@@ -356,17 +699,16 @@ function preparePackageResources(options = {}) {
     "coding-tools-headless",
     platform,
   );
-  const tunnelSource = validateBinary(
-    options.tunnelBinary || firstExisting(defaultTunnelCandidates(repositoryRoot, platform, arch), "tunnel-client"),
-    "tunnel-client",
-    platform,
-  );
+  const tunnelRelease = resolveTunnelRelease(platform, arch, options.tunnelRelease);
+  const tunnelArchive = options.tunnelArchive
+    || firstExisting(defaultTunnelArchiveCandidates(repositoryRoot, tunnelRelease), "tunnel-client archive");
+  const tunnel = validateTunnelArchive(tunnelArchive, tunnelRelease, platform);
   const noticesPath = path.resolve(
     options.noticesPath
       || process.env.CODING_TOOLS_THIRD_PARTY_NOTICES
       || path.join(repositoryRoot, "third_party", "THIRD_PARTY_NOTICES.md"),
   );
-  const notices = combinedNotices(noticesPath, runtime.root);
+  const notices = combinedNotices(noticesPath, runtime.root, tunnel);
   const paths = componentPaths(platform);
   const versions = componentVersions();
   const session = createRetentionSession({
@@ -380,10 +722,16 @@ function preparePackageResources(options = {}) {
 
   try {
     copyTree(runtime.root, path.join(stagingRoot, "runtime"));
-    fs.mkdirSync(path.dirname(path.join(stagingRoot, ...paths["rust-headless"].split("/"))), { recursive: true, mode: 0o700 });
-    fs.copyFileSync(headlessSource, path.join(stagingRoot, ...paths["rust-headless"].split("/")), fs.constants.COPYFILE_EXCL);
-    fs.mkdirSync(path.dirname(path.join(stagingRoot, ...paths["tunnel-client"].split("/"))), { recursive: true, mode: 0o700 });
-    fs.copyFileSync(tunnelSource, path.join(stagingRoot, ...paths["tunnel-client"].split("/")), fs.constants.COPYFILE_EXCL);
+    const headlessTarget = path.join(stagingRoot, ...paths["rust-headless"].split("/"));
+    fs.mkdirSync(path.dirname(headlessTarget), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(headlessSource.path, headlessTarget, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(headlessTarget, platform === "win32" ? 0o600 : (headlessSource.metadata.mode & 0o777) || 0o755);
+    writeComponent(
+      stagingRoot,
+      paths["tunnel-client"],
+      tunnel.members.get(tunnel.release.binaryName),
+      platform === "win32" ? 0o600 : 0o755,
+    );
 
     writeJson(path.join(stagingRoot, ...paths["migration-manifest"].split("/")), {
       schema: 1,
@@ -423,6 +771,24 @@ function preparePackageResources(options = {}) {
         sha: sourceSha,
       },
       upstream: UPSTREAM,
+      supply_chain: {
+        tunnel_client: {
+          repository: tunnel.release.repository,
+          version: tunnel.release.version,
+          archive: {
+            name: tunnel.release.archiveName,
+            sha256: tunnel.archiveDigest,
+          },
+          license_report: {
+            name: tunnel.release.licenseName,
+            sha256: tunnel.licenseDigest,
+          },
+          spdx: {
+            name: tunnel.release.spdxName,
+            sha256: tunnel.spdxDigest,
+          },
+        },
+      },
       components,
     });
 
@@ -434,6 +800,8 @@ function preparePackageResources(options = {}) {
       platform,
       arch,
       componentIds: components.map((component) => component.id),
+      tunnelArchive: tunnel.release.archiveName,
+      tunnelArchiveSha256: tunnel.archiveDigest,
       trashRoot: session.trashRoot,
     };
   } catch (error) {
@@ -461,10 +829,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+  OFFICIAL_TUNNEL_RELEASES,
   PRODUCT_VERSION,
   STABLE_ROLLBACK,
   TUNNEL_VERSION,
   componentPaths,
   createRetentionSession,
   preparePackageResources,
+  readTunnelZip,
+  validateTunnelArchive,
 };
