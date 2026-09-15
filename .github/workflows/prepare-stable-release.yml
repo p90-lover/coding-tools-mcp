@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: prepare-stable-release-${{ github.ref }}
@@ -16,8 +17,9 @@ jobs:
   prepare:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 60
     env:
+      GH_TOKEN: ${{ github.token }}
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -31,13 +33,13 @@ jobs:
           node-version: '22'
 
       - id: identity
-        name: Resolve stable version from branch
+        name: Resolve canonical stable version from branch
         shell: bash
         run: |
           set -euo pipefail
           branch="$GITHUB_REF_NAME"
-          if [[ ! "$branch" =~ ^release/prepare-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "Unsupported release preparation branch: $branch" >&2
+          if [[ ! "$branch" =~ ^release/prepare-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
+            echo "Unsupported or non-canonical release preparation branch: $branch" >&2
             exit 1
           fi
           version="${BASH_REMATCH[1]}"
@@ -71,9 +73,11 @@ jobs:
           mkdir -p aiTemp/release-preparation
           node <<'NODE'
           const fs = require('node:fs');
+          const component = '(?:0|[1-9]\\d*)';
+          const stable = new RegExp(`^${component}\\.${component}\\.${component}$`);
           const version = process.env.VERSION;
-          if (!/^\d+\.\d+\.\d+$/.test(version)) {
-            throw new Error(`Invalid stable version: ${version}`);
+          if (!stable.test(version)) {
+            throw new Error(`Invalid canonical stable version: ${version}`);
           }
           const updateJson = (file, mutate) => {
             const value = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -150,7 +154,20 @@ jobs:
           node --test tests/version-alignment.test.mjs
           git diff -- package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock > aiTemp/release-preparation/version.diff
 
-      - name: Commit aligned version files
+      - name: Retire legacy manual macOS publisher globally
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/actions/workflows/macos-release.yml/disable"
+          state="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/macos-release.yml" --jq .state)"
+          if [ "$state" != "disabled_manually" ]; then
+            echo "Legacy macOS workflow was not disabled globally: $state" >&2
+            exit 1
+          fi
+          printf '%s\n' "$state" > aiTemp/release-preparation/legacy-macos-workflow-state.txt
+
+      - id: commit
+        name: Commit aligned version files when needed
         shell: bash
         env:
           VERSION: ${{ steps.identity.outputs.version }}
@@ -174,7 +191,66 @@ jobs:
           PY
           if git diff --cached --quiet; then
             echo "Version files are already aligned; no preparation commit is needed."
+            source="$(git rev-parse HEAD)"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "source=$source" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git commit -m "release: prepare v$VERSION"
+          source="$(git rev-parse HEAD)"
           git push origin "HEAD:$GITHUB_REF_NAME"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+
+      - name: Validate exact final preparation head with complete CI
+        shell: bash
+        env:
+          SOURCE: ${{ steps.commit.outputs.source }}
+        run: |
+          set -euo pipefail
+          remote_source="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | awk '{print $1}')"
+          if [ "$remote_source" != "$SOURCE" ]; then
+            echo "Release branch moved before CI dispatch: expected $SOURCE, found $remote_source" >&2
+            exit 1
+          fi
+
+          requested_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+          run_id=""
+          for _ in $(seq 1 30); do
+            gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f event=workflow_dispatch \
+              -f branch="$GITHUB_REF_NAME" \
+              -f per_page=50 > aiTemp/release-preparation/ci-runs.json
+            run_id="$(SOURCE="$SOURCE" REQUESTED_AT="$requested_at" python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          runs = json.loads(pathlib.Path('aiTemp/release-preparation/ci-runs.json').read_text())
+          matches = [
+              run for run in runs.get('workflow_runs', [])
+              if run.get('head_sha') == os.environ['SOURCE']
+              and run.get('event') == 'workflow_dispatch'
+              and run.get('created_at', '') >= os.environ['REQUESTED_AT']
+          ]
+          matches.sort(key=lambda run: run.get('created_at', ''), reverse=True)
+          print(matches[0]['id'] if matches else '')
+          PY
+            )"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$run_id" ]; then
+            echo "Exact-source CI run was not created for $SOURCE" >&2
+            exit 1
+          fi
+          run_source="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq .head_sha)"
+          if [ "$run_source" != "$SOURCE" ]; then
+            echo "CI run source mismatch: expected $SOURCE, found $run_source" >&2
+            exit 1
+          fi
+          printf '%s\n' "$run_id" > aiTemp/release-preparation/ci-run-id.txt
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status

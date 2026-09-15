@@ -38,6 +38,19 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Retire legacy manual macOS publisher globally
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/stable-promotion
+          gh api --method PUT "repos/$GITHUB_REPOSITORY/actions/workflows/macos-release.yml/disable"
+          state="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/macos-release.yml" --jq .state)"
+          if [ "$state" != "disabled_manually" ]; then
+            echo "Legacy macOS workflow was not disabled globally: $state" >&2
+            exit 1
+          fi
+          printf '%s\n' "$state" > aiTemp/stable-promotion/legacy-macos-workflow-state.txt
+
       - name: Verify exact green main source and stable version transition
         id: identity
         shell: bash

@@ -9,11 +9,14 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'u
 
 test('verified release validates the exact tagged checkout with the shared checker', () => {
   const workflow = read('.github/workflows/release.yml');
-  const checker = 'node scripts/check-version-alignment.mjs --tag "$TAG"';
-  assert.ok(workflow.includes(checker), 'verified release must invoke the shared checker');
+  const packageJson = JSON.parse(read('package.json'));
+  assert.equal(packageJson.scripts.precheck, 'npm run check:version');
+  assert.ok(workflow.includes('ref: ${{ needs.identity.outputs.source }}'));
+  assert.ok(workflow.includes('TAG: ${{ needs.identity.outputs.tag }}'));
+  assert.ok(workflow.includes('npm run check 2>&1 | tee'));
   assert.ok(
-    workflow.indexOf(checker) < workflow.indexOf('npm run tauri -- build'),
-    'version and bilingual-note validation must happen before installer construction',
+    workflow.indexOf('npm run check 2>&1 | tee') < workflow.indexOf('npm run tauri -- build'),
+    'shared version and bilingual-note validation must happen before installer construction',
   );
 });
 

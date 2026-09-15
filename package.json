@@ -10,6 +10,7 @@
     "start": "tauri dev",
     "build": "vite build",
     "preview": "vite preview",
+    "precheck": "npm run check:version",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:version": "node scripts/check-version-alignment.mjs",
     "tauri": "tauri"
