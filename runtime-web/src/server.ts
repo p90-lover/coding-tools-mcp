@@ -53,6 +53,10 @@ import {
   parseCodexRouterModelId,
   resolveCodexRouterConnection,
 } from "./routed-providers";
+import {
+  routeRouterWebResponse,
+  routerWebModelsResponse,
+} from "./router-web-ingress";
 import { VERSION } from "./version";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
@@ -990,6 +994,47 @@ export function startServer(
         }
         setTimeout(shutdown, 0);
         return Response.json({ status: "ok", accepting_turns: false, ...current });
+      }
+      if (req.method === "GET" && url.pathname === "/router/v1/models") {
+        if (draining) {
+          return formatErrorResponse(
+            503,
+            "server_error",
+            "codex-chatgpt-web is draining for a requested service operation",
+          );
+        }
+        try {
+          return routerWebModelsResponse(config);
+        } catch (error) {
+          return formatErrorResponse(
+            500,
+            "server_error",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+      if (req.method === "POST" && url.pathname === "/router/v1/responses") {
+        if (draining) {
+          return formatErrorResponse(
+            503,
+            "server_error",
+            "codex-chatgpt-web is draining for a requested service operation",
+          );
+        }
+        return httpTurns.track(
+          (signal, bindIdentity) => routeRouterWebResponse(
+            new Request(req, { signal }),
+            routedRequest => responseRequest(
+              routedRequest,
+              config,
+              dependencies.adapterFactory,
+              { onTurnIdentity: bindIdentity },
+            ),
+          ),
+          req.signal,
+          process.platform,
+          "responses",
+        );
       }
       if (req.method === "GET" && url.pathname === "/v1/models") {
         if (draining) {
