@@ -130,9 +130,8 @@ fn authorization_response_preserves_registered_query_bytes() {
         .and_then(|value| value.to_str().ok())
         .expect("authorization redirect");
 
-    assert!(location.starts_with(
-        "https://client.example/callback?flag&space=%20&slash=%2f&opaque=%FF&code="
-    ));
+    assert!(location
+        .starts_with("https://client.example/callback?flag&space=%20&slash=%2f&opaque=%FF&code="));
     assert!(!location.contains("evil.example"));
     let redirect = url::Url::parse(location).expect("parse authorization redirect");
     let issuers: Vec<_> = redirect
@@ -168,12 +167,7 @@ fn invalid_issuer_does_not_consume_the_one_time_consent() {
     let invalid = authorize_post_browser(
         &oauth,
         &headers,
-        authorization_form(
-            callback,
-            "retry-state",
-            nonce.clone(),
-            challenge.clone(),
-        ),
+        authorization_form(callback, "retry-state", nonce.clone(), challenge.clone()),
         "https://trusted.example/not-an-origin",
     );
     assert_eq!(invalid.status(), StatusCode::SERVICE_UNAVAILABLE);
