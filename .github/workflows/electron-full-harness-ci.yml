@@ -38,7 +38,7 @@ jobs:
     if: >-
       github.repository == 'p90-lover/coding-tools-mcp' &&
       github.ref == 'refs/heads/release/v0.6.0' &&
-      github.actor == github.repository_owner
+      (github.actor == github.repository_owner || github.actor == 'github-actions[bot]')
     runs-on: windows-2025
     timeout-minutes: 120
     defaults:
