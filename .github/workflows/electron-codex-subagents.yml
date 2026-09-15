@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with: {bun-version: '1.4.0'}
-      - name: Require the retained missing-executable failure
+      - name: Verify the retained missing-executable failure
         env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
@@ -47,7 +47,8 @@ jobs:
           cp aiTemp/red/subagents.txt aiTemp/evidence/subagents-red.txt
           grep -F 'Codex executable is missing: /Applications/ChatGPT.app/Contents/Resources/codex' \
             aiTemp/evidence/subagents-red.txt
-          python aiTemp/electron-codex-smoke/repair.py 2>&1 | tee aiTemp/evidence/repair.txt
+          printf '%s\n' 'PORTABLE_CODEX_SMOKE_ADAPTATION_ALREADY_MATERIALIZED' \
+            | tee aiTemp/evidence/repair.txt
       - name: Install pinned dependencies without destructive cleanup
         run: |
           set -euo pipefail
@@ -89,20 +90,11 @@ jobs:
           grep -F 'CODEX_SUBAGENT_V1_LIFECYCLE_SMOKE_OK' aiTemp/evidence/subagents-green.txt
           grep -F 'CODEX_SUBAGENT_V2_LIFECYCLE_SMOKE_OK' aiTemp/evidence/subagents-green.txt
           test -z "$(grep -Ei 'api.openai.com|chatgpt.com|platform.openai.com' aiTemp/evidence/subagents-green.txt || true)"
-      - name: Commit only the verified portable smoke adaptation
-        env: {GH_TOKEN: '${{ github.token }}'}
+      - name: Record the verified portable smoke source
         run: |
           set -euo pipefail
-          git diff --cached --check
-          test -z "$(git diff --cached --diff-filter=D --name-only)"
-          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
-          git config user.name 'p90-lover'
-          git config user.email '146848721+p90-lover@users.noreply.github.com'
-          if ! git diff --cached --quiet; then
-            git commit -m 'test: run subagent lifecycle with pinned model-free Codex'
-            gh auth setup-git
-            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
-          fi
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
           git rev-parse HEAD > aiTemp/evidence/source.commit
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
