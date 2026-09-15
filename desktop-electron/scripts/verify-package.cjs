@@ -34,6 +34,17 @@ const REQUIRED_COMPONENTS = Object.freeze({
   "third-party-notices": "coding-tools/THIRD_PARTY_NOTICES.md",
   "tunnel-client": "native/tunnel-client.exe",
 });
+const REQUIRED_ASAR_FILES = Object.freeze([
+  "electron/main.cjs",
+  "electron/migration-manager.cjs",
+  "electron/preload.cjs",
+  "electron/product.cjs",
+  "electron/rollback-manager.cjs",
+  "electron/runtime-supervisor.cjs",
+  "electron/rust-core-client.cjs",
+  "electron/rust-core-state.cjs",
+  "electron/rust-core-supervisor.cjs",
+]);
 const COMPONENT_VERSIONS = Object.freeze({
   "migration-manifest": PRODUCT.version,
   "rollback-manifest": "0.4.10",
@@ -269,10 +280,25 @@ function asarManifest(asarPath) {
   try { return JSON.parse(Buffer.from(asarApi().extractFile(asarPath, "package.json")).toString("utf8")); }
   catch (error) { fail("PACKAGE_ASAR_MANIFEST_INVALID", error instanceof Error ? error.message : String(error)); }
 }
-function scanAsar(asarPath) {
-  const api = asarApi();
-  const entries = api.listPackage(asarPath).map((entry) => String(entry).replaceAll("\\", "/").replace(/^\/+/, ""))
+function normalizeAsarEntries(entries) {
+  const normalized = entries.map((entry) => String(entry).replaceAll("\\", "/").replace(/^\/+/, ""))
     .filter(Boolean).sort(sortText);
+  for (let index = 1; index < normalized.length; index += 1) {
+    if (normalized[index] === normalized[index - 1]) fail("PACKAGE_ASAR_ENTRIES_NOT_UNIQUE", normalized[index]);
+  }
+  return normalized;
+}
+function listAsarEntries(asarPath) {
+  return normalizeAsarEntries(asarApi().listPackage(asarPath));
+}
+function validateAsarIntegration(entries) {
+  const set = new Set(normalizeAsarEntries(entries));
+  for (const required of REQUIRED_ASAR_FILES) {
+    if (!set.has(required)) fail("PACKAGE_ASAR_REQUIRED_FILE_MISSING", required);
+  }
+}
+function scanAsar(asarPath, entries) {
+  const api = asarApi();
   return scanEntries(entries, (entry) => api.extractFile(asarPath, entry))
     .map((finding) => ({ ...finding, path: `app.asar/${finding.path}` }));
 }
@@ -312,9 +338,11 @@ function inspectExtractedApplication(appRoot, options = {}) {
   if (!fs.existsSync(resources) || !fs.statSync(resources).isDirectory()) fail("PACKAGE_RESOURCES_MISSING", resources);
   const asarPath = path.join(resources, "app.asar");
   const appManifest = options.appManifest ?? asarManifest(asarPath);
+  const asarEntries = options.asarEntries ? normalizeAsarEntries(options.asarEntries) : listAsarEntries(asarPath);
+  validateAsarIntegration(asarEntries);
   const validated = validatePackageManifest(resources, appManifest, options);
   const findings = scanEntries(walkFiles(root), (relative) => fs.readFileSync(path.join(root, ...relative.split("/"))));
-  if (!options.appManifest) findings.push(...scanAsar(asarPath));
+  if (!options.appManifest) findings.push(...scanAsar(asarPath, asarEntries));
   if (findings.length) fail("PACKAGE_SECRET_MATERIAL_FOUND", JSON.stringify(findings));
   return { ok: true, productVersion: PRODUCT.version, appId: PRODUCT.appId, sourceSha: validated.sourceSha,
     componentIds: validated.componentIds, runtime: validated.runtime, secretsFound: [] };
@@ -437,6 +465,7 @@ if (require.main === module) {
 
 module.exports = {
   PRODUCT,
+  REQUIRED_ASAR_FILES,
   REQUIRED_COMPONENTS,
   findWindowsInstaller,
   inspectExtractedApplication,
