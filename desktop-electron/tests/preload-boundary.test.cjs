@@ -146,6 +146,25 @@ test("forged validation codes thrown by accessors are normalized", async () => {
   assert.equal(invocations.length, 0);
 });
 
+test("excessive object entries are rejected before reading accessors", async () => {
+  let reads = 0;
+  const response = {};
+  for (let index = 0; index < 10_000; index += 1) {
+    response[`key-${index}`] = index;
+  }
+  Object.defineProperty(response, "lateGetter", {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return "must not run";
+    },
+  });
+  const { api } = loadPreload(() => response);
+
+  await assert.rejects(api.diagnostics.snapshot(), /IPC_RESPONSE_SCHEMA_INVALID/);
+  assert.equal(reads, 0, "entry-count rejection must happen before getter evaluation");
+});
+
 test("an invalid main-process response is rejected before reaching the renderer", async () => {
   const { api } = loadPreload(() => ({ state: "mystery" }));
   await assert.rejects(api.runtime.status(), /IPC_RESPONSE_SCHEMA_INVALID/);
