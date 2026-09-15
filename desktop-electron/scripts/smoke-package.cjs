@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
+const { runPackagedLauncherProcess } = require("./launcher-process-smoke.cjs");
 const { createPreservationSession } = require("./preservation.cjs");
 
 const launcherRoot = path.resolve(__dirname, "..");
@@ -94,7 +95,7 @@ function smokeEnvironment() {
   };
 }
 
-function runSmoke() {
+async function runSmoke() {
   let executable;
   let command;
   let args;
@@ -129,9 +130,21 @@ function runSmoke() {
   }
 
   if (!fs.existsSync(executable)) throw new Error(`Packaged launcher executable is missing: ${executable}`);
-  run(command, args, { env });
-  if (!fs.existsSync(markerPath)) throw new Error("Packaged launcher did not write its readiness marker");
-  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  const launched = await runPackagedLauncherProcess({
+    command,
+    args,
+    cwd: scratch,
+    env,
+    markerPath,
+    fatalLogPath: path.join(env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR, "logs", "launcher-fatal.log"),
+    timeoutMs: 120_000,
+    exitGraceMs: 5_000,
+    pollIntervalMs: 100,
+  });
+  if (launched.forcedTermination) {
+    process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_REAPED_AFTER_MARKER ${process.platform}/${process.arch}\n`);
+  }
+  const marker = launched.marker;
   if (marker.ok !== true
     || marker.packaged !== true
     || marker.runtimeVerified !== true
@@ -163,38 +176,44 @@ function runSmoke() {
   }
 }
 
-let smokeError = null;
-try {
-  runSmoke();
-} catch (error) {
-  smokeError = error;
-}
-
-const finalizationErrors = [];
-if (macAppBundle) {
+async function main() {
+  let smokeError = null;
   try {
-    const launchServices =
-      "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
-    run(launchServices, ["-u", macAppBundle]);
-    run(launchServices, ["-gc"]);
+    await runSmoke();
+  } catch (error) {
+    smokeError = error;
+  }
+
+  const finalizationErrors = [];
+  if (macAppBundle) {
+    try {
+      const launchServices =
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+      run(launchServices, ["-u", macAppBundle]);
+      run(launchServices, ["-gc"]);
+    } catch (error) {
+      finalizationErrors.push(error);
+    }
+  }
+  try {
+    if (fs.existsSync(scratch)) preservation.preservePath(scratch, "smoke-evidence");
   } catch (error) {
     finalizationErrors.push(error);
   }
-}
-try {
-  if (fs.existsSync(scratch)) preservation.preservePath(scratch, "smoke-evidence");
-} catch (error) {
-  finalizationErrors.push(error);
+
+  if (smokeError && finalizationErrors.length > 0) {
+    throw new AggregateError(
+      [smokeError, ...finalizationErrors],
+      "Packaged launcher smoke failed and evidence finalization also failed",
+    );
+  }
+  if (smokeError) throw smokeError;
+  if (finalizationErrors.length > 0) {
+    throw new AggregateError(finalizationErrors, "Packaged launcher smoke evidence could not be preserved");
+  }
+  process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);
 }
 
-if (smokeError && finalizationErrors.length > 0) {
-  throw new AggregateError(
-    [smokeError, ...finalizationErrors],
-    "Packaged launcher smoke failed and evidence finalization also failed",
-  );
-}
-if (smokeError) throw smokeError;
-if (finalizationErrors.length > 0) {
-  throw new AggregateError(finalizationErrors, "Packaged launcher smoke evidence could not be preserved");
-}
-process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);
+void main().catch((error) => {
+  process.nextTick(() => { throw error; });
+});
