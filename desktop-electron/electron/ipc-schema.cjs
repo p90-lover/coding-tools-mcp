@@ -4,6 +4,29 @@ const MAX_JSON_DEPTH = 32;
 const MAX_JSON_ARRAY_ITEMS = 10_000;
 const MAX_JSON_OBJECT_ENTRIES = 10_000;
 const DISALLOWED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const SENSITIVE_RESPONSE_KEYS = new Set([
+  "access_token",
+  "accesstoken",
+  "refresh_token",
+  "refreshtoken",
+  "client_secret",
+  "clientsecret",
+  "api_key",
+  "apikey",
+  "runtime_key",
+  "runtimekey",
+  "private_key",
+  "privatekey",
+  "session_cookie",
+  "sessioncookie",
+  "authorization",
+  "cookie",
+  "set_cookie",
+  "password",
+  "secret",
+  "token",
+  "bearer",
+]);
 const VALIDATION_ERROR_MARKER = Symbol("coding-tools-ipc-validation-error");
 
 function codedError(code, detail) {
@@ -19,7 +42,23 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
-function snapshotJsonValue(value, code, path = "$", ancestors = new Set(), depth = 0) {
+function normalizedJsonKey(key) {
+  return key.toLowerCase().replace(/[-.\s]+/g, "_");
+}
+
+function jsonKeyIsDisallowed(key, rejectSensitiveKeys) {
+  return DISALLOWED_JSON_KEYS.has(key)
+    || (rejectSensitiveKeys && SENSITIVE_RESPONSE_KEYS.has(normalizedJsonKey(key)));
+}
+
+function snapshotJsonValue(
+  value,
+  code,
+  path = "$",
+  ancestors = new Set(),
+  depth = 0,
+  rejectSensitiveKeys = false,
+) {
   if (depth > MAX_JSON_DEPTH) throw codedError(code, `${path} exceeds the maximum JSON depth`);
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -48,6 +87,7 @@ function snapshotJsonValue(value, code, path = "$", ancestors = new Set(), depth
           `${path}[${index}]`,
           ancestors,
           depth + 1,
+          rejectSensitiveKeys,
         );
       }
       return Object.freeze(snapshot);
@@ -59,11 +99,18 @@ function snapshotJsonValue(value, code, path = "$", ancestors = new Set(), depth
     }
     const snapshot = {};
     for (const key of keys) {
-      if (DISALLOWED_JSON_KEYS.has(key)) {
+      if (jsonKeyIsDisallowed(key, rejectSensitiveKeys)) {
         throw codedError(code, `${path}.${key} is not allowed`);
       }
       Object.defineProperty(snapshot, key, {
-        value: snapshotJsonValue(value[key], code, `${path}.${key}`, ancestors, depth + 1),
+        value: snapshotJsonValue(
+          value[key],
+          code,
+          `${path}.${key}`,
+          ancestors,
+          depth + 1,
+          rejectSensitiveKeys,
+        ),
         enumerable: true,
         configurable: false,
         writable: false,
@@ -75,9 +122,9 @@ function snapshotJsonValue(value, code, path = "$", ancestors = new Set(), depth
   }
 }
 
-function snapshotJsonPayload(value, code) {
+function snapshotJsonPayload(value, code, { rejectSensitiveKeys = false } = {}) {
   try {
-    return snapshotJsonValue(value, code);
+    return snapshotJsonValue(value, code, "$", new Set(), 0, rejectSensitiveKeys);
   } catch (error) {
     if (error instanceof Error
       && error[VALIDATION_ERROR_MARKER] === true
@@ -349,7 +396,11 @@ async function invokeContract(ipcRenderer, name, payload = {}) {
   assertSchema(requestSnapshot, contract.request, "IPC_REQUEST_SCHEMA_INVALID");
 
   const response = await ipcRenderer.invoke(contract.channel, requestSnapshot);
-  const responseSnapshot = snapshotJsonPayload(response, "IPC_RESPONSE_SCHEMA_INVALID");
+  const responseSnapshot = snapshotJsonPayload(
+    response,
+    "IPC_RESPONSE_SCHEMA_INVALID",
+    { rejectSensitiveKeys: true },
+  );
   assertSerializedSize(
     responseSnapshot,
     MAX_RESPONSE_BYTES,
@@ -367,5 +418,6 @@ module.exports = Object.freeze({
   MAX_JSON_DEPTH,
   MAX_JSON_ARRAY_ITEMS,
   MAX_JSON_OBJECT_ENTRIES,
+  SENSITIVE_RESPONSE_KEYS,
   invokeContract,
 });
