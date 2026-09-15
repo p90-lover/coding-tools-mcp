@@ -55,9 +55,25 @@ function windowsInstallLocation() {
   return match[1];
 }
 
+function artifactNameFor(osName, arch, extension) {
+  const template = launcherManifest.build.artifactName;
+  if (typeof template !== "string" || template.length === 0) {
+    throw new Error("Electron Builder artifactName is missing from package.json");
+  }
+  const resolved = template
+    .replaceAll("${version}", expectedVersion)
+    .replaceAll("${os}", osName)
+    .replaceAll("${arch}", arch)
+    .replaceAll("${ext}", extension);
+  if (/\$\{[^}]+\}/.test(resolved) || path.basename(resolved) !== resolved) {
+    throw new Error(`Unsupported Electron Builder artifactName template: ${template}`);
+  }
+  return resolved;
+}
+
 function artifact(pattern, label) {
   const matches = fs.readdirSync(artifactsDirectory)
-    .filter((name) => pattern.test(name))
+    .filter((name) => typeof pattern === "string" ? name === pattern : pattern.test(name))
     .sort();
   if (matches.length !== 1) {
     throw new Error(`Expected exactly one ${label} in ${artifactsDirectory}; found ${matches.join(", ") || "none"}`);
@@ -103,7 +119,10 @@ function runSmoke() {
     args = ["-a", executable, "--launcher-smoke-test"];
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
-    const installer = artifact(/-win-x64\.exe$/, "Windows installer");
+    const installer = artifact(
+      artifactNameFor("win", process.arch, "exe"),
+      "Windows installer",
+    );
     run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
     executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
     command = executable;
