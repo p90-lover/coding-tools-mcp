@@ -8,9 +8,11 @@ on:
       - .github/workflows/codex-router-multiprovider-apply.yml
       - aiTemp/codex-router-multiprovider/apply-server.py
       - aiTemp/codex-router-multiprovider/fix-fetch-types.py
+      - aiTemp/codex-router-multiprovider/fix-agent-smoke.py
       - runtime-web/src/routed-providers.ts
       - runtime-web/src/routed-agent-catalog.ts
       - runtime-web/scripts/commandcode-proxy-provider.ts
+      - runtime-web/scripts/smoke-codex-router-agent-types.ts
       - runtime-web/tests/routed-providers.test.ts
       - runtime-web/tests/routed-agent-catalog.test.ts
       - runtime-web/tests/commandcode-proxy-provider.test.ts
@@ -26,9 +28,10 @@ concurrency:
 jobs:
   patch-and-test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 18
     env:
       BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -43,13 +46,16 @@ jobs:
       - name: Apply exact idempotent integration patches
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/evidence aiTemp/tmp
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/routed-agent-smoke
           python aiTemp/codex-router-multiprovider/apply-server.py \
             | tee aiTemp/evidence/routed-provider-server-patch.txt
           python aiTemp/codex-router-multiprovider/fix-fetch-types.py \
             | tee aiTemp/evidence/routed-provider-type-patch.txt
+          python aiTemp/codex-router-multiprovider/fix-agent-smoke.py \
+            | tee aiTemp/evidence/routed-agent-smoke-patch.txt
           grep -F ROUTED_PROVIDER_SERVER_PATCH_OK aiTemp/evidence/routed-provider-server-patch.txt
           grep -F ROUTED_PROVIDER_FETCH_TYPES_PATCH_OK aiTemp/evidence/routed-provider-type-patch.txt
+          grep -F ROUTED_AGENT_SMOKE_DIAGNOSTICS_PATCH_OK aiTemp/evidence/routed-agent-smoke-patch.txt
           test -z "$(git diff --diff-filter=D --name-only)"
           git diff --check
 
@@ -75,6 +81,33 @@ jobs:
             bun run --cwd runtime-web typecheck \
             2>&1 | tee aiTemp/evidence/typecheck.txt
 
+      - name: Install pinned official Codex fixture
+        run: |
+          set -euo pipefail
+          python aiTemp/electron-codex-smoke/install.py \
+            > aiTemp/evidence/codex-path.txt 2> aiTemp/evidence/codex-install.txt
+          codex="$(cat aiTemp/evidence/codex-path.txt)"
+          test -x "$codex"
+          echo "CODEX_SMOKE_BIN=$codex" >> "$GITHUB_ENV"
+          "$codex" --version | tee aiTemp/evidence/codex-version.txt
+          grep -F 'codex-cli 0.154.0' aiTemp/evidence/codex-version.txt
+
+      - name: Prove native root to routed agent-type child without provider inference
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          export CODING_TOOLS_TEMP_ROOT="$PWD/aiTemp/tmp"
+          export CODING_TOOLS_RETENTION_ROOT="$PWD/aiTemp/Trash/routed-agent-smoke"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            CODEX_SMOKE_BIN="$CODEX_SMOKE_BIN" \
+            bun run --cwd runtime-web scripts/smoke-codex-router-agent-types.ts \
+            2>&1 | tee aiTemp/evidence/routed-agent-smoke.txt
+          grep -F CODEX_ROUTER_AGENT_TYPE_SMOKE_OK aiTemp/evidence/routed-agent-smoke.txt
+          grep -F 'commandcode-proxy/claude-sonnet-4-6' aiTemp/evidence/routed-agent-smoke.txt
+          grep -F ROUTED_AGENT_SMOKE_RETAINED aiTemp/evidence/routed-agent-smoke.txt
+          test -z "$(grep -Ei 'api\.openai\.com|chatgpt\.com|platform\.openai\.com' aiTemp/evidence/routed-agent-smoke.txt || true)"
+
       - name: Commit only verified integration files
         run: |
           set -euo pipefail
@@ -85,11 +118,12 @@ jobs:
           git add \
             runtime-web/src/server.ts \
             runtime-web/src/routed-providers.ts \
-            runtime-web/tests/routed-providers.test.ts
+            runtime-web/tests/routed-providers.test.ts \
+            runtime-web/scripts/smoke-codex-router-agent-types.ts
           if ! git diff --cached --quiet; then
             git config user.name 'p90-lover'
             git config user.email '146848721+p90-lover@users.noreply.github.com'
-            git commit -m 'feat: route Codex subagents through local model router'
+            git commit -m 'test: prove routed Codex agent-type lifecycle'
             git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
           fi
 
