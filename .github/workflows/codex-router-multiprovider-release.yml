@@ -14,9 +14,18 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  BUN_VERSION: '1.4.0'
+  NODE_VERSION: '22'
+  RUST_TOOLCHAIN: '1.98.1'
   BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
   PYTHONDONTWRITEBYTECODE: '1'
   RELEASE_VERSION: '0.7.0-rc.1'
+  SOURCE_SHA: ${{ github.sha }}
+  WINDOWS_INSTALLER: Coding.Tools_0.7.0-rc.1_windows_x64_setup.exe
+  TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip
+  TUNNEL_ARCHIVE_SHA256: '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'
+  TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
+  CARGO_TERM_COLOR: always
 
 jobs:
   release-contract:
@@ -32,7 +41,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with:
-          bun-version: '1.4.0'
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Prepare retained work roots
         run: |
@@ -122,6 +131,143 @@ jobs:
         if: always()
         with:
           name: codex-router-release-contract-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-package:
+    name: Windows x64 installer and packaged smoke
+    needs: release-contract
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/Trash/release-0.7.0-rc.1-windows
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Prepare retained package roots and dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            aiTemp/evidence \
+            aiTemp/tmp \
+            aiTemp/Trash/release-0.7.0-rc.1-windows \
+            aiTemp/release-output
+          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          export NODE_OPTIONS="--import=$preload"
+          absolute_tmp="$PWD/aiTemp/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --frozen-lockfile --cwd runtime-web
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --frozen-lockfile --cwd runtime-web/launcher
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --frozen-lockfile --cwd desktop-electron
+
+      - name: Acquire checksum-pinned official tunnel-client archive
+        run: |
+          set -euo pipefail
+          input_dir="aiTemp/input/tunnel-client/v0.0.12/windows-amd64"
+          archive="$input_dir/$TUNNEL_ARCHIVE"
+          partial_archive="$archive.partial"
+          asset_url="$TUNNEL_RELEASE_URL/$TUNNEL_ARCHIVE"
+          test ! -e "$archive"
+          test ! -e "$partial_archive"
+          mkdir -p "$input_dir"
+          command -v curl.exe >/dev/null
+          curl.exe --fail --location --proto '=https' --tlsv1.2 \
+            --retry 5 --retry-all-errors --connect-timeout 30 \
+            --output "$partial_archive" "$asset_url"
+          test -s "$partial_archive"
+          actual_sha256="$(sha256sum "$partial_archive" | awk '{print $1}')"
+          test "$actual_sha256" = "$TUNNEL_ARCHIVE_SHA256"
+          mv --no-clobber "$partial_archive" "$archive"
+          test ! -e "$partial_archive"
+          test -s "$archive"
+          final_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          test "$final_sha256" = "$TUNNEL_ARCHIVE_SHA256"
+          echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$archive" >> "$GITHUB_ENV"
+          printf 'archive=%s\nsha256=%s\nurl=%s\n' \
+            "$archive" "$final_sha256" "$asset_url" \
+            > aiTemp/evidence/tunnel-client-archive.txt
+
+      - name: Build the Rust sidecar and Electron installer
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+            2>&1 | tee aiTemp/evidence/rust-headless-release.txt
+          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron package:win \
+            2>&1 | tee aiTemp/evidence/windows-package.txt
+
+      - name: Verify package contents, identity, and launcher smoke
+        run: |
+          set -euo pipefail
+          mapfile -t package_roots < <(
+            for candidate in desktop-electron/artifacts desktop-electron/release; do
+              test -d "$candidate" && printf '%s\n' "$candidate"
+            done
+          )
+          test "${#package_roots[@]}" -eq 1
+          package_root="${package_roots[0]}"
+          printf '%s\n' "$package_root" > aiTemp/evidence/package-root.txt
+          node desktop-electron/scripts/verify-package.cjs "$package_root" \
+            --source "$SOURCE_SHA" \
+            --json-out aiTemp/evidence/package-verification.json \
+            2>&1 | tee aiTemp/evidence/package-verification.txt
+          test -s aiTemp/evidence/package-verification.json
+          node --test desktop-electron/tests/package-contents.test.cjs \
+            2>&1 | tee aiTemp/evidence/package-contents-tests.txt
+          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron smoke:package \
+            2>&1 | tee aiTemp/evidence/package-smoke.txt
+          mapfile -t installers < <(
+            find "$package_root" -maxdepth 1 -type f -iname '*.exe' -print
+          )
+          test "${#installers[@]}" -eq 1
+          printf '%s\n' "${installers[0]}" > aiTemp/evidence/original-installer-path.txt
+          release_installer="aiTemp/release-output/$WINDOWS_INSTALLER"
+          test ! -e "$release_installer"
+          cp --no-clobber "${installers[0]}" "$release_installer"
+          test -s "$release_installer"
+          sha256sum "$release_installer" > aiTemp/evidence/windows-installer.sha256
+          printf 'source=%s\ninstaller=%s\n' "$SOURCE_SHA" "$WINDOWS_INSTALLER" \
+            > aiTemp/evidence/windows-installer-source.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coding-tools-0.7.0-rc.1-windows-x64-${{ github.sha }}
+          path: aiTemp/release-output/Coding.Tools_0.7.0-rc.1_windows_x64_setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coding-tools-0.7.0-rc.1-windows-evidence-${{ github.sha }}
           path: aiTemp/evidence/
           if-no-files-found: error
           retention-days: 14
