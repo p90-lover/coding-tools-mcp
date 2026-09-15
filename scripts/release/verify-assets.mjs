@@ -76,7 +76,13 @@ export async function verifyReleaseAssets({
 }) {
   const root = path.resolve(directory);
   const directoryEntries = await fs.readdir(root, { withFileTypes: true });
-  const names = directoryEntries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
+  for (const entry of directoryEntries) {
+    const entryPath = path.join(root, entry.name);
+    const metadata = await fs.lstat(entryPath);
+    if (metadata.isSymbolicLink()) fail('ASSET_SYMLINK_FORBIDDEN', entry.name);
+    if (!metadata.isFile()) fail('ASSET_ENTRY_UNSUPPORTED', entry.name);
+  }
+  const names = directoryEntries.map((entry) => entry.name).sort();
   const required = [WINDOWS_INSTALLER, 'SHA256SUMS.txt', 'provenance.json', 'validation-evidence.json'];
   for (const name of required) {
     if (!names.includes(name)) fail('REQUIRED_ASSET_MISSING', name);
