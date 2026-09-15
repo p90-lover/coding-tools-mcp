@@ -15,12 +15,21 @@ def load_module():
     return module
 
 
+EXPECTED_SYNTHETIC_BLOBS = {
+    "ca6aace6e2e7e236ffe18a8b3447f4b6e4d8e168",
+    "79f44f0363fbca255525cbb5efbe3062625cfdfc",
+    "f3137dc08c41bb9d5d4e273aa54b79d2a9d7c355",
+    "a9ba427524ed0dcc9b1934e448533c1101d8feb0",
+}
+
+
 class CredentialHistoryAllowlistTests(unittest.TestCase):
-    def test_accepts_only_the_three_exact_synthetic_openai_fixture_blobs(self):
+    def test_accepts_only_the_exact_synthetic_openai_fixture_blobs(self):
         scanner = load_module()
+        self.assertEqual(set(scanner.KNOWN_SYNTHETIC_FINDINGS), EXPECTED_SYNTHETIC_BLOBS)
         findings = [
             {"blob": blob, "kind": "openai-key"}
-            for blob in sorted(scanner.KNOWN_SYNTHETIC_FINDINGS)
+            for blob in sorted(EXPECTED_SYNTHETIC_BLOBS)
         ]
 
         accepted, unexpected = scanner.partition_findings(findings)
