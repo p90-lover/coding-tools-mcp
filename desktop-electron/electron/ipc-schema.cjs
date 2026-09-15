@@ -3,10 +3,12 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 32;
 const MAX_JSON_ARRAY_ITEMS = 10_000;
 const DISALLOWED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const VALIDATION_ERROR_MARKER = Symbol("coding-tools-ipc-validation-error");
 
 function codedError(code, detail) {
   const error = new Error(`${code}: ${detail}`);
   error.code = code;
+  Object.defineProperty(error, VALIDATION_ERROR_MARKER, { value: true });
   return error;
 }
 
@@ -72,7 +74,11 @@ function snapshotJsonPayload(value, code) {
   try {
     return snapshotJsonValue(value, code);
   } catch (error) {
-    if (error && typeof error === "object" && error.code === code) throw error;
+    if (error instanceof Error
+      && error[VALIDATION_ERROR_MARKER] === true
+      && error.code === code) {
+      throw error;
+    }
     throw codedError(code, "payload could not be read safely");
   }
 }
