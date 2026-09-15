@@ -454,31 +454,43 @@ jobs:
           PYCREDENTIALS
           cat aiTemp/audit-evidence/credential-screen.json
 
-      - name: Audit Rust dependencies against RustSec
+      - name: Audit every Rust release lockfile against RustSec
         run: |
           set -euo pipefail
           cargo install cargo-audit --locked --version 0.22.2 \
             --root "$PWD/aiTemp/audit-tool"
-          aiTemp/audit-tool/bin/cargo-audit audit \
-            --file src-tauri/Cargo.lock \
-            2>&1 | tee aiTemp/audit-evidence/rustsec.txt
-          aiTemp/audit-tool/bin/cargo-audit audit \
-            --file src-tauri/Cargo.lock \
-            --json > aiTemp/audit-evidence/rustsec.json
+          for spec in \
+            tauri:src-tauri/Cargo.lock \
+            core:rust-core/coding-tools-core/Cargo.lock \
+            headless:rust-core/coding-tools-headless/Cargo.lock
+          do
+            name="${spec%%:*}"
+            lockfile="${spec#*:}"
+            aiTemp/audit-tool/bin/cargo-audit audit \
+              --file "$lockfile" \
+              2>&1 | tee "aiTemp/audit-evidence/rustsec-$name.txt"
+            aiTemp/audit-tool/bin/cargo-audit audit \
+              --file "$lockfile" \
+              --json > "aiTemp/audit-evidence/rustsec-$name.json"
+          done
           python - <<'PYAUDIT'
           import json
           import pathlib
 
-          report = json.loads(pathlib.Path('aiTemp/audit-evidence/rustsec.json').read_text())
-          assert not report['vulnerabilities']['found'], 'RustSec vulnerability remains'
-          warnings = report.get('warnings', {})
-          assert not warnings.get('yanked', []), 'A locked crate was yanked'
-          assert all(
-              item['advisory']['id'] == 'RUSTSEC-2024-0429'
-              and item['package']['name'] == 'glib'
-              for item in warnings.get('unsound', [])
-          ), 'Unreviewed soundness warning'
-          print('RustSec vulnerability/yanked gates passed; GLib exclusion is checked in the Windows headless job.')
+          root = pathlib.Path('aiTemp/audit-evidence')
+          reports = sorted(root.glob('rustsec-*.json'))
+          assert len(reports) == 3, f'Expected three RustSec reports, received {len(reports)}'
+          for report_path in reports:
+              report = json.loads(report_path.read_text())
+              assert not report['vulnerabilities']['found'], f'RustSec vulnerability remains in {report_path.name}'
+              warnings = report.get('warnings', {})
+              assert not warnings.get('yanked', []), f'A locked crate was yanked in {report_path.name}'
+              assert all(
+                  item['advisory']['id'] == 'RUSTSEC-2024-0429'
+                  and item['package']['name'] == 'glib'
+                  for item in warnings.get('unsound', [])
+              ), f'Unreviewed soundness warning in {report_path.name}'
+          print('All Rust lockfiles passed vulnerability/yanked gates; GLib exclusion is checked in the Windows headless job.')
           PYAUDIT
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
