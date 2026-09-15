@@ -22,7 +22,7 @@ jobs:
           clean: false
           fetch-depth: 0
 
-      - name: Apply exact job-context repair
+      - name: Apply exact workflow repairs
         shell: bash
         run: |
           set -euo pipefail
@@ -34,7 +34,8 @@ jobs:
           source = workflow.read_text(encoding='utf-8')
           expression_open = '$' + '{{'
           expression_close = '}}'
-          old = (
+
+          old_target = (
               'CARGO_TARGET_DIR: '
               + expression_open
               + ' github.workspace '
@@ -44,7 +45,7 @@ jobs:
               + ' runner.os '
               + expression_close
           )
-          new = (
+          new_target = (
               'CARGO_TARGET_DIR: '
               + expression_open
               + ' github.workspace '
@@ -54,16 +55,33 @@ jobs:
               + ' matrix.os '
               + expression_close
           )
-          count = source.count(old)
-          if count != 1:
-              raise SystemExit(f'EXPECTED_ONE_CARGO_TARGET_MATCH: found {count}')
-          workflow.write_text(source.replace(old, new), encoding='utf-8')
-          if new not in workflow.read_text(encoding='utf-8'):
-              raise SystemExit('MATRIX_CONTEXT_REPAIR_NOT_WRITTEN')
+          if source.count(old_target) != 1:
+              raise SystemExit(f'EXPECTED_ONE_CARGO_TARGET_MATCH: found {source.count(old_target)}')
+          source = source.replace(old_target, new_target)
+
+          old_history = (
+              '          mkdir -p aiTemp/audit-evidence aiTemp/audit-tool\n'
+              "          python - <<'PYCREDENTIALS' > aiTemp/audit-evidence/credential-screen.json\n"
+          )
+          new_history = (
+              '          mkdir -p aiTemp/audit-evidence aiTemp/audit-tool\n'
+              '          git rev-list --objects --all > aiTemp/audit-evidence/reachable-objects.txt\n'
+              '          test -s aiTemp/audit-evidence/reachable-objects.txt\n'
+              "          python - <<'PYCREDENTIALS' > aiTemp/audit-evidence/credential-screen.json\n"
+          )
+          if source.count(old_history) != 1:
+              raise SystemExit(f'EXPECTED_ONE_HISTORY_GATE_MATCH: found {source.count(old_history)}')
+          source = source.replace(old_history, new_history)
+
+          workflow.write_text(source, encoding='utf-8')
+          repaired = workflow.read_text(encoding='utf-8')
+          for required in (new_target, 'git rev-list --objects --all'):
+              if required not in repaired:
+                  raise SystemExit(f'WORKFLOW_REPAIR_NOT_WRITTEN: {required}')
           PY
           git diff --check
           git diff -- .github/workflows/electron-full-harness-ci.yml \
-            | tee aiTemp/evidence/runner-context-fix.diff
+            | tee aiTemp/evidence/full-harness-contract-fix.diff
 
       - name: Validate repaired workflow before commit
         shell: bash
@@ -87,7 +105,7 @@ jobs:
             echo 'REPAIR_PRODUCED_NO_CHANGE' >&2
             exit 1
           }
-          git commit -m 'fix(ci): use matrix context for Rust target directory'
+          git commit -m 'fix(ci): make full-harness gate executable'
           git push origin HEAD:subagent/electron-full-harness-ci-0.6.0-rc.1-20260914
 
       - name: Retain repair evidence
