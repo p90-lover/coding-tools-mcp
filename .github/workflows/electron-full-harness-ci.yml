@@ -355,6 +355,122 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  security_audit:
+    name: Security — reachable history and RustSec
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: source_contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/audit-target
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Screen reachable Git history for credential patterns
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/audit-evidence aiTemp/audit-tool
+          python - <<'PYCREDENTIALS' > aiTemp/audit-evidence/credential-screen.json
+          import json
+          import re
+          import subprocess
+          import sys
+
+          patterns = {
+              'github-token': rb'\bgh[pousr]_[A-Za-z0-9]{36,255}\b',
+              'github-fine-grained-token': rb'\bgithub_pat_[A-Za-z0-9_]{70,255}\b',
+              'private-key-material': rb'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----\s+[A-Za-z0-9+/=\r\n]{100,}-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----',
+              'aws-access-key': rb'\bAKIA[A-Z0-9]{16}\b',
+              'openai-key': rb'\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{40,255}\b',
+          }
+          patterns = {name: re.compile(value) for name, value in patterns.items()}
+          lines = subprocess.check_output(['git', 'rev-list', '--objects', '--all']).splitlines()
+          objects = list(dict.fromkeys(line.split(b' ', 1)[0] for line in lines))
+          process = subprocess.Popen(
+              ['git', 'cat-file', '--batch'],
+              stdin=subprocess.PIPE,
+              stdout=subprocess.PIPE,
+          )
+          findings = []
+          blobs = 0
+          for oid in objects:
+              process.stdin.write(oid + b'\n')
+              process.stdin.flush()
+              header = process.stdout.readline().split()
+              if len(header) != 3:
+                  raise RuntimeError('Git object could not be read')
+              size = int(header[2])
+              content = process.stdout.read(size)
+              if len(content) != size or process.stdout.read(1) != b'\n':
+                  raise RuntimeError('Incomplete Git object')
+              if header[1] != b'blob':
+                  continue
+              blobs += 1
+              for name, pattern in patterns.items():
+                  if pattern.search(content):
+                      findings.append({'blob': oid.decode(), 'kind': name})
+          process.stdin.close()
+          if process.wait() != 0:
+              raise RuntimeError('Git object scan failed')
+          print(json.dumps({
+              'scope': 'reachable Git history; selected high-confidence patterns, not proof that every secret is absent',
+              'objects_scanned': len(objects),
+              'blobs_scanned': blobs,
+              'findings': findings,
+          }, indent=2))
+          sys.exit(1 if findings else 0)
+          PYCREDENTIALS
+          cat aiTemp/audit-evidence/credential-screen.json
+
+      - name: Audit Rust dependencies against RustSec
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked --version 0.22.2 \
+            --root "$PWD/aiTemp/audit-tool"
+          aiTemp/audit-tool/bin/cargo-audit audit \
+            --file src-tauri/Cargo.lock \
+            2>&1 | tee aiTemp/audit-evidence/rustsec.txt
+          aiTemp/audit-tool/bin/cargo-audit audit \
+            --file src-tauri/Cargo.lock \
+            --json > aiTemp/audit-evidence/rustsec.json
+          python - <<'PYAUDIT'
+          import json
+          import pathlib
+
+          report = json.loads(pathlib.Path('aiTemp/audit-evidence/rustsec.json').read_text())
+          assert not report['vulnerabilities']['found'], 'RustSec vulnerability remains'
+          warnings = report.get('warnings', {})
+          assert not warnings.get('yanked', []), 'A locked crate was yanked'
+          assert all(
+              item['advisory']['id'] == 'RUSTSEC-2024-0429'
+              and item['package']['name'] == 'glib'
+              for item in warnings.get('unsound', [])
+          ), 'Unreviewed soundness warning'
+          print('RustSec vulnerability and yanked-crate gates passed.')
+          PYAUDIT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: security-audit-${{ github.sha }}
+          path: aiTemp/source/aiTemp/audit-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
   windows_installer:
     name: Windows x64 installer and packaged smoke
     if: ${{ github.event_name != 'pull_request' }}
@@ -478,6 +594,7 @@ jobs:
       - source_contract
       - electron_runtime
       - rust_compatibility
+      - security_audit
       - windows_installer
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -487,6 +604,7 @@ jobs:
           SOURCE_RESULT: ${{ needs.source_contract.result }}
           ELECTRON_RESULT: ${{ needs.electron_runtime.result }}
           RUST_RESULT: ${{ needs.rust_compatibility.result }}
+          SECURITY_RESULT: ${{ needs.security_audit.result }}
           INSTALLER_RESULT: ${{ needs.windows_installer.result }}
         run: |
           set -euo pipefail
@@ -494,6 +612,7 @@ jobs:
             "$SOURCE_RESULT" \
             "$ELECTRON_RESULT" \
             "$RUST_RESULT" \
+            "$SECURITY_RESULT" \
             "$INSTALLER_RESULT"
           do
             test "$result" = success
