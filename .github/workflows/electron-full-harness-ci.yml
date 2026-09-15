@@ -295,7 +295,7 @@ jobs:
         shell: bash
         working-directory: aiTemp/source
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-${{ runner.os }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-${{ matrix.os }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -405,6 +405,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/audit-evidence aiTemp/audit-tool
+          git rev-list --objects --all > aiTemp/audit-evidence/reachable-objects.txt
+          test -s aiTemp/audit-evidence/reachable-objects.txt
           python - <<'PYCREDENTIALS' > aiTemp/audit-evidence/credential-screen.json
           import json
           import re
