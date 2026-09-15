@@ -21,7 +21,7 @@ env:
 jobs:
   release-contract:
     runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -48,16 +48,23 @@ jobs:
           test -z "$(git diff --diff-filter=D --name-only)"
           git diff --check
 
-      - name: Install runtime dependencies
+      - name: Install focused runtime and desktop dependencies
         run: |
           set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun install --cwd runtime-web --frozen-lockfile \
             2>&1 | tee aiTemp/evidence/runtime-install.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/desktop-install.txt
 
       - name: Run release identity contract
         run: |
           set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun test --cwd runtime-web tests/runtime-bundle-version.test.ts \
             2>&1 | tee aiTemp/evidence/release-identity-test.txt
@@ -65,6 +72,18 @@ jobs:
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun run --cwd runtime-web typecheck \
             2>&1 | tee aiTemp/evidence/runtime-typecheck.txt
+          node --test \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/packaging-contract.test.cjs \
+            desktop-electron/tests/prepare-runtime.test.cjs \
+            2>&1 | tee aiTemp/evidence/desktop-release-tests.txt
+          grep -E '^# pass [1-9][0-9]*$' aiTemp/evidence/desktop-release-tests.txt
+          grep -F '# fail 0' aiTemp/evidence/desktop-release-tests.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
           node --input-type=module <<'NODE' | tee aiTemp/evidence/desktop-release-version.txt
           import fs from 'node:fs';
           const desktop = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
@@ -83,14 +102,20 @@ jobs:
           test "$remote_head" = "$GITHUB_SHA"
           git add \
             desktop-electron/package.json \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/scripts/prepare-package-resources.cjs \
             desktop-electron/scripts/runtime-preparation.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
             runtime-web/scripts/build-runtime-bundle.ts \
             runtime-web/src/runtime-bundle-version.ts \
             runtime-web/tests/runtime-bundle-version.test.ts
           if ! git diff --cached --quiet; then
             git config user.name 'p90-lover'
             git config user.email '146848721+p90-lover@users.noreply.github.com'
-            git commit -m 'build: align Coding Tools 0.7 runtime identity'
+            git commit -m 'build: align Coding Tools 0.7 package identity'
             git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
           fi
 
