@@ -20,32 +20,31 @@ test('verified release validates the exact tagged checkout with the shared check
   );
 });
 
-test('legacy manual macOS publication is retired globally before stable tagging', () => {
+test('legacy manual macOS publication is retired or proven unregistered before stable tagging', () => {
   const legacy = read('.github/workflows/macos-release.yml');
   assert.doesNotMatch(legacy, /workflow_dispatch/);
   assert.doesNotMatch(legacy, /gh release upload/);
 
+  const helperPath = 'scripts/retire_legacy_macos_workflow.py';
+  const helper = read(helperPath);
+  assert.ok(helper.includes('.github/workflows/macos-release.yml'));
+  assert.ok(helper.includes('actions/workflows?per_page=100&page='));
+  assert.ok(helper.includes('/disable'));
+  assert.ok(helper.includes('disabled_manually'));
+  assert.ok(helper.includes('HTTPStatus.NOT_FOUND'));
+  assert.ok(helper.includes('unregistered'));
+
+  const command = `python ${helperPath}`;
   const preparation = read('.github/workflows/prepare-stable-release.yml');
   const promotion = read('.github/workflows/promote-stable-release.yml');
-  const list = 'actions/workflows?per_page=100';
-  const disable = 'actions/workflows/$workflow_id/disable';
   const tag = 'git tag -a "$TAG"';
   for (const workflow of [preparation, promotion]) {
     assert.ok(workflow.includes('actions: write'));
-    assert.ok(workflow.includes('--paginate'));
-    assert.ok(workflow.includes(list));
-    assert.ok(workflow.includes('.github/workflows/macos-release.yml'));
-    assert.ok(workflow.includes('workflow_id'));
-    assert.ok(workflow.includes(disable), 'workflow must disable the resolved numeric workflow ID');
-    assert.ok(workflow.includes('disabled_manually'), 'workflow must verify global disabled state');
-    assert.ok(
-      workflow.indexOf(list) < workflow.indexOf(disable),
-      'workflow ID resolution must happen before the disable request',
-    );
+    assert.ok(workflow.includes(command), 'both release lanes must use the same retirement helper');
   }
   assert.ok(
-    promotion.indexOf(disable) < promotion.indexOf(tag),
-    'the legacy publisher must be disabled before a stable tag can be created',
+    promotion.indexOf(command) < promotion.indexOf(tag),
+    'the legacy publisher must be retired or proven unregistered before a stable tag can be created',
   );
 });
 
