@@ -5,8 +5,11 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 
+const repoRoot = path.resolve(__dirname, "..", "..");
+
 function uniqueRoot() {
-  return path.resolve(
+  return path.join(
+    repoRoot,
     "aiTemp",
     "no-delete-preload-test",
     `${process.platform}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -16,7 +19,8 @@ function uniqueRoot() {
 test("no-delete preload starts on supported Node and retains unlink targets", () => {
   const root = uniqueRoot();
   const sourceRoot = path.join(root, "source");
-  const retainedRoot = path.resolve(
+  const retainedRoot = path.join(
+    repoRoot,
     "aiTemp",
     "Trash",
     "no-delete-preload-test",
@@ -28,7 +32,12 @@ test("no-delete preload starts on supported Node and retains unlink targets", ()
   fs.mkdirSync(sourceRoot, { recursive: true });
   fs.writeFileSync(target, original, "utf8");
 
-  const preload = path.resolve("runtime-web", "scripts", "no-delete-preload.mjs");
+  const preload = path.join(
+    repoRoot,
+    "runtime-web",
+    "scripts",
+    "no-delete-preload.mjs",
+  );
   const child = spawnSync(
     process.execPath,
     [
@@ -39,7 +48,7 @@ test("no-delete preload starts on supported Node and retains unlink targets", ()
       target,
     ],
     {
-      cwd: process.cwd(),
+      cwd: repoRoot,
       env: {
         ...process.env,
         CODING_TOOLS_RETENTION_ROOT: retainedRoot,
