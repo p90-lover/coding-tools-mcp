@@ -1,0 +1,38 @@
+name: Inventory v0.6 stable alignment
+
+on:
+  push:
+    branches:
+      - release/v0.6.0
+    paths:
+      - .github/workflows/v060-stable-inventory.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Inventory release-candidate identity references
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/v060-stable-inventory
+          git grep -n -I -e '0\.6\.0-rc\.1' -e 'v0\.6\.0-rc\.1' \
+            > aiTemp/v060-stable-inventory/references.txt || true
+          cat aiTemp/v060-stable-inventory/references.txt
+          test -s aiTemp/v060-stable-inventory/references.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: v060-stable-inventory-${{ github.sha }}
+          path: aiTemp/v060-stable-inventory/
+          if-no-files-found: error
+          retention-days: 14
