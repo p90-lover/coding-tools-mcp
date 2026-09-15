@@ -6,7 +6,7 @@
   import { translated as t } from '$lib/control-center/model';
   type Thread = { id: string; status: string; turn_id?: string | null };
   type Snapshot = { connected: boolean; model_usage_enabled: boolean; command_execution_enabled?: boolean; command_runtime_sha256?: string | null; model?: string;
-    requests_used?: number; request_limit?: number; seconds_remaining?: number;
+    requests_used?: number; request_limit?: number | null; request_limit_unbounded?: boolean; seconds_remaining?: number | null; lifetime_unbounded?: boolean;
     stop_reason?: string | null; native_identity?: string; threads?: Thread[] };
   type Answer = Thread & { answer: string; answer_truncated: boolean; notice?: string | null };
   let workspaceId = $state('');
@@ -18,8 +18,8 @@
   let commandConsent = $state(false);
   let commandArgs = $state('["cmd.exe", "/d", "/c", "echo Ready"]');
   let commandResult = $state('');
-  let requestLimit = $state(4);
-  let lifetime = $state(300);
+  let requestLimit = $state(0);
+  let lifetime = $state(0);
   let snapshot = $state<Snapshot | null>(null);
   let selectedThread = $state('');
   let answer = $state<Answer | null>(null);
@@ -57,6 +57,10 @@
   }
   async function connect() {
     if (busy || !workspaceId) return;
+    if (!Number.isInteger(lifetime) || lifetime < 0 || lifetime > 900 || (lifetime > 0 && lifetime < 30)) {
+      error = t($locale, 'Consent lifetime must be 0 or 30–900 seconds.', '授權有效期必須為 0 或 30–900 秒。');
+      return;
+    }
     busy = true; error = '';
     const id = workspaceId, generation = selectionGeneration;
     try {
@@ -88,7 +92,10 @@
       const result = await invoke<{ ok: boolean; thread_id?: string; error?: unknown }>('codex_local_control', { workspaceId: id, args });
       if (disposed || generation !== selectionGeneration) return;
       if (!result.ok) throw new Error(typeof result.error === 'string' ? result.error : JSON.stringify(result.error ?? result));
-      if (result.thread_id) selectedThread = result.thread_id;
+      if (operation === 'close') {
+        selectedThread = '';
+        answer = null;
+      } else if (result.thread_id) selectedThread = result.thread_id;
       prompt = '';
       await refresh();
     } catch (e) {
@@ -137,10 +144,10 @@
       <label>SHA-256<input bind:value={sha256} autocomplete="off" spellcheck="false" pattern="[a-fA-F0-9]{64}" required disabled={busy || !!snapshot?.connected}/></label>
       <label>{t($locale, 'Dedicated Codex home outside the workspace', '工作區以外的專用 Codex 主目錄')}<input bind:value={codexHome} autocomplete="off" spellcheck="false" required disabled={busy || !!snapshot?.connected}/></label>
       <label>{t($locale, 'Model ID from your native provider configuration', '原生供應商設定中的模型 ID')}<input bind:value={model} autocomplete="off" spellcheck="false" required={consent} disabled={busy || !!snapshot?.connected}/></label>
-      <label>{t($locale, 'Model-request limit (not token/cost limit)', '模型請求上限（並非 Token／費用上限）')}<input type="number" bind:value={requestLimit} min="1" max="20" required disabled={busy || !!snapshot?.connected}/></label>
-      <label>{t($locale, 'Consent lifetime in seconds', '授權有效秒數')}<input type="number" bind:value={lifetime} min="30" max="900" required disabled={busy || !!snapshot?.connected}/></label>
+      <label>{t($locale, 'Model-request limit · 0 = no app-side ceiling', '模型請求上限 · 0 = 應用程式不設上限')}<input type="number" bind:value={requestLimit} min="0" max="20" required disabled={busy || !!snapshot?.connected}/></label>
+      <label>{t($locale, 'Consent lifetime seconds · 0 = until disconnect', '授權有效秒數 · 0 = 直到斷線')}<input type="number" bind:value={lifetime} min="0" max="900" required disabled={busy || !!snapshot?.connected}/></label>
     </div>
-    <label class="native-consent"><input type="checkbox" bind:checked={consent} disabled={busy || !!snapshot?.connected}/><span>{t($locale, 'I authorize native model usage for this connection. Commands have a separate checkbox; leaving this unchecked prohibits model turns.', '我授權這次連接使用原生模型；命令有獨立勾選框；此處未勾選會禁止模型回合。')}</span></label>
+    <label class="native-consent"><input type="checkbox" bind:checked={consent} disabled={busy || !!snapshot?.connected}/><span>{t($locale, 'I authorize native model usage for this connection. Commands have a separate checkbox; leaving this unchecked prohibits model turns. A zero request/lifetime field removes only this app’s ceiling; provider quotas and local Stop still apply.', '我授權這次連接使用原生模型；命令有獨立勾選框；此處未勾選會禁止模型回合。請求／期限填 0 只代表本程式不設上限；供應商配額及本機停止仍然生效。')}</span></label>
     <label class="native-consent"><input type="checkbox" bind:checked={commandConsent} disabled={busy || !!snapshot?.connected}/><span>{t($locale, 'Allow standalone read-only commands without model usage. Read-only may read outside the workspace; only use trusted commands.', '允許不呼叫模型的獨立唯讀命令。唯讀仍可能讀取工作區外的資料，只應執行可信命令。')}</span></label>
     <p class="cc-help">{t($locale,
       'Select a trusted native binary, not a shell wrapper. Sign in to the dedicated home separately; no credentials are copied or requested here. Native configuration, logs and provider retention are outside the bridge’s RAM-only response handling. Read-only policy is requested, not an independently verified OS sandbox. Permission changes revoke this connection.',
@@ -158,7 +165,7 @@
     </section>
   {/if}
   {#if snapshot}
-    <p class="native-status" role="status">{snapshot.connected ? t($locale, 'Connected', '已連接') : t($locale, 'Not connected', '未連接')} · {snapshot.requests_used ?? 0}/{snapshot.request_limit ?? requestLimit} · {snapshot.seconds_remaining ?? 0}s · {snapshot.stop_reason ?? snapshot.native_identity ?? ''}</p>
+    <p class="native-status" role="status">{snapshot.connected ? t($locale, 'Connected', '已連接') : t($locale, 'Not connected', '未連接')} · {snapshot.requests_used ?? 0}/{snapshot.request_limit_unbounded ? '∞' : (snapshot.request_limit ?? requestLimit)} · {snapshot.lifetime_unbounded ? t($locale, 'until disconnect', '直到斷線') : `${snapshot.seconds_remaining ?? 0}s`} · {snapshot.stop_reason ?? snapshot.native_identity ?? ''}</p>
     <div class="cc-form">
       <label>{t($locale, 'Owned native thread', '此連接擁有的原生會話')}<select bind:value={selectedThread} onchange={() => { answer = null; void refresh(); }} disabled={busy}><option value="">{t($locale, 'New thread', '新會話')}</option>{#each snapshot.threads ?? [] as thread}<option value={thread.id}>{thread.id} · {thread.status}</option>{/each}</select></label>
       <label>{t($locale, 'Task or review instructions', '任務或審查指示')}<textarea bind:value={prompt} maxlength="16000" rows="4" disabled={busy || !snapshot.connected}></textarea></label>
