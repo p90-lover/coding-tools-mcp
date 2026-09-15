@@ -217,7 +217,7 @@ test("rejects a packaged component changed after the package manifest was writte
 });
 
 test("rejects credential-like files and never reports their contents", () => {
-  const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+  const secret = ["sk", "proj", "abcdefghijklmnopqrstuvwxyz0123456789"].join("-");
   const { appRoot } = createPackageFixture("secret", ({ resourcesRoot }) => {
     writeFile(path.join(resourcesRoot, "coding-tools", ".env.production"), `OPENAI_API_KEY=${secret}\n`);
   });
