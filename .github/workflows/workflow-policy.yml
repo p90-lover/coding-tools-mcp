@@ -6,6 +6,7 @@ on:
     branches:
       - subagent/electron-full-harness-ci-0.6.0-rc.1-20260914
     paths:
+      - .github/workflows/branch-ci-env-repair.yml
       - .github/workflows/electron-full-harness-ci.yml
       - .github/workflows/workflow-policy.yml
       - tests/electron-full-harness-ci.test.mjs
@@ -43,6 +44,7 @@ jobs:
           go version | tee aiTemp/evidence/go-version.txt
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 \
             -format '{{json .}}' \
+            .github/workflows/branch-ci-env-repair.yml \
             .github/workflows/electron-full-harness-ci.yml \
             2>&1 | tee aiTemp/evidence/actionlint.jsonl
           node --test tests/electron-full-harness-ci.test.mjs \
