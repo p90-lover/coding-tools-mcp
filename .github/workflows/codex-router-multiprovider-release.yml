@@ -145,6 +145,7 @@ jobs:
     timeout-minutes: 75
     env:
       CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/Trash/release-0.7.0-rc.1-windows
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/cache/electron-builder
     defaults:
       run:
         shell: bash
@@ -172,11 +173,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p \
+            aiTemp/cache/electron-builder \
             aiTemp/evidence \
             aiTemp/tmp \
             aiTemp/Trash/release-0.7.0-rc.1-windows \
             aiTemp/release-output
-          printf 'source=%s\nrunner=%s\n' "$SOURCE_SHA" "$RUNNER_OS" \
+          test -d aiTemp/cache/electron-builder
+          printf 'source=%s\nrunner=%s\nelectron_builder_cache=%s\n' \
+            "$SOURCE_SHA" "$RUNNER_OS" "$ELECTRON_BUILDER_CACHE" \
             > aiTemp/evidence/windows-run-identity.txt
           preload="$(node -e 'const {pathToFileURL}=require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href)' "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
           export NODE_OPTIONS="--import=$preload"
