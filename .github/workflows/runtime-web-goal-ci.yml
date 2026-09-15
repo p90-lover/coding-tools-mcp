@@ -6,8 +6,10 @@ on:
     paths:
       - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
       - "aiTemp/codex-web-send-latency/apply-send-readiness-fast-path.py"
+      - "aiTemp/codex-web-effort-latency/apply-effort-readiness-fast-path.py"
       - ".github/workflows/codex-web-goal-latency-apply.yml"
       - ".github/workflows/codex-web-send-latency-apply.yml"
+      - ".github/workflows/codex-web-effort-latency-apply.yml"
       - "runtime-web/src/adapters/chatgpt-web/browser-worker.ts"
       - "runtime-web/src/http-body.ts"
       - "runtime-web/src/native-passthrough.ts"
@@ -23,8 +25,10 @@ on:
     paths:
       - "aiTemp/codex-web-goal-latency/apply-request-body-fast-path.py"
       - "aiTemp/codex-web-send-latency/apply-send-readiness-fast-path.py"
+      - "aiTemp/codex-web-effort-latency/apply-effort-readiness-fast-path.py"
       - ".github/workflows/codex-web-goal-latency-apply.yml"
       - ".github/workflows/codex-web-send-latency-apply.yml"
+      - ".github/workflows/codex-web-effort-latency-apply.yml"
       - "runtime-web/src/adapters/chatgpt-web/browser-worker.ts"
       - "runtime-web/src/http-body.ts"
       - "runtime-web/src/native-passthrough.ts"
