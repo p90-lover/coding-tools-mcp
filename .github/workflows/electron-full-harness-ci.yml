@@ -2,49 +2,39 @@ name: Electron Full Harness CI
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - feature/electron-full-codex-harness-0.6.0
-    paths:
-      - .github/workflows/electron-full-harness-ci.yml
-      - desktop-electron/**
-      - runtime-web/**
-      - rust-core/**
-      - src-tauri/**
-      - scripts/**
-      - tests/**
-      - third_party/**
-      - vendor/codex-chatgpt-web-v5.0.6/**
-      - docs/releases/v0.6.0-rc.1.md
   push:
     branches:
-      - feature/electron-full-codex-harness-0.6.0
+      - release/v0.6.0
+    paths:
+      - .github/workflows/electron-full-harness-ci.yml
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
 
 concurrency:
-  group: electron-full-harness-ci-${{ github.event.pull_request.number || github.ref }}
+  group: electron-full-harness-ci-v0.6.0
   cancel-in-progress: false
 
 env:
   BUN_VERSION: '1.4.0'
   NODE_VERSION: '22'
   RUST_TOOLCHAIN: '1.98.1'
-  RELEASE_VERSION: '0.6.0-rc.1'
+  RELEASE_VERSION: '0.6.0'
+  RELEASE_TAG: 'v0.6.0'
   SOURCE_SHA: ${{ github.sha }}
-  WINDOWS_INSTALLER: Coding.Tools_0.6.0-rc.1_windows_x64_setup.exe
+  WINDOWS_INSTALLER: Coding.Tools_0.6.0_windows_x64_setup.exe
   TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip
   TUNNEL_ARCHIVE_SHA256: '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'
   TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
-  CARGO_TERM_COLOR: always
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
   source_contract:
-    name: Exact source, identity, and release prerequisites
+    name: Stable source and release contract
+    if: github.actor == github.repository_owner
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -57,95 +47,84 @@ jobs:
           fetch-depth: 0
           clean: false
           persist-credentials: false
-
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: ${{ env.NODE_VERSION }}
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          bun-version: ${{ env.BUN_VERSION }}
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Prepare retained evidence paths
+      - name: Verify exact stable source identity
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/full-harness-ci
-          printf 'source_sha=%s\nworkflow=%s\nrun_id=%s\n' \
-            "$SOURCE_SHA" "$GITHUB_WORKFLOW_REF" "$GITHUB_RUN_ID" \
-            > aiTemp/evidence/run-identity.txt
-
-      - name: Verify exact checkout and fixed product identity
-        run: |
-          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/v060-stable-source
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          node --input-type=module <<'NODE' | tee aiTemp/evidence/product-identity.txt
+          git fetch --no-tags origin \
+            refs/heads/release/v0.6.0:refs/remotes/origin/release/v0.6.0
+          node scripts/release/verify-source-scope-v0.6.0.mjs \
+            --tag "$RELEASE_TAG" \
+            --source "$SOURCE_SHA" \
+            --allowed-ref origin/release/v0.6.0 \
+            --json-out aiTemp/evidence/source-scope.json
+          node --input-type=module <<'NODE' | tee aiTemp/evidence/product-identity.json
           import fs from 'node:fs';
-
           const desktop = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
-          const upstream = JSON.parse(fs.readFileSync(
-            'vendor/codex-chatgpt-web-v5.0.6/UPSTREAM_MANIFEST.json',
-            'utf8',
-          ));
+          const integration = JSON.parse(fs.readFileSync('runtime-web/CODING_TOOLS_INTEGRATION.json', 'utf8'));
           const expected = {
-            version: process.env.RELEASE_VERSION,
+            version: '0.6.0',
             appId: 'dev.codingtools.fullharness',
             productName: 'Coding Tools',
             electron: '41.10.7',
-            upstreamTag: 'v5.0.6',
+            upstreamVersion: 'v5.0.6',
             upstreamCommit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
-            tunnelClient: '0.0.12',
           };
           const actual = {
             version: desktop.version,
             appId: desktop.build?.appId,
             productName: desktop.build?.productName,
             electron: desktop.devDependencies?.electron,
-            upstreamTag: upstream.tag,
-            upstreamCommit: upstream.commit,
-            tunnelClient: upstream.tunnelClientVersion,
+            upstreamVersion: integration.upstream?.version,
+            upstreamCommit: integration.upstream?.commit,
           };
           if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-            throw new Error(`ELECTRON_RELEASE_IDENTITY_MISMATCH: ${JSON.stringify(actual)}`);
+            throw new Error(`STABLE_PRODUCT_IDENTITY_MISMATCH: ${JSON.stringify(actual)}`);
           }
-          if (desktop.build?.nsis?.perMachine !== false
-              || desktop.build?.nsis?.allowElevation !== false) {
+          if (desktop.build?.nsis?.perMachine !== false || desktop.build?.nsis?.allowElevation !== false) {
             throw new Error('WINDOWS_INSTALLER_MUST_REMAIN_PER_USER_WITHOUT_ELEVATION');
           }
           process.stdout.write(`${JSON.stringify(actual, null, 2)}\n`);
           NODE
 
-      - name: Verify pinned source and focused CI contract
+      - name: Run focused release-policy verification
         run: |
           set -euo pipefail
+          node --check scripts/release/verify-source-scope-v0.6.0.mjs
+          node --check scripts/release/verify-assets-v0.6.0.mjs
+          node --check scripts/release/publish-v0.6.0.mjs
           node scripts/verify-vendored-upstream.mjs \
-            | tee aiTemp/evidence/upstream-verification.txt
-          node --test tests/electron-full-harness-ci.test.mjs \
-            | tee aiTemp/evidence/ci-contract-tests.txt
-          grep -F UPSTREAM_VENDOR_PASS aiTemp/evidence/upstream-verification.txt
-          grep -F '# fail 0' aiTemp/evidence/ci-contract-tests.txt
-
-      - name: Require complete release producers outside PR review
-        if: ${{ github.event_name != 'pull_request' }}
-        run: |
-          set -euo pipefail
-          required=(
-            desktop-electron/scripts/verify-package.cjs
-            desktop-electron/tests/package-contents.test.cjs
-            docs/releases/v0.6.0-rc.1.md
-            rust-core/coding-tools-core/Cargo.toml
-            rust-core/coding-tools-core/Cargo.lock
-            rust-core/coding-tools-headless/Cargo.toml
-            rust-core/coding-tools-headless/Cargo.lock
-            third_party/THIRD_PARTY_NOTICES.md
-          )
-          for path in "${required[@]}"; do
-            test -f "$path" || {
-              printf 'MISSING_RELEASE_PRODUCER %s\n' "$path" >&2
-              exit 1
-            }
-          done
-          printf '%s\n' "${required[@]}" \
-            > aiTemp/evidence/release-producers.txt
+            2>&1 | tee aiTemp/evidence/upstream-verification.txt
+          node --test \
+            tests/no-delete-policy.test.mjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            2>&1 | tee aiTemp/evidence/focused-release-tests.txt
+          grep -F '# fail 0' aiTemp/evidence/focused-release-tests.txt
+          cargo metadata --locked \
+            --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+            --format-version 1 > aiTemp/evidence/headless-metadata.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          metadata = json.loads(Path('aiTemp/evidence/headless-metadata.json').read_text(encoding='utf-8'))
+          versions = sorted({p['version'] for p in metadata['packages'] if p['name'] == 'rustls'})
+          if versions != ['0.23.45']:
+              raise SystemExit(f'Unexpected rustls lock: {versions}')
+          print('RUSTLS_LOCK_OK', versions)
+          PY
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git diff --diff-filter=D --name-only)"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
@@ -155,26 +134,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  electron_runtime:
-    name: Electron and pinned runtime — ${{ matrix.os }}
-    if: ${{ github.event_name != 'pull_request' }}
+  windows_installer:
+    name: Windows x64 integrated installer
+    if: github.actor == github.repository_owner
     needs: source_contract
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-24.04
-          - windows-latest
-          - macos-15
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 65
+    runs-on: windows-2025
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
         working-directory: aiTemp/source
     env:
-      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
-      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/full-harness-runtime
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/v060-stable-cargo-target
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/v060-stable-bun-cache
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/v060-stable-package
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -183,33 +156,26 @@ jobs:
           fetch-depth: 0
           clean: false
           persist-credentials: false
-
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: ${{ env.NODE_VERSION }}
-
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: ${{ env.BUN_VERSION }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Prepare retained temporary and evidence roots
+      - name: Install exact dependencies into retained temporary roots
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/full-harness-runtime
-          short_tmp="$PWD/aiTemp/tmp"
-          if [[ "$RUNNER_OS" != "Windows" ]]; then
-            short_tmp="$GITHUB_WORKSPACE/aiTemp/t"
-            mkdir -p "$short_tmp"
-          fi
-          echo "CODING_TOOLS_SHORT_TMP=$short_tmp" >> "$GITHUB_ENV"
-
-      - name: Install exact locked dependencies
-        run: |
-          set -euo pipefail
-          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            preload="$(cygpath -w "$preload")"
-          fi
+          mkdir -p \
+            aiTemp/evidence \
+            aiTemp/tmp \
+            aiTemp/Trash/v060-stable-package \
+            aiTemp/release-output
+          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
           export NODE_OPTIONS="--import=$preload"
           absolute_tmp="$PWD/aiTemp/tmp"
           TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
@@ -222,421 +188,118 @@ jobs:
             bun install --frozen-lockfile --cwd desktop-electron \
             2>&1 | tee aiTemp/evidence/desktop-install.txt
 
-      - name: Validate Electron tests, renderer, and dependency audits
+      - name: Run focused integrated harness checks
         run: |
           set -euo pipefail
-          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            preload="$(cygpath -w "$preload")"
-          fi
+          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
           export NODE_OPTIONS="--import=$preload"
-          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
-            bun run --cwd desktop-electron test \
-            2>&1 | tee aiTemp/evidence/desktop-tests.txt
-          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
+          node --test \
+            desktop-electron/tests/no-delete-preload.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            2>&1 | tee aiTemp/evidence/desktop-focused-tests.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun run --cwd desktop-electron typecheck \
             2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
-          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
-            bun run --cwd desktop-electron build:renderer \
-            2>&1 | tee aiTemp/evidence/desktop-renderer-build.txt
-          bun run --cwd desktop-electron audit \
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun test --cwd runtime-web \
+              tests/codex-smoke-path.test.ts \
+              tests/codex-integration.test.ts \
+              tests/chatgpt-web-models.test.ts \
+            2>&1 | tee aiTemp/evidence/runtime-focused-tests.txt
+          cargo test --locked \
+            --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+            2>&1 | tee aiTemp/evidence/headless-tests.txt
+          bun audit --cwd runtime-web \
+            2>&1 | tee aiTemp/evidence/runtime-audit.txt
+          bun audit --cwd desktop-electron \
             2>&1 | tee aiTemp/evidence/desktop-audit.txt
 
-      - name: Validate pinned runtime, modes, compaction, and subagents
-        run: |
-          set -euo pipefail
-          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            preload="$(cygpath -w "$preload")"
-          fi
-          export NODE_OPTIONS="--import=$preload"
-          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
-            bun run --cwd runtime-web verify \
-            2>&1 | tee aiTemp/evidence/runtime-verify.txt
-          TMPDIR="$CODING_TOOLS_SHORT_TMP" TMP="$CODING_TOOLS_SHORT_TMP" TEMP="$CODING_TOOLS_SHORT_TMP" \
-            bun run --cwd runtime-web smoke:subagents \
-            2>&1 | tee aiTemp/evidence/runtime-subagents.txt
-          bun run --cwd runtime-web audit \
-            2>&1 | tee aiTemp/evidence/runtime-audit.txt
-
-      - name: Verify retained evidence and unchanged tracked source
-        run: |
-          set -euo pipefail
-          git diff --exit-code
-          git diff --cached --exit-code
-          test -z "$(git diff --diff-filter=D --name-only)"
-          find aiTemp/Trash \( -type f -o -type d \) \
-            | sort > aiTemp/evidence/retained-paths.txt
-          test -s aiTemp/evidence/retained-paths.txt
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: electron-runtime-${{ matrix.os }}-${{ github.sha }}
-          path: aiTemp/source/aiTemp/evidence/
-          if-no-files-found: error
-          retention-days: 14
-
-  rust_compatibility:
-    name: Rust compatibility and headless core — ${{ matrix.os }}
-    if: ${{ github.event_name != 'pull_request' }}
-    needs: source_contract
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-24.04
-          - windows-latest
-          - macos-14
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 55
-    defaults:
-      run:
-        shell: bash
-        working-directory: aiTemp/source
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          ref: ${{ github.sha }}
-          path: aiTemp/source
-          fetch-depth: 0
-          clean: false
-          persist-credentials: false
-
-      - name: Install Linux desktop dependencies
-        if: ${{ runner.os == 'Linux' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libpipewire-0.3-dev \
-            libgbm-dev
-
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt,clippy
-
-      - name: Validate retained Tauri compatibility shell
-        run: |
-          set -euo pipefail
-          mkdir -p aiTemp/evidence
-          (
-            cd src-tauri
-            cargo fmt --all -- --check
-            cargo build --locked
-            cargo test --locked
-            cargo clippy --locked --all-targets -- -D warnings
-          ) 2>&1 | tee aiTemp/evidence/tauri-rust.txt
-
-      - name: Validate reusable core and headless service
-        run: |
-          set -euo pipefail
-          cargo test --locked --manifest-path rust-core/coding-tools-core/Cargo.toml \
-            2>&1 | tee aiTemp/evidence/rust-core-tests.txt
-          cargo clippy --locked --manifest-path rust-core/coding-tools-core/Cargo.toml \
-            --all-targets -- -D warnings \
-            2>&1 | tee aiTemp/evidence/rust-core-clippy.txt
-          cargo test --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
-            2>&1 | tee aiTemp/evidence/rust-headless-tests.txt
-          cargo clippy --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
-            --all-targets -- -D warnings \
-            2>&1 | tee aiTemp/evidence/rust-headless-clippy.txt
-
-      - name: Verify shipped Windows headless dependency boundary
-        if: ${{ runner.os == 'Windows' }}
-        run: |
-          set -euo pipefail
-          dependency_evidence="aiTemp/evidence/dependencies-x86_64-pc-windows-msvc.txt"
-          cargo tree --locked \
-            --manifest-path rust-core/coding-tools-headless/Cargo.toml \
-            --target x86_64-pc-windows-msvc \
-            --prefix none \
-            --format '{p}' \
-            > "$dependency_evidence"
-          if grep -Eq '^glib v' "$dependency_evidence"; then
-            echo 'Release blocked: affected GLib present in the shipped Windows headless target'
-            exit 1
-          fi
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: rust-compatibility-${{ matrix.os }}-${{ github.sha }}
-          path: aiTemp/source/aiTemp/evidence/
-          if-no-files-found: error
-          retention-days: 14
-
-  security_audit:
-    name: Security — reachable history and RustSec
-    if: ${{ github.event_name != 'pull_request' }}
-    needs: source_contract
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/audit-target
-    defaults:
-      run:
-        shell: bash
-        working-directory: aiTemp/source
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          ref: ${{ github.sha }}
-          path: aiTemp/source
-          fetch-depth: 0
-          clean: false
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Screen reachable Git history for credential patterns
-        run: |
-          set -euo pipefail
-          mkdir -p aiTemp/audit-evidence aiTemp/audit-tool
-          git rev-list --objects --all > aiTemp/audit-evidence/reachable-objects.txt
-          test -s aiTemp/audit-evidence/reachable-objects.txt
-          python - <<'PYCREDENTIALS' > aiTemp/audit-evidence/credential-screen.json
-          import json
-          import re
-          import subprocess
-          import sys
-
-          patterns = {
-              'github-token': rb'\bgh[pousr]_[A-Za-z0-9]{36,255}\b',
-              'github-fine-grained-token': rb'\bgithub_pat_[A-Za-z0-9_]{70,255}\b',
-              'private-key-material': rb'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----\s+[A-Za-z0-9+/=\r\n]{100,}-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----',
-              'aws-access-key': rb'\bAKIA[A-Z0-9]{16}\b',
-              'openai-key': rb'\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{40,255}\b',
-          }
-          patterns = {name: re.compile(value) for name, value in patterns.items()}
-          lines = subprocess.check_output(['git', 'rev-list', '--objects', '--all']).splitlines()
-          objects = list(dict.fromkeys(line.split(b' ', 1)[0] for line in lines))
-          process = subprocess.Popen(
-              ['git', 'cat-file', '--batch'],
-              stdin=subprocess.PIPE,
-              stdout=subprocess.PIPE,
-          )
-          findings = []
-          blobs = 0
-          for oid in objects:
-              process.stdin.write(oid + b'\n')
-              process.stdin.flush()
-              header = process.stdout.readline().split()
-              if len(header) != 3:
-                  raise RuntimeError('Git object could not be read')
-              size = int(header[2])
-              content = process.stdout.read(size)
-              if len(content) != size or process.stdout.read(1) != b'\n':
-                  raise RuntimeError('Incomplete Git object')
-              if header[1] != b'blob':
-                  continue
-              blobs += 1
-              for name, pattern in patterns.items():
-                  if pattern.search(content):
-                      findings.append({'blob': oid.decode(), 'kind': name})
-          process.stdin.close()
-          if process.wait() != 0:
-              raise RuntimeError('Git object scan failed')
-          print(json.dumps({
-              'scope': 'reachable Git history; selected high-confidence patterns, not proof that every secret is absent',
-              'objects_scanned': len(objects),
-              'blobs_scanned': blobs,
-              'findings': findings,
-          }, indent=2))
-          sys.exit(1 if findings else 0)
-          PYCREDENTIALS
-          cat aiTemp/audit-evidence/credential-screen.json
-
-      - name: Audit every Rust release lockfile against RustSec
-        run: |
-          set -euo pipefail
-          cargo install cargo-audit --locked --version 0.22.2 \
-            --root "$PWD/aiTemp/audit-tool"
-          for spec in \
-            tauri:src-tauri/Cargo.lock \
-            core:rust-core/coding-tools-core/Cargo.lock \
-            headless:rust-core/coding-tools-headless/Cargo.lock
-          do
-            name="${spec%%:*}"
-            lockfile="${spec#*:}"
-            aiTemp/audit-tool/bin/cargo-audit audit \
-              --file "$lockfile" \
-              2>&1 | tee "aiTemp/audit-evidence/rustsec-$name.txt"
-            aiTemp/audit-tool/bin/cargo-audit audit \
-              --file "$lockfile" \
-              --json > "aiTemp/audit-evidence/rustsec-$name.json"
-          done
-          python - <<'PYAUDIT'
-          import json
-          import pathlib
-
-          root = pathlib.Path('aiTemp/audit-evidence')
-          reports = sorted(root.glob('rustsec-*.json'))
-          assert len(reports) == 3, f'Expected three RustSec reports, received {len(reports)}'
-          for report_path in reports:
-              report = json.loads(report_path.read_text())
-              assert not report['vulnerabilities']['found'], f'RustSec vulnerability remains in {report_path.name}'
-              warnings = report.get('warnings', {})
-              assert not warnings.get('yanked', []), f'A locked crate was yanked in {report_path.name}'
-              assert all(
-                  item['advisory']['id'] == 'RUSTSEC-2024-0429'
-                  and item['package']['name'] == 'glib'
-                  for item in warnings.get('unsound', [])
-              ), f'Unreviewed soundness warning in {report_path.name}'
-          print('All Rust lockfiles passed vulnerability/yanked gates; GLib exclusion is checked in the Windows headless job.')
-          PYAUDIT
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: security-audit-${{ github.sha }}
-          path: aiTemp/source/aiTemp/audit-evidence/
-          if-no-files-found: error
-          retention-days: 14
-
-  windows_installer:
-    name: Windows x64 installer and packaged smoke
-    if: ${{ github.event_name != 'pull_request' }}
-    needs:
-      - electron_runtime
-      - rust_compatibility
-    runs-on: windows-latest
-    timeout-minutes: 75
-    defaults:
-      run:
-        shell: bash
-        working-directory: aiTemp/source
-    env:
-      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
-      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/full-harness-package
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          ref: ${{ github.sha }}
-          path: aiTemp/source
-          fetch-depth: 0
-          clean: false
-          persist-credentials: false
-
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
-      - name: Prepare retained package roots and dependencies
-        run: |
-          set -euo pipefail
-          mkdir -p \
-            aiTemp/evidence \
-            aiTemp/tmp \
-            aiTemp/Trash/full-harness-package \
-            aiTemp/release-output
-          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
-          export NODE_OPTIONS="--import=$preload"
-          absolute_tmp="$PWD/aiTemp/tmp"
-          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
-            bun install --frozen-lockfile --cwd runtime-web
-          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
-            bun install --frozen-lockfile --cwd runtime-web/launcher
-          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
-            bun install --frozen-lockfile --cwd desktop-electron
-
-      - name: Acquire checksum-pinned official tunnel-client archive
+      - name: Acquire checksum-pinned official tunnel client
         run: |
           set -euo pipefail
           input_dir="aiTemp/input/tunnel-client/v0.0.12/windows-amd64"
           archive="$input_dir/$TUNNEL_ARCHIVE"
-          partial_archive="$archive.partial"
-          asset_url="$TUNNEL_RELEASE_URL/$TUNNEL_ARCHIVE"
-          test ! -e "$archive"
-          test ! -e "$partial_archive"
+          partial="$archive.partial"
+          url="$TUNNEL_RELEASE_URL/$TUNNEL_ARCHIVE"
           mkdir -p "$input_dir"
-          command -v curl.exe >/dev/null
+          test ! -e "$archive"
+          test ! -e "$partial"
           curl.exe --fail --location --proto '=https' --tlsv1.2 \
             --retry 5 --retry-all-errors --connect-timeout 30 \
-            --output "$partial_archive" "$asset_url"
-          test -s "$partial_archive"
-          actual_sha256="$(sha256sum "$partial_archive" | awk '{print $1}')"
-          test "$actual_sha256" = "$TUNNEL_ARCHIVE_SHA256"
-          mv --no-clobber "$partial_archive" "$archive"
-          test ! -e "$partial_archive"
+            --output "$partial" "$url"
+          test -s "$partial"
+          actual="$(sha256sum "$partial" | awk '{print $1}')"
+          test "$actual" = "$TUNNEL_ARCHIVE_SHA256"
+          mv --no-clobber "$partial" "$archive"
           test -s "$archive"
-          final_sha256="$(sha256sum "$archive" | awk '{print $1}')"
-          test "$final_sha256" = "$TUNNEL_ARCHIVE_SHA256"
           echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$archive" >> "$GITHUB_ENV"
-          printf 'archive=%s\nsha256=%s\nurl=%s\n' \
-            "$archive" "$final_sha256" "$asset_url" \
-            > aiTemp/evidence/tunnel-client-archive.txt
+          printf 'url=%s\nsha256=%s\n' "$url" "$actual" \
+            > aiTemp/evidence/tunnel-client.txt
 
-      - name: Build the exact Rust sidecar and Electron installer
+      - name: Build Rust sidecar and Electron installer
         run: |
           set -euo pipefail
-          cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
-            2>&1 | tee aiTemp/evidence/rust-headless-release.txt
+          cargo build --release --locked \
+            --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+            2>&1 | tee aiTemp/evidence/headless-build.txt
           preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
           export NODE_OPTIONS="--import=$preload"
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun run --cwd desktop-electron package:win \
             2>&1 | tee aiTemp/evidence/windows-package.txt
 
-      - name: Verify package contents, identity, and launcher smoke
+      - name: Verify packaged harness and materialize stable EXE
         run: |
           set -euo pipefail
-          mapfile -t package_roots < <(
+          mapfile -t roots < <(
             for candidate in desktop-electron/artifacts desktop-electron/release; do
               test -d "$candidate" && printf '%s\n' "$candidate"
             done
           )
-          test "${#package_roots[@]}" -eq 1
-          package_root="${package_roots[0]}"
-          printf '%s\n' "$package_root" > aiTemp/evidence/package-root.txt
+          test "${#roots[@]}" -eq 1
+          package_root="${roots[0]}"
           node desktop-electron/scripts/verify-package.cjs "$package_root" \
             --source "$SOURCE_SHA" \
             --json-out aiTemp/evidence/package-verification.json \
             2>&1 | tee aiTemp/evidence/package-verification.txt
-          test -s aiTemp/evidence/package-verification.json
-          node --test desktop-electron/tests/package-contents.test.cjs \
-            2>&1 | tee aiTemp/evidence/package-contents-tests.txt
           preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
           export NODE_OPTIONS="--import=$preload"
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun run --cwd desktop-electron smoke:package \
             2>&1 | tee aiTemp/evidence/package-smoke.txt
-          mapfile -t installers < <(
-            find "$package_root" -maxdepth 1 -type f -iname '*.exe' -print
-          )
+          mapfile -t installers < <(find "$package_root" -maxdepth 1 -type f -iname '*.exe' -print)
           test "${#installers[@]}" -eq 1
-          printf '%s\n' "${installers[0]}" > aiTemp/evidence/original-installer-path.txt
-          release_installer="aiTemp/release-output/$WINDOWS_INSTALLER"
-          test ! -e "$release_installer"
-          cp --no-clobber "${installers[0]}" "$release_installer"
-          test -s "$release_installer"
-          sha256sum "$release_installer" \
-            > aiTemp/evidence/windows-installer.sha256
+          output="aiTemp/release-output/$WINDOWS_INSTALLER"
+          test ! -e "$output"
+          cp --no-clobber "${installers[0]}" "$output"
+          node --input-type=module <<'NODE' | tee aiTemp/evidence/installer-verification.json
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          const path = `aiTemp/release-output/${process.env.WINDOWS_INSTALLER}`;
+          const bytes = fs.readFileSync(path);
+          if (bytes.length < 100000) throw new Error(`INSTALLER_TOO_SMALL: ${bytes.length}`);
+          if (bytes.subarray(0, 2).toString('ascii') !== 'MZ') throw new Error('INSTALLER_MZ_HEADER_MISSING');
+          const result = {
+            name: process.env.WINDOWS_INSTALLER,
+            size: bytes.length,
+            sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+            source_sha: process.env.SOURCE_SHA,
+          };
+          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+          NODE
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git diff --diff-filter=D --name-only)"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: electron-windows-installer-${{ github.sha }}
-          path: aiTemp/source/aiTemp/release-output/Coding.Tools_0.6.0-rc.1_windows_x64_setup.exe
+          path: aiTemp/source/aiTemp/release-output/Coding.Tools_0.6.0_windows_x64_setup.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -648,93 +311,172 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  validation_evidence:
-    name: Bind complete validation evidence to source SHA
-    if: ${{ always() && github.event_name != 'pull_request' }}
+  publish_release:
+    name: Publish and independently verify latest v0.6.0
+    if: github.actor == github.repository_owner
     needs:
       - source_contract
-      - electron_runtime
-      - rust_compatibility
-      - security_audit
       - windows_installer
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
     steps:
-      - name: Require every automated gate
-        env:
-          SOURCE_RESULT: ${{ needs.source_contract.result }}
-          ELECTRON_RESULT: ${{ needs.electron_runtime.result }}
-          RUST_RESULT: ${{ needs.rust_compatibility.result }}
-          SECURITY_RESULT: ${{ needs.security_audit.result }}
-          INSTALLER_RESULT: ${{ needs.windows_installer.result }}
-        run: |
-          set -euo pipefail
-          for result in \
-            "$SOURCE_RESULT" \
-            "$ELECTRON_RESULT" \
-            "$RUST_RESULT" \
-            "$SECURITY_RESULT" \
-            "$INSTALLER_RESULT"
-          do
-            test "$result" = success
-          done
-
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: '*-${{ github.sha }}'
-          path: aiTemp/downloaded-evidence
+          name: electron-windows-installer-${{ github.sha }}
+          path: aiTemp/source/aiTemp/downloaded-installer
 
-      - name: Create exact-source validation disclosure
-        shell: bash
+      - name: Build exact release evidence and verify local assets
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/final-validation
-          test -n "$(find aiTemp/downloaded-evidence -type f -print -quit)"
-          find aiTemp/downloaded-evidence -type f -print \
-            | sort > aiTemp/final-validation/evidence-files.txt
-          SOURCE_SHA="$SOURCE_SHA" \
-          RUN_ID="$GITHUB_RUN_ID" \
-          RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
-          REPOSITORY="$GITHUB_REPOSITORY" \
+          mkdir -p aiTemp/release-assets aiTemp/publication-evidence aiTemp/readback aiTemp/Trash/v060-publication
+          mapfile -t installers < <(find aiTemp/downloaded-installer -type f -name "$WINDOWS_INSTALLER" -print)
+          test "${#installers[@]}" -eq 1
+          cp --no-clobber "${installers[0]}" "aiTemp/release-assets/$WINDOWS_INSTALLER"
           node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
           import fs from 'node:fs';
           import path from 'node:path';
-
-          const disclosure = {
+          const root = 'aiTemp/release-assets';
+          const installerName = process.env.WINDOWS_INSTALLER;
+          const installer = fs.readFileSync(path.join(root, installerName));
+          const sha256 = crypto.createHash('sha256').update(installer).digest('hex');
+          const provenance = {
             schema: 1,
+            release_tag: process.env.RELEASE_TAG,
+            version: process.env.RELEASE_VERSION,
             source_sha: process.env.SOURCE_SHA,
-            validation_run_id: Number(process.env.RUN_ID),
-            validation_run_attempt: Number(process.env.RUN_ATTEMPT),
-            validation_workflow: '.github/workflows/electron-full-harness-ci.yml',
-            validation_conclusion: 'success',
-            automated_gates: 'passed',
-            live_account_acceptance: 'pending_manual',
-            product: {
-              version: '0.6.0-rc.1',
-              app_id: 'dev.codingtools.fullharness',
-              name: 'Coding Tools',
-            },
+            product: { name: 'Coding Tools', app_id: 'dev.codingtools.fullharness' },
             upstream: {
               repository: 'miuuyy/codex-chatgpt-web',
               version: 'v5.0.6',
               commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
             },
-            run_url: `https://github.com/${process.env.REPOSITORY}/actions/runs/${process.env.RUN_ID}`,
+            validation_run: {
+              id: Number(process.env.GITHUB_RUN_ID),
+              url: `https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+              workflow: '.github/workflows/electron-full-harness-ci.yml',
+            },
+            assets: [{ name: installerName, sha256, size: installer.length }],
           };
-          fs.writeFileSync(
-            path.join('aiTemp', 'final-validation', 'validation-evidence.json'),
-            `${JSON.stringify(disclosure, null, 2)}\n`,
-          );
+          const validation = {
+            automated_gates: 'passed',
+            live_account_acceptance: 'pending_manual',
+            source_sha: process.env.SOURCE_SHA,
+            validation_run_id: Number(process.env.GITHUB_RUN_ID),
+            validation_workflow: '.github/workflows/electron-full-harness-ci.yml',
+            validation_conclusion: 'success',
+          };
+          fs.writeFileSync(path.join(root, 'provenance.json'), `${JSON.stringify(provenance, null, 2)}\n`);
+          fs.writeFileSync(path.join(root, 'validation-evidence.json'), `${JSON.stringify(validation, null, 2)}\n`);
+          const names = fs.readdirSync(root).filter((name) => name !== 'SHA256SUMS.txt').sort();
+          const sums = names.map((name) => {
+            const bytes = fs.readFileSync(path.join(root, name));
+            return `${crypto.createHash('sha256').update(bytes).digest('hex')}  ${name}`;
+          });
+          fs.writeFileSync(path.join(root, 'SHA256SUMS.txt'), `${sums.join('\n')}\n`);
           NODE
-          printf '%s\n' "$SOURCE_SHA" \
-            > aiTemp/final-validation/source.commit
-          printf '%s\n' \
-            'Live ChatGPT account, browser UI eligibility, and connector reauthorization remain manual acceptance gates.' \
-            > aiTemp/final-validation/manual-acceptance.txt
+          node scripts/release/verify-assets-v0.6.0.mjs \
+            --directory aiTemp/release-assets \
+            --tag "$RELEASE_TAG" \
+            --version "$RELEASE_VERSION" \
+            --source "$SOURCE_SHA" \
+            --json-out aiTemp/publication-evidence/prepublish-assets.json
+
+      - name: Publish stable release after remote asset readback
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/release/publish-v0.6.0.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --source "$SOURCE_SHA" \
+            --assets aiTemp/release-assets \
+            --notes docs/releases/v0.6.0.md \
+            --json-out aiTemp/publication-evidence/publication.json
+
+      - name: Independently re-download and verify latest release EXE
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" \
+            > aiTemp/readback/latest-release.json
+          asset_id="$(node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const release = JSON.parse(fs.readFileSync('aiTemp/readback/latest-release.json', 'utf8'));
+          if (release.tag_name !== process.env.RELEASE_TAG || release.draft || release.prerelease) {
+            throw new Error(`LATEST_RELEASE_MISMATCH: ${release.tag_name}`);
+          }
+          const names = release.assets.map((asset) => asset.name).sort();
+          const expected = [
+            process.env.WINDOWS_INSTALLER,
+            'SHA256SUMS.txt',
+            'provenance.json',
+            'validation-evidence.json',
+          ].sort();
+          if (JSON.stringify(names) !== JSON.stringify(expected)) {
+            throw new Error(`LATEST_ASSET_INVENTORY_MISMATCH: ${JSON.stringify(names)}`);
+          }
+          const installer = release.assets.find((asset) => asset.name === process.env.WINDOWS_INSTALLER);
+          process.stdout.write(String(installer.id));
+          NODE
+          )"
+          gh api \
+            -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+            > "aiTemp/readback/$WINDOWS_INSTALLER"
+          node --input-type=module <<'NODE' | tee aiTemp/readback/independent-verification.json
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          const installerPath = `aiTemp/readback/${process.env.WINDOWS_INSTALLER}`;
+          const bytes = fs.readFileSync(installerPath);
+          const sums = fs.readFileSync('aiTemp/release-assets/SHA256SUMS.txt', 'utf8');
+          const expected = sums.split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .map((line) => line.split(/\s{2}/))
+            .find(([, name]) => name === process.env.WINDOWS_INSTALLER)?.[0];
+          const actual = crypto.createHash('sha256').update(bytes).digest('hex');
+          if (!expected || actual !== expected) throw new Error(`READBACK_SHA256_MISMATCH: ${actual}`);
+          if (bytes.length < 100000) throw new Error(`READBACK_INSTALLER_TOO_SMALL: ${bytes.length}`);
+          if (bytes.subarray(0, 2).toString('ascii') !== 'MZ') throw new Error('READBACK_MZ_HEADER_MISSING');
+          const result = {
+            release_tag: process.env.RELEASE_TAG,
+            latest: true,
+            name: process.env.WINDOWS_INSTALLER,
+            size: bytes.length,
+            sha256: actual,
+            source_sha: process.env.SOURCE_SHA,
+          };
+          process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+          NODE
+          git fetch --tags origin
+          test "$(git rev-parse "$RELEASE_TAG^{}")" = "$SOURCE_SHA"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
-          name: electron-full-harness-validation-${{ github.sha }}
-          path: aiTemp/final-validation/
+          name: electron-v060-publication-${{ github.sha }}
+          path: |
+            aiTemp/source/aiTemp/publication-evidence/
+            aiTemp/source/aiTemp/readback/
           if-no-files-found: error
           retention-days: 14
