@@ -23,6 +23,26 @@ type OriginMap = std::collections::HashMap<(String, bool), String>;
 static TRUSTED_ORIGINS: std::sync::OnceLock<std::sync::RwLock<OriginMap>> =
     std::sync::OnceLock::new();
 
+// Data-store fixtures run on independent Rust test threads but production owns
+// one process-wide store. Keep each fixture's latest synchronized view local to
+// its thread so an unrelated parallel fixture cannot erase an in-flight HTTP
+// flow's issuer. The production registry and behavior remain unchanged.
+#[cfg(test)]
+thread_local! {
+    static TEST_TRUSTED_ORIGINS: std::cell::RefCell<Option<OriginMap>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_trusted_origin(id: &str, actions: bool) -> Option<Option<String>> {
+    TEST_TRUSTED_ORIGINS.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .map(|origins| origins.get(&(id.to_owned(), actions)).cloned())
+    })
+}
+
 pub fn sync_trusted_origins(data: &crate::data::AppData) {
     let settings = crate::settings::AppSettings::from_data(data);
     let mut origins = OriginMap::new();
@@ -36,6 +56,8 @@ pub fn sync_trusted_origins(data: &crate::data::AppData) {
             profile.actions_effective_public_url_with(&settings),
         );
     }
+    #[cfg(test)]
+    TEST_TRUSTED_ORIGINS.with(|current| *current.borrow_mut() = Some(origins.clone()));
     let lock = TRUSTED_ORIGINS.get_or_init(Default::default);
     if let Ok(mut current) = lock.write() {
         *current = origins;
@@ -43,6 +65,15 @@ pub fn sync_trusted_origins(data: &crate::data::AppData) {
 }
 
 pub fn trusted_external_base_url(id: &str, actions: bool, port: u16, configured: &str) -> String {
+    #[cfg(test)]
+    if let Some(test_configured) = test_trusted_origin(id, actions) {
+        return external_base_url(
+            &HeaderMap::new(),
+            port,
+            test_configured.as_deref().unwrap_or(configured),
+        );
+    }
+
     let lock = TRUSTED_ORIGINS.get_or_init(Default::default);
     let Ok(origins) = lock.read() else {
         return format!("http://127.0.0.1:{port}");
@@ -191,6 +222,47 @@ mod tests {
             external_base_url(&headers, 28767, ""),
             "http://127.0.0.1:28767"
         );
+    }
+
+    #[test]
+    fn fixture_origin_survives_unrelated_parallel_sync() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/oauth-origin-isolation")
+            .join(uuid::Uuid::new_v4().to_string());
+        crate::data::with_test_file(root.join("profiles.json"), || {
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(1);
+            let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
+            let worker_id = profile_id.clone();
+            let worker = std::thread::spawn(move || {
+                let mut data = crate::data::AppData::default();
+                let mut profile =
+                    crate::workspace::WorkspaceProfile::new("fixture-workspace".into(), None);
+                profile.id = worker_id.clone();
+                profile.tunnel.public_url = "https://new-popup.example".into();
+                data.profiles.push(profile);
+                sync_trusted_origins(&data);
+                ready_tx.send(()).unwrap();
+                continue_rx.recv().unwrap();
+                assert_eq!(
+                    trusted_external_base_url(
+                        &worker_id,
+                        false,
+                        28767,
+                        "https://old-popup.example",
+                    ),
+                    "https://new-popup.example"
+                );
+            });
+
+            ready_rx.recv().unwrap();
+            // Deterministically erase the process-wide map from another thread.
+            // The worker must retain its own fixture view until its HTTP flow ends.
+            sync_trusted_origins(&crate::data::AppData::default());
+            continue_tx.send(()).unwrap();
+            worker.join().unwrap();
+        });
     }
 }
 
