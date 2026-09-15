@@ -6,6 +6,7 @@ on:
       - feature/0.7-exact-sha-prerelease-promotion
       - integration/0.7-goal-headless-release-20260915
       - fix/codex-router-0.7-exact-sha-publish
+      - fix/codex-router-0.7-nsis-cache-volume
     paths:
       - .github/workflows/codex-router-0.7-release-tooling-ci.yml
       - .github/workflows/codex-router-multiprovider-release.yml
