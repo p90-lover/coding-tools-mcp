@@ -42,18 +42,10 @@ jobs:
           from pathlib import Path
           workflow = Path('.github/workflows/electron-full-harness-ci.yml')
           text = workflow.read_text(encoding='utf-8')
-          old = """    if: >-
-              github.repository == 'p90-lover/coding-tools-mcp' &&
-              github.ref == 'refs/heads/release/v0.6.0' &&
-              github.actor == github.repository_owner
-          """
-          new = """    if: >-
-              github.repository == 'p90-lover/coding-tools-mcp' &&
-              github.ref == 'refs/heads/release/v0.6.0' &&
-              (github.actor == github.repository_owner || github.actor == 'github-actions[bot]')
-          """
+          old = "      github.actor == github.repository_owner\n"
+          new = "      (github.actor == github.repository_owner || github.actor == 'github-actions[bot]')\n"
           if text.count(old) != 1:
-              raise SystemExit(f'Expected one exact release guard, found {text.count(old)}')
+              raise SystemExit(f'Expected one exact release actor guard, found {text.count(old)}')
           workflow.write_text(text.replace(old, new, 1), encoding='utf-8')
           PY
           git diff --check
