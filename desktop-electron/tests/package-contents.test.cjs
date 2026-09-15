@@ -106,8 +106,9 @@ function createPackageFixture(label, mutate) {
       stableVersion: "0.4.10",
       mode: "reference",
       releaseTag: "v0.4.10",
-      assetName: "Coding.Tools.MCP_0.4.10_windows_x64_setup.exe",
-      sha256: "b".repeat(64),
+      assetName: "Coding.Tools.MCP_0.4.10_x64-setup.exe",
+      size: 6461938,
+      sha256: "3c3f60262672556ae113a8cccbc671e7b559bb7106392333cd4a0628471427d1",
     }, null, 2)}\n`)],
   ]);
   for (const [relativePath, bytes] of componentBytes) {
@@ -267,6 +268,27 @@ test("rejects a package that omits sidecar or migration integration modules", ()
       asarEntries: REQUIRED_ASAR_FILES.filter((entry) => entry !== "electron/migration-manager.cjs"),
     })),
     /PACKAGE_ASAR_REQUIRED_FILE_MISSING/,
+  );
+});
+
+test("rejects a rollback reference whose checksum does not match the published v0.4.10 Windows asset", () => {
+  const { appRoot } = createPackageFixture("rollback-checksum", ({ resourcesRoot }) => {
+    const rollbackPath = path.join(resourcesRoot, "rollback", "manifest.json");
+    const rollback = JSON.parse(fs.readFileSync(rollbackPath, "utf8"));
+    rollback.sha256 = "c".repeat(64);
+    const rollbackBytes = Buffer.from(`${JSON.stringify(rollback, null, 2)}\n`);
+    fs.writeFileSync(rollbackPath, rollbackBytes);
+
+    const packageManifestPath = path.join(resourcesRoot, "coding-tools", "package-manifest.json");
+    const packageManifest = JSON.parse(fs.readFileSync(packageManifestPath, "utf8"));
+    const component = packageManifest.components.find((entry) => entry.id === "rollback-manifest");
+    component.size = rollbackBytes.length;
+    component.sha256 = sha256(rollbackBytes);
+    fs.writeFileSync(packageManifestPath, `${JSON.stringify(packageManifest, null, 2)}\n`);
+  });
+  assert.throws(
+    () => inspectExtractedApplication(appRoot, packageOptions()),
+    /PACKAGE_ROLLBACK_REFERENCE_INVALID/,
   );
 });
 
