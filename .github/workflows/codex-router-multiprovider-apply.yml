@@ -12,6 +12,7 @@ on:
       - aiTemp/codex-router-multiprovider/fix-agent-smoke.py
       - aiTemp/codex-router-multiprovider/fix-global-router-agent-definition.py
       - runtime-web/package.json
+      - runtime-web/src/cli.ts
       - runtime-web/src/routed-providers.ts
       - runtime-web/src/routed-agent-catalog.ts
       - runtime-web/src/router-web-ingress.ts
@@ -20,6 +21,7 @@ on:
       - runtime-web/scripts/codex-router-integration.ts
       - runtime-web/scripts/smoke-codex-router-agent-types.ts
       - runtime-web/scripts/smoke-codex-router-global-agents.ts
+      - runtime-web/tests/cli-codex-router-integration.test.ts
       - runtime-web/tests/routed-providers.test.ts
       - runtime-web/tests/routed-agent-catalog.test.ts
       - runtime-web/tests/router-web-ingress.test.ts
@@ -87,6 +89,7 @@ jobs:
           set -euo pipefail
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
             bun test --cwd runtime-web \
+              tests/cli-codex-router-integration.test.ts \
               tests/routed-providers.test.ts \
               tests/routed-agent-catalog.test.ts \
               tests/router-web-ingress.test.ts \
@@ -136,10 +139,12 @@ jobs:
           test "$remote_head" = "$GITHUB_SHA"
           git add \
             runtime-web/package.json \
+            runtime-web/src/cli.ts \
             runtime-web/src/server.ts \
             runtime-web/src/routed-providers.ts \
             runtime-web/src/routed-agent-catalog.ts \
             runtime-web/src/router-web-ingress.ts \
+            runtime-web/tests/cli-codex-router-integration.test.ts \
             runtime-web/tests/routed-providers.test.ts \
             runtime-web/tests/routed-agent-catalog.test.ts \
             runtime-web/tests/router-web-ingress.test.ts \
