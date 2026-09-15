@@ -18,7 +18,7 @@ export interface CommandCodeProxyProviderProfile {
   modelEndpoint: "/models";
 }
 
-type FetchLike = typeof fetch;
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type JsonObject = Record<string, unknown>;
 
 function normalizeOrigin(value: string, label: string, allowRemoteHttps: boolean): string {

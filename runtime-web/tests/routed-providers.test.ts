@@ -112,7 +112,7 @@ describe("Codex Router provider contract", () => {
     const original = nativeCatalog();
     const snapshot = structuredClone(original);
     const calls: string[] = [];
-    const fetchImpl: typeof fetch = async input => {
+    const fetchImpl = async (input: RequestInfo | URL): Promise<Response> => {
       calls.push(String(input));
       return Response.json({
         object: "list",
@@ -130,7 +130,7 @@ describe("Codex Router provider contract", () => {
 
     expect(original).toEqual(snapshot);
     expect(calls).toEqual([`${connection.baseUrl}/models`]);
-    expect(models.slice(0, 2)).toEqual(snapshot.models);
+    expect(models.slice(0, 2)).toEqual(snapshot.models as Array<Record<string, unknown>>);
     expect(models.slice(2).map(model => model.slug)).toEqual([
       "codex-router/deepseek/deepseek-v4-pro",
       "codex-router/commandcode-proxy/claude-sonnet-4-6",
@@ -171,7 +171,7 @@ describe("Codex Router provider contract", () => {
     })!;
     const seen: Array<{ url: string; body: Record<string, unknown> }> = [];
     const encoder = new TextEncoder();
-    const fetchImpl: typeof fetch = async (input, init) => {
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       seen.push({
         url: String(input),
         body: JSON.parse(String(init?.body)),
