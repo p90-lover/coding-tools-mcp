@@ -8,6 +8,7 @@ const path = require("node:path");
 
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const {
+  REQUIRED_ASAR_FILES,
   REQUIRED_COMPONENTS,
   inspectExtractedApplication,
   findWindowsInstaller,
@@ -181,12 +182,18 @@ function appManifest(overrides = {}) {
   };
 }
 
-test("accepts an exact package contract with verified runtime, sidecar, tunnel, migration, rollback, and notices", () => {
-  const { appRoot } = createPackageFixture("complete");
-  const result = inspectExtractedApplication(appRoot, {
+function packageOptions(overrides = {}) {
+  return {
     appManifest: appManifest(),
     expectedSourceSha: SOURCE_SHA,
-  });
+    asarEntries: [...REQUIRED_ASAR_FILES],
+    ...overrides,
+  };
+}
+
+test("accepts an exact package contract with verified runtime, sidecar, tunnel, migration, rollback, and notices", () => {
+  const { appRoot } = createPackageFixture("complete");
+  const result = inspectExtractedApplication(appRoot, packageOptions());
   assert.equal(result.ok, true);
   assert.equal(result.productVersion, PRODUCT_VERSION);
   assert.equal(result.sourceSha, SOURCE_SHA);
@@ -203,10 +210,7 @@ test("rejects a packaged component changed after the package manifest was writte
     );
   });
   assert.throws(
-    () => inspectExtractedApplication(appRoot, {
-      appManifest: appManifest(),
-      expectedSourceSha: SOURCE_SHA,
-    }),
+    () => inspectExtractedApplication(appRoot, packageOptions()),
     /PACKAGE_COMPONENT_(?:SIZE|CHECKSUM)_MISMATCH/,
   );
 });
@@ -217,10 +221,7 @@ test("rejects credential-like files and never reports their contents", () => {
     writeFile(path.join(resourcesRoot, "coding-tools", ".env.production"), `OPENAI_API_KEY=${secret}\n`);
   });
   assert.throws(
-    () => inspectExtractedApplication(appRoot, {
-      appManifest: appManifest(),
-      expectedSourceSha: SOURCE_SHA,
-    }),
+    () => inspectExtractedApplication(appRoot, packageOptions()),
     (error) => {
       assert.match(error.message, /PACKAGE_SECRET_MATERIAL_FOUND/);
       assert.doesNotMatch(error.message, new RegExp(secret));
@@ -232,7 +233,7 @@ test("rejects credential-like files and never reports their contents", () => {
 test("rejects the retained Tauri identity masquerading as the Electron candidate", () => {
   const { appRoot } = createPackageFixture("identity");
   assert.throws(
-    () => inspectExtractedApplication(appRoot, {
+    () => inspectExtractedApplication(appRoot, packageOptions({
       appManifest: appManifest({
         version: "0.4.10",
         build: {
@@ -241,8 +242,7 @@ test("rejects the retained Tauri identity masquerading as the Electron candidate
           nsis: { perMachine: true, allowElevation: true },
         },
       }),
-      expectedSourceSha: SOURCE_SHA,
-    }),
+    })),
     /PACKAGE_APP_IDENTITY_MISMATCH/,
   );
 });
@@ -255,11 +255,18 @@ test("rejects an installer contract that permits elevation", () => {
     fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   });
   assert.throws(
-    () => inspectExtractedApplication(appRoot, {
-      appManifest: appManifest(),
-      expectedSourceSha: SOURCE_SHA,
-    }),
+    () => inspectExtractedApplication(appRoot, packageOptions()),
     /PACKAGE_MANIFEST_IDENTITY_MISMATCH/,
+  );
+});
+
+test("rejects a package that omits sidecar or migration integration modules", () => {
+  const { appRoot } = createPackageFixture("missing-integration");
+  assert.throws(
+    () => inspectExtractedApplication(appRoot, packageOptions({
+      asarEntries: REQUIRED_ASAR_FILES.filter((entry) => entry !== "electron/migration-manager.cjs"),
+    })),
+    /PACKAGE_ASAR_REQUIRED_FILE_MISSING/,
   );
 });
 
