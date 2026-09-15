@@ -33,17 +33,38 @@ jobs:
 
           workflow = Path('.github/workflows/electron-full-harness-ci.yml')
           source = workflow.read_text(encoding='utf-8')
-          old = 'CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-${{ runner.os }}'
-          new = 'CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-${{ matrix.os }}'
+          expression_open = '$' + '{{'
+          expression_close = '}}'
+          old = (
+              'CARGO_TARGET_DIR: '
+              + expression_open
+              + ' github.workspace '
+              + expression_close
+              + '/aiTemp/cargo-target-'
+              + expression_open
+              + ' runner.os '
+              + expression_close
+          )
+          new = (
+              'CARGO_TARGET_DIR: '
+              + expression_open
+              + ' github.workspace '
+              + expression_close
+              + '/aiTemp/cargo-target-'
+              + expression_open
+              + ' matrix.os '
+              + expression_close
+          )
           count = source.count(old)
           if count != 1:
               raise SystemExit(f'EXPECTED_ONE_CARGO_TARGET_MATCH: found {count}')
           workflow.write_text(source.replace(old, new), encoding='utf-8')
+          if new not in workflow.read_text(encoding='utf-8'):
+              raise SystemExit('MATRIX_CONTEXT_REPAIR_NOT_WRITTEN')
           PY
           git diff --check
           git diff -- .github/workflows/electron-full-harness-ci.yml \
             | tee aiTemp/evidence/runner-context-fix.diff
-          grep -F 'cargo-target-${{ matrix.os }}' .github/workflows/electron-full-harness-ci.yml
 
       - name: Validate repaired workflow before commit
         shell: bash
