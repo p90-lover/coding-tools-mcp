@@ -2,6 +2,7 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 32;
 const MAX_JSON_ARRAY_ITEMS = 10_000;
+const MAX_JSON_OBJECT_ENTRIES = 10_000;
 const DISALLOWED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const VALIDATION_ERROR_MARKER = Symbol("coding-tools-ipc-validation-error");
 
@@ -52,13 +53,17 @@ function snapshotJsonValue(value, code, path = "$", ancestors = new Set(), depth
       return Object.freeze(snapshot);
     }
 
+    const keys = Object.keys(value);
+    if (keys.length > MAX_JSON_OBJECT_ENTRIES) {
+      throw codedError(code, `${path} has too many object entries`);
+    }
     const snapshot = {};
-    for (const [key, item] of Object.entries(value)) {
+    for (const key of keys) {
       if (DISALLOWED_JSON_KEYS.has(key)) {
         throw codedError(code, `${path}.${key} is not allowed`);
       }
       Object.defineProperty(snapshot, key, {
-        value: snapshotJsonValue(item, code, `${path}.${key}`, ancestors, depth + 1),
+        value: snapshotJsonValue(value[key], code, `${path}.${key}`, ancestors, depth + 1),
         enumerable: true,
         configurable: false,
         writable: false,
@@ -377,5 +382,6 @@ module.exports = Object.freeze({
   MAX_RESPONSE_BYTES,
   MAX_JSON_DEPTH,
   MAX_JSON_ARRAY_ITEMS,
+  MAX_JSON_OBJECT_ENTRIES,
   invokeContract,
 });
