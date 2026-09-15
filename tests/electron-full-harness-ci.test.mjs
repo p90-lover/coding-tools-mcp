@@ -78,6 +78,37 @@ test('full-harness CI is cross-platform, exact-source, and fail-closed on missin
   );
 });
 
+test('Windows packaging acquires the checksum-pinned official tunnel archive before build', () => {
+  for (const required of [
+    'TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip',
+    "TUNNEL_ARCHIVE_SHA256: '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'",
+    'TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12',
+    'aiTemp/input/tunnel-client/v0.0.12/windows-amd64',
+    'curl.exe --fail --location --proto \'=https\' --tlsv1.2',
+    '--output "$partial_archive" "$asset_url"',
+    'sha256sum "$partial_archive"',
+    'mv --no-clobber "$partial_archive" "$archive"',
+    'test ! -e "$partial_archive"',
+    'sha256sum "$archive"',
+    'CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$archive',
+  ]) {
+    assert.ok(workflow.includes(required), required);
+  }
+  const acquireIndex = workflow.indexOf(
+    '- name: Acquire checksum-pinned official tunnel-client archive',
+  );
+  const packageIndex = workflow.indexOf(
+    'bun run --cwd desktop-electron package:win',
+  );
+  assert.ok(acquireIndex >= 0, 'missing tunnel archive acquisition step');
+  assert.ok(packageIndex > acquireIndex, 'package build must run after archive verification');
+  assert.equal(
+    workflow.includes('--output "$archive" "$asset_url"'),
+    false,
+    'network download must never write directly to the trusted final path',
+  );
+});
+
 test('full-harness CI preserves files and keeps temporary state under aiTemp', () => {
   for (const required of [
     'clean: false',
