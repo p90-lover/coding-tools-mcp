@@ -32,6 +32,29 @@ const STABLE_ROLLBACK = Object.freeze({
   size: 6461938,
   sha256: "3c3f60262672556ae113a8cccbc671e7b559bb7106392333cd4a0628471427d1",
 });
+const OFFICIAL_TUNNEL_RELEASE = Object.freeze({
+  repository: "openai/tunnel-client",
+  version: "v0.0.12",
+  platform: "windows/amd64",
+  archiveName: "tunnel-client-v0.0.12-windows-amd64.zip",
+  archiveSha256: "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356",
+  licenseName: "tunnel-client-v0.0.12-windows-amd64-licenses.txt",
+  licenseSha256: "7d85227df86c38a689fca913d6f4a0b49ad030d6e056155a6832312cf7fb4bad",
+  spdxName: "tunnel-client-v0.0.12-windows-amd64.spdx.json",
+  spdxSha256: "4c6b46a645b71853d55f50cfb4b2c51324422a57f007984ba113d3edcfeb4f2c",
+  cloudflaredBinaryName: "cloudflared.exe",
+  cloudflaredVersion: "2026.7.2",
+  cloudflaredReleaseCommit: "8679787525edc8575b2948a7c4a50b6292c6d426",
+});
+const REQUIRED_TUNNEL_MEMBERS = Object.freeze([
+  "LICENSE",
+  "NOTICE",
+  "cloudflared-manifest.json",
+  "cloudflared.exe",
+  "tunnel-client-v0.0.12-windows-amd64-licenses.txt",
+  "tunnel-client-v0.0.12-windows-amd64.spdx.json",
+  "tunnel-client.exe",
+]);
 const REQUIRED_COMPONENTS = Object.freeze({
   "migration-manifest": "migration/manifest.json",
   "rollback-manifest": "rollback/manifest.json",
@@ -224,6 +247,135 @@ function validateComponentRecords(resourcesRoot, manifest) {
   return actualIds;
 }
 
+function validateExpectedTunnelRelease(release) {
+  if (!plain(release)
+    || release.repository !== "openai/tunnel-client"
+    || release.version !== "v0.0.12"
+    || release.platform !== "windows/amd64"
+    || release.archiveName !== "tunnel-client-v0.0.12-windows-amd64.zip"
+    || !SHA256.test(release.archiveSha256)
+    || release.licenseName !== "tunnel-client-v0.0.12-windows-amd64-licenses.txt"
+    || !SHA256.test(release.licenseSha256)
+    || release.spdxName !== "tunnel-client-v0.0.12-windows-amd64.spdx.json"
+    || !SHA256.test(release.spdxSha256)
+    || release.cloudflaredBinaryName !== "cloudflared.exe"
+    || release.cloudflaredVersion !== "2026.7.2"
+    || release.cloudflaredReleaseCommit !== "8679787525edc8575b2948a7c4a50b6292c6d426") {
+    fail("PACKAGE_TUNNEL_EXPECTED_RELEASE_INVALID", JSON.stringify(release));
+  }
+  return release;
+}
+
+function validateTunnelSupplyChain(resourcesRoot, manifest, expectedRelease = OFFICIAL_TUNNEL_RELEASE) {
+  const expected = validateExpectedTunnelRelease(expectedRelease);
+  const tunnel = manifest?.supply_chain?.tunnel_client;
+  if (!plain(tunnel) || tunnel.repository !== expected.repository || tunnel.version !== expected.version) {
+    fail("PACKAGE_TUNNEL_SUPPLY_CHAIN_INVALID", JSON.stringify(tunnel ?? null));
+  }
+  const archive = tunnel.archive;
+  if (!plain(archive) || archive.name !== expected.archiveName
+    || archive.sha256 !== expected.archiveSha256 || !Array.isArray(archive.members)) {
+    fail("PACKAGE_TUNNEL_ARCHIVE_IDENTITY_MISMATCH", JSON.stringify(archive ?? null));
+  }
+
+  const nativeRoot = path.join(resourcesRoot, "native");
+  let nativeStat;
+  try { nativeStat = fs.lstatSync(nativeRoot); }
+  catch { fail("PACKAGE_TUNNEL_NATIVE_ROOT_MISSING", nativeRoot); }
+  if (nativeStat.isSymbolicLink()) fail("PACKAGE_TUNNEL_NATIVE_ROOT_SYMLINK_FORBIDDEN", nativeRoot);
+  if (!nativeStat.isDirectory()) fail("PACKAGE_TUNNEL_NATIVE_ROOT_INVALID", nativeRoot);
+
+  const requiredNames = [...REQUIRED_TUNNEL_MEMBERS].sort(sortText);
+  const memberRecords = [];
+  let previous = null;
+  for (const [index, record] of archive.members.entries()) {
+    if (!plain(record) || typeof record.name !== "string"
+      || !Number.isSafeInteger(record.size) || record.size < 0 || !SHA256.test(record.sha256)) {
+      fail("PACKAGE_TUNNEL_MEMBER_RECORD_INVALID", String(index));
+    }
+    const name = safePath(record.name, "PACKAGE_TUNNEL_MEMBER_PATH_UNSAFE");
+    if (name.includes("/")) fail("PACKAGE_TUNNEL_MEMBER_PATH_UNSAFE", name);
+    if (previous !== null && sortText(previous, name) >= 0) {
+      fail("PACKAGE_TUNNEL_MEMBERS_NOT_SORTED_UNIQUE", name);
+    }
+    previous = name;
+    memberRecords.push({ name, size: record.size, sha256: record.sha256 });
+  }
+  const memberNames = memberRecords.map((entry) => entry.name);
+  if (JSON.stringify(memberNames) !== JSON.stringify(requiredNames)) {
+    fail("PACKAGE_TUNNEL_MEMBER_INVENTORY_MISMATCH", JSON.stringify({ requiredNames, memberNames }));
+  }
+  const actualNativeFiles = walkFiles(nativeRoot);
+  if (JSON.stringify(actualNativeFiles) !== JSON.stringify(requiredNames)) {
+    fail("PACKAGE_TUNNEL_NATIVE_FILE_SET_MISMATCH", JSON.stringify({ requiredNames, actualNativeFiles }));
+  }
+
+  const byName = new Map();
+  for (const record of memberRecords) {
+    const current = regularFile(nativeRoot, record.name, "PACKAGE_TUNNEL_MEMBER");
+    if (current.stat.size !== record.size) fail("PACKAGE_TUNNEL_MEMBER_SIZE_MISMATCH", record.name);
+    const currentDigest = digest(fs.readFileSync(current.absolutePath));
+    if (currentDigest !== record.sha256) fail("PACKAGE_TUNNEL_MEMBER_CHECKSUM_MISMATCH", record.name);
+    byName.set(record.name, record);
+  }
+  for (const executable of ["tunnel-client.exe", expected.cloudflaredBinaryName]) {
+    const current = regularFile(nativeRoot, executable, "PACKAGE_TUNNEL_EXECUTABLE");
+    if (fs.readFileSync(current.absolutePath).subarray(0, 2).toString("ascii") !== "MZ") {
+      fail("PACKAGE_TUNNEL_MEMBER_NOT_WINDOWS_EXECUTABLE", executable);
+    }
+  }
+
+  const cloudflared = tunnel.cloudflared;
+  const cloudflaredRecord = byName.get(expected.cloudflaredBinaryName);
+  const cloudflaredManifestRecord = byName.get("cloudflared-manifest.json");
+  if (!plain(cloudflared)
+    || cloudflared.binaryName !== expected.cloudflaredBinaryName
+    || cloudflared.binarySha256 !== cloudflaredRecord.sha256
+    || cloudflared.manifestSha256 !== cloudflaredManifestRecord.sha256
+    || cloudflared.version !== expected.cloudflaredVersion
+    || cloudflared.releaseCommit !== expected.cloudflaredReleaseCommit) {
+    fail("PACKAGE_TUNNEL_CLOUDFLARED_METADATA_MISMATCH", JSON.stringify(cloudflared ?? null));
+  }
+  const cloudflaredManifest = readJson(
+    path.join(nativeRoot, "cloudflared-manifest.json"),
+    "PACKAGE_TUNNEL_CLOUDFLARED_MANIFEST_INVALID",
+  );
+  if (!plain(cloudflaredManifest)
+    || cloudflaredManifest.version !== expected.cloudflaredVersion
+    || cloudflaredManifest.release_commit !== expected.cloudflaredReleaseCommit
+    || !Array.isArray(cloudflaredManifest.platforms)
+    || !cloudflaredManifest.platforms.includes(expected.platform)) {
+    fail("PACKAGE_TUNNEL_CLOUDFLARED_IDENTITY_MISMATCH", JSON.stringify(cloudflaredManifest));
+  }
+
+  const licenseReport = tunnel.license_report;
+  const licenseRecord = byName.get(expected.licenseName);
+  if (!plain(licenseReport) || licenseReport.name !== expected.licenseName
+    || licenseReport.sha256 !== expected.licenseSha256
+    || licenseRecord.sha256 !== expected.licenseSha256) {
+    fail("PACKAGE_TUNNEL_LICENSE_REPORT_MISMATCH", JSON.stringify(licenseReport ?? null));
+  }
+  const spdxMetadata = tunnel.spdx;
+  const spdxRecord = byName.get(expected.spdxName);
+  if (!plain(spdxMetadata) || spdxMetadata.name !== expected.spdxName
+    || spdxMetadata.sha256 !== expected.spdxSha256
+    || spdxRecord.sha256 !== expected.spdxSha256) {
+    fail("PACKAGE_TUNNEL_SPDX_MISMATCH", JSON.stringify(spdxMetadata ?? null));
+  }
+  const spdx = readJson(path.join(nativeRoot, expected.spdxName), "PACKAGE_TUNNEL_SPDX_INVALID");
+  if (!plain(spdx) || spdx.spdxVersion !== "SPDX-2.3") {
+    fail("PACKAGE_TUNNEL_SPDX_INVALID", String(spdx?.spdxVersion));
+  }
+
+  return {
+    archiveName: archive.name,
+    archiveSha256: archive.sha256,
+    memberCount: memberRecords.length,
+    cloudflaredVersion: cloudflared.version,
+    cloudflaredReleaseCommit: cloudflared.releaseCommit,
+  };
+}
+
 function validateMigrationRollback(resourcesRoot) {
   const migration = readJson(path.join(resourcesRoot, REQUIRED_COMPONENTS["migration-manifest"]), "PACKAGE_MIGRATION_MANIFEST_INVALID");
   if (!plain(migration) || migration.schema !== 1 || migration.sourceVersion !== "0.4.10"
@@ -335,13 +487,21 @@ function validatePackageManifest(resourcesRoot, appManifest, options = {}) {
     fail("PACKAGE_MANIFEST_IDENTITY_MISMATCH", JSON.stringify({ product: manifest?.product, source: manifest?.source, upstream: manifest?.upstream }));
   }
   const componentIds = validateComponentRecords(resourcesRoot, manifest);
+  let tunnelSupplyChain = null;
+  if (manifest.supply_chain !== undefined || options.appManifest === undefined) {
+    tunnelSupplyChain = validateTunnelSupplyChain(
+      resourcesRoot,
+      manifest,
+      options.expectedTunnelRelease || OFFICIAL_TUNNEL_RELEASE,
+    );
+  }
   const runtime = validateRuntimeBundle(path.join(resourcesRoot, "runtime"));
   validateMigrationRollback(resourcesRoot);
   const notices = fs.readFileSync(path.join(resourcesRoot, REQUIRED_COMPONENTS["third-party-notices"]), "utf8");
   for (const marker of ["codex-chatgpt-web", "MIT", "Apache-2.0"]) {
     if (!notices.includes(marker)) fail("PACKAGE_NOTICES_INCOMPLETE", marker);
   }
-  return { componentIds, runtime, sourceSha: manifest.source.sha };
+  return { componentIds, runtime, sourceSha: manifest.source.sha, tunnelSupplyChain };
 }
 
 function inspectExtractedApplication(appRoot, options = {}) {
@@ -360,7 +520,8 @@ function inspectExtractedApplication(appRoot, options = {}) {
   if (!options.appManifest) findings.push(...scanAsar(asarPath, asarEntries));
   if (findings.length) fail("PACKAGE_SECRET_MATERIAL_FOUND", JSON.stringify(findings));
   return { ok: true, productVersion: PRODUCT.version, appId: PRODUCT.appId, sourceSha: validated.sourceSha,
-    componentIds: validated.componentIds, runtime: validated.runtime, secretsFound: [] };
+    componentIds: validated.componentIds, runtime: validated.runtime,
+    tunnelSupplyChain: validated.tunnelSupplyChain, secretsFound: [] };
 }
 
 function installerName(name) {
@@ -470,6 +631,7 @@ if (require.main === module) {
     process.stdout.write(`PACKAGE_VERIFICATION_PASS ${JSON.stringify({
       productVersion: result.productVersion, sourceSha: result.sourceSha,
       componentIds: result.componentIds, runtimeBundleId: result.runtime.bundleId,
+      tunnelArchiveSha256: result.tunnelSupplyChain?.archiveSha256,
       installer: result.installer, retainedEvidenceRoot: result.retainedEvidenceRoot,
     })}\n`);
   } catch (error) {
@@ -479,12 +641,15 @@ if (require.main === module) {
 }
 
 module.exports = {
+  OFFICIAL_TUNNEL_RELEASE,
   PRODUCT,
   REQUIRED_ASAR_FILES,
   REQUIRED_COMPONENTS,
+  REQUIRED_TUNNEL_MEMBERS,
   findWindowsInstaller,
   inspectExtractedApplication,
   validatePackageManifest,
   validateRuntimeBundle,
+  validateTunnelSupplyChain,
   verifyPackage,
 };
