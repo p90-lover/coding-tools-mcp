@@ -18,3 +18,7 @@ pub(crate) use oauth::{sync_trusted_origins, trusted_external_base_url};
 #[cfg(test)]
 #[path = "../../../aiTemp/oauth-popup/origin_policy.rs"]
 mod oauth_popup_origin_policy;
+
+#[cfg(test)]
+#[path = "../../../aiTemp/oauth-issuer/authorization_response_contract.rs"]
+mod oauth_authorization_response_contract;
