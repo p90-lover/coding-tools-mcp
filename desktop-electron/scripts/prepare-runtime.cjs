@@ -1,5 +1,8 @@
 "use strict";
 
+// The delegated implementation stages work under repository aiTemp/work and
+// preserves replaced or failed runtime bundles under repository aiTemp/Trash.
+// This wrapper never performs cleanup, deletion, or direct publication itself.
 const { prepareRuntime } = require("./runtime-preparation.cjs");
 
 if (require.main === module) {
