@@ -6,6 +6,10 @@ on:
       - feature/headless-rust-service-0.6.0
     paths:
       - .github/workflows/headless-service-green.yml
+      - aiTemp/headless-service/**
+      - rust-core/coding-tools-headless/**
+      - rust-core/coding-tools-core/**
+      - src-tauri/src/data/store.rs
   workflow_dispatch:
 
 permissions:
@@ -61,11 +65,15 @@ jobs:
           set -euo pipefail
           mkdir -p aiTemp/evidence aiTemp/red
           gh run download 34863637333 --repo "$GITHUB_REPOSITORY" --dir aiTemp/red
-          find aiTemp/red -type f -maxdepth 3 -print -exec grep -H -E 'coding-tools-headless|No such file|could not find' {} \; > aiTemp/evidence/red-evidence.txt || true
+          find aiTemp/red -maxdepth 3 -type f -print -exec grep -H -E 'coding-tools-headless|No such file|could not find' {} \; > aiTemp/evidence/red-evidence.txt || true
           test -s aiTemp/evidence/red-evidence.txt
-      - name: Format and materialize exact lockfiles
+      - name: Apply focused dispatcher repair and materialize exact lockfiles
         run: |
           set -euo pipefail
+          python aiTemp/headless-service/apply_compile_fixes.py
+          rustfmt --edition 2021 --config skip_children=true \
+            src-tauri/src/data/store.rs \
+            rust-core/coding-tools-core/src/lib.rs
           cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml
           cargo generate-lockfile --manifest-path rust-core/coding-tools-core/Cargo.toml
           cargo generate-lockfile --manifest-path rust-core/coding-tools-headless/Cargo.toml
@@ -79,18 +87,23 @@ jobs:
           cargo test --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml -- --test-threads=1 --nocapture 2>&1 | tee aiTemp/evidence/headless-tests.txt
           cargo clippy --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml --all-targets -- -D warnings 2>&1 | tee aiTemp/evidence/headless-clippy.txt
           grep -F 'test result: ok' aiTemp/evidence/headless-tests.txt
-      - name: Commit only formatted source and generated lockfiles
+      - name: Commit only verified formatting, retained originals and lockfiles
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          allowed='^(rust-core/coding-tools-headless/(Cargo.lock|src/.*\.rs|tests/.*\.rs)|rust-core/coding-tools-core/Cargo.lock)$'
+          allowed='^(rust-core/coding-tools-headless/(Cargo.lock|src/.*\.rs|tests/.*\.rs)|rust-core/coding-tools-core/(Cargo.lock|src/lib\.rs)|src-tauri/src/data/store\.rs|Trash/headless-service-0\.6\.0/[0-9]+/rust-core/coding-tools-headless/src/lib\.rs)$'
           changed="$(git status --short | sed -E 's/^.. //')"
           if [ -n "$changed" ]; then
             while IFS= read -r path; do
               test -z "$path" || printf '%s\n' "$path" | grep -Eq "$allowed"
             done <<< "$changed"
-            git add -- rust-core/coding-tools-headless rust-core/coding-tools-core/Cargo.lock
+            git add -- \
+              rust-core/coding-tools-headless \
+              rust-core/coding-tools-core/Cargo.lock \
+              rust-core/coding-tools-core/src/lib.rs \
+              src-tauri/src/data/store.rs \
+              Trash/headless-service-0.6.0
             git diff --cached --check
             test -z "$(git diff --cached --diff-filter=D --name-only)"
             git config user.name 'p90-lover'
