@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: codex-router-multiprovider-release-0.7.0-rc.1
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   BUN_VERSION: '1.4.0'
@@ -31,6 +31,8 @@ jobs:
   release-contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 22
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -275,4 +277,236 @@ jobs:
           name: coding-tools-0.7.0-rc.1-windows-evidence-${{ github.sha }}
           path: aiTemp/evidence/
           if-no-files-found: error
+          retention-days: 14
+
+  publish-beta:
+    name: Publish exact-SHA beta prerelease
+    needs: [release-contract, windows-package]
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[publish-beta]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    permissions:
+      contents: write
+      actions: read
+    env:
+      RELEASE_TAG: v0.7.0-rc.1
+      VALIDATION_WORKFLOW: .github/workflows/codex-router-multiprovider-release.yml
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: coding-tools-0.7.0-rc.1-windows-x64-${{ github.sha }}
+          path: aiTemp/publish/assets
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: coding-tools-0.7.0-rc.1-windows-evidence-${{ github.sha }}
+          path: aiTemp/publish/windows-evidence
+
+      - name: Bind installer and evidence to the exact release-branch head
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          remote_head="$(git ls-remote origin refs/heads/release/codex-router-multiprovider-0.7.0-rc.1 | cut -f1)"
+          test "$remote_head" = "$SOURCE_SHA"
+          test -f "aiTemp/publish/assets/$WINDOWS_INSTALLER"
+          mapfile -t source_receipts < <(
+            find aiTemp/publish/windows-evidence -type f -name windows-installer-source.txt -print
+          )
+          mapfile -t hash_receipts < <(
+            find aiTemp/publish/windows-evidence -type f -name windows-installer.sha256 -print
+          )
+          test "${#source_receipts[@]}" -eq 1
+          test "${#hash_receipts[@]}" -eq 1
+          grep -Fqx "source=$SOURCE_SHA" "${source_receipts[0]}"
+          grep -Fqx "installer=$WINDOWS_INSTALLER" "${source_receipts[0]}"
+          expected_sha256="$(awk 'NR == 1 {print $1}' "${hash_receipts[0]}")"
+          actual_sha256="$(sha256sum "aiTemp/publish/assets/$WINDOWS_INSTALLER" | awk '{print $1}')"
+          test "$expected_sha256" = "$actual_sha256"
+          printf 'source=%s\ninstaller=%s\nsha256=%s\n' \
+            "$SOURCE_SHA" "$WINDOWS_INSTALLER" "$actual_sha256" \
+            > aiTemp/publish/exact-source-receipt.txt
+
+      - name: Generate immutable provenance, validation, and checksums
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const root = path.resolve('aiTemp/publish/assets');
+          const installer = process.env.WINDOWS_INSTALLER;
+          const installerPath = path.join(root, installer);
+          const installerBytes = fs.readFileSync(installerPath);
+          const installerSha256 = crypto.createHash('sha256').update(installerBytes).digest('hex');
+          const sourceSha = process.env.SOURCE_SHA;
+          const validationRunId = Number(process.env.GITHUB_RUN_ID);
+          if (!Number.isSafeInteger(validationRunId) || validationRunId < 1) {
+            throw new Error(`VALIDATION_RUN_ID_INVALID:${process.env.GITHUB_RUN_ID}`);
+          }
+
+          const provenance = {
+            schema: 1,
+            release_tag: process.env.RELEASE_TAG,
+            version: process.env.RELEASE_VERSION,
+            source_sha: sourceSha,
+            product: {
+              name: 'Coding Tools',
+              app_id: 'dev.codingtools.fullharness',
+            },
+            upstream: {
+              repository: 'miuuyy/codex-chatgpt-web',
+              version: 'v5.0.6',
+              commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+            },
+            validation_run: {
+              id: validationRunId,
+              workflow: process.env.VALIDATION_WORKFLOW,
+            },
+            assets: [{
+              name: installer,
+              sha256: installerSha256,
+              size: installerBytes.length,
+            }],
+          };
+          const validation = {
+            schema: 1,
+            automated_gates: 'passed',
+            live_account_acceptance: 'pending_manual',
+            source_sha: sourceSha,
+            validation_run_id: validationRunId,
+            validation_workflow: process.env.VALIDATION_WORKFLOW,
+            validation_conclusion: 'success',
+            release_contract_job: 'success',
+            windows_package_job: 'success',
+          };
+          fs.writeFileSync(
+            path.join(root, 'provenance.json'),
+            `${JSON.stringify(provenance, null, 2)}\n`,
+          );
+          fs.writeFileSync(
+            path.join(root, 'validation-evidence.json'),
+            `${JSON.stringify(validation, null, 2)}\n`,
+          );
+          const names = [installer, 'provenance.json', 'validation-evidence.json'];
+          const checksums = names.map((name) => {
+            const bytes = fs.readFileSync(path.join(root, name));
+            const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+            return `${digest}  ${name}`;
+          }).join('\n');
+          fs.writeFileSync(path.join(root, 'SHA256SUMS.txt'), `${checksums}\n`);
+          NODE
+          test -f aiTemp/publish/assets/Coding.Tools_0.7.0-rc.1_windows_x64_setup.exe
+          test -f aiTemp/publish/assets/SHA256SUMS.txt
+          test -f aiTemp/publish/assets/provenance.json
+          test -f aiTemp/publish/assets/validation-evidence.json
+
+      - name: Verify assets and publish the prerelease with remote readback
+        run: |
+          set -euo pipefail
+          node scripts/release/verify-assets.mjs \
+            --directory aiTemp/publish/assets \
+            --tag "$RELEASE_TAG" \
+            --version "$RELEASE_VERSION" \
+            --source "$SOURCE_SHA" \
+            --json-out aiTemp/publish/pre-publication-verification.json
+          node scripts/release/publish-v0.6.0-rc.1.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --source "$SOURCE_SHA" \
+            --assets aiTemp/publish/assets \
+            --notes docs/releases/v0.7.0-rc.1.md \
+            --json-out aiTemp/publish/publisher-result.json
+
+      - name: Record independent public release and tag receipt
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const apiRoot = 'https://api.github.com';
+          const repository = process.env.GITHUB_REPOSITORY;
+          const tag = process.env.RELEASE_TAG;
+          const sourceSha = process.env.SOURCE_SHA;
+          const headers = {
+            accept: 'application/vnd.github+json',
+            authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+            'x-github-api-version': '2022-11-28',
+            'user-agent': 'coding-tools-0.7-beta-readback',
+          };
+          async function readJson(url) {
+            const response = await fetch(url, { headers });
+            const text = await response.text();
+            if (!response.ok) throw new Error(`HTTP_${response.status}:${text.slice(0, 500)}`);
+            return JSON.parse(text);
+          }
+          const release = await readJson(
+            `${apiRoot}/repos/${repository}/releases/tags/${encodeURIComponent(tag)}`,
+          );
+          const tagRef = await readJson(
+            `${apiRoot}/repos/${repository}/git/ref/tags/${encodeURIComponent(tag)}`,
+          );
+          if (release.draft !== false || release.prerelease !== true || !release.published_at) {
+            throw new Error('PUBLIC_PRERELEASE_STATE_INVALID');
+          }
+          if (String(tagRef.object?.sha ?? '').toLowerCase() !== sourceSha.toLowerCase()) {
+            throw new Error(`PUBLIC_TAG_SHA_MISMATCH:${tagRef.object?.sha}`);
+          }
+          const expectedNames = [
+            'Coding.Tools_0.7.0-rc.1_windows_x64_setup.exe',
+            'SHA256SUMS.txt',
+            'provenance.json',
+            'validation-evidence.json',
+          ].sort();
+          const actualNames = (release.assets ?? []).map((asset) => asset.name).sort();
+          if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+            throw new Error(`PUBLIC_ASSET_INVENTORY_MISMATCH:${JSON.stringify(actualNames)}`);
+          }
+          const publisher = JSON.parse(fs.readFileSync('aiTemp/publish/publisher-result.json', 'utf8'));
+          const receipt = {
+            schema: 1,
+            url: release.html_url,
+            release_id: release.id,
+            tag,
+            source_sha: sourceSha,
+            draft: release.draft,
+            prerelease: release.prerelease,
+            published_at: release.published_at,
+            assets: release.assets.map((asset) => ({
+              name: asset.name,
+              size: asset.size,
+              digest: asset.digest ?? null,
+              browser_download_url: asset.browser_download_url,
+            })),
+            publisher,
+          };
+          fs.writeFileSync(
+            'aiTemp/publish/publication-receipt.json',
+            `${JSON.stringify(receipt, null, 2)}\n`,
+          );
+          process.stdout.write(`${JSON.stringify(receipt, null, 2)}\n`);
+          NODE
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coding-tools-0.7.0-rc.1-publication-${{ github.sha }}
+          path: |
+            aiTemp/publish/publication-receipt.json
+            aiTemp/publish/publisher-result.json
+            aiTemp/publish/pre-publication-verification.json
+            aiTemp/publish/exact-source-receipt.txt
+          if-no-files-found: warn
           retention-days: 14
