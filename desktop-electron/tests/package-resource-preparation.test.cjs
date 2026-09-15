@@ -72,6 +72,7 @@ function storedZip(entries) {
   return Buffer.concat([...localParts, centralDirectory, end]);
 }
 
+
 function cloudflaredManifest(platform = "windows/amd64") {
   return `${JSON.stringify({
     version: "2026.7.2",
@@ -212,15 +213,24 @@ test("composes the exact Windows payload from the official seven-member client a
     version: "v5.0.6",
     commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
   });
-  assert.deepEqual(manifest.supply_chain.tunnel_client.archive.members, [
-    "LICENSE",
-    "NOTICE",
-    "cloudflared-manifest.json",
-    "cloudflared.exe",
-    "tunnel-client-v0.0.12-windows-amd64-licenses.txt",
-    "tunnel-client-v0.0.12-windows-amd64.spdx.json",
-    "tunnel-client.exe",
+  const expectedNativeMembers = new Map([
+    ["LICENSE", Buffer.from("Apache License\nVersion 2.0, January 2004\n")],
+    ["NOTICE", Buffer.from("OpenAI tunnel-client\n")],
+    ["cloudflared-manifest.json", Buffer.from(cloudflaredManifest())],
+    ["cloudflared.exe", Buffer.from("MZfixture-cloudflared")],
+    [options.tunnelRelease.licenseName, Buffer.from("tunnel-client dependency licenses include Apache-2.0 components.\n")],
+    [options.tunnelRelease.spdxName, Buffer.from("{\"spdxVersion\":\"SPDX-2.3\"}\n")],
+    ["tunnel-client.exe", Buffer.from("MZfixture-tunnel-client-0.0.12")],
   ]);
+  assert.deepEqual(
+    manifest.supply_chain.tunnel_client.archive.members,
+    [...expectedNativeMembers]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([name, bytes]) => ({ name, size: bytes.length, sha256: sha256(bytes) })),
+  );
+  for (const [name, bytes] of expectedNativeMembers) {
+    assert.deepEqual(fs.readFileSync(path.join(options.outputRoot, "native", name)), bytes, name);
+  }
   assert.deepEqual(manifest.supply_chain.tunnel_client.cloudflared, {
     binaryName: "cloudflared.exe",
     binarySha256: sha256(Buffer.from("MZfixture-cloudflared")),
