@@ -5,6 +5,7 @@ import {
   routerWebModelCatalog,
   routerWebModelsResponse,
 } from "../src/router-web-ingress";
+import { startServer } from "../src/server";
 
 describe("restricted Coding Tools Web router ingress", () => {
   test("builds a standard provider catalog directly from enabled chatgpt-web routes", async () => {
@@ -87,5 +88,42 @@ describe("restricted Coding Tools Web router ingress", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(response.headers.get("x-web-ingress")).toBe("ok");
     expect(await response.text()).toContain("response.completed");
+  });
+
+  test("serves bearer-free Web discovery and rejects router recursion on the real listener", async () => {
+    const config = defaultConfig("browser-only");
+    config.port = 0;
+    config.solAvailable = true;
+    config.proAvailable = false;
+    let adapterCalls = 0;
+    const server = startServer(config, {
+      adapterFactory: () => {
+        adapterCalls += 1;
+        throw new Error("adapter should not be reached by rejected router ingress");
+      },
+    });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const catalogResponse = await fetch(`${base}/router/v1/models`);
+      expect(catalogResponse.status).toBe(200);
+      const catalog = await catalogResponse.json() as { data: Array<{ id: string }> };
+      expect(catalog.data.length).toBeGreaterThan(0);
+      expect(catalog.data.every(model => model.id.startsWith("chatgpt-web/"))).toBe(true);
+
+      const recursive = await fetch(`${base}/router/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "codex-router/deepseek/deepseek-v4-pro",
+          input: [],
+          stream: true,
+        }),
+      });
+      expect(recursive.status).toBe(400);
+      expect(await recursive.text()).toContain("chatgpt-web/");
+      expect(adapterCalls).toBe(0);
+    } finally {
+      await server.stop(true);
+    }
   });
 });
