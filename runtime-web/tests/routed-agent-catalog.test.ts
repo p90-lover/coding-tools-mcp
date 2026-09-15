@@ -24,7 +24,7 @@ describe("scalable Codex Router agent types", () => {
     expect(first.fileName).toMatch(/^coding-tools-router-commandcode-proxy-claude-sonnet-4-6-[a-f0-9]{10}\.toml$/);
     expect(collision.agentName).not.toBe(first.agentName);
     expect(collision.fileName).not.toBe(first.fileName);
-    expect(first.contents).toContain('model_provider = "codex-router"');
+    expect(first.contents).not.toContain("model_provider");
     expect(first.contents).toContain('model = "commandcode-proxy/claude-sonnet-4-6"');
     expect(first.contents).not.toContain("CODING_TOOLS_CODEX_ROUTER_CALLER_KEY");
     expect(first.contents).not.toContain("user_");

@@ -166,6 +166,7 @@ writeFileSync(join(codexHome, "config.toml"), [
   `base_url = "http://127.0.0.1:${rootServer.port}/v1"`,
   'env_key = "OPENAI_API_KEY"',
   'wire_api = "responses"',
+  "requires_openai_auth = false",
   "supports_websockets = false",
   "",
   "[model_providers.codex-router]",
@@ -240,10 +241,13 @@ try {
   if (rootSteps.length < 3) failures.push(`root lifecycle observed only ${rootSteps.length} response turns`);
 
   if (failures.length > 0) {
+    const redactedRoutedRequests = routedRequests.map(entry => ({
+      authorization: entry.authorization ? "Bearer [REDACTED]" : null,
+      body: entry.body,
+    }));
     throw new Error(
       `${failures.join("; ")}\nRoot requests: ${JSON.stringify(rootRequests)}`
-        + `\nRouted requests: ${JSON.stringify(routedRequests.map(entry => ({`
-        + ` authorization: entry.authorization ? "Bearer [REDACTED]" : null, body: entry.body }))}`
+        + `\nRouted requests: ${JSON.stringify(redactedRoutedRequests)}`
         + `\nCodex stdout: ${stdout.slice(-8_000)}\nCodex stderr: ${stderr.slice(-8_000)}`,
     );
   }

@@ -69,7 +69,6 @@ export function routedAgentDefinition(slug: string): RoutedAgentDefinition {
     "# Managed by Coding Tools. This file contains no provider credential.",
     `name = ${tomlString(agentName)}`,
     `description = ${tomlString(`${model} subagent routed through the authenticated local Codex Router.`)}`,
-    'model_provider = "codex-router"',
     `model = ${tomlString(model)}`,
     "",
     'developer_instructions = """',
