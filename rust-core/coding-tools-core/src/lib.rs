@@ -8,7 +8,7 @@
 
 use std::sync::Mutex;
 
-pub use coding_tools_mcp_desktop_lib::{data, error, runtime, tools};
+pub use coding_tools_mcp_desktop_lib::{data, error, integrations, runtime, tools};
 
 use data::{AppData, DataStore};
 use error::{AppError, AppResult};
