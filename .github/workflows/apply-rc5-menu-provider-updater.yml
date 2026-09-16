@@ -1,0 +1,165 @@
+name: Apply rc.5 menu, provider, and updater hotfix
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.5-menu-provider-updater
+    paths:
+      - aiTemp/rc5-menu-provider-updater/apply-hotfix.py
+      - .github/workflows/apply-rc5-menu-provider-updater.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc5-menu-provider-updater
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: '1.4.0'
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/cache/bun-rc5-menu-provider-updater
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/v0.7.0-rc.5-menu-provider-updater
+          fetch-depth: 2
+          clean: false
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Prepare retained work roots
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            aiTemp/tmp/rc5-menu-provider-updater \
+            aiTemp/rc5-menu-provider-updater/evidence \
+            aiTemp/Trash/rc5-menu-provider-updater
+
+      - name: Apply focused hotfix
+        run: |
+          set -euo pipefail
+          python aiTemp/rc5-menu-provider-updater/apply-hotfix.py \
+            | tee aiTemp/rc5-menu-provider-updater/evidence/patch.txt
+          grep -F CODING_TOOLS_RC5_MENU_PROVIDER_UPDATER_PATCH_OK \
+            aiTemp/rc5-menu-provider-updater/evidence/patch.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+
+      - name: Verify bounded source changes
+        run: |
+          set -euo pipefail
+          cat > aiTemp/rc5-menu-provider-updater/expected-paths.txt <<'EOF'
+          desktop-electron/electron/browser-host.cjs
+          desktop-electron/electron/product.cjs
+          desktop-electron/electron/update.cjs
+          desktop-electron/package.json
+          desktop-electron/scripts/prepare-package-resources.cjs
+          desktop-electron/scripts/verify-package.cjs
+          desktop-electron/src/App.tsx
+          desktop-electron/src/features/ProviderHubSurface.tsx
+          desktop-electron/tests/browser-host.test.cjs
+          desktop-electron/tests/package-contents.test.cjs
+          desktop-electron/tests/package-resource-preparation.test.cjs
+          desktop-electron/tests/product-identity.test.cjs
+          desktop-electron/tests/provider-center-account-wiring.test.cjs
+          desktop-electron/tests/renderer-provider-bundle.test.cjs
+          desktop-electron/tests/update.test.cjs
+          docs/releases/v0.7.0-rc.5.md
+          EOF
+          git status --short --untracked-files=all \
+            | sed -E 's/^.. //' \
+            | grep -v '^aiTemp/rc5-menu-provider-updater/evidence/' \
+            | sort -u > aiTemp/rc5-menu-provider-updater/actual-paths.txt
+          diff -u \
+            aiTemp/rc5-menu-provider-updater/expected-paths.txt \
+            aiTemp/rc5-menu-provider-updater/actual-paths.txt
+
+      - name: Install exact focused dependencies
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          temp="$PWD/aiTemp/tmp/rc5-menu-provider-updater"
+          TMPDIR="$temp" TMP="$temp" TEMP="$temp" \
+            bun install --cwd runtime-web --frozen-lockfile
+          TMPDIR="$temp" TMP="$temp" TEMP="$temp" \
+            bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run focused regressions
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/update.cjs
+          node --check desktop-electron/electron/browser-host.cjs
+          node --test desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            2>&1 | tee aiTemp/rc5-menu-provider-updater/evidence/provider-center-tests.txt
+          node --test \
+            --test-name-pattern='browser surface visibility|descriptor-owned home surface' \
+            desktop-electron/tests/browser-host.test.cjs \
+            2>&1 | tee aiTemp/rc5-menu-provider-updater/evidence/browser-visibility-tests.txt
+          node --test \
+            --test-name-pattern='release comparison|checksums and release URLs|project updater selects|startup check' \
+            desktop-electron/tests/update.test.cjs \
+            2>&1 | tee aiTemp/rc5-menu-provider-updater/evidence/project-updater-tests.txt
+          bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/rc5-menu-provider-updater/evidence/desktop-typecheck.txt
+
+      - name: Build renderer without deleting retained output
+        run: |
+          set -euo pipefail
+          if [ -d desktop-electron/dist ]; then
+            mv desktop-electron/dist \
+              "aiTemp/Trash/rc5-menu-provider-updater/dist-before-$GITHUB_RUN_ID"
+          fi
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          temp="$PWD/aiTemp/tmp/rc5-menu-provider-updater"
+          TMPDIR="$temp" TMP="$temp" TEMP="$temp" \
+            bun run --cwd desktop-electron build \
+            2>&1 | tee aiTemp/rc5-menu-provider-updater/evidence/desktop-build.txt
+          node --test desktop-electron/tests/renderer-provider-bundle.test.cjs \
+            2>&1 | tee aiTemp/rc5-menu-provider-updater/evidence/renderer-bundle-tests.txt
+
+      - name: Commit only verified source files
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/electron/browser-host.cjs \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/electron/update.cjs \
+            desktop-electron/package.json \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/features/ProviderHubSurface.tsx \
+            desktop-electron/tests/browser-host.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/renderer-provider-bundle.test.cjs \
+            desktop-electron/tests/update.test.cjs \
+            docs/releases/v0.7.0-rc.5.md
+          if git diff --cached --quiet; then
+            echo RC5_MENU_PROVIDER_UPDATER_ALREADY_APPLIED
+            exit 0
+          fi
+          git diff --cached --check
+          git diff --cached --name-only | sort -u \
+            > aiTemp/rc5-menu-provider-updater/staged-paths.txt
+          diff -u \
+            aiTemp/rc5-menu-provider-updater/expected-paths.txt \
+            aiTemp/rc5-menu-provider-updater/staged-paths.txt
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix(rc5): repair menu isolation, account totals, and project updater'
+          git push origin HEAD:fix/v0.7.0-rc.5-menu-provider-updater
