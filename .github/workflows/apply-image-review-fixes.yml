@@ -7,6 +7,7 @@ on:
     paths:
       - aiTemp/rc2/apply_image_review_fixes.py
       - aiTemp/rc2/apply_image_review_fixes_v2.py
+      - aiTemp/rc2/apply_image_review_fixes_v3.py
       - .github/workflows/apply-image-review-fixes.yml
   workflow_dispatch:
 
@@ -49,18 +50,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence aiTemp/Trash/image-review-green
-          python aiTemp/rc2/apply_image_review_fixes_v2.py \
+          python aiTemp/rc2/apply_image_review_fixes_v3.py \
             | tee aiTemp/evidence/image-review-green-apply.txt
           grep -F 'IMAGE_REVIEW_FIXES_OK changed=true' \
             aiTemp/evidence/image-review-green-apply.txt
           grep -F 'IMAGE_REVIEW_FIXES_V2_OK' \
+            aiTemp/evidence/image-review-green-apply.txt
+          grep -F 'RC2_FRONTEND_INTEGRATION_FIXES_OK changed=true' \
             aiTemp/evidence/image-review-green-apply.txt
       - name: Format and enforce narrow no-delete patch
         run: |
           set -euo pipefail
           rustfmt --edition 2021 src-tauri/src/media.rs src-tauri/src/providers.rs
           test -z "$(git diff --diff-filter=D --name-only)"
-          unexpected="$(git diff --name-only | grep -Ev '^(src-tauri/src/media\.rs|src-tauri/src/providers\.rs|src/lib/provider-media\.ts|src/routes/image-studio/\+page\.svelte)$' || true)"
+          unexpected="$(git diff --name-only | grep -Ev '^(src-tauri/src/media\.rs|src-tauri/src/providers\.rs|src/lib/provider-media\.ts|src/routes/image-studio/\+page\.svelte|src/lib/provider-center\.ts|src/lib/orchestrator-center\.ts|src/lib/components/AppShell\.svelte)$' || true)"
           if [ -n "$unexpected" ]; then
             echo "::error::Unexpected tracked changes:"
             printf '%s\n' "$unexpected"
@@ -98,10 +101,13 @@ jobs:
             src-tauri/src/media.rs \
             src-tauri/src/providers.rs \
             src/lib/provider-media.ts \
-            src/routes/image-studio/+page.svelte
+            src/routes/image-studio/+page.svelte \
+            src/lib/provider-center.ts \
+            src/lib/orchestrator-center.ts \
+            src/lib/components/AppShell.svelte
           git diff --cached --check
           test -z "$(git diff --cached --diff-filter=D --name-only)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix(image): harden provider generation and previews'
+          git commit -m 'fix(rc.2): harden image providers and frontend integration'
           git push origin "HEAD:$TARGET_BRANCH"
