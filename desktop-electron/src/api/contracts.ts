@@ -54,6 +54,28 @@ export interface CodingToolsApi {
   readonly integrations: {
     snapshot(): Promise<JsonObject>;
   };
+  readonly execution: {
+    read(input: {
+      readonly workspaceId: string;
+      readonly missionId?: string | null;
+      readonly refreshSource?: boolean;
+    }): Promise<JsonObject>;
+    provider(input: {
+      readonly workspaceId: string;
+      readonly operation: "configure" | "connect" | "disable";
+      readonly expectedRevision?: number | null;
+      readonly bindingId?: string | null;
+      readonly settings?: JsonObject | null;
+      readonly credential?: string;
+      readonly confirm: boolean;
+    }): Promise<JsonObject>;
+    update(input: {
+      readonly workspaceId: string;
+      readonly expectedRevision: number;
+      readonly change: JsonObject;
+      readonly confirm: boolean;
+    }): Promise<JsonObject>;
+  };
   readonly updates: {
     status(): Promise<JsonObject>;
   };

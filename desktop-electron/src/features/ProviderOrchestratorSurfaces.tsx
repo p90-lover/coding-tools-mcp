@@ -49,6 +49,8 @@ interface ExecutionBinding {
 const PROVIDER_STORAGE_KEY = "coding-tools-provider-instances-v1";
 const ORCHESTRATOR_STORAGE_KEY = "coding-tools-orchestrators-v1";
 
+const PROVIDER_DEFINITIONS: readonly ProviderDefinition[] = DEFAULT_PROVIDERS;
+
 function text(language: Language, english: string, traditionalChinese: string): string {
   return language === "zh-TW" || language === "zh-CN" ? traditionalChinese : english;
 }
@@ -71,7 +73,7 @@ function presetBaseUrl(providerId: string): string {
 }
 
 function defaultInstances(): ProviderInstance[] {
-  return DEFAULT_PROVIDERS.map((provider) => ({
+  return PROVIDER_DEFINITIONS.map((provider) => ({
     id: provider.id,
     definitionId: provider.id,
     name: provider.name,
@@ -187,7 +189,7 @@ function missionRevision(value: unknown, missionId: string): number {
 }
 
 function providerDefinition(id: string): ProviderDefinition | undefined {
-  return DEFAULT_PROVIDERS.find((provider) => provider.id === id);
+  return PROVIDER_DEFINITIONS.find((provider) => provider.id === id);
 }
 
 function modelEndpoint(instance: ProviderInstance): string {
@@ -466,7 +468,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                     selectedModel: next.models[0] ?? "",
                   });
                 }}>
-                  {DEFAULT_PROVIDERS.map((provider) => (
+                  {PROVIDER_DEFINITIONS.map((provider) => (
                     <option key={provider.id} value={provider.id}>{provider.name}</option>
                   ))}
                 </select>
@@ -571,7 +573,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
 }
 
 function defaultOrchestrator(): CustomOrchestratorDefinition {
-  const defaultProviders = DEFAULT_PROVIDERS.filter((provider) => provider.annealEnabled);
+  const defaultProviders = PROVIDER_DEFINITIONS.filter((provider) => provider.annealEnabled);
   const stageNames = ["Planner", "Coder", "Reviewer", "Tester"];
   return {
     id: `orchestrator-${crypto.randomUUID().slice(0, 8)}`,
@@ -833,7 +835,7 @@ export function OrchestratorSurface({ language, setError }: SurfaceProps) {
                         model: { providerId: event.target.value, model: stage.model?.model ?? "" },
                       })}
                     >
-                      {DEFAULT_PROVIDERS.filter((provider) => provider.annealEnabled).map((provider) => (
+                      {PROVIDER_DEFINITIONS.filter((provider) => provider.annealEnabled).map((provider) => (
                         <option key={provider.id} value={provider.id}>{provider.name}</option>
                       ))}
                     </select>

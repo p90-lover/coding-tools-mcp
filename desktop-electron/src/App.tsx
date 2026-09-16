@@ -11,6 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { ProviderCenterSurface, OrchestratorSurface } from "./features/ProviderOrchestratorSurfaces";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -618,6 +619,18 @@ function LauncherShell({
                     navigateSurface("mcp");
                   }}
                 />
+                <SidebarItem
+                  active={surface === "providers"}
+                  icon="providers"
+                  label={language === "zh-TW" ? "供應商" : language === "zh-CN" ? "供应商" : language === "ja" ? "プロバイダー" : "Providers"}
+                  onClick={() => navigateSurface("providers")}
+                />
+                <SidebarItem
+                  active={surface === "orchestrator"}
+                  icon="orchestrator"
+                  label={language === "zh-TW" ? "Orchestrator 編排" : language === "zh-CN" ? "Orchestrator 编排" : language === "ja" ? "オーケストレーター" : "Orchestrator"}
+                  onClick={() => navigateSurface("orchestrator")}
+                />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
@@ -701,6 +714,12 @@ function LauncherShell({
             ) : null}
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+            ) : null}
+            {surface === "providers" ? (
+              <ProviderCenterSurface language={language} setError={setError} />
+            ) : null}
+            {surface === "orchestrator" ? (
+              <OrchestratorSurface language={language} setError={setError} />
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface

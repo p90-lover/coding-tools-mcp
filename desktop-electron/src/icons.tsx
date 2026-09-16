@@ -16,6 +16,8 @@ export type IconName =
   | "info"
   | "logs"
   | "mcp"
+  | "providers"
+  | "orchestrator"
   | "minus"
   | "plus"
   | "reload"
@@ -44,6 +46,8 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
       {name === "info" ? <><circle {...common} cx="12" cy="12" r="9" /><path {...common} d="M12 10.5V17M12 7h.01" /></> : null}
       {name === "logs" ? <><path {...common} d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4" /></> : null}
       {name === "mcp" ? <><path {...common} d="M8 7.5 12 4l4 3.5v5L12 16l-4-3.5v-5Z" /><path {...common} d="m8 12.5-3 2.7v3.3L8 21l3-2.5V16M16 12.5l3 2.7v3.3L16 21l-3-2.5V16" /></> : null}
+      {name === "providers" ? <><rect {...common} x="3" y="5" width="8" height="6" rx="2" /><rect {...common} x="13" y="5" width="8" height="6" rx="2" /><rect {...common} x="8" y="14" width="8" height="6" rx="2" /><path {...common} d="M7 11v1.5h10V11M12 12.5V14" /></> : null}
+      {name === "orchestrator" ? <><circle {...common} cx="5" cy="6" r="2" /><circle {...common} cx="19" cy="6" r="2" /><circle {...common} cx="12" cy="18" r="2" /><path {...common} d="M7 6h10M6.5 7.5 10.8 16M17.5 7.5 13.2 16" /></> : null}
       {name === "minus" ? <path {...common} d="M5 12h14" /> : null}
       {name === "plus" ? <path {...common} d="M5 12h14M12 5v14" /> : null}
       {name === "reload" ? <><path {...common} d="M19 8a8 8 0 1 0 .3 7" /><path {...common} d="M19 4v4h-4" /></> : null}
