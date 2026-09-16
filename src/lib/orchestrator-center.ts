@@ -41,7 +41,7 @@ export interface OrchestratorProfile {
 
 export type OrchestratorProfileInput = Omit<
   OrchestratorProfile,
-  'archived' | 'revision' | 'updated_at'
+  'id' | 'archived' | 'revision' | 'updated_at'
 > & { id: string | null };
 
 export interface ResolvedOrchestrator {
