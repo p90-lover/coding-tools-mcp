@@ -53,8 +53,9 @@ Var LegacyRegistryAfter
         !insertmacro FailLegacyMigration "the registered uninstaller does not match the legacy Coding Tools MCP installation"
       ${EndIf}
 
-      IfFileExists "$LegacyInstallLocation\uninstall.exe" +2 0
+      ${Unless} ${FileExists} "$LegacyInstallLocation\uninstall.exe"
         !insertmacro FailLegacyMigration "the registered uninstaller file does not exist"
+      ${EndUnless}
 
       DetailPrint "Removing legacy Coding Tools MCP before installing Coding Tools"
       ClearErrors
