@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
-use coding_tools_core::{data::AppData, integrations, tools, CoreState};
+use coding_tools_core::{integrations, tools, CoreState};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -466,7 +466,7 @@ struct ExecutionReadRequest {
     refresh_source: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutionProviderRequest {
     workspace_id: String,
