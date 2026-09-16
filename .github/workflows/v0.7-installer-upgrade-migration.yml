@@ -1,0 +1,98 @@
+name: v0.7 installer upgrade migration
+
+on:
+  push:
+    branches:
+      - fix/v0.7-rc5-installer-upgrade-migration
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+      - aiTemp/installer-upgrade/**
+      - .github/workflows/v0.7-installer-upgrade-migration.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.4
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+      - aiTemp/installer-upgrade/**
+      - .github/workflows/v0.7-installer-upgrade-migration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v0.7-installer-upgrade-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  red-green-contract:
+    name: Installer migration contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run installer migration contract
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/installer-upgrade/evidence
+          node --test desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            2>&1 | tee aiTemp/installer-upgrade/evidence/contract.txt
+          grep -F '# fail 0' aiTemp/installer-upgrade/evidence/contract.txt
+
+      - name: Enforce no-delete changes
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.4 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.4...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.4...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: installer-upgrade-contract-${{ github.sha }}
+          path: aiTemp/installer-upgrade/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-migration-smoke:
+    name: Legacy uninstall fixture to rc.5 reinstall
+    needs: red-green-contract
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - name: Reserve migration evidence root
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/installer-upgrade/legacy-uninstall-fixture
+          printf 'The executable migration smoke is enabled after the contract turns green.\n' \
+            > aiTemp/installer-upgrade/legacy-uninstall-fixture/README.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: installer-upgrade-windows-${{ github.sha }}
+          path: aiTemp/installer-upgrade/
+          if-no-files-found: error
+          retention-days: 14
