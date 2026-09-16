@@ -21,48 +21,42 @@ def patch_types() -> None:
         'export type Surface = "browser" | "setup" | "mcp" | "activity" | "settings";',
         'export type Surface = "browser" | "setup" | "mcp" | "providers" | "orchestrator" | "activity" | "settings";',
     )
-    marker = '''declare global {
-  interface Window {
-    codexWebLauncher?: LauncherApi;
-  }
-}
-'''
-    addition = '''export interface CodingToolsApi {
-  workspaces: {
-    list(input?: Record<string, unknown>): Promise<unknown>;
-  };
-  execution: {
-    read(input: {
-      workspaceId: string;
-      missionId?: string | null;
-      refreshSource?: boolean;
-    }): Promise<unknown>;
-    provider(input: {
-      workspaceId: string;
-      operation: "configure" | "connect" | "disable";
-      expectedRevision?: number | null;
-      bindingId?: string | null;
-      settings?: Record<string, unknown> | null;
-      credential?: string;
-      confirm: boolean;
-    }): Promise<unknown>;
-    update(input: {
-      workspaceId: string;
-      expectedRevision: number;
-      change: Record<string, unknown>;
-      confirm: boolean;
-    }): Promise<unknown>;
-  };
-}
 
-declare global {
-  interface Window {
-    codexWebLauncher?: LauncherApi;
-    codingTools?: CodingToolsApi;
-  }
-}
-'''
-    replace_once(path, marker, addition)
+
+def patch_feature_types() -> None:
+    path = Path("desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx")
+    source = path.read_text(encoding="utf-8")
+    anchor = 'const ORCHESTRATOR_STORAGE_KEY = "coding-tools-orchestrators-v1";\n'
+    declaration = (
+        anchor
+        + '\nconst PROVIDER_DEFINITIONS: readonly ProviderDefinition[] = DEFAULT_PROVIDERS;\n'
+    )
+    if "const PROVIDER_DEFINITIONS: readonly ProviderDefinition[]" not in source:
+        if anchor not in source:
+            raise SystemExit(f"provider definition anchor missing in {path}")
+        source = source.replace(anchor, declaration, 1)
+
+    replacements = {
+        "return DEFAULT_PROVIDERS.map((provider) => ({":
+            "return PROVIDER_DEFINITIONS.map((provider) => ({",
+        "return DEFAULT_PROVIDERS.find((provider) => provider.id === id);":
+            "return PROVIDER_DEFINITIONS.find((provider) => provider.id === id);",
+        "{DEFAULT_PROVIDERS.map((provider) => (":
+            "{PROVIDER_DEFINITIONS.map((provider) => (",
+        "const defaultProviders = DEFAULT_PROVIDERS.filter((provider) => provider.annealEnabled);":
+            "const defaultProviders = PROVIDER_DEFINITIONS.filter((provider) => provider.annealEnabled);",
+        "{DEFAULT_PROVIDERS.filter((provider) => provider.annealEnabled).map((provider) => (":
+            "{PROVIDER_DEFINITIONS.filter((provider) => provider.annealEnabled).map((provider) => (",
+    }
+    for before, after in replacements.items():
+        if after in source:
+            continue
+        if before not in source:
+            raise SystemExit(f"provider type patch anchor missing in {path}: {before!r}")
+        source = source.replace(before, after, 1)
+
+    path.write_text(source, encoding="utf-8")
+    print(f"patched: {path}")
 
 
 def patch_icons() -> None:
@@ -146,6 +140,7 @@ def patch_app() -> None:
 
 def main() -> None:
     patch_types()
+    patch_feature_types()
     patch_icons()
     patch_app()
 
