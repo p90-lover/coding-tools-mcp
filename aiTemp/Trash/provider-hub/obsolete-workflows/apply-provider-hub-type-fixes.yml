@@ -1,0 +1,99 @@
+# Archived evidence: this one-shot workflow completed successfully and is intentionally inert outside .github/workflows.
+# The permanent validation path is .github/workflows/provider-multiaccount-global-proxy.yml.
+name: Archive completed Provider Hub repair workflows
+
+on:
+  push:
+    branches:
+      - feature/v0.7.0-provider-multiaccount-global-proxy
+    paths:
+      - .github/workflows/apply-provider-hub-type-fixes.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: archive-provider-hub-repair-workflows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  archive-completed-repairs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - name: Preserve completed repair automation in Trash
+        run: |
+          set -euo pipefail
+          workflows="aiTemp/Trash/provider-hub/obsolete-workflows"
+          recipes="aiTemp/Trash/provider-hub/obsolete-recipes"
+          mkdir -p "$workflows" "$recipes" aiTemp/evidence
+
+          test -f .github/workflows/apply-provider-hub-type-fixes.yml
+          test -f .github/workflows/apply-provider-hub-typecheck-fix.yml
+          test -f .github/workflows/provider-hub-ci.yml
+          test -f aiTemp/provider-hub/fix_typecheck.py
+
+          git mv .github/workflows/apply-provider-hub-type-fixes.yml "$workflows/apply-provider-hub-type-fixes.yml"
+          git mv .github/workflows/apply-provider-hub-typecheck-fix.yml "$workflows/apply-provider-hub-typecheck-fix.yml"
+          git mv .github/workflows/provider-hub-ci.yml "$workflows/provider-hub-ci.yml"
+          git mv aiTemp/provider-hub/fix_typecheck.py "$recipes/fix_typecheck.py"
+
+          git diff --cached -M --check
+          deleted="$(git diff --cached -M --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Unexpected deletion instead of preservation move:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+          git diff --cached -M --name-status | tee aiTemp/evidence/provider-hub-repair-archive.txt
+          python - <<'PY'
+          import subprocess
+
+          expected_targets = {
+              'aiTemp/Trash/provider-hub/obsolete-workflows/apply-provider-hub-type-fixes.yml',
+              'aiTemp/Trash/provider-hub/obsolete-workflows/apply-provider-hub-typecheck-fix.yml',
+              'aiTemp/Trash/provider-hub/obsolete-workflows/provider-hub-ci.yml',
+              'aiTemp/Trash/provider-hub/obsolete-recipes/fix_typecheck.py',
+          }
+          rows = subprocess.check_output(
+              ['git', 'diff', '--cached', '-M', '--name-status'], text=True
+          ).splitlines()
+          targets = set()
+          for row in rows:
+              parts = row.split('\t')
+              if not parts or parts[0].startswith('D'):
+                  raise SystemExit(f'ARCHIVE_DELETE_FORBIDDEN:{row}')
+              if parts[0].startswith('R') and len(parts) == 3:
+                  targets.add(parts[2])
+          missing = sorted(expected_targets - targets)
+          if missing:
+              raise SystemExit(f'ARCHIVE_TARGETS_MISSING:{missing}')
+          print('PROVIDER_HUB_REPAIR_WORKFLOWS_ARCHIVED')
+          PY
+
+      - name: Commit preservation moves safely
+        run: |
+          set -euo pipefail
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'chore(provider-hub): preserve completed repair workflows in Trash'
+
+          for attempt in 1 2 3; do
+            git fetch origin "$GITHUB_REF_NAME"
+            remote_head="$(git rev-parse FETCH_HEAD)"
+            if ! git merge-base --is-ancestor "$remote_head" HEAD; then
+              git rebase "$remote_head"
+            fi
+            if git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+          done
+          echo 'Unable to publish preservation move after three race-safe attempts' >&2
+          exit 1

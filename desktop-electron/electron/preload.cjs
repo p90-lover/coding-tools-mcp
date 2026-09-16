@@ -45,6 +45,30 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setBrowserInteractionMode: (mode) => ipcRenderer.invoke("launcher:browser-interaction-mode", mode),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
+  providerSnapshot: () => ipcRenderer.invoke("launcher:provider-snapshot"),
+  providerExecutionPlan: (input) => ipcRenderer.invoke("launcher:provider-execution-plan", input),
+  saveProviderAccount: (input) => ipcRenderer.invoke("launcher:provider-account-save", input),
+  setDefaultProviderAccount: (providerId, accountId) => ipcRenderer.invoke(
+    "launcher:provider-account-default",
+    providerId,
+    accountId,
+  ),
+  setProviderAccountEnabled: (accountId, enabled) => ipcRenderer.invoke(
+    "launcher:provider-account-enabled",
+    accountId,
+    enabled,
+  ),
+  archiveProviderAccount: (accountId) => ipcRenderer.invoke(
+    "launcher:provider-account-archive",
+    accountId,
+  ),
+  beginProviderLogin: (accountId) => ipcRenderer.invoke("launcher:provider-login", accountId),
+  saveProxyProfile: (input) => ipcRenderer.invoke("launcher:proxy-profile-save", input),
+  archiveProxyProfile: (profileId) => ipcRenderer.invoke("launcher:proxy-profile-archive", profileId),
+  testProxyProfile: (profileId) => ipcRenderer.invoke("launcher:proxy-profile-test", profileId),
+  setGlobalProxyRouting: (input) => ipcRenderer.invoke("launcher:proxy-global-routing", input),
+  setProviderProxyPolicy: (input) => ipcRenderer.invoke("launcher:proxy-provider-policy", input),
+  setAccountProxyPolicy: (input) => ipcRenderer.invoke("launcher:proxy-account-policy", input),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   exportLogs: () => ipcRenderer.invoke("launcher:export-logs"),
   installUpdate: () => ipcRenderer.invoke("launcher:update-install"),
@@ -56,6 +80,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onOperation: (listener) => subscription("launcher:operation", listener),
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
+  onProviderNetworkChanged: (listener) => subscription("launcher:provider-network-changed", listener),
 });
 
 const { invokeContract } = require("./ipc-schema.cjs");

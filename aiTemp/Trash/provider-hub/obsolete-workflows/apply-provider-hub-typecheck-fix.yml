@@ -1,0 +1,79 @@
+name: Apply Provider Hub typecheck repair
+
+on:
+  push:
+    branches:
+      - feature/v0.7.0-provider-multiaccount-global-proxy
+    paths:
+      - aiTemp/provider-hub/fix_typecheck.py
+      - desktop-electron/src/providers/ProviderHubIntegration.tsx
+      - desktop-electron/src/providers/ProviderManagerSurface.tsx
+      - .github/workflows/apply-provider-hub-typecheck-fix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-provider-hub-typecheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply-and-verify:
+    if: github.ref == 'refs/heads/feature/v0.7.0-provider-multiaccount-global-proxy'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Apply deterministic type repair
+        run: python3 aiTemp/provider-hub/fix_typecheck.py
+
+      - name: Run focused Provider Hub contracts
+        run: node --test desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs desktop-electron/tests/proxy-provider-contract.test.cjs desktop-electron/tests/provider-proxy-domain.test.cjs
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build Electron renderer into retained aiTemp evidence
+        run: |
+          mkdir -p aiTemp/provider-hub/renderer-dist
+          cd desktop-electron
+          bunx vite build --outDir ../aiTemp/provider-hub/renderer-dist --emptyOutDir
+
+      - name: Enforce no file deletion
+        shell: bash
+        run: |
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit verified type repair
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet; then
+            echo "Provider Hub type repair is already applied."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add desktop-electron/src/providers/ProviderHubIntegration.tsx
+          git diff --cached --check
+          git commit -m "fix(provider): narrow Provider Hub snapshot results"
+          git fetch origin "${TARGET_BRANCH}"
+          git rebase "origin/${TARGET_BRANCH}"
+          git push origin "HEAD:${TARGET_BRANCH}"

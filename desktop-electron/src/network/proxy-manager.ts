@@ -1,4 +1,7 @@
 import type {
+  AccountProxyPolicy,
+  ProviderProxyPolicy,
+  ProxyProfile,
   ProxyRoute,
   ProxyRoutingState,
   ProxyTraffic,
@@ -39,18 +42,71 @@ function matchesBypass(hostname: string, entries: readonly string[]): boolean {
   });
 }
 
+function copyRoute(route: ProxyRoute): ProxyRoute {
+  return {
+    enabled: route.enabled,
+    endpoint: { ...route.endpoint },
+    scopes: [...route.scopes],
+    bypass: [...route.bypass],
+  };
+}
+
+function routeFromProfile(
+  profileId: string | undefined,
+  profiles: readonly ProxyProfile[],
+): ProxyRoute | null {
+  if (!profileId) return null;
+  const profile = profiles.find((item) => item.id === profileId && !item.archivedAt);
+  if (!profile || !validateProxy(profile)) return null;
+  return copyRoute(profile);
+}
+
+function routeFromPolicy(
+  policy: Pick<ProviderProxyPolicy | AccountProxyPolicy, "profileId" | "override"> | undefined,
+  profiles: readonly ProxyProfile[],
+): ProxyRoute | null {
+  if (!policy) return null;
+  if (policy.override?.enabled && validateProxy(policy.override)) {
+    return copyRoute(policy.override);
+  }
+  return routeFromProfile(policy.profileId, profiles);
+}
+
+function globalRoute(state: ProxyRoutingState): ProxyRoute | null {
+  if (state.globalEnabled === false) return null;
+  const saved = routeFromProfile(state.globalProfileId ?? undefined, state.profiles ?? []);
+  if (saved) return saved;
+  return state.global?.enabled && validateProxy(state.global)
+    ? copyRoute(state.global)
+    : null;
+}
+
 export function resolveProxy(
   providerId: string,
   state: ProxyRoutingState,
+  accountId?: string,
 ): ProxyRoute | null {
-  const provider = state.providers.find((item) => item.providerId === providerId);
+  const profiles = state.profiles ?? [];
+  const account = accountId
+    ? state.accounts?.find((item) => item.accountId === accountId && item.providerId === providerId)
+    : undefined;
+  let allowGlobal = true;
 
-  if (provider?.override?.enabled && validateProxy(provider.override)) {
-    return provider.override;
+  if (account) {
+    const accountRoute = routeFromPolicy(account, profiles);
+    if (accountRoute) return accountRoute;
+    allowGlobal = account.inheritGlobal !== false;
+    if (account.inheritProvider === false) {
+      return allowGlobal ? globalRoute(state) : null;
+    }
   }
 
-  if (provider?.inheritGlobal === false) return null;
-  return state.global?.enabled && validateProxy(state.global) ? state.global : null;
+  const provider = state.providers.find((item) => item.providerId === providerId);
+  const providerRoute = routeFromPolicy(provider, profiles);
+  if (providerRoute) return providerRoute;
+
+  if (provider?.inheritGlobal === false || !allowGlobal) return null;
+  return globalRoute(state);
 }
 
 export function validateProxy(route: ProxyRoute): boolean {
@@ -60,7 +116,7 @@ export function validateProxy(route: ProxyRoute): boolean {
       && Number.isInteger(endpoint.port)
       && endpoint.port > 0
       && endpoint.port < 65_536
-      && ["http", "https", "socks5"].includes(endpoint.protocol)
+      && ["http", "https", "socks4", "socks5"].includes(endpoint.protocol)
       && route.scopes.length > 0,
   );
 }
@@ -84,4 +140,13 @@ export function shouldProxyUrl(
   }
 
   return route.scopes.includes("all") || route.scopes.includes(traffic);
+}
+
+export function proxyUrl(route: ProxyRoute): string | null {
+  if (!validateProxy(route)) return null;
+  const protocol = route.endpoint.protocol;
+  const host = route.endpoint.host.includes(":")
+    ? `[${normalizeHostname(route.endpoint.host)}]`
+    : normalizeHostname(route.endpoint.host);
+  return `${protocol}://${host}:${route.endpoint.port}`;
 }

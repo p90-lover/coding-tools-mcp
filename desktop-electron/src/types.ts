@@ -1,7 +1,115 @@
 export type Language = "en" | "zh-CN" | "ja";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "settings";
+export type Surface = "browser" | "providers" | "setup" | "mcp" | "activity" | "settings";
+
+export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
+export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
+export type ProxyProtocol = "http" | "https" | "socks4" | "socks5";
+export type ProxyScope =
+  | "all"
+  | "browser"
+  | "provider"
+  | "oauth"
+  | "paseo"
+  | "anneal"
+  | "mcp"
+  | "websocket"
+  | "http"
+  | "update";
+export type ProxyPolicyMode = "inherit" | "global" | "direct" | "profile";
+
+export interface ProviderAccountRecord {
+  id: string;
+  providerId: string;
+  label: string;
+  identity?: string;
+  auth: ProviderAuth;
+  status: ProviderAccountStatus;
+  enabled: boolean;
+  isDefault: boolean;
+  models: string[];
+  proxyProfileId?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string;
+  archivedAt?: string;
+  error?: string;
+}
+
+export interface ProviderAccountInput {
+  id?: string;
+  providerId: string;
+  label: string;
+  identity?: string;
+  auth: ProviderAuth;
+  status?: ProviderAccountStatus;
+  enabled?: boolean;
+  isDefault?: boolean;
+  models?: string[];
+  proxyProfileId?: string;
+  secret?: Record<string, string>;
+  error?: string;
+}
+
+export interface ProxyEndpointRecord {
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+}
+
+export interface ProxyProfileRecord {
+  id: string;
+  name: string;
+  enabled: boolean;
+  endpoint: ProxyEndpointRecord;
+  scopes: ProxyScope[];
+  bypass: string[];
+  hasAuthentication: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastCheckedAt?: string;
+  latencyMs?: number;
+  lastError?: string;
+  archivedAt?: string;
+}
+
+export interface ProxyProfileInput {
+  id?: string;
+  name: string;
+  enabled?: boolean;
+  endpoint: ProxyEndpointRecord;
+  scopes?: ProxyScope[];
+  bypass?: string[];
+  username?: string;
+  password?: string;
+}
+
+export interface ProviderProxyPolicyRecord {
+  providerId: string;
+  inheritGlobal: boolean;
+  profileId?: string;
+}
+
+export interface AccountProxyPolicyRecord {
+  accountId: string;
+  providerId: string;
+  inheritProvider: boolean;
+  inheritGlobal: boolean;
+  profileId?: string;
+}
+
+export interface ProviderNetworkSnapshot {
+  version: 1;
+  accounts: ProviderAccountRecord[];
+  proxyProfiles: ProxyProfileRecord[];
+  routing: {
+    globalEnabled: boolean;
+    globalProfileId: string | null;
+    providers: ProviderProxyPolicyRecord[];
+    accounts: AccountProxyPolicyRecord[];
+  };
+}
 
 export interface LauncherState {
   version: 1;
@@ -166,6 +274,34 @@ export interface LauncherApi {
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
+  providerSnapshot(): Promise<ProviderNetworkSnapshot>;
+  saveProviderAccount(input: ProviderAccountInput): Promise<ProviderNetworkSnapshot>;
+  setDefaultProviderAccount(providerId: string, accountId: string): Promise<ProviderNetworkSnapshot>;
+  setProviderAccountEnabled(accountId: string, enabled: boolean): Promise<ProviderNetworkSnapshot>;
+  archiveProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
+  beginProviderLogin(accountId: string): Promise<{ opened: boolean; mode: "embedded" | "external" }>;
+  saveProxyProfile(input: ProxyProfileInput): Promise<ProviderNetworkSnapshot>;
+  archiveProxyProfile(profileId: string): Promise<ProviderNetworkSnapshot>;
+  testProxyProfile(profileId: string): Promise<{
+    reachable: boolean;
+    latencyMs?: number;
+    error?: string;
+    snapshot: ProviderNetworkSnapshot;
+  }>;
+  setGlobalProxyRouting(input: {
+    enabled: boolean;
+    profileId?: string | null;
+  }): Promise<ProviderNetworkSnapshot>;
+  setProviderProxyPolicy(input: {
+    providerId: string;
+    mode: ProxyPolicyMode;
+    profileId?: string;
+  }): Promise<ProviderNetworkSnapshot>;
+  setAccountProxyPolicy(input: {
+    accountId: string;
+    mode: ProxyPolicyMode;
+    profileId?: string;
+  }): Promise<ProviderNetworkSnapshot>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   installUpdate(): Promise<boolean>;
@@ -177,6 +313,7 @@ export interface LauncherApi {
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
+  onProviderNetworkChanged(listener: (state: ProviderNetworkSnapshot) => void): () => void;
 }
 
 declare global {
