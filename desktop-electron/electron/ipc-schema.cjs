@@ -29,6 +29,7 @@ const SENSITIVE_RESPONSE_KEYS = new Set([
   "csrf_token",
   "xsrf_token",
   "secret_key",
+  "credential",
   "password",
   "secret",
   "token",
@@ -339,6 +340,77 @@ const genericListResponse = Object.freeze({
   additionalProperties: false,
 });
 
+
+const executionReadRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    missionId: Object.freeze({ type: "string", minLength: 1, maxLength: 128, nullable: true }),
+    refreshSource: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
+const executionSettings = Object.freeze({
+  type: "object",
+  required: Object.freeze([
+    "engine",
+    "endpoint",
+    "provider",
+    "model",
+    "mode",
+    "maxDurationMin",
+    "allowCodex",
+    "confirmExternalExecution",
+  ]),
+  properties: Object.freeze({
+    id: Object.freeze({ type: "string", minLength: 1, maxLength: 128, nullable: true }),
+    engine: Object.freeze({ type: "string", enum: Object.freeze(["paseo", "anneal"]) }),
+    endpoint: Object.freeze({ type: "string", minLength: 1, maxLength: 2048 }),
+    provider: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    model: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    mode: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    projectId: Object.freeze({ type: "string", minLength: 1, maxLength: 128, nullable: true }),
+    repoId: Object.freeze({ type: "string", minLength: 1, maxLength: 128, nullable: true }),
+    assigneeId: Object.freeze({ type: "string", minLength: 1, maxLength: 128, nullable: true }),
+    maxDurationMin: Object.freeze({ type: "integer", minimum: 1, maximum: 1440 }),
+    allowCodex: Object.freeze({ type: "boolean" }),
+    confirmExternalExecution: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
+const executionProviderRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "operation", "confirm"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    operation: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["configure", "connect", "disable"]),
+    }),
+    expectedRevision: Object.freeze({ type: "integer", minimum: 0, nullable: true }),
+    bindingId: Object.freeze({ type: "string", minLength: 1, maxLength: 128, nullable: true }),
+    settings: Object.freeze({ ...executionSettings, nullable: true }),
+    credential: Object.freeze({ type: "string", maxLength: 4096 }),
+    confirm: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
+const executionUpdateRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "expectedRevision", "change", "confirm"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    expectedRevision: Object.freeze({ type: "integer", minimum: 0 }),
+    change: genericObject,
+    confirm: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
 const CONTRACTS = Object.freeze({
   "runtime.status": Object.freeze({
     channel: "coding-tools:runtime:status",
@@ -378,6 +450,21 @@ const CONTRACTS = Object.freeze({
   "integrations.snapshot": Object.freeze({
     channel: "coding-tools:integrations:snapshot",
     request: emptyObject,
+    response: genericObject,
+  }),
+  "execution.read": Object.freeze({
+    channel: "coding-tools:execution:read",
+    request: executionReadRequest,
+    response: genericObject,
+  }),
+  "execution.provider": Object.freeze({
+    channel: "coding-tools:execution:provider",
+    request: executionProviderRequest,
+    response: genericObject,
+  }),
+  "execution.update": Object.freeze({
+    channel: "coding-tools:execution:update",
+    request: executionUpdateRequest,
     response: genericObject,
   }),
   "updates.status": Object.freeze({
