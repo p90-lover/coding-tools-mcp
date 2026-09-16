@@ -1,0 +1,55 @@
+name: Provider Hub CI
+
+on:
+  push:
+    branches:
+      - feature/v0.7.0-provider-multiaccount-global-proxy
+    paths:
+      - 'desktop-electron/**'
+      - '.github/workflows/provider-hub-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-hub-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provider-hub:
+    name: Provider Hub — contracts, typecheck, renderer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+    defaults:
+      run:
+        working-directory: desktop-electron
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Install pinned Bun
+        run: npm install --global bun@1.2.22
+
+      - name: Install desktop dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run focused Provider Hub contracts
+        run: >-
+          node --test
+          tests/provider-multiaccount-global-proxy.test.cjs
+          tests/proxy-provider-contract.test.cjs
+          tests/provider-proxy-domain.test.cjs
+
+      - name: Typecheck desktop renderer
+        run: bun run typecheck
+
+      - name: Build desktop renderer
+        run: bun run build:renderer
