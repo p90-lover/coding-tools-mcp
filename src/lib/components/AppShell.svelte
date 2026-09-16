@@ -3,7 +3,7 @@
  import { goto } from '$app/navigation';
  import { onMount } from 'svelte';
  import type { Snippet } from 'svelte';
- import { LayoutDashboard, Columns3, Layers, Monitor, Cable, Plug, Plus, Search, Menu, X, ChevronRight, Settings2, ShieldCheck, Github, Command, Cpu, GitBranch, Play } from '@lucide/svelte';
+ import { LayoutDashboard, Columns3, Layers, Monitor, Cable, Plug, Plus, Search, Menu, X, ChevronRight, Settings2, ShieldCheck, Github, Command, Cpu, GitBranch, Play, Image as ImageIcon } from '@lucide/svelte';
  import ThemeToggle from './ThemeToggle.svelte';
  import { APP_VERSION } from '$lib/app-version';
  import { REPO_URL } from '$lib/app-links';
@@ -15,7 +15,7 @@
  let { children,sidebar,onAddWorkspace,settingsNav }:Props=$props();
  let menu=$state(false),searchOpen=$state(false),query=$state(''),repoError=$state('');
  let searchInput=$state<HTMLInputElement>();
- const nav=[{path:'/',en:'Overview',zh:'總覽',icon:LayoutDashboard},{path:'/work',en:'Work board',zh:'任務看板',icon:Columns3},{path:'/tasks',en:'Task monitor',zh:'任務監察',icon:Monitor},{path:'/missions',en:'Mission control',zh:'任務協調',icon:Layers},{path:'/providers',en:'Providers',zh:'供應商',icon:Cpu},{path:'/orchestrators',en:'Orchestrators',zh:'編排器',icon:GitBranch},{path:'/orchestrator-run',en:'Run orchestrator',zh:'執行編排器',icon:Play},{path:'/sessions',en:'Agent sessions',zh:'Agent 會話',icon:Layers},{path:'/computer',en:'Computer control',zh:'電腦操作',icon:Monitor},{path:'/connections',en:'Connections',zh:'連線',icon:Cable},{path:'/integrations',en:'Integrations',zh:'專案整合',icon:Plug}];
+ const nav=[{path:'/',en:'Overview',zh:'總覽',icon:LayoutDashboard},{path:'/work',en:'Work board',zh:'任務看板',icon:Columns3},{path:'/tasks',en:'Task monitor',zh:'任務監察',icon:Monitor},{path:'/missions',en:'Mission control',zh:'任務協調',icon:Layers},{path:'/image-studio',en:'Image Studio',zh:'圖片工作室',icon:ImageIcon},{path:'/providers',en:'Providers',zh:'供應商',icon:Cpu},{path:'/orchestrators',en:'Orchestrators',zh:'編排器',icon:GitBranch},{path:'/orchestrator-run',en:'Run orchestrator',zh:'執行編排器',icon:Play},{path:'/sessions',en:'Agent sessions',zh:'Agent 會話',icon:Layers},{path:'/computer',en:'Computer control',zh:'電腦操作',icon:Monitor},{path:'/connections',en:'Connections',zh:'連線',icon:Cable},{path:'/integrations',en:'Integrations',zh:'專案整合',icon:Plug}];
  let title=$derived(nav.find(n=>n.path===$page.url.pathname)?.[$locale==='en'?'en':'zh'] ?? ($page.url.pathname.startsWith('/settings')?translated($locale,'Settings','設定'):translated($locale,'Workspace','工作區')));
  let results=$derived([...nav.map(n=>({label:translated($locale,n.en,n.zh),path:n.path})),...$workspaces.map(w=>({label:w.name,path:`/workspace/${w.id}`}))].filter(n=>n.label.toLowerCase().includes(query.toLowerCase())).slice(0,12));
  function search(){searchOpen=true;query='';setTimeout(()=>searchInput?.focus(),0);}

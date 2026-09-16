@@ -1,5 +1,6 @@
 use crate::{
     error::{AppError, AppResult},
+    media::{self, ImageGenerationInput, ImageGenerationResult},
     providers::{self, ProviderProfileInput},
 };
 use serde_json::Value;
@@ -103,4 +104,17 @@ pub async fn provider_profile_probe(
 ) -> AppResult<Value> {
     local(&window, false)?;
     providers::probe(&profile_id, discover_models.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn provider_image_generate(
+    window: WebviewWindow,
+    input: ImageGenerationInput,
+    confirm: bool,
+) -> AppResult<ImageGenerationResult> {
+    local(&window, true)?;
+    if !confirm {
+        return Err(fail("Confirm provider image generation and any provider cost locally"));
+    }
+    media::generate(input).await
 }

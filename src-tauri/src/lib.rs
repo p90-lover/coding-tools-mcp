@@ -2,6 +2,7 @@
 
 mod codex_bridge;
 pub mod integrations;
+pub mod media;
 pub mod orchestrator_run;
 pub mod orchestrators;
 pub mod providers;
@@ -39,7 +40,7 @@ use commands::{
     install_software, integration_read, list_frp_profiles, list_linked_projects, list_software,
     list_workspaces, open_url, open_workspace_directory, orchestrator_profile_archive,
     orchestrator_profile_run, orchestrator_profile_save, orchestrator_profiles_read,
-    provider_config_preview, provider_profile_archive, provider_profile_connect,
+    provider_config_preview, provider_image_generate, provider_profile_archive, provider_profile_connect,
     provider_profile_disable, provider_profile_probe, provider_profile_save, provider_profiles_read,
     quick_add_linked_project, quit_app, read_workspace_logs, recreate_ui_webview,
     regenerate_shared_secret, regenerate_workspace_secret, restart_actions_runtime,
@@ -203,6 +204,7 @@ pub fn run() {
             execution_local_read,
             execution_local_provider,
             execution_local_update,
+            provider_image_generate,
             provider_profiles_read,
             provider_profile_save,
             provider_profile_connect,
