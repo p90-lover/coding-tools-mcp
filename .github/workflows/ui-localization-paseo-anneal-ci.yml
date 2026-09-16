@@ -1,0 +1,87 @@
+name: UI localization and orchestration surfaces
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.5-zhtw-paseo-anneal-ui
+      - integration/v0.7.0-rc.5-main-sync
+    paths:
+      - 'desktop-electron/src/features/PaseoOrchestratorSurface.tsx'
+      - 'desktop-electron/src/features/AnnealTasksSurface.tsx'
+      - 'desktop-electron/src/features/orchestration-copy.ts'
+      - 'desktop-electron/src/features/orchestration-control.css'
+      - 'desktop-electron/src/providers/ProviderHubIntegration.tsx'
+      - 'desktop-electron/tests/orchestration-localization-layout.test.cjs'
+      - 'desktop-electron/package.json'
+      - 'desktop-electron/bun.lock'
+      - '.github/workflows/ui-localization-paseo-anneal-ci.yml'
+  pull_request:
+    paths:
+      - 'desktop-electron/src/features/PaseoOrchestratorSurface.tsx'
+      - 'desktop-electron/src/features/AnnealTasksSurface.tsx'
+      - 'desktop-electron/src/features/orchestration-copy.ts'
+      - 'desktop-electron/src/features/orchestration-control.css'
+      - 'desktop-electron/src/providers/ProviderHubIntegration.tsx'
+      - 'desktop-electron/tests/orchestration-localization-layout.test.cjs'
+      - 'desktop-electron/package.json'
+      - 'desktop-electron/bun.lock'
+      - '.github/workflows/ui-localization-paseo-anneal-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-orchestration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/ui-orchestration/bun-cache
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/ui-orchestration/renderer-dist aiTemp/Trash/ui-orchestration
+
+      - name: Run focused localization and layout contracts
+        run: node --test desktop-electron/tests/orchestration-localization-layout.test.cjs
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build production renderer into aiTemp evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/ui-orchestration/renderer-dist \
+            --emptyOutDir
+
+      - name: Enforce no file deletion
+        run: |
+          deleted="$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "aiTemp/Trash/ui-orchestration/node_modules-$GITHUB_RUN_ID"
+          fi
