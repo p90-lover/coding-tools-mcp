@@ -230,6 +230,42 @@ test("proxy resolution enforces workload scopes and explicit account inheritance
   assert.equal(inheritedRoute.profile.endpoint.host, "provider.proxy.test");
 });
 
+test("account global opt-out remains direct even when a provider proxy profile exists", () => {
+  const state = snapshot();
+  state.routing.accounts = [{
+    accountId: "codex-main",
+    providerId: "codex-oauth",
+    inheritProvider: true,
+    inheritGlobal: false,
+    profileId: null,
+  }];
+
+  const route = resolveExecutionProxy(state, "codex-oauth", "codex-main", "anneal");
+  assert.equal(route.mode, "direct");
+  assert.equal(route.source, "account");
+  assert.equal(route.profile, null);
+});
+
+test("providers with direct proxy defaults do not inherit global routing without an explicit policy", () => {
+  const state = snapshot();
+  state.accounts = [account("ollama-main", "ollama", {
+    auth: "local",
+    isDefault: true,
+    models: ["llama3.2"],
+  })];
+  state.routing.providers = [];
+  state.routing.accounts = [];
+
+  const plan = createProviderExecutionPlan(state, {
+    workload: "paseo",
+    providerId: "ollama",
+    allowFallback: false,
+  });
+  assert.equal(plan.proxy.mode, "direct");
+  assert.equal(plan.proxy.source, "provider-default");
+  assert.equal(plan.proxy.profile, null);
+});
+
 test("execution planning is exposed through bootstrap, preload, and the typed launcher API", () => {
   const root = path.resolve(__dirname, "..");
   const bootstrap = fs.readFileSync(path.join(root, "electron/provider-bootstrap.cjs"), "utf8");
