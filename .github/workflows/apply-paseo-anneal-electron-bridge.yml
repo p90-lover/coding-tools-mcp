@@ -5,6 +5,7 @@ on:
     branches:
       - feature/0.7-paseo-anneal-electron
       - feature/v0.7-subagent-orchestrator
+      - integration/v0.7-rc2-subagent-bridge-current
     paths:
       - aiTemp/paseo-anneal-electron/apply_bridge_patch.py
       - desktop-electron/electron/headless-host.cjs
@@ -21,7 +22,7 @@ concurrency:
 
 jobs:
   apply-and-verify:
-    if: github.ref == 'refs/heads/feature/0.7-paseo-anneal-electron' || github.ref == 'refs/heads/feature/v0.7-subagent-orchestrator'
+    if: github.ref == 'refs/heads/feature/0.7-paseo-anneal-electron' || github.ref == 'refs/heads/feature/v0.7-subagent-orchestrator' || github.ref == 'refs/heads/integration/v0.7-rc2-subagent-bridge-current'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -75,5 +76,5 @@ jobs:
             desktop-electron/electron/main.cjs \
             desktop-electron/electron/headless-host.cjs
           git diff --cached --check
-          git commit -m "feat: connect Paseo and Anneal to Electron"
+          git commit -m "feat(rc.2): connect Paseo and Anneal to Electron"
           git push origin "HEAD:${TARGET_BRANCH}"
