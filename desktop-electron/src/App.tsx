@@ -11,7 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
-import { ProviderCenterSurface } from "./features/ProviderOrchestratorSurfaces";
+import { ProviderCenterSurface } from "./features/ProviderHubSurface";
 import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
 import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
