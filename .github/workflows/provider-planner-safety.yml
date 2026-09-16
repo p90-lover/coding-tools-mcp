@@ -1,0 +1,68 @@
+name: Provider Hub planner safety repair
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.2-provider-hub-current
+    paths:
+      - aiTemp/provider-planner-safety/**
+      - .github/workflows/provider-planner-safety.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: provider-planner-safety-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  red-green-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache-provider-planner-safety
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained work roots
+        run: mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/provider-planner-safety
+
+      - name: Materialize regression test and prove RED
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp aiTemp/provider-planner-safety/payload/desktop-electron/tests/provider-network-credentials.test.cjs \
+            desktop-electron/tests/provider-network-credentials.test.cjs
+          set +e
+          node --test \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/provider-network-credentials.test.cjs \
+            > aiTemp/evidence/provider-planner-safety-red.txt 2>&1
+          status=$?
+          set -e
+          cat aiTemp/evidence/provider-planner-safety-red.txt
+          test "$status" -ne 0
+
+      - name: Apply minimal safety repair
+        run: |
+          set -euo pipefail
+          python3 aiTemp/provider-planner-safety/apply_provider_planner_safety.py \
+            2>&1 | tee aiU[\Щ]љY[ЩKЬ›ЭљY\‹\[›™\‹\ШY™]K\]Ъќ€Ь™\Q€“Х’QT—ФS“‘T—ФРQ‘UWФUТУТИ€ZU[\Щ]љY[ЩKЬ›ЭљY\‹\[›™\‹\ШY™]K\]Ъќ€Ъ]Y™€KXЪXЪВ€\Э^€‰
+Ъ]Y™€KYY™‹Yљ[\ЏQK[[YK[Ы›JH‚‚€H[YN€[Y]H]TШЬљ\Ю[ќ^€ќ[Ћ€€›ЩHKXЪXЪИ\ЪЭЬY[XЭ›Ы‹Щ[XЭ›Ы‹Ь›ЭљY\‹Y^XЭ][Ы‹\›Э]\‹ЪњВ€›ЩHKXЪXЪИ\ЪЭЬY[XЭ›Ы‹Щ[XЭ›Ы‹Ь›ЭљY\‹[™]ЫЬљЛЪњВ€›ЩHKXЪXЪИ\ЪЭЬY[XЭ›Ы‹Э\ЭЛЬ›ЭљY\‹[™]ЫЬљЛXЬ™Y[ќX[Лќ\ЭЪњВ‚€H[YN€[њЭ[ШЪЩY[XЭ›Ы€\[™[ЪY\В€ќ[Ћ€€Щ]Y][И\YZ[€TTЏH‰СШZU[\Э\€TH‰СШZU[\Э\€STH‰СШZU[\Э\€€ќ[€[њЭ[KXЭЩ\ЪЭЬY[XЭ›Ы€KYњ›Ю™[‹[ШЪЩљ[H€Џ‰ЊHYHZU[\Щ]љY[ЩKЬ›ЭљY\‹\[›™\‹\ШY™]KZ[њЭ[ќ‚€H[YN€›Э™HФ‘QS€Ъ]›ШЭ\ЩY[™™\Щ\ќ™YЫЫќXЭВ€ќ[Ћ€€Щ]Y][И\YZ[€›ЩHK]\Э€\ЪЭЬY[XЭ›Ы‹Э\ЭЛЬ›ЭљY\‹Y^XЭ][Ы‹\›Э]\‹ќ\ЭЪњИ€\ЪЭЬY[XЭ›Ы‹Э\ЭЛЬ›ЭљY\‹[™]ЫЬљЛXЬ™Y[ќX[Лќ\ЭЪњИ€\ЪЭЬY[XЭ›Ы‹Э\ЭЛЬ›ЭљY\‹[][XXШЫЭ[ќYЫШ[\›ЮKќ\ЭЪњИ€\ЪЭЬY[XЭ›Ы‹Э\ЭЛЬ›ЮK\›ЭљY\‹XЫЫќXЭќ\ЭЪњИ€\ЪЭЬY[XЭ›Ы‹Э\ЭЛЬ›ЭљY\‹\›ЮKYЫXZ[‹ќ\ЭЪњИ€\ЪЭЬY[XЭ›Ы‹Э\ЭЛЩ^XЭ][Ы‹XњљYЩKXЫЫќXЭќ\ЭЪњИ€Џ‰ЊHYHZU[\Щ]љY[ЩKЬ›ЭљY\‹\[›™\‹\ШY™]KYЬ™Y[‹ќ€Ь™\Q€	ИИZ[	ИZU[\Щ]љY[ЩKЬ›ЭљY\‹\[›™\‹\ШY™]KYЬ™Y[‹ќ‚€H[YN€\XЪXЪИ[™ќZ[™[™\™\‚€ќ[Ћ€€Щ]Y][И\YZ[€TTЏH‰СШZU[\Э\€TH‰СШZU[\Э\€STH‰СШZU[\Э\€€ќ[€ќ[€KXЭЩ\ЪЭЬY[XЭ›Ы€\XЪXЪИ€Џ‰ЊHYHZU[\Щ]љY[ЩKЬ›ЭљY\‹\[›™\‹\ШY™]K]\XЪXЪЛќ€ZЩ\€\ZU[\Ь›ЭљY\‹\[›™\‹\ШY™]KЬ™[™\™\‹Y\Э€Щ\ЪЭЬY[XЭ›Ы‚€TTЏH‰ТUP—ХУФ’ФФPСKШZU[\Э\€TH‰ТUP—ХУФ’ФФPСKШZU[\Э\€STH‰ТUP—ХУФ’ФФPСKШZU[\€€ќ[ћљ]HќZ[€K[Э]\€‹‹ШZU[\Ь›ЭљY\‹\[›™\‹\ШY™]KЬ™[™\™\‹Y\Э€KY[\SЭ]\€€Џ‰ЊHYH‹‹ШZU[\Щ]љY[ЩKЬ›ЭљY\‹\[›™\‹\ШY™]K\™[™\™\‹XќZ[ќ‚€H[YN€[™›ЬЩH›И[][Ы€[™^XЭ›ЩXЭ[Ы€ШЫЬB€Ъ[€\Ъ€ќ[Ћ€€Щ]Y][И\YZ[€Ъ]Y™€KXЪXЪВ€\Э^€‰
+Ъ]Y™€KYY™‹Yљ[\ЏQK[[YK[Ы›JH‚€Ъ[™ЩYH‰
+Ъ]Y™€K[[YK[Ы›HKH\ЪЭЬY[XЭ›Ы€ЫЬќ
+H‚€^XЭYH‰
+љ[ќ€	Й\Ч‰И€\ЪЭЬY[XЭ›Ы‹Щ[XЭ›Ы‹Ь›ЭљY\‹Y^XЭ][Ы‹\›Э]\‹ЪњИ€\ЪЭЬY[XЭ›Ы‹Щ[XЭ›Ы‹Ь›ЭљY\‹[™]ЫЬљЛЪњИ€\ЪЭЬY[XЭ›Ы‹ЬЬЛЭ\\ЛќИ€\ЪЭЬY[XЭ›Ы‹Э\ЭЛЬ›ЭљY\‹[™]ЫЬљЛXЬ™Y[ќX[Лќ\ЭЪњИЫЬќ
+H‚€љ[ќ€	ШЪ[™ЩYљ[\О—‰\Ч‰И‰Ъ[™ЩY€€YHZU[\Щ]љY[ЩKЬ›ЭљY\‹\[›™\‹\ШY™]KXЪ[™ЩYYљ[\Лќ€\Э‰Ъ[™ЩY€H‰^XЭY‚‚€H[YN€ЫЫ[Z]^XЭ™\љYљYY™\Z\‚€Ъ[€\Ъ€ќ[Ћ€€Щ]Y][И\YZ[€Ъ]ЫЫ™љYИ\Щ\‹›[YH	ЩЪ]X‹XXЭ[ЫњЦШ›ЭIВ€Ъ]ЫЫ™љYИ\Щ\‹™[XZ[	НNNЋЉЩЪ]X‹XXЭ[ЫњЦШ›ЭP\Щ\њЛ››Ь™\K™Ъ]X‹ЫЫIВ€Ъ]Y€\ЪЭЬY[XЭ›Ы‹Щ[XЭ›Ы‹Ь›ЭљY\‹Y^XЭ][Ы‹\›Э]\‹ЪњИ€\ЪЭЬY[XЭ›Ы‹Щ[XЭ›Ы‹Ь›ЭљY\‹[™]ЫЬљЛЪњИ€\ЪЭЬY[XЭ›Ы‹ЬЬЛЭ\\ЛќИ€\ЪЭЬY[XЭ›Ы‹Э\ЭЛЬ›ЭљY\‹[™]ЫЬљЛXЬ™Y[ќX[Лќ\ЭЪњВ€Ъ]Y™€KXШXЪYKXЪXЪВ€Y€Ъ]Y™€KXШXЪYK\]ZY]И[‚€XЪИ	Ф›ЭљY\€[›™\€ШY™]H™\Z\€\И[™XYHЫЫ[Z]Y‰В€^]€љB€Ъ]ЫЫ[Z][H	Щљ^
+›ЭљY\‹ZXЉN€[™›ЬЩHЭљXЭ[›™\€[™Ь™Y[ќX[ШY™]IВ€Ъ]\ЪЬљYЪ[€’PQ‰СТUP—Ф‘Q—УђSQ_H‚‚€H\Щ\О€XЭ[ЫњЛЭ\ШYX\ќYXЭXLMЌYЋЌXЌ™MНXЌMYNLЌ™ЌНЊЩL‚€YЋ€[Ш^\К
+B€Ъ]‚€[YN€›ЭљY\‹\[›™\‹\ШY™]KIЮИЪ]X‹њЪH_B€]€ZU[\Щ]љY[ЩKВ€Y‹[›ЛYљ[\ЛY›Э[™€\њ›Ь‚€™][ќ[Ы‹Y^\О€M
