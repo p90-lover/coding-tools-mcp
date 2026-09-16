@@ -1,0 +1,40 @@
+name: v0.6 final package contracts
+
+on:
+  push:
+    branches:
+      - subagent/v0.6-electron-release-continuation-20260916
+    paths:
+      - .github/workflows/v060-final-package-contracts.yml
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/runtime-command.cjs
+      - desktop-electron/scripts/prepare-package-resources.cjs
+      - desktop-electron/tests/runtime-version-probe.test.cjs
+      - desktop-electron/tests/package-resource-symlink.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+      - name: Run focused package contracts
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/runtime-command.cjs
+          node --check desktop-electron/scripts/prepare-package-resources.cjs
+          node --test \
+            desktop-electron/tests/runtime-version-probe.test.cjs \
+            desktop-electron/tests/package-resource-symlink.test.cjs
