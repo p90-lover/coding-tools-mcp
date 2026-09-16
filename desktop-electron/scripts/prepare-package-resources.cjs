@@ -211,15 +211,39 @@ function crc32(bytes) {
   return (value ^ 0xffffffff) >>> 0;
 }
 
-function copyTree(sourcePath, destinationPath) {
+function pathInside(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (
+    relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative)
+  );
+}
+
+function copyTree(sourcePath, destinationPath, sourceRoot = sourcePath) {
   const source = path.resolve(sourcePath);
   const destination = path.resolve(destinationPath);
+  const canonicalRoot = fs.realpathSync(path.resolve(sourceRoot));
   const metadata = fs.lstatSync(source);
-  if (metadata.isSymbolicLink()) fail("PACKAGE_RESOURCE_SYMLINK_FORBIDDEN", source);
+  if (metadata.isSymbolicLink()) {
+    let target;
+    try {
+      target = fs.realpathSync(source);
+    } catch {
+      fail("PACKAGE_RESOURCE_SYMLINK_FORBIDDEN", source);
+    }
+    if (!pathInside(canonicalRoot, target)) fail("PACKAGE_RESOURCE_SYMLINK_FORBIDDEN", source);
+    const targetMetadata = fs.statSync(target);
+    if (!targetMetadata.isFile()) fail("PACKAGE_RESOURCE_SYMLINK_FORBIDDEN", source);
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(target, destination, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(destination, targetMetadata.mode & 0o777);
+    return;
+  }
   if (metadata.isDirectory()) {
     fs.mkdirSync(destination, { recursive: false, mode: metadata.mode & 0o777 });
     for (const entry of fs.readdirSync(source, { withFileTypes: true }).sort((a, b) => compareText(a.name, b.name))) {
-      copyTree(path.join(source, entry.name), path.join(destination, entry.name));
+      copyTree(path.join(source, entry.name), path.join(destination, entry.name), canonicalRoot);
     }
     return;
   }
@@ -881,6 +905,7 @@ module.exports = {
   STABLE_ROLLBACK,
   TUNNEL_VERSION,
   componentPaths,
+  copyTree,
   createRetentionSession,
   preparePackageResources,
   readTunnelZip,
