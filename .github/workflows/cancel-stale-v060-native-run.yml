@@ -1,0 +1,36 @@
+name: Cancel stale v0.6 native run
+
+on:
+  push:
+    branches:
+      - subagent/v0.6-electron-release-continuation-20260916
+    paths:
+      - .github/workflows/cancel-stale-v060-native-run.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel_stale:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Cancel pre-profile-fix native run only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STALE_RUN: '35074759410'
+          FIXED_SHA: '3801256021e17ac01f154249af363bd2cb0506f2'
+        run: |
+          set -euo pipefail
+          stale_sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STALE_RUN" --jq .head_sha)"
+          test "$stale_sha" = '4063147a4fc58a03f854c3ba3bcfb470d24db8cf'
+          test "$stale_sha" != "$FIXED_SHA"
+          status="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$STALE_RUN" --jq .status)"
+          if [ "$status" = queued ] || [ "$status" = pending ] || [ "$status" = in_progress ] || [ "$status" = requested ] || [ "$status" = waiting ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$STALE_RUN/cancel"
+            echo "STALE_V060_NATIVE_CANCEL_REQUESTED $STALE_RUN $stale_sha"
+          else
+            echo "STALE_V060_NATIVE_ALREADY_SETTLED $STALE_RUN $status"
+          fi
