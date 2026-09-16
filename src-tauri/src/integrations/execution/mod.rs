@@ -9,3 +9,7 @@ pub mod transport;
 pub mod book;
 
 pub mod observation;
+
+pub mod service;
+
+pub mod schema;

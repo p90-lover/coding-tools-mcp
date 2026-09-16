@@ -15,7 +15,13 @@ tokio-tungstenite={version="=0.28.0",default-features=false,features=["connect",
 futures-util="0.3"
 axum="0.8"
 ''')
-(out/'src/lib.rs').write_text('#[path="'+(root/'src-tauri/src/integrations/execution/mod.rs').as_posix()+'"]pub mod execution;\n#[cfg(test)]mod contracts {use crate::execution;include!("'+(root/'aiTemp/execution/contracts.rs').as_posix()+'");}\n')
+modules='pub mod execution {\n'
+for name in ['model','protocol','transport','book','observation']:
+ p=root/('src-tauri/src/integrations/execution/'+name+'.rs')
+ if p.exists():modules+='#[path="'+p.as_posix()+'"]pub mod '+name+';\n'
+modules+='}\n#[cfg(test)]mod contracts {use crate::execution;include!("'+(root/'aiTemp/execution/contracts.rs').as_posix()+'");}\n'
+(out/'src/lib.rs').write_text(modules)
+
 result=subprocess.run(['cargo','test','--manifest-path',str(out/'Cargo.toml'),'execution_','--','--test-threads=1','--nocapture'])
 if result.returncode:sys.exit(result.returncode)
 # Export real builder output for validation by pinned upstream schemas; no IO.

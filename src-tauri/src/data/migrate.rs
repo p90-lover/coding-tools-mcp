@@ -407,6 +407,7 @@ mod tests {
 
 /// Backups preserve documents, not live authority. A recovered consent needs local approval.
 fn suspend_recovered_permissions(data: &mut AppData) {
+    data.execution_book.suspend_recovered();
     for grant in &mut data.sandbox_permissions {
         grant.enabled = false;
     }
@@ -429,4 +430,9 @@ mod computer_recovery_tests {
         suspend_recovered_permissions(&mut data);
         assert!(data.computer_permissions[0].suspended);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn current_test_file() -> Option<PathBuf> {
+    TEST_DATA_FILE.with(|v| v.borrow().clone())
 }
