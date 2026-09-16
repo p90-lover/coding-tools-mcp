@@ -76,3 +76,22 @@ test("packaged smoke startup failures never block on a native error dialog", () 
     1,
   );
 });
+
+test("packaged smoke validates the runtime CLI version instead of the desktop release version", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "electron", "main.cjs"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /const \{ assertLauncherRuntimeVersion, terminateLauncherSmoke \} = require\("\.\/smoke-exit\.cjs"\);/,
+  );
+  assert.match(
+    source,
+    /assertLauncherRuntimeVersion\(\{\s*runtimeRoot: smokeRuntimeRoot,\s*result: versionResult,\s*\}\);/,
+  );
+  assert.doesNotMatch(
+    source,
+    /versionResult\.stdout\.trim\(\)\s*!==\s*app\.getVersion\(\)/,
+  );
+});
