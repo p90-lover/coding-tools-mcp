@@ -1,14 +1,19 @@
-import type { AgentProfile } from '../agents/subagent-types';
+import { AgentRegistry } from "../agents/agent-registry";
+import type { OrchestratorAgentProfile } from "../agents/subagent-types";
 
-export interface OrchestratorRoute {
-  task: string;
-  agent: AgentProfile;
-}
-
-export class OrchestratorRouter {
-  selectAgent(task: string, agents: AgentProfile[]): AgentProfile | undefined {
-    return agents.find((agent) =>
-      task.toLowerCase().includes(agent.role.toLowerCase())
-    ) ?? agents[0];
+export function resolveOrchestratorAgent(
+  registry: AgentRegistry,
+  agentId: string,
+  workflowAncestry: readonly string[],
+): OrchestratorAgentProfile {
+  const agent = registry.get(agentId);
+  if (!agent) throw new Error(`agent ${agentId} is not registered`);
+  if (!agent.enabled) throw new Error(`agent ${agentId} is disabled`);
+  if (agent.kind !== "orchestrator") {
+    throw new Error(`agent ${agentId} is not an orchestrator`);
   }
+  if (workflowAncestry.includes(agent.orchestratorId)) {
+    throw new Error(`recursive orchestrator delegation: ${agent.orchestratorId}`);
+  }
+  return agent;
 }
