@@ -9,12 +9,16 @@ on:
       - desktop-electron/electron/main-with-provider.cjs
       - desktop-electron/electron/provider-bootstrap.cjs
       - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/preload.cjs
       - desktop-electron/src/network/**
       - desktop-electron/src/providers/**
       - desktop-electron/src/App.tsx
+      - desktop-electron/src/main.tsx
       - desktop-electron/src/types.ts
       - desktop-electron/src/styles.css
       - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+      - desktop-electron/tests/proxy-provider-contract.test.cjs
+      - desktop-electron/tests/provider-proxy-domain.test.cjs
       - desktop-electron/package.json
       - desktop-electron/bun.lock
       - .github/workflows/provider-multiaccount-global-proxy.yml
@@ -23,12 +27,16 @@ on:
       - desktop-electron/electron/main-with-provider.cjs
       - desktop-electron/electron/provider-bootstrap.cjs
       - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/preload.cjs
       - desktop-electron/src/network/**
       - desktop-electron/src/providers/**
       - desktop-electron/src/App.tsx
+      - desktop-electron/src/main.tsx
       - desktop-electron/src/types.ts
       - desktop-electron/src/styles.css
       - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+      - desktop-electron/tests/proxy-provider-contract.test.cjs
+      - desktop-electron/tests/provider-proxy-domain.test.cjs
       - desktop-electron/package.json
       - desktop-electron/bun.lock
       - .github/workflows/provider-multiaccount-global-proxy.yml
@@ -40,6 +48,9 @@ permissions:
 concurrency:
   group: provider-hub-global-proxy-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache-provider-hub
 
 jobs:
   focused-provider-hub:
@@ -54,6 +65,9 @@ jobs:
         with:
           bun-version: 1.4.0
 
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/provider-hub/renderer-dist aiTemp/Trash/provider-hub
+
       - name: Install exact Electron dependencies
         run: bun install --cwd desktop-electron --frozen-lockfile
 
@@ -62,21 +76,39 @@ jobs:
           node --check desktop-electron/electron/main-with-provider.cjs
           node --check desktop-electron/electron/provider-bootstrap.cjs
           node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/preload.cjs
 
       - name: Run focused Provider Hub and proxy contracts
-        run: node --test desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+        run: |
+          node --test \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/provider-proxy-domain.test.cjs
 
       - name: Typecheck Electron renderer
         run: bun run --cwd desktop-electron typecheck
 
-      - name: Build Electron renderer
-        run: bun run --cwd desktop-electron build:renderer
+      - name: Build Electron renderer into aiTemp evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/provider-hub/renderer-dist \
+            --emptyOutDir
 
       - name: Enforce no file deletion
         shell: bash
         run: |
-          deleted="$(git diff --diff-filter=D --name-only HEAD^ HEAD)"
+          deleted="$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
           if [ -n "$deleted" ]; then
             printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
             exit 1
+          fi
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          target="aiTemp/Trash/provider-hub/node_modules-$GITHUB_RUN_ID"
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "$target"
           fi
