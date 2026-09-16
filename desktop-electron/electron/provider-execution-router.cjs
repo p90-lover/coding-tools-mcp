@@ -57,7 +57,12 @@ function activeProfile(snapshot, profileId) {
   };
 }
 
-function selectProviderAccount(snapshot, providerId, preferredAccountId) {
+function selectProviderAccount(
+  snapshot,
+  providerId,
+  preferredAccountId,
+  allowFallback = true,
+) {
   const candidates = (snapshot.accounts ?? [])
     .filter((account) => account.providerId === providerId && accountUsable(account))
     .sort((left, right) => {
@@ -71,6 +76,7 @@ function selectProviderAccount(snapshot, providerId, preferredAccountId) {
   if (preferredAccountId) {
     const preferred = candidates.find((account) => account.id === preferredAccountId);
     if (preferred) return preferred;
+    if (!allowFallback) return null;
   }
   return candidates[0] ?? null;
 }
@@ -156,7 +162,12 @@ function createProviderExecutionPlan(snapshot, input = {}, catalog = PROVIDER_EX
   let selectedAccount = null;
   for (const provider of ordered) {
     const preferred = provider.id === requestedProviderId ? requestedAccountId : null;
-    const account = selectProviderAccount(snapshot, provider.id, preferred);
+    const account = selectProviderAccount(
+      snapshot,
+      provider.id,
+      preferred,
+      preferred ? allowFallback : true,
+    );
     if (account) {
       selectedProvider = provider;
       selectedAccount = account;
