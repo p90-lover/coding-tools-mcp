@@ -1,0 +1,65 @@
+name: Apply rc.3 release concurrency fix
+
+on:
+  push:
+    branches:
+      - fix/rc3-cancel-stale-publishers
+    paths:
+      - '.github/workflows/apply-rc3-release-concurrency-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc3-release-concurrency-fix
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/rc3-cancel-stale-publishers
+          fetch-depth: 0
+
+      - name: Apply exact guarded concurrency patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/codex-router-multiprovider-release-rc3.yml')
+          old = '  cancel-in-progress: false\n'
+          new = '  cancel-in-progress: true\n'
+          text = path.read_text(encoding='utf-8')
+          if new in text and old not in text:
+              print('Release concurrency patch already applied.')
+          elif text.count(old) == 1:
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+              print('Release concurrency patch applied.')
+          else:
+              raise SystemExit(f'Expected exactly one stale concurrency setting, found {text.count(old)}')
+          PY
+
+      - name: Verify bounded change and no deletion
+        run: |
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          changed="$(git diff --name-only)"
+          test "$changed" = '.github/workflows/codex-router-multiprovider-release-rc3.yml'
+          grep -F '  cancel-in-progress: true' .github/workflows/codex-router-multiprovider-release-rc3.yml
+          test "$(grep -c '  cancel-in-progress: true' .github/workflows/codex-router-multiprovider-release-rc3.yml)" -eq 1
+
+      - name: Commit verified release queue fix
+        run: |
+          if git diff --quiet; then
+            echo 'No source patch required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/codex-router-multiprovider-release-rc3.yml
+          git commit -m 'fix(release): cancel stale rc.3 publisher runs'
+          git push origin HEAD:fix/rc3-cancel-stale-publishers
