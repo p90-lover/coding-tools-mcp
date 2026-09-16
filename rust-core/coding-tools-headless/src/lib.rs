@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
-use coding_tools_core::{data::AppData, tools, CoreState};
+use coding_tools_core::{data::AppData, integrations, tools, CoreState};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -448,6 +448,15 @@ struct ToolCallRequest {
     arguments: Value,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrationReadRequest {
+    source: integrations::Source,
+    endpoint: String,
+    #[serde(default)]
+    credential: String,
+}
+
 fn json_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
         status,
@@ -624,6 +633,28 @@ async fn tool_catalog(
     }
 }
 
+async fn integration_read(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<IntegrationReadRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "integration_read") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    match integrations::read(body.source, &body.endpoint, &body.credential).await {
+        Ok(snapshot) => Json(json!({"ok":true,"snapshot":snapshot})).into_response(),
+        Err(error) => json_error(
+            StatusCode::BAD_REQUEST,
+            "INTEGRATION_READ_FAILED",
+            text_error(error),
+        ),
+    }
+}
+
 async fn operation_read(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -795,6 +826,7 @@ fn router(state: ServiceState) -> Router {
         .route("/control/v1/shutdown", post(shutdown))
         .route("/api/v1/state", get(state_view))
         .route("/api/v1/workspaces", get(workspace_list))
+        .route("/api/v1/integrations/read", post(integration_read))
         .route("/api/v1/tools/catalog", get(tool_catalog))
         .route("/api/v1/tools/call", post(tool_call))
         .route("/api/v1/operations/{request_id}", get(operation_read))

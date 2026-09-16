@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", allow(linker_messages))]
 
 mod codex_bridge;
-mod integrations;
+pub mod integrations;
 
 mod actions;
 mod app_state;
@@ -29,8 +29,9 @@ use commands::{
     computer_local_pause, computer_local_permissions, computer_local_poll, computer_local_preview,
     computer_local_resume, computer_local_start, computer_local_stop, computer_local_targets,
     control_board_change, control_board_read, create_workspace, delete_frp_profile,
-    delete_workspace, get_actions_runtime_status, get_app_settings, get_download_config,
-    get_frp_snippet, get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret,
+    delete_workspace, execution_local_provider, execution_local_read, execution_local_update,
+    get_actions_runtime_status, get_app_settings, get_download_config, get_frp_snippet,
+    get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret,
     get_tunnel_connection_status, get_webview_memory_sample, get_workspace_secret, hide_to_tray,
     install_software, integration_read, list_frp_profiles, list_linked_projects, list_software,
     list_workspaces, open_url, open_workspace_directory, provider_config_preview,
@@ -193,6 +194,9 @@ pub fn run() {
             provider_config_preview,
             control_board_change,
             task_monitor_read,
+            execution_local_read,
+            execution_local_provider,
+            execution_local_update,
             sandbox_local_prepare,
             sandbox_local_status,
             sandbox_local_disable,
