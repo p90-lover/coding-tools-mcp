@@ -1,0 +1,85 @@
+name: v0.7 rc.2 execution bridge
+
+on:
+  push:
+    branches:
+      - fix/v0.7-rc2-execution-bridge
+    paths:
+      - rust-core/coding-tools-headless/**
+      - desktop-electron/electron/headless-host.cjs
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - .github/workflows/v0.7-rc2-execution-bridge.yml
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - rust-core/coding-tools-headless/**
+      - desktop-electron/electron/headless-host.cjs
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - .github/workflows/v0.7-rc2-execution-bridge.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v0.7-rc2-execution-bridge-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bridge:
+    name: Authenticated execution bridge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run Node syntax and bridge contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/v0.7-rc2-execution-bridge
+          (
+            node --check desktop-electron/electron/headless-host.cjs
+            node --check desktop-electron/electron/ipc-schema.cjs
+            node --check desktop-electron/electron/main.cjs
+            node --check desktop-electron/electron/preload.cjs
+            node --test desktop-electron/tests/execution-bridge-contract.test.cjs
+          ) 2>&1 | tee aiTemp/v0.7-rc2-execution-bridge/node-results.txt
+          grep -F '# fail 0' aiTemp/v0.7-rc2-execution-bridge/node-results.txt
+
+      - name: Check and test the headless Rust service
+        run: |
+          set -euo pipefail
+          (
+            cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml -- --check
+            cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml
+          ) 2>&1 | tee aiTemp/v0.7-rc2-execution-bridge/rust-results.txt
+
+      - name: Enforce integration diff safety
+        run: |
+          set -euo pipefail
+          git fetch origin integration/v0.7.0-rc.2-all-project-work --no-tags
+          git diff --check origin/integration/v0.7.0-rc.2-all-project-work...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.2-all-project-work...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: v0.7-rc2-execution-bridge-${{ github.sha }}
+          path: aiTemp/v0.7-rc2-execution-bridge/
+          if-no-files-found: error
+          retention-days: 14
