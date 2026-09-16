@@ -1,3 +1,5 @@
+# Archived evidence: this one-shot workflow completed successfully and is intentionally inert outside .github/workflows.
+# The permanent validation path is .github/workflows/provider-multiaccount-global-proxy.yml.
 name: Archive completed Provider Hub repair workflows
 
 on:
