@@ -19,7 +19,8 @@ pub use providers::{
 };
 mod orchestrators;
 pub use orchestrators::{
-    orchestrator_profile_archive, orchestrator_profile_save, orchestrator_profiles_read,
+    orchestrator_profile_archive, orchestrator_profile_run, orchestrator_profile_save,
+    orchestrator_profiles_read,
 };
 mod task_monitor;
 pub use task_monitor::task_monitor_read;
