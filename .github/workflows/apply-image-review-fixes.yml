@@ -1,0 +1,104 @@
+name: Apply image provider review fixes
+
+on:
+  push:
+    branches:
+      - feature/0.7-rc2-image-providers
+    paths:
+      - aiTemp/rc2/apply_image_review_fixes.py
+      - .github/workflows/apply-image-review-fixes.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-image-provider-review-fixes
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-image-review-green
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache-image-review-green
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev libgtk-3-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libpipewire-0.3-dev libgbm-dev
+      - name: Apply exact production fixes
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/Trash/image-review-green
+          python aiTemp/rc2/apply_image_review_fixes.py \
+            | tee aiTemp/evidence/image-review-green-apply.txt
+          grep -F 'IMAGE_REVIEW_FIXES_OK changed=true' \
+            aiTemp/evidence/image-review-green-apply.txt
+      - name: Format and enforce narrow no-delete patch
+        run: |
+          set -euo pipefail
+          cargo fmt --all --manifest-path src-tauri/Cargo.toml
+          test -z "$(git diff --diff-filter=D --name-only)"
+          unexpected="$(git diff --name-only | grep -Ev '^(src-tauri/src/media\.rs|src-tauri/src/providers\.rs|src/lib/provider-media\.ts|src/routes/image-studio/\+page\.svelte)$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected tracked changes:"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          git diff --check
+      - name: Verify static image integration contract
+        run: |
+          set -euo pipefail
+          python aiTemp/rc2/image_provider_contract.py \
+            2>&1 | tee aiTemp/evidence/image-review-green-contract.txt
+          grep -F IMAGE_PROVIDER_RC2_CONTRACT_OK aiTemp/evidence/image-review-green-contract.txt
+      - name: Install and verify frontend
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check 2>&1 | tee aiTemp/evidence/image-review-frontend-check.txt
+          npm run build 2>&1 | tee aiTemp/evidence/image-review-frontend-build.txt
+      - name: Verify Rust image provider runtime
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check 2>&1 | tee ../aiTemp/evidence/image-review-rustfmt.txt
+          cargo check --locked 2>&1 | tee ../aiTemp/evidence/image-review-cargo-check.txt
+          cargo test --locked media::tests 2>&1 | tee ../aiTemp/evidence/image-review-media-tests.txt
+          cargo clippy --locked --lib -- -D warnings 2>&1 | tee ../aiTemp/evidence/image-review-clippy.txt
+      - name: Commit verified source fixes
+        env:
+          TARGET_BRANCH: feature/0.7-rc2-image-providers
+        run: |
+          set -euo pipefail
+          remote_head="$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')"
+          test "$remote_head" = "$GITHUB_SHA"
+          git add \
+            src-tauri/src/media.rs \
+            src-tauri/src/providers.rs \
+            src/lib/provider-media.ts \
+            src/routes/image-studio/+page.svelte
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(image): harden provider generation and previews'
+          git push origin "HEAD:$TARGET_BRANCH"
