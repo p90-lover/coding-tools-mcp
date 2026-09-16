@@ -1,101 +1,25 @@
-name: Apply Provider Hub to current rc.2
+name: Archived Provider Hub current materializer
 
 on:
-  push:
-    branches:
-      - integration/v0.7.0-rc.2-provider-hub-current
-    paths:
-      - aiTemp/provider-hub-current/apply_current_release.py
-      - desktop-electron/electron/main-with-provider.cjs
-      - desktop-electron/electron/provider-bootstrap.cjs
-      - desktop-electron/electron/provider-network.cjs
-      - desktop-electron/src/providers/**
-      - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
-      - .github/workflows/apply-provider-hub-current.yml
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: apply-provider-hub-current-${{ github.ref }}
-  cancel-in-progress: true
+  group: archived-provider-hub-current-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  apply-and-verify:
-    if: github.ref == 'refs/heads/integration/v0.7.0-rc.2-provider-hub-current'
+  archived:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 2
-          ref: ${{ github.ref_name }}
-
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
-        with:
-          bun-version: 1.4.0
-
-      - name: Install exact Electron dependencies
-        run: bun install --cwd desktop-electron --frozen-lockfile
-
-      - name: Apply deterministic current-release integration
-        run: python3 aiTemp/provider-hub-current/apply_current_release.py
-
-      - name: Validate Electron provider runtime syntax
-        run: |
-          node --check desktop-electron/electron/main.cjs
-          node --check desktop-electron/electron/main-with-provider.cjs
-          node --check desktop-electron/electron/provider-bootstrap.cjs
-          node --check desktop-electron/electron/provider-network.cjs
-          node --check desktop-electron/electron/preload.cjs
-
-      - name: Run focused Provider Hub and preserved rc.2 contracts
-        run: >-
-          node --test
-          desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
-          desktop-electron/tests/proxy-provider-contract.test.cjs
-          desktop-electron/tests/provider-proxy-domain.test.cjs
-          desktop-electron/tests/execution-bridge-contract.test.cjs
-          desktop-electron/tests/rc2-onboarding-localization.test.cjs
-
-      - name: Typecheck Electron renderer
-        run: bun run --cwd desktop-electron typecheck
-
-      - name: Build renderer into retained aiTemp evidence
-        run: |
-          mkdir -p aiTemp/provider-hub-current/renderer-dist
-          cd desktop-electron
-          bunx vite build --outDir ../aiTemp/provider-hub-current/renderer-dist --emptyOutDir
-
-      - name: Enforce no file deletion
+      - name: Report preserved materializer location
         shell: bash
         run: |
-          deleted="$(git diff --diff-filter=D --name-only)"
-          if [ -n "$deleted" ]; then
-            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
-            exit 1
-          fi
-
-      - name: Commit verified Provider Hub integration
-        shell: bash
-        env:
-          TARGET_BRANCH: ${{ github.ref_name }}
-        run: |
-          if git diff --quiet; then
-            echo "Provider Hub current-release integration is already applied."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            desktop-electron/electron/preload.cjs \
-            desktop-electron/package.json \
-            desktop-electron/src/main.tsx \
-            desktop-electron/src/network/proxy-manager.ts \
-            desktop-electron/src/network/proxy-routing-types.ts \
-            desktop-electron/src/providers/provider-types.ts \
-            desktop-electron/src/types.ts
-          git diff --cached --check
-          git commit -m "feat(rc.2): integrate Provider Hub and global proxy"
-          git push origin "HEAD:${TARGET_BRANCH}"
+          set -euo pipefail
+          echo "The completed Provider Hub current-release materializer is archived."
+          echo "Workflow copy: aiTemp/Trash/provider-hub-current/obsolete-workflows/apply-provider-hub-current.yml"
+          echo "Recipe copy: aiTemp/Trash/provider-hub-current/obsolete-recipes/apply_current_release.py"
+          echo "This compatibility workflow performs no repository writes or deletions."
