@@ -1,18 +1,26 @@
 <script lang="ts">
  import { ShieldCheck, RefreshCw, Plug, Settings2, Cpu } from '@lucide/svelte';
- import { builtinProviderProfiles } from '../../runtime-web/src/provider-registry';
+ import { listProviders, providerHealth, testProvider } from '../../../runtime-web/src/provider-runtime';
+
+ const providers = listProviders();
+ let status = $state<Record<string,string>>({});
+
+ async function connect(id:string){
+  const result = await testProvider(id);
+  status[id] = result.health.status;
+ }
 </script>
 <section class="cc-page">
 <header class="cc-page-heading"><div><h1><Cpu size={18}/> Providers</h1><p>API key, OAuth, browser and reverse proxy provider management.</p></div><span class="cc-inline-label"><ShieldCheck size={16}/> Provider execution requires consent</span></header>
 <div class="provider-grid">
-{#each builtinProviderProfiles as provider}
+{#each providers as provider}
 <article class="cc-panel provider-card">
 <h2>{provider.name}</h2>
 <p>{provider.category} · {provider.auth}</p>
-<strong>Available</strong>
+<strong>{status[provider.id] ?? providerHealth(provider.id)?.status ?? 'Available'}</strong>
 <div class="caps">{#each provider.capabilities as cap}<span>{cap}</span>{/each}</div>
 <small>Engines: {provider.paseoEnabled?'Paseo':''}{provider.paseoEnabled&&provider.annealEnabled?', ':''}{provider.annealEnabled?'Anneal':''}</small>
-<div class="buttons"><button class="cc-button secondary"><Plug size={14}/>Connect</button><button class="cc-button ghost"><RefreshCw size={14}/>Models</button><button class="cc-button ghost"><Settings2 size={14}/>Edit</button></div>
+<div class="buttons"><button class="cc-button secondary" onclick={()=>connect(provider.id)}><Plug size={14}/>Connect</button><button class="cc-button ghost"><RefreshCw size={14}/>Models</button><button class="cc-button ghost"><Settings2 size={14}/>Edit</button></div>
 </article>
 {/each}
 </div>
