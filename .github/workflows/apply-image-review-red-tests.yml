@@ -50,6 +50,7 @@ jobs:
       - name: Prove the new contracts fail on the unfixed source
         shell: bash
         run: |
+          set +e
           set -uo pipefail
           python aiTemp/rc2/image_provider_contract.py \
             > aiTemp/evidence/image-review-red-contract.txt 2>&1
