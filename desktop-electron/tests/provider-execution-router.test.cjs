@@ -123,7 +123,7 @@ test("provider direct routing blocks global proxy inheritance", () => {
   assert.equal(route.profile, null);
 });
 
-test("strict selection fails closed instead of silently changing providers", () => {
+test("strict provider selection fails closed instead of silently changing providers", () => {
   const state = snapshot();
   state.accounts = state.accounts.filter((item) => item.providerId !== "codex-oauth");
 
@@ -131,6 +131,25 @@ test("strict selection fails closed instead of silently changing providers", () 
     () => createProviderExecutionPlan(state, {
       workload: "anneal",
       providerId: "codex-oauth",
+      allowFallback: false,
+    }),
+    /No connected provider account/,
+  );
+});
+
+test("strict account selection fails closed instead of silently changing accounts", () => {
+  const state = snapshot();
+  state.accounts = state.accounts.map((item) => (
+    item.id === "codex-main"
+      ? { ...item, status: "expired", isDefault: false }
+      : item
+  ));
+
+  assert.throws(
+    () => createProviderExecutionPlan(state, {
+      workload: "paseo",
+      providerId: "codex-oauth",
+      accountId: "codex-main",
       allowFallback: false,
     }),
     /No connected provider account/,
