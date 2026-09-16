@@ -1,5 +1,6 @@
 name: Paseo Anneal Electron Contract
 
+# Revalidate the exact user-authored head after verified apply workflows commit source repairs.
 on:
   push:
     branches:
