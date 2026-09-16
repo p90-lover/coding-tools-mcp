@@ -158,7 +158,7 @@ jobs:
             aiTemp/installer-upgrade/legacy-uninstall-fixture \
             aiTemp/installer-upgrade/output \
             aiTemp/installer-upgrade/tmp \
-            aiTemp/Trash/installer-upgrade
+            aiTemp/Trash/installer-upgrade/legacy-uninstall-fixture
           echo "ELECTRON_BUILDER_CACHE=$PWD/aiTemp/installer-upgrade/cache/electron-builder" >> "$GITHUB_ENV"
           absolute_tmp="$PWD/aiTemp/installer-upgrade/tmp"
           preload="$(node -e 'const {pathToFileURL}=require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href)' "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
@@ -197,30 +197,66 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\installer-upgrade\legacy-uninstall-fixture'
+          $trash = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\Trash\installer-upgrade\legacy-uninstall-fixture'
           $install = Join-Path $root 'Coding Tools MCP'
           $marker = Join-Path $root 'legacy-uninstaller-ran.txt'
           New-Item -ItemType Directory -Path $install -Force | Out-Null
+          New-Item -ItemType Directory -Path $trash -Force | Out-Null
           Set-Content -LiteralPath (Join-Path $install 'legacy-app.bin') -Value 'legacy payload'
           $source = @'
           using System;
+          using System.Diagnostics;
           using System.IO;
+          using System.Reflection;
+          using System.Text;
           using Microsoft.Win32;
 
           internal static class LegacyUninstallFixture
           {
+              private static string PowerShellLiteral(string value)
+              {
+                  return "'" + value.Replace("'", "''") + "'";
+              }
+
               public static int Main(string[] args)
               {
                   string marker = Environment.GetEnvironmentVariable("CODING_TOOLS_LEGACY_UNINSTALL_MARKER");
                   string install = Environment.GetEnvironmentVariable("CODING_TOOLS_LEGACY_INSTALL_LOCATION");
-                  if (String.IsNullOrWhiteSpace(marker) || String.IsNullOrWhiteSpace(install)) return 41;
+                  string trash = Environment.GetEnvironmentVariable("CODING_TOOLS_LEGACY_TRASH_DIR");
+                  if (String.IsNullOrWhiteSpace(marker)
+                      || String.IsNullOrWhiteSpace(install)
+                      || String.IsNullOrWhiteSpace(trash)) return 41;
+
+                  Directory.CreateDirectory(trash);
                   File.WriteAllText(marker, String.Join(" ", args));
+
                   string payload = Path.Combine(install, "legacy-app.bin");
-                  if (File.Exists(payload)) File.Delete(payload);
+                  string retainedPayload = Path.Combine(trash, "legacy-app.bin");
+                  if (File.Exists(payload)) File.Move(payload, retainedPayload);
+
                   using (RegistryKey key = Registry.CurrentUser.OpenSubKey(
                       @"Software\Microsoft\Windows\CurrentVersion\Uninstall", true))
                   {
                       key?.DeleteSubKeyTree("Coding Tools MCP", false);
                   }
+
+                  int processId = Process.GetCurrentProcess().Id;
+                  string currentExecutable = Assembly.GetExecutingAssembly().Location;
+                  string retainedUninstaller = Path.Combine(trash, "uninstall.exe");
+                  string script = "$ErrorActionPreference='Stop'; Wait-Process -Id "
+                      + processId
+                      + "; Move-Item -LiteralPath "
+                      + PowerShellLiteral(currentExecutable)
+                      + " -Destination "
+                      + PowerShellLiteral(retainedUninstaller);
+                  string encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+                  Process.Start(new ProcessStartInfo
+                  {
+                      FileName = "pwsh.exe",
+                      Arguments = "-NoProfile -NonInteractive -EncodedCommand " + encodedScript,
+                      CreateNoWindow = true,
+                      UseShellExecute = false,
+                  });
                   return 0;
               }
           }
@@ -236,22 +272,29 @@ jobs:
           New-ItemProperty -Path $key -Name DisplayVersion -Value '0.4.11' -PropertyType String -Force | Out-Null
           New-ItemProperty -Path $key -Name InstallLocation -Value ('"' + $install + '"') -PropertyType String -Force | Out-Null
           New-ItemProperty -Path $key -Name UninstallString -Value ('"' + $uninstaller + '"') -PropertyType String -Force | Out-Null
-          "LEGACY_FIXTURE_READY`ninstall=$install`nmarker=$marker" | Set-Content -LiteralPath (Join-Path $root 'fixture.txt')
+          "LEGACY_FIXTURE_READY`ninstall=$install`nmarker=$marker`ntrash=$trash" | Set-Content -LiteralPath (Join-Path $root 'fixture.txt')
 
       - name: Run old-install removal and rc.5 reinstall
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\installer-upgrade\legacy-uninstall-fixture'
+          $trash = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\Trash\installer-upgrade\legacy-uninstall-fixture'
           $install = Join-Path $root 'Coding Tools MCP'
           $marker = Join-Path $root 'legacy-uninstaller-ran.txt'
           $env:CODING_TOOLS_LEGACY_UNINSTALL_MARKER = $marker
           $env:CODING_TOOLS_LEGACY_INSTALL_LOCATION = $install
+          $env:CODING_TOOLS_LEGACY_TRASH_DIR = $trash
           $installer = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\installer-upgrade\output\Coding.Tools_0.7.0-rc.5_windows_x64_setup.exe'
           $process = Start-Process -FilePath $installer -ArgumentList '/S', '/currentuser' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "rc.5 installer failed with exit code $($process.ExitCode)" }
           if (-not (Test-Path -LiteralPath $marker)) { throw 'legacy uninstaller was not executed' }
-          if (Test-Path -LiteralPath (Join-Path $install 'legacy-app.bin')) { throw 'legacy payload was not removed' }
+          if (Test-Path -LiteralPath (Join-Path $install 'legacy-app.bin')) { throw 'legacy payload remains in the old installation' }
+          if (Test-Path -LiteralPath (Join-Path $install 'uninstall.exe')) { throw 'legacy uninstaller remains in the old installation' }
+          $preservedPayload = Join-Path $trash 'legacy-app.bin'
+          $preservedUninstaller = Join-Path $trash 'uninstall.exe'
+          if (-not (Test-Path -LiteralPath $preservedPayload)) { throw 'legacy payload was not preserved under aiTemp/Trash' }
+          if (-not (Test-Path -LiteralPath $preservedUninstaller)) { throw 'legacy uninstaller was not preserved under aiTemp/Trash' }
           $legacyKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Coding Tools MCP'
           if (Test-Path -LiteralPath $legacyKey) { throw 'legacy uninstall key remains after migration' }
 
@@ -267,7 +310,10 @@ jobs:
             installerExitCode = $process.ExitCode
             legacyUninstallerRan = $true
             legacyRegistryRemoved = $true
-            legacyPayloadRemoved = $true
+            legacyPayloadPreserved = $true
+            legacyUninstallerPreserved = $true
+            preservedPayload = $preservedPayload
+            preservedUninstaller = $preservedUninstaller
             currentInstallLocation = $location
             currentApplication = $application
           }
