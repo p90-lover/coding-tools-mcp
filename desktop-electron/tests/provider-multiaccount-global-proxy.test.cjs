@@ -123,20 +123,28 @@ test("proxy routing resolves account then provider then global saved profiles", 
 
 test("renderer and Electron IPC expose the Provider Hub and global proxy controls", () => {
   const read = (relativePath) => fs.readFileSync(path.join(__dirname, "..", relativePath), "utf8");
-  const app = read("src/App.tsx");
+  const main = read("src/main.tsx");
+  const integration = read("src/providers/ProviderHubIntegration.tsx");
   const types = read("src/types.ts");
   const preload = read("electron/preload.cjs");
-  const main = read("electron/main.cjs");
-  const styles = read("src/styles.css");
+  const bootstrap = read("electron/provider-bootstrap.cjs");
+  const wrapper = read("electron/main-with-provider.cjs");
+  const styles = read("src/providers/provider-manager.css");
+  const packageJson = JSON.parse(read("package.json"));
 
   assert.match(types, /Surface[^;]+"providers"/s);
-  assert.match(app, /ProviderManagerSurface/);
+  assert.match(main, /ProviderHubIntegration/);
+  assert.match(integration, /ProviderManagerSurface/);
+  assert.match(integration, /archiveProviderAccount/);
+  assert.match(integration, /archiveProxyProfile/);
   assert.match(preload, /providerSnapshot/);
   assert.match(preload, /saveProviderAccount/);
   assert.match(preload, /saveProxyProfile/);
   assert.match(preload, /setGlobalProxyRouting/);
-  assert.match(main, /createProviderNetworkStore/);
-  assert.match(main, /launcher:provider-snapshot/);
-  assert.match(main, /launcher:proxy-global-routing/);
+  assert.match(bootstrap, /createProviderNetworkStore/);
+  assert.match(bootstrap, /launcher:provider-snapshot/);
+  assert.match(bootstrap, /launcher:proxy-global-routing/);
+  assert.match(wrapper, /installProviderNetwork/);
+  assert.equal(packageJson.main, "electron/main-with-provider.cjs");
   assert.match(styles, /\.provider-manager/);
 });
