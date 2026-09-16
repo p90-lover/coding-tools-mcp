@@ -19,6 +19,8 @@ const preservation = createPreservationSession({
 const scratch = preservation.createWorkDirectory("smoke");
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
+const launcherDataDir = path.join(scratch, "launcher-data");
+const codexHome = path.join(scratch, "codex-home");
 let macAppBundle;
 
 function run(command, args, options = {}) {
@@ -88,9 +90,11 @@ function smokeEnvironment() {
     TMPDIR: scratch,
     TMP: scratch,
     TEMP: scratch,
-    CODEX_WEB_GPT_LAUNCHER_DATA_DIR: path.join(scratch, "launcher-data"),
+    CODING_TOOLS_LAUNCHER_DATA_DIR: launcherDataDir,
+    CODING_TOOLS_HOME: coreHome,
+    CODEX_HOME: codexHome,
+    CODEX_WEB_GPT_LAUNCHER_DATA_DIR: launcherDataDir,
     CODEX_CHATGPT_WEB_HOME: coreHome,
-    CODEX_HOME: path.join(scratch, "codex-home"),
     CODEX_WEB_GPT_SMOKE_FILE: markerPath,
   };
 }
@@ -136,7 +140,7 @@ async function runSmoke() {
     cwd: scratch,
     env,
     markerPath,
-    fatalLogPath: path.join(env.CODEX_WEB_GPT_LAUNCHER_DATA_DIR, "logs", "launcher-fatal.log"),
+    fatalLogPath: path.join(env.CODING_TOOLS_LAUNCHER_DATA_DIR, "logs", "launcher-fatal.log"),
     timeoutMs: 120_000,
     exitGraceMs: 5_000,
     pollIntervalMs: 100,
