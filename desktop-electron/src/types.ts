@@ -111,6 +111,55 @@ export interface ProviderNetworkSnapshot {
   };
 }
 
+export type ProviderExecutionWorkload = "paseo" | "anneal";
+export type ProviderExecutionProtocol =
+  | "openai_chat"
+  | "openai_responses"
+  | "anthropic_messages"
+  | "gemini_native";
+
+export interface ProviderExecutionPlanInput {
+  workload: ProviderExecutionWorkload;
+  providerId?: string;
+  accountId?: string;
+  model?: string;
+  allowFallback?: boolean;
+}
+
+export interface ProviderExecutionProxyProfile {
+  id: string;
+  name: string;
+  endpoint: ProxyEndpointRecord;
+  scopes: ProxyScope[];
+  bypass: string[];
+}
+
+export interface ProviderExecutionPlan {
+  version: 1;
+  workload: ProviderExecutionWorkload;
+  provider: {
+    id: string;
+    name: string;
+    protocol: ProviderExecutionProtocol;
+  };
+  account: {
+    id: string;
+    label: string;
+    identity: string | null;
+    auth: ProviderAuth;
+  };
+  model: string | null;
+  proxy: {
+    mode: "direct" | "profile";
+    source: "account" | "provider" | "global" | "default";
+    profile: ProviderExecutionProxyProfile | null;
+  };
+  fallbackUsed: boolean;
+  credentialHandle: {
+    providerId: string;
+    accountId: string;
+  };
+}
 
 export interface LauncherState {
   version: 1;
@@ -276,6 +325,7 @@ export interface LauncherApi {
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   providerSnapshot(): Promise<ProviderNetworkSnapshot>;
+  providerExecutionPlan(input: ProviderExecutionPlanInput): Promise<ProviderExecutionPlan>;
   saveProviderAccount(input: ProviderAccountInput): Promise<ProviderNetworkSnapshot>;
   setDefaultProviderAccount(providerId: string, accountId: string): Promise<ProviderNetworkSnapshot>;
   setProviderAccountEnabled(accountId: string, enabled: boolean): Promise<ProviderNetworkSnapshot>;
