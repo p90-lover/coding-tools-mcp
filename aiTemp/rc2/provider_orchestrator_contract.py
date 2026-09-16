@@ -22,11 +22,13 @@ def main() -> None:
         "src-tauri/src/lib.rs",
         "pub mod providers;",
         "pub mod orchestrators;",
+        "pub mod orchestrator_run;",
         "provider_profiles_read",
         "provider_profile_save",
         "provider_profile_probe",
         "orchestrator_profiles_read",
         "orchestrator_profile_save",
+        "orchestrator_profile_run",
     )
     require(
         "src-tauri/src/commands/mod.rs",
@@ -34,6 +36,7 @@ def main() -> None:
         "mod orchestrators;",
         "provider_profiles_read",
         "orchestrator_profiles_read",
+        "orchestrator_profile_run",
     )
     require(
         "src-tauri/src/data/model.rs",
@@ -46,6 +49,7 @@ def main() -> None:
         "src/lib/components/AppShell.svelte",
         "'/providers'",
         "'/orchestrators'",
+        "'/orchestrator-run'",
     )
     require(
         "src/lib/provider-center.ts",
@@ -65,6 +69,7 @@ def main() -> None:
         "src/lib/orchestrator-center.ts",
         "orchestrator_profiles_read",
         "orchestrator_profile_save",
+        "orchestrator_profile_run",
         "fallback_provider_ids",
         "max_concurrency",
     )
@@ -74,6 +79,13 @@ def main() -> None:
         "saveOrchestrator",
         "fallback_provider_ids",
         "max_concurrency",
+    )
+    require(
+        "src/routes/orchestrator-run/+page.svelte",
+        "runAnnealOrchestrator",
+        "operator_token",
+        "auto_start",
+        "approved",
     )
     require(
         "src-tauri/src/providers.rs",
@@ -87,6 +99,13 @@ def main() -> None:
         "pub struct OrchestratorStage",
         "fallback_provider_ids",
         "pub fn runnable_snapshot",
+    )
+    require(
+        "src-tauri/src/orchestrator_run.rs",
+        "task-templates/{}/instantiate",
+        "stepOverrides",
+        "staffingProfileId",
+        "pub async fn run",
     )
     print("PROVIDER_ORCHESTRATOR_RC2_CONTRACT_OK")
 
