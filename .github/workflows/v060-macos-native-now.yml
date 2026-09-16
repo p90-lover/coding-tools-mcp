@@ -1,0 +1,146 @@
+name: v0.6 macOS native now
+
+on:
+  push:
+    branches:
+      - subagent/v0.6-electron-release-continuation-20260916
+    paths:
+      - .github/workflows/v060-macos-native-now.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: '1.4.0'
+  NODE_VERSION: '22'
+  RUST_TOOLCHAIN: '1.98.1'
+  SOURCE_SHA: ${{ github.sha }}
+  TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/source/aiTemp/native-macos-cargo-target
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/source/aiTemp/native-macos-bun-cache
+  ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/source/aiTemp/electron-builder-cache
+  CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/native-macos
+
+jobs:
+  macos:
+    if: github.actor == github.repository_owner
+    runs-on: macos-14
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Prepare dependencies and focused contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/release-output "$ELECTRON_BUILDER_CACHE" "$CODING_TOOLS_RETENTION_ROOT"
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun install --frozen-lockfile --cwd runtime-web
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun install --frozen-lockfile --cwd runtime-web/launcher
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun install --frozen-lockfile --cwd desktop-electron
+          bun test runtime-web/tests/runtime-bundle-version.test.ts
+          node --test desktop-electron/tests/smoke-artifact-contract.test.cjs
+          node --check desktop-electron/scripts/package.cjs
+          node --check desktop-electron/scripts/smoke-package.cjs
+          node --check desktop-electron/scripts/launcher-process-smoke.cjs
+
+      - name: Acquire pinned macOS tunnel client
+        run: |
+          set -euo pipefail
+          arch="$(node -p 'process.arch')"
+          case "$arch" in
+            arm64) archive=tunnel-client-v0.0.12-darwin-arm64.zip; expected=42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02 ;;
+            x64) archive=tunnel-client-v0.0.12-darwin-amd64.zip; expected=33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009 ;;
+            *) echo "unsupported macOS tunnel target $arch" >&2; exit 1 ;;
+          esac
+          input_dir="aiTemp/input/tunnel-client/v0.0.12/macos-$arch"
+          mkdir -p "$input_dir"
+          partial="$input_dir/$archive.partial"
+          final="$input_dir/$archive"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --connect-timeout 30 --output "$partial" "$TUNNEL_RELEASE_URL/$archive"
+          actual="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$partial")"
+          test "$actual" = "$expected"
+          mv -n "$partial" "$final"
+          test -s "$final"
+          echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$final" >> "$GITHUB_ENV"
+
+      - name: Apply proven v0.6 headless compile repairs
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('rust-core/coding-tools-headless/src/lib.rs'); text=path.read_text(encoding='utf-8')
+          replacements=[
+            ('tools::call_tool_mcp(&context, &tool, &arguments)','tools::dispatch::call_tool_mcp(&context, &tool, &arguments)'),
+            ('        let join = tokio::spawn(async move {\n','        let service_shutdown_tx = shutdown_tx.clone();\n        let join = tokio::spawn(async move {\n'),
+            ('            let reason = shutdown_tx\n                .borrow()\n','            let reason = service_shutdown_tx\n                .borrow()\n'),
+          ]
+          for old,new in replacements:
+            if text.count(old)!=1: raise SystemExit(f'compile repair match count != 1: {old!r}')
+            text=text.replace(old,new,1)
+          path.write_text(text,encoding='utf-8')
+          PY
+          git diff --check -- rust-core/coding-tools-headless/src/lib.rs
+
+      - name: Build macOS package
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml 2>&1 | tee aiTemp/evidence/headless-build.txt
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun run --cwd desktop-electron package:mac 2>&1 | tee aiTemp/evidence/native-package.txt
+
+      - name: Materialize macOS artifacts
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'; import path from 'node:path'; import crypto from 'node:crypto';
+          const pkg=JSON.parse(fs.readFileSync('desktop-electron/package.json','utf8')); const arch=process.arch; const out='aiTemp/release-output'; fs.mkdirSync(out,{recursive:true}); const files=[];
+          for(const ext of ['dmg','zip']){const name=pkg.build.artifactName.replaceAll('${version}',pkg.version).replaceAll('${os}','mac').replaceAll('${arch}',arch).replaceAll('${ext}',ext); const src=path.join('desktop-electron','artifacts',name); if(!fs.existsSync(src)) throw new Error(`missing ${src}`); const dest=path.join(out,name); fs.copyFileSync(src,dest,fs.constants.COPYFILE_EXCL); const b=fs.readFileSync(dest); files.push({name,size:b.length,sha256:crypto.createHash('sha256').update(b).digest('hex')});}
+          fs.writeFileSync(path.join(out,'manifest.json'),`${JSON.stringify({sourceSha:process.env.SOURCE_SHA,arch,files},null,2)}\n`,{flag:'wx'}); console.log(JSON.stringify(files));
+          NODE
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: v060-macos-${{ github.sha }}
+          path: aiTemp/source/aiTemp/release-output/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Smoke macOS packaged launcher
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun run --cwd desktop-electron smoke:package 2>&1 | tee aiTemp/evidence/native-smoke.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: v060-macos-evidence-${{ github.sha }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14
