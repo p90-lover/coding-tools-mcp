@@ -1,0 +1,100 @@
+name: v0.7 rc.2 OAuth compatibility
+
+on:
+  push:
+    branches:
+      - fix/v0.7-rc2-oauth-rfc9207-rfc9728
+    paths:
+      - src-tauri/src/auth/**
+      - src-tauri/src/mcp/listener.rs
+      - src-tauri/src/mcp/transport.rs
+      - aiTemp/oauth-issuer/**
+      - aiTemp/oauth-prm/**
+      - tests/v0.7-rc2-oauth-compatibility-contract.test.mjs
+      - .github/workflows/v0.7-rc2-oauth-compatibility.yml
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - src-tauri/src/auth/**
+      - src-tauri/src/mcp/listener.rs
+      - src-tauri/src/mcp/transport.rs
+      - aiTemp/oauth-issuer/**
+      - aiTemp/oauth-prm/**
+      - tests/v0.7-rc2-oauth-compatibility-contract.test.mjs
+      - .github/workflows/v0.7-rc2-oauth-compatibility.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v0.7-rc2-oauth-compatibility-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    name: RFC 9207 and RFC 9728 contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run source compatibility contract
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/v0.7-rc2-oauth-compatibility
+          node --test tests/v0.7-rc2-oauth-compatibility-contract.test.mjs \
+            2>&1 | tee aiTemp/v0.7-rc2-oauth-compatibility/node-results.txt
+          grep -F '# fail 0' aiTemp/v0.7-rc2-oauth-compatibility/node-results.txt
+
+      - name: Install Linux Rust system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            libgbm-dev \
+            libpipewire-0.3-dev \
+            patchelf
+
+      - name: Run focused and complete Rust gates
+        run: |
+          set -euo pipefail
+          (
+            cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+            cargo test --manifest-path src-tauri/Cargo.toml --locked oauth_authorization_response -- --nocapture
+            cargo test --manifest-path src-tauri/Cargo.toml --locked oauth_resource_metadata -- --nocapture
+            cargo test --manifest-path src-tauri/Cargo.toml --locked
+          ) 2>&1 | tee aiTemp/v0.7-rc2-oauth-compatibility/rust-results.txt
+
+      - name: Enforce no-delete integration diff
+        run: |
+          set -euo pipefail
+          git fetch origin integration/v0.7.0-rc.2-all-project-work --no-tags
+          git diff --check origin/integration/v0.7.0-rc.2-all-project-work...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.2-all-project-work...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: v0.7-rc2-oauth-compatibility-${{ github.sha }}
+          path: aiTemp/v0.7-rc2-oauth-compatibility/
+          if-no-files-found: error
+          retention-days: 14
