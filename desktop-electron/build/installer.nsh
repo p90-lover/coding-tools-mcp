@@ -1,6 +1,7 @@
 !include "LogicLib.nsh"
 !include "x64.nsh"
 
+!ifndef BUILD_UNINSTALLER
 !define LEGACY_PRODUCT_NAME "Coding Tools MCP"
 !define LEGACY_UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Coding Tools MCP"
 
@@ -100,3 +101,4 @@ Var LegacyRegistryAfter
     SetRegView 32
   ${EndIf}
 !macroend
+!endif
