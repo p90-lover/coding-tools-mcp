@@ -3,7 +3,9 @@ const {
   createProviderNetworkController,
   createProviderNetworkStore,
 } = require("./provider-network.cjs");
+const { createProviderExecutionDispatcher } = require("./provider-execution-dispatch.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
+const { requestHeadlessExecution } = require("./headless-execution-registry.cjs");
 const { resolveLauncherProfile } = require("./profile.cjs");
 
 function installProviderNetwork({
@@ -15,6 +17,7 @@ function installProviderNetwork({
   shell,
 }) {
   let controller = null;
+  let executionDispatcher = null;
 
   const logger = Object.freeze({
     info(event, detail = {}) {
@@ -34,6 +37,19 @@ function installProviderNetwork({
     return snapshot;
   }
 
+  function assertFocusedExecutionWindow(event) {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const valid = window
+      && !window.isDestroyed()
+      && window.isVisible()
+      && !window.isMinimized()
+      && window.isFocused()
+      && event.sender.isFocused();
+    if (!valid) {
+      throw new Error("Use the visible, focused main-window controller for Provider Hub execution");
+    }
+  }
+
   const controllerPromise = app.whenReady().then(async () => {
     const launcherProfile = resolveLauncherProfile({ appData: app.getPath("appData") });
     controller = createProviderNetworkController({
@@ -45,6 +61,11 @@ function installProviderNetwork({
       session,
       shell,
       userData: app.getPath("userData"),
+    });
+    executionDispatcher = createProviderExecutionDispatcher({
+      store: controller.store,
+      requestExecution: requestHeadlessExecution,
+      applyGlobalRouting: () => controller.applyGlobalRouting(),
     });
 
     const snapshot = controller.store.snapshot();
@@ -87,6 +108,16 @@ function installProviderNetwork({
   handle("launcher:provider-execution-plan", (active, _event, input) => (
     createProviderExecutionPlan(providerExecutionSnapshot(active), input)
   ));
+  handle("launcher:provider-execution-configure", async (_active, event, input) => {
+    assertFocusedExecutionWindow(event);
+    if (!executionDispatcher) throw new Error("Provider Hub execution dispatcher is unavailable");
+    return executionDispatcher.configure(input);
+  });
+  handle("launcher:provider-execution-dispatch-mission", async (_active, event, input) => {
+    assertFocusedExecutionWindow(event);
+    if (!executionDispatcher) throw new Error("Provider Hub execution dispatcher is unavailable");
+    return executionDispatcher.dispatchMission(input);
+  });
   handle("launcher:provider-account-save", (active, _event, input) => publishMutation(
     active,
     () => active.store.saveAccount(input),
