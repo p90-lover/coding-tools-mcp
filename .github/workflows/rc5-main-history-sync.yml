@@ -1,0 +1,147 @@
+name: RC5 Main History Sync
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.5-main-sync
+    paths:
+      - .github/workflows/rc5-main-history-sync.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc5-main-history-sync
+  cancel-in-progress: false
+
+env:
+  NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache-rc5-sync
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-rc5-sync
+
+jobs:
+  merge-and-verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the RC5 integration branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: integration/v0.7.0-rc.5-main-sync
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - name: Install native verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev libgtk-3-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libpipewire-0.3-dev libgbm-dev
+
+      - name: Merge main without deleting RC4 material
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main --prune
+
+          before="$(git rev-parse HEAD)"
+          main="$(git rev-parse origin/main)"
+          base="$(git merge-base "$before" "$main")"
+
+          mkdir -p aiTemp/evidence aiTemp/Trash/main-v0.4.11
+          printf '%s\n' "$before" > aiTemp/evidence/rc5-sync-before-sha.txt
+          printf '%s\n' "$main" > aiTemp/evidence/rc5-sync-main-sha.txt
+          printf '%s\n' "$base" > aiTemp/evidence/rc5-sync-merge-base-sha.txt
+          git diff --name-only "$base"..."$main" > aiTemp/evidence/rc5-main-changed-paths.txt
+          git ls-tree -r --name-only "$before" > aiTemp/evidence/rc5-before-files.txt
+
+          if git merge-base --is-ancestor "$main" "$before"; then
+            echo "RC5_MAIN_HISTORY_ALREADY_PRESENT"
+            exit 0
+          fi
+
+          set +e
+          git merge --no-ff --no-commit -X ours "$main"
+          merge_status=$?
+          set -e
+          printf '%s\n' "$merge_status" > aiTemp/evidence/rc5-sync-merge-status.txt
+
+          mapfile -t unresolved < <(git diff --name-only --diff-filter=U)
+          printf '%s\n' "${unresolved[@]:-}" > aiTemp/evidence/rc5-sync-conflicts.txt
+          for path in "${unresolved[@]}"; do
+            [ -n "$path" ] || continue
+            if git cat-file -e "$before:$path" 2>/dev/null; then
+              git checkout "$before" -- "$path"
+            elif git cat-file -e "$main:$path" 2>/dev/null; then
+              mkdir -p "$(dirname "$path")"
+              git show "$main:$path" > "$path"
+              git add -- "$path"
+            else
+              echo "::error file=$path::Unable to preserve either side of unresolved path"
+              exit 1
+            fi
+          done
+
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            if ! git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+              git checkout "$before" -- "$path"
+              printf '%s\n' "$path" >> aiTemp/evidence/rc5-restored-rc4-paths.txt
+            fi
+          done < aiTemp/evidence/rc5-before-files.txt
+
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            if git cat-file -e "$main:$path" 2>/dev/null && \
+               ! git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+              preserved="aiTemp/Trash/main-v0.4.11/$path"
+              mkdir -p "$(dirname "$preserved")"
+              git show "$main:$path" > "$preserved"
+              git add -- "$preserved"
+              printf '%s\n' "$path -> $preserved" >> aiTemp/evidence/rc5-preserved-main-paths.txt
+            fi
+          done < aiTemp/evidence/rc5-main-changed-paths.txt
+
+          git add -A
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          test -z "$(git diff --diff-filter=U --name-only)"
+          git diff --cached --check
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Verify version alignment when available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if npm run | grep -q 'check:version'; then
+            npm run check:version
+          elif [ -f scripts/check-version-alignment.mjs ]; then
+            node scripts/check-version-alignment.mjs
+          else
+            echo "VERSION_ALIGNMENT_CHECK_NOT_PRESENT"
+          fi
+
+      - name: Verify frontend contracts
+        run: |
+          npm run check
+          npm run build
+
+      - name: Verify Rust contracts
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: Commit and push the verified two-lineage merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "RC5_MAIN_HISTORY_ALREADY_PRESENT"
+            exit 0
+          fi
+          git commit -m "Merge main into verified v0.7.0-rc.5 integration" \
+            -m "Preserve the complete RC4 release line, integrate current main, retain superseded material under aiTemp/Trash, and record focused verification evidence."
+          git push origin HEAD:integration/v0.7.0-rc.5-main-sync
