@@ -23,6 +23,43 @@ def patch_types() -> None:
     )
 
 
+def patch_api_contracts() -> None:
+    path = Path("desktop-electron/src/api/contracts.ts")
+    before = '''  readonly integrations: {
+    snapshot(): Promise<JsonObject>;
+  };
+  readonly updates: {
+'''
+    after = '''  readonly integrations: {
+    snapshot(): Promise<JsonObject>;
+  };
+  readonly execution: {
+    read(input: {
+      readonly workspaceId: string;
+      readonly missionId?: string | null;
+      readonly refreshSource?: boolean;
+    }): Promise<JsonObject>;
+    provider(input: {
+      readonly workspaceId: string;
+      readonly operation: "configure" | "connect" | "disable";
+      readonly expectedRevision?: number | null;
+      readonly bindingId?: string | null;
+      readonly settings?: JsonObject | null;
+      readonly credential?: string;
+      readonly confirm: boolean;
+    }): Promise<JsonObject>;
+    update(input: {
+      readonly workspaceId: string;
+      readonly expectedRevision: number;
+      readonly change: JsonObject;
+      readonly confirm: boolean;
+    }): Promise<JsonObject>;
+  };
+  readonly updates: {
+'''
+    replace_once(path, before, after)
+
+
 def patch_feature_types() -> None:
     path = Path("desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx")
     source = path.read_text(encoding="utf-8")
@@ -140,6 +177,7 @@ def patch_app() -> None:
 
 def main() -> None:
     patch_types()
+    patch_api_contracts()
     patch_feature_types()
     patch_icons()
     patch_app()
