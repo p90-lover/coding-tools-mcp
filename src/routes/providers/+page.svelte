@@ -1,25 +1,17 @@
 <script lang="ts">
  import { ShieldCheck, RefreshCw, Plug, Settings2, Cpu } from '@lucide/svelte';
- type Provider={name:string;type:string;auth:string;status:string;caps:string[];models:string[];engines:string[]};
- const providers:Provider[]=[
-  {name:'Codex OAuth',type:'OAuth',auth:'OAuth',status:'Ready',caps:['text','reasoning','tools'],models:[],engines:['Paseo','Anneal']},
-  {name:'Claude OAuth',type:'OAuth',auth:'OAuth',status:'Ready',caps:['text','reasoning','tools'],models:[],engines:['Paseo','Anneal']},
-  {name:'AI Studio Reverse Proxy',type:'Reverse Proxy',auth:'Browser Session',status:'Available',caps:['text','vision','image'],models:[],engines:['Paseo','Anneal']},
-  {name:'Gemini Reverse Proxy',type:'Reverse Proxy',auth:'API / OAuth',status:'Available',caps:['text','vision','tools','image'],models:[],engines:['Paseo','Anneal']},
-  {name:'AIStudioToAPI',type:'API Bridge',auth:'Local Key',status:'Available',caps:['text','vision','image'],models:[],engines:['Paseo','Anneal']},
-  {name:'CommandCode Proxy',type:'Reverse Proxy',auth:'Router Credential',status:'Available',caps:['text','reasoning','tools'],models:[],engines:['Paseo','Anneal']}
- ];
+ import { builtinProviderProfiles } from '../../runtime-web/src/provider-registry';
 </script>
 <section class="cc-page">
 <header class="cc-page-heading"><div><h1><Cpu size={18}/> Providers</h1><p>API key, OAuth, browser and reverse proxy provider management.</p></div><span class="cc-inline-label"><ShieldCheck size={16}/> Provider execution requires consent</span></header>
 <div class="provider-grid">
-{#each providers as provider}
+{#each builtinProviderProfiles as provider}
 <article class="cc-panel provider-card">
 <h2>{provider.name}</h2>
-<p>{provider.type} · {provider.auth}</p>
-<strong>{provider.status}</strong>
-<div class="caps">{#each provider.caps as cap}<span>{cap}</span>{/each}</div>
-<small>Engines: {provider.engines.join(', ')}</small>
+<p>{provider.category} · {provider.auth}</p>
+<strong>Available</strong>
+<div class="caps">{#each provider.capabilities as cap}<span>{cap}</span>{/each}</div>
+<small>Engines: {provider.paseoEnabled?'Paseo':''}{provider.paseoEnabled&&provider.annealEnabled?', ':''}{provider.annealEnabled?'Anneal':''}</small>
 <div class="buttons"><button class="cc-button secondary"><Plug size={14}/>Connect</button><button class="cc-button ghost"><RefreshCw size={14}/>Models</button><button class="cc-button ghost"><Settings2 size={14}/>Edit</button></div>
 </article>
 {/each}
