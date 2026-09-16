@@ -11,7 +11,10 @@ import {
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
-import { ProviderCenterSurface, OrchestratorSurface } from "./features/ProviderOrchestratorSurfaces";
+import { ProviderCenterSurface } from "./features/ProviderOrchestratorSurfaces";
+import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
+import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
+import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -626,10 +629,22 @@ function LauncherShell({
                   onClick={() => navigateSurface("providers")}
                 />
                 <SidebarItem
-                  active={surface === "orchestrator"}
+                  active={surface === "paseo"}
                   icon="orchestrator"
-                  label={language === "zh-TW" ? "Orchestrator 編排" : language === "zh-CN" ? "Orchestrator 编排" : language === "ja" ? "オーケストレーター" : "Orchestrator"}
-                  onClick={() => navigateSurface("orchestrator")}
+                  label={language === "zh-TW" ? "Paseo 協調器" : language === "zh-CN" ? "Paseo 协调器" : language === "ja" ? "Paseo オーケストレーター" : "Paseo Orchestrator"}
+                  onClick={() => navigateSurface("paseo")}
+                />
+                <SidebarItem
+                  active={surface === "anneal"}
+                  icon="activity"
+                  label={language === "zh-TW" ? "Anneal 任務" : language === "zh-CN" ? "Anneal 任务" : language === "ja" ? "Anneal タスク" : "Anneal Tasks"}
+                  onClick={() => navigateSurface("anneal")}
+                />
+                <SidebarItem
+                  active={surface === "network"}
+                  icon="globe"
+                  label={language === "zh-TW" ? "網路代理" : language === "zh-CN" ? "网络代理" : language === "ja" ? "ネットワークプロキシ" : "Network Proxy"}
+                  onClick={() => navigateSurface("network")}
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
@@ -718,8 +733,14 @@ function LauncherShell({
             {surface === "providers" ? (
               <ProviderCenterSurface language={language} setError={setError} />
             ) : null}
-            {surface === "orchestrator" ? (
-              <OrchestratorSurface language={language} setError={setError} />
+            {surface === "paseo" ? (
+              <PaseoOrchestratorSurface language={language} setError={setError} />
+            ) : null}
+            {surface === "anneal" ? (
+              <AnnealTasksSurface language={language} setError={setError} />
+            ) : null}
+            {surface === "network" ? (
+              <NetworkProxySurface language={language} setError={setError} />
             ) : null}
             {surface === "settings" ? (
               <SettingsSurface
