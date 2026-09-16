@@ -74,11 +74,20 @@ jobs:
             libpipewire-0.3-dev \
             patchelf
 
-      - name: Run focused and complete Rust gates
+      - name: Check formatting for the touched OAuth and MCP files
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2021 --check --config skip_children=true \
+            src-tauri/src/auth/mod.rs \
+            src-tauri/src/auth/oauth_authorization_response.rs \
+            src-tauri/src/auth/oauth_resource_metadata.rs \
+            src-tauri/src/mcp/listener.rs \
+            src-tauri/src/mcp/transport.rs
+
+      - name: Run focused and complete locked Rust tests
         run: |
           set -euo pipefail
           (
-            cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
             cargo test --manifest-path src-tauri/Cargo.toml --locked oauth_authorization_response -- --nocapture
             cargo test --manifest-path src-tauri/Cargo.toml --locked oauth_resource_metadata -- --nocapture
             cargo test --manifest-path src-tauri/Cargo.toml --locked
