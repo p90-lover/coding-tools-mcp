@@ -2,6 +2,7 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
+const { artifactNameFor } = require("./smoke-artifact-contract.cjs");
 const { createPreservationSession } = require("./preservation.cjs");
 
 const root = path.resolve(__dirname, "..");
@@ -86,10 +87,19 @@ function preserveAfterOperation(sourcePath, category, operation) {
 }
 
 function verifySignedMacArchive() {
+  const expectedArchive = artifactNameFor({
+    template: launcherManifest.build.artifactName,
+    version: launcherManifest.version,
+    os: "mac",
+    arch: process.arch,
+    extension: "zip",
+  });
   const archives = fs.readdirSync(staging)
-    .filter(name => /-mac-(?:arm64|x64)\.zip$/.test(name));
+    .filter((name) => name === expectedArchive);
   if (archives.length !== 1) {
-    throw new Error(`Expected exactly one macOS ZIP for verification; found ${archives.join(", ") || "none"}`);
+    throw new Error(
+      `Expected exactly one configured macOS ZIP ${expectedArchive} for verification; found ${archives.join(", ") || "none"}`,
+    );
   }
   const verificationRoot = preservation.createWorkDirectory("mac-verification");
   preserveAfterOperation(verificationRoot, "mac-verification", () => {
