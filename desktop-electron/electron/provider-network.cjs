@@ -81,6 +81,13 @@ function normalizeModels(value) {
     .slice(0, 128);
 }
 
+function secretHasCredential(secret) {
+  if (!secret || typeof secret !== "object" || Array.isArray(secret)) return false;
+  return ["apiKey", "accessToken", "token", "credential"].some((key) => (
+    typeof secret[key] === "string" && secret[key].trim().length > 0
+  ));
+}
+
 function normalizeBypass(value) {
   const entries = Array.isArray(value) ? value : DEFAULT_BYPASS;
   return [...new Set(entries
@@ -335,10 +342,18 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     writePrivateFileAtomic(filePath, `${JSON.stringify(state, null, 2)}\n`);
   }
 
+  function accountCredentialPresent(account) {
+    if (account.auth !== "api_key") return account.status === "connected";
+    return secretHasCredential(codec.decrypt(state.secrets.accounts[account.id]));
+  }
+
   function publicSnapshot() {
     return {
       version: STORE_VERSION,
-      accounts: clone(state.accounts),
+      accounts: state.accounts.map((account) => ({
+        ...clone(account),
+        hasCredential: accountCredentialPresent(account),
+      })),
       proxyProfiles: state.proxyProfiles.map((profile) => ({ ...clone(profile) })),
       routing: clone(state.routing),
     };
@@ -378,9 +393,14 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       state.secrets.accounts[id] = codec.encrypt(suppliedSecret);
     }
     const statusInput = input.status ?? previous?.status;
-    const status = ACCOUNT_STATUS.has(statusInput)
+    const requestedStatus = ACCOUNT_STATUS.has(statusInput)
       ? statusInput
       : suppliedSecret ? "connected" : "pending";
+    const credentialPresent = auth !== "api_key"
+      || secretHasCredential(codec.decrypt(state.secrets.accounts[id]));
+    const status = requestedStatus === "connected" && !credentialPresent
+      ? "pending"
+      : requestedStatus;
     const account = normalizeAccount({
       id,
       providerId,
@@ -432,7 +452,9 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       account.isDefault = false;
       account.status = "disabled";
     } else if (account.status === "disabled") {
-      account.status = state.secrets.accounts[account.id] ? "connected" : "pending";
+      account.status = account.auth === "api_key" && !accountCredentialPresent(account)
+        ? "pending"
+        : "connected";
     }
     state.accounts = normalizeAccountDefaults(state.accounts);
     write();
@@ -577,6 +599,8 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       ...state.routing.accounts.filter((item) => item.accountId !== accountId),
       policy,
     ];
+    account.proxyProfileId = undefined;
+    account.updatedAt = new Date().toISOString();
     write();
     return publicSnapshot();
   }

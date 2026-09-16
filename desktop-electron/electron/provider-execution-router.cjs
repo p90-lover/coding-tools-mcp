@@ -21,28 +21,44 @@ const PROVIDER_EXECUTION_CATALOG = Object.freeze([
 
 function requiredWorkload(value) {
   const workload = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (!WORKLOADS.has(workload)) {
-    throw new Error("Workload must be paseo or anneal");
-  }
+  if (!WORKLOADS.has(workload)) throw new Error("Workload must be paseo or anneal");
   return workload;
 }
 
-function accountUsable(account) {
-  return Boolean(
-    account
-      && account.enabled !== false
-      && !account.archivedAt
-      && account.status === "connected",
-  );
+function accountModels(account) {
+  return Array.isArray(account?.models)
+    ? [...new Set(account.models.filter((model) => typeof model === "string").map((model) => model.trim()).filter(Boolean))]
+    : [];
 }
 
-function activeProfile(snapshot, profileId) {
+function accountSupportsModel(account, requestedModel) {
+  if (!requestedModel) return true;
+  const models = accountModels(account);
+  return models.length === 0 || models.includes(requestedModel);
+}
+
+function accountUsable(account) {
+  return Boolean(account
+    && account.enabled !== false
+    && !account.archivedAt
+    && account.status === "connected"
+    && (account.auth !== "api_key" || account.hasCredential === true));
+}
+
+function profileSupportsWorkload(profile, workload) {
+  const scopes = Array.isArray(profile?.scopes) && profile.scopes.length > 0
+    ? profile.scopes
+    : ["all"];
+  return scopes.includes("all")
+    || (WORKLOADS.has(workload) && scopes.includes(workload));
+}
+
+function activeProfile(snapshot, profileId, workload) {
   if (!profileId) return null;
-  const profile = snapshot.proxyProfiles?.find((candidate) => (
-    candidate.id === profileId
-      && candidate.enabled !== false
-      && !candidate.archivedAt
-  ));
+  const profile = snapshot.proxyProfiles?.find((candidate) => candidate.id === profileId
+    && candidate.enabled !== false
+    && !candidate.archivedAt
+    && profileSupportsWorkload(candidate, workload));
   if (!profile) return null;
   return {
     id: profile.id,
@@ -57,14 +73,11 @@ function activeProfile(snapshot, profileId) {
   };
 }
 
-function selectProviderAccount(
-  snapshot,
-  providerId,
-  preferredAccountId,
-  allowFallback = true,
-) {
+function selectProviderAccount(snapshot, providerId, preferredAccountId, allowFallback = true, requestedModel = "") {
   const candidates = (snapshot.accounts ?? [])
-    .filter((account) => account.providerId === providerId && accountUsable(account))
+    .filter((account) => account.providerId === providerId
+      && accountUsable(account)
+      && accountSupportsModel(account, requestedModel))
     .sort((left, right) => {
       if (left.isDefault !== right.isDefault) return left.isDefault ? -1 : 1;
       const used = String(right.lastUsedAt ?? "").localeCompare(String(left.lastUsedAt ?? ""));
@@ -72,7 +85,6 @@ function selectProviderAccount(
       const created = String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? ""));
       return created || String(left.id).localeCompare(String(right.id));
     });
-
   if (preferredAccountId) {
     const preferred = candidates.find((account) => account.id === preferredAccountId);
     if (preferred) return preferred;
@@ -81,44 +93,39 @@ function selectProviderAccount(
   return candidates[0] ?? null;
 }
 
-function resolveExecutionProxy(snapshot, providerId, accountId) {
+function resolveExecutionProxy(snapshot, providerId, accountId, workload) {
   const accountPolicy = (snapshot.routing?.accounts ?? []).find((candidate) => (
     candidate.accountId === accountId && candidate.providerId === providerId
   ));
-
   if (accountPolicy) {
-    const selected = activeProfile(snapshot, accountPolicy.profileId);
+    const selected = activeProfile(snapshot, accountPolicy.profileId, workload);
     if (selected) return { mode: "profile", source: "account", profile: selected };
     if (accountPolicy.inheritProvider === false) {
       if (accountPolicy.inheritGlobal === false) {
         return { mode: "direct", source: "account", profile: null };
       }
       const global = snapshot.routing?.globalEnabled
-        ? activeProfile(snapshot, snapshot.routing.globalProfileId)
+        ? activeProfile(snapshot, snapshot.routing.globalProfileId, workload)
         : null;
       return global
         ? { mode: "profile", source: "global", profile: global }
         : { mode: "direct", source: "account", profile: null };
     }
+  } else {
+    const accountRecord = (snapshot.accounts ?? []).find((candidate) => candidate.id === accountId);
+    const accountProfile = activeProfile(snapshot, accountRecord?.proxyProfileId, workload);
+    if (accountProfile) return { mode: "profile", source: "account", profile: accountProfile };
   }
-
-  const accountRecord = (snapshot.accounts ?? []).find((candidate) => candidate.id === accountId);
-  const accountProfile = activeProfile(snapshot, accountRecord?.proxyProfileId);
-  if (accountProfile) return { mode: "profile", source: "account", profile: accountProfile };
-
-  const providerPolicy = (snapshot.routing?.providers ?? []).find((candidate) => (
-    candidate.providerId === providerId
-  ));
+  const providerPolicy = (snapshot.routing?.providers ?? []).find((candidate) => candidate.providerId === providerId);
   if (providerPolicy) {
-    const selected = activeProfile(snapshot, providerPolicy.profileId);
+    const selected = activeProfile(snapshot, providerPolicy.profileId, workload);
     if (selected) return { mode: "profile", source: "provider", profile: selected };
     if (providerPolicy.inheritGlobal === false) {
       return { mode: "direct", source: "provider", profile: null };
     }
   }
-
   const global = snapshot.routing?.globalEnabled
-    ? activeProfile(snapshot, snapshot.routing.globalProfileId)
+    ? activeProfile(snapshot, snapshot.routing.globalProfileId, workload)
     : null;
   return global
     ? { mode: "profile", source: "global", profile: global }
@@ -127,77 +134,70 @@ function resolveExecutionProxy(snapshot, providerId, accountId) {
 
 function eligibleProviders(workload, catalog) {
   const flag = workload === "paseo" ? "paseoEnabled" : "annealEnabled";
-  return catalog
-    .filter((provider) => provider[flag] === true)
+  return catalog.filter((provider) => provider[flag] === true)
     .sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id));
 }
 
 function createProviderExecutionPlan(snapshot, input = {}, catalog = PROVIDER_EXECUTION_CATALOG) {
-  if (!snapshot || typeof snapshot !== "object") {
-    throw new Error("Provider network snapshot is required");
-  }
-
+  if (!snapshot || typeof snapshot !== "object") throw new Error("Provider network snapshot is required");
   const workload = requiredWorkload(input.workload);
   const providers = eligibleProviders(workload, catalog);
   const requestedProviderId = typeof input.providerId === "string" && input.providerId.trim()
-    ? input.providerId.trim()
-    : null;
+    ? input.providerId.trim() : null;
   const requestedAccountId = typeof input.accountId === "string" && input.accountId.trim()
-    ? input.accountId.trim()
-    : null;
+    ? input.accountId.trim() : null;
+  const requestedModel = typeof input.model === "string" ? input.model.trim() : "";
   const allowFallback = input.allowFallback !== false;
+  const requestedAccount = requestedAccountId
+    ? (snapshot.accounts ?? []).find((account) => account.id === requestedAccountId)
+    : null;
 
-  if (requestedProviderId && !providers.some((provider) => provider.id === requestedProviderId)) {
-    throw new Error(`Provider ${requestedProviderId} is not enabled for ${workload}`);
+  if (requestedAccountId && !requestedAccount) {
+    throw new Error(`Provider Hub account ${requestedAccountId} was not found`);
   }
-
-  const ordered = requestedProviderId
-    ? [
-        ...providers.filter((provider) => provider.id === requestedProviderId),
-        ...(allowFallback ? providers.filter((provider) => provider.id !== requestedProviderId) : []),
-      ]
+  if (requestedProviderId && requestedAccount && requestedAccount.providerId !== requestedProviderId) {
+    throw new Error(`Provider Hub account ${requestedAccountId} does not belong to provider ${requestedProviderId}`);
+  }
+  const anchoredProviderId = requestedProviderId ?? requestedAccount?.providerId ?? null;
+  if (anchoredProviderId && !providers.some((provider) => provider.id === anchoredProviderId)) {
+    throw new Error(`Provider ${anchoredProviderId} is not enabled for ${workload}`);
+  }
+  const ordered = anchoredProviderId
+    ? [...providers.filter((provider) => provider.id === anchoredProviderId),
+      ...(allowFallback ? providers.filter((provider) => provider.id !== anchoredProviderId) : [])]
     : providers;
 
   let selectedProvider = null;
   let selectedAccount = null;
+  let modelMismatchAccount = null;
   for (const provider of ordered) {
-    const preferred = provider.id === requestedProviderId ? requestedAccountId : null;
-    const account = selectProviderAccount(
-      snapshot,
-      provider.id,
-      preferred,
-      preferred ? allowFallback : true,
-    );
+    const preferred = provider.id === anchoredProviderId ? requestedAccountId : null;
+    const account = selectProviderAccount(snapshot, provider.id, preferred, preferred ? allowFallback : true, requestedModel);
     if (account) {
       selectedProvider = provider;
       selectedAccount = account;
       break;
     }
+    if (requestedModel && !modelMismatchAccount) {
+      modelMismatchAccount = selectProviderAccount(snapshot, provider.id, preferred, preferred ? allowFallback : true, "");
+    }
   }
-
   if (!selectedProvider || !selectedAccount) {
-    const detail = requestedProviderId
-      ? ` for provider ${requestedProviderId}`
-      : "";
+    if (requestedModel && modelMismatchAccount) {
+      throw new Error(`Model ${requestedModel} is not available for Provider Hub account ${modelMismatchAccount.id}`);
+    }
+    const detail = anchoredProviderId ? ` for provider ${anchoredProviderId}` : "";
     throw new Error(`No connected provider account is available for ${workload}${detail}`);
   }
 
   const fallbackUsed = Boolean(
-    (requestedProviderId && selectedProvider.id !== requestedProviderId)
-      || (requestedAccountId && selectedAccount.id !== requestedAccountId),
-  );
-  const requestedModel = typeof input.model === "string" ? input.model.trim() : "";
-  const model = requestedModel || selectedAccount.models?.[0] || null;
-  const proxy = resolveExecutionProxy(snapshot, selectedProvider.id, selectedAccount.id);
-
+    (anchoredProviderId && selectedProvider.id !== anchoredProviderId)
+      || (requestedAccountId && selectedAccount.id !== requestedAccountId));
+  const model = requestedModel || accountModels(selectedAccount)[0] || null;
   return {
     version: 1,
     workload,
-    provider: {
-      id: selectedProvider.id,
-      name: selectedProvider.name,
-      protocol: selectedProvider.protocol,
-    },
+    provider: { id: selectedProvider.id, name: selectedProvider.name, protocol: selectedProvider.protocol },
     account: {
       id: selectedAccount.id,
       label: selectedAccount.label,
@@ -205,12 +205,9 @@ function createProviderExecutionPlan(snapshot, input = {}, catalog = PROVIDER_EX
       auth: selectedAccount.auth,
     },
     model,
-    proxy,
+    proxy: resolveExecutionProxy(snapshot, selectedProvider.id, selectedAccount.id, workload),
     fallbackUsed,
-    credentialHandle: {
-      providerId: selectedProvider.id,
-      accountId: selectedAccount.id,
-    },
+    credentialHandle: { providerId: selectedProvider.id, accountId: selectedAccount.id },
   };
 }
 
