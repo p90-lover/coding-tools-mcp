@@ -16,6 +16,21 @@ def require(path: str, *needles: str) -> None:
         raise AssertionError(f"{path} missing: {', '.join(missing)}")
 
 
+def forbid(path: str, *needles: str) -> None:
+    text = source(path)
+    present = [needle for needle in needles if needle in text]
+    if present:
+        raise AssertionError(f"{path} contains forbidden text: {', '.join(present)}")
+
+
+def require_before(path: str, first: str, second: str) -> None:
+    text = source(path)
+    first_index = text.find(first)
+    second_index = text.find(second)
+    if first_index < 0 or second_index < 0 or first_index >= second_index:
+        raise AssertionError(f"{path} must place {first!r} before {second!r}")
+
+
 def main() -> None:
     require(
         "src-tauri/src/lib.rs",
@@ -32,6 +47,14 @@ def main() -> None:
         "create_new(true)",
         ".coding-tools",
         "artifacts",
+        "connected_credential(&profile)",
+        "validate_image_dimensions",
+        "preview_data_url",
+    )
+    require_before(
+        "src-tauri/src/media.rs",
+        "workspace_root(&input.workspace_id)",
+        ".post(endpoint(&profile, &input.model)?",
     )
     require(
         "src-tauri/src/commands/providers.rs",
@@ -49,6 +72,12 @@ def main() -> None:
         "image_generation",
         "paseo",
         "anneal",
+        "profile.base_url",
+        "artifact.preview_data_url",
+    )
+    forbid(
+        "src/routes/image-studio/+page.svelte",
+        "convertFileSrc",
     )
     require(
         "src/lib/components/AppShell.svelte",

@@ -564,6 +564,47 @@ pub async fn generate(input: ImageGenerationInput) -> AppResult<ImageGenerationR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::{ProviderAuth, ProviderCategory};
+
+    fn profile(auth: ProviderAuth, protocol: ProviderProtocol) -> ProviderProfile {
+        ProviderProfile {
+            id: "image-test".into(),
+            name: "Image test".into(),
+            template_id: "image-test".into(),
+            category: ProviderCategory::ReverseProxy,
+            auth,
+            protocol,
+            base_url: Some("http://127.0.0.1:7860/v1".into()),
+            models_endpoint: Some("/models".into()),
+            models: vec!["image-model".into()],
+            capabilities: vec![ProviderCapability::ImageGeneration],
+            paseo_enabled: true,
+            anneal_enabled: true,
+            direct_enabled: true,
+            image_enabled: true,
+            priority: 1,
+            enabled: true,
+            archived: false,
+            generation: "generation-1".into(),
+            revision: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn input(size: Option<&str>, aspect_ratio: Option<&str>) -> ImageGenerationInput {
+        ImageGenerationInput {
+            workspace_id: "workspace".into(),
+            provider_profile_id: "image-test".into(),
+            credential: "secret".into(),
+            target: ImageGenerationTarget::Direct,
+            model: "image-model".into(),
+            prompt: "draw a test image".into(),
+            negative_prompt: None,
+            size: size.map(str::to_owned),
+            aspect_ratio: aspect_ratio.map(str::to_owned),
+            count: 1,
+        }
+    }
 
     #[test]
     fn parses_openai_and_gemini_image_shapes() {
@@ -571,6 +612,67 @@ mod tests {
         let gemini = json!({"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"AA=="}}]}}]});
         assert_eq!(collect_images(&openai).len(), 1);
         assert_eq!(collect_images(&gemini).len(), 1);
+    }
+
+    #[test]
+    fn parses_string_valued_chat_image_content() {
+        let chat = json!({
+            "choices": [{
+                "message": {
+                    "content": "data:image/png;base64,AA=="
+                }
+            }]
+        });
+        assert_eq!(collect_images(&chat).len(), 1);
+    }
+
+    #[test]
+    fn maps_openai_dimensions_to_gemini_symbolic_size() {
+        let body = request_body(
+            &profile(ProviderAuth::ApiKey, ProviderProtocol::GeminiNative),
+            &input(Some("1024x1024"), Some("1:1")),
+        );
+        assert_eq!(
+            body.pointer("/generationConfig/imageConfig/imageSize"),
+            Some(&Value::String("1K".into()))
+        );
+    }
+
+    #[test]
+    fn omits_unsupported_aspect_ratio_from_openai_image_request() {
+        let body = request_body(
+            &profile(ProviderAuth::ApiKey, ProviderProtocol::OpenAiResponses),
+            &input(Some("1024x1024"), Some("1:1")),
+        );
+        assert!(body.get("aspect_ratio").is_none());
+    }
+
+    #[test]
+    fn gemini_local_proxy_uses_bearer_and_compatibility_key_headers() {
+        let headers = headers(
+            &profile(ProviderAuth::LocalProxy, ProviderProtocol::GeminiNative),
+            "secret",
+        )
+        .expect("headers");
+        assert_eq!(
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer secret")
+        );
+        assert_eq!(
+            headers
+                .get("x-goog-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn json_response_limit_covers_all_advertised_base64_outputs() {
+        let decoded = MAX_IMAGE_BYTES * MAX_IMAGES as usize;
+        let encoded = 4 * decoded.div_ceil(3);
+        assert!(MAX_JSON_BYTES >= encoded + 1024 * 1024);
     }
 
     #[test]
