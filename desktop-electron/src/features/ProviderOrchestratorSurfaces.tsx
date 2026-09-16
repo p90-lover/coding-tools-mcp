@@ -305,8 +305,8 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   };
 
   const connectProvider = async () => {
-    const api = window.codingTools;
-    if (!api) throw new Error("Coding Tools execution bridge is unavailable");
+    const launcher = window.codexWebLauncher;
+    if (!launcher) throw new Error("Provider Hub execution bridge is unavailable");
     if (!selected || !selectedDefinition) return;
     if (!workspaceId) throw new Error("Select a workspace before connecting a provider");
     if (!selected.selectedModel.trim()) throw new Error("Select or enter a model");
@@ -317,36 +317,31 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     setBusy(`connect:${selected.id}`);
     setError(null);
     try {
-      const current = await api.execution.read({
+      const result = await launcher.configureProviderExecution({
         workspaceId,
-        missionId: null,
-        refreshSource: false,
-      });
-      await api.execution.provider({
-        workspaceId,
-        operation: "configure",
-        expectedRevision: executionRevision(current),
-        bindingId: null,
-        settings: {
-          id: selected.id,
-          engine: selected.engine,
-          endpoint: selected.engineEndpoint,
-          provider: selected.definitionId,
-          model: selected.selectedModel,
-          mode: selected.mode || "default",
-          projectId: selected.engine === "anneal" ? selected.projectId : null,
-          repoId: selected.engine === "anneal" ? selected.repoId : null,
-          assigneeId: selected.engine === "anneal" ? selected.assigneeId : null,
-          maxDurationMin: 120,
-          allowCodex: selected.definitionId === "codex-oauth",
-          confirmExternalExecution: true,
-        },
+        workload: selected.engine,
+        engine: selected.engine,
+        providerId: selected.definitionId,
+        model: selected.selectedModel,
+        allowFallback: false,
+        endpoint: selected.engineEndpoint,
+        mode: selected.mode || "default",
+        projectId: selected.engine === "anneal" ? selected.projectId : undefined,
+        repoId: selected.engine === "anneal" ? selected.repoId : undefined,
+        assigneeId: selected.engine === "anneal" ? selected.assigneeId : undefined,
+        maxDurationMin: 120,
+        allowCodex: selected.definitionId === "codex-oauth",
+        confirmExternalExecution: true,
         credential,
         confirm: true,
       });
       setCredential("");
       await refreshBindings();
-      setNotice(text(language, `${selected.name} is connected to ${selected.engine}.`, `${selected.name} 已連線至 ${selected.engine}。`));
+      setNotice(text(
+        language,
+        `${result.plan.account.label} is connected to ${selected.engine}.`,
+        `${result.plan.account.label} 已連線至 ${selected.engine}。`,
+      ));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -362,9 +357,14 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     setSelectedId(created.id);
   };
 
-  const connectedIds = useMemo(() => new Set(bindings.filter((binding) => (
-    binding.enabled && binding.connected && binding.current_scope_valid
-  )).map((binding) => binding.id)), [bindings]);
+  const connectedIds = useMemo(() => new Set(instances.filter((instance) => bindings.some((binding) => (
+    binding.engine === instance.engine
+      && binding.provider === instance.definitionId
+      && binding.model === instance.selectedModel
+      && binding.enabled
+      && binding.connected
+      && binding.current_scope_valid
+  ))).map((instance) => instance.id)), [bindings, instances]);
 
   return (
     <section className="provider-surface">
@@ -693,8 +693,8 @@ export function OrchestratorSurface({ language, setError }: SurfaceProps) {
   };
 
   const prepareAnnealRun = async () => {
-    const api = window.codingTools;
-    if (!api) throw new Error("Coding Tools execution bridge is unavailable");
+    const launcher = window.codexWebLauncher;
+    if (!launcher) throw new Error("Provider Hub execution bridge is unavailable");
     if (!selected || !workspaceId || !taskId.trim()) {
       throw new Error("Select a workspace and enter an existing task ID");
     }
@@ -702,53 +702,28 @@ export function OrchestratorSurface({ language, setError }: SurfaceProps) {
     setBusy(true);
     setError(null);
     try {
-      const initial = await api.execution.read({ workspaceId, missionId: null, refreshSource: false });
-      const bindings = executionBindings(initial).filter((binding) => (
-        binding.engine === "anneal"
-        && binding.enabled
-        && binding.connected
-        && binding.current_scope_valid
-      ));
-      if (bindings.length === 0) throw new Error("Connect at least one approved Anneal provider binding first");
-
       const prepared: string[] = [];
       for (const stage of selected.stages) {
         const providerId = stageProvider(stage);
-        const binding = bindings.find((candidate) => candidate.provider === providerId)
-          ?? bindings.find((candidate) => candidate.model === stage.model?.model);
-        if (!binding) throw new Error(`No connected Anneal binding for ${stage.name} (${providerId})`);
-
-        const view = await api.execution.read({ workspaceId, missionId: null, refreshSource: false });
         const missionId = sanitizeIdentifier(`${selected.id}-${stage.id}-${crypto.randomUUID().slice(0, 8)}`);
-        await api.execution.update({
+        await launcher.dispatchProviderMission({
           workspaceId,
-          expectedRevision: boardRevision(view),
-          change: {
-            operation: "agent_prepare",
-            binding_id: binding.id,
-            task_id: taskId.trim(),
-            mission_id: missionId,
-          },
-          confirm: true,
-        });
-        const preparedView = await api.execution.read({ workspaceId, missionId, refreshSource: false });
-        await api.execution.update({
-          workspaceId,
-          expectedRevision: missionRevision(preparedView, missionId),
-          change: {
-            operation: "agent_control",
-            mission_id: missionId,
-            request_key: crypto.randomUUID(),
-            action: "create",
-          },
+          workload: "anneal",
+          engine: "anneal",
+          providerId,
+          model: stage.model?.model || undefined,
+          allowFallback: false,
+          taskId: taskId.trim(),
+          missionId,
+          requestKey: crypto.randomUUID(),
           confirm: true,
         });
         prepared.push(missionId);
       }
       setNotice(text(
         language,
-        `Prepared ${prepared.length} owned Anneal stage missions. Inspect source state before starting them.`,
-        `已建立 ${prepared.length} 個 Anneal 階段任務。啟動前請先核對來源狀態。`,
+        `Prepared ${prepared.length} Provider Hub-owned Anneal stage missions. Inspect source state before starting them.`,
+        `已建立 ${prepared.length} 個由供應商中心管理嘅 Anneal 階段任務。啟動前請先核對來源狀態。`,
       ));
     } catch (cause) {
       setError(messageOf(cause));
