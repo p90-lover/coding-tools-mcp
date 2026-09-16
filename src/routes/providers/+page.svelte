@@ -142,7 +142,7 @@
           models: discovered,
         };
       },
-      discoverModels: discover,
+      discoverModels: (_profile, signal) => discover(signal),
     };
   }
 
