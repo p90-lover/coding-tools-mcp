@@ -22,6 +22,7 @@ env:
   SOURCE_SHA: ${{ github.sha }}
   CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/source/aiTemp/v060-windows-cargo-target
   BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/source/aiTemp/v060-windows-bun-cache
+  ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/source/aiTemp/electron-builder-cache
   CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/v060-windows-package
   TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip
   TUNNEL_ARCHIVE_SHA256: '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'
@@ -58,7 +59,17 @@ jobs:
       - name: Prepare retained temporary roots and dependencies
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/v060-windows-package aiTemp/release-output
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/v060-windows-package aiTemp/release-output aiTemp/electron-builder-cache
+          test -d aiTemp/electron-builder-cache
+          printf 'electron_builder_cache=%s\nretention_root=%s\n' "$ELECTRON_BUILDER_CACHE" "$CODING_TOOLS_RETENTION_ROOT" \
+            | tee aiTemp/evidence/cache-volume-contract.txt
+          node --input-type=module <<'NODE'
+          import path from 'node:path';
+          const cache = path.parse(process.env.ELECTRON_BUILDER_CACHE).root.toLowerCase();
+          const retained = path.parse(process.env.CODING_TOOLS_RETENTION_ROOT).root.toLowerCase();
+          if (!cache || cache !== retained) throw new Error(`NSIS cache and retention roots must share a volume: ${cache} != ${retained}`);
+          console.log(`NSIS_CACHE_VOLUME_OK ${cache}`);
+          NODE
           preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
           preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
           export NODE_OPTIONS="--import=$preload"
