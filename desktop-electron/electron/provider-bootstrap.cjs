@@ -3,6 +3,7 @@ const {
   createProviderNetworkController,
   createProviderNetworkStore,
 } = require("./provider-network.cjs");
+const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { resolveLauncherProfile } = require("./profile.cjs");
 
 function installProviderNetwork({
@@ -71,6 +72,9 @@ function installProviderNetwork({
   }
 
   handle("launcher:provider-snapshot", (active) => active.store.snapshot());
+  handle("launcher:provider-execution-plan", (active, _event, input) => (
+    createProviderExecutionPlan(active.store.snapshot(), input)
+  ));
   handle("launcher:provider-account-save", (active, _event, input) => publishMutation(
     active,
     () => active.store.saveAccount(input),
@@ -133,6 +137,7 @@ function installProviderNetwork({
   return Object.freeze({
     ready: () => controllerPromise,
     createProviderNetworkStore,
+    createProviderExecutionPlan,
   });
 }
 
