@@ -3,7 +3,7 @@
 exports.PRODUCT_IDENTITY = Object.freeze({
   appId: "dev.codingtools.fullharness",
   productName: "Coding Tools",
-  version: "0.7.0-rc.4",
+  version: "0.7.0-rc.5",
   protocolVersion: 1,
   connectorName: "Coding Tools Native2",
   devConnectorName: "Coding Tools Native2 DEV",

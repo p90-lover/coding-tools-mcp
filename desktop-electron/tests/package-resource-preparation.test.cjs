@@ -11,7 +11,7 @@ const {
   preparePackageResources,
 } = require("../scripts/prepare-package-resources.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.4";
+const PRODUCT_VERSION = "0.7.0-rc.5";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
