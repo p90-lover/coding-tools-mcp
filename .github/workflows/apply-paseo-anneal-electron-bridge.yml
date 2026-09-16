@@ -43,8 +43,8 @@ jobs:
           node --check desktop-electron/electron/main.cjs
       - name: Format and verify Rust
         run: |
-          cargo fmt --manifest-path rust-core/Cargo.toml
-          cargo fmt --manifest-path rust-core/Cargo.toml --check
+          cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml
+          cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml --check
       - name: Run focused bridge contract
         run: node --test desktop-electron/tests/execution-bridge-contract.test.cjs
       - name: Enforce no-delete patch
