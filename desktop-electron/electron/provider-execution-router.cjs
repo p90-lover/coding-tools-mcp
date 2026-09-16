@@ -13,9 +13,9 @@ const PROVIDER_EXECUTION_CATALOG = Object.freeze([
   { id: "openrouter", name: "OpenRouter", protocol: "openai_chat", priority: 65, paseoEnabled: true, annealEnabled: true },
   { id: "gemini-reverse-proxy", name: "Gemini Reverse Proxy", protocol: "gemini_native", priority: 60, paseoEnabled: true, annealEnabled: true },
   { id: "aistudio-to-api", name: "AIStudioToAPI", protocol: "openai_chat", priority: 50, paseoEnabled: true, annealEnabled: true },
-  { id: "cliproxyapi-antigravity", name: "CLIProxyAPI / Antigravity", protocol: "openai_chat", priority: 40, paseoEnabled: true, annealEnabled: true },
+  { id: "cliproxyapi-antigravity", name: "CLIProxyAPI / Antigravity", protocol: "openai_chat", proxyMode: "direct", priority: 40, paseoEnabled: true, annealEnabled: true },
   { id: "commandcode-proxy", name: "CommandCode Proxy", protocol: "openai_chat", priority: 30, paseoEnabled: true, annealEnabled: true },
-  { id: "ollama", name: "Ollama", protocol: "openai_chat", priority: 20, paseoEnabled: true, annealEnabled: true },
+  { id: "ollama", name: "Ollama", protocol: "openai_chat", proxyMode: "direct", priority: 20, paseoEnabled: true, annealEnabled: true },
   { id: "custom-openai-compatible", name: "Custom OpenAI Compatible", protocol: "openai_chat", priority: 10, paseoEnabled: true, annealEnabled: true },
 ]);
 
@@ -94,7 +94,13 @@ function selectProviderAccount(
   return candidates[0] ?? null;
 }
 
-function resolveExecutionProxy(snapshot, providerId, accountId, workload) {
+function resolveExecutionProxy(
+  snapshot,
+  providerId,
+  accountId,
+  workload,
+  providerProxyMode = "inherit",
+) {
   const accountPolicy = (snapshot.routing?.accounts ?? []).find((candidate) => (
     candidate.accountId === accountId && candidate.providerId === providerId
   ));
@@ -113,6 +119,9 @@ function resolveExecutionProxy(snapshot, providerId, accountId, workload) {
         ? { mode: "profile", source: "global", profile: global }
         : { mode: "direct", source: "account", profile: null };
     }
+    if (accountPolicy.inheritGlobal === false) {
+      return { mode: "direct", source: "account", profile: null };
+    }
   } else {
     const accountRecord = (snapshot.accounts ?? []).find((candidate) => candidate.id === accountId);
     const accountProfile = activeProfile(snapshot, accountRecord?.proxyProfileId, workload);
@@ -128,10 +137,8 @@ function resolveExecutionProxy(snapshot, providerId, accountId, workload) {
     if (providerPolicy.inheritGlobal === false) {
       return { mode: "direct", source: "provider", profile: null };
     }
-  }
-
-  if (accountPolicy?.inheritGlobal === false) {
-    return { mode: "direct", source: "account", profile: null };
+  } else if (providerProxyMode === "direct") {
+    return { mode: "direct", source: "provider-default", profile: null };
   }
 
   const global = snapshot.routing?.globalEnabled
@@ -239,6 +246,7 @@ function createProviderExecutionPlan(snapshot, input = {}, catalog = PROVIDER_EX
     selectedProvider.id,
     selectedAccount.id,
     workload,
+    selectedProvider.proxyMode ?? "inherit",
   );
 
   return {
