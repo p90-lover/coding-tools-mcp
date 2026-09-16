@@ -37,6 +37,7 @@ for pathname in IDENTITY_FILES:
 migration_test_path = Path("desktop-electron/tests/installer-upgrade-migration.test.cjs")
 migration_test = migration_test_path.read_text(encoding="utf-8")
 migration_test = migration_test.replace(OLD_VERSION, NEW_VERSION)
+migration_test = migration_test.replace(r"0\.7\.0-rc\.5", r"0\.7\.0-rc\.6")
 migration_test = migration_test.replace(OLD_SHORT, NEW_SHORT)
 migration_test = migration_test.replace(
     "v0.7-installer-upgrade-migration.yml",
