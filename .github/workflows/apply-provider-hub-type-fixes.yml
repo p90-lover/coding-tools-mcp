@@ -1,0 +1,71 @@
+name: Apply Provider Hub type fixes
+
+on:
+  push:
+    branches:
+      - feature/v0.7.0-provider-multiaccount-global-proxy
+    paths:
+      - '.github/workflows/apply-provider-hub-type-fixes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    name: Preserve concurrent work and patch strict types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: feature/v0.7.0-provider-multiaccount-global-proxy
+          fetch-depth: 2
+
+      - name: Apply exact type-only replacements
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              Path('desktop-electron/src/providers/ProviderHubIntegration.tsx'): [
+                  (
+                      'setSnapshot(result as ProviderNetworkSnapshot);',
+                      'setSnapshot(result as unknown as ProviderNetworkSnapshot);',
+                  ),
+              ],
+              Path('desktop-electron/src/providers/ProviderManagerSurface.tsx'): [
+                  (
+                      'const ZH_TW: typeof EN = {',
+                      'const ZH_TW: { [K in keyof typeof EN]: string } = {',
+                  ),
+              ],
+          }
+
+          for path, edits in replacements.items():
+              text = path.read_text(encoding='utf-8')
+              for old, new in edits:
+                  if old not in text:
+                      raise SystemExit(f'Expected text not found in {path}: {old}')
+                  text = text.replace(old, new, 1)
+              path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify no file was deleted
+        run: |
+          if git diff --name-status | grep -E '^D[[:space:]]'; then
+            echo 'File deletion is forbidden for this patch.' >&2
+            exit 1
+          fi
+
+      - name: Commit strict type fixes
+        run: |
+          if git diff --quiet; then
+            echo 'No patch required.'
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git add desktop-electron/src/providers/ProviderHubIntegration.tsx \
+                  desktop-electron/src/providers/ProviderManagerSurface.tsx
+          git commit -m 'fix(provider): resolve strict Provider Hub copy and snapshot types'
+          git push origin HEAD:feature/v0.7.0-provider-multiaccount-global-proxy
