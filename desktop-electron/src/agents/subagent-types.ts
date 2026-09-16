@@ -1,3 +1,5 @@
+import type { ProviderCapability } from "../providers/provider-types";
+
 export type AgentProvider =
   | "codex"
   | "claude"
@@ -23,6 +25,8 @@ export interface AgentProfile {
   id: string;
   name: string;
   provider: AgentProvider;
+  providerId?: string;
+  capabilities?: ProviderCapability[];
   role: AgentRole;
   enabled: boolean;
   permissions: AgentPermissionPolicy;

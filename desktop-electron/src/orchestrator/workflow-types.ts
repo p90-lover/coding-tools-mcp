@@ -18,6 +18,8 @@ export interface CustomOrchestrator {
   retryOnFailure: boolean;
 }
 
+export type OrchestratorWorkflow = CustomOrchestrator;
+
 export interface OrchestratorExecutionContext {
   taskId: string;
   workflowId: string;

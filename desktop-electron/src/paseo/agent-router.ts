@@ -1,8 +1,9 @@
-import type { AgentProfile } from '../agents/subagent-types';
+import type { AgentProfile } from "../agents/subagent-types";
+import type { ProviderCapability } from "../providers/provider-types";
 
 export interface RoutingRequest {
   taskType: string;
-  requiredCapabilities?: string[];
+  requiredCapabilities?: ProviderCapability[];
 }
 
 export interface RoutingResult {
@@ -17,14 +18,15 @@ export class AgentRouter {
     const match = this.agents.find((agent) => {
       if (!agent.enabled) return false;
       if (!request.requiredCapabilities?.length) return true;
+      const capabilities = agent.capabilities ?? [];
       return request.requiredCapabilities.every((capability) =>
-        agent.capabilities.includes(capability)
+        capabilities.includes(capability)
       );
     });
 
     return {
       agent: match ?? null,
-      reason: match ? 'matched-enabled-agent' : 'no-compatible-agent',
+      reason: match ? "matched-enabled-agent" : "no-compatible-agent",
     };
   }
 }
