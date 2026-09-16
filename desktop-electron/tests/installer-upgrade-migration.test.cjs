@@ -73,7 +73,7 @@ test("legacy removal is silent, bounded, fail-closed, and preserves application 
   assert.doesNotMatch(source, /Delete\s+\"?\$LOCALAPPDATA/i);
 });
 
-test("the release gate runs a real Windows old-install to reinstall migration smoke", () => {
+test("the release gate runs a real no-delete Windows old-install to reinstall migration smoke", () => {
   const workflowPath = path.resolve(
     desktopRoot,
     "..",
@@ -87,5 +87,9 @@ test("the release gate runs a real Windows old-install to reinstall migration sm
   assert.match(workflow, /legacy-uninstall-fixture/i);
   assert.match(workflow, /\/S/);
   assert.match(workflow, /Coding\.Tools_0\.7\.0-rc\.5_windows_x64_setup\.exe/);
+  assert.match(workflow, /CODING_TOOLS_LEGACY_TRASH_DIR/);
+  assert.match(workflow, /Move-Item/);
+  assert.match(workflow, /legacyUninstallerPreserved/);
+  assert.doesNotMatch(workflow, /File\.Delete\(/);
   assert.match(workflow, /git diff --diff-filter=D/);
 });
