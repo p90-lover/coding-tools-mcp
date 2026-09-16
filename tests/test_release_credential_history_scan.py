@@ -13,6 +13,7 @@ EXPECTED_SYNTHETIC_BLOBS = {
     "c32549ef3ff736ceff8aaae026657c70abff5120",
     "ad88631f3124c58730dbe666dbfd23590e4eec3a",
     "d23defc0909cc32314272135d4e09d4f743bd3ba",
+    "af51b2e406e77316b42c65ef2712e64b4acb7447",
 }
 
 
