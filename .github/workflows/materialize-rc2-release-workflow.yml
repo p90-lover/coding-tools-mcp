@@ -52,10 +52,17 @@ jobs:
       - name: Enforce generated-file-only scope
         run: |
           set -euo pipefail
-          changed="$(git status --short | awk '{print $2}' | sort)"
           expected='.github/workflows/codex-router-multiprovider-release-rc2.yml'
-          printf 'changed files:\n%s\n' "$changed"
+          changed="$(git status --short --untracked-files=all -- "$expected" | awk '{print $2}' | sort)"
+          unexpected="$(git status --short --untracked-files=all \
+            | awk '{print $2}' \
+            | grep -v '^aiTemp/evidence/' \
+            | grep -v "^${expected}$" \
+            || true)"
+          printf 'generated file:\n%s\n' "$changed"
+          printf 'unexpected files:\n%s\n' "$unexpected"
           test "$changed" = "$expected"
+          test -z "$unexpected"
 
       - name: Commit verified rc.2 release workflow
         run: |
