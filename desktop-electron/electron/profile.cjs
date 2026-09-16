@@ -4,6 +4,12 @@ const path = require("node:path");
 const PRODUCTION_PROFILE = "production";
 const DEVELOPMENT_PROFILE = "development";
 
+function browserPartitionForLauncherProfile(profile) {
+  if (profile === PRODUCTION_PROFILE) return "persist:coding-tools-chatgpt";
+  if (profile === DEVELOPMENT_PROFILE) return "persist:coding-tools-dev-chatgpt";
+  throw new Error("Launcher profile is invalid");
+}
+
 function resolveUserPath(value, homeDir = os.homedir()) {
   if (value === "~") return homeDir;
   if (value.startsWith("~/") || value.startsWith("~\\")) {
@@ -34,7 +40,7 @@ function resolveLauncherProfile({
       coreHome: configuredPath(env, "CODING_TOOLS_HOME", path.join(homeDir, ".coding-tools"), homeDir),
       codexHome: configuredPath(env, "CODEX_HOME", path.join(homeDir, ".codex"), homeDir),
       userData: configuredPath(env, "CODING_TOOLS_LAUNCHER_DATA_DIR", path.join(appData, "Coding Tools"), homeDir),
-      browserPartition: "persist:coding-tools-chatgpt",
+      browserPartition: browserPartitionForLauncherProfile(PRODUCTION_PROFILE),
     };
   }
 
@@ -59,12 +65,13 @@ function resolveLauncherProfile({
     coreHome,
     codexHome: path.join(coreHome, "codex-home"),
     userData: path.join(coreHome, "launcher"),
-    browserPartition: "persist:coding-tools-dev-chatgpt",
+    browserPartition: browserPartitionForLauncherProfile(DEVELOPMENT_PROFILE),
   };
 }
 
 module.exports = {
   DEVELOPMENT_PROFILE,
   PRODUCTION_PROFILE,
+  browserPartitionForLauncherProfile,
   resolveLauncherProfile,
 };
