@@ -2,6 +2,8 @@
 
 mod codex_bridge;
 pub mod integrations;
+pub mod orchestrators;
+pub mod providers;
 
 mod actions;
 mod app_state;
@@ -34,14 +36,17 @@ use commands::{
     get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret,
     get_tunnel_connection_status, get_webview_memory_sample, get_workspace_secret, hide_to_tray,
     install_software, integration_read, list_frp_profiles, list_linked_projects, list_software,
-    list_workspaces, open_url, open_workspace_directory, provider_config_preview,
-    quick_add_linked_project, quit_app, read_workspace_logs, recreate_ui_webview,
-    regenerate_shared_secret, regenerate_workspace_secret, restart_actions_runtime,
-    restart_runtime, restart_tunnel, run_health_checks, sandbox_local_disable,
-    sandbox_local_prepare, sandbox_local_status, save_frp_profile, set_download_config,
-    set_last_workspace, set_proxy, set_shared_secret, set_workspace_secret, show_main_window,
-    start_actions_runtime, start_runtime, start_tunnel, stop_actions_runtime, stop_runtime,
-    stop_tunnel, task_monitor_read, test_tunnel, uninstall_software, update_workspace,
+    list_workspaces, open_url, open_workspace_directory, orchestrator_profile_archive,
+    orchestrator_profile_save, orchestrator_profiles_read, provider_config_preview,
+    provider_profile_archive, provider_profile_connect, provider_profile_disable,
+    provider_profile_probe, provider_profile_save, provider_profiles_read, quick_add_linked_project,
+    quit_app, read_workspace_logs, recreate_ui_webview, regenerate_shared_secret,
+    regenerate_workspace_secret, restart_actions_runtime, restart_runtime, restart_tunnel,
+    run_health_checks, sandbox_local_disable, sandbox_local_prepare, sandbox_local_status,
+    save_frp_profile, set_download_config, set_last_workspace, set_proxy, set_shared_secret,
+    set_workspace_secret, show_main_window, start_actions_runtime, start_runtime, start_tunnel,
+    stop_actions_runtime, stop_runtime, stop_tunnel, task_monitor_read, test_tunnel,
+    uninstall_software, update_workspace,
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -197,6 +202,15 @@ pub fn run() {
             execution_local_read,
             execution_local_provider,
             execution_local_update,
+            provider_profiles_read,
+            provider_profile_save,
+            provider_profile_connect,
+            provider_profile_disable,
+            provider_profile_archive,
+            provider_profile_probe,
+            orchestrator_profiles_read,
+            orchestrator_profile_save,
+            orchestrator_profile_archive,
             sandbox_local_prepare,
             sandbox_local_status,
             sandbox_local_disable,
