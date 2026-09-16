@@ -1,3 +1,4 @@
+import zhTWOverrides from "./i18n/locales/zh-TW";
 import type { Language } from "./types";
 
 const en = {
@@ -26,6 +27,7 @@ const en = {
   chooseLanguageHint: "You can change this later in Settings.",
   english: "English",
   chinese: "简体中文",
+  traditionalChinese: "繁體中文",
   japanese: "日本語",
   continue: "Continue",
   supportTitle: "Before we start",
@@ -218,6 +220,7 @@ const zh: Record<keyof typeof en, string> = {
   chooseLanguageHint: "稍后可以在设置中更改。",
   english: "English",
   chinese: "简体中文",
+  traditionalChinese: "繁體中文",
   japanese: "日本語",
   continue: "继续",
   supportTitle: "开始之前",
@@ -410,6 +413,7 @@ const ja: Record<keyof typeof en, string> = {
   chooseLanguageHint: "後から設定で変更できます。",
   english: "English",
   chinese: "简体中文",
+  traditionalChinese: "繁體中文",
   japanese: "日本語",
   continue: "続ける",
   supportTitle: "開始する前に",
@@ -578,8 +582,14 @@ const ja: Record<keyof typeof en, string> = {
 
 export type Copy = typeof en;
 
+const zhTW = {
+  ...zh,
+  ...zhTWOverrides,
+} as unknown as Copy;
+
 export function copyFor(language: Language): Copy {
   if (language === "zh-CN") return zh as Copy;
+  if (language === "zh-TW") return zhTW;
   if (language === "ja") return ja as Copy;
   return en;
 }
