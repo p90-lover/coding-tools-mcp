@@ -1,0 +1,83 @@
+name: v0.7 rc.2 Tauri provider orchestrator backend
+
+on:
+  push:
+    branches:
+      - feature/v0.7-rc2-tauri-provider-orchestrator-backend
+    paths:
+      - src-tauri/src/providers.rs
+      - src-tauri/src/orchestrators.rs
+      - src-tauri/src/orchestrator_run.rs
+      - src-tauri/src/commands/providers.rs
+      - src-tauri/src/commands/orchestrators.rs
+      - src-tauri/src/commands/mod.rs
+      - src-tauri/src/data/model.rs
+      - src-tauri/src/lib.rs
+      - src/lib/provider-center.ts
+      - src/lib/orchestrator-center.ts
+      - src/lib/components/AppShell.svelte
+      - src/routes/orchestrator-run/**
+      - aiTemp/rc2/tauri_provider_orchestrator_backend_contract.py
+      - .github/workflows/v0.7-rc2-tauri-provider-orchestrator-backend.yml
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - src-tauri/src/providers.rs
+      - src-tauri/src/orchestrators.rs
+      - src-tauri/src/orchestrator_run.rs
+      - src-tauri/src/commands/providers.rs
+      - src-tauri/src/commands/orchestrators.rs
+      - src-tauri/src/commands/mod.rs
+      - src-tauri/src/data/model.rs
+      - src-tauri/src/lib.rs
+      - src/lib/provider-center.ts
+      - src/lib/orchestrator-center.ts
+      - src/lib/components/AppShell.svelte
+      - src/routes/orchestrator-run/**
+      - aiTemp/rc2/tauri_provider_orchestrator_backend_contract.py
+      - .github/workflows/v0.7-rc2-tauri-provider-orchestrator-backend.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v0.7-rc2-tauri-provider-orchestrator-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Native provider and orchestrator source contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - name: Run the native backend contract
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/v0.7-rc2-tauri-provider-orchestrator
+          python3 aiTemp/rc2/tauri_provider_orchestrator_backend_contract.py \
+            2>&1 | tee aiTemp/v0.7-rc2-tauri-provider-orchestrator/contract.txt
+          grep -F TAURI_PROVIDER_ORCHESTRATOR_BACKEND_CONTRACT_OK \
+            aiTemp/v0.7-rc2-tauri-provider-orchestrator/contract.txt
+
+      - name: Enforce no-delete integration diff
+        run: |
+          set -euo pipefail
+          git fetch origin integration/v0.7.0-rc.2-all-project-work --no-tags
+          git diff --check origin/integration/v0.7.0-rc.2-all-project-work...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.2-all-project-work...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: v0.7-rc2-tauri-provider-orchestrator-${{ github.sha }}
+          path: aiTemp/v0.7-rc2-tauri-provider-orchestrator/
+          if-no-files-found: error
+          retention-days: 14
