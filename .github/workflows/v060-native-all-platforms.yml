@@ -6,11 +6,8 @@ on:
       - subagent/v0.6-electron-release-continuation-20260916
     paths:
       - .github/workflows/v060-native-all-platforms.yml
-      - desktop-electron/scripts/package.cjs
-      - desktop-electron/scripts/smoke-package.cjs
-      - desktop-electron/scripts/smoke-artifact-contract.cjs
-      - desktop-electron/scripts/launcher-process-smoke.cjs
-      - desktop-electron/tests/smoke-artifact-contract.test.cjs
+      - rust-core/coding-tools-headless/**
+      - desktop-electron/**
   workflow_dispatch:
 
 permissions:
@@ -29,7 +26,7 @@ env:
 
 jobs:
   native:
-    if: ${{ github.actor == github.repository_owner && (matrix.label != 'windows' || !contains(github.event.head_commit.message, '[unix-only]')) }}
+    if: github.actor == github.repository_owner
     strategy:
       fail-fast: false
       matrix:
@@ -78,20 +75,9 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libpipewire-0.3-dev \
-            libgbm-dev \
-            libnss3 \
-            libasound2t64 \
-            libfuse2 \
-            xvfb
+            build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpipewire-0.3-dev \
+            libgbm-dev libnss3 libasound2t64 libfuse2 xvfb
 
       - name: Prepare retained roots and dependencies
         run: |
@@ -119,69 +105,38 @@ jobs:
         run: |
           set -euo pipefail
           bun test runtime-web/tests/runtime-bundle-version.test.ts 2>&1 | tee aiTemp/evidence/runtime-version.txt
-          node --test desktop-electron/tests/smoke-artifact-contract.test.cjs 2>&1 | tee aiTemp/evidence/smoke-artifact-contract.txt
+          node --test \
+            desktop-electron/tests/smoke-artifact-contract.test.cjs \
+            desktop-electron/tests/source-release-contract.test.cjs \
+            2>&1 | tee aiTemp/evidence/source-contracts.txt
           node --check desktop-electron/scripts/package.cjs
+          node --check desktop-electron/scripts/verify-package.cjs
           node --check desktop-electron/scripts/smoke-package.cjs
           node --check desktop-electron/scripts/launcher-process-smoke.cjs
 
-      - name: Acquire native tunnel client
+      - name: Acquire pinned native tunnel client
         run: |
           set -euo pipefail
-          platform="${{ matrix.label }}"
-          machine="$(node -p 'process.arch')"
-          case "$platform/$machine" in
-            windows/x64)
-              archive=tunnel-client-v0.0.12-windows-amd64.zip
-              expected=2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356
-              ;;
-            macos/x64)
-              archive=tunnel-client-v0.0.12-darwin-amd64.zip
-              expected=33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009
-              ;;
-            macos/arm64)
-              archive=tunnel-client-v0.0.12-darwin-arm64.zip
-              expected=42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02
-              ;;
-            linux/x64)
-              archive=tunnel-client-v0.0.12-linux-amd64.zip
-              expected=2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81
-              ;;
-            linux/arm64)
-              archive=tunnel-client-v0.0.12-linux-arm64.zip
-              expected=6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6
-              ;;
-            *) echo "unsupported tunnel target $platform/$machine" >&2; exit 1 ;;
+          label='${{ matrix.label }}'
+          arch="$(node -p 'process.arch')"
+          case "$label/$arch" in
+            windows/x64) archive=tunnel-client-v0.0.12-windows-amd64.zip; expected=2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356 ;;
+            macos/arm64) archive=tunnel-client-v0.0.12-darwin-arm64.zip; expected=42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02 ;;
+            macos/x64) archive=tunnel-client-v0.0.12-darwin-amd64.zip; expected=33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009 ;;
+            linux/x64) archive=tunnel-client-v0.0.12-linux-amd64.zip; expected=2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81 ;;
+            linux/arm64) archive=tunnel-client-v0.0.12-linux-arm64.zip; expected=6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6 ;;
+            *) echo "unsupported native tunnel target $label/$arch" >&2; exit 1 ;;
           esac
-          input_dir="aiTemp/input/tunnel-client/v0.0.12/$platform-$machine"
+          input_dir="aiTemp/input/tunnel-client/v0.0.12/$label-$arch"
           mkdir -p "$input_dir"
           partial="$input_dir/$archive.partial"
           final="$input_dir/$archive"
           curl --fail --location --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --connect-timeout 30 --output "$partial" "$TUNNEL_RELEASE_URL/$archive"
           actual="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$partial")"
           test "$actual" = "$expected"
-          mv --no-clobber "$partial" "$final"
+          mv -n "$partial" "$final"
+          test -s "$final"
           echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$final" >> "$GITHUB_ENV"
-
-      - name: Apply proven v0.6 headless compile repairs
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('rust-core/coding-tools-headless/src/lib.rs')
-          text = path.read_text(encoding='utf-8')
-          replacements = [
-              ('tools::call_tool_mcp(&context, &tool, &arguments)', 'tools::dispatch::call_tool_mcp(&context, &tool, &arguments)'),
-              ('        let join = tokio::spawn(async move {\n', '        let service_shutdown_tx = shutdown_tx.clone();\n        let join = tokio::spawn(async move {\n'),
-              ('            let reason = shutdown_tx\n                .borrow()\n', '            let reason = service_shutdown_tx\n                .borrow()\n'),
-          ]
-          for old, new in replacements:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'expected one compile-repair match, found {count}: {old!r}')
-              text = text.replace(old, new, 1)
-          path.write_text(text, encoding='utf-8')
-          PY
-          git diff --check -- rust-core/coding-tools-headless/src/lib.rs
 
       - name: Build native headless sidecar and Electron package
         run: |
@@ -193,37 +148,34 @@ jobs:
           export NODE_OPTIONS="--import=$preload"
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun run --cwd desktop-electron ${{ matrix.package_script }} 2>&1 | tee aiTemp/evidence/native-package.txt
 
-      - name: Materialize native artifact before smoke
+      - name: Verify Windows package payload
+        if: matrix.label == 'windows'
+        run: |
+          set -euo pipefail
+          node desktop-electron/scripts/verify-package.cjs desktop-electron/artifacts \
+            --source "$SOURCE_SHA" \
+            --json-out aiTemp/evidence/package-verification.json \
+            2>&1 | tee aiTemp/evidence/package-verification.txt
+
+      - name: Materialize native artifacts
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          import path from 'node:path';
-          import crypto from 'node:crypto';
-          const pkg = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
-          const label = '${{ matrix.label }}';
-          const arch = process.arch;
-          const os = label === 'windows' ? 'win' : label === 'macos' ? 'mac' : 'linux';
-          const wantedExt = label === 'windows' ? ['exe'] : label === 'macos' ? ['dmg', 'zip'] : ['AppImage'];
-          const source = path.join('desktop-electron', 'artifacts');
-          const out = path.join('aiTemp', 'release-output');
-          fs.mkdirSync(out, { recursive: true });
-          const copied = [];
-          for (const ext of wantedExt) {
-            const name = pkg.build.artifactName
-              .replaceAll('${version}', pkg.version)
-              .replaceAll('${os}', os)
-              .replaceAll('${arch}', arch)
-              .replaceAll('${ext}', ext);
-            const src = path.join(source, name);
-            if (!fs.existsSync(src)) throw new Error(`missing configured native artifact ${src}`);
-            const dest = path.join(out, name);
-            fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL);
-            const bytes = fs.readFileSync(dest);
-            copied.push({ name, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') });
+          import fs from 'node:fs'; import path from 'node:path'; import crypto from 'node:crypto';
+          const pkg=JSON.parse(fs.readFileSync('desktop-electron/package.json','utf8'));
+          const label='${{ matrix.label }}', arch=process.arch;
+          const os=label==='windows'?'win':label==='macos'?'mac':'linux';
+          const exts=label==='windows'?['exe']:label==='macos'?['dmg','zip']:['AppImage'];
+          const out='aiTemp/release-output'; fs.mkdirSync(out,{recursive:true}); const files=[];
+          for(const ext of exts){
+            const name=pkg.build.artifactName.replaceAll('${version}',pkg.version).replaceAll('${os}',os).replaceAll('${arch}',arch).replaceAll('${ext}',ext);
+            const src=path.join('desktop-electron','artifacts',name);
+            if(!fs.existsSync(src)) throw new Error(`missing configured native artifact ${src}`);
+            const dest=path.join(out,name); fs.copyFileSync(src,dest,fs.constants.COPYFILE_EXCL);
+            const bytes=fs.readFileSync(dest); files.push({name,size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')});
           }
-          fs.writeFileSync(path.join(out, 'manifest.json'), `${JSON.stringify({ sourceSha: process.env.SOURCE_SHA, label, arch, files: copied }, null, 2)}\n`, { flag: 'wx' });
-          console.log(JSON.stringify(copied));
+          fs.writeFileSync(path.join(out,'manifest.json'),`${JSON.stringify({sourceSha:process.env.SOURCE_SHA,label,arch,files},null,2)}\n`,{flag:'wx'});
+          console.log(JSON.stringify(files));
           NODE
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
