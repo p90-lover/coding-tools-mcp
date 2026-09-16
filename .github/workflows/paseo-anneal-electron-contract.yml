@@ -6,6 +6,7 @@ on:
       - feature/0.7-paseo-anneal-electron
       - feature/v0.7-subagent-orchestrator
       - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
+      - integration/v0.7.0-rc.2-all-project-work
     paths:
       - rust-core/coding-tools-headless/src/lib.rs
       - desktop-electron/electron/**
@@ -20,6 +21,7 @@ on:
     branches:
       - release/codex-router-multiprovider-0.7.0-rc.1
       - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
+      - integration/v0.7.0-rc.2-all-project-work
     paths:
       - rust-core/coding-tools-headless/src/lib.rs
       - desktop-electron/electron/**
@@ -50,6 +52,12 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 22
+      - name: Parse the Electron bridge sources
+        run: |
+          node --check desktop-electron/electron/headless-host.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+          node --check desktop-electron/electron/preload.cjs
+          node --check desktop-electron/electron/main.cjs
       - name: Run the focused execution bridge contract
         run: node --test desktop-electron/tests/execution-bridge-contract.test.cjs
       - name: Parse the headless Rust patch
