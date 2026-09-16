@@ -1,0 +1,75 @@
+name: Apply Paseo Anneal Electron Bridge
+
+on:
+  push:
+    branches:
+      - feature/0.7-paseo-anneal-electron
+    paths:
+      - aiTemp/paseo-anneal-electron/apply_bridge_patch.py
+      - desktop-electron/electron/headless-host.cjs
+      - .github/workflows/apply-paseo-anneal-electron-bridge.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-paseo-anneal-electron-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply-and-verify:
+    if: github.ref == 'refs/heads/feature/0.7-paseo-anneal-electron'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          ref: feature/0.7-paseo-anneal-electron
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply deterministic production patch
+        run: python3 aiTemp/paseo-anneal-electron/apply_bridge_patch.py
+      - name: Validate JavaScript syntax
+        run: |
+          node --check desktop-electron/electron/headless-host.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+          node --check desktop-electron/electron/preload.cjs
+          node --check desktop-electron/electron/main.cjs
+      - name: Format and verify Rust
+        run: |
+          cargo fmt --manifest-path rust-core/Cargo.toml
+          cargo fmt --manifest-path rust-core/Cargo.toml --check
+      - name: Run focused bridge contract
+        run: node --test desktop-electron/tests/execution-bridge-contract.test.cjs
+      - name: Enforce no-delete patch
+        shell: bash
+        run: |
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+      - name: Commit verified production bridge
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Production bridge is already applied."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            rust-core/coding-tools-headless/src/lib.rs \
+            desktop-electron/electron/ipc-schema.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/headless-host.cjs
+          git diff --cached --check
+          git commit -m "feat: connect Paseo and Anneal to Electron"
+          git push origin HEAD:feature/0.7-paseo-anneal-electron
