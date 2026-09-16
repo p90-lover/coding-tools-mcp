@@ -43,6 +43,7 @@ const {
 } = require("./window-state.cjs");
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const LAUNCHER_SMOKE_TEST = process.argv.includes("--launcher-smoke-test");
 const SOURCE_ROOT = path.resolve(__dirname, "../..");
 const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
 const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
@@ -1038,7 +1039,7 @@ async function start() {
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
-  const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
+  const launcherSmokeTest = LAUNCHER_SMOKE_TEST;
   let startupAuthenticationRefresh = Promise.resolve();
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
     startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
@@ -1257,7 +1258,9 @@ void start().catch((error) => {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
   } catch {}
   try {
-    dialog.showErrorBox("Codex Web GPT could not start", message);
+    if (!LAUNCHER_SMOKE_TEST) {
+      dialog.showErrorBox("Codex Web GPT could not start", message);
+    }
   } catch {}
   app.exit(1);
 });
