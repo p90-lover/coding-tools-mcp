@@ -1,17 +1,27 @@
-export type ProxyKind = "none" | "http" | "https" | "socks5";
+export type ProxyProtocol = "http" | "https" | "socks5";
 
-export type ProxyScope =
-  | "all"
+export type ProxyTraffic =
   | "browser"
-  | "providers"
+  | "provider"
   | "paseo"
-  | "anneal";
+  | "anneal"
+  | "update"
+  | "local-control";
+
+export type ProxyScope = Exclude<ProxyTraffic, "local-control"> | "all";
+
+export interface ProxyEndpoint {
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  usernameRef?: string;
+  passwordRef?: string;
+}
 
 export interface ProxyRoute {
   enabled: boolean;
-  kind: ProxyKind;
-  address: string;
-  scope: ProxyScope;
+  endpoint: ProxyEndpoint;
+  scopes: ProxyScope[];
   bypass: string[];
 }
 
@@ -19,6 +29,11 @@ export interface ProviderProxyPolicy {
   providerId: string;
   inheritGlobal: boolean;
   override?: ProxyRoute;
+}
+
+export interface ProxyRoutingState {
+  global: ProxyRoute | null;
+  providers: ProviderProxyPolicy[];
 }
 
 export interface ProxyHealth {

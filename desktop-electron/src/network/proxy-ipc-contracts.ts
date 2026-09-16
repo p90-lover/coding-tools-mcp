@@ -1,35 +1,33 @@
-export type ProxyTransport = "http" | "https" | "socks5";
-
-export type ProxyScope =
-  | "all"
-  | "browser"
-  | "providers"
-  | "paseo"
-  | "anneal";
-
-export interface ProxyRoute {
-  enabled: boolean;
-  transport: ProxyTransport;
-  endpoint: string;
-  scope: ProxyScope;
-  bypass: string[];
-}
-
-export interface ProviderProxyOverride {
-  providerId: string;
-  inheritGlobal: boolean;
-  route?: ProxyRoute;
-}
+import type {
+  ProviderProxyPolicy,
+  ProxyHealth,
+  ProxyRoute,
+} from "./proxy-routing-types";
 
 export interface ProxySnapshot {
-  global: ProxyRoute;
-  overrides: ProviderProxyOverride[];
-  healthy: boolean;
-  latencyMs?: number;
+  global: ProxyRoute | null;
+  overrides: ProviderProxyPolicy[];
+  lastHealthCheck?: ProxyHealth;
+}
+
+export interface ProxyUpdateInput {
+  global?: ProxyRoute | null;
+  overrides?: ProviderProxyPolicy[];
 }
 
 export interface ProxyApi {
   snapshot(): Promise<ProxySnapshot>;
-  update(route: ProxyRoute): Promise<ProxySnapshot>;
-  test(endpoint: string): Promise<{ ok: boolean; latencyMs?: number; error?: string }>;
+  update(input: ProxyUpdateInput): Promise<ProxySnapshot>;
+  test(input: { providerId?: string }): Promise<ProxyHealth>;
 }
+
+export type {
+  ProviderProxyPolicy,
+  ProxyEndpoint,
+  ProxyHealth,
+  ProxyProtocol,
+  ProxyRoute,
+  ProxyRoutingState,
+  ProxyScope,
+  ProxyTraffic,
+} from "./proxy-routing-types";

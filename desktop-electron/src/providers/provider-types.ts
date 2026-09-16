@@ -1,48 +1,157 @@
-export type ProviderAuth = "oauth" | "api_key" | "browser" | "proxy";
+export type ProviderAuth =
+  | "oauth"
+  | "api_key"
+  | "browser_session"
+  | "local_proxy";
+
+export type ProviderCategory =
+  | "api_key"
+  | "oauth"
+  | "browser"
+  | "reverse_proxy"
+  | "custom";
+
+export type ProviderProtocol =
+  | "openai_chat"
+  | "openai_responses"
+  | "anthropic_messages"
+  | "gemini_native"
+  | "custom";
+
+export type ProviderCapability =
+  | "text"
+  | "reasoning"
+  | "tools"
+  | "vision"
+  | "image_generation";
 
 export type ProxyMode = "inherit" | "direct" | "custom";
 
 export interface ProviderDefinition {
   id: string;
   name: string;
+  category: ProviderCategory;
   auth: ProviderAuth;
+  protocol: ProviderProtocol;
+  capabilities: ProviderCapability[];
   models: string[];
   proxyMode: ProxyMode;
+  baseUrl?: string;
+  modelsEndpoint?: string;
+  paseoEnabled: boolean;
+  annealEnabled: boolean;
+  priority: number;
 }
 
 export interface ProviderRoute {
   providerId: string;
   model?: string;
-  proxy?: string;
+  proxyPolicyId?: string;
 }
 
-export const DEFAULT_PROVIDERS: ProviderDefinition[] = [
+export const DEFAULT_PROVIDERS = [
+  {
+    id: "codex-oauth",
+    name: "Codex OAuth",
+    category: "oauth",
+    auth: "oauth",
+    protocol: "openai_responses",
+    capabilities: ["text", "reasoning", "tools"],
+    models: [],
+    proxyMode: "inherit",
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 100,
+  },
+  {
+    id: "claude-oauth",
+    name: "Claude OAuth",
+    category: "oauth",
+    auth: "oauth",
+    protocol: "anthropic_messages",
+    capabilities: ["text", "reasoning", "tools", "vision"],
+    models: [],
+    proxyMode: "inherit",
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 90,
+  },
   {
     id: "chatgpt-web",
     name: "ChatGPT Web",
-    auth: "browser",
+    category: "browser",
+    auth: "browser_session",
+    protocol: "openai_responses",
+    capabilities: ["text", "reasoning", "tools", "vision", "image_generation"],
     models: ["web-gpt"],
     proxyMode: "inherit",
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 80,
+  },
+  {
+    id: "ai-studio-reverse-proxy",
+    name: "AI Studio Reverse Proxy",
+    category: "reverse_proxy",
+    auth: "browser_session",
+    protocol: "gemini_native",
+    capabilities: ["text", "reasoning", "vision", "image_generation"],
+    models: [],
+    proxyMode: "custom",
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 70,
+  },
+  {
+    id: "gemini-reverse-proxy",
+    name: "Gemini Reverse Proxy",
+    category: "reverse_proxy",
+    auth: "local_proxy",
+    protocol: "gemini_native",
+    capabilities: ["text", "reasoning", "tools", "vision"],
+    models: [],
+    proxyMode: "custom",
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 60,
+  },
+  {
+    id: "aistudio-to-api",
+    name: "AIStudioToAPI",
+    category: "reverse_proxy",
+    auth: "local_proxy",
+    protocol: "openai_chat",
+    capabilities: ["text", "vision", "image_generation"],
+    models: [],
+    proxyMode: "custom",
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 50,
+  },
+  {
+    id: "cliproxyapi-antigravity",
+    name: "CLIProxyAPI / Antigravity",
+    category: "reverse_proxy",
+    auth: "local_proxy",
+    protocol: "openai_chat",
+    capabilities: ["text", "reasoning", "tools", "vision"],
+    models: [],
+    proxyMode: "custom",
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 40,
   },
   {
     id: "commandcode-proxy",
     name: "CommandCode Proxy",
-    auth: "proxy",
+    category: "reverse_proxy",
+    auth: "local_proxy",
+    protocol: "openai_chat",
+    capabilities: ["text", "reasoning", "tools"],
     models: [],
     proxyMode: "custom",
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 30,
   },
-  {
-    id: "paseo",
-    name: "Paseo Orchestrator",
-    auth: "proxy",
-    models: [],
-    proxyMode: "inherit",
-  },
-  {
-    id: "anneal",
-    name: "Anneal Tasks",
-    auth: "proxy",
-    models: [],
-    proxyMode: "inherit",
-  },
-];
+] satisfies ProviderDefinition[];

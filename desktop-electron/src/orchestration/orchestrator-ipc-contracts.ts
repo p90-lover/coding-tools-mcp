@@ -1,27 +1,47 @@
-export type OrchestratorEngine = "paseo" | "anneal";
+import type {
+  AnnealDispatchRequest,
+  CustomOrchestratorDefinition,
+  OrchestrationTask,
+  OrchestratorEngine,
+  PaseoDispatchRequest,
+  TaskModelSelection,
+} from "./paseo-anneal-types";
 
-export type TaskModelSource =
-  | "chatgpt-web"
-  | "codex-router"
-  | "commandcode-proxy"
-  | "custom";
+export interface OrchestratorSnapshot {
+  tasks: OrchestrationTask[];
+  workflows: CustomOrchestratorDefinition[];
+  paseoConnected: boolean;
+  annealConnected: boolean;
+}
 
-export interface OrchestratorTask {
-  id: string;
+export interface OrchestratorCreateInput {
+  title: string;
   engine: OrchestratorEngine;
-  modelSource: TaskModelSource;
-  model: string;
-  status: string;
+  model?: TaskModelSelection;
+  workflowId?: string;
   workspace?: string;
 }
 
 export interface OrchestratorApi {
-  list(engine?: OrchestratorEngine): Promise<OrchestratorTask[]>;
-  create(input: {
-    engine: OrchestratorEngine;
-    modelSource: TaskModelSource;
-    model: string;
-    prompt: string;
-  }): Promise<OrchestratorTask>;
-  control(id: string, action: "start" | "pause" | "resume" | "cancel"): Promise<OrchestratorTask>;
+  snapshot(): Promise<OrchestratorSnapshot>;
+  create(input: OrchestratorCreateInput): Promise<OrchestratorSnapshot>;
+  saveWorkflow(input: CustomOrchestratorDefinition): Promise<OrchestratorSnapshot>;
+  dispatchPaseo(input: PaseoDispatchRequest): Promise<OrchestratorSnapshot>;
+  dispatchAnneal(input: AnnealDispatchRequest): Promise<OrchestratorSnapshot>;
+  control(input: {
+    taskId: string;
+    action: "start" | "pause" | "resume" | "cancel";
+  }): Promise<OrchestratorSnapshot>;
 }
+
+export type {
+  AnnealDispatchRequest,
+  CustomOrchestratorDefinition,
+  OrchestrationStage,
+  OrchestrationStatus,
+  OrchestrationTask,
+  OrchestratorEngine,
+  PaseoDispatchRequest,
+  StageApprovalMode,
+  TaskModelSelection,
+} from "./paseo-anneal-types";
