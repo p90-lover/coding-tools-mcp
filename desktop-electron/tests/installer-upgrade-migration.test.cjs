@@ -60,6 +60,14 @@ test("legacy removal is silent, bounded, fail-closed, and preserves application 
   assert.match(source, /legacy uninstall failed/i);
   assert.match(source, /Abort/);
   assert.match(source, /ReadRegStr[^\n]*UninstallString/);
+  assert.match(
+    source,
+    /\$\{Unless\}\s+\$\{FileExists\}\s+"\$LegacyInstallLocation\\uninstall\.exe"/,
+  );
+  assert.doesNotMatch(
+    source,
+    /IfFileExists\s+"\$LegacyInstallLocation\\uninstall\.exe"\s+\+2\s+0/,
+  );
   assert.doesNotMatch(source, /RMDir\s+\/r/i);
   assert.doesNotMatch(source, /DeleteRegKey/i);
   assert.doesNotMatch(source, /Delete\s+\"?\$LOCALAPPDATA/i);
