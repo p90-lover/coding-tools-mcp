@@ -42,6 +42,6 @@ jobs:
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src-tauri/src/lib.rs src/lib/components/AppShell.svelte
+          git add src-tauri/src/lib.rs src-tauri/src/media.rs src/lib/components/AppShell.svelte
           git commit -m 'feat: wire image provider into desktop and navigation'
           git push origin "HEAD:${GITHUB_REF_NAME}"
