@@ -52,8 +52,8 @@ const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browse
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
-const GITHUB_URL = "https://github.com/miuuyy/codex-chatgpt-web";
-const X_URL = "https://x.com/miu21590";
+const GITHUB_URL = "https://github.com/p90-lover/coding-tools-mcp";
+const X_URL = "https://x.com/GIBUSHAT";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
@@ -212,6 +212,16 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
+  }),
+  "zh-TW": Object.freeze({
+    openLauncher: "開啟 Codex Web GPT",
+    quit: "結束",
+    exportDiagnostics: "匯出已保護私隱的診斷資料",
+    cancel: "取消",
+    remove: "移除",
+    removeTitle: "移除 Codex Web GPT",
+    removeMessage: "從 Codex 移除 ChatGPT Web 模型並還原先前的模型路由？",
+    removeDetail: "啟動器中的 ChatGPT 登入 profile 會保留。Codex 需要重新啟動一次。",
   }),
   ja: Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -397,8 +407,8 @@ async function loadRenderer(window) {
 }
 
 function validateLanguage(value) {
-  if (value !== "en" && value !== "zh-CN" && value !== "ja") {
-    throw new Error("Language must be en, zh-CN, or ja");
+  if (value !== "en" && value !== "zh-CN" && value !== "zh-TW" && value !== "ja") {
+    throw new Error("Language must be en, zh-CN, zh-TW, or ja");
   }
   return value;
 }
@@ -463,7 +473,6 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
     const current = stateStore.read();
-    if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
     if (current.autoStart) setAutostart(app, true);
     const next = stateStore.update({
       language: validateLanguage(language),
