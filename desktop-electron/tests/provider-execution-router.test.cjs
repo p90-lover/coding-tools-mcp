@@ -19,6 +19,7 @@ function account(id, providerId, overrides = {}) {
     status: "connected",
     enabled: true,
     isDefault: false,
+    hasCredential: true,
     models: ["default-model"],
     createdAt: "2026-09-16T00:00:00.000Z",
     updatedAt: "2026-09-16T00:00:00.000Z",
@@ -26,7 +27,7 @@ function account(id, providerId, overrides = {}) {
   };
 }
 
-function profile(id, host) {
+function profile(id, host, overrides = {}) {
   return {
     id,
     name: id,
@@ -36,6 +37,7 @@ function profile(id, host) {
     bypass: ["localhost", "127.0.0.1", "::1"],
     createdAt: "2026-09-16T00:00:00.000Z",
     updatedAt: "2026-09-16T00:00:00.000Z",
+    ...overrides,
   };
 }
 
@@ -117,7 +119,7 @@ test("provider direct routing blocks global proxy inheritance", () => {
   state.routing.providers = [{ providerId: "claude-oauth", inheritGlobal: false }];
   state.routing.accounts = [];
 
-  const route = resolveExecutionProxy(state, "claude-oauth", "claude-main");
+  const route = resolveExecutionProxy(state, "claude-oauth", "claude-main", "anneal");
   assert.equal(route.mode, "direct");
   assert.equal(route.source, "provider");
   assert.equal(route.profile, null);
@@ -154,6 +156,106 @@ test("strict account selection fails closed instead of silently changing account
     }),
     /No connected provider account/,
   );
+});
+
+test("an account-only request infers its provider and provider/account conflicts fail closed", () => {
+  const state = snapshot();
+  const plan = createProviderExecutionPlan(state, {
+    workload: "anneal",
+    accountId: "claude-main",
+    allowFallback: false,
+  });
+  assert.equal(plan.provider.id, "claude-oauth");
+  assert.equal(plan.account.id, "claude-main");
+
+  assert.throws(
+    () => createProviderExecutionPlan(state, {
+      workload: "anneal",
+      providerId: "codex-oauth",
+      accountId: "claude-main",
+      allowFallback: false,
+    }),
+    /does not belong to provider|conflicts with provider/,
+  );
+});
+
+test("requested models must be allowed by the selected account", () => {
+  assert.throws(
+    () => createProviderExecutionPlan(snapshot(), {
+      workload: "anneal",
+      providerId: "codex-oauth",
+      accountId: "codex-main",
+      model: "not-authorized-for-this-account",
+      allowFallback: false,
+    }),
+    /model.+not available|does not allow model/i,
+  );
+});
+
+test("API-key and local proxy accounts require an encrypted stored credential", () => {
+  const state = snapshot();
+  state.accounts = [account("openai-main", "openai-api", {
+    auth: "api_key",
+    hasCredential: false,
+    isDefault: true,
+    models: ["gpt-test"],
+  })];
+  state.routing = { globalEnabled: false, globalProfileId: null, providers: [], accounts: [] };
+
+  assert.throws(
+    () => createProviderExecutionPlan(state, {
+      workload: "paseo",
+      providerId: "openai-api",
+      model: "gpt-test",
+      allowFallback: false,
+    }),
+    /No connected provider account|stored credential/i,
+  );
+
+  state.accounts[0].hasCredential = true;
+  assert.equal(
+    createProviderExecutionPlan(state, {
+      workload: "paseo",
+      providerId: "openai-api",
+      model: "gpt-test",
+      allowFallback: false,
+    }).account.id,
+    "openai-main",
+  );
+});
+
+test("proxy profiles must authorize the selected Paseo or Anneal workload", () => {
+  const state = snapshot();
+  state.proxyProfiles = [
+    profile("global", "global.proxy.test", { scopes: ["anneal"] }),
+    profile("provider", "provider.proxy.test", { scopes: ["paseo"] }),
+    profile("account", "account.proxy.test", { scopes: ["anneal"] }),
+  ];
+
+  const paseo = resolveExecutionProxy(state, "codex-oauth", "codex-main", "paseo");
+  assert.equal(paseo.source, "provider");
+  assert.equal(paseo.profile.endpoint.host, "provider.proxy.test");
+
+  const anneal = resolveExecutionProxy(state, "codex-oauth", "codex-main", "anneal");
+  assert.equal(anneal.source, "account");
+  assert.equal(anneal.profile.endpoint.host, "account.proxy.test");
+});
+
+test("an explicit inherit policy suppresses stale legacy account proxy fields", () => {
+  const state = snapshot();
+  state.accounts = state.accounts.map((item) => (
+    item.id === "codex-main" ? { ...item, proxyProfileId: "account" } : item
+  ));
+  state.routing.accounts = [{
+    accountId: "codex-main",
+    providerId: "codex-oauth",
+    inheritProvider: true,
+    inheritGlobal: true,
+  }];
+
+  const route = resolveExecutionProxy(state, "codex-oauth", "codex-main", "paseo");
+  assert.equal(route.source, "provider");
+  assert.equal(route.profile.endpoint.host, "provider.proxy.test");
 });
 
 test("execution planning is exposed through bootstrap, preload, and the typed launcher API", () => {
