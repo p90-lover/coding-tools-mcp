@@ -178,7 +178,7 @@ function prepareRuntime({
     ["run", layout.buildScript, staged],
     {
       cwd: layout.runtimeRoot,
-      env: process.env,
+      env: { ...process.env, CODEX_CHATGPT_WEB_BUNDLE_APP_VERSION: layout.version },
       stdio: "inherit",
       shell: false,
     },
