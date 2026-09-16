@@ -153,6 +153,17 @@ jobs:
           grep -F '# pass 1' aiTemp/evidence/renderer-provider-bundle-tests.txt
           grep -F '# fail 0' aiTemp/evidence/renderer-provider-bundle-tests.txt
 
+      - name: Preserve generated renderer and restore exact tracked source
+        run: |
+          set -euo pipefail
+          retained="aiTemp/Trash/release-0.7.0-rc.5/generated-dist-$GITHUB_RUN_ID"
+          test -d desktop-electron/dist
+          test ! -e "$retained"
+          mv desktop-electron/dist "$retained"
+          git restore --source=HEAD --worktree -- desktop-electron/dist
+          test -d "$retained"
+          test -d desktop-electron/dist
+
       - name: Require an unchanged tracked source tree
         run: |
           set -euo pipefail
