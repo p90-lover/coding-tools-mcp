@@ -1,0 +1,58 @@
+name: Apply Provider Hub planned dispatch
+
+on:
+  push:
+    branches:
+      - fix/provider-routing-review-20260916
+    paths:
+      - aiTemp/provider-routing-review/apply_planned_dispatch.py
+      - .github/workflows/apply-provider-planned-dispatch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-provider-planned-dispatch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/provider-routing-review-20260916
+          fetch-depth: 0
+          clean: false
+
+      - name: Apply exact renderer dispatch replacements
+        run: python aiTemp/provider-routing-review/apply_planned_dispatch.py
+
+      - name: Verify retained changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          grep -F 'configureProviderExecution({' desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx
+          grep -F 'dispatchProviderMission({' desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx
+          if grep -F 'api.execution.provider({' desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx; then
+            echo 'Direct provider execution bypass remains' >&2
+            exit 1
+          fi
+          git diff --check
+
+      - name: Commit materialized renderer bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx; then
+            echo 'Renderer bridge already materialized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx
+          git commit -m 'fix(provider-hub): route live UI through planned dispatch'
+          git push origin HEAD:fix/provider-routing-review-20260916
