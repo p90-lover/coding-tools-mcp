@@ -1,0 +1,80 @@
+name: Materialize rc2 release workflow
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.2-final-union
+    paths:
+      - aiTemp/rc2-release/generate-release-workflow.py
+      - aiTemp/rc2-release/apply-release-identity.py
+      - docs/releases/v0.7.0-rc.2.md
+      - .github/workflows/materialize-rc2-release-workflow.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-codex-router-release-0.7.0-rc.2
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+
+      - name: Prepare retained evidence roots
+        run: mkdir -p aiTemp/evidence
+
+      - name: Generate exact rc.2 release workflow
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc2-release/generate-release-workflow.py \
+            2>&1 | tee aiTemp/evidence/rc2-release-workflow-generation.txt
+          test -s .github/workflows/codex-router-multiprovider-release-rc2.yml
+          grep -F "release/codex-router-multiprovider-0.7.0-rc.2" \
+            .github/workflows/codex-router-multiprovider-release-rc2.yml
+          grep -F "RELEASE_VERSION: '0.7.0-rc.2'" \
+            .github/workflows/codex-router-multiprovider-release-rc2.yml
+          grep -F "aiTemp/rc2-release/apply-release-identity.py" \
+            .github/workflows/codex-router-multiprovider-release-rc2.yml
+          grep -F "docs/releases/v0.7.0-rc.2.md" \
+            .github/workflows/codex-router-multiprovider-release-rc2.yml
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+
+      - name: Enforce generated-file-only scope
+        run: |
+          set -euo pipefail
+          changed="$(git status --short | awk '{print $2}' | sort)"
+          expected='.github/workflows/codex-router-multiprovider-release-rc2.yml'
+          printf 'changed files:\n%s\n' "$changed"
+          test "$changed" = "$expected"
+
+      - name: Commit verified rc.2 release workflow
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- .github/workflows/codex-router-multiprovider-release-rc2.yml; then
+            echo 'The rc.2 release workflow is already current.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/codex-router-multiprovider-release-rc2.yml
+          git diff --cached --check
+          git commit -m 'release(rc2): materialize exact Windows prerelease workflow'
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc2-release-workflow-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
