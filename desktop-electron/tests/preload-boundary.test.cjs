@@ -12,6 +12,7 @@ const REQUIRED_NAMESPACES = [
   "history",
   "nativeCodex",
   "integrations",
+  "execution",
   "updates",
   "diagnostics",
 ];
@@ -84,6 +85,58 @@ test("a typed workspace list call uses its exact channel and validates its respo
     channel: "coding-tools:workspaces:list",
     payload: { cursor: 0, limit: 25 },
   }]);
+});
+
+test("execution methods use only their three bounded typed channels", async () => {
+  const response = { ok: true, execution: { revision: 4 } };
+  const { api, invocations } = loadPreload(() => response);
+
+  assert.deepEqual(await api.execution.read({
+    workspaceId: "workspace-1",
+    missionId: "mission-1",
+    refreshSource: false,
+  }), response);
+  assert.deepEqual(await api.execution.provider({
+    workspaceId: "workspace-1",
+    operation: "disable",
+    bindingId: "binding-1",
+    confirm: true,
+  }), response);
+  assert.deepEqual(await api.execution.update({
+    workspaceId: "workspace-1",
+    expectedRevision: 4,
+    change: { operation: "pause", missionId: "mission-1" },
+    confirm: true,
+  }), response);
+
+  assert.deepEqual(invocations, [
+    {
+      channel: "coding-tools:execution:read",
+      payload: {
+        workspaceId: "workspace-1",
+        missionId: "mission-1",
+        refreshSource: false,
+      },
+    },
+    {
+      channel: "coding-tools:execution:provider",
+      payload: {
+        workspaceId: "workspace-1",
+        operation: "disable",
+        bindingId: "binding-1",
+        confirm: true,
+      },
+    },
+    {
+      channel: "coding-tools:execution:update",
+      payload: {
+        workspaceId: "workspace-1",
+        expectedRevision: 4,
+        change: { operation: "pause", missionId: "mission-1" },
+        confirm: true,
+      },
+    },
+  ]);
 });
 
 test("runtime status remains bounded without freezing the producer-owned DTO", async () => {

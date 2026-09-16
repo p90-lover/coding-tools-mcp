@@ -6,8 +6,12 @@ on:
       - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
       - feature/v0.7-rc2-subagent-port
       - integration/v0.7.0-rc.2-all-project-work
+      - integration/v0.7-rc2-subagent-bridge-current
     paths:
       - .github/workflows/v0.7-rc2-contracts.yml
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/src/api/**
       - desktop-electron/src/agents/**
       - desktop-electron/src/anneal/**
       - desktop-electron/src/i18n/**
@@ -17,6 +21,7 @@ on:
       - desktop-electron/src/orchestrator/**
       - desktop-electron/src/paseo/**
       - desktop-electron/src/providers/**
+      - desktop-electron/tests/preload-boundary.test.cjs
       - desktop-electron/tests/proxy-provider-contract.test.cjs
       - desktop-electron/tests/subagent-orchestrator-contract.test.cjs
       - desktop-electron/tests/anneal-monitor-contract.test.cjs
@@ -25,6 +30,9 @@ on:
       - integration/v0.7.0-rc.2-all-project-work
     paths:
       - .github/workflows/v0.7-rc2-contracts.yml
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/src/api/**
       - desktop-electron/src/agents/**
       - desktop-electron/src/anneal/**
       - desktop-electron/src/i18n/**
@@ -34,6 +42,7 @@ on:
       - desktop-electron/src/orchestrator/**
       - desktop-electron/src/paseo/**
       - desktop-electron/src/providers/**
+      - desktop-electron/tests/preload-boundary.test.cjs
       - desktop-electron/tests/proxy-provider-contract.test.cjs
       - desktop-electron/tests/subagent-orchestrator-contract.test.cjs
       - desktop-electron/tests/anneal-monitor-contract.test.cjs
@@ -73,7 +82,10 @@ jobs:
           (
             cd desktop-electron
             npm run typecheck
-            tests=(tests/proxy-provider-contract.test.cjs)
+            tests=(
+              tests/preload-boundary.test.cjs
+              tests/proxy-provider-contract.test.cjs
+            )
             for candidate in \
               tests/subagent-orchestrator-contract.test.cjs \
               tests/anneal-monitor-contract.test.cjs
