@@ -8,6 +8,7 @@ on:
     paths:
       - aiTemp/paseo-anneal-electron/apply_bridge_patch.py
       - desktop-electron/electron/headless-host.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
       - .github/workflows/apply-paseo-anneal-electron-bridge.yml
   workflow_dispatch:
 
