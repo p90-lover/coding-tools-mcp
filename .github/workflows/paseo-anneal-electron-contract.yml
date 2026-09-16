@@ -1,0 +1,53 @@
+name: Paseo Anneal Electron Contract
+
+on:
+  push:
+    branches:
+      - feature/0.7-paseo-anneal-electron
+    paths:
+      - rust-core/coding-tools-headless/src/lib.rs
+      - desktop-electron/electron/**
+      - desktop-electron/src/api/**
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - .github/workflows/paseo-anneal-electron-contract.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.1
+    paths:
+      - rust-core/coding-tools-headless/src/lib.rs
+      - desktop-electron/electron/**
+      - desktop-electron/src/api/**
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - .github/workflows/paseo-anneal-electron-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paseo-anneal-electron-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+      - name: Run the focused execution bridge contract
+        run: node --test desktop-electron/tests/execution-bridge-contract.test.cjs
+      - name: Parse the headless Rust patch
+        run: cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml --check
+      - name: Enforce no-delete changes
+        shell: bash
+        run: |
+          deleted="$(git diff --diff-filter=D --name-only HEAD^ HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
