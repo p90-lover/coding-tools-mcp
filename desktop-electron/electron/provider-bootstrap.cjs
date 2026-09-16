@@ -6,6 +6,15 @@ const {
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { resolveLauncherProfile } = require("./profile.cjs");
 
+let providerNetworkControllerPromise = null;
+
+function providerNetworkReady() {
+  if (!providerNetworkControllerPromise) {
+    throw new Error("Provider Network has not been installed");
+  }
+  return providerNetworkControllerPromise;
+}
+
 function installProviderNetwork({
   app,
   BrowserWindow,
@@ -34,7 +43,7 @@ function installProviderNetwork({
     return snapshot;
   }
 
-  const controllerPromise = app.whenReady().then(async () => {
+  providerNetworkControllerPromise = app.whenReady().then(async () => {
     const launcherProfile = resolveLauncherProfile({ appData: app.getPath("appData") });
     controller = createProviderNetworkController({
       app,
@@ -53,6 +62,7 @@ function installProviderNetwork({
     }
     return controller;
   });
+  const controllerPromise = providerNetworkControllerPromise;
 
   app.on("login", (event, _webContents, _authenticationDetails, authInfo, callback) => {
     controller?.handleProxyLogin(event, authInfo, callback);
@@ -135,7 +145,7 @@ function installProviderNetwork({
   ));
 
   return Object.freeze({
-    ready: () => controllerPromise,
+    ready: providerNetworkReady,
     createProviderNetworkStore,
     createProviderExecutionPlan,
   });
@@ -143,4 +153,5 @@ function installProviderNetwork({
 
 module.exports = {
   installProviderNetwork,
+  providerNetworkReady,
 };
