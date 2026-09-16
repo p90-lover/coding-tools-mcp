@@ -8,6 +8,7 @@ on:
       - feature/v0.7-subagent-orchestrator
       - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
       - integration/v0.7.0-rc.2-all-project-work
+      - integration/v0.7-rc2-subagent-bridge-current
     paths:
       - rust-core/coding-tools-headless/**
       - desktop-electron/electron/**
