@@ -22,6 +22,12 @@ require(
     "pub mod execution;",
     "execution-parent-module",
 )
+for module in ("service", "schema"):
+    require(
+        "src-tauri/src/integrations/execution/mod.rs",
+        f"pub mod {module};",
+        f"execution-{module}-module",
+    )
 require(
     "src-tauri/src/commands/mod.rs",
     "mod execution;",
@@ -52,31 +58,59 @@ require(
     "pub use coding_tools_mcp_desktop_lib::{data, error, integrations, runtime, tools};",
     "headless-core-integration-export",
 )
+for function in ("service::view", "service::refresh", "service::change"):
+    require(
+        "src-tauri/src/tools/workflow.rs",
+        function,
+        f"workflow-{function.replace('::', '-')}",
+    )
+for operation in ("agent_prepare", "agent_control", "agent_review"):
+    require(
+        "src-tauri/src/tools/workflow.rs",
+        operation,
+        f"workflow-operation-{operation}",
+    )
 require(
-    "src-tauri/src/tools/workflow.rs",
-    "integrations::{board_sync, execution::service}",
-    "workflow-execution-service",
+    "src-tauri/src/commands/execution.rs",
+    'workflow::call(',
+    "visible-read-shared-workflow",
 )
 require(
-    "src-tauri/src/tools/workflow.rs",
-    '"agent_prepare" | "agent_control" | "agent_review"',
-    "workflow-execution-routing",
+    "src-tauri/src/commands/execution.rs",
+    "service::change(&request, expected_revision, change)",
+    "visible-update-typed-service",
+)
+forbid(
+    "src-tauri/src/commands/execution.rs",
+    "call_tool_mcp",
+    "local-command-self-dispatch",
 )
 require(
     "rust-core/coding-tools-headless/src/lib.rs",
     'route("/api/v1/integrations/read", post(integration_read))',
     "headless-read-adapter-route",
 )
-for source_name in ("Paseo", "Anneal"):
+for marker in (
+    "struct IntegrationReadRequest",
+    'admit(&state, "integration_read")',
+    "integrations::read(body.source, &body.endpoint, &body.credential).await",
+    '"INTEGRATION_READ_FAILED"',
+):
     require(
         "rust-core/coding-tools-headless/src/lib.rs",
-        source_name,
-        f"headless-source-{source_name.lower()}",
+        marker,
+        f"headless-{marker[:32]}",
     )
-forbid(
-    "src-tauri/src/commands/execution.rs",
-    'call_tool_mcp(&ctx,"workflow_list",&json!({"mission_id":mission_id,"refresh_source":refresh_source.unwrap_or(false)}))',
-    "unverified-workflow-list-call",
+for source_name in ("Paseo", "Anneal"):
+    require(
+        "src-tauri/src/integrations/mod.rs",
+        source_name,
+        f"bounded-source-{source_name.lower()}",
+    )
+require(
+    "src-tauri/src/integrations/mod.rs",
+    "Use 127.0.0.1 or [::1]",
+    "loopback-only-provider-boundary",
 )
 
 print("PASEO_ANNEAL_07_WIRING_CONTRACT_OK")
