@@ -68,6 +68,26 @@ export interface OrchestratorRegistryView {
   resolved: ResolvedOrchestrator[];
 }
 
+export interface AnnealOrchestratorRunInput {
+  profile_id: string;
+  endpoint: string;
+  operator_token: string;
+  name: string;
+  description: string;
+  branch_name: string;
+  auto_start: boolean;
+}
+
+export interface AnnealOrchestratorRunResult {
+  profile_id: string;
+  profile_revision: number;
+  project_id: string;
+  template_id: string;
+  status: number;
+  accepted: boolean;
+  response: unknown;
+}
+
 export function defaultStages(providerProfileId = ''): OrchestratorStage[] {
   return [
     {
@@ -189,3 +209,8 @@ export const saveOrchestrator = (
 
 export const archiveOrchestrator = (profileId: string): Promise<OrchestratorRegistryView> =>
   invoke('orchestrator_profile_archive', { profileId, confirm: true });
+
+export const runAnnealOrchestrator = (
+  input: AnnealOrchestratorRunInput
+): Promise<AnnealOrchestratorRunResult> =>
+  invoke('orchestrator_profile_run', { input, confirm: true });
