@@ -1,5 +1,6 @@
 use crate::{
     error::{AppError, AppResult},
+    orchestrator_run::{self, AnnealOrchestratorRunInput, AnnealOrchestratorRunResult},
     orchestrators::{self, OrchestratorProfileInput},
 };
 use serde_json::Value;
@@ -61,4 +62,17 @@ pub async fn orchestrator_profile_archive(
     tauri::async_runtime::spawn_blocking(move || orchestrators::archive(&profile_id))
         .await
         .map_err(|_| fail("Orchestrator archival worker unavailable"))?
+}
+
+#[tauri::command]
+pub async fn orchestrator_profile_run(
+    window: WebviewWindow,
+    input: AnnealOrchestratorRunInput,
+    confirm: bool,
+) -> AppResult<AnnealOrchestratorRunResult> {
+    local(&window, true)?;
+    if !confirm {
+        return Err(fail("Confirm the external Anneal orchestrator run locally"));
+    }
+    orchestrator_run::run(input).await
 }
