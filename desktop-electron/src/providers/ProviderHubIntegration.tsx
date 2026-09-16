@@ -442,7 +442,7 @@ export function ProviderManagerSurface({
     try {
       const result = await task();
       if (result && typeof result === "object" && "accounts" in result) {
-        setSnapshot(result as ProviderNetworkSnapshot);
+        setSnapshot(result as unknown as ProviderNetworkSnapshot);
       }
       if (success) setNotice(success);
       return result;
