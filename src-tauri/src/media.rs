@@ -557,7 +557,6 @@ pub async fn generate(input: ImageGenerationInput) -> AppResult<ImageGenerationR
         "artifacts": result.artifacts,
     }))
     .map_err(|_| fail("Could not serialize image manifest"))?;
-    create_new(true);
     create_new(&manifest_path, &manifest)?;
     Ok(result)
 }
