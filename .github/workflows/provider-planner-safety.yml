@@ -57,12 +57,91 @@ jobs:
         run: |
           set -euo pipefail
           python3 aiTemp/provider-planner-safety/apply_provider_planner_safety.py \
-            2>&1 | tee aiU[\Ù]šY[˜ÙKÜ›ÝšY\‹\[›™\‹\ØY™]K\]ÚˆÜ™\Qˆ“Õ’QT—ÔS“‘T—ÔÐQ‘UWÔUÒÓÒÈˆZU[\Ù]šY[˜ÙKÜ›ÝšY\‹\[›™\‹\ØY™]K\]ÚˆÚ]Y™ˆKXÚXÚÂˆ\Ý^ˆ‰
-Ú]Y™ˆKYY™‹Yš[\QK[˜[YK[Û›JH‚‚ˆH˜[YNˆ˜[Y]H˜]˜TØÜš\Þ[^ˆ[Žˆˆ›ÙHKXÚXÚÈ\ÚÝÜY[XÝ›Û‹Ù[XÝ›Û‹Ü›ÝšY\‹Y^XÝ][Û‹\›Ý]\‹˜ÚœÂˆ›ÙHKXÚXÚÈ\ÚÝÜY[XÝ›Û‹Ù[XÝ›Û‹Ü›ÝšY\‹[™]ÛÜšË˜ÚœÂˆ›ÙHKXÚXÚÈ\ÚÝÜY[XÝ›Û‹Ý\ÝËÜ›ÝšY\‹[™]ÛÜšËXÜ™Y[X[Ë\Ý˜ÚœÂ‚ˆH˜[YNˆ[œÝ[ØÚÙY[XÝ›Ûˆ\[™[˜ÚY\Âˆ[ŽˆˆÙ]Y][È\Y˜Z[ˆTTH‰ÑØZU[\Ý\ˆTH‰ÑØZU[\Ý\ˆSTH‰ÑØZU[\Ý\ˆˆ[ˆ[œÝ[KXÝÙ\ÚÝÜY[XÝ›ÛˆKYœ›Þ™[‹[ØÚÙš[Hˆ‰ŒHYHZU[\Ù]šY[˜ÙKÜ›ÝšY\‹\[›™\‹\ØY™]KZ[œÝ[‚ˆH˜[YNˆ›Ý™HÔ‘QSˆÚ]›ØÝ\ÙY[™™\Ù\™YÛÛ˜XÝÂˆ[ŽˆˆÙ]Y][È\Y˜Z[ˆ›ÙHK]\Ýˆ\ÚÝÜY[XÝ›Û‹Ý\ÝËÜ›ÝšY\‹Y^XÝ][Û‹\›Ý]\‹\Ý˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹Ý\ÝËÜ›ÝšY\‹[™]ÛÜšËXÜ™Y[X[Ë\Ý˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹Ý\ÝËÜ›ÝšY\‹[][XXØÛÝ[YÛØ˜[\›ÞK\Ý˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹Ý\ÝËÜ›ÞK\›ÝšY\‹XÛÛ˜XÝ\Ý˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹Ý\ÝËÜ›ÝšY\‹\›ÞKYÛXZ[‹\Ý˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹Ý\ÝËÙ^XÝ][Û‹XœšYÙKXÛÛ˜XÝ\Ý˜ÚœÈˆ‰ŒHYHZU[\Ù]šY[˜ÙKÜ›ÝšY\‹\[›™\‹\ØY™]KYÜ™Y[‹ˆÜ™\Qˆ	ÈÈ˜Z[	ÈZU[\Ù]šY[˜ÙKÜ›ÝšY\‹\[›™\‹\ØY™]KYÜ™Y[‹‚ˆH˜[YNˆ\XÚXÚÈ[™Z[™[™\™\‚ˆ[ŽˆˆÙ]Y][È\Y˜Z[ˆTTH‰ÑØZU[\Ý\ˆTH‰ÑØZU[\Ý\ˆSTH‰ÑØZU[\Ý\ˆˆ[ˆ[ˆKXÝÙ\ÚÝÜY[XÝ›Ûˆ\XÚXÚÈˆ‰ŒHYHZU[\Ù]šY[˜ÙKÜ›ÝšY\‹\[›™\‹\ØY™]K]\XÚXÚËˆZÙ\ˆ\ZU[\Ü›ÝšY\‹\[›™\‹\ØY™]KÜ™[™\™\‹Y\ÝˆÙ\ÚÝÜY[XÝ›Û‚ˆTTH‰ÒUP—ÕÓÔ’ÔÔPÑKØZU[\Ý\ˆTH‰ÒUP—ÕÓÔ’ÔÔPÑKØZU[\Ý\ˆSTH‰ÒUP—ÕÓÔ’ÔÔPÑKØZU[\ˆˆ[žš]HZ[ˆK[Ý]\ˆ‹‹ØZU[\Ü›ÝšY\‹\[›™\‹\ØY™]KÜ™[™\™\‹Y\ÝˆKY[\SÝ]\ˆˆ‰ŒHYH‹‹ØZU[\Ù]šY[˜ÙKÜ›ÝšY\‹\[›™\‹\ØY™]K\™[™\™\‹XZ[‚ˆH˜[YNˆ[™›Ü˜ÙH›È[][Ûˆ[™^XÝ›ÙXÝ[ÛˆØÛÜBˆÚ[ˆ˜\Úˆ[ŽˆˆÙ]Y][È\Y˜Z[ˆÚ]Y™ˆKXÚXÚÂˆ\Ý^ˆ‰
-Ú]Y™ˆKYY™‹Yš[\QK[˜[YK[Û›JH‚ˆÚ[™ÙYH‰
-Ú]Y™ˆK[˜[YK[Û›HKH\ÚÝÜY[XÝ›ÛˆÛÜ
-H‚ˆ^XÝYH‰
-š[ˆ	É\×‰Èˆ\ÚÝÜY[XÝ›Û‹Ù[XÝ›Û‹Ü›ÝšY\‹Y^XÝ][Û‹\›Ý]\‹˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹Ù[XÝ›Û‹Ü›ÝšY\‹[™]ÛÜšË˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹ÜÜ˜ËÝ\\ËÈˆ\ÚÝÜY[XÝ›Û‹Ý\ÝËÜ›ÝšY\‹[™]ÛÜšËXÜ™Y[X[Ë\Ý˜ÚœÈÛÜ
-H‚ˆš[ˆ	ØÚ[™ÙYš[\Î—‰\×‰È‰Ú[™ÙYˆˆYHZU[\Ù]šY[˜ÙKÜ›ÝšY\‹\[›™\‹\ØY™]KXÚ[™ÙYYš[\Ëˆ\Ý‰Ú[™ÙYˆH‰^XÝY‚‚ˆH˜[YNˆÛÛ[Z]^XÝ™\šYšYY™\Z\‚ˆÚ[ˆ˜\Úˆ[ŽˆˆÙ]Y][È\Y˜Z[ˆÚ]ÛÛ™šYÈ\Ù\‹›˜[YH	ÙÚ]X‹XXÝ[ÛœÖØ›ÝIÂˆÚ]ÛÛ™šYÈ\Ù\‹™[XZ[	ÍNNŽŠÙÚ]X‹XXÝ[ÛœÖØ›ÝP\Ù\œË››Ü™\K™Ú]X‹˜ÛÛIÂˆÚ]Yˆ\ÚÝÜY[XÝ›Û‹Ù[XÝ›Û‹Ü›ÝšY\‹Y^XÝ][Û‹\›Ý]\‹˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹Ù[XÝ›Û‹Ü›ÝšY\‹[™]ÛÜšË˜ÚœÈˆ\ÚÝÜY[XÝ›Û‹ÜÜ˜ËÝ\\ËÈˆ\ÚÝÜY[XÝ›Û‹Ý\ÝËÜ›ÝšY\‹[™]ÛÜšËXÜ™Y[X[Ë\Ý˜ÚœÂˆÚ]Y™ˆKXØXÚYKXÚXÚÂˆYˆÚ]Y™ˆKXØXÚYK\]ZY]È[‚ˆXÚÈ	Ô›ÝšY\ˆ[›™\ˆØY™]H™\Z\ˆ\È[™XYHÛÛ[Z]Y‰Âˆ^]ˆšBˆÚ]ÛÛ[Z][H	Ùš^
-›ÝšY\‹ZXŠNˆ[™›Ü˜ÙHÝšXÝ[›™\ˆ[™Ü™Y[X[ØY™]IÂˆÚ]\ÚÜšYÚ[ˆ’PQ‰ÑÒUP—Ô‘Q—ÓSQ_H‚‚ˆH\Ù\ÎˆXÝ[ÛœËÝ\ØYX\Y˜XÝXLMYŽX™MÍXMYNL˜™ÍŒÙ˜L‚ˆYŽˆ[Ø^\Ê
-BˆÚ]‚ˆ˜[YNˆ›ÝšY\‹\[›™\‹\ØY™]KIÞÈÚ]X‹œÚH_Bˆ]ˆZU[\Ù]šY[˜ÙKÂˆY‹[›ËYš[\ËY›Ý[™ˆ\œ›Ü‚ˆ™][[Û‹Y^\ÎˆM
+            2>&1 | tee aiTemp/evidence/provider-planner-safety-patch.txt
+          grep -F PROVIDER_PLANNER_SAFETY_PATCH_OK \
+            aiTemp/evidence/provider-planner-safety-patch.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Validate JavaScript syntax
+        run: |
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/tests/provider-network-credentials.test.cjs
+
+      - name: Install locked Electron dependencies
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/provider-planner-safety-install.txt
+
+      - name: Prove GREEN with focused and preserved contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/provider-network-credentials.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/provider-proxy-domain.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            2>&1 | tee aiTemp/evidence/provider-planner-safety-green.txt
+          grep -F '# fail 0' aiTemp/evidence/provider-planner-safety-green.txt
+
+      - name: Typecheck and build renderer
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/evidence/provider-planner-safety-typecheck.txt
+          mkdir -p aiTemp/provider-planner-safety/renderer-dist
+          cd desktop-electron
+          TMPDIR="$GITHUB_WORKSPACE/aiTemp/tmp" TMP="$GITHUB_WORKSPACE/aiTemp/tmp" TEMP="$GITHUB_WORKSPACE/aiTemp/tmp" \
+            bunx vite build \
+              --outDir ../aiTemp/provider-planner-safety/renderer-dist \
+              --emptyOutDir \
+            2>&1 | tee ../aiTemp/evidence/provider-planner-safety-renderer-build.txt
+
+      - name: Enforce no deletion and exact production scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          changed="$(git diff --name-only -- desktop-electron | sort)"
+          expected="$(printf '%s\n' \
+            desktop-electron/electron/provider-execution-router.cjs \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/src/types.ts \
+            desktop-electron/tests/provider-network-credentials.test.cjs | sort)"
+          printf 'changed files:\n%s\n' "$changed" \
+            | tee aiTemp/evidence/provider-planner-safety-changed-files.txt
+          test "$changed" = "$expected"
+
+      - name: Commit exact verified repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/provider-execution-router.cjs \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/src/types.ts \
+            desktop-electron/tests/provider-network-credentials.test.cjs
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'Provider planner safety repair is already committed.'
+            exit 0
+          fi
+          git commit -m 'fix(provider-hub): enforce strict planner and credential safety'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: provider-planner-safety-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
