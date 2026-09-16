@@ -10,6 +10,8 @@ EXPECTED_SYNTHETIC_BLOBS = {
     "f3137dc08c41bb9d5d4e273aa54b79d2a9d7c355",
     "a9ba427524ed0dcc9b1934e448533c1101d8feb0",
     "5329ab49df852b7b2c9c949ebc7cbe7e7c9d1494",
+    "c32549ef3ff736ceff8aaae026657c70abff5120",
+    "ad88631f3124c58730dbe666dbfd23590e4eec3a",
 }
 
 
