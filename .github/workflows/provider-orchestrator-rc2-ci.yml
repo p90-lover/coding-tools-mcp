@@ -1,0 +1,58 @@
+name: Provider Center and Anneal orchestrator rc2
+
+on:
+  push:
+    branches:
+      - feature/0.7-rc2-provider-orchestrator
+  pull_request:
+    paths:
+      - 'src-tauri/src/providers.rs'
+      - 'src-tauri/src/orchestrators.rs'
+      - 'src-tauri/src/commands/providers.rs'
+      - 'src-tauri/src/commands/orchestrators.rs'
+      - 'src-tauri/src/data/model.rs'
+      - 'src-tauri/src/lib.rs'
+      - 'src/lib/components/AppShell.svelte'
+      - 'src/routes/providers/**'
+      - 'src/routes/orchestrators/**'
+      - 'aiTemp/rc2/**'
+      - '.github/workflows/provider-orchestrator-rc2-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-orchestrator-rc2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  focused-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+      - name: Prepare retained evidence root
+        run: mkdir -p aiTemp/evidence
+      - name: Enforce no deleted repository paths
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin release/codex-router-multiprovider-0.7.0-rc.1
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.1...HEAD)"
+      - name: Run provider and orchestrator integration contract
+        run: |
+          set -euo pipefail
+          python aiTemp/rc2/provider_orchestrator_contract.py \
+            2>&1 | tee aiTemp/evidence/provider-orchestrator-contract.txt
+          grep -F PROVIDER_ORCHESTRATOR_RC2_CONTRACT_OK aiTemp/evidence/provider-orchestrator-contract.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: provider-orchestrator-rc2-contract-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
