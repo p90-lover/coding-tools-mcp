@@ -51,11 +51,11 @@ test("provider credentials remain main-process only and are rejected from render
   assert.match(schema, /SENSITIVE_RESPONSE_KEYS[\s\S]*[\"']credential[\"']/);
   assert.match(schema, /rejectSensitiveKeys:\s*true/);
 
-  const schemaRequest = schema.match(/const executionProviderRequest = schema\.object\(\{([\s\S]*?)\n\}\);/);
+  const schemaRequest = schema.match(/const executionProviderRequest = Object\.freeze\(\{([\s\S]*?)\n\}\);/);
   assert.ok(schemaRequest, "execution provider request schema is missing");
   assert.doesNotMatch(schemaRequest[1], /\bcredential\b/);
 
-  const contractRequest = contracts.match(/export interface ExecutionProviderRequest \{([\s\S]*?)\n\}/);
+  const contractRequest = contracts.match(/provider\(input: \{([\s\S]*?)\n    \}\): Promise<JsonObject>/);
   assert.ok(contractRequest, "typed execution provider request is missing");
   assert.doesNotMatch(contractRequest[1], /\bcredential\b/);
 
