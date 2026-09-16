@@ -84,11 +84,39 @@ jobs:
         run: node --test desktop-electron/tests/execution-bridge-contract.test.cjs
       - name: Verify headless Rust formatting
         run: cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml --check
-      - name: Run headless Rust tests
-        run: cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked
+      - name: Run headless Rust tests with retained diagnostics
+        id: headless-tests
+        shell: bash
+        run: |
+          mkdir -p aiTemp/evidence/paseo-anneal-electron
+          set +e
+          cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked 2>&1 \
+            | tee aiTemp/evidence/paseo-anneal-electron/headless-tests.log
+          status=${PIPESTATUS[0]}
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          {
+            echo '## Headless Rust test tail'
+            echo '```text'
+            tail -n 120 aiTemp/evidence/paseo-anneal-electron/headless-tests.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - name: Upload retained headless test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: paseo-anneal-headless-test-diagnostics-${{ github.sha }}
+          path: aiTemp/evidence/paseo-anneal-electron/headless-tests.log
+          if-no-files-found: error
+          retention-days: 14
+      - name: Require headless Rust tests to pass
+        if: steps.headless-tests.outputs.status != '0'
+        run: exit 1
       - name: Run strict headless Rust Clippy
+        if: steps.headless-tests.outputs.status == '0'
         run: cargo clippy --manifest-path rust-core/coding-tools-headless/Cargo.toml --all-targets --locked -- -D warnings
       - name: Enforce no-delete changes
+        if: steps.headless-tests.outputs.status == '0'
         shell: bash
         run: |
           deleted="$(git diff --diff-filter=D --name-only HEAD^ HEAD)"
