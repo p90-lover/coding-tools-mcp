@@ -80,6 +80,14 @@ function failureMessage(prefix, state) {
   return details.join("; ");
 }
 
+function packagedChildEnvironment(env) {
+  const childEnv = { ...env };
+  // Electron rejects NODE_OPTIONS preload flags in packaged applications. The build-time
+  // no-delete preload belongs to CI shell processes, not the installed app smoke process.
+  delete childEnv.NODE_OPTIONS;
+  return childEnv;
+}
+
 async function runPackagedLauncherProcess({
   command,
   args = [],
@@ -100,7 +108,7 @@ async function runPackagedLauncherProcess({
 
   const child = spawn(command, args, {
     cwd,
-    env,
+    env: packagedChildEnvironment(env),
     detached: DETACH_OWNED_CHILD,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
