@@ -1,0 +1,226 @@
+name: Apply v0.6 final package fixes
+
+on:
+  push:
+    branches:
+      - subagent/v0.6-electron-release-continuation-20260916
+    paths:
+      - .github/workflows/apply-v060-final-package-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: subagent/v0.6-electron-release-continuation-20260916
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+      - name: Apply minimal production fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          runtime = Path('desktop-electron/electron/runtime-command.cjs')
+          text = runtime.read_text(encoding='utf-8')
+          anchor = '''function embeddedRuntimeInvocation({ app, sourceRoot, args }) {
+            if (!Array.isArray(args)) throw new Error("Runtime arguments must be an array");
+            if (!app.isPackaged) return sourceRuntimeInvocation(sourceRoot, args);
+            const { runtimeRoot, executable, entrypoint } = packagedRuntimePaths(process.resourcesPath);
+            if (!fs.existsSync(executable)) throw new Error(`Embedded Bun runtime is missing: ${executable}`);
+            if (!fs.existsSync(entrypoint)) throw new Error(`Embedded runtime entrypoint is missing: ${entrypoint}`);
+            return {
+              executable,
+              args: [entrypoint, ...args],
+              cwd: runtimeRoot,
+            };
+          }
+          '''.replace('          ', '')
+          addition = anchor + '''
+          const RUNTIME_VERSION_PATTERN = /^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$/;
+
+          function outputText(value) {
+            if (typeof value === "string") return value.trim();
+            if (Buffer.isBuffer(value)) return value.toString("utf8").trim();
+            return "";
+          }
+
+          function runtimePackageVersion(runtimeRoot, fsImpl = fs) {
+            if (typeof runtimeRoot !== "string" || !path.isAbsolute(runtimeRoot)) {
+              throw new Error("Installed launcher runtime root must be an absolute path");
+            }
+            const manifestPath = path.join(runtimeRoot, "app", "package.json");
+            let manifest;
+            try {
+              manifest = JSON.parse(fsImpl.readFileSync(manifestPath, "utf8"));
+            } catch (error) {
+              throw new Error(`Installed launcher runtime package manifest is invalid: ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            if (typeof manifest?.version !== "string" || !RUNTIME_VERSION_PATTERN.test(manifest.version)) {
+              throw new Error(`Installed launcher runtime package version is invalid: ${JSON.stringify(manifest?.version)}`);
+            }
+            return manifest.version;
+          }
+
+          function validateRuntimeVersionProbe(runtimeRoot, result, fsImpl = fs) {
+            if (result?.error) throw result.error;
+            const expectedVersion = runtimePackageVersion(runtimeRoot, fsImpl);
+            const stdout = outputText(result?.stdout);
+            const stderr = outputText(result?.stderr);
+            if (result?.status !== 0 || stdout !== expectedVersion) {
+              throw new Error(`Installed launcher runtime version probe failed (status=${result?.status ?? "unknown"}, expected=${JSON.stringify(expectedVersion)}, stdout=${JSON.stringify(stdout)}, stderr=${JSON.stringify(stderr)})`);
+            }
+            return expectedVersion;
+          }
+          '''.replace('          ', '')
+          if text.count(anchor) != 1:
+              raise SystemExit(f'runtime-command anchor count={text.count(anchor)}')
+          text = text.replace(anchor, addition, 1)
+          old_exports = '''module.exports = {
+            embeddedRuntimeInvocation,
+            packagedRuntimePaths,
+            runtimeBundlePaths,
+            runtimeInvocation,
+          };
+          '''.replace('          ', '')
+          new_exports = '''module.exports = {
+            embeddedRuntimeInvocation,
+            packagedRuntimePaths,
+            runtimeBundlePaths,
+            runtimeInvocation,
+            runtimePackageVersion,
+            validateRuntimeVersionProbe,
+          };
+          '''.replace('          ', '')
+          if text.count(old_exports) != 1:
+              raise SystemExit('runtime-command export block mismatch')
+          runtime.write_text(text.replace(old_exports, new_exports, 1), encoding='utf-8')
+
+          main = Path('desktop-electron/electron/main.cjs')
+          text = main.read_text(encoding='utf-8')
+          old_import = 'const { runtimeBundlePaths } = require("./runtime-command.cjs");'
+          new_import = 'const {\n  runtimeBundlePaths,\n  validateRuntimeVersionProbe,\n} = require("./runtime-command.cjs");'
+          if text.count(old_import) != 1:
+              raise SystemExit('main runtime import mismatch')
+          text = text.replace(old_import, new_import, 1)
+          old_probe = '''    if (versionResult.error) throw versionResult.error;
+              if (versionResult.status !== 0 || versionResult.stdout.trim() !== app.getVersion()) {
+                throw new Error(
+                  `Installed launcher runtime is not executable`
+                  + ` (status=${versionResult.status ?? "unknown"}, stdout=${JSON.stringify(versionResult.stdout.trim())},`
+                  + ` stderr=${JSON.stringify(versionResult.stderr.trim())})`,
+                );
+              }
+          '''.replace('          ', '')
+          new_probe = '    validateRuntimeVersionProbe(smokeRuntimeRoot, versionResult);\n'
+          if text.count(old_probe) != 1:
+              raise SystemExit(f'main probe block count={text.count(old_probe)}')
+          main.write_text(text.replace(old_probe, new_probe, 1), encoding='utf-8')
+
+          prep = Path('desktop-electron/scripts/prepare-package-resources.cjs')
+          text = prep.read_text(encoding='utf-8')
+          old_copy = '''function copyTree(sourcePath, destinationPath) {
+            const source = path.resolve(sourcePath);
+            const destination = path.resolve(destinationPath);
+            const metadata = fs.lstatSync(source);
+            if (metadata.isSymbolicLink()) fail("PACKAGE_RESOURCE_SYMLINK_FORBIDDEN", source);
+            if (metadata.isDirectory()) {
+              fs.mkdirSync(destination, { recursive: false, mode: metadata.mode & 0o777 });
+              for (const entry of fs.readdirSync(source, { withFileTypes: true }).sort((a, b) => compareText(a.name, b.name))) {
+                copyTree(path.join(source, entry.name), path.join(destination, entry.name));
+              }
+              return;
+            }
+            if (!metadata.isFile()) fail("PACKAGE_RESOURCE_ENTRY_UNSUPPORTED", source);
+            fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+            fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+            fs.chmodSync(destination, metadata.mode & 0o777);
+          }
+          '''.replace('          ', '')
+          new_copy = '''function pathInside(root, candidate) {
+            const relative = path.relative(path.resolve(root), path.resolve(candidate));
+            return relative === "" || (
+              relative !== ".."
+              && !relative.startsWith(`..${path.sep}`)
+              && !path.isAbsolute(relative)
+            );
+          }
+
+          function copyTree(sourcePath, destinationPath, sourceRoot = sourcePath) {
+            const source = path.resolve(sourcePath);
+            const destination = path.resolve(destinationPath);
+            const canonicalRoot = fs.realpathSync(path.resolve(sourceRoot));
+            const metadata = fs.lstatSync(source);
+            if (metadata.isSymbolicLink()) {
+              let target;
+              try {
+                target = fs.realpathSync(source);
+              } catch {
+                fail("PACKAGE_RESOURCE_SYMLINK_FORBIDDEN", source);
+              }
+              if (!pathInside(canonicalRoot, target)) fail("PACKAGE_RESOURCE_SYMLINK_FORBIDDEN", source);
+              const targetMetadata = fs.statSync(target);
+              if (!targetMetadata.isFile()) fail("PACKAGE_RESOURCE_SYMLINK_FORBIDDEN", source);
+              fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+              fs.copyFileSync(target, destination, fs.constants.COPYFILE_EXCL);
+              fs.chmodSync(destination, targetMetadata.mode & 0o777);
+              return;
+            }
+            if (metadata.isDirectory()) {
+              fs.mkdirSync(destination, { recursive: false, mode: metadata.mode & 0o777 });
+              for (const entry of fs.readdirSync(source, { withFileTypes: true }).sort((a, b) => compareText(a.name, b.name))) {
+                copyTree(path.join(source, entry.name), path.join(destination, entry.name), canonicalRoot);
+              }
+              return;
+            }
+            if (!metadata.isFile()) fail("PACKAGE_RESOURCE_ENTRY_UNSUPPORTED", source);
+            fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+            fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+            fs.chmodSync(destination, metadata.mode & 0o777);
+          }
+          '''.replace('          ', '')
+          if text.count(old_copy) != 1:
+              raise SystemExit('prepare-package-resources copyTree block mismatch')
+          text = text.replace(old_copy, new_copy, 1)
+          old_export = '  componentPaths,\n  createRetentionSession,\n'
+          new_export = '  componentPaths,\n  copyTree,\n  createRetentionSession,\n'
+          if text.count(old_export) != 1:
+              raise SystemExit('prepare-package-resources export block mismatch')
+          prep.write_text(text.replace(old_export, new_export, 1), encoding='utf-8')
+          PY
+      - name: Verify GREEN contracts and preservation
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/runtime-command.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/scripts/prepare-package-resources.cjs
+          node --test \
+            desktop-electron/tests/runtime-version-probe.test.cjs \
+            desktop-electron/tests/package-resource-symlink.test.cjs
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+      - name: Commit verified production fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/runtime-command.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/scripts/prepare-package-resources.cjs
+          git diff --cached --check
+          git commit -m 'fix(v0.6): finish native package and smoke contracts'
+          git push origin HEAD:subagent/v0.6-electron-release-continuation-20260916
