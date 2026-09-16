@@ -8,6 +8,7 @@ on:
       - src-tauri/src/auth/**
       - src-tauri/src/mcp/listener.rs
       - src-tauri/src/mcp/transport.rs
+      - aiTemp/connection-tests/http.rs
       - aiTemp/oauth-issuer/**
       - aiTemp/oauth-prm/**
       - tests/v0.7-rc2-oauth-compatibility-contract.test.mjs
@@ -19,6 +20,7 @@ on:
       - src-tauri/src/auth/**
       - src-tauri/src/mcp/listener.rs
       - src-tauri/src/mcp/transport.rs
+      - aiTemp/connection-tests/http.rs
       - aiTemp/oauth-issuer/**
       - aiTemp/oauth-prm/**
       - tests/v0.7-rc2-oauth-compatibility-contract.test.mjs
@@ -82,7 +84,8 @@ jobs:
             src-tauri/src/auth/oauth_authorization_response.rs \
             src-tauri/src/auth/oauth_resource_metadata.rs \
             src-tauri/src/mcp/listener.rs \
-            src-tauri/src/mcp/transport.rs
+            src-tauri/src/mcp/transport.rs \
+            aiTemp/connection-tests/http.rs
 
       - name: Run focused and complete locked Rust tests
         run: |
