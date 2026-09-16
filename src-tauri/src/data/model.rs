@@ -23,6 +23,14 @@ pub struct AppData {
     #[serde(default)]
     pub control_board: crate::integrations::board::Board,
     #[serde(default)]
+    pub provider_registry_revision: u64,
+    #[serde(default)]
+    pub provider_profiles: Vec<crate::providers::ProviderProfile>,
+    #[serde(default)]
+    pub orchestrator_registry_revision: u64,
+    #[serde(default)]
+    pub orchestrator_profiles: Vec<crate::orchestrators::OrchestratorProfile>,
+    #[serde(default)]
     pub sandbox_permissions: Vec<crate::tools::native_sandbox::SandboxGrant>,
     #[serde(default)]
     pub computer_permissions: Vec<crate::tools::computer::permissions::SavedPermission>,

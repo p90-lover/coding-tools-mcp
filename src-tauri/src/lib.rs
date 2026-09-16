@@ -2,6 +2,9 @@
 
 mod codex_bridge;
 pub mod integrations;
+pub mod orchestrator_run;
+pub mod orchestrators;
+pub mod providers;
 
 mod actions;
 mod app_state;
@@ -34,7 +37,10 @@ use commands::{
     get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret,
     get_tunnel_connection_status, get_webview_memory_sample, get_workspace_secret, hide_to_tray,
     install_software, integration_read, list_frp_profiles, list_linked_projects, list_software,
-    list_workspaces, open_url, open_workspace_directory, provider_config_preview,
+    list_workspaces, open_url, open_workspace_directory, orchestrator_profile_archive,
+    orchestrator_profile_run, orchestrator_profile_save, orchestrator_profiles_read,
+    provider_config_preview, provider_profile_archive, provider_profile_connect,
+    provider_profile_disable, provider_profile_probe, provider_profile_save, provider_profiles_read,
     quick_add_linked_project, quit_app, read_workspace_logs, recreate_ui_webview,
     regenerate_shared_secret, regenerate_workspace_secret, restart_actions_runtime,
     restart_runtime, restart_tunnel, run_health_checks, sandbox_local_disable,
@@ -197,6 +203,16 @@ pub fn run() {
             execution_local_read,
             execution_local_provider,
             execution_local_update,
+            provider_profiles_read,
+            provider_profile_save,
+            provider_profile_connect,
+            provider_profile_disable,
+            provider_profile_archive,
+            provider_profile_probe,
+            orchestrator_profiles_read,
+            orchestrator_profile_save,
+            orchestrator_profile_archive,
+            orchestrator_profile_run,
             sandbox_local_prepare,
             sandbox_local_status,
             sandbox_local_disable,
