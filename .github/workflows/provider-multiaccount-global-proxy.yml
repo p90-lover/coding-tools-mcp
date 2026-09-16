@@ -1,6 +1,6 @@
 name: Provider Hub multi-account and global proxy
 
-# Exact-head validation after deterministic type narrowing and concurrent GUI composition.
+# Permanent exact-head gate for Provider Hub accounts, proxy routing, typed IPC, and renderer delivery.
 on:
   push:
     branches:
