@@ -353,34 +353,6 @@ export interface LauncherApi {
     mode: ProxyPolicyMode;
     profileId?: string;
   }): Promise<ProviderNetworkSnapshot>;
-  providerSnapshot(): Promise<ProviderNetworkSnapshot>;
-  saveProviderAccount(input: ProviderAccountInput): Promise<ProviderNetworkSnapshot>;
-  setDefaultProviderAccount(providerId: string, accountId: string): Promise<ProviderNetworkSnapshot>;
-  setProviderAccountEnabled(accountId: string, enabled: boolean): Promise<ProviderNetworkSnapshot>;
-  archiveProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
-  beginProviderLogin(accountId: string): Promise<{ opened: boolean; mode: "embedded" | "external" }>;
-  saveProxyProfile(input: ProxyProfileInput): Promise<ProviderNetworkSnapshot>;
-  archiveProxyProfile(profileId: string): Promise<ProviderNetworkSnapshot>;
-  testProxyProfile(profileId: string): Promise<{
-    reachable: boolean;
-    latencyMs?: number;
-    error?: string;
-    snapshot: ProviderNetworkSnapshot;
-  }>;
-  setGlobalProxyRouting(input: {
-    enabled: boolean;
-    profileId?: string | null;
-  }): Promise<ProviderNetworkSnapshot>;
-  setProviderProxyPolicy(input: {
-    providerId: string;
-    mode: ProxyPolicyMode;
-    profileId?: string;
-  }): Promise<ProviderNetworkSnapshot>;
-  setAccountProxyPolicy(input: {
-    accountId: string;
-    mode: ProxyPolicyMode;
-    profileId?: string;
-  }): Promise<ProviderNetworkSnapshot>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
   installUpdate(): Promise<boolean>;
