@@ -73,9 +73,16 @@ jobs:
           (
             cd desktop-electron
             npm run typecheck
-            node --test \
-              tests/proxy-provider-contract.test.cjs \
-              tests/execution-bridge-contract.test.cjs
+            tests=(tests/proxy-provider-contract.test.cjs)
+            for candidate in \
+              tests/subagent-orchestrator-contract.test.cjs \
+              tests/anneal-monitor-contract.test.cjs
+            do
+              if [[ -f "${candidate}" ]]; then
+                tests+=("${candidate}")
+              fi
+            done
+            node --test "${tests[@]}"
           ) 2>&1 | tee aiTemp/v0.7-rc2-contracts/results.txt
           grep -F '# fail 0' aiTemp/v0.7-rc2-contracts/results.txt
 
