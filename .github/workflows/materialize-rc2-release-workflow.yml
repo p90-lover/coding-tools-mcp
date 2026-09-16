@@ -67,13 +67,14 @@ jobs:
       - name: Commit verified rc.2 release workflow
         run: |
           set -euo pipefail
-          if git diff --quiet -- .github/workflows/codex-router-multiprovider-release-rc2.yml; then
+          target='.github/workflows/codex-router-multiprovider-release-rc2.yml'
+          if [ -z "$(git status --porcelain --untracked-files=all -- "$target")" ]; then
             echo 'The rc.2 release workflow is already current.'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/workflows/codex-router-multiprovider-release-rc2.yml
+          git add "$target"
           git diff --cached --check
           git commit -m 'release(rc2): materialize exact Windows prerelease workflow'
           git push origin "HEAD:${{ github.ref_name }}"
