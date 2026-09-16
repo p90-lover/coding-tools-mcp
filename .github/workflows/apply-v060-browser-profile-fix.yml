@@ -1,0 +1,125 @@
+name: Apply v0.6 browser profile fix
+
+on:
+  push:
+    branches:
+      - subagent/v0.6-electron-release-continuation-20260916
+    paths:
+      - .github/workflows/apply-v060-browser-profile-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: subagent/v0.6-electron-release-continuation-20260916
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+      - name: Apply canonical launcher partition contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          profile = Path('desktop-electron/electron/profile.cjs')
+          profile_text = profile.read_text(encoding='utf-8')
+          profile_replacements = [
+              (
+                  'const DEVELOPMENT_PROFILE = "development";\n',
+                  'const DEVELOPMENT_PROFILE = "development";\n\n'
+                  'function browserPartitionForLauncherProfile(profile) {\n'
+                  '  if (profile === PRODUCTION_PROFILE) return "persist:coding-tools-chatgpt";\n'
+                  '  if (profile === DEVELOPMENT_PROFILE) return "persist:coding-tools-dev-chatgpt";\n'
+                  '  throw new Error("Launcher profile is invalid");\n'
+                  '}\n',
+              ),
+              (
+                  '      browserPartition: "persist:coding-tools-chatgpt",\n',
+                  '      browserPartition: browserPartitionForLauncherProfile(PRODUCTION_PROFILE),\n',
+              ),
+              (
+                  '    browserPartition: "persist:coding-tools-dev-chatgpt",\n',
+                  '    browserPartition: browserPartitionForLauncherProfile(DEVELOPMENT_PROFILE),\n',
+              ),
+              (
+                  '  PRODUCTION_PROFILE,\n  resolveLauncherProfile,\n',
+                  '  PRODUCTION_PROFILE,\n  browserPartitionForLauncherProfile,\n  resolveLauncherProfile,\n',
+              ),
+          ]
+          for old, new in profile_replacements:
+              count = profile_text.count(old)
+              if count != 1:
+                  raise SystemExit(f'profile patch expected exactly one match, found {count}: {old!r}')
+              profile_text = profile_text.replace(old, new, 1)
+          profile.write_text(profile_text, encoding='utf-8')
+
+          host = Path('desktop-electron/electron/browser-host.cjs')
+          host_text = host.read_text(encoding='utf-8')
+          host_replacements = [
+              (
+                  'const { processRunning } = require("./process-tree.cjs");\n',
+                  'const { processRunning } = require("./process-tree.cjs");\n'
+                  'const { browserPartitionForLauncherProfile } = require("./profile.cjs");\n',
+              ),
+              (
+                  '    partition = "persist:codex-web-gpt-chatgpt",\n',
+                  '    partition,\n',
+              ),
+              (
+                  '    if (profile !== "production" && profile !== "development") {\n'
+                  '      throw new Error("Browser host profile is invalid");\n'
+                  '    }\n'
+                  '    const expectedPartition = profile === "development"\n'
+                  '      ? "persist:codex-web-gpt-dev-chatgpt"\n'
+                  '      : "persist:codex-web-gpt-chatgpt";\n'
+                  '    if (partition !== expectedPartition) throw new Error("Browser host partition does not match its profile");\n'
+                  '    this.partition = partition;\n',
+                  '    const expectedPartition = browserPartitionForLauncherProfile(profile);\n'
+                  '    const resolvedPartition = partition ?? expectedPartition;\n'
+                  '    if (resolvedPartition !== expectedPartition) {\n'
+                  '      throw new Error("Browser host partition does not match its profile");\n'
+                  '    }\n'
+                  '    this.partition = resolvedPartition;\n',
+              ),
+          ]
+          for old, new in host_replacements:
+              count = host_text.count(old)
+              if count != 1:
+                  raise SystemExit(f'browser-host patch expected exactly one match, found {count}: {old!r}')
+              host_text = host_text.replace(old, new, 1)
+          if 'persist:codex-web-gpt-chatgpt' in host_text or 'persist:codex-web-gpt-dev-chatgpt' in host_text:
+              raise SystemExit('stale codex-web-gpt browser partition remains in BrowserHost')
+          host.write_text(host_text, encoding='utf-8')
+          PY
+      - name: Verify RED case is now GREEN
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/profile.cjs
+          node --check desktop-electron/electron/browser-host.cjs
+          node --test desktop-electron/tests/profile.test.cjs
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          grep -F 'browserPartitionForLauncherProfile(profile)' desktop-electron/electron/browser-host.cjs
+          grep -F 'persist:coding-tools-chatgpt' desktop-electron/electron/profile.cjs
+      - name: Commit verified source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add desktop-electron/electron/profile.cjs desktop-electron/electron/browser-host.cjs
+          git diff --cached --check
+          git commit -m 'fix(v0.6): align browser host partition with launcher profile'
+          git push origin HEAD:subagent/v0.6-electron-release-continuation-20260916
