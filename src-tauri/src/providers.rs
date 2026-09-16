@@ -244,6 +244,7 @@ fn normalize_models_endpoint(value: Option<String>) -> AppResult<Option<String>>
         return Ok(None);
     }
     if value.len() > 256
+        || value == "/"
         || !value.starts_with('/')
         || value.contains("..")
         || value.contains('?')
@@ -265,9 +266,7 @@ fn normalize_models(models: Vec<String>) -> AppResult<Vec<String>> {
     for model in models {
         let model = model.trim();
         bounded(model, 256, "provider model", true)?;
-        if !seen.insert(model.to_string()) {
-            continue;
-        }
+        seen.insert(model.to_string());
     }
     Ok(seen.into_iter().collect())
 }
@@ -343,17 +342,14 @@ fn template(
 }
 
 pub fn builtin_templates() -> Vec<ProviderProfile> {
-    use ProviderAuth::*;
-    use ProviderCapability::*;
-    use ProviderCategory::*;
-    use ProviderProtocol::*;
+    use ProviderCapability::{ImageGeneration, Reasoning, Text, Tools, Vision};
     vec![
         template(
             "openai-api",
             "OpenAI API",
-            ApiKey,
-            ApiKey,
-            OpenAiResponses,
+            ProviderCategory::ApiKey,
+            ProviderAuth::ApiKey,
+            ProviderProtocol::OpenAiResponses,
             Some("https://api.openai.com/v1"),
             Some("/models"),
             &[Text, Reasoning, Tools, Vision, ImageGeneration],
@@ -362,9 +358,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "anthropic-api",
             "Anthropic API",
-            ApiKey,
-            ApiKey,
-            AnthropicMessages,
+            ProviderCategory::ApiKey,
+            ProviderAuth::ApiKey,
+            ProviderProtocol::AnthropicMessages,
             Some("https://api.anthropic.com/v1"),
             Some("/models"),
             &[Text, Reasoning, Tools, Vision],
@@ -373,9 +369,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "gemini-api",
             "Gemini API",
-            ApiKey,
-            ApiKey,
-            GeminiNative,
+            ProviderCategory::ApiKey,
+            ProviderAuth::ApiKey,
+            ProviderProtocol::GeminiNative,
             Some("https://generativelanguage.googleapis.com/v1beta"),
             Some("/models"),
             &[Text, Reasoning, Tools, Vision, ImageGeneration],
@@ -384,9 +380,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "codex-oauth",
             "Codex OAuth",
-            OAuth,
-            OAuth,
-            OpenAiResponses,
+            ProviderCategory::OAuth,
+            ProviderAuth::OAuth,
+            ProviderProtocol::OpenAiResponses,
             None,
             None,
             &[Text, Reasoning, Tools, Vision],
@@ -395,9 +391,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "claude-oauth",
             "Claude OAuth",
-            OAuth,
-            OAuth,
-            AnthropicMessages,
+            ProviderCategory::OAuth,
+            ProviderAuth::OAuth,
+            ProviderProtocol::AnthropicMessages,
             None,
             None,
             &[Text, Reasoning, Tools, Vision],
@@ -406,9 +402,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "chatgpt-web",
             "ChatGPT Web GPT",
-            Browser,
-            BrowserSession,
-            OpenAiResponses,
+            ProviderCategory::Browser,
+            ProviderAuth::BrowserSession,
+            ProviderProtocol::OpenAiResponses,
             None,
             None,
             &[Text, Reasoning, Tools, Vision, ImageGeneration],
@@ -417,9 +413,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "ai-studio-browser",
             "AI Studio Browser Session",
-            Browser,
-            BrowserSession,
-            GeminiNative,
+            ProviderCategory::Browser,
+            ProviderAuth::BrowserSession,
+            ProviderProtocol::GeminiNative,
             None,
             None,
             &[Text, Reasoning, Tools, Vision, ImageGeneration],
@@ -428,9 +424,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "ai-studio-reverse-proxy",
             "AI Studio Reverse Proxy",
-            ReverseProxy,
-            BrowserSession,
-            GeminiNative,
+            ProviderCategory::ReverseProxy,
+            ProviderAuth::BrowserSession,
+            ProviderProtocol::GeminiNative,
             None,
             Some("/models"),
             &[Text, Reasoning, Tools, Vision, ImageGeneration],
@@ -439,9 +435,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "gemini-reverse-proxy",
             "Gemini Reverse Proxy",
-            ReverseProxy,
-            LocalProxy,
-            GeminiNative,
+            ProviderCategory::ReverseProxy,
+            ProviderAuth::LocalProxy,
+            ProviderProtocol::GeminiNative,
             None,
             Some("/models"),
             &[Text, Reasoning, Tools, Vision, ImageGeneration],
@@ -450,9 +446,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "aistudio-to-api",
             "AIStudioToAPI",
-            ReverseProxy,
-            LocalProxy,
-            OpenAiChat,
+            ProviderCategory::ReverseProxy,
+            ProviderAuth::LocalProxy,
+            ProviderProtocol::OpenAiChat,
             Some("http://127.0.0.1:7860/v1"),
             Some("/models"),
             &[Text, Reasoning, Tools, Vision, ImageGeneration],
@@ -461,9 +457,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "cliproxyapi-antigravity",
             "CLIProxyAPI / Antigravity",
-            ReverseProxy,
-            LocalProxy,
-            OpenAiResponses,
+            ProviderCategory::ReverseProxy,
+            ProviderAuth::LocalProxy,
+            ProviderProtocol::OpenAiResponses,
             None,
             Some("/models"),
             &[Text, Reasoning, Tools, Vision, ImageGeneration],
@@ -472,9 +468,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "commandcode-proxy",
             "CommandCode Proxy",
-            ReverseProxy,
-            LocalProxy,
-            OpenAiChat,
+            ProviderCategory::ReverseProxy,
+            ProviderAuth::LocalProxy,
+            ProviderProtocol::OpenAiChat,
             Some("http://127.0.0.1:3050/v1"),
             Some("/models"),
             &[Text, Reasoning, Tools],
@@ -483,9 +479,9 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         template(
             "custom-compatible",
             "Custom compatible provider",
-            Custom,
-            ApiKey,
-            OpenAiResponses,
+            ProviderCategory::Custom,
+            ProviderAuth::ApiKey,
+            ProviderProtocol::OpenAiResponses,
             None,
             Some("/models"),
             &[Text],
@@ -564,7 +560,7 @@ pub fn save(
     }) {
         return Err(fail("Provider credential is invalid"));
     }
-    let mut saved = DataStore::update_file(|data| {
+    let saved = DataStore::update_file(|data| {
         if data.provider_registry_revision != expected_revision {
             return Err(fail("Provider registry changed; refresh before saving"));
         }
@@ -577,7 +573,7 @@ pub fn save(
             .iter()
             .find(|profile| profile.id == id)
             .cloned();
-        let mut profile = ProviderProfile {
+        let profile = ProviderProfile {
             id: id.clone(),
             name: input.name.trim().to_string(),
             template_id: input.template_id.trim().to_string(),
@@ -602,13 +598,6 @@ pub fn save(
             updated_at: now(),
         };
         profile.validate()?;
-        if profile.image_enabled
-            && !profile
-                .capabilities
-                .contains(&ProviderCapability::ImageGeneration)
-        {
-            profile.image_enabled = false;
-        }
         if let Some(index) = data
             .provider_profiles
             .iter()
@@ -642,7 +631,6 @@ pub fn save(
                 },
             );
     }
-    saved.updated_at = now();
     read()
 }
 
@@ -771,33 +759,35 @@ fn request_headers(profile: &ProviderProfile, credential: &str) -> AppResult<Hea
 
 fn model_ids(value: &Value) -> Vec<String> {
     let mut ids = BTreeSet::new();
-    let mut collect = |candidate: &Value| {
-        let id = candidate
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| candidate.get("id").and_then(Value::as_str).map(str::to_owned))
-            .or_else(|| candidate.get("name").and_then(Value::as_str).map(str::to_owned))
-            .or_else(|| candidate.get("model").and_then(Value::as_str).map(str::to_owned));
-        if let Some(id) = id {
-            let id = id.trim().trim_start_matches("models/");
-            if !id.is_empty() && id.len() <= 256 {
-                ids.insert(id.to_string());
+    {
+        let mut collect = |candidate: &Value| {
+            let id = candidate
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| candidate.get("id").and_then(Value::as_str).map(str::to_owned))
+                .or_else(|| candidate.get("name").and_then(Value::as_str).map(str::to_owned))
+                .or_else(|| candidate.get("model").and_then(Value::as_str).map(str::to_owned));
+            if let Some(id) = id {
+                let id = id.trim().trim_start_matches("models/");
+                if !id.is_empty() && id.len() <= 256 {
+                    ids.insert(id.to_string());
+                }
+            }
+        };
+        if let Some(data) = value.get("data").and_then(Value::as_array) {
+            for candidate in data {
+                collect(candidate);
             }
         }
-    };
-    if let Some(data) = value.get("data").and_then(Value::as_array) {
-        for candidate in data {
-            collect(candidate);
+        if let Some(models) = value.get("models").and_then(Value::as_array) {
+            for candidate in models {
+                collect(candidate);
+            }
         }
-    }
-    if let Some(models) = value.get("models").and_then(Value::as_array) {
-        for candidate in models {
-            collect(candidate);
-        }
-    }
-    if let Some(array) = value.as_array() {
-        for candidate in array {
-            collect(candidate);
+        if let Some(array) = value.as_array() {
+            for candidate in array {
+                collect(candidate);
+            }
         }
     }
     ids.into_iter().take(512).collect()
