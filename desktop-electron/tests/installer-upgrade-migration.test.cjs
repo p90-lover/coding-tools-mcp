@@ -28,6 +28,18 @@ test("rc.5 keeps the stable Electron installer identity and enables the NSIS mig
   assert.equal(manifest.build.nsis.deleteAppDataOnUninstall, false);
 });
 
+test("migration code is excluded from electron-builder's BUILD_UNINSTALLER pass", () => {
+  const source = readInstallerInclude();
+  const guardStart = source.indexOf("!ifndef BUILD_UNINSTALLER");
+  const firstVariable = source.indexOf("Var LegacyDisplayName");
+  const customInit = source.indexOf("!macro customInit");
+  const guardEnd = source.lastIndexOf("!endif");
+  assert.ok(guardStart >= 0, "missing BUILD_UNINSTALLER exclusion guard");
+  assert.ok(firstVariable > guardStart, "legacy variables must be inside the installer-only guard");
+  assert.ok(customInit > firstVariable, "customInit must remain inside the installer-only guard");
+  assert.ok(guardEnd > customInit, "installer-only guard must close after customInit");
+});
+
 test("the installer detects the exact legacy Tauri uninstall identity in every registry view", () => {
   const source = readInstallerInclude();
   assert.match(
