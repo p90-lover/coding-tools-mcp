@@ -46,6 +46,9 @@ concurrency:
   group: v0.7-rc2-tauri-provider-orchestrator-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   contract:
     name: Native provider and orchestrator source contract
@@ -77,7 +80,135 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: v0.7-rc2-tauri-provider-orchestrator-${{ github.sha }}
+          name: v0.7-rc2-tauri-provider-orchestrator-contract-${{ github.sha }}
+          path: aiTemp/v0.7-rc2-tauri-provider-orchestrator/
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend:
+    name: Svelte checks and production build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Run Svelte type and accessibility checks
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/v0.7-rc2-tauri-provider-orchestrator
+          npm run check 2>&1 | tee aiTemp/v0.7-rc2-tauri-provider-orchestrator/frontend-check.txt
+
+      - name: Build the provider and orchestrator routes
+        run: |
+          set -euo pipefail
+          npm run build 2>&1 | tee aiTemp/v0.7-rc2-tauri-provider-orchestrator/frontend-build.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: v0.7-rc2-tauri-provider-orchestrator-frontend-${{ github.sha }}
+          path: aiTemp/v0.7-rc2-tauri-provider-orchestrator/
+          if-no-files-found: error
+          retention-days: 14
+
+  rust:
+    name: Locked native compile and focused tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-tauri-provider-orchestrator
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libpipewire-0.3-dev \
+            libgbm-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+
+      - name: Check formatting for touched Rust files
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2021 --check --config skip_children=true \
+            src-tauri/src/providers.rs \
+            src-tauri/src/orchestrators.rs \
+            src-tauri/src/orchestrator_run.rs \
+            src-tauri/src/commands/providers.rs \
+            src-tauri/src/commands/orchestrators.rs \
+            src-tauri/src/commands/mod.rs \
+            src-tauri/src/data/model.rs \
+            src-tauri/src/lib.rs
+
+      - name: Compile the native provider and orchestrator runtime
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          mkdir -p ../aiTemp/v0.7-rc2-tauri-provider-orchestrator
+          cargo check --locked 2>&1 | tee ../aiTemp/v0.7-rc2-tauri-provider-orchestrator/cargo-check.txt
+
+      - name: Run focused provider and orchestrator contracts
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          cargo test --locked providers::tests \
+            2>&1 | tee ../aiTemp/v0.7-rc2-tauri-provider-orchestrator/provider-tests.txt
+          cargo test --locked orchestrators::tests \
+            2>&1 | tee ../aiTemp/v0.7-rc2-tauri-provider-orchestrator/orchestrator-tests.txt
+          cargo test --locked orchestrator_run::tests \
+            2>&1 | tee ../aiTemp/v0.7-rc2-tauri-provider-orchestrator/orchestrator-run-tests.txt
+
+      - name: Run strict library Clippy
+        working-directory: src-tauri
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --lib -- -D warnings \
+            2>&1 | tee ../aiTemp/v0.7-rc2-tauri-provider-orchestrator/clippy.txt
+
+      - name: Enforce no-delete integration diff
+        run: |
+          set -euo pipefail
+          git fetch origin integration/v0.7.0-rc.2-all-project-work --no-tags
+          git diff --check origin/integration/v0.7.0-rc.2-all-project-work...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.2-all-project-work...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: v0.7-rc2-tauri-provider-orchestrator-rust-${{ github.sha }}
           path: aiTemp/v0.7-rc2-tauri-provider-orchestrator/
           if-no-files-found: error
           retention-days: 14
