@@ -53,9 +53,56 @@ function embeddedRuntimeInvocation({ app, sourceRoot, args }) {
   };
 }
 
+const RUNTIME_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+function outputText(value) {
+  if (typeof value === "string") return value.trim();
+  if (Buffer.isBuffer(value)) return value.toString("utf8").trim();
+  return "";
+}
+
+function runtimePackageVersion(runtimeRoot, fsImpl = fs) {
+  if (typeof runtimeRoot !== "string" || !path.isAbsolute(runtimeRoot)) {
+    throw new Error("Installed launcher runtime root must be an absolute path");
+  }
+  const manifestPath = path.join(runtimeRoot, "app", "package.json");
+  let manifest;
+  try {
+    manifest = JSON.parse(fsImpl.readFileSync(manifestPath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Installed launcher runtime package manifest is invalid: ${manifestPath}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (typeof manifest?.version !== "string" || !RUNTIME_VERSION_PATTERN.test(manifest.version)) {
+    throw new Error(
+      `Installed launcher runtime package version is invalid: ${JSON.stringify(manifest?.version)}`,
+    );
+  }
+  return manifest.version;
+}
+
+function validateRuntimeVersionProbe(runtimeRoot, result, fsImpl = fs) {
+  if (result?.error) throw result.error;
+  const expectedVersion = runtimePackageVersion(runtimeRoot, fsImpl);
+  const stdout = outputText(result?.stdout);
+  const stderr = outputText(result?.stderr);
+  if (result?.status !== 0 || stdout !== expectedVersion) {
+    throw new Error(
+      `Installed launcher runtime version probe failed`
+      + ` (status=${result?.status ?? "unknown"}, expected=${JSON.stringify(expectedVersion)},`
+      + ` stdout=${JSON.stringify(stdout)}, stderr=${JSON.stringify(stderr)})`,
+    );
+  }
+  return expectedVersion;
+}
+
 module.exports = {
   embeddedRuntimeInvocation,
   packagedRuntimePaths,
   runtimeBundlePaths,
   runtimeInvocation,
+  runtimePackageVersion,
+  validateRuntimeVersionProbe,
 };

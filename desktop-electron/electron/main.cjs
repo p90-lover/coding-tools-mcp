@@ -29,7 +29,10 @@ const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runti
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
-const { runtimeBundlePaths } = require("./runtime-command.cjs");
+const {
+  runtimeBundlePaths,
+  validateRuntimeVersionProbe,
+} = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
 const {
   createStateStore,
@@ -1062,14 +1065,7 @@ async function start() {
       timeout: 30_000,
       windowsHide: true,
     });
-    if (versionResult.error) throw versionResult.error;
-    if (versionResult.status !== 0 || versionResult.stdout.trim() !== app.getVersion()) {
-      throw new Error(
-        `Installed launcher runtime is not executable`
-        + ` (status=${versionResult.status ?? "unknown"}, stdout=${JSON.stringify(versionResult.stdout.trim())},`
-        + ` stderr=${JSON.stringify(versionResult.stderr.trim())})`,
-      );
-    }
+    validateRuntimeVersionProbe(smokeRuntimeRoot, versionResult);
     const markerPath = process.env.CODEX_WEB_GPT_SMOKE_FILE?.trim();
     if (!markerPath || !path.isAbsolute(markerPath)) {
       throw new Error("Packaged launcher smoke test requires an absolute CODEX_WEB_GPT_SMOKE_FILE");
