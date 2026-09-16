@@ -104,15 +104,21 @@ class HeadlessHost {
     this.stopping = false;
   }
 
-  binaryPath() {
+  binaryCandidates() {
     const suffix = process.platform === "win32" ? ".exe" : "";
     const name = `coding-tools-headless${suffix}`;
-    const candidates = [
+    return [
       process.env.CODING_TOOLS_HEADLESS_BINARY,
       this.app.isPackaged ? path.join(process.resourcesPath, "coding-tools", name) : null,
+      path.join(this.sourceRoot, "rust-core", "coding-tools-headless", "target", "debug", name),
+      path.join(this.sourceRoot, "rust-core", "coding-tools-headless", "target", "release", name),
       path.join(this.sourceRoot, "rust-core", "target", "debug", name),
       path.join(this.sourceRoot, "rust-core", "target", "release", name),
     ].filter(Boolean);
+  }
+
+  binaryPath() {
+    const candidates = this.binaryCandidates();
     for (const candidate of candidates) {
       try {
         regularFile(candidate, "Headless executable");

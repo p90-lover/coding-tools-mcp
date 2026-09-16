@@ -46,3 +46,36 @@ test("provider credentials are request-only and rejected from renderer responses
   assert.match(schema, /SENSITIVE_RESPONSE_KEYS[\s\S]*[\"']credential[\"']/);
   assert.match(schema, /rejectSensitiveKeys:\s*true/);
 });
+
+test("development binary discovery includes Cargo package-local targets", () => {
+  const { HeadlessHost } = require(path.join(
+    repositoryRoot,
+    "desktop-electron/electron/headless-host.cjs",
+  ));
+  const sourceRoot = path.join(repositoryRoot, "source-fixture");
+  const host = new HeadlessHost({
+    app: { isPackaged: false },
+    logger: {},
+    sourceRoot,
+  });
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const executable = `coding-tools-headless${suffix}`;
+  const candidates = host.binaryCandidates();
+
+  assert.ok(candidates.includes(path.join(
+    sourceRoot,
+    "rust-core",
+    "coding-tools-headless",
+    "target",
+    "debug",
+    executable,
+  )));
+  assert.ok(candidates.includes(path.join(
+    sourceRoot,
+    "rust-core",
+    "coding-tools-headless",
+    "target",
+    "release",
+    executable,
+  )));
+});
