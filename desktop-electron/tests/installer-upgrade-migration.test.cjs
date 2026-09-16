@@ -41,12 +41,15 @@ test("the installer detects the exact legacy Tauri uninstall identity in every r
   assert.match(source, /DisplayName/);
   assert.match(source, /Coding Tools MCP/);
   assert.match(source, /UninstallString/);
+  assert.match(source, /InstallLocation/);
 });
 
-test("legacy removal is synchronous, fail-closed, and preserves application data", () => {
+test("legacy removal is silent, bounded, fail-closed, and preserves application data", () => {
   const source = readInstallerInclude();
   assert.match(source, /!macro customInit/);
   assert.match(source, /ExecWait[^\n]*\/S/);
+  assert.match(source, /Sleep 500/);
+  assert.match(source, /LegacyWaitCount >= 60/);
   assert.match(source, /legacy uninstall failed/i);
   assert.match(source, /Abort/);
   assert.match(source, /ReadRegStr[^\n]*UninstallString/);
