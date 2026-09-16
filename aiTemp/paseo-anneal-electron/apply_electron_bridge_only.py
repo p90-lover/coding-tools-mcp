@@ -91,7 +91,7 @@ test("development binary discovery includes Cargo package-local targets", () => 
   )));
 });
 '''
-    path.write_text(text.rstrip() + addition + "\n", encoding="utf-8")
+    path.write_text(text.rstrip() + addition.rstrip() + "\n", encoding="utf-8")
 
 
 def bridge_contract_present() -> bool:
