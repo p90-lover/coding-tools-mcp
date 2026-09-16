@@ -4,19 +4,30 @@ on:
   push:
     branches:
       - feature/0.7-paseo-anneal-electron
+      - feature/v0.7-subagent-orchestrator
+      - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
     paths:
       - rust-core/coding-tools-headless/src/lib.rs
       - desktop-electron/electron/**
       - desktop-electron/src/api/**
+      - desktop-electron/src/agents/**
+      - desktop-electron/src/anneal/**
+      - desktop-electron/src/orchestrator/**
+      - desktop-electron/src/paseo/**
       - desktop-electron/tests/execution-bridge-contract.test.cjs
       - .github/workflows/paseo-anneal-electron-contract.yml
   pull_request:
     branches:
       - release/codex-router-multiprovider-0.7.0-rc.1
+      - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
     paths:
       - rust-core/coding-tools-headless/src/lib.rs
       - desktop-electron/electron/**
       - desktop-electron/src/api/**
+      - desktop-electron/src/agents/**
+      - desktop-electron/src/anneal/**
+      - desktop-electron/src/orchestrator/**
+      - desktop-electron/src/paseo/**
       - desktop-electron/tests/execution-bridge-contract.test.cjs
       - .github/workflows/paseo-anneal-electron-contract.yml
   workflow_dispatch:
