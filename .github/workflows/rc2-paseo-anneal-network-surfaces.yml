@@ -1,5 +1,6 @@
 name: RC2 Paseo Anneal Network Surfaces
 
+# Revalidate the exact user-authored head after the apply workflow commits App/types wiring.
 on:
   push:
     branches:
