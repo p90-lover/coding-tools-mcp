@@ -52,6 +52,22 @@ jobs:
           grep -F '  cancel-in-progress: true' .github/workflows/codex-router-multiprovider-release-rc3.yml
           test "$(grep -c '  cancel-in-progress: true' .github/workflows/codex-router-multiprovider-release-rc3.yml)" -eq 1
 
+      - name: Stage retained patched workflow artifact
+        run: |
+          mkdir -p aiTemp/rc3-release-concurrency
+          cp --no-clobber \
+            .github/workflows/codex-router-multiprovider-release-rc3.yml \
+            aiTemp/rc3-release-concurrency/codex-router-multiprovider-release-rc3.yml
+          sha256sum aiTemp/rc3-release-concurrency/codex-router-multiprovider-release-rc3.yml \
+            > aiTemp/rc3-release-concurrency/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rc3-release-concurrency-patch-${{ github.sha }}
+          path: aiTemp/rc3-release-concurrency/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Commit verified release queue fix
         run: |
           if git diff --quiet; then
