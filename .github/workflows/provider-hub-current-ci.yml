@@ -6,17 +6,22 @@ on:
       - integration/v0.7.0-rc.2-provider-hub-current
       - integration/v0.7.0-rc.2-provider-execution-current
     paths:
+      - desktop-electron/electron/headless-execution-registry.cjs
+      - desktop-electron/electron/main.cjs
       - desktop-electron/electron/main-with-provider.cjs
       - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-execution-dispatch.cjs
       - desktop-electron/electron/provider-execution-router.cjs
       - desktop-electron/electron/provider-network.cjs
       - desktop-electron/electron/preload.cjs
+      - desktop-electron/src/features/**
       - desktop-electron/src/network/**
       - desktop-electron/src/providers/**
       - desktop-electron/src/main.tsx
       - desktop-electron/src/types.ts
       - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
       - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/provider-planned-dispatch.test.cjs
       - desktop-electron/package.json
       - .github/workflows/provider-hub-current-ci.yml
   pull_request:
@@ -24,17 +29,22 @@ on:
       - integration/v0.7.0-rc.2-provider-hub-current
       - release/codex-router-multiprovider-0.7.0-rc.2
     paths:
+      - desktop-electron/electron/headless-execution-registry.cjs
+      - desktop-electron/electron/main.cjs
       - desktop-electron/electron/main-with-provider.cjs
       - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-execution-dispatch.cjs
       - desktop-electron/electron/provider-execution-router.cjs
       - desktop-electron/electron/provider-network.cjs
       - desktop-electron/electron/preload.cjs
+      - desktop-electron/src/features/**
       - desktop-electron/src/network/**
       - desktop-electron/src/providers/**
       - desktop-electron/src/main.tsx
       - desktop-electron/src/types.ts
       - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
       - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/provider-planned-dispatch.test.cjs
       - desktop-electron/package.json
       - .github/workflows/provider-hub-current-ci.yml
   workflow_dispatch:
@@ -70,9 +80,11 @@ jobs:
 
       - name: Validate Electron provider runtime syntax
         run: |
+          node --check desktop-electron/electron/headless-execution-registry.cjs
           node --check desktop-electron/electron/main.cjs
           node --check desktop-electron/electron/main-with-provider.cjs
           node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-execution-dispatch.cjs
           node --check desktop-electron/electron/provider-execution-router.cjs
           node --check desktop-electron/electron/provider-network.cjs
           node --check desktop-electron/electron/preload.cjs
@@ -82,6 +94,7 @@ jobs:
           node --test
           desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
           desktop-electron/tests/provider-execution-router.test.cjs
+          desktop-electron/tests/provider-planned-dispatch.test.cjs
           desktop-electron/tests/proxy-provider-contract.test.cjs
           desktop-electron/tests/provider-proxy-domain.test.cjs
           desktop-electron/tests/execution-bridge-contract.test.cjs
