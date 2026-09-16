@@ -6,6 +6,7 @@ on:
       - feature/0.7-rc2-image-providers
     paths:
       - aiTemp/rc2/apply_image_review_red_tests.py
+      - aiTemp/rc2/apply_image_review_fixes.py
       - .github/workflows/apply-image-review-red-tests.yml
   workflow_dispatch:
 
