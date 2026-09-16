@@ -48,17 +48,30 @@ def main() -> None:
         "'/orchestrators'",
     )
     require(
-        "src/routes/providers/+page.svelte",
+        "src/lib/provider-center.ts",
         "provider_profiles_read",
         "provider_profile_save",
         "provider_profile_probe",
-        "AI Studio Reverse Proxy",
-        "CommandCode Proxy",
+        "connectProviderProfile",
+    )
+    require(
+        "src/routes/providers/+page.svelte",
+        "readProviderProfiles",
+        "saveProviderProfile",
+        "probeProviderProfile",
+        "PROVIDER_CAPABILITIES",
+    )
+    require(
+        "src/lib/orchestrator-center.ts",
+        "orchestrator_profiles_read",
+        "orchestrator_profile_save",
+        "fallback_provider_ids",
+        "max_concurrency",
     )
     require(
         "src/routes/orchestrators/+page.svelte",
-        "orchestrator_profiles_read",
-        "orchestrator_profile_save",
+        "readOrchestrators",
+        "saveOrchestrator",
         "fallback_provider_ids",
         "max_concurrency",
     )
