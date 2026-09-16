@@ -1,0 +1,36 @@
+name: v0.6 browser profile contract
+
+on:
+  push:
+    branches:
+      - subagent/v0.6-electron-release-continuation-20260916
+    paths:
+      - .github/workflows/v060-browser-profile-contract.yml
+      - desktop-electron/electron/profile.cjs
+      - desktop-electron/electron/browser-host.cjs
+      - desktop-electron/tests/profile.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  profile_contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+      - name: Verify launcher profile partition contract
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/profile.cjs
+          node --check desktop-electron/electron/browser-host.cjs
+          node --test desktop-electron/tests/profile.test.cjs
