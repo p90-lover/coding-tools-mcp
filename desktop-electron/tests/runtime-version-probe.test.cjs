@@ -1,5 +1,6 @@
 "use strict";
 
+// Independent native rebuild trigger for production source 57333afcf08810c8381f55d192ea13395e92c7da.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
