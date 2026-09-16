@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import {
-  builtinProviderProfiles,
-  getBuiltinProvider,
-  validateProviderProfiles,
-} from "../src/provider-registry";
+import * as providerRegistry from "../src/provider-registry";
 import {
   discoverProviderModels,
   registerProviderRuntimeAdapter,
@@ -24,7 +20,7 @@ afterEach(() => {
 
 describe("provider center", () => {
   test("ships the requested provider families without embedded credentials", () => {
-    expect(validateProviderProfiles()).toEqual([]);
+    expect(providerRegistry.validateProviderProfiles()).toEqual([]);
 
     const required = [
       "codex-oauth",
@@ -41,10 +37,10 @@ describe("provider center", () => {
       "custom-openai-compatible",
     ];
     for (const providerId of required) {
-      expect(getBuiltinProvider(providerId), providerId).toBeDefined();
+      expect(providerRegistry.getBuiltinProvider(providerId), providerId).toBeDefined();
     }
 
-    for (const profile of builtinProviderProfiles) {
+    for (const profile of providerRegistry.builtinProviderProfiles) {
       expect(profile.requiresExplicitConsent).toBe(true);
       expect(Object.hasOwn(profile, "apiKey")).toBe(false);
       expect(Object.hasOwn(profile, "secret")).toBe(false);
