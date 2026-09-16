@@ -67,6 +67,12 @@ pub enum OrchestratorExecutionMode {
     ParallelGroups,
 }
 
+impl Default for OrchestratorExecutionMode {
+    fn default() -> Self {
+        Self::Sequential
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OrchestratorStage {
@@ -122,12 +128,6 @@ pub struct OrchestratorProfile {
     pub revision: u64,
     #[serde(default)]
     pub updated_at: u64,
-}
-
-impl Default for OrchestratorExecutionMode {
-    fn default() -> Self {
-        Self::Sequential
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -216,11 +216,15 @@ impl OrchestratorStage {
             if !fallbacks.insert(fallback) {
                 return Err(fail("Fallback providers must be unique"));
             }
-            let profile = providers::profile(data, fallback)?;
-            if !profile.anneal_enabled || !profile.capabilities.contains(&ProviderCapability::Text) {
+            let fallback_profile = providers::profile(data, fallback)?;
+            if !fallback_profile.anneal_enabled
+                || !fallback_profile
+                    .capabilities
+                    .contains(&ProviderCapability::Text)
+            {
                 return Err(fail(format!(
                     "Fallback provider {} is not usable for Anneal",
-                    profile.name
+                    fallback_profile.name
                 )));
             }
         }
@@ -323,22 +327,22 @@ fn view(data: &AppData) -> Value {
                         .iter()
                         .find(|provider| provider.id == stage.provider_profile_id);
                     json!({
-                        "id": stage.id,
-                        "name": stage.name,
-                        "role": stage.role,
-                        "provider_profile_id": stage.provider_profile_id,
+                        "id": &stage.id,
+                        "name": &stage.name,
+                        "role": &stage.role,
+                        "provider_profile_id": &stage.provider_profile_id,
                         "provider_name": provider.map(|provider| provider.name.as_str()),
-                        "model": stage.model,
-                        "fallback_provider_ids": stage.fallback_provider_ids,
-                        "anneal_agent_id": stage.anneal_agent_id,
+                        "model": &stage.model,
+                        "fallback_provider_ids": &stage.fallback_provider_ids,
+                        "anneal_agent_id": &stage.anneal_agent_id,
                         "parallel_group": stage.parallel_group,
                         "approval_gate": stage.approval_gate,
-                        "output_kind": stage.output_kind,
+                        "output_kind": &stage.output_kind,
                     })
                 })
                 .collect();
             json!({
-                "id": profile.id,
+                "id": &profile.id,
                 "runnable": profile.runnable_snapshot().is_ok(),
                 "stages": stages,
             })
@@ -416,14 +420,16 @@ pub fn save(expected_revision: u64, input: OrchestratorProfileInput) -> AppResul
 
 pub fn archive(id: &str) -> AppResult<Value> {
     DataStore::update_file(|data| {
-        let profile = data
-            .orchestrator_profiles
-            .iter_mut()
-            .find(|profile| profile.id == id)
-            .ok_or_else(|| fail("Orchestrator profile not found"))?;
-        profile.enabled = false;
-        profile.archived = true;
-        profile.updated_at = now();
+        {
+            let profile = data
+                .orchestrator_profiles
+                .iter_mut()
+                .find(|profile| profile.id == id)
+                .ok_or_else(|| fail("Orchestrator profile not found"))?;
+            profile.enabled = false;
+            profile.archived = true;
+            profile.updated_at = now();
+        }
         data.orchestrator_registry_revision = data
             .orchestrator_registry_revision
             .checked_add(1)
