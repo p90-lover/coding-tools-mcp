@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
-use coding_tools_core::{data::AppData, integrations, tools, CoreState};
+use coding_tools_core::{integrations, tools, CoreState};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -457,6 +457,39 @@ struct IntegrationReadRequest {
     credential: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionReadRequest {
+    workspace_id: String,
+    mission_id: Option<String>,
+    #[serde(default)]
+    refresh_source: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionProviderRequest {
+    workspace_id: String,
+    operation: String,
+    expected_revision: Option<u64>,
+    binding_id: Option<String>,
+    settings: Option<integrations::execution::service::Settings>,
+    #[serde(default)]
+    credential: String,
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionUpdateRequest {
+    workspace_id: String,
+    expected_revision: u64,
+    change: Value,
+    #[serde(default)]
+    confirm: bool,
+}
+
 fn json_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
         status,
@@ -655,6 +688,176 @@ async fn integration_read(
     }
 }
 
+fn execution_outcome(
+    outcome: Result<Result<Value, String>, tokio::task::JoinError>,
+    code: &str,
+) -> Response {
+    match outcome {
+        Ok(Ok(execution)) => Json(json!({"ok":true,"execution":execution})).into_response(),
+        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, code, error),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "EXECUTION_WORKER_UNAVAILABLE",
+            "Local execution worker unavailable",
+        ),
+    }
+}
+
+async fn execution_read(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<ExecutionReadRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "execution_read") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if body.workspace_id.trim().is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "EXECUTION_WORKSPACE_REQUIRED",
+            "Workspace is required",
+        );
+    }
+    let context = match state.context(&body.workspace_id) {
+        Ok(context) => context,
+        Err(error) => {
+            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
+        }
+    };
+    let mission_id = body.mission_id;
+    let refresh_source = body.refresh_source;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let request = context
+            .for_request()
+            .map_err(|error| error.message().to_string())?;
+        if refresh_source {
+            let mission_id = mission_id
+                .as_deref()
+                .ok_or_else(|| "Select a mission before refreshing its source".to_string())?;
+            integrations::execution::service::refresh(&request, mission_id).map_err(text_error)
+        } else {
+            integrations::execution::service::view(&request, mission_id.as_deref())
+                .map_err(text_error)
+        }
+    })
+    .await;
+    execution_outcome(outcome, "EXECUTION_READ_FAILED")
+}
+
+async fn execution_provider(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<ExecutionProviderRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "execution_provider") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "LOCAL_PROVIDER_CONSENT_REQUIRED",
+            "Local provider consent was not confirmed",
+        );
+    }
+    let context = match state.context(&body.workspace_id) {
+        Ok(context) => context,
+        Err(error) => {
+            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
+        }
+    };
+    let outcome = tokio::task::spawn_blocking(move || {
+        let request = context
+            .for_request()
+            .map_err(|error| error.message().to_string())?;
+        match body.operation.as_str() {
+            "configure" => integrations::execution::service::configure(
+                &request,
+                body.expected_revision
+                    .ok_or_else(|| "Missing execution-book revision".to_string())?,
+                body.settings
+                    .ok_or_else(|| "Provider settings required".to_string())?,
+                body.credential,
+            )
+            .map_err(text_error),
+            "connect" => integrations::execution::service::reconnect(
+                &request,
+                body.binding_id
+                    .as_deref()
+                    .ok_or_else(|| "Select an existing provider binding".to_string())?,
+                body.credential,
+                true,
+            )
+            .map_err(text_error),
+            "disable" => integrations::execution::service::disable(
+                &request,
+                body.binding_id
+                    .as_deref()
+                    .ok_or_else(|| "Select an existing provider binding".to_string())?,
+            )
+            .map_err(text_error),
+            _ => Err("Unsupported local provider operation".to_string()),
+        }
+    })
+    .await;
+    execution_outcome(outcome, "EXECUTION_PROVIDER_FAILED")
+}
+
+async fn execution_update(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<ExecutionUpdateRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "execution_update") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "LOCAL_MISSION_CONSENT_REQUIRED",
+            "Confirm this particular mission operation locally",
+        );
+    }
+    let change: integrations::execution::service::Change = match serde_json::from_value(body.change)
+    {
+        Ok(change) => change,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_MISSION_OPERATION",
+                "Invalid mission operation",
+            )
+        }
+    };
+    let context = match state.context(&body.workspace_id) {
+        Ok(context) => context,
+        Err(error) => {
+            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
+        }
+    };
+    let expected_revision = body.expected_revision;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let request = context
+            .for_request()
+            .map_err(|error| error.message().to_string())?;
+        integrations::execution::service::change(&request, expected_revision, change)
+            .map_err(text_error)
+    })
+    .await;
+    execution_outcome(outcome, "EXECUTION_UPDATE_FAILED")
+}
+
 async fn operation_read(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -827,6 +1030,9 @@ fn router(state: ServiceState) -> Router {
         .route("/api/v1/state", get(state_view))
         .route("/api/v1/workspaces", get(workspace_list))
         .route("/api/v1/integrations/read", post(integration_read))
+        .route("/api/v1/execution/read", post(execution_read))
+        .route("/api/v1/execution/provider", post(execution_provider))
+        .route("/api/v1/execution/update", post(execution_update))
         .route("/api/v1/tools/catalog", get(tool_catalog))
         .route("/api/v1/tools/call", post(tool_call))
         .route("/api/v1/operations/{request_id}", get(operation_read))
@@ -855,7 +1061,7 @@ pub struct HeadlessService {
 
 impl HeadlessService {
     pub async fn start(config: ServiceConfig) -> Result<Self, String> {
-        let core = Arc::new(CoreState::from_data(AppData::default()).map_err(text_error)?);
+        let core = Arc::new(CoreState::load().map_err(text_error)?);
         Self::start_with_core(config, core).await
     }
 

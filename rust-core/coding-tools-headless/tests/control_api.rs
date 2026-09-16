@@ -27,10 +27,9 @@ async fn loopback_control_requires_token_and_stops_cleanly() {
     assert_eq!(parsed.host_str(), Some("127.0.0.1"));
     assert!(parsed.port().is_some());
 
-    let descriptor: Value = serde_json::from_slice(
-        &fs::read(&descriptor_path).expect("descriptor"),
-    )
-    .expect("descriptor json");
+    let descriptor: Value =
+        serde_json::from_slice(&fs::read(&descriptor_path).expect("descriptor"))
+            .expect("descriptor json");
     assert_eq!(descriptor["schema"], 1);
     assert_eq!(descriptor["protocol_version"], 1);
     assert_eq!(descriptor["endpoint"], endpoint);
@@ -48,7 +47,10 @@ async fn loopback_control_requires_token_and_stops_cleanly() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(fs::metadata(&token_file).unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(
+            fs::metadata(&token_file).unwrap().permissions().mode() & 0o077,
+            0
+        );
         assert_eq!(
             fs::metadata(&descriptor_path).unwrap().permissions().mode() & 0o077,
             0
@@ -123,10 +125,9 @@ async fn loopback_control_requires_token_and_stops_cleanly() {
         .shutdown("fixture-complete")
         .await
         .expect("clean shutdown");
-    let stopped: Value = serde_json::from_slice(
-        &fs::read(&descriptor_path).expect("retained descriptor"),
-    )
-    .expect("stopped descriptor json");
+    let stopped: Value =
+        serde_json::from_slice(&fs::read(&descriptor_path).expect("retained descriptor"))
+            .expect("stopped descriptor json");
     assert_eq!(stopped["status"], "stopped");
     assert_eq!(stopped["shutdown_reason"], "fixture-complete");
     assert!(token_file.exists());
