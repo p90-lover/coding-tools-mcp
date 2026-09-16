@@ -1,7 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
-const { resolveLauncherProfile } = require("../electron/profile.cjs");
+const {
+  browserPartitionForLauncherProfile,
+  resolveLauncherProfile,
+} = require("../electron/profile.cjs");
 
 test("DEV launcher profile isolates every durable home from production", () => {
   const homeDir = path.resolve("/Users/tester");
@@ -28,6 +31,36 @@ test("DEV launcher profile isolates every durable home from production", () => {
   assert.notEqual(development.browserPartition, production.browserPartition);
   assert.equal(development.userData, path.join(development.coreHome, "launcher"));
   assert.equal(development.codexHome, path.join(development.coreHome, "codex-home"));
+});
+
+test("BrowserHost partition identity is derived from the same launcher profile contract", () => {
+  const homeDir = path.resolve("/Users/tester");
+  const appData = path.join(homeDir, "Library", "Application Support");
+  const production = resolveLauncherProfile({
+    argv: ["electron", "."],
+    env: {},
+    homeDir,
+    appData,
+  });
+  const development = resolveLauncherProfile({
+    argv: ["electron", ".", "--dev-profile"],
+    env: {},
+    homeDir,
+    appData,
+  });
+
+  assert.equal(
+    production.browserPartition,
+    browserPartitionForLauncherProfile(production.kind),
+  );
+  assert.equal(
+    development.browserPartition,
+    browserPartitionForLauncherProfile(development.kind),
+  );
+  assert.throws(
+    () => browserPartitionForLauncherProfile("unknown"),
+    /Launcher profile is invalid/,
+  );
 });
 
 test("DEV launcher refuses an explicit home collision with production", () => {

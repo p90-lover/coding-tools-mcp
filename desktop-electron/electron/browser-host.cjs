@@ -9,6 +9,7 @@ const {
 } = require("./browser-helper-verifier.cjs");
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
+const { browserPartitionForLauncherProfile } = require("./profile.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
@@ -311,7 +312,7 @@ class BrowserHost {
     helper,
     logger,
     loginWithPasskey,
-    partition = "persist:codex-web-gpt-chatgpt",
+    partition,
     profile = "production",
     publishState,
     showWindow = () => {},
@@ -333,14 +334,12 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.loginWithPasskey = loginWithPasskey;
-    if (profile !== "production" && profile !== "development") {
-      throw new Error("Browser host profile is invalid");
+    const expectedPartition = browserPartitionForLauncherProfile(profile);
+    const resolvedPartition = partition ?? expectedPartition;
+    if (resolvedPartition !== expectedPartition) {
+      throw new Error("Browser host partition does not match its profile");
     }
-    const expectedPartition = profile === "development"
-      ? "persist:codex-web-gpt-dev-chatgpt"
-      : "persist:codex-web-gpt-chatgpt";
-    if (partition !== expectedPartition) throw new Error("Browser host partition does not match its profile");
-    this.partition = partition;
+    this.partition = resolvedPartition;
     this.profile = profile;
     this.publishState = publishState;
     this.showWindow = showWindow;
