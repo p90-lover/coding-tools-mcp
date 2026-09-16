@@ -484,6 +484,9 @@ function LauncherShell({
   };
 
   const navigateSurface = (next: Surface) => {
+    if (next !== "browser") {
+      void api!.setBrowserSurfaceActive(false).catch((cause) => setError(messageOf(cause)));
+    }
     setSurface(next);
     if (compactSidebar) setSidebarOpen(false);
   };
@@ -658,7 +661,7 @@ function LauncherShell({
                   active={false}
                   disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
                   icon="update"
-                  label={updateBusy ? copy.updating : `${copy.updateAvailable} v${updateVersion}`}
+                  label={updateBusy ? copy.updating : `${copy.updateAvailable} Coding Tools v${updateVersion}`}
                   onClick={() => void installUpdate()}
                   tone="update"
                 />
@@ -705,7 +708,7 @@ function LauncherShell({
                 setError={setError}
                 showMcp={() => {
                   setMcpTargetMode(null);
-                  setSurface("mcp");
+                  navigateSurface("mcp");
                 }}
                 snapshot={snapshot}
                 updateState={updateState}
@@ -719,7 +722,7 @@ function LauncherShell({
                 language={language}
                 onDone={() => {
                   setMcpTargetMode(null);
-                  setSurface("browser");
+                  navigateSurface("browser");
                 }}
                 operation={operation}
                 setError={setError}
@@ -746,7 +749,7 @@ function LauncherShell({
               <SettingsSurface
                 configureInteractionMode={(mode) => {
                   setMcpTargetMode(mode);
-                  setSurface("mcp");
+                  navigateSurface("mcp");
                 }}
                 copy={copy}
                 devProfile={devProfile}

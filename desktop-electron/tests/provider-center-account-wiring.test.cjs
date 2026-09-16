@@ -20,6 +20,7 @@ test("the active Provider Center uses the focused Provider Hub component", () =>
     /import \{ ProviderCenterSurface \} from "\.\/features\/ProviderHubSurface"/,
   );
   assert.ok(surface.length > 0, "ProviderHubSurface.tsx must exist");
+  assert.doesNotMatch(app, /ProviderOrchestratorSurfaces/);
 });
 
 test("Provider Center is backed by the encrypted multi-account Provider Hub", () => {
@@ -30,6 +31,9 @@ test("Provider Center is backed by the encrypted multi-account Provider Hub", ()
   assert.match(surface, /setDefaultProviderAccount\(/);
   assert.match(surface, /setProviderAccountEnabled\(/);
   assert.match(surface, /archiveProviderAccount\(/);
+  assert.match(surface, /data-provider-account-summary/);
+  assert.match(surface, /providerAccountCounts/);
+  assert.match(surface, /個帳戶/);
 
   assert.match(preload, /saveProviderAccount/);
   assert.match(preload, /beginProviderLogin/);

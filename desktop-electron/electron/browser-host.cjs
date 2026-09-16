@@ -1468,10 +1468,13 @@ class BrowserHost {
   }
 
   presentPrimaryView(visible) {
-    // The descriptor advertises this exact WebContents for the lifetime of the launcher. Hiding
-    // the native View can make Windows drop it from the remote-debugging target set, leaving a
-    // live descriptor whose ownership id cannot be leased. Keep the View attached and drawable
-    // offscreen; only its placement, never its ownership lifetime, follows the launcher UI.
+    // Non-browser launcher pages must never be covered by the native ChatGPT view. Keep the
+    // descriptor-owned view attached while the browser page is selected, but fully hide it when
+    // the launcher explicitly deactivates the browser surface.
+    if (!this.surfaceActive) {
+      this.view.setVisible(false);
+      return;
+    }
     this.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
     this.view.setVisible(true);
   }

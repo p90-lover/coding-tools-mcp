@@ -211,6 +211,14 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const [notice, setNotice] = useState("");
 
   const activeAccounts = useMemo(() => snapshot.accounts.filter((account) => !account.archivedAt), [snapshot]);
+  const providerAccountCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const account of activeAccounts) {
+      counts.set(account.providerId, (counts.get(account.providerId) ?? 0) + 1);
+    }
+    return counts;
+  }, [activeAccounts]);
+  const activeProviderCount = providerAccountCounts.size;
   const selectedAccount = activeAccounts.find((account) => account.id === selectedAccountId);
   const selectedProvider = providerDefinition(draft.providerId);
 
@@ -527,6 +535,13 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         <button className="secondary-button" onClick={() => void refreshBindings().catch((cause) => setError(messageOf(cause)))} type="button">
           {text(language, "Refresh bindings", "刷新綁定")}
         </button>
+        <p className="inline-notice provider-account-summary" data-provider-account-summary>
+          {text(
+            language,
+            `${activeAccounts.length} account${activeAccounts.length === 1 ? "" : "s"} across ${activeProviderCount} provider${activeProviderCount === 1 ? "" : "s"}`,
+            `${activeAccounts.length} 個帳戶・${activeProviderCount} 個供應商`,
+          )}
+        </p>
         {notice ? <p className="inline-notice">{notice}</p> : null}
       </div>
 
@@ -534,6 +549,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         <div className="provider-card-grid">
           {activeAccounts.map((account) => {
             const provider = providerDefinition(account.providerId);
+            const providerAccountCount = providerAccountCounts.get(account.providerId) ?? 0;
             const active = account.id === selectedAccountId;
             const connected = account.enabled && account.status === "connected";
             return (
@@ -557,7 +573,11 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                 <footer>
                   <span>Paseo</span>
                   <span>Anneal</span>
-                  <span>{account.models.length} models</span>
+                  <span>{text(
+                    language,
+                    `${providerAccountCount} account${providerAccountCount === 1 ? "" : "s"} · ${account.models.length} models`,
+                    `${providerAccountCount} 個帳戶 · ${account.models.length} 個模型`,
+                  )}</span>
                 </footer>
               </button>
             );

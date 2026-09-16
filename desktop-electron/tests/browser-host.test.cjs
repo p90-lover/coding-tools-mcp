@@ -355,7 +355,7 @@ test("browser surface visibility requires both requested and active state", () =
   assert.equal(browserViewVisible(true, true, true), true);
 });
 
-test("descriptor-owned home surface stays attached offscreen while another launcher surface is active", () => {
+test("descriptor-owned home surface is hidden outside Browser and restored when Browser returns", () => {
   const calls = [];
   const hiddenBounds = { x: 1201, y: 801, width: 1200, height: 800 };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
@@ -378,9 +378,14 @@ test("descriptor-owned home surface stays attached offscreen while another launc
   });
 
   BrowserHost.prototype.syncViewVisibility.call(fixture);
+  assert.deepEqual(calls, [["visible", false]]);
 
+  calls.length = 0;
+  fixture.surfaceActive = true;
+  fixture.visible = true;
+  BrowserHost.prototype.syncViewVisibility.call(fixture);
   assert.deepEqual(calls, [
-    ["bounds", hiddenBounds],
+    ["bounds", fixture.bounds],
     ["visible", true],
   ]);
 });

@@ -6,9 +6,10 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { pipeline } = require("node:stream/promises");
 
-const REPOSITORY = "miuuyy/codex-chatgpt-web";
-const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
-const USER_AGENT = "codex-web-gpt-launcher-updater";
+const REPOSITORY = "p90-lover/coding-tools-mcp";
+const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases?per_page=20`;
+const CHECKSUM_ASSET_NAME = "SHA256SUMS.txt";
+const USER_AGENT = "coding-tools-launcher-updater";
 const MAX_REDIRECTS = 5;
 
 function parseVersion(value) {
@@ -43,15 +44,38 @@ function releaseVersion(tagName) {
 
 function releaseAssetName(version, platform = process.platform, arch = process.arch) {
   if (platform === "darwin" && ["arm64", "x64"].includes(arch)) {
-    return `codex-web-gpt-${version}-mac-${arch}.zip`;
+    return `Coding.Tools_${version}_mac_${arch}.zip`;
   }
   if (platform === "win32" && arch === "x64") {
-    return `codex-web-gpt-${version}-win-x64.exe`;
+    return `Coding.Tools_${version}_windows_x64_setup.exe`;
   }
   if (platform === "linux" && arch === "x64") {
-    return `codex-web-gpt-${version}-linux-x64.AppImage`;
+    return `Coding.Tools_${version}_linux_x64.AppImage`;
   }
   return null;
+}
+
+function selectCompatibleRelease(payload, platform = process.platform, arch = process.arch) {
+  const releases = Array.isArray(payload) ? payload : payload ? [payload] : [];
+  const candidates = [];
+  for (const release of releases) {
+    if (!release || release.draft === true) continue;
+    let version;
+    try {
+      version = releaseVersion(release.tag_name);
+    } catch {
+      continue;
+    }
+    const assetName = releaseAssetName(version, platform, arch);
+    if (!assetName) continue;
+    const assets = Array.isArray(release.assets) ? release.assets : [];
+    const asset = assets.find((item) => item?.name === assetName);
+    const checksums = assets.find((item) => item?.name === CHECKSUM_ASSET_NAME);
+    if (!asset?.browser_download_url || !checksums?.browser_download_url) continue;
+    candidates.push({ release, version, assetName, asset, checksums });
+  }
+  candidates.sort((left, right) => compareVersions(right.version, left.version));
+  return candidates[0] ?? null;
 }
 
 function expectedChecksum(contents, assetName) {
@@ -59,7 +83,7 @@ function expectedChecksum(contents, assetName) {
     const match = /^([a-fA-F0-9]{64})\s+(.+)$/.exec(line.trim());
     if (match && match[2] === assetName) return match[1].toLowerCase();
   }
-  throw new Error(`checksums.txt has no entry for ${assetName}`);
+  throw new Error(`${CHECKSUM_ASSET_NAME} has no entry for ${assetName}`);
 }
 
 function validateReleaseAssetUrl(raw, version, assetName) {
@@ -274,25 +298,21 @@ function createUpdateController({
     checked = true;
     transition({ status: "checking" });
     try {
-      const release = await deps.fetchRelease();
-      const version = releaseVersion(release?.tag_name);
-      if (compareVersions(version, currentVersion) <= 0) {
+      const selected = selectCompatibleRelease(await deps.fetchRelease(), platform, arch);
+      if (!selected || compareVersions(selected.version, currentVersion) <= 0) {
         candidate = null;
         return transition({ status: "up-to-date" });
       }
-      const assetName = releaseAssetName(version, platform, arch);
-      if (!assetName) return transition({ status: "disabled" });
-      const assets = Array.isArray(release?.assets) ? release.assets : [];
-      const asset = assets.find((item) => item?.name === assetName);
-      const checksums = assets.find((item) => item?.name === "checksums.txt");
-      if (!asset?.browser_download_url || !checksums?.browser_download_url) {
-        throw new Error(`Release v${version} is missing ${assetName} or checksums.txt`);
-      }
+      const { version, assetName, asset, checksums } = selected;
       candidate = {
         version,
         assetName,
         assetUrl: validateReleaseAssetUrl(asset.browser_download_url, version, assetName),
-        checksumsUrl: validateReleaseAssetUrl(checksums.browser_download_url, version, "checksums.txt"),
+        checksumsUrl: validateReleaseAssetUrl(
+          checksums.browser_download_url,
+          version,
+          CHECKSUM_ASSET_NAME,
+        ),
       };
       logger?.info("launcher.update_available", { currentVersion, version, platform, arch });
       return transition({ status: "available", version });
@@ -309,7 +329,7 @@ function createUpdateController({
     const available = candidate;
     pending = (async () => {
       transition({ status: "downloading", version: available.version });
-      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-update-"));
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-update-"));
       try {
         const checksums = await deps.downloadText(available.checksumsUrl);
         const expected = expectedChecksum(checksums, available.assetName);
@@ -382,5 +402,6 @@ module.exports = {
   parseVersion,
   releaseAssetName,
   releaseVersion,
+  selectCompatibleRelease,
   validateReleaseAssetUrl,
 };

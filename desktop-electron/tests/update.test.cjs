@@ -11,6 +11,7 @@ const {
   expectedChecksum,
   macApplicationPath,
   releaseAssetName,
+  selectCompatibleRelease,
   validateReleaseAssetUrl,
 } = require("../electron/update.cjs");
 
@@ -42,10 +43,12 @@ test("release comparison and platform assets are strict", () => {
   assert.equal(compareVersions("1.1.4", "1.1.4"), 0);
   assert.equal(compareVersions("1.1.3", "1.1.4"), -1);
   assert.equal(compareVersions("1.2.0", "1.1.99"), 1);
-  assert.equal(releaseAssetName("1.2.0", "darwin", "arm64"), "codex-web-gpt-1.2.0-mac-arm64.zip");
-  assert.equal(releaseAssetName("1.2.0", "darwin", "x64"), "codex-web-gpt-1.2.0-mac-x64.zip");
-  assert.equal(releaseAssetName("1.2.0", "win32", "x64"), "codex-web-gpt-1.2.0-win-x64.exe");
-  assert.equal(releaseAssetName("1.2.0", "linux", "x64"), "codex-web-gpt-1.2.0-linux-x64.AppImage");
+  assert.equal(compareVersions("0.7.0-rc.5", "0.7.0-rc.4"), 1);
+  assert.equal(compareVersions("0.7.0", "0.7.0-rc.5"), 1);
+  assert.equal(releaseAssetName("1.2.0", "darwin", "arm64"), "Coding.Tools_1.2.0_mac_arm64.zip");
+  assert.equal(releaseAssetName("1.2.0", "darwin", "x64"), "Coding.Tools_1.2.0_mac_x64.zip");
+  assert.equal(releaseAssetName("1.2.0", "win32", "x64"), "Coding.Tools_1.2.0_windows_x64_setup.exe");
+  assert.equal(releaseAssetName("1.2.0", "linux", "x64"), "Coding.Tools_1.2.0_linux_x64.AppImage");
   assert.equal(releaseAssetName("1.2.0", "linux", "arm64"), null);
 });
 
@@ -55,16 +58,46 @@ test("checksums and release URLs bind the exact expected asset", () => {
   assert.throws(() => expectedChecksum(`${hash}  other.zip\n`, "launcher.zip"), /no entry/);
   assert.equal(
     validateReleaseAssetUrl(
-      "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/launcher.zip",
+      "https://github.com/p90-lover/coding-tools-mcp/releases/download/v1.2.0/launcher.zip",
       "1.2.0",
       "launcher.zip",
     ),
-    "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/launcher.zip",
+    "https://github.com/p90-lover/coding-tools-mcp/releases/download/v1.2.0/launcher.zip",
   );
   assert.throws(
     () => validateReleaseAssetUrl("https://example.com/launcher.zip", "1.2.0", "launcher.zip"),
     /unexpected release asset URL/,
   );
+});
+
+test("project updater selects the newest complete prerelease and ignores draft or incomplete releases", () => {
+  const release = selectCompatibleRelease([
+    {
+      tag_name: "v0.7.0-rc.6",
+      draft: true,
+      assets: [],
+    },
+    {
+      tag_name: "v0.7.0-rc.5",
+      prerelease: true,
+      assets: [
+        {
+          name: "Coding.Tools_0.7.0-rc.5_windows_x64_setup.exe",
+          browser_download_url: "https://github.com/p90-lover/coding-tools-mcp/releases/download/v0.7.0-rc.5/Coding.Tools_0.7.0-rc.5_windows_x64_setup.exe",
+        },
+        {
+          name: "SHA256SUMS.txt",
+          browser_download_url: "https://github.com/p90-lover/coding-tools-mcp/releases/download/v0.7.0-rc.5/SHA256SUMS.txt",
+        },
+      ],
+    },
+    {
+      tag_name: "v5.0.7",
+      assets: [],
+    },
+  ], "win32", "x64");
+  assert.equal(release?.version, "0.7.0-rc.5");
+  assert.equal(release?.assetName, "Coding.Tools_0.7.0-rc.5_windows_x64_setup.exe");
 });
 
 test("macOS bundle resolution never guesses outside Contents/MacOS", () => {
@@ -94,12 +127,12 @@ test("startup check runs once and exposes only a newer complete release", async 
           tag_name: "v1.2.0",
           assets: [
             {
-              name: "codex-web-gpt-1.2.0-linux-x64.AppImage",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/codex-web-gpt-1.2.0-linux-x64.AppImage",
+              name: "Coding.Tools_1.2.0_linux_x64.AppImage",
+              browser_download_url: "https://github.com/p90-lover/coding-tools-mcp/releases/download/v1.2.0/Coding.Tools_1.2.0_linux_x64.AppImage",
             },
             {
-              name: "checksums.txt",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/checksums.txt",
+              name: "SHA256SUMS.txt",
+              browser_download_url: "https://github.com/p90-lover/coding-tools-mcp/releases/download/v1.2.0/SHA256SUMS.txt",
             },
           ],
         };
@@ -141,16 +174,16 @@ test("verified update is handed to one detached worker", async () => {
           tag_name: "v1.2.0",
           assets: [
             {
-              name: "codex-web-gpt-1.2.0-linux-x64.AppImage",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/codex-web-gpt-1.2.0-linux-x64.AppImage",
+              name: "Coding.Tools_1.2.0_linux_x64.AppImage",
+              browser_download_url: "https://github.com/p90-lover/coding-tools-mcp/releases/download/v1.2.0/Coding.Tools_1.2.0_linux_x64.AppImage",
             },
             {
-              name: "checksums.txt",
-              browser_download_url: "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v1.2.0/checksums.txt",
+              name: "SHA256SUMS.txt",
+              browser_download_url: "https://github.com/p90-lover/coding-tools-mcp/releases/download/v1.2.0/SHA256SUMS.txt",
             },
           ],
         }),
-        downloadText: async () => `${hash}  codex-web-gpt-1.2.0-linux-x64.AppImage\n`,
+        downloadText: async () => `${hash}  Coding.Tools_1.2.0_linux_x64.AppImage\n`,
         downloadFile: async (_url, destination) => fs.writeFileSync(destination, assetBody),
         sha256: (filePath) => require("node:crypto").createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"),
         spawnWorker: (runtime, worker, job) => {
