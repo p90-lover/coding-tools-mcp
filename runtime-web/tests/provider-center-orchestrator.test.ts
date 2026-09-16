@@ -114,6 +114,8 @@ describe("Anneal orchestrator", () => {
   test("rejects unknown providers before dispatch", () => {
     const definition = createDefaultOrchestrator();
     definition.stages[0]!.providerId = "unknown-provider";
-    expect(() => projectToAnneal(definition)).toThrow("Unknown primary provider");
+    expect(() => projectToAnneal(definition)).toThrow(
+      "Stage stage-planner uses unknown provider unknown-provider",
+    );
   });
 });
