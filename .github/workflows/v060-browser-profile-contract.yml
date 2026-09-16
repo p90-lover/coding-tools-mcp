@@ -1,5 +1,6 @@
 name: v0.6 browser profile contract
 
+# Verification trigger for source fix 33acd13694e4f6945870ffb856b93bde202cfa48.
 on:
   push:
     branches:
