@@ -12,7 +12,6 @@ on:
       - 'desktop-electron/src/features/orchestration-control.css'
       - 'desktop-electron/src/providers/ProviderHubIntegration.tsx'
       - 'desktop-electron/tests/orchestration-localization-layout.test.cjs'
-      - 'aiTemp/ui-orchestration/apply_provider_locale_fix.py'
       - 'desktop-electron/package.json'
       - 'desktop-electron/bun.lock'
       - '.github/workflows/ui-localization-paseo-anneal-ci.yml'
@@ -30,7 +29,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ui-orchestration-${{ github.workflow }}-${{ github.ref }}
@@ -46,8 +45,8 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 0
-          persist-credentials: true
+          fetch-depth: 2
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with:
@@ -55,25 +54,6 @@ jobs:
 
       - name: Prepare retained temporary directories
         run: mkdir -p aiTemp/ui-orchestration/renderer-dist aiTemp/Trash/ui-orchestration
-
-      - name: Apply canonical Provider Hub language bridge
-        if: github.event_name == 'push' && github.ref_name == 'fix/v0.7.0-rc.5-zhtw-paseo-anneal-ui'
-        run: python aiTemp/ui-orchestration/apply_provider_locale_fix.py
-
-      - name: Commit canonical language repair
-        if: github.event_name == 'push' && github.ref_name == 'fix/v0.7.0-rc.5-zhtw-paseo-anneal-ui'
-        run: |
-          if git diff --quiet; then
-            echo 'Provider Hub language bridge already committed.'
-          else
-            test -z "$(git diff --diff-filter=D --name-only)"
-            git diff --check
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add desktop-electron/src/providers/ProviderHubIntegration.tsx
-            git commit -m 'fix(i18n): follow canonical launcher language in Provider Hub'
-            git push origin HEAD:fix/v0.7.0-rc.5-zhtw-paseo-anneal-ui
-          fi
 
       - name: Run focused localization and layout contracts
         run: node --test desktop-electron/tests/orchestration-localization-layout.test.cjs
