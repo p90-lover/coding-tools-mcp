@@ -1,5 +1,6 @@
 name: Provider Hub multi-account and global proxy
 
+# Exact-head validation after deterministic type narrowing and concurrent GUI composition.
 on:
   push:
     branches:
