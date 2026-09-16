@@ -1,3 +1,4 @@
+// Rebuild trigger after browser profile source fix 33acd13694e4f6945870ffb856b93bde202cfa48.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
