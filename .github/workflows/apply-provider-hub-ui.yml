@@ -1,0 +1,104 @@
+name: Apply Provider Hub renderer wiring
+
+on:
+  push:
+    branches:
+      - feature/v0.7.0-provider-multiaccount-global-proxy
+    paths:
+      - .github/workflows/apply-provider-hub-ui.yml
+      - aiTemp/provider-hub/apply_provider_hub.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: provider-hub-ui-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache-provider-hub
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Apply typed Provider Hub renderer wiring
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/Trash/provider-hub
+          python aiTemp/provider-hub/apply_provider_hub.py \
+            2>&1 | tee aiTemp/evidence/provider-hub-wiring.txt
+          grep -F 'PROVIDER_HUB_WIRING_OK changed=True' aiTemp/evidence/provider-hub-wiring.txt
+
+      - name: Verify bounded source mutation
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          python - <<'PY'
+          import subprocess
+
+          expected = {
+              'desktop-electron/src/App.tsx',
+              'desktop-electron/src/types.ts',
+              'desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs',
+          }
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--cached', '--name-only'], text=True
+          ).splitlines())
+          unexpected = sorted(changed - expected)
+          missing = sorted(expected - changed)
+          if unexpected:
+              raise SystemExit(f'UNEXPECTED_PROVIDER_HUB_PATHS:{unexpected}')
+          if missing:
+              raise SystemExit(f'MISSING_PROVIDER_HUB_PATHS:{missing}')
+          print('PROVIDER_HUB_DIFF_BOUNDED')
+          PY
+
+      - name: Run focused Provider Hub verification
+        working-directory: desktop-electron
+        run: |
+          set -euo pipefail
+          trash="$GITHUB_WORKSPACE/aiTemp/Trash/provider-hub/node_modules-$GITHUB_RUN_ID"
+          cleanup() {
+            mkdir -p "$(dirname "$trash")"
+            if [ -d node_modules ]; then
+              mv node_modules "$trash"
+            fi
+          }
+          trap cleanup EXIT
+
+          npm install --ignore-scripts --package-lock=false --no-audit --no-fund
+          node --test tests/provider-multiaccount-global-proxy.test.cjs \
+            2>&1 | tee "$GITHUB_WORKSPACE/aiTemp/evidence/provider-hub-contract.txt"
+          npm run typecheck \
+            2>&1 | tee "$GITHUB_WORKSPACE/aiTemp/evidence/provider-hub-typecheck.txt"
+          npm run build:renderer -- --outDir ../aiTemp/provider-hub/renderer-dist --emptyOutDir \
+            2>&1 | tee "$GITHUB_WORKSPACE/aiTemp/evidence/provider-hub-renderer-build.txt"
+          node -c electron/provider-network.cjs
+          node -c electron/provider-bootstrap.cjs
+          node -c electron/preload.cjs
+          node -c electron/main-with-provider.cjs
+
+      - name: Commit verified Provider Hub wiring
+        run: |
+          set -euo pipefail
+          remote_head="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote_head" = "$GITHUB_SHA"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'feat(provider-hub): wire renderer and typed IPC controls'
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
