@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           ref: ${{ github.ref_name }}
 
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
@@ -74,4 +74,6 @@ jobs:
           git add desktop-electron/src/providers/ProviderHubIntegration.tsx
           git diff --cached --check
           git commit -m "fix(provider): narrow Provider Hub snapshot results"
+          git fetch origin "${TARGET_BRANCH}"
+          git rebase "origin/${TARGET_BRANCH}"
           git push origin "HEAD:${TARGET_BRANCH}"
