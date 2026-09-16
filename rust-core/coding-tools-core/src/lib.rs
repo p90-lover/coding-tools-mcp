@@ -6,6 +6,7 @@
 //! provider process. Later extraction commits invert the remaining package
 //! dependency without changing this public contract.
 
+use std::path::Path;
 use std::sync::Mutex;
 
 pub use coding_tools_mcp_desktop_lib::{data, error, integrations, runtime, tools};
@@ -27,6 +28,18 @@ impl CoreState {
     /// location and initialize required shared secrets exactly as v0.4.10 did.
     pub fn load() -> AppResult<Self> {
         let mut data = DataStore::load()?;
+        data.init_shared_secrets()?;
+        Ok(Self {
+            data: Mutex::new(data),
+            runtime: Mutex::new(RuntimeSupervisor::default()),
+        })
+    }
+
+    /// Load state from an explicit application-data root. This is used by the
+    /// Electron sidecar so development, production, and test profiles cannot
+    /// read or overwrite one another.
+    pub fn load_from_app_data_dir(app_data_dir: &Path) -> AppResult<Self> {
+        let mut data = DataStore::load_from_app_data_dir(app_data_dir)?;
         data.init_shared_secrets()?;
         Ok(Self {
             data: Mutex::new(data),

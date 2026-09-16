@@ -21,6 +21,10 @@ async fn loopback_control_requires_token_and_stops_cleanly() {
     let service = HeadlessService::start(config)
         .await
         .expect("headless service starts");
+    assert!(
+        app_data_dir.join("data/profiles.json").is_file(),
+        "headless state must be created inside ServiceConfig.app_data_dir"
+    );
     let endpoint = service.endpoint().to_string();
     let parsed = url::Url::parse(&endpoint).expect("valid endpoint");
     assert_eq!(parsed.scheme(), "http");

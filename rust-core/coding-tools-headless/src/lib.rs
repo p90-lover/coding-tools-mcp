@@ -1061,7 +1061,8 @@ pub struct HeadlessService {
 
 impl HeadlessService {
     pub async fn start(config: ServiceConfig) -> Result<Self, String> {
-        let core = Arc::new(CoreState::load().map_err(text_error)?);
+        let core =
+            Arc::new(CoreState::load_from_app_data_dir(&config.app_data_dir).map_err(text_error)?);
         Self::start_with_core(config, core).await
     }
 

@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::error::{AppError, AppResult};
@@ -5,7 +6,10 @@ use crate::settings::AppSettings;
 use crate::workspace::legacy_import::import_legacy_profiles_if_empty;
 use crate::workspace::WorkspaceProfile;
 
-use super::migrate::{data_file_path, load_or_migrate, maybe_backup_legacy_files, save};
+use super::migrate::{
+    data_file_path, data_file_path_for_app_data_dir, load_or_migrate, load_or_migrate_at,
+    maybe_backup_legacy_files, save, save_at,
+};
 use super::model::AppData;
 
 static DATA_FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -26,26 +30,41 @@ const SHARED_KEYS: &[&str] = &[
 pub struct DataStore {
     data: AppData,
     baseline: serde_json::Value,
-    persistent: bool,
+    persistent_path: Option<PathBuf>,
 }
 
 impl DataStore {
     pub fn load() -> AppResult<Self> {
-        let _guard = lock_data_file()?;
         let path = data_file_path()?;
+        Self::load_at(path, true)
+    }
+
+    /// Load state from the caller-selected application-data root without
+    /// consulting or importing the user's normal desktop profile.
+    pub fn load_from_app_data_dir(app_data_dir: &Path) -> AppResult<Self> {
+        let path = data_file_path_for_app_data_dir(app_data_dir)?;
+        Self::load_at(path, false)
+    }
+
+    fn load_at(path: PathBuf, import_legacy_home: bool) -> AppResult<Self> {
+        let _guard = lock_data_file()?;
         let existed_before = path.exists();
-        let mut data = load_or_migrate()?;
-        let imported = import_legacy_profiles_if_empty(&mut data)?;
+        let mut data = load_or_migrate_at(&path)?;
+        let imported = if import_legacy_home {
+            import_legacy_profiles_if_empty(&mut data)?
+        } else {
+            0
+        };
         let baseline = serde_json::to_value(&data)?;
         let store = Self {
             data,
             baseline,
-            persistent: true,
+            persistent_path: Some(path.clone()),
         };
         if !existed_before || imported > 0 {
-            save(&store.data)?;
+            save_at(&path, &store.data)?;
         }
-        if !existed_before {
+        if !existed_before && import_legacy_home {
             maybe_backup_legacy_files(&path)?;
         }
         crate::auth::sync_trusted_origins(&store.data);
@@ -61,7 +80,7 @@ impl DataStore {
         Ok(Self {
             data,
             baseline,
-            persistent: false,
+            persistent_path: None,
         })
     }
 
@@ -89,16 +108,16 @@ impl DataStore {
 
     /// True only for a store loaded from the configured application-data file.
     pub fn is_persistent(&self) -> bool {
-        self.persistent
+        self.persistent_path.is_some()
     }
 
     pub fn refresh(&mut self) -> AppResult<()> {
-        if !self.persistent {
+        let Some(path) = self.persistent_path.clone() else {
             self.baseline = serde_json::to_value(&self.data)?;
             return Ok(());
-        }
+        };
         let _guard = lock_data_file()?;
-        let data = load_or_migrate()?;
+        let data = load_or_migrate_at(&path)?;
         self.baseline = serde_json::to_value(&data)?;
         self.data = data;
         crate::auth::sync_trusted_origins(&self.data);
@@ -106,12 +125,12 @@ impl DataStore {
     }
 
     pub fn save(&mut self) -> AppResult<()> {
-        if !self.persistent {
+        let Some(path) = self.persistent_path.clone() else {
             self.baseline = serde_json::to_value(&self.data)?;
             return Ok(());
-        }
+        };
         let _guard = lock_data_file()?;
-        let latest = load_or_migrate()?;
+        let latest = load_or_migrate_at(&path)?;
         let latest_value = serde_json::to_value(&latest)?;
         let local = serde_json::to_value(&self.data)?;
         let merged = match merge_local_changes(&self.baseline, &local, &latest_value) {
@@ -124,7 +143,7 @@ impl DataStore {
         };
         let data: AppData = serde_json::from_value(merged.clone())?;
         if merged != latest_value {
-            save(&data)?;
+            save_at(&path, &data)?;
         }
         self.data = data;
         self.baseline = merged;

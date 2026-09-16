@@ -117,6 +117,15 @@ fn fixture_worker_can_share_parent_store_without_cross_fixture_admission() {
     );
 }
 
+pub(crate) fn data_file_path_for_app_data_dir(app_data_dir: &Path) -> AppResult<PathBuf> {
+    if !app_data_dir.is_absolute() {
+        return Err(AppError::Message(
+            "configured application data directory must be absolute".into(),
+        ));
+    }
+    Ok(app_data_dir.join("data").join("profiles.json"))
+}
+
 pub fn data_file_path() -> AppResult<PathBuf> {
     #[cfg(test)]
     if let Some(path) = TEST_DATA_FILE.with(|v| v.borrow().clone()) {
@@ -130,7 +139,11 @@ pub fn data_file_path() -> AppResult<PathBuf> {
 
 pub fn load_or_migrate() -> AppResult<AppData> {
     let path = data_file_path()?;
-    let app_root = app_root_for(&path)?;
+    load_or_migrate_at(&path)
+}
+
+pub(crate) fn load_or_migrate_at(path: &Path) -> AppResult<AppData> {
+    let app_root = app_root_for(path)?;
     if path.exists() {
         return load_or_recover_at(&path, &app_root);
     }
@@ -162,8 +175,12 @@ pub fn load_or_migrate() -> AppResult<AppData> {
 
 pub fn save(data: &AppData) -> AppResult<()> {
     let path = data_file_path()?;
-    let app_root = app_root_for(&path)?;
-    write_data_at(&path, &app_root, data)
+    save_at(&path, data)
+}
+
+pub(crate) fn save_at(path: &Path, data: &AppData) -> AppResult<()> {
+    let app_root = app_root_for(path)?;
+    write_data_at(path, &app_root, data)
 }
 
 fn app_root_for(path: &Path) -> AppResult<PathBuf> {
