@@ -37,8 +37,10 @@ jobs:
         run: python3 aiTemp/rc2-onboarding-zhtw/apply_patch.py
       - name: Run focused onboarding and localization contract
         run: node --test desktop-electron/tests/rc2-onboarding-localization.test.cjs
-      - name: Validate Electron main syntax
-        run: node --check desktop-electron/electron/main.cjs
+      - name: Validate Electron main and state syntax
+        run: |
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/state.cjs
       - name: Typecheck Electron renderer
         run: bun run --cwd desktop-electron typecheck
       - name: Enforce no-delete patch
@@ -65,7 +67,8 @@ jobs:
             desktop-electron/src/i18n.ts \
             desktop-electron/src/i18n/locales/zh-TW.ts \
             desktop-electron/src/types.ts \
-            desktop-electron/electron/main.cjs
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/state.cjs
           git diff --cached --check
           git commit -m "feat(rc.2): add optional onboarding and Traditional Chinese"
           git push origin "HEAD:${TARGET_BRANCH}"
