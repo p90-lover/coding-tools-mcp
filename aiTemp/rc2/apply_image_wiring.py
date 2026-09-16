@@ -16,6 +16,17 @@ def replace_once(path: str, old: str, new: str) -> None:
     target.write_text(source.replace(old, new, 1), encoding="utf-8")
 
 
+def remove_once(path: str, value: str) -> None:
+    target = ROOT / path
+    source = target.read_text(encoding="utf-8")
+    count = source.count(value)
+    if count == 0:
+        return
+    if count != 1:
+        raise RuntimeError(f"{path}: expected at most one removable anchor, got {count}")
+    target.write_text(source.replace(value, "", 1), encoding="utf-8")
+
+
 def main() -> None:
     replace_once(
         "src-tauri/src/lib.rs",
@@ -42,6 +53,7 @@ def main() -> None:
         "{path:'/providers',en:'Providers',zh:'供應商',icon:Cpu}",
         "{path:'/image-studio',en:'Image Studio',zh:'圖片工作室',icon:ImageIcon},{path:'/providers',en:'Providers',zh:'供應商',icon:Cpu}",
     )
+    remove_once("src-tauri/src/media.rs", "    create_new(true);\n")
     print("IMAGE_PROVIDER_WIRING_OK")
 
 
