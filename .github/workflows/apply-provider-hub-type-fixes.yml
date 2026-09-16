@@ -6,48 +6,45 @@ on:
       - feature/v0.7.0-provider-multiaccount-global-proxy
     paths:
       - '.github/workflows/apply-provider-hub-type-fixes.yml'
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: provider-hub-type-fix-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   patch:
     name: Preserve concurrent work and patch strict types
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      TARGET_BRANCH: feature/v0.7.0-provider-multiaccount-global-proxy
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: feature/v0.7.0-provider-multiaccount-global-proxy
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: Apply exact type-only replacements
+      - name: Apply idempotent snapshot narrowing
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          replacements = {
-              Path('desktop-electron/src/providers/ProviderHubIntegration.tsx'): [
-                  (
-                      'setSnapshot(result as ProviderNetworkSnapshot);',
-                      'setSnapshot(result as unknown as ProviderNetworkSnapshot);',
-                  ),
-              ],
-              Path('desktop-electron/src/providers/ProviderManagerSurface.tsx'): [
-                  (
-                      'const ZH_TW: typeof EN = {',
-                      'const ZH_TW: { [K in keyof typeof EN]: string } = {',
-                  ),
-              ],
-          }
+          path = Path('desktop-electron/src/providers/ProviderHubIntegration.tsx')
+          old = 'setSnapshot(result as ProviderNetworkSnapshot);'
+          new = 'setSnapshot(result as unknown as ProviderNetworkSnapshot);'
+          text = path.read_text(encoding='utf-8')
 
-          for path, edits in replacements.items():
-              text = path.read_text(encoding='utf-8')
-              for old, new in edits:
-                  if old not in text:
-                      raise SystemExit(f'Expected text not found in {path}: {old}')
-                  text = text.replace(old, new, 1)
-              path.write_text(text, encoding='utf-8')
+          if new in text:
+              print('Snapshot narrowing is already applied.')
+          elif text.count(old) == 1:
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+              print('Applied snapshot narrowing.')
+          else:
+              raise SystemExit(f'Expected one snapshot cast, found {text.count(old)}')
           PY
 
       - name: Verify no file was deleted
@@ -57,15 +54,27 @@ jobs:
             exit 1
           fi
 
-      - name: Commit strict type fixes
+      - name: Commit and rebase safely
         run: |
           if git diff --quiet; then
-            echo 'No patch required.'
+            echo 'No source patch required.'
             exit 0
           fi
-          git config user.name 'p90-lover'
-          git config user.email '146848721+p90-lover@users.noreply.github.com'
-          git add desktop-electron/src/providers/ProviderHubIntegration.tsx \
-                  desktop-electron/src/providers/ProviderManagerSurface.tsx
-          git commit -m 'fix(provider): resolve strict Provider Hub copy and snapshot types'
-          git push origin HEAD:feature/v0.7.0-provider-multiaccount-global-proxy
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add desktop-electron/src/providers/ProviderHubIntegration.tsx
+          git diff --cached --check
+          git commit -m 'fix(provider): narrow Provider Hub snapshot results'
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "${TARGET_BRANCH}"
+            git rebase "origin/${TARGET_BRANCH}"
+            if git push origin "HEAD:${TARGET_BRANCH}"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+
+          echo 'Unable to publish the verified patch after five race-safe attempts.' >&2
+          exit 1
