@@ -43,9 +43,7 @@ pub async fn execution_local_read(
     local(&window, false)?;
     let ctx = context(&state, &workspace_id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let request = ctx
-            .for_request()
-            .map_err(|error| fail(error.message()))?;
+        let request = ctx.for_request().map_err(|error| fail(error.message()))?;
         workflow::call(
             &request,
             "workflow_list",
@@ -78,9 +76,7 @@ pub async fn execution_local_provider(
     }
     let ctx = context(&state, &workspace_id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let request = ctx
-            .for_request()
-            .map_err(|error| fail(error.message()))?;
+        let request = ctx.for_request().map_err(|error| fail(error.message()))?;
         match operation.as_str() {
             "configure" => service::configure(
                 &request,
@@ -128,9 +124,7 @@ pub async fn execution_local_update(
         serde_json::from_value(change).map_err(|_| fail("Invalid mission operation"))?;
     let ctx = context(&state, &workspace_id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let request = ctx
-            .for_request()
-            .map_err(|error| fail(error.message()))?;
+        let request = ctx.for_request().map_err(|error| fail(error.message()))?;
         service::change(&request, expected_revision, change)
             .map(|execution| json!({"ok": true, "execution": execution}))
     })

@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", allow(linker_messages))]
 
 mod codex_bridge;
-mod integrations;
+pub mod integrations;
 
 mod actions;
 mod app_state;
