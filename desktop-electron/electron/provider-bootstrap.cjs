@@ -65,6 +65,18 @@ function installProviderNetwork({
     });
   }
 
+  function providerExecutionSnapshot(active) {
+    const snapshot = active.store.snapshot();
+    return {
+      ...snapshot,
+      accounts: snapshot.accounts.map((account) => ({
+        ...account,
+        hasCredential: account.auth !== "api_key"
+          || Boolean(active.store.accountSecret(account.id)),
+      })),
+    };
+  }
+
   async function publishMutation(active, mutate, { refreshGlobal = false } = {}) {
     let snapshot = await mutate();
     if (refreshGlobal) snapshot = await active.applyGlobalRouting();
@@ -73,7 +85,7 @@ function installProviderNetwork({
 
   handle("launcher:provider-snapshot", (active) => active.store.snapshot());
   handle("launcher:provider-execution-plan", (active, _event, input) => (
-    createProviderExecutionPlan(active.store.snapshot(), input)
+    createProviderExecutionPlan(providerExecutionSnapshot(active), input)
   ));
   handle("launcher:provider-account-save", (active, _event, input) => publishMutation(
     active,
