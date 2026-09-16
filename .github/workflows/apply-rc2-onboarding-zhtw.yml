@@ -6,6 +6,7 @@ on:
       - fix/v0.7-rc2-onboarding-zhtw-links
     paths:
       - aiTemp/rc2-onboarding-zhtw/apply_patch.py
+      - aiTemp/rc2-onboarding-zhtw/apply_typecheck_fix.py
       - desktop-electron/src/i18n/locales/zh-TW.ts
       - desktop-electron/tests/rc2-onboarding-localization.test.cjs
       - .github/workflows/apply-rc2-onboarding-zhtw.yml
@@ -34,7 +35,9 @@ jobs:
       - name: Install exact Electron dependencies
         run: bun install --cwd desktop-electron --frozen-lockfile
       - name: Apply deterministic production patch
-        run: python3 aiTemp/rc2-onboarding-zhtw/apply_patch.py
+        run: |
+          python3 aiTemp/rc2-onboarding-zhtw/apply_patch.py
+          python3 aiTemp/rc2-onboarding-zhtw/apply_typecheck_fix.py
       - name: Run focused onboarding and localization contract
         run: node --test desktop-electron/tests/rc2-onboarding-localization.test.cjs
       - name: Validate Electron main and state syntax
