@@ -2,6 +2,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
+const { runPackagedLauncherProcess } = require("./launcher-process-smoke.cjs");
+const { artifactNameFor, macBundlePaths } = require("./smoke-artifact-contract.cjs");
 const { createPreservationSession } = require("./preservation.cjs");
 
 const launcherRoot = path.resolve(__dirname, "..");
@@ -18,6 +20,8 @@ const preservation = createPreservationSession({
 const scratch = preservation.createWorkDirectory("smoke");
 const markerPath = path.join(scratch, "ready.json");
 const coreHome = path.join(scratch, "core-home");
+const launcherDataDir = path.join(scratch, "launcher-data");
+const codexHome = path.join(scratch, "codex-home");
 let macAppBundle;
 
 function run(command, args, options = {}) {
@@ -55,14 +59,19 @@ function windowsInstallLocation() {
   return match[1];
 }
 
-function artifact(pattern, label) {
-  const matches = fs.readdirSync(artifactsDirectory)
-    .filter((name) => pattern.test(name))
-    .sort();
+function configuredArtifact(osName, extension, label) {
+  const name = artifactNameFor({
+    template: launcherManifest.build.artifactName,
+    version: expectedVersion,
+    os: osName,
+    arch: process.arch,
+    extension,
+  });
+  const matches = fs.readdirSync(artifactsDirectory).filter((entry) => entry === name);
   if (matches.length !== 1) {
-    throw new Error(`Expected exactly one ${label} in ${artifactsDirectory}; found ${matches.join(", ") || "none"}`);
+    throw new Error(`Expected exactly one ${label} in ${artifactsDirectory}; found ${matches.join(", ") || "none"}; expected ${name}`);
   }
-  return path.join(artifactsDirectory, matches[0]);
+  return path.join(artifactsDirectory, name);
 }
 
 function smokeEnvironment() {
@@ -71,30 +80,33 @@ function smokeEnvironment() {
     TMPDIR: scratch,
     TMP: scratch,
     TEMP: scratch,
-    CODEX_WEB_GPT_LAUNCHER_DATA_DIR: path.join(scratch, "launcher-data"),
+    CODING_TOOLS_LAUNCHER_DATA_DIR: launcherDataDir,
+    CODING_TOOLS_HOME: coreHome,
+    CODEX_HOME: codexHome,
+    CODEX_WEB_GPT_LAUNCHER_DATA_DIR: launcherDataDir,
     CODEX_CHATGPT_WEB_HOME: coreHome,
-    CODEX_HOME: path.join(scratch, "codex-home"),
     CODEX_WEB_GPT_SMOKE_FILE: markerPath,
   };
 }
 
-function runSmoke() {
+async function runSmoke() {
   let executable;
   let command;
   let args;
   const env = smokeEnvironment();
 
   if (process.platform === "darwin") {
-    const archive = artifact(/-mac-(?:arm64|x64)\.zip$/, "macOS launcher archive");
+    const archive = configuredArtifact("mac", "zip", "macOS launcher archive");
     const stage = path.join(scratch, "stage");
     fs.mkdirSync(stage);
     run("ditto", ["-x", "-k", archive, stage]);
-    macAppBundle = path.join(stage, "Codex Web GPT.app");
-    executable = path.join(macAppBundle, "Contents", "MacOS", "Codex Web GPT");
+    const bundle = macBundlePaths({ stage, productName: launcherManifest.build.productName });
+    macAppBundle = bundle.appBundle;
+    executable = bundle.executable;
     command = executable;
     args = ["--launcher-smoke-test"];
   } else if (process.platform === "linux") {
-    executable = artifact(/-linux-x64\.AppImage$/, "Linux AppImage");
+    executable = configuredArtifact("linux", "AppImage", "Linux AppImage");
     fs.chmodSync(executable, 0o755);
     run(path.join(launcherRoot, "scripts", "smoke-linux-appimage-symbols.sh"), [executable], {
       timeout: 120_000,
@@ -103,7 +115,7 @@ function runSmoke() {
     args = ["-a", executable, "--launcher-smoke-test"];
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
-    const installer = artifact(/-win-x64\.exe$/, "Windows installer");
+    const installer = configuredArtifact("win", "exe", "Windows installer");
     run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
     executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
     command = executable;
@@ -113,9 +125,21 @@ function runSmoke() {
   }
 
   if (!fs.existsSync(executable)) throw new Error(`Packaged launcher executable is missing: ${executable}`);
-  run(command, args, { env });
-  if (!fs.existsSync(markerPath)) throw new Error("Packaged launcher did not write its readiness marker");
-  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  const launched = await runPackagedLauncherProcess({
+    command,
+    args,
+    cwd: scratch,
+    env,
+    markerPath,
+    fatalLogPath: path.join(launcherDataDir, "logs", "launcher-fatal.log"),
+    timeoutMs: 120_000,
+    exitGraceMs: 5_000,
+    pollIntervalMs: 100,
+  });
+  if (launched.forcedTermination) {
+    process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_REAPED_AFTER_MARKER ${process.platform}/${process.arch}\n`);
+  }
+  const marker = launched.marker;
   if (marker.ok !== true
     || marker.packaged !== true
     || marker.runtimeVerified !== true
@@ -147,38 +171,44 @@ function runSmoke() {
   }
 }
 
-let smokeError = null;
-try {
-  runSmoke();
-} catch (error) {
-  smokeError = error;
-}
-
-const finalizationErrors = [];
-if (macAppBundle) {
+async function main() {
+  let smokeError = null;
   try {
-    const launchServices =
-      "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
-    run(launchServices, ["-u", macAppBundle]);
-    run(launchServices, ["-gc"]);
+    await runSmoke();
+  } catch (error) {
+    smokeError = error;
+  }
+
+  const finalizationErrors = [];
+  if (macAppBundle) {
+    try {
+      const launchServices =
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+      run(launchServices, ["-u", macAppBundle]);
+      run(launchServices, ["-gc"]);
+    } catch (error) {
+      finalizationErrors.push(error);
+    }
+  }
+  try {
+    if (fs.existsSync(scratch)) preservation.preservePath(scratch, "smoke-evidence");
   } catch (error) {
     finalizationErrors.push(error);
   }
-}
-try {
-  if (fs.existsSync(scratch)) preservation.preservePath(scratch, "smoke-evidence");
-} catch (error) {
-  finalizationErrors.push(error);
+
+  if (smokeError && finalizationErrors.length > 0) {
+    throw new AggregateError(
+      [smokeError, ...finalizationErrors],
+      "Packaged launcher smoke failed and evidence finalization also failed",
+    );
+  }
+  if (smokeError) throw smokeError;
+  if (finalizationErrors.length > 0) {
+    throw new AggregateError(finalizationErrors, "Packaged launcher smoke evidence could not be preserved");
+  }
+  process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);
 }
 
-if (smokeError && finalizationErrors.length > 0) {
-  throw new AggregateError(
-    [smokeError, ...finalizationErrors],
-    "Packaged launcher smoke failed and evidence finalization also failed",
-  );
-}
-if (smokeError) throw smokeError;
-if (finalizationErrors.length > 0) {
-  throw new AggregateError(finalizationErrors, "Packaged launcher smoke evidence could not be preserved");
-}
-process.stdout.write(`PACKAGED_LAUNCHER_SMOKE_OK ${process.platform}/${process.arch}\n`);
+void main().catch((error) => {
+  process.nextTick(() => { throw error; });
+});
