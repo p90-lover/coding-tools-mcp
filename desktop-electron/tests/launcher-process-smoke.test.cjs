@@ -92,3 +92,16 @@ test("reports bounded child diagnostics when the launcher exits before readiness
     },
   );
 });
+
+test("packaged smoke uses the canonical Coding Tools profile paths", () => {
+  const source = fs.readFileSync(
+    path.join(repositoryRoot, "desktop-electron", "scripts", "smoke-package.cjs"),
+    "utf8",
+  );
+  assert.match(source, /\bCODING_TOOLS_HOME\s*:/);
+  assert.match(source, /\bCODING_TOOLS_LAUNCHER_DATA_DIR\s*:/);
+  assert.match(
+    source,
+    /fatalLogPath:\s*path\.join\(env\.CODING_TOOLS_LAUNCHER_DATA_DIR,\s*"logs",\s*"launcher-fatal\.log"\)/,
+  );
+});
