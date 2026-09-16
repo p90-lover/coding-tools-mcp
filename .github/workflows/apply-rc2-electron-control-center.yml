@@ -85,6 +85,7 @@ jobs:
           changed="$(git diff --name-only | sort)"
           expected="$(printf '%s\n' \
             desktop-electron/src/App.tsx \
+            desktop-electron/src/api/contracts.ts \
             desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx \
             desktop-electron/src/icons.tsx \
             desktop-electron/src/types.ts | sort)"
@@ -95,6 +96,7 @@ jobs:
           set -euo pipefail
           if git diff --quiet -- \
             desktop-electron/src/App.tsx \
+            desktop-electron/src/api/contracts.ts \
             desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx \
             desktop-electron/src/icons.tsx \
             desktop-electron/src/types.ts; then
@@ -105,6 +107,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add \
             desktop-electron/src/App.tsx \
+            desktop-electron/src/api/contracts.ts \
             desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx \
             desktop-electron/src/icons.tsx \
             desktop-electron/src/types.ts
