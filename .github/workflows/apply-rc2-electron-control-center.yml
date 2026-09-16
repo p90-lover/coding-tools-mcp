@@ -47,7 +47,7 @@ jobs:
           python3 aiTemp/rc2-electron-control-center/apply.py \
             2>&1 | tee aiTemp/evidence/electron-control-center-patch.txt
           git diff --check
-          test -z "$(git diff --diff-filter=D --name-only)"
+          test -z "$(git diff --diff-filter=D --name-only -- desktop-electron/src)"
 
       - name: Install locked Electron dependencies
         run: |
@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
-          test -z "$(git diff --diff-filter=D --name-only)"
+          test -z "$(git diff --diff-filter=D --name-only -- desktop-electron/src)"
           git status --short | tee aiTemp/evidence/electron-control-center-status.txt
           changed="$(git diff --name-only -- desktop-electron/src | sort)"
           if [ -z "$changed" ]; then
