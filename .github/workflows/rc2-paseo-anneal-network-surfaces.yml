@@ -1,0 +1,87 @@
+name: RC2 Paseo Anneal Network Surfaces
+
+# Revalidate the exact user-authored head after the apply workflow commits App/types wiring.
+on:
+  push:
+    branches:
+      - feature/v0.7-rc2-paseo-anneal-network-surfaces
+    paths:
+      - aiTemp/rc2-control-surfaces/apply_patch.py
+      - desktop-electron/src/App.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/src/features/**
+      - desktop-electron/tests/rc2-paseo-anneal-network-surfaces.test.cjs
+      - .github/workflows/rc2-paseo-anneal-network-surfaces.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc2-paseo-anneal-network-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply-and-verify:
+    if: github.ref == 'refs/heads/feature/v0.7-rc2-paseo-anneal-network-surfaces'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          ref: ${{ github.ref_name }}
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/rc2-control-surfaces/renderer aiTemp/Trash/rc2-control-surfaces
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+      - name: Apply deterministic navigation wiring
+        run: python3 aiTemp/rc2-control-surfaces/apply_patch.py
+      - name: Run focused control-center and preserved rc.2 contracts
+        run: |
+          node --test \
+            desktop-electron/tests/rc2-paseo-anneal-network-surfaces.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/provider-proxy-domain.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/rc2-onboarding-localization.test.cjs
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+      - name: Build renderer into aiTemp evidence
+        run: bun run --cwd desktop-electron build:renderer -- --outDir ../aiTemp/rc2-control-surfaces/renderer
+      - name: Enforce no file deletion
+        shell: bash
+        run: |
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          target="aiTemp/Trash/rc2-control-surfaces/node_modules-${GITHUB_RUN_ID}"
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "$target"
+          fi
+      - name: Commit verified navigation wiring
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet -- desktop-electron/src/App.tsx desktop-electron/src/types.ts; then
+            echo "Separate control surfaces are already wired."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add desktop-electron/src/App.tsx desktop-electron/src/types.ts
+          git diff --cached --check
+          git commit -m "feat(rc.2): expose Paseo Anneal and Network surfaces"
+          git push origin "HEAD:${TARGET_BRANCH}"
