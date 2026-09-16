@@ -1,3 +1,5 @@
+# Archived after the superseded top-level renderer was preserved in aiTemp/Trash.
+# This file is evidence only and is intentionally outside .github/workflows.
 name: Archive superseded Provider Hub renderer
 
 on:
