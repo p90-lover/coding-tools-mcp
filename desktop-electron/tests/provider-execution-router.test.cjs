@@ -26,7 +26,7 @@ function account(id, providerId, overrides = {}) {
   };
 }
 
-function profile(id, host) {
+function profile(id, host, overrides = {}) {
   return {
     id,
     name: id,
@@ -36,6 +36,7 @@ function profile(id, host) {
     bypass: ["localhost", "127.0.0.1", "::1"],
     createdAt: "2026-09-16T00:00:00.000Z",
     updatedAt: "2026-09-16T00:00:00.000Z",
+    ...overrides,
   };
 }
 
@@ -117,7 +118,7 @@ test("provider direct routing blocks global proxy inheritance", () => {
   state.routing.providers = [{ providerId: "claude-oauth", inheritGlobal: false }];
   state.routing.accounts = [];
 
-  const route = resolveExecutionProxy(state, "claude-oauth", "claude-main");
+  const route = resolveExecutionProxy(state, "claude-oauth", "claude-main", "anneal");
   assert.equal(route.mode, "direct");
   assert.equal(route.source, "provider");
   assert.equal(route.profile, null);
@@ -154,6 +155,79 @@ test("strict account selection fails closed instead of silently changing account
     }),
     /No connected provider account/,
   );
+});
+
+test("account-only requests infer ownership and provider/account conflicts fail closed", () => {
+  const inferred = createProviderExecutionPlan(snapshot(), {
+    workload: "anneal",
+    accountId: "claude-main",
+    allowFallback: false,
+  });
+  assert.equal(inferred.provider.id, "claude-oauth");
+  assert.equal(inferred.account.id, "claude-main");
+
+  assert.throws(
+    () => createProviderExecutionPlan(snapshot(), {
+      workload: "anneal",
+      providerId: "codex-oauth",
+      accountId: "claude-main",
+      allowFallback: true,
+    }),
+    /does not belong to provider codex-oauth/,
+  );
+});
+
+test("execution planning rejects unsupported models and API-key accounts without stored credentials", () => {
+  assert.throws(
+    () => createProviderExecutionPlan(snapshot(), {
+      workload: "paseo",
+      providerId: "codex-oauth",
+      model: "not-in-account-allowlist",
+      allowFallback: false,
+    }),
+    /is not available for Provider Hub account codex-main/,
+  );
+
+  const state = snapshot();
+  state.accounts = [account("openai-key", "openai-api", {
+    auth: "api_key",
+    hasCredential: false,
+    isDefault: true,
+    models: ["gpt-key-model"],
+  })];
+  assert.throws(
+    () => createProviderExecutionPlan(state, {
+      workload: "anneal",
+      providerId: "openai-api",
+      allowFallback: false,
+    }),
+    /No connected provider account/,
+  );
+});
+
+test("proxy resolution enforces workload scopes and explicit account inheritance skips stale account profiles", () => {
+  const scoped = snapshot();
+  scoped.proxyProfiles = scoped.proxyProfiles.map((item) => (
+    item.id === "account" ? { ...item, scopes: ["browser"] } : item
+  ));
+  const scopedRoute = resolveExecutionProxy(scoped, "codex-oauth", "codex-main", "anneal");
+  assert.equal(scopedRoute.source, "provider");
+  assert.equal(scopedRoute.profile.endpoint.host, "provider.proxy.test");
+
+  const inherited = snapshot();
+  inherited.accounts = inherited.accounts.map((item) => (
+    item.id === "codex-main" ? { ...item, proxyProfileId: "account" } : item
+  ));
+  inherited.routing.accounts = [{
+    accountId: "codex-main",
+    providerId: "codex-oauth",
+    inheritProvider: true,
+    inheritGlobal: true,
+    profileId: null,
+  }];
+  const inheritedRoute = resolveExecutionProxy(inherited, "codex-oauth", "codex-main", "paseo");
+  assert.equal(inheritedRoute.source, "provider");
+  assert.equal(inheritedRoute.profile.endpoint.host, "provider.proxy.test");
 });
 
 test("execution planning is exposed through bootstrap, preload, and the typed launcher API", () => {
