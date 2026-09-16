@@ -16,7 +16,7 @@ def replace_count(
 ) -> tuple[str, bool]:
     old_count = text.count(old)
     new_count = text.count(new)
-    if old_count == 0 and new_count == expected:
+    if new_count == expected:
         return text, False
     if old_count != expected:
         raise SystemExit(
