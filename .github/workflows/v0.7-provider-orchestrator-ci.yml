@@ -1,0 +1,80 @@
+name: v0.7 Provider and Orchestrator Check
+
+on:
+  push:
+    branches:
+      - feature/v0.7-rc2-provider-ui-port
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - runtime-web/src/provider-*.ts
+      - runtime-web/src/orchestrator-config.ts
+      - runtime-web/tests/provider-center-orchestrator.test.ts
+      - src/lib/components/AppShell.svelte
+      - src/routes/providers/**
+      - src/routes/orchestrators/**
+      - .github/workflows/v0.7-provider-orchestrator-ci.yml
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - runtime-web/src/provider-*.ts
+      - runtime-web/src/orchestrator-config.ts
+      - runtime-web/tests/provider-center-orchestrator.test.ts
+      - src/lib/components/AppShell.svelte
+      - src/routes/providers/**
+      - src/routes/orchestrators/**
+      - .github/workflows/v0.7-provider-orchestrator-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v0.7-provider-orchestrator-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused:
+    name: Provider Center and structured orchestrator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Install locked dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+          bun install --cwd runtime-web --frozen-lockfile
+
+      - name: Check the control-center UI
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run build
+
+      - name: Check provider and orchestrator contracts
+        run: |
+          set -euo pipefail
+          bun run --cwd runtime-web typecheck
+          bun test --cwd runtime-web tests/provider-center-orchestrator.test.ts
+
+      - name: Enforce the no-delete integration contract
+        run: |
+          set -euo pipefail
+          git fetch origin integration/v0.7.0-rc.2-all-project-work --no-tags
+          git diff --check origin/integration/v0.7.0-rc.2-all-project-work...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.2-all-project-work...HEAD)"
