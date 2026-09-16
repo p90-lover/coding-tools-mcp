@@ -5,7 +5,7 @@
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
   "type": "module",
-  "main": "electron/main.cjs",
+  "main": "electron/main-with-provider.cjs",
   "scripts": {
     "dev": "bun run scripts/dev.cjs",
     "audit": "bun audit",
