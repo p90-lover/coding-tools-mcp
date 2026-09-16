@@ -4,7 +4,9 @@ use std::time::Duration;
 #[tokio::test]
 async fn drains_without_replaying_or_killing_owned_work() {
     let lifecycle = Lifecycle::new(2);
-    let first = lifecycle.admit("fixture-read").expect("first request admitted");
+    let first = lifecycle
+        .admit("fixture-read")
+        .expect("first request admitted");
     let second = lifecycle
         .admit("fixture-command")
         .expect("second request admitted");
