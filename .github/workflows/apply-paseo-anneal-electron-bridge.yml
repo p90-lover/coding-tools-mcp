@@ -41,6 +41,7 @@ jobs:
         run: |
           if [ "${GITHUB_REF_NAME}" = "integration/v0.7-rc2-subagent-bridge-current" ]; then
             python3 aiTemp/paseo-anneal-electron/apply_electron_bridge_only.py
+            python3 aiTemp/paseo-anneal-electron/apply_electron_bridge_only.py
           else
             python3 aiTemp/paseo-anneal-electron/apply_bridge_patch.py
           fi
@@ -80,7 +81,8 @@ jobs:
             desktop-electron/electron/ipc-schema.cjs \
             desktop-electron/electron/preload.cjs \
             desktop-electron/electron/main.cjs \
-            desktop-electron/electron/headless-host.cjs
+            desktop-electron/electron/headless-host.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs
           git diff --cached --check
-          git commit -m "feat(rc.2): connect Paseo and Anneal to Electron"
+          git commit -m "fix(rc.2): make Electron bridge application idempotent"
           git push origin "HEAD:${TARGET_BRANCH}"
