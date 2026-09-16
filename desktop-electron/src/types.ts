@@ -151,7 +151,7 @@ export interface ProviderExecutionPlan {
   model: string | null;
   proxy: {
     mode: "direct" | "profile";
-    source: "account" | "provider" | "global" | "default";
+    source: "account" | "provider" | "provider-default" | "global" | "default";
     profile: ProviderExecutionProxyProfile | null;
   };
   fallbackUsed: boolean;
@@ -159,6 +159,37 @@ export interface ProviderExecutionPlan {
     providerId: string;
     accountId: string;
   };
+}
+
+export interface ProviderExecutionConfigureInput extends ProviderExecutionPlanInput {
+  workspaceId: string;
+  engine?: ProviderExecutionWorkload;
+  endpoint: string;
+  mode?: string;
+  projectId?: string;
+  repoId?: string;
+  assigneeId?: string;
+  maxDurationMin?: number;
+  allowCodex?: boolean;
+  confirmExternalExecution?: boolean;
+  credential?: string;
+  confirm: boolean;
+}
+
+export interface ProviderExecutionMissionInput extends ProviderExecutionPlanInput {
+  workspaceId: string;
+  engine?: ProviderExecutionWorkload;
+  taskId: string;
+  missionId: string;
+  requestKey?: string;
+  confirm: boolean;
+}
+
+export interface ProviderExecutionDispatchResult {
+  plan: ProviderExecutionPlan;
+  bindingId: string;
+  missionId?: string;
+  execution: unknown;
 }
 
 export interface LauncherState {
@@ -326,6 +357,8 @@ export interface LauncherApi {
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   providerSnapshot(): Promise<ProviderNetworkSnapshot>;
   providerExecutionPlan(input: ProviderExecutionPlanInput): Promise<ProviderExecutionPlan>;
+  configureProviderExecution(input: ProviderExecutionConfigureInput): Promise<ProviderExecutionDispatchResult>;
+  dispatchProviderMission(input: ProviderExecutionMissionInput): Promise<ProviderExecutionDispatchResult>;
   saveProviderAccount(input: ProviderAccountInput): Promise<ProviderNetworkSnapshot>;
   setDefaultProviderAccount(providerId: string, accountId: string): Promise<ProviderNetworkSnapshot>;
   setProviderAccountEnabled(accountId: string, enabled: boolean): Promise<ProviderNetworkSnapshot>;
