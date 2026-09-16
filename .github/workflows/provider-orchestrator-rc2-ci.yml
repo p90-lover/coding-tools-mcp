@@ -8,16 +8,24 @@ on:
     paths:
       - 'src-tauri/src/providers.rs'
       - 'src-tauri/src/orchestrators.rs'
+      - 'src-tauri/src/orchestrator_run.rs'
       - 'src-tauri/src/commands/providers.rs'
       - 'src-tauri/src/commands/orchestrators.rs'
       - 'src-tauri/src/data/model.rs'
       - 'src-tauri/src/lib.rs'
+      - 'src-tauri/src/auth/**'
+      - 'src-tauri/src/mcp/listener.rs'
+      - 'src-tauri/src/mcp/transport.rs'
       - 'src/lib/provider-center.ts'
       - 'src/lib/orchestrator-center.ts'
       - 'src/lib/components/AppShell.svelte'
       - 'src/routes/providers/**'
       - 'src/routes/orchestrators/**'
+      - 'src/routes/orchestrator-run/**'
       - 'aiTemp/rc2/**'
+      - 'aiTemp/oauth-issuer/**'
+      - 'aiTemp/oauth-prm/**'
+      - 'aiTemp/connection-tests/http.rs'
       - '.github/workflows/provider-orchestrator-rc2-ci.yml'
   workflow_dispatch:
 
@@ -93,7 +101,7 @@ jobs:
 
   rust:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-provider-orchestrator
     steps:
@@ -120,11 +128,14 @@ jobs:
       - name: Compile desktop provider and orchestrator runtime
         working-directory: src-tauri
         run: cargo check --locked 2>&1 | tee ../aiTemp/evidence/cargo-check.txt
-      - name: Run provider and orchestrator unit tests
+      - name: Run provider, orchestrator and OAuth unit contracts
         working-directory: src-tauri
         run: |
           cargo test --locked providers::tests 2>&1 | tee ../aiTemp/evidence/provider-tests.txt
           cargo test --locked orchestrators::tests 2>&1 | tee ../aiTemp/evidence/orchestrator-tests.txt
+          cargo test --locked orchestrator_run::tests 2>&1 | tee ../aiTemp/evidence/orchestrator-run-tests.txt
+          cargo test --locked oauth_authorization_response_contract 2>&1 | tee ../aiTemp/evidence/oauth-issuer-tests.txt
+          cargo test --locked oauth_prm_path_contract 2>&1 | tee ../aiTemp/evidence/oauth-prm-tests.txt
       - name: Strict focused Clippy
         working-directory: src-tauri
         run: cargo clippy --locked --lib -- -D warnings 2>&1 | tee ../aiTemp/evidence/clippy.txt
