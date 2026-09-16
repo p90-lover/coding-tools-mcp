@@ -6,12 +6,21 @@ const path = require("node:path");
 const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
-const surface = fs.readFileSync(
-  path.join(root, "src/features/ProviderOrchestratorSurfaces.tsx"),
-  "utf8",
-);
+const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
+const providerHubPath = path.join(root, "src/features/ProviderHubSurface.tsx");
+const surface = fs.existsSync(providerHubPath)
+  ? fs.readFileSync(providerHubPath, "utf8")
+  : "";
 const preload = fs.readFileSync(path.join(root, "electron/preload.cjs"), "utf8");
 const types = fs.readFileSync(path.join(root, "src/types.ts"), "utf8");
+
+test("the active Provider Center uses the focused Provider Hub component", () => {
+  assert.match(
+    app,
+    /import \{ ProviderCenterSurface \} from "\.\/features\/ProviderHubSurface"/,
+  );
+  assert.ok(surface.length > 0, "ProviderHubSurface.tsx must exist");
+});
 
 test("Provider Center is backed by the encrypted multi-account Provider Hub", () => {
   assert.match(surface, /providerSnapshot\(\)/);
@@ -35,7 +44,7 @@ test("Paseo and Anneal execution dispatch names the selected Provider Hub accoun
 
 test("Provider secrets and model discovery do not bypass the Electron main-process boundary", () => {
   assert.doesNotMatch(surface, /PROVIDER_STORAGE_KEY/);
-  assert.doesNotMatch(surface, /localStorage\.(?:getItem|setItem)\(PROVIDER_STORAGE_KEY/);
+  assert.doesNotMatch(surface, /localStorage\.(?:getItem|setItem)/);
   assert.doesNotMatch(surface, /await\s+fetch\s*\(/);
   assert.doesNotMatch(surface, /authorization["']?\s*,\s*`Bearer \$\{credential/);
 });
