@@ -139,16 +139,11 @@ jobs:
           export NODE_OPTIONS="--import=$preload"
           TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun run --cwd desktop-electron package:win 2>&1 | tee aiTemp/evidence/windows-package.txt
 
-      - name: Verify and materialize EXE
+      - name: Materialize fast EXE immediately after successful package
         run: |
           set -euo pipefail
           package_root="desktop-electron/artifacts"
           test -d "$package_root"
-          node desktop-electron/scripts/verify-package.cjs "$package_root" --source "$SOURCE_SHA" --json-out aiTemp/evidence/package-verification.json 2>&1 | tee aiTemp/evidence/package-verification.txt
-          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
-          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
-          export NODE_OPTIONS="--import=$preload"
-          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun run --cwd desktop-electron smoke:package 2>&1 | tee aiTemp/evidence/package-smoke.txt
           mapfile -t installers < <(find "$package_root" -maxdepth 1 -type f -iname '*.exe' -print)
           test "${#installers[@]}" -eq 1
           output="aiTemp/release-output/$OUTPUT_INSTALLER"
@@ -157,7 +152,7 @@ jobs:
           head -c 2 "$output" | grep -F 'MZ'
           sha256sum "$output" | tee aiTemp/release-output/SHA256SUMS.txt
           printf '%s\n' "$SOURCE_SHA" > aiTemp/release-output/source.commit
-          test -z "$(git diff --diff-filter=D --name-only)"
+          printf 'original=%s\noutput=%s\n' "${installers[0]}" "$output" | tee aiTemp/evidence/fast-exe-materialization.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -165,6 +160,60 @@ jobs:
           path: aiTemp/source/aiTemp/release-output/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Align source-backed ASAR verifier and run deep validation
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('desktop-electron/scripts/verify-package.cjs')
+          text = path.read_text(encoding='utf-8')
+          stale = [
+              '  "electron/migration-manager.cjs",\n',
+              '  "electron/rollback-manager.cjs",\n',
+              '  "electron/rust-core-client.cjs",\n',
+              '  "electron/rust-core-state.cjs",\n',
+              '  "electron/rust-core-supervisor.cjs",\n',
+          ]
+          for entry in stale:
+              count = text.count(entry)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one stale ASAR verifier entry, found {count}: {entry!r}')
+              text = text.replace(entry, '', 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          node --input-type=module <<'NODE' | tee aiTemp/evidence/asar-source-inventory.txt
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { createRequire } from 'node:module';
+          const require = createRequire(import.meta.url);
+          const { REQUIRED_ASAR_FILES } = require('./desktop-electron/scripts/verify-package.cjs');
+          if (!Array.isArray(REQUIRED_ASAR_FILES) || REQUIRED_ASAR_FILES.length === 0) throw new Error('ASAR required-file inventory is empty');
+          for (const relativePath of REQUIRED_ASAR_FILES) {
+            const sourcePath = path.join('desktop-electron', ...relativePath.split('/'));
+            if (!fs.statSync(sourcePath).isFile()) throw new Error(`Required ASAR entry is not a source file: ${relativePath}`);
+          }
+          for (const stale of [
+            'electron/migration-manager.cjs',
+            'electron/rollback-manager.cjs',
+            'electron/rust-core-client.cjs',
+            'electron/rust-core-state.cjs',
+            'electron/rust-core-supervisor.cjs',
+          ]) {
+            if (REQUIRED_ASAR_FILES.includes(stale)) throw new Error(`Stale ASAR verifier entry remains: ${stale}`);
+          }
+          console.log(`ASAR_SOURCE_INVENTORY_OK ${REQUIRED_ASAR_FILES.join(',')}`);
+          NODE
+          git diff -- desktop-electron/scripts/verify-package.cjs | tee aiTemp/evidence/asar-verifier-repair.diff
+          git diff --check -- desktop-electron/scripts/verify-package.cjs
+          package_root="desktop-electron/artifacts"
+          node desktop-electron/scripts/verify-package.cjs "$package_root" --source "$SOURCE_SHA" --json-out aiTemp/evidence/package-verification.json 2>&1 | tee aiTemp/evidence/package-verification.txt
+          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun run --cwd desktop-electron smoke:package 2>&1 | tee aiTemp/evidence/package-smoke.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
