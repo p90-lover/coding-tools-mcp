@@ -47,6 +47,14 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
   providerSnapshot: () => ipcRenderer.invoke("launcher:provider-snapshot"),
   providerExecutionPlan: (input) => ipcRenderer.invoke("launcher:provider-execution-plan", input),
+  configureProviderExecution: (input) => ipcRenderer.invoke(
+    "launcher:provider-execution-configure",
+    input,
+  ),
+  dispatchProviderMission: (input) => ipcRenderer.invoke(
+    "launcher:provider-execution-dispatch-mission",
+    input,
+  ),
   saveProviderAccount: (input) => ipcRenderer.invoke("launcher:provider-account-save", input),
   setDefaultProviderAccount: (providerId, accountId) => ipcRenderer.invoke(
     "launcher:provider-account-default",
