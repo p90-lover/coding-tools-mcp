@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - integration/v0.7.0-rc.5-main-sync
-    paths:
-      - .github/workflows/rc5-main-history-sync.yml
   workflow_dispatch:
 
 permissions:
