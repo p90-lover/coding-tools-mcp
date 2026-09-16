@@ -64,15 +64,20 @@ for function in ("service::view", "service::refresh", "service::change"):
         function,
         f"workflow-{function.replace('::', '-')}",
     )
-for operation in ("agent_prepare", "agent_control", "agent_review"):
+require(
+    "src-tauri/src/tools/workflow.rs",
+    'v.starts_with("agent_")',
+    "workflow-typed-agent-routing",
+)
+for variant in ("AgentPrepare", "AgentControl", "AgentReview"):
     require(
-        "src-tauri/src/tools/workflow.rs",
-        operation,
-        f"workflow-operation-{operation}",
+        "src-tauri/src/integrations/execution/service.rs",
+        variant,
+        f"typed-operation-{variant}",
     )
 require(
     "src-tauri/src/commands/execution.rs",
-    'workflow::call(',
+    "workflow::call(",
     "visible-read-shared-workflow",
 )
 require(
