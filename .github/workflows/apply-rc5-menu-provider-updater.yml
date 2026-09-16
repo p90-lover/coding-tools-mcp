@@ -78,7 +78,7 @@ jobs:
           EOF
           git status --short --untracked-files=all \
             | sed -E 's/^.. //' \
-            | grep -v '^aiTemp/rc5-menu-provider-updater/evidence/' \
+            | grep -v '^aiTemp/rc5-menu-provider-updater/' \
             | sort -u > aiTemp/rc5-menu-provider-updater/actual-paths.txt
           diff -u \
             aiTemp/rc5-menu-provider-updater/expected-paths.txt \
