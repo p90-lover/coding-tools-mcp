@@ -29,6 +29,7 @@ export interface ProviderAccountRecord {
   enabled: boolean;
   isDefault: boolean;
   models: string[];
+  hasCredential?: boolean;
   proxyProfileId?: string;
   createdAt: string;
   updatedAt: string;
