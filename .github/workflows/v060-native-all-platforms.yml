@@ -6,6 +6,7 @@ on:
       - subagent/v0.6-electron-release-continuation-20260916
     paths:
       - .github/workflows/v060-native-all-platforms.yml
+      - desktop-electron/scripts/package.cjs
       - desktop-electron/scripts/smoke-package.cjs
       - desktop-electron/scripts/smoke-artifact-contract.cjs
       - desktop-electron/scripts/launcher-process-smoke.cjs
@@ -28,7 +29,7 @@ env:
 
 jobs:
   native:
-    if: github.actor == github.repository_owner
+    if: ${{ github.actor == github.repository_owner && (matrix.label != 'windows' || !contains(github.event.head_commit.message, '[unix-only]')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -76,7 +77,21 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y xvfb libgtk-3-0 libnss3 libasound2t64 libgbm1 libfuse2
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libpipewire-0.3-dev \
+            libgbm-dev \
+            libnss3 \
+            libasound2t64 \
+            libfuse2 \
+            xvfb
 
       - name: Prepare retained roots and dependencies
         run: |
@@ -105,6 +120,7 @@ jobs:
           set -euo pipefail
           bun test runtime-web/tests/runtime-bundle-version.test.ts 2>&1 | tee aiTemp/evidence/runtime-version.txt
           node --test desktop-electron/tests/smoke-artifact-contract.test.cjs 2>&1 | tee aiTemp/evidence/smoke-artifact-contract.txt
+          node --check desktop-electron/scripts/package.cjs
           node --check desktop-electron/scripts/smoke-package.cjs
           node --check desktop-electron/scripts/launcher-process-smoke.cjs
 
@@ -141,7 +157,8 @@ jobs:
           partial="$input_dir/$archive.partial"
           final="$input_dir/$archive"
           curl --fail --location --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --connect-timeout 30 --output "$partial" "$TUNNEL_RELEASE_URL/$archive"
-          test "$(sha256sum "$partial" | awk '{print $1}')" = "$expected"
+          actual="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$partial")"
+          test "$actual" = "$expected"
           mv --no-clobber "$partial" "$final"
           echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$final" >> "$GITHUB_ENV"
 
