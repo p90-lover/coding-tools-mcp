@@ -1,0 +1,102 @@
+name: Apply Provider Execution Gates
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.2-provider-execution-gates
+    paths:
+      - 'aiTemp/provider-execution-gates/apply_patch.py'
+      - '.github/workflows/apply-provider-execution-gates.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-provider-execution-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/provider-execution-gates/bun-cache
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/provider-execution-gates/renderer-dist aiTemp/Trash/provider-execution-gates
+
+      - name: Apply exact guarded patch
+        run: python aiTemp/provider-execution-gates/apply_patch.py
+
+      - name: Verify runtime syntax
+        run: |
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run focused execution and Provider Hub contracts
+        run: |
+          node --test \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/provider-proxy-domain.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build production renderer into aiTemp evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/provider-execution-gates/renderer-dist \
+            --emptyOutDir
+
+      - name: Enforce no file deletion
+        run: |
+          deleted="$(git diff -M --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit verified source patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/ipc-schema.cjs \
+            desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx \
+            desktop-electron/src/types.ts
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'Source patch already applied.'
+            exit 0
+          fi
+          git commit -m 'fix(provider): route execution through encrypted Provider Hub accounts'
+          git push origin HEAD:fix/v0.7.0-rc.2-provider-execution-gates
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "aiTemp/Trash/provider-execution-gates/node_modules-$GITHUB_RUN_ID"
+          fi
