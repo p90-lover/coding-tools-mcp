@@ -21,6 +21,10 @@
  function search(){searchOpen=true;query='';setTimeout(()=>searchInput?.focus(),0);}
  function navigate(path:string){searchOpen=false;menu=false;void goto(path);}
  function keydown(e:KeyboardEvent){if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();search();}if(e.key==='Escape'){searchOpen=false;menu=false;}}
+ async function openRepository(){
+  repoError='';
+  try{await openUrl(REPO_URL);}catch{repoError='Open the repository from your browser. / 請在瀏覽器開啟儲存庫。';}
+ }
  onMount(initializePreferences);
  $effect(()=>{if(typeof document!=="undefined")document.documentElement.lang=$locale;});
 </script>
@@ -34,7 +38,7 @@
   <div class="cc-workspace-nav">{#if $workspaces.length}{@render sidebar()}{:else}<p class="cc-nav-empty">{translated($locale,'Add your first workspace to get started.','新增第一個工作區以開始使用。')}</p>{/if}</div>
   <div class="cc-nav-bottom">{#if settingsNav}<details><summary><Settings2 size={17}/>{translated($locale,'Settings','設定')}<ChevronRight size={15}/></summary><div class="cc-settings-items">{@render settingsNav()}</div></details>{/if}
    <div class="cc-safe-mode"><ShieldCheck size={17}/><div>{translated($locale,'Local permission boundaries','本機權限邊界')}<small>{translated($locale,'Provider execution needs consent','供應商執行須明確批准')}</small></div></div>
-   <div class="cc-version"><span>v{APP_VERSION}</span><button aria-label="Open GitHub repository" onclick={async()=>{try{await openUrl(REPO_URL);}catch{repoError='Open the repository from your browser. / 請在瀏覽器開啟儲存庫。';}}><Github size={16}/></button></div>{#if repoError}<small>{repoError}</small>{/if}
+   <div class="cc-version"><span>v{APP_VERSION}</span><button aria-label="Open GitHub repository" onclick={openRepository}><Github size={16}/></button></div>{#if repoError}<small>{repoError}</small>{/if}
   </div>
  </aside>
  <div class="cc-main">
