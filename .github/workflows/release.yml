@@ -17,6 +17,12 @@ concurrency:
   group: electron-desktop-release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
+env:
+  BUN_VERSION: '1.4.0'
+  NODE_VERSION: '22'
+  RUST_TOOLCHAIN: '1.98.1'
+  TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
+
 jobs:
   identity:
     runs-on: ubuntu-24.04
@@ -26,9 +32,8 @@ jobs:
       version: ${{ steps.identity.outputs.version }}
       prerelease: ${{ steps.identity.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
           clean: false
@@ -42,14 +47,13 @@ jobs:
           version="${TAG#v}"
           source="$(git rev-parse "refs/tags/$TAG^{commit}")"
           git merge-base --is-ancestor "$source" origin/main
+          git checkout --detach "$source"
           node - <<'NODE'
           const fs = require('node:fs');
           const pkg = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
           const expected = process.env.TAG.slice(1);
           if (pkg.version !== expected) throw new Error(`desktop-electron version ${pkg.version} != tag ${expected}`);
-          if (pkg.build?.appId !== 'dev.codingtools.fullharness') {
-            throw new Error(`unexpected Electron appId: ${pkg.build?.appId || '<missing>'}`);
-          }
+          if (pkg.build?.appId !== 'dev.codingtools.fullharness') throw new Error(`unexpected Electron appId: ${pkg.build?.appId || '<missing>'}`);
           NODE
           node scripts/verify-oauth-release-contract.mjs \
             --expected-version "$version" \
@@ -76,46 +80,72 @@ jobs:
             package_script: package:mac
             assets: |
               desktop-electron/artifacts/*.dmg
-              desktop-electron/artifacts/*-mac-*.zip
+              desktop-electron/artifacts/*_mac_*.zip
           - os: ubuntu-24.04
             platform: linux
             package_script: package:linux
             assets: desktop-electron/artifacts/*.AppImage
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
-      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
-      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+      SOURCE_SHA: ${{ needs.identity.outputs.source }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/release-${{ matrix.platform }}-cargo-target
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/release-${{ matrix.platform }}-bun-cache
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/electron-builder-cache
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/Trash/release-${{ matrix.platform }}
       TMPDIR: ${{ github.workspace }}/aiTemp/system-tmp
       TMP: ${{ github.workspace }}/aiTemp/system-tmp
       TEMP: ${{ github.workspace }}/aiTemp/system-tmp
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: ${{ needs.identity.outputs.source }}
+          fetch-depth: 0
           persist-credentials: false
           clean: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
-          node-version: '22'
-      - name: Prepare preserved temp roots
-        shell: bash
-        run: mkdir -p aiTemp/system-tmp aiTemp/release-evidence
-      - name: Install Bun
-        shell: bash
-        run: npm install --global bun@1.2.22
-      - name: Install Linux package prerequisites
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install Linux native prerequisites
         if: matrix.platform == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y xvfb libgtk-3-0 libnss3 libasound2t64 libgbm1
-      - name: Install Electron launcher dependencies
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpipewire-0.3-dev \
+            libgbm-dev libnss3 libasound2t64 libfuse2 xvfb
+
+      - name: Prepare retained roots and dependencies
         shell: bash
-        working-directory: desktop-electron
-        run: bun install --frozen-lockfile
-      - name: Verify Electron release identity
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/system-tmp aiTemp/release-evidence "$ELECTRON_BUILDER_CACHE" "$CODING_TOOLS_RETENTION_ROOT"
+          if [ "${{ matrix.platform }}" = windows ]; then
+            node --input-type=module <<'NODE'
+          import path from 'node:path';
+          const cache = path.parse(process.env.ELECTRON_BUILDER_CACHE).root.toLowerCase();
+          const retained = path.parse(process.env.CODING_TOOLS_RETENTION_ROOT).root.toLowerCase();
+          if (!cache || cache !== retained) throw new Error(`NSIS cache and retention roots must share a volume: ${cache} != ${retained}`);
+          NODE
+          fi
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if command -v cygpath >/dev/null 2>&1; then preload="$(cygpath -w "$preload")"; fi
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          bun install --frozen-lockfile --cwd runtime-web
+          bun install --frozen-lockfile --cwd runtime-web/launcher
+          bun install --frozen-lockfile --cwd desktop-electron
+
+      - name: Verify release contracts
         shell: bash
         env:
           RELEASE_VERSION: ${{ needs.identity.outputs.version }}
@@ -124,27 +154,73 @@ jobs:
           node scripts/verify-oauth-release-contract.mjs \
             --expected-version "$RELEASE_VERSION" \
             --expected-app-id dev.codingtools.fullharness \
-            --json | tee aiTemp/release-evidence/oauth-release-contract.json
-      - name: Run Electron launcher tests
+            --json | tee aiTemp/release-evidence/oauth-release-contract-${{ matrix.platform }}.json
+          bun test runtime-web/tests/runtime-bundle-version.test.ts 2>&1 | tee aiTemp/release-evidence/runtime-version-${{ matrix.platform }}.txt
+          node --test \
+            desktop-electron/tests/smoke-artifact-contract.test.cjs \
+            desktop-electron/tests/source-release-contract.test.cjs \
+            2>&1 | tee aiTemp/release-evidence/source-contracts-${{ matrix.platform }}.txt
+          bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/release-evidence/typecheck-${{ matrix.platform }}.txt
+          bun run --cwd desktop-electron test 2>&1 | tee aiTemp/release-evidence/tests-${{ matrix.platform }}.txt
+
+      - name: Acquire pinned native tunnel client
         shell: bash
-        working-directory: desktop-electron
         run: |
           set -euo pipefail
-          bun run typecheck 2>&1 | tee ../aiTemp/release-evidence/typecheck-${{ matrix.platform }}.txt
-          bun run test 2>&1 | tee ../aiTemp/release-evidence/tests-${{ matrix.platform }}.txt
-      - name: Build native Electron package
+          label='${{ matrix.platform }}'
+          arch="$(node -p 'process.arch')"
+          case "$label/$arch" in
+            windows/x64) archive=tunnel-client-v0.0.12-windows-amd64.zip; expected=2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356 ;;
+            macos/arm64) archive=tunnel-client-v0.0.12-darwin-arm64.zip; expected=42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02 ;;
+            macos/x64) archive=tunnel-client-v0.0.12-darwin-amd64.zip; expected=33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009 ;;
+            linux/x64) archive=tunnel-client-v0.0.12-linux-amd64.zip; expected=2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81 ;;
+            linux/arm64) archive=tunnel-client-v0.0.12-linux-arm64.zip; expected=6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6 ;;
+            *) echo "unsupported release target $label/$arch" >&2; exit 1 ;;
+          esac
+          input_dir="aiTemp/input/tunnel-client/v0.0.12/$label-$arch"
+          mkdir -p "$input_dir"
+          partial="$input_dir/$archive.partial"
+          final="$input_dir/$archive"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --connect-timeout 30 --output "$partial" "$TUNNEL_RELEASE_URL/$archive"
+          actual="$(node -e 'const fs=require("node:fs"),crypto=require("node:crypto"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$partial")"
+          test "$actual" = "$expected"
+          mv -n "$partial" "$final"
+          test -s "$final"
+          echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$final" >> "$GITHUB_ENV"
+
+      - name: Build native headless sidecar and Electron package
         shell: bash
-        working-directory: desktop-electron
         run: |
           set -euo pipefail
-          bun run ${{ matrix.package_script }} 2>&1 | tee ../aiTemp/release-evidence/package-${{ matrix.platform }}.txt
+          cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml 2>&1 | tee aiTemp/release-evidence/headless-${{ matrix.platform }}.txt
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if command -v cygpath >/dev/null 2>&1; then preload="$(cygpath -w "$preload")"; fi
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          bun run --cwd desktop-electron ${{ matrix.package_script }} 2>&1 | tee aiTemp/release-evidence/package-${{ matrix.platform }}.txt
+
+      - name: Verify Windows package payload
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node desktop-electron/scripts/verify-package.cjs desktop-electron/artifacts \
+            --source "$SOURCE_SHA" \
+            --json-out aiTemp/release-evidence/package-verification.json \
+            2>&1 | tee aiTemp/release-evidence/package-verification.txt
+
       - name: Smoke packaged launcher
         shell: bash
-        working-directory: desktop-electron
         run: |
           set -euo pipefail
-          bun run smoke:package 2>&1 | tee ../aiTemp/release-evidence/smoke-${{ matrix.platform }}.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if command -v cygpath >/dev/null 2>&1; then preload="$(cygpath -w "$preload")"; fi
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          bun run --cwd desktop-electron smoke:package 2>&1 | tee aiTemp/release-evidence/smoke-${{ matrix.platform }}.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: electron-${{ matrix.platform }}-${{ needs.identity.outputs.source }}
           path: ${{ matrix.assets }}
@@ -152,7 +228,7 @@ jobs:
           retention-days: 14
       - name: Preserve release validation evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: electron-evidence-${{ matrix.platform }}-${{ needs.identity.outputs.source }}
           path: |
@@ -166,31 +242,29 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: ${{ needs.identity.outputs.source }}
           fetch-depth: 0
           persist-credentials: false
           clean: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
-          node-version: '22'
-      - name: Install Bun
-        shell: bash
-        run: npm install --global bun@1.2.22
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
       - name: Audit Electron dependency lock
-        shell: bash
-        working-directory: desktop-electron
-        run: |
-          set -euo pipefail
-          mkdir -p ../aiTemp/audit-evidence
-          bun install --frozen-lockfile
-          bun audit 2>&1 | tee ../aiTemp/audit-evidence/bun-audit.txt
-      - name: Screen reachable Git history for credential patterns
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p aiTemp/audit-evidence
+          bun install --frozen-lockfile --cwd desktop-electron
+          bun audit --cwd desktop-electron 2>&1 | tee aiTemp/audit-evidence/bun-audit.txt
+      - name: Screen reachable Git history for credential patterns
+        shell: bash
+        run: |
+          set -euo pipefail
           python - <<'PY' > aiTemp/audit-evidence/credential-screen.json
           import json, re, subprocess, sys
           patterns = {
@@ -221,7 +295,7 @@ jobs:
           sys.exit(1 if findings else 0)
           PY
           cat aiTemp/audit-evidence/credential-screen.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: electron-audit-${{ needs.identity.outputs.source }}
@@ -236,7 +310,7 @@ jobs:
       contents: write
       actions: read
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: ${{ needs.identity.outputs.source }}
           persist-credentials: false
