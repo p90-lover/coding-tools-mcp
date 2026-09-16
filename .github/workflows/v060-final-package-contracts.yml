@@ -1,5 +1,6 @@
 name: v0.6 final package contracts
 
+# Independent verification trigger for production fix 57333afcf08810c8381f55d192ea13395e92c7da.
 on:
   push:
     branches:
@@ -34,6 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           node --check desktop-electron/electron/runtime-command.cjs
+          node --check desktop-electron/electron/main.cjs
           node --check desktop-electron/scripts/prepare-package-resources.cjs
           node --test \
             desktop-electron/tests/runtime-version-probe.test.cjs \
