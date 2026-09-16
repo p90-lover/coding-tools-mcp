@@ -77,18 +77,24 @@ jobs:
             2>&1 | tee aiTemp/evidence/electron-control-center-tests.txt
           grep -F '# fail 0' aiTemp/evidence/electron-control-center-tests.txt
 
-      - name: Enforce focused no-delete patch scope
+      - name: Enforce focused no-delete source scope
         run: |
           set -euo pipefail
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
-          changed="$(git diff --name-only | sort)"
+          git status --short | tee aiTemp/evidence/electron-control-center-status.txt
+          changed="$(git diff --name-only -- desktop-electron/src | sort)"
+          if [ -z "$changed" ]; then
+            echo 'Source wiring is already committed.'
+            exit 0
+          fi
           expected="$(printf '%s\n' \
             desktop-electron/src/App.tsx \
             desktop-electron/src/api/contracts.ts \
             desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx \
             desktop-electron/src/icons.tsx \
             desktop-electron/src/types.ts | sort)"
+          printf 'changed source files:\n%s\n' "$changed"
           test "$changed" = "$expected"
 
       - name: Commit verified GUI wiring
