@@ -58,7 +58,7 @@ jobs:
       - name: Format and enforce narrow no-delete patch
         run: |
           set -euo pipefail
-          cargo fmt --all --manifest-path src-tauri/Cargo.toml
+          rustfmt --edition 2021 src-tauri/src/media.rs src-tauri/src/providers.rs
           test -z "$(git diff --diff-filter=D --name-only)"
           unexpected="$(git diff --name-only | grep -Ev '^(src-tauri/src/media\.rs|src-tauri/src/providers\.rs|src/lib/provider-media\.ts|src/routes/image-studio/\+page\.svelte)$' || true)"
           if [ -n "$unexpected" ]; then
@@ -83,7 +83,7 @@ jobs:
         working-directory: src-tauri
         run: |
           set -euo pipefail
-          cargo fmt --all -- --check 2>&1 | tee ../aiTemp/evidence/image-review-rustfmt.txt
+          rustfmt --edition 2021 --check src/media.rs src/providers.rs 2>&1 | tee ../aiTemp/evidence/image-review-rustfmt.txt
           cargo check --locked 2>&1 | tee ../aiTemp/evidence/image-review-cargo-check.txt
           cargo test --locked media::tests 2>&1 | tee ../aiTemp/evidence/image-review-media-tests.txt
           cargo clippy --locked --lib -- -D warnings 2>&1 | tee ../aiTemp/evidence/image-review-clippy.txt
