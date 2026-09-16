@@ -4,7 +4,28 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { terminateLauncherSmoke } = require("../electron/smoke-exit.cjs");
+const {
+  assertLauncherRuntimeVersion,
+  terminateLauncherSmoke,
+} = require("../electron/smoke-exit.cjs");
+
+let fixtureSequence = 0;
+
+function createRuntimeFixture(version) {
+  const runtimeRoot = path.resolve(
+    "aiTemp",
+    "Trash",
+    "launcher-smoke-exit-tests",
+    `runtime-${process.pid}-${Date.now()}-${fixtureSequence++}`,
+  );
+  const appRoot = path.join(runtimeRoot, "app");
+  fs.mkdirSync(appRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(appRoot, "package.json"),
+    `${JSON.stringify({ name: "codex-chatgpt-web", version }, null, 2)}\n`,
+  );
+  return runtimeRoot;
+}
 
 test("launcher smoke cleanup force-exits only after local resources close", async () => {
   const events = [];
@@ -39,6 +60,29 @@ test("launcher smoke cleanup tolerates an already-destroyed window", async () =>
   assert.deepEqual(events, ["browser.destroy", "control.close", "app.exit:0"]);
 });
 
+test("launcher smoke accepts the runtime CLI's own package version", () => {
+  const runtimeRoot = createRuntimeFixture("5.0.6");
+  assert.equal(assertLauncherRuntimeVersion({
+    runtimeRoot,
+    result: { status: 0, stdout: "5.0.6\n", stderr: "" },
+  }), "5.0.6");
+});
+
+test("launcher smoke rejects a CLI version that differs from packaged runtime metadata", () => {
+  const runtimeRoot = createRuntimeFixture("5.0.6");
+  assert.throws(
+    () => assertLauncherRuntimeVersion({
+      runtimeRoot,
+      result: { status: 0, stdout: "0.7.0-rc.1\n", stderr: "" },
+    }),
+    (error) => {
+      assert.match(error.message, /expected="5\.0\.6"/);
+      assert.match(error.message, /stdout="0\.7\.0-rc\.1"/);
+      return true;
+    },
+  );
+});
+
 test("main launcher delegates packaged smoke termination to the force-exit helper", () => {
   const source = fs.readFileSync(
     path.join(__dirname, "..", "electron", "main.cjs"),
@@ -46,7 +90,7 @@ test("main launcher delegates packaged smoke termination to the force-exit helpe
   );
   assert.match(
     source,
-    /const \{ terminateLauncherSmoke \} = require\("\.\/smoke-exit\.cjs"\);/,
+    /const \{ assertLauncherRuntimeVersion, terminateLauncherSmoke \} = require\("\.\/smoke-exit\.cjs"\);/,
   );
   assert.match(
     source,
