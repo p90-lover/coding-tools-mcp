@@ -6,6 +6,7 @@ on:
       - feature/0.7-rc2-image-providers
     paths:
       - aiTemp/rc2/apply_image_review_fixes.py
+      - aiTemp/rc2/apply_image_review_fixes_v2.py
       - .github/workflows/apply-image-review-fixes.yml
   workflow_dispatch:
 
@@ -48,9 +49,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/evidence aiTemp/Trash/image-review-green
-          python aiTemp/rc2/apply_image_review_fixes.py \
+          python aiTemp/rc2/apply_image_review_fixes_v2.py \
             | tee aiTemp/evidence/image-review-green-apply.txt
           grep -F 'IMAGE_REVIEW_FIXES_OK changed=true' \
+            aiTemp/evidence/image-review-green-apply.txt
+          grep -F 'IMAGE_REVIEW_FIXES_V2_OK' \
             aiTemp/evidence/image-review-green-apply.txt
       - name: Format and enforce narrow no-delete patch
         run: |
