@@ -67,6 +67,12 @@ jobs:
           TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" bun install --frozen-lockfile --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/runtime-launcher-install.txt
           TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
 
+      - name: Verify runtime release-version contract
+        run: |
+          set -euo pipefail
+          bun test runtime-web/tests/runtime-bundle-version.test.ts 2>&1 | tee aiTemp/evidence/runtime-bundle-version-test.txt
+          node --check desktop-electron/scripts/runtime-preparation.cjs
+
       - name: Acquire pinned Windows tunnel client
         run: |
           set -euo pipefail
