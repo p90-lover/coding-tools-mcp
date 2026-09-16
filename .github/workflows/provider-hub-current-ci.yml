@@ -17,6 +17,7 @@ on:
       - desktop-electron/src/types.ts
       - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
       - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/provider-network-credentials.test.cjs
       - desktop-electron/package.json
       - .github/workflows/provider-hub-current-ci.yml
   pull_request:
@@ -35,6 +36,7 @@ on:
       - desktop-electron/src/types.ts
       - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
       - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/provider-network-credentials.test.cjs
       - desktop-electron/package.json
       - .github/workflows/provider-hub-current-ci.yml
   workflow_dispatch:
@@ -82,6 +84,7 @@ jobs:
           node --test
           desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
           desktop-electron/tests/provider-execution-router.test.cjs
+          desktop-electron/tests/provider-network-credentials.test.cjs
           desktop-electron/tests/proxy-provider-contract.test.cjs
           desktop-electron/tests/provider-proxy-domain.test.cjs
           desktop-electron/tests/execution-bridge-contract.test.cjs
