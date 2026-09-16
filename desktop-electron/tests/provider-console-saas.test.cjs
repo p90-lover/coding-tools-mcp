@@ -7,7 +7,7 @@ const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
 const surface = fs.readFileSync(
-  path.join(root, "src/features/ProviderHubSurface.tsx"),
+  path.join(root, "src/features/ProviderHubSaasSurface.tsx"),
   "utf8",
 );
 const catalog = fs.readFileSync(
@@ -59,7 +59,9 @@ test("Provider Hub localizes the new management controls in Traditional Chinese"
   }
 });
 
-test("The application exposes only one Provider navigation destination", () => {
+test("The application exposes one active Provider destination and imports the SaaS surface", () => {
   const providerNavigationCalls = app.match(/navigateSurface\("providers"\)/g) ?? [];
   assert.equal(providerNavigationCalls.length, 1);
+  assert.match(app, /ProviderHubSaasSurface/);
+  assert.doesNotMatch(app, /from "\.\/features\/ProviderHubSurface"/);
 });
