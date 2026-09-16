@@ -8,6 +8,7 @@ on:
       - integration/v0.7-rc2-subagent-bridge-current
     paths:
       - aiTemp/paseo-anneal-electron/apply_bridge_patch.py
+      - aiTemp/paseo-anneal-electron/apply_electron_bridge_only.py
       - desktop-electron/electron/headless-host.cjs
       - desktop-electron/tests/execution-bridge-contract.test.cjs
       - .github/workflows/apply-paseo-anneal-electron-bridge.yml
@@ -37,7 +38,12 @@ jobs:
         with:
           components: rustfmt
       - name: Apply deterministic production patch
-        run: python3 aiTemp/paseo-anneal-electron/apply_bridge_patch.py
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "integration/v0.7-rc2-subagent-bridge-current" ]; then
+            python3 aiTemp/paseo-anneal-electron/apply_electron_bridge_only.py
+          else
+            python3 aiTemp/paseo-anneal-electron/apply_bridge_patch.py
+          fi
       - name: Validate JavaScript syntax
         run: |
           node --check desktop-electron/electron/headless-host.cjs
