@@ -228,6 +228,10 @@ function normalizeState(parsed) {
   };
 }
 
+function requiresStoredCredential(auth) {
+  return auth === "api_key" || auth === "local_proxy";
+}
+
 function accountUsable(account) {
   return account.enabled && !account.archivedAt && account.status === "connected";
 }
@@ -338,7 +342,10 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   function publicSnapshot() {
     return {
       version: STORE_VERSION,
-      accounts: clone(state.accounts),
+      accounts: state.accounts.map((account) => ({
+        ...clone(account),
+        hasCredential: Boolean(state.secrets.accounts[account.id]),
+      })),
       proxyProfiles: state.proxyProfiles.map((profile) => ({ ...clone(profile) })),
       routing: clone(state.routing),
     };
@@ -377,10 +384,14 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     if (suppliedSecret && Object.keys(suppliedSecret).length > 0) {
       state.secrets.accounts[id] = codec.encrypt(suppliedSecret);
     }
+    const hasCredential = Boolean(state.secrets.accounts[id]);
     const statusInput = input.status ?? previous?.status;
-    const status = ACCOUNT_STATUS.has(statusInput)
+    let status = ACCOUNT_STATUS.has(statusInput)
       ? statusInput
       : suppliedSecret ? "connected" : "pending";
+    if (status === "connected" && requiresStoredCredential(auth) && !hasCredential) {
+      status = "pending";
+    }
     const account = normalizeAccount({
       id,
       providerId,
@@ -414,7 +425,10 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   function setDefaultAccount(providerId, accountId) {
     const account = findAccount(accountId);
     if (!account || account.providerId !== providerId) throw new Error("Provider account was not found");
-    if (!accountUsable(account)) throw new Error("Only a connected account can be the default");
+    if (!accountUsable(account)
+      || (requiresStoredCredential(account.auth) && !state.secrets.accounts[account.id])) {
+      throw new Error("Only a connected account with its required credential can be the default");
+    }
     for (const candidate of state.accounts) {
       if (candidate.providerId === providerId) candidate.isDefault = candidate.id === accountId;
     }
@@ -432,7 +446,9 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       account.isDefault = false;
       account.status = "disabled";
     } else if (account.status === "disabled") {
-      account.status = state.secrets.accounts[account.id] ? "connected" : "pending";
+      account.status = requiresStoredCredential(account.auth) && !state.secrets.accounts[account.id]
+        ? "pending"
+        : "connected";
     }
     state.accounts = normalizeAccountDefaults(state.accounts);
     write();

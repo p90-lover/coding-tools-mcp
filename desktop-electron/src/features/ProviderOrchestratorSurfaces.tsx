@@ -341,7 +341,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
           allowCodex: selected.definitionId === "codex-oauth",
           confirmExternalExecution: true,
         },
-        credential,
+        allowProviderFallback: true,
         confirm: true,
       });
       setCredential("");

@@ -209,7 +209,7 @@ test("API-key and local proxy accounts require an encrypted stored credential", 
       model: "gpt-test",
       allowFallback: false,
     }),
-    /No connected provider account|stored credential/i,
+    /No connected provider account|stored credential|not available on a connected provider account/i,
   );
 
   state.accounts[0].hasCredential = true;

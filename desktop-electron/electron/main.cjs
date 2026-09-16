@@ -32,6 +32,8 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
+const { providerNetworkReady } = require("./provider-bootstrap.cjs");
+const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -466,6 +468,19 @@ function executionSettingsPayload(settings) {
   };
 }
 
+function storedProviderCredential(secret) {
+  if (!secret || typeof secret !== "object") return "";
+  for (const key of ["apiKey", "token", "credential", "password"]) {
+    const value = secret[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function accountNeedsStoredCredential(auth) {
+  return auth === "api_key" || auth === "local_proxy";
+}
+
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
   handle("coding-tools:execution:read", async (event, input) => {
@@ -480,13 +495,50 @@ function registerIpc({ logger, stateStore }) {
   handle("coding-tools:execution:provider", async (event, input) => {
     assertFocusedMainWindow(event, true);
     if (!headlessHost) throw new Error("Local execution service is unavailable");
+
+    let settings = input.settings;
+    let credential = "";
+    const plannedWorkload = input.operation === "configure"
+      && settings
+      && (settings.engine === "paseo" || settings.engine === "anneal");
+    if (plannedWorkload) {
+      const providerNetwork = await providerNetworkReady();
+      const plan = createProviderExecutionPlan(providerNetwork.store.snapshot(), {
+        workload: settings.engine,
+        providerId: settings.provider,
+        accountId: input.providerAccountId ?? undefined,
+        model: settings.model,
+        allowFallback: input.allowProviderFallback !== false,
+      });
+      const secret = providerNetwork.store.accountSecret(plan.account.id);
+      credential = storedProviderCredential(secret);
+      if (accountNeedsStoredCredential(plan.account.auth) && !credential) {
+        throw new Error(`Provider account ${plan.account.id} has no usable stored credential`);
+      }
+      settings = {
+        ...settings,
+        provider: plan.provider.id,
+        model: plan.model ?? settings.model,
+      };
+      logger.info("execution.provider_planned", {
+        workload: plan.workload,
+        providerId: plan.provider.id,
+        accountId: plan.account.id,
+        model: plan.model,
+        fallbackUsed: plan.fallbackUsed,
+        proxyMode: plan.proxy.mode,
+        proxySource: plan.proxy.source,
+        proxyProfileId: plan.proxy.profile?.id ?? null,
+      });
+    }
+
     return headlessHost.request("/api/v1/execution/provider", {
       workspace_id: input.workspaceId,
       operation: input.operation,
       expected_revision: input.expectedRevision ?? null,
       binding_id: input.bindingId ?? null,
-      settings: executionSettingsPayload(input.settings),
-      credential: input.credential ?? "",
+      settings: executionSettingsPayload(settings),
+      credential,
       confirm: input.confirm === true,
     });
   });
