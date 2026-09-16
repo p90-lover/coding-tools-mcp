@@ -21,18 +21,22 @@ test("onboarding exposes Traditional Chinese without mandatory social clicks", (
     app,
     /disabled=\{busy\s*\|\|\s*\(stage === "support"[^}]*githubOpened[^}]*xOpened/,
   );
+  assert.match(app, /label:\s*copy\.traditionalChinese,\s*value:\s*"zh-TW"/);
+  assert.match(app, /language === "zh-TW"\s*\?\s*"zh-TW"/);
   assert.match(i18n, /language === "zh-TW"/);
   assert.match(i18n, /zhTWOverrides/);
 });
 
 test("launcher uses the project owner links and never blocks completion on social state", () => {
   const main = read("desktop-electron/electron/main.cjs");
+  const state = read("desktop-electron/electron/state.cjs");
 
   assert.match(main, /https:\/\/github\.com\/p90-lover\/coding-tools-mcp/);
   assert.match(main, /https:\/\/x\.com\/GIBUSHAT/);
   assert.doesNotMatch(main, /Open the GitHub and X pages before continuing/);
   assert.match(main, /value !== "zh-TW"/);
   assert.match(main, /"zh-TW": Object\.freeze\(/);
+  assert.match(state, /state\.language !== "zh-TW"/);
 });
 
 test("Traditional Chinese overrides cover onboarding and new orchestration surfaces", () => {
