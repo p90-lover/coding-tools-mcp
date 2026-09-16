@@ -25,6 +25,7 @@ const {
   registerLoggedIpc,
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
+const { HeadlessHost } = require("./headless-host.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
@@ -52,8 +53,8 @@ const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browse
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
-const GITHUB_URL = "https://github.com/miuuyy/codex-chatgpt-web";
-const X_URL = "https://x.com/miu21590";
+const GITHUB_URL = "https://github.com/p90-lover/coding-tools-mcp";
+const X_URL = "https://x.com/GIBUSHAT";
 const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
@@ -81,6 +82,7 @@ let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
 let runtimeHost = null;
+let headlessHost = null;
 let browserControl = null;
 let runtimeSupervisor = null;
 let tray = null;
@@ -212,6 +214,16 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
+  }),
+  "zh-TW": Object.freeze({
+    openLauncher: "開啟 Codex Web GPT",
+    quit: "結束",
+    exportDiagnostics: "匯出已保護私隱的診斷資料",
+    cancel: "取消",
+    remove: "移除",
+    removeTitle: "移除 Codex Web GPT",
+    removeMessage: "從 Codex 移除 ChatGPT Web 模型並還原先前的模型路由？",
+    removeDetail: "啟動器中的 ChatGPT 登入 profile 會保留。Codex 需要重新啟動一次。",
   }),
   ja: Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -397,8 +409,8 @@ async function loadRenderer(window) {
 }
 
 function validateLanguage(value) {
-  if (value !== "en" && value !== "zh-CN" && value !== "ja") {
-    throw new Error("Language must be en, zh-CN, or ja");
+  if (value !== "en" && value !== "zh-CN" && value !== "zh-TW" && value !== "ja") {
+    throw new Error("Language must be en, zh-CN, zh-TW, or ja");
   }
   return value;
 }
@@ -422,8 +434,73 @@ function smokePassedForCurrentVersion(state) {
   return state.browserSmokePassed === true && state.browserSmokeVersion === app.getVersion();
 }
 
+
+function assertFocusedMainWindow(event, write = false) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const valid = window
+    && window === mainWindow
+    && !window.isDestroyed()
+    && window.isVisible()
+    && !window.isMinimized()
+    && (!write || (window.isFocused() && event.sender.isFocused()));
+  if (!valid) {
+    throw new Error("Use the visible, focused main-window controller for provider consent");
+  }
+}
+
+function executionSettingsPayload(settings) {
+  if (!settings) return null;
+  return {
+    id: settings.id ?? null,
+    engine: settings.engine,
+    endpoint: settings.endpoint,
+    provider: settings.provider,
+    model: settings.model,
+    mode: settings.mode,
+    project_id: settings.projectId ?? null,
+    repo_id: settings.repoId ?? null,
+    assignee_id: settings.assigneeId ?? null,
+    max_duration_min: settings.maxDurationMin,
+    allow_codex: settings.allowCodex,
+    confirm_external_execution: settings.confirmExternalExecution,
+  };
+}
+
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  handle("coding-tools:execution:read", async (event, input) => {
+    assertFocusedMainWindow(event, false);
+    if (!headlessHost) throw new Error("Local execution service is unavailable");
+    return headlessHost.request("/api/v1/execution/read", {
+      workspace_id: input.workspaceId,
+      mission_id: input.missionId ?? null,
+      refresh_source: input.refreshSource === true,
+    });
+  });
+  handle("coding-tools:execution:provider", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!headlessHost) throw new Error("Local execution service is unavailable");
+    return headlessHost.request("/api/v1/execution/provider", {
+      workspace_id: input.workspaceId,
+      operation: input.operation,
+      expected_revision: input.expectedRevision ?? null,
+      binding_id: input.bindingId ?? null,
+      settings: executionSettingsPayload(input.settings),
+      credential: input.credential ?? "",
+      confirm: input.confirm === true,
+    });
+  });
+  handle("coding-tools:execution:update", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!headlessHost) throw new Error("Local execution service is unavailable");
+    return headlessHost.request("/api/v1/execution/update", {
+      workspace_id: input.workspaceId,
+      expected_revision: input.expectedRevision,
+      change: input.change,
+      confirm: input.confirm === true,
+    });
+  });
+
   handle("launcher:snapshot", async () => ({
     profile: LAUNCHER_PROFILE.kind,
     profilePaths: {
@@ -463,7 +540,6 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
     const current = stateStore.read();
-    if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
     if (current.autoStart) setAutostart(app, true);
     const next = stateStore.update({
       language: validateLanguage(language),
@@ -878,6 +954,7 @@ async function requestQuit() {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
     quitting = true;
     await browserHost?.persistSession();
@@ -963,6 +1040,11 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  headlessHost = new HeadlessHost({
+    app,
+    logger,
+    sourceRoot: SOURCE_ROOT,
+  });
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
     logger,
