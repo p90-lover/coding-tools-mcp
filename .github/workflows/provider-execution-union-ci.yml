@@ -1,0 +1,132 @@
+name: Provider execution union CI
+
+on:
+  push:
+    branches:
+      - fix/v0.7-rc2-provider-execution-union
+    paths:
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-execution-router.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/src/api/contracts.ts
+      - desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/provider-execution-union.test.cjs
+      - desktop-electron/tests/provider-execution-dispatch-contract.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+      - desktop-electron/tests/provider-proxy-domain.test.cjs
+      - desktop-electron/tests/proxy-provider-contract.test.cjs
+      - .github/workflows/provider-execution-union-ci.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.2
+    paths:
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-execution-router.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/src/api/contracts.ts
+      - desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/provider-execution-union.test.cjs
+      - desktop-electron/tests/provider-execution-dispatch-contract.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+      - desktop-electron/tests/provider-proxy-domain.test.cjs
+      - desktop-electron/tests/proxy-provider-contract.test.cjs
+      - .github/workflows/provider-execution-union-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-execution-union-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/provider-execution-union/bun-cache
+
+jobs:
+  verify:
+    name: Current rc.2 runtime and contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/provider-execution-union/renderer-dist aiTemp/Trash/provider-execution-union
+
+      - name: Validate runtime syntax
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+          node --check desktop-electron/electron/preload.cjs
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run focused and preserved Provider Hub contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/provider-execution-union.test.cjs \
+            desktop-electron/tests/provider-execution-dispatch-contract.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/provider-proxy-domain.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            2>&1 | tee aiTemp/provider-execution-union/contracts.txt
+          grep -F '# fail 0' aiTemp/provider-execution-union/contracts.txt
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build production renderer into retained evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/provider-execution-union/renderer-dist \
+            --emptyOutDir
+
+      - name: Enforce no source-file deletion
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.2 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.2...HEAD
+          test -z "$(git diff -M --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.2...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: provider-execution-union-${{ github.sha }}
+          path: aiTemp/provider-execution-union/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "aiTemp/Trash/provider-execution-union/node_modules-$GITHUB_RUN_ID"
+          fi
