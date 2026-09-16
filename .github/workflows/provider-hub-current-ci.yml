@@ -1,0 +1,92 @@
+name: Provider Hub current rc.2 validation
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.2-provider-hub-current
+    paths:
+      - desktop-electron/electron/main-with-provider.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/src/network/**
+      - desktop-electron/src/providers/**
+      - desktop-electron/src/main.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+      - desktop-electron/package.json
+      - .github/workflows/provider-hub-current-ci.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.2
+    paths:
+      - desktop-electron/electron/main-with-provider.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/src/network/**
+      - desktop-electron/src/providers/**
+      - desktop-electron/src/main.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+      - desktop-electron/package.json
+      - .github/workflows/provider-hub-current-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-hub-current-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exact-head:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Validate Electron provider runtime syntax
+        run: |
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/main-with-provider.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/preload.cjs
+
+      - name: Run focused Provider Hub and preserved rc.2 contracts
+        run: >-
+          node --test
+          desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+          desktop-electron/tests/proxy-provider-contract.test.cjs
+          desktop-electron/tests/provider-proxy-domain.test.cjs
+          desktop-electron/tests/execution-bridge-contract.test.cjs
+          desktop-electron/tests/rc2-onboarding-localization.test.cjs
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build renderer into retained aiTemp evidence
+        run: |
+          mkdir -p aiTemp/provider-hub-current/exact-head-renderer
+          cd desktop-electron
+          bunx vite build --outDir ../aiTemp/provider-hub-current/exact-head-renderer --emptyOutDir
+
+      - name: Enforce no file deletion
+        shell: bash
+        run: |
+          deleted="$(git diff --diff-filter=D --name-only HEAD^ HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
