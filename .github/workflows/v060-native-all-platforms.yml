@@ -1,0 +1,235 @@
+name: v0.6 native Windows macOS Linux
+
+on:
+  push:
+    branches:
+      - subagent/v0.6-electron-release-continuation-20260916
+    paths:
+      - .github/workflows/v060-native-all-platforms.yml
+      - desktop-electron/scripts/smoke-package.cjs
+      - desktop-electron/scripts/smoke-artifact-contract.cjs
+      - desktop-electron/scripts/launcher-process-smoke.cjs
+      - desktop-electron/tests/smoke-artifact-contract.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v060-native-all-platforms-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: '1.4.0'
+  NODE_VERSION: '22'
+  RUST_TOOLCHAIN: '1.98.1'
+  SOURCE_SHA: ${{ github.sha }}
+  TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
+
+jobs:
+  native:
+    if: github.actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+            package_script: package:win
+          - os: macos-14
+            label: macos
+            package_script: package:mac
+          - os: ubuntu-24.04
+            label: linux
+            package_script: package:linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/source/aiTemp/native-${{ matrix.label }}-cargo-target
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/source/aiTemp/native-${{ matrix.label }}-bun-cache
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/source/aiTemp/electron-builder-cache
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/native-${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install Linux native prerequisites
+        if: matrix.label == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgtk-3-0 libnss3 libasound2t64 libgbm1 libfuse2
+
+      - name: Prepare retained roots and dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/release-output "$ELECTRON_BUILDER_CACHE" "$CODING_TOOLS_RETENTION_ROOT"
+          if [ "${{ matrix.label }}" = windows ]; then
+            node --input-type=module <<'NODE'
+          import path from 'node:path';
+          const cache = path.parse(process.env.ELECTRON_BUILDER_CACHE).root.toLowerCase();
+          const retained = path.parse(process.env.CODING_TOOLS_RETENTION_ROOT).root.toLowerCase();
+          if (!cache || cache !== retained) throw new Error(`NSIS cache and retention roots must share a volume: ${cache} != ${retained}`);
+          console.log(`NSIS_CACHE_VOLUME_OK ${cache}`);
+          NODE
+          fi
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if command -v cygpath >/dev/null 2>&1; then preload="$(cygpath -w "$preload")"; fi
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          absolute_tmp="$PWD/aiTemp/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" bun install --frozen-lockfile --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" bun install --frozen-lockfile --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/runtime-launcher-install.txt
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
+
+      - name: Run focused release contracts
+        run: |
+          set -euo pipefail
+          bun test runtime-web/tests/runtime-bundle-version.test.ts 2>&1 | tee aiTemp/evidence/runtime-version.txt
+          node --test desktop-electron/tests/smoke-artifact-contract.test.cjs 2>&1 | tee aiTemp/evidence/smoke-artifact-contract.txt
+          node --check desktop-electron/scripts/smoke-package.cjs
+          node --check desktop-electron/scripts/launcher-process-smoke.cjs
+
+      - name: Acquire native tunnel client
+        run: |
+          set -euo pipefail
+          platform="${{ matrix.label }}"
+          machine="$(node -p 'process.arch')"
+          case "$platform/$machine" in
+            windows/x64)
+              archive=tunnel-client-v0.0.12-windows-amd64.zip
+              expected=2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356
+              ;;
+            macos/x64)
+              archive=tunnel-client-v0.0.12-darwin-amd64.zip
+              expected=33de53aec680faafedc795f8f8268d6861577bddb871cb2d49529c91f88c2009
+              ;;
+            macos/arm64)
+              archive=tunnel-client-v0.0.12-darwin-arm64.zip
+              expected=42fb3138dc9c081d5777cb7e8bd1e041cc48b67c4978dbab3c5167ca1aabca02
+              ;;
+            linux/x64)
+              archive=tunnel-client-v0.0.12-linux-amd64.zip
+              expected=2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81
+              ;;
+            linux/arm64)
+              archive=tunnel-client-v0.0.12-linux-arm64.zip
+              expected=6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6
+              ;;
+            *) echo "unsupported tunnel target $platform/$machine" >&2; exit 1 ;;
+          esac
+          input_dir="aiTemp/input/tunnel-client/v0.0.12/$platform-$machine"
+          mkdir -p "$input_dir"
+          partial="$input_dir/$archive.partial"
+          final="$input_dir/$archive"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --connect-timeout 30 --output "$partial" "$TUNNEL_RELEASE_URL/$archive"
+          test "$(sha256sum "$partial" | awk '{print $1}')" = "$expected"
+          mv --no-clobber "$partial" "$final"
+          echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$final" >> "$GITHUB_ENV"
+
+      - name: Apply proven v0.6 headless compile repairs
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('rust-core/coding-tools-headless/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          replacements = [
+              ('tools::call_tool_mcp(&context, &tool, &arguments)', 'tools::dispatch::call_tool_mcp(&context, &tool, &arguments)'),
+              ('        let join = tokio::spawn(async move {\n', '        let service_shutdown_tx = shutdown_tx.clone();\n        let join = tokio::spawn(async move {\n'),
+              ('            let reason = shutdown_tx\n                .borrow()\n', '            let reason = service_shutdown_tx\n                .borrow()\n'),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one compile-repair match, found {count}: {old!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check -- rust-core/coding-tools-headless/src/lib.rs
+
+      - name: Build native headless sidecar and Electron package
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml 2>&1 | tee aiTemp/evidence/headless-build.txt
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if command -v cygpath >/dev/null 2>&1; then preload="$(cygpath -w "$preload")"; fi
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun run --cwd desktop-electron ${{ matrix.package_script }} 2>&1 | tee aiTemp/evidence/native-package.txt
+
+      - name: Materialize native artifact before smoke
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import crypto from 'node:crypto';
+          const pkg = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
+          const label = '${{ matrix.label }}';
+          const arch = process.arch;
+          const os = label === 'windows' ? 'win' : label === 'macos' ? 'mac' : 'linux';
+          const wantedExt = label === 'windows' ? ['exe'] : label === 'macos' ? ['dmg', 'zip'] : ['AppImage'];
+          const source = path.join('desktop-electron', 'artifacts');
+          const out = path.join('aiTemp', 'release-output');
+          fs.mkdirSync(out, { recursive: true });
+          const copied = [];
+          for (const ext of wantedExt) {
+            const name = pkg.build.artifactName
+              .replaceAll('${version}', pkg.version)
+              .replaceAll('${os}', os)
+              .replaceAll('${arch}', arch)
+              .replaceAll('${ext}', ext);
+            const src = path.join(source, name);
+            if (!fs.existsSync(src)) throw new Error(`missing configured native artifact ${src}`);
+            const dest = path.join(out, name);
+            fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL);
+            const bytes = fs.readFileSync(dest);
+            copied.push({ name, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') });
+          }
+          fs.writeFileSync(path.join(out, 'manifest.json'), `${JSON.stringify({ sourceSha: process.env.SOURCE_SHA, label, arch, files: copied }, null, 2)}\n`, { flag: 'wx' });
+          console.log(JSON.stringify(copied));
+          NODE
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: v060-native-${{ matrix.label }}-${{ github.sha }}
+          path: aiTemp/source/aiTemp/release-output/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Smoke packaged launcher
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          if command -v cygpath >/dev/null 2>&1; then preload="$(cygpath -w "$preload")"; fi
+          preload="$(node -e 'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);' "$preload")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" bun run --cwd desktop-electron smoke:package 2>&1 | tee aiTemp/evidence/native-smoke.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: v060-native-evidence-${{ matrix.label }}-${{ github.sha }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14
