@@ -28,6 +28,7 @@ export interface ProviderAccountRecord {
   status: ProviderAccountStatus;
   enabled: boolean;
   isDefault: boolean;
+  hasCredential: boolean;
   models: string[];
   proxyProfileId?: string;
   createdAt: string;
@@ -151,7 +152,7 @@ export interface ProviderExecutionPlan {
   model: string | null;
   proxy: {
     mode: "direct" | "profile";
-    source: "account" | "provider" | "global" | "default";
+    source: "account" | "provider" | "provider-default" | "global" | "default";
     profile: ProviderExecutionProxyProfile | null;
   };
   fallbackUsed: boolean;
