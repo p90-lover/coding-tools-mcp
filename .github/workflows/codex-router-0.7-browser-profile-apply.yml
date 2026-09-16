@@ -1,0 +1,95 @@
+name: Apply Codex Router 0.7 browser profile smoke fix
+
+on:
+  push:
+    branches:
+      - fix/codex-router-0.7-browser-partition-smoke-20260916
+    paths:
+      - aiTemp/codex-router-0.7-browser-profile-fix/apply-browser-profile-smoke-fix.py
+      - .github/workflows/codex-router-0.7-browser-profile-apply.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-router-0.7-browser-profile-apply-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Apply exact browser profile and smoke repair
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/codex-router-0.7-browser-profile-fix/evidence
+          python aiTemp/codex-router-0.7-browser-profile-fix/apply-browser-profile-smoke-fix.py \
+            | tee aiTemp/codex-router-0.7-browser-profile-fix/evidence/apply.txt
+          grep -F 'BROWSER_PROFILE_SMOKE_FIX_OK' \
+            aiTemp/codex-router-0.7-browser-profile-fix/evidence/apply.txt
+
+      - name: Enforce narrow no-delete patch
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          unexpected="$(git diff --name-only | grep -Ev '^(desktop-electron/electron/(browser-host|main|profile)\.cjs|desktop-electron/scripts/smoke-package\.cjs)$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo '::error::Unexpected tracked changes:'
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          git diff --check
+
+      - name: Check production syntax
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/profile.cjs
+          node --check desktop-electron/electron/browser-host.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/scripts/smoke-package.cjs
+
+      - name: Run focused profile and packaged smoke contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/profile.test.cjs \
+            desktop-electron/tests/launcher-process-smoke.test.cjs \
+            desktop-electron/tests/launcher-smoke-exit.test.cjs
+
+      - name: Commit verified production repair
+        env:
+          TARGET_BRANCH: fix/codex-router-0.7-browser-partition-smoke-20260916
+        run: |
+          set -euo pipefail
+          remote_head="$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | awk '{print $1}')"
+          if [ "$remote_head" != "$GITHUB_SHA" ]; then
+            echo '::error::Branch advanced while validation was running; refusing to overwrite it.'
+            exit 1
+          fi
+          git add \
+            desktop-electron/electron/profile.cjs \
+            desktop-electron/electron/browser-host.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/scripts/smoke-package.cjs
+          if git diff --cached --quiet; then
+            echo 'Browser profile and smoke repair is already applied.'
+            exit 0
+          fi
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(release): align browser profile and smoke diagnostics'
+          git push origin "HEAD:$TARGET_BRANCH"
