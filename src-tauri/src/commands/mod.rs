@@ -14,8 +14,8 @@ mod execution;
 pub use execution::{execution_local_provider, execution_local_read, execution_local_update};
 mod providers;
 pub use providers::{
-    provider_profile_archive, provider_profile_connect, provider_profile_disable,
-    provider_profile_probe, provider_profile_save, provider_profiles_read,
+    provider_image_generate, provider_profile_archive, provider_profile_connect,
+    provider_profile_disable, provider_profile_probe, provider_profile_save, provider_profiles_read,
 };
 mod orchestrators;
 pub use orchestrators::{
