@@ -12,6 +12,16 @@ pub use codex_runtime::{
 };
 mod execution;
 pub use execution::{execution_local_provider, execution_local_read, execution_local_update};
+mod providers;
+pub use providers::{
+    provider_profile_archive, provider_profile_connect, provider_profile_disable,
+    provider_profile_probe, provider_profile_save, provider_profiles_read,
+};
+mod orchestrators;
+pub use orchestrators::{
+    orchestrator_profile_archive, orchestrator_profile_run, orchestrator_profile_save,
+    orchestrator_profiles_read,
+};
 mod task_monitor;
 pub use task_monitor::task_monitor_read;
 mod control_center;
