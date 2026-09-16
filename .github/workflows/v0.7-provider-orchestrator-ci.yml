@@ -1,0 +1,86 @@
+name: v0.7 Provider and Orchestrator Check
+
+on:
+  push:
+    branches:
+      - feature/0.7-provider-center-orchestrator-a
+      - integration/v0.7.0-rc.2-all-features-20260916
+    paths:
+      - runtime-web/src/provider-*.ts
+      - runtime-web/src/orchestrator-config.ts
+      - runtime-web/tests/provider-center-orchestrator.test.ts
+      - src/lib/components/AppShell.svelte
+      - src/routes/providers/**
+      - src/routes/orchestrators/**
+      - desktop-electron/electron/headless-host.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - .github/workflows/v0.7-provider-orchestrator-ci.yml
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.2-all-features-20260916
+      - feature/0.7-paseo-anneal-electron
+    paths:
+      - runtime-web/src/provider-*.ts
+      - runtime-web/src/orchestrator-config.ts
+      - runtime-web/tests/provider-center-orchestrator.test.ts
+      - src/lib/components/AppShell.svelte
+      - src/routes/providers/**
+      - src/routes/orchestrators/**
+      - desktop-electron/electron/headless-host.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - .github/workflows/v0.7-provider-orchestrator-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v0.7-provider-orchestrator-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Install locked dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+          bun install --cwd runtime-web --frozen-lockfile
+
+      - name: Check the control-center UI
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run build
+
+      - name: Check provider and orchestrator contracts
+        run: |
+          set -euo pipefail
+          bun run --cwd runtime-web typecheck
+          bun test --cwd runtime-web tests/provider-center-orchestrator.test.ts
+
+      - name: Check the Paseo and Anneal execution bridge
+        run: node --test desktop-electron/tests/execution-bridge-contract.test.cjs
+
+      - name: Enforce a clean no-delete patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
