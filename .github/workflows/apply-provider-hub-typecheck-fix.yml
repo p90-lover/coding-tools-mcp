@@ -45,8 +45,11 @@ jobs:
       - name: Typecheck Electron renderer
         run: bun run --cwd desktop-electron typecheck
 
-      - name: Build Electron renderer
-        run: bun run --cwd desktop-electron build:renderer
+      - name: Build Electron renderer into retained aiTemp evidence
+        run: |
+          mkdir -p aiTemp/provider-hub/renderer-dist
+          cd desktop-electron
+          bunx vite build --outDir ../aiTemp/provider-hub/renderer-dist --emptyOutDir
 
       - name: Enforce no file deletion
         shell: bash
