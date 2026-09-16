@@ -5,41 +5,123 @@ on:
     branches:
       - fix/v0.7.0-rc.5-provider-console-saas
     paths:
-      - desktop-electron/src/features/ProviderHubSurface.tsx
+      - aiTemp/provider-console-saas/**
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
       - desktop-electron/src/features/provider-hub-saas.css
       - desktop-electron/src/providers/provider-types.ts
       - desktop-electron/src/App.tsx
       - desktop-electron/tests/provider-console-saas.test.cjs
+      - desktop-electron/tests/provider-center-account-wiring.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/package.json
+      - desktop-electron/bun.lock
       - .github/workflows/provider-console-saas-ci.yml
   pull_request:
     paths:
-      - desktop-electron/src/features/ProviderHubSurface.tsx
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
       - desktop-electron/src/features/provider-hub-saas.css
       - desktop-electron/src/providers/provider-types.ts
       - desktop-electron/src/App.tsx
       - desktop-electron/tests/provider-console-saas.test.cjs
+      - desktop-electron/tests/provider-center-account-wiring.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/package.json
+      - desktop-electron/bun.lock
       - .github/workflows/provider-console-saas-ci.yml
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: provider-console-saas-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/provider-console-saas/bun-cache
 
 jobs:
-  focused-contract:
+  apply-and-verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 2
           clean: false
+          persist-credentials: true
 
-      - name: Run compact Provider Hub contract
-        run: node --test desktop-electron/tests/provider-console-saas.test.cjs
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained work roots
+        run: mkdir -p aiTemp/provider-console-saas/evidence aiTemp/provider-console-saas/renderer aiTemp/Trash/provider-console-saas
+
+      - name: Materialize the SaaS Provider Hub
+        shell: bash
+        run: |
+          set -euo pipefail
+          python aiTemp/provider-console-saas/apply_provider_console_saas.py \
+            | tee aiTemp/provider-console-saas/evidence/materialization.txt
+          grep -F PROVIDER_CONSOLE_SAAS_APPLIED \
+            aiTemp/provider-console-saas/evidence/materialization.txt
+
+      - name: Verify bounded source changes and integrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+          test -f desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          test -f desktop-electron/src/features/provider-hub-saas.css
+          grep -F 'ProviderHubSaasSurface' desktop-electron/src/App.tsx
+          grep -F 'Codex OAuth' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F 'Claude OAuth' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F 'CommandCode Proxy' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F 'Gemini Antigravity Reverse Proxy' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          mapfile -t source_changes < <(
+            git status --short --untracked-files=all \
+              | sed -E 's/^.. //' \
+              | grep -v '^aiTemp/' \
+              | sort \
+              || true
+          )
+          for changed in "${source_changes[@]}"; do
+            case "$changed" in
+              desktop-electron/src/App.tsx|desktop-electron/src/features/ProviderHubSaasSurface.tsx|desktop-electron/src/features/provider-hub-saas.css) ;;
+              *) echo "Unexpected source change: $changed" >&2; exit 1 ;;
+            esac
+          done
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run focused Provider Hub regressions
+        run: >-
+          node --test
+          desktop-electron/tests/provider-console-saas.test.cjs
+          desktop-electron/tests/provider-center-account-wiring.test.cjs
+          desktop-electron/tests/provider-execution-router.test.cjs
+          desktop-electron/tests/execution-bridge-contract.test.cjs
+
+      - name: Validate Electron runtime and renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/main-with-provider.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/preload.cjs
+          bun run --cwd desktop-electron typecheck
+          (
+            cd desktop-electron
+            bunx vite build \
+              --outDir ../aiTemp/provider-console-saas/renderer \
+              --emptyOutDir
+          )
 
       - name: Enforce no file deletion
         shell: bash
@@ -47,3 +129,31 @@ jobs:
           set -euo pipefail
           deleted="$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
           test -z "$deleted"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit verified SaaS Provider Hub source
+        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/v0.7.0-rc.5-provider-console-saas'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+            desktop-electron/src/features/provider-hub-saas.css
+          if git diff --cached --quiet; then
+            echo PROVIDER_CONSOLE_SAAS_ALREADY_COMMITTED
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'feat(provider): add compact SaaS management console'
+          git push origin HEAD:refs/heads/fix/v0.7.0-rc.5-provider-console-saas
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          target="aiTemp/Trash/provider-console-saas/node_modules-$GITHUB_RUN_ID"
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "$target"
+          fi
