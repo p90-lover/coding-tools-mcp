@@ -1,4 +1,4 @@
-name: Apply Provider Hub renderer wiring
+name: Archive superseded Provider Hub renderer
 
 on:
   push:
@@ -6,23 +6,19 @@ on:
       - feature/v0.7.0-provider-multiaccount-global-proxy
     paths:
       - .github/workflows/apply-provider-hub-ui.yml
-      - aiTemp/provider-hub/apply_provider_hub.py
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: provider-hub-ui-${{ github.ref }}
+  group: archive-provider-hub-duplicates-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache-provider-hub
-
 jobs:
-  apply-and-verify:
+  archive-preserved-duplicates:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -31,74 +27,72 @@ jobs:
           clean: false
           persist-credentials: true
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        with:
-          node-version: '22'
-
-      - name: Apply typed Provider Hub renderer wiring
+      - name: Move superseded files into aiTemp Trash
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/evidence aiTemp/Trash/provider-hub
-          python aiTemp/provider-hub/apply_provider_hub.py \
-            2>&1 | tee aiTemp/evidence/provider-hub-wiring.txt
-          grep -F 'PROVIDER_HUB_WIRING_OK changed=True' aiTemp/evidence/provider-hub-wiring.txt
+          target="aiTemp/Trash/provider-hub/superseded-renderer"
+          recipes="aiTemp/Trash/provider-hub/obsolete-recipes"
+          workflows="aiTemp/Trash/provider-hub/obsolete-workflows"
+          mkdir -p "$target" "$recipes" "$workflows" aiTemp/evidence
 
-      - name: Verify bounded source mutation
-        run: |
-          set -euo pipefail
-          git diff --cached --check
-          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          test -f desktop-electron/src/ProviderManagerSurface.tsx
+          test -f desktop-electron/src/ProviderManagerSurface.css
+          test -f aiTemp/provider-hub/apply_provider_hub.py
+          test -f .github/workflows/apply-provider-hub-ui.yml
+
+          git mv desktop-electron/src/ProviderManagerSurface.tsx "$target/ProviderManagerSurface.tsx"
+          git mv desktop-electron/src/ProviderManagerSurface.css "$target/ProviderManagerSurface.css"
+          git mv aiTemp/provider-hub/apply_provider_hub.py "$recipes/apply_provider_hub.py"
+          git mv .github/workflows/apply-provider-hub-ui.yml "$workflows/apply-provider-hub-ui.yml"
+
+          git diff --cached -M --check
+          deleted="$(git diff --cached -M --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Unexpected deletion instead of preservation move:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+          git diff --cached -M --name-status | tee aiTemp/evidence/provider-hub-archive.txt
           python - <<'PY'
           import subprocess
 
-          expected = {
-              'desktop-electron/src/App.tsx',
-              'desktop-electron/src/types.ts',
-              'desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs',
+          expected_targets = {
+              'aiTemp/Trash/provider-hub/superseded-renderer/ProviderManagerSurface.tsx',
+              'aiTemp/Trash/provider-hub/superseded-renderer/ProviderManagerSurface.css',
+              'aiTemp/Trash/provider-hub/obsolete-recipes/apply_provider_hub.py',
+              'aiTemp/Trash/provider-hub/obsolete-workflows/apply-provider-hub-ui.yml',
           }
-          changed = set(subprocess.check_output(
-              ['git', 'diff', '--cached', '--name-only'], text=True
-          ).splitlines())
-          unexpected = sorted(changed - expected)
-          missing = sorted(expected - changed)
-          if unexpected:
-              raise SystemExit(f'UNEXPECTED_PROVIDER_HUB_PATHS:{unexpected}')
+          rows = subprocess.check_output(
+              ['git', 'diff', '--cached', '-M', '--name-status'], text=True
+          ).splitlines()
+          targets = set()
+          for row in rows:
+              parts = row.split('\t')
+              if not parts or parts[0].startswith('D'):
+                  raise SystemExit(f'ARCHIVE_DELETE_FORBIDDEN:{row}')
+              if parts[0].startswith('R') and len(parts) == 3:
+                  targets.add(parts[2])
+          missing = sorted(expected_targets - targets)
           if missing:
-              raise SystemExit(f'MISSING_PROVIDER_HUB_PATHS:{missing}')
-          print('PROVIDER_HUB_DIFF_BOUNDED')
+              raise SystemExit(f'ARCHIVE_TARGETS_MISSING:{missing}')
+          print('PROVIDER_HUB_DUPLICATES_ARCHIVED')
           PY
 
-      - name: Run focused Provider Hub verification
-        working-directory: desktop-electron
+      - name: Commit preservation moves safely
         run: |
           set -euo pipefail
-          trash="$GITHUB_WORKSPACE/aiTemp/Trash/provider-hub/node_modules-$GITHUB_RUN_ID"
-          cleanup() {
-            mkdir -p "$(dirname "$trash")"
-            if [ -d node_modules ]; then
-              mv node_modules "$trash"
-            fi
-          }
-          trap cleanup EXIT
-
-          npm install --ignore-scripts --package-lock=false --no-audit --no-fund
-          node --test tests/provider-multiaccount-global-proxy.test.cjs \
-            2>&1 | tee "$GITHUB_WORKSPACE/aiTemp/evidence/provider-hub-contract.txt"
-          npm run typecheck \
-            2>&1 | tee "$GITHUB_WORKSPACE/aiTemp/evidence/provider-hub-typecheck.txt"
-          npm run build:renderer -- --outDir ../aiTemp/provider-hub/renderer-dist --emptyOutDir \
-            2>&1 | tee "$GITHUB_WORKSPACE/aiTemp/evidence/provider-hub-renderer-build.txt"
-          node -c electron/provider-network.cjs
-          node -c electron/provider-bootstrap.cjs
-          node -c electron/preload.cjs
-          node -c electron/main-with-provider.cjs
-
-      - name: Commit verified Provider Hub wiring
-        run: |
-          set -euo pipefail
-          remote_head="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
-          test "$remote_head" = "$GITHUB_SHA"
           git config user.name 'p90-lover'
           git config user.email '146848721+p90-lover@users.noreply.github.com'
-          git commit -m 'feat(provider-hub): wire renderer and typed IPC controls'
-          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          git commit -m 'chore(provider-hub): preserve superseded renderer in Trash'
+
+          for attempt in 1 2 3; do
+            git fetch origin "$GITHUB_REF_NAME"
+            remote_head="$(git rev-parse FETCH_HEAD)"
+            if ! git merge-base --is-ancestor "$remote_head" HEAD; then
+              git rebase "$remote_head"
+            fi
+            if git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"; then
+              exit 0
+            fi
+          done
+          echo 'Unable to publish preservation move after three race-safe attempts' >&2
+          exit 1
