@@ -1,0 +1,113 @@
+name: v0.6 materialize proven source fixes
+
+on:
+  push:
+    branches:
+      - subagent/v0.6-electron-release-continuation-20260916
+    paths:
+      - .github/workflows/v060-materialize-source-fixes.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: subagent/v0.6-electron-release-continuation-20260916
+          fetch-depth: 0
+          clean: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+      - name: Install native check prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libpipewire-0.3-dev libgbm-dev
+      - name: Materialize exact proven fixes
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          python - <<'PY'
+          from pathlib import Path
+
+          rust = Path('rust-core/coding-tools-headless/src/lib.rs')
+          text = rust.read_text(encoding='utf-8')
+          replacements = [
+              ('tools::call_tool_mcp(&context, &tool, &arguments)', 'tools::dispatch::call_tool_mcp(&context, &tool, &arguments)'),
+              ('        let join = tokio::spawn(async move {\n', '        let service_shutdown_tx = shutdown_tx.clone();\n        let join = tokio::spawn(async move {\n'),
+              ('            let reason = shutdown_tx\n                .borrow()\n', '            let reason = service_shutdown_tx\n                .borrow()\n'),
+          ]
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one Rust repair match, found {count}: {old!r}')
+              text = text.replace(old, new, 1)
+          rust.write_text(text, encoding='utf-8')
+
+          verifier = Path('desktop-electron/scripts/verify-package.cjs')
+          text = verifier.read_text(encoding='utf-8')
+          stale = [
+              '  "electron/migration-manager.cjs",\n',
+              '  "electron/rollback-manager.cjs",\n',
+              '  "electron/rust-core-client.cjs",\n',
+              '  "electron/rust-core-state.cjs",\n',
+              '  "electron/rust-core-supervisor.cjs",\n',
+          ]
+          for entry in stale:
+              count = text.count(entry)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one stale verifier entry, found {count}: {entry!r}')
+              text = text.replace(entry, '', 1)
+          verifier.write_text(text, encoding='utf-8')
+          PY
+          cat > desktop-electron/tests/source-release-contract.test.cjs <<'NODE'
+          "use strict";
+          const test = require("node:test");
+          const assert = require("node:assert/strict");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { REQUIRED_ASAR_FILES } = require("../scripts/verify-package.cjs");
+
+          test("every required ASAR verifier entry is backed by current Electron source", () => {
+            assert.ok(Array.isArray(REQUIRED_ASAR_FILES) && REQUIRED_ASAR_FILES.length > 0);
+            for (const relativePath of REQUIRED_ASAR_FILES) {
+              const source = path.resolve(__dirname, "..", ...relativePath.split("/"));
+              assert.equal(fs.statSync(source).isFile(), true, `missing required source file: ${relativePath}`);
+            }
+            for (const stale of [
+              "electron/migration-manager.cjs",
+              "electron/rollback-manager.cjs",
+              "electron/rust-core-client.cjs",
+              "electron/rust-core-state.cjs",
+              "electron/rust-core-supervisor.cjs",
+            ]) assert.equal(REQUIRED_ASAR_FILES.includes(stale), false, `stale verifier entry: ${stale}`);
+          });
+          NODE
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff -- rust-core/coding-tools-headless/src/lib.rs desktop-electron/scripts/verify-package.cjs desktop-electron/tests/source-release-contract.test.cjs | tee aiTemp/evidence/source-fixes.diff
+      - name: Verify materialized source fixes
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target
+        run: |
+          set -euo pipefail
+          node --test desktop-electron/tests/source-release-contract.test.cjs
+          node --check desktop-electron/scripts/verify-package.cjs
+          cargo check --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml
+      - name: Commit verified source fixes
+        run: |
+          set -euo pipefail
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git add rust-core/coding-tools-headless/src/lib.rs desktop-electron/scripts/verify-package.cjs desktop-electron/tests/source-release-contract.test.cjs
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git commit -m 'fix(release): materialize verified v0.6 source repairs'
+          git push origin HEAD:subagent/v0.6-electron-release-continuation-20260916
