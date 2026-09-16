@@ -1,52 +1,21 @@
-export type CompletionSource =
-  | "chat"
-  | "github"
-  | "build"
-  | "browser"
-  | "web-task";
-
 export type TaskState =
   | "created"
   | "running"
   | "waiting"
   | "verifying"
   | "completed"
-  | "failed"
-  | "blocked"
-  | "cancelled";
-
-export interface CompletionRule {
-  id: string;
-  source: CompletionSource;
-  key: string;
-}
+  | "failed";
 
 export interface TaskObservation {
-  id: string;
-  source: CompletionSource;
-  key: string;
-  success: boolean;
-  terminal?: boolean;
-  message: string;
+  source: "chat" | "github" | "browser" | "build";
   timestamp: number;
-  evidence?: unknown;
+  message: string;
 }
 
-export interface AnnealTaskDefinition {
+export interface AnnealTaskMonitor {
   taskId: string;
-  title: string;
-  completionRules: CompletionRule[];
-}
-
-export interface CompletionEvaluation {
-  state: "verifying" | "completed" | "failed";
-  satisfiedRuleIds: string[];
-  missingRuleIds: string[];
-  failureObservationIds: string[];
-}
-
-export interface AnnealTaskSnapshot extends AnnealTaskDefinition {
   state: TaskState;
   observations: TaskObservation[];
-  evaluation: CompletionEvaluation;
+  addObservation(observation: TaskObservation): void;
+  isComplete(): boolean;
 }

@@ -1,22 +1,36 @@
 name: Paseo Anneal Electron Contract
 
+# Revalidate the exact user-authored head after verified apply workflows commit source repairs.
 on:
   push:
     branches:
       - feature/0.7-paseo-anneal-electron
+      - feature/v0.7-subagent-orchestrator
+      - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
+      - integration/v0.7.0-rc.2-all-project-work
     paths:
-      - rust-core/coding-tools-headless/src/lib.rs
+      - rust-core/coding-tools-headless/**
       - desktop-electron/electron/**
       - desktop-electron/src/api/**
+      - desktop-electron/src/agents/**
+      - desktop-electron/src/anneal/**
+      - desktop-electron/src/orchestrator/**
+      - desktop-electron/src/paseo/**
       - desktop-electron/tests/execution-bridge-contract.test.cjs
       - .github/workflows/paseo-anneal-electron-contract.yml
   pull_request:
     branches:
       - release/codex-router-multiprovider-0.7.0-rc.1
+      - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
+      - integration/v0.7.0-rc.2-all-project-work
     paths:
-      - rust-core/coding-tools-headless/src/lib.rs
+      - rust-core/coding-tools-headless/**
       - desktop-electron/electron/**
       - desktop-electron/src/api/**
+      - desktop-electron/src/agents/**
+      - desktop-electron/src/anneal/**
+      - desktop-electron/src/orchestrator/**
+      - desktop-electron/src/paseo/**
       - desktop-electron/tests/execution-bridge-contract.test.cjs
       - .github/workflows/paseo-anneal-electron-contract.yml
   workflow_dispatch:
@@ -28,22 +42,82 @@ concurrency:
   group: paseo-anneal-electron-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-paseo-anneal
+
 jobs:
   focused-contract:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 2
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libpipewire-0.3-dev \
+            libgbm-dev
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 22
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - name: Parse the Electron bridge sources
+        run: |
+          node --check desktop-electron/electron/headless-host.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+          node --check desktop-electron/electron/preload.cjs
+          node --check desktop-electron/electron/main.cjs
       - name: Run the focused execution bridge contract
         run: node --test desktop-electron/tests/execution-bridge-contract.test.cjs
-      - name: Parse the headless Rust patch
+      - name: Verify headless Rust formatting
         run: cargo fmt --manifest-path rust-core/coding-tools-headless/Cargo.toml --check
+      - name: Run headless Rust tests with retained diagnostics
+        id: headless-tests
+        shell: bash
+        run: |
+          mkdir -p aiTemp/evidence/paseo-anneal-electron
+          set +e
+          cargo test --manifest-path rust-core/coding-tools-headless/Cargo.toml --locked 2>&1 \
+            | tee aiTemp/evidence/paseo-anneal-electron/headless-tests.log
+          status=${PIPESTATUS[0]}
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          {
+            echo '## Headless Rust test tail'
+            echo '```text'
+            tail -n 120 aiTemp/evidence/paseo-anneal-electron/headless-tests.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - name: Upload retained headless test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: paseo-anneal-headless-test-diagnostics-${{ github.sha }}
+          path: aiTemp/evidence/paseo-anneal-electron/headless-tests.log
+          if-no-files-found: error
+          retention-days: 14
+      - name: Require headless Rust tests to pass
+        if: steps.headless-tests.outputs.status != '0'
+        run: exit 1
+      - name: Run strict headless Rust Clippy
+        if: steps.headless-tests.outputs.status == '0'
+        run: cargo clippy --manifest-path rust-core/coding-tools-headless/Cargo.toml --all-targets --locked -- -D warnings
       - name: Enforce no-delete changes
+        if: steps.headless-tests.outputs.status == '0'
         shell: bash
         run: |
           deleted="$(git diff --diff-filter=D --name-only HEAD^ HEAD)"

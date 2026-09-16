@@ -1,38 +1,26 @@
-import type {
-  CustomOrchestratorDefinition,
-  OrchestrationStage,
-} from "../orchestration/paseo-anneal-types";
+export type WorkflowStepType =
+  | "agent"
+  | "condition"
+  | "validator";
 
-export type ResolvedStageTarget =
-  | {
-      kind: "agent";
-      agentId: string;
-      providerId: string;
-      model: string;
-    }
-  | {
-      kind: "orchestrator";
-      orchestratorId: string;
-      agentId?: string;
-    };
+export interface WorkflowStep {
+  id: string;
+  type: WorkflowStepType;
+  agentId?: string;
+  next?: string[];
+}
 
-export interface ResolvedWorkflowStage {
+export interface CustomOrchestrator {
   id: string;
   name: string;
-  target: ResolvedStageTarget;
-  fallbackStageId?: string;
-  maxRetries: number;
-  approvalMode: OrchestrationStage["approvalMode"];
-  timeoutMs: number;
-  completionRules: string[];
+  description?: string;
+  steps: WorkflowStep[];
+  retryOnFailure: boolean;
 }
 
-export interface ResolvedWorkflowPlan {
+export interface OrchestratorExecutionContext {
+  taskId: string;
   workflowId: string;
-  name: string;
-  entryStageId: string;
-  ancestry: string[];
-  stages: ResolvedWorkflowStage[];
+  currentStep?: string;
+  status: "created" | "running" | "waiting" | "completed" | "failed";
 }
-
-export type { CustomOrchestratorDefinition, OrchestrationStage };
