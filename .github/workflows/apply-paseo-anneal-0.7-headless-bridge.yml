@@ -46,7 +46,6 @@ jobs:
         run: |
           set -euo pipefail
           rustfmt --edition 2021 \
-            src-tauri/src/lib.rs \
             src-tauri/src/commands/execution.rs \
             rust-core/coding-tools-core/src/lib.rs \
             rust-core/coding-tools-headless/src/lib.rs
