@@ -32,9 +32,9 @@ test("Electron registers typed execution IPC instead of exposing dead preload me
     ["execution.provider", "coding-tools:execution:provider"],
     ["execution.update", "coding-tools:execution:update"],
   ]) {
-    assert.match(schema, new RegExp(`\\\"${contract.replace(".", "\\\\.")}\\\"`));
-    assert.match(schema, new RegExp(`channel: \\\"${channel}\\\"`));
-    assert.match(main, new RegExp(`handle\\(\\\"${channel}\\\"`));
+    assert.ok(schema.includes(`"${contract}"`), `missing ${contract} IPC contract`);
+    assert.ok(schema.includes(`channel: "${channel}"`), `missing ${channel} IPC channel`);
+    assert.ok(main.includes(`handle("${channel}"`), `missing ${channel} main-process handler`);
   }
 
   assert.match(preload, /execution:\s*Object\.freeze\(/);
