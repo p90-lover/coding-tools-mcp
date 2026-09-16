@@ -109,7 +109,7 @@ jobs:
           set -euo pipefail
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
-          changed="$(git diff --name-only -- desktop-electron | sort)"
+          changed="$( { git diff --name-only -- desktop-electron; git ls-files --others --exclude-standard -- desktop-electron; } | sort -u)"
           expected="$(printf '%s\n' \
             desktop-electron/electron/provider-execution-router.cjs \
             desktop-electron/electron/provider-network.cjs \
