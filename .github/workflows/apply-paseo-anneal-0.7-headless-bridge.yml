@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/apply-paseo-anneal-0.7-headless-bridge.yml
       - aiTemp/paseo-anneal-0.7/apply_headless_bridge.py
+      - aiTemp/paseo-anneal-0.7/wiring_contract.py
   workflow_dispatch:
 
 permissions:
