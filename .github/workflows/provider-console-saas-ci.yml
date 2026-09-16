@@ -1,0 +1,49 @@
+name: Provider console SaaS contract
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.5-provider-console-saas
+    paths:
+      - desktop-electron/src/features/ProviderHubSurface.tsx
+      - desktop-electron/src/features/provider-hub-saas.css
+      - desktop-electron/src/providers/provider-types.ts
+      - desktop-electron/src/App.tsx
+      - desktop-electron/tests/provider-console-saas.test.cjs
+      - .github/workflows/provider-console-saas-ci.yml
+  pull_request:
+    paths:
+      - desktop-electron/src/features/ProviderHubSurface.tsx
+      - desktop-electron/src/features/provider-hub-saas.css
+      - desktop-electron/src/providers/provider-types.ts
+      - desktop-electron/src/App.tsx
+      - desktop-electron/tests/provider-console-saas.test.cjs
+      - .github/workflows/provider-console-saas-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-console-saas-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          clean: false
+
+      - name: Run compact Provider Hub contract
+        run: node --test desktop-electron/tests/provider-console-saas.test.cjs
+
+      - name: Enforce no file deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          deleted="$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
+          test -z "$deleted"
