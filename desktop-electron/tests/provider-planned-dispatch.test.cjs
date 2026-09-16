@@ -163,11 +163,13 @@ test("planned Anneal dispatch uses the exact account-owned binding selected by t
 test("renderer dispatch calls the planned main-process bridge instead of bypassing Provider Hub", () => {
   const root = path.resolve(__dirname, "..");
   const preload = fs.readFileSync(path.join(root, "electron/preload.cjs"), "utf8");
+  const bootstrap = fs.readFileSync(path.join(root, "electron/main-with-provider.cjs"), "utf8");
   const surface = fs.readFileSync(
     path.join(root, "src/features/ProviderOrchestratorSurfaces.tsx"),
     "utf8",
   );
 
+  assert.match(bootstrap, /registerHeadlessExecutionHost/);
   assert.match(preload, /configureProviderExecution/);
   assert.match(preload, /dispatchProviderMission/);
   assert.match(surface, /configureProviderExecution\(/);
