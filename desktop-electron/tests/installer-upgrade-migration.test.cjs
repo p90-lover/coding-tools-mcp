@@ -34,8 +34,15 @@ test("the installer detects the exact legacy Tauri uninstall identity in every r
     source,
     /Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Coding Tools MCP/,
   );
-  assert.match(source, /ReadRegStr[^\n]*HKCU/);
-  assert.match(source, /ReadRegStr[^\n]*HKLM/);
+  assert.match(source, /ReadRegStr[^\n]*\$\{ROOT\}/);
+  for (const root of ["HKCU", "HKLM"]) {
+    for (const view of ["64", "32"]) {
+      assert.ok(
+        source.includes(`!insertmacro MigrateLegacyInstall ${root} ${view}`),
+        `missing ${root} ${view}-bit legacy migration invocation`,
+      );
+    }
+  }
   assert.match(source, /SetRegView 32/);
   assert.match(source, /SetRegView 64/);
   assert.match(source, /DisplayName/);
