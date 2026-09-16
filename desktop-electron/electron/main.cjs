@@ -25,6 +25,7 @@ const {
   registerLoggedIpc,
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
+const { HeadlessHost } = require("./headless-host.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
@@ -81,6 +82,7 @@ let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
 let runtimeHost = null;
+let headlessHost = null;
 let browserControl = null;
 let runtimeSupervisor = null;
 let tray = null;
@@ -422,8 +424,73 @@ function smokePassedForCurrentVersion(state) {
   return state.browserSmokePassed === true && state.browserSmokeVersion === app.getVersion();
 }
 
+
+function assertFocusedMainWindow(event, write = false) {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const valid = window
+    && window === mainWindow
+    && !window.isDestroyed()
+    && window.isVisible()
+    && !window.isMinimized()
+    && (!write || (window.isFocused() && event.sender.isFocused()));
+  if (!valid) {
+    throw new Error("Use the visible, focused main-window controller for provider consent");
+  }
+}
+
+function executionSettingsPayload(settings) {
+  if (!settings) return null;
+  return {
+    id: settings.id ?? null,
+    engine: settings.engine,
+    endpoint: settings.endpoint,
+    provider: settings.provider,
+    model: settings.model,
+    mode: settings.mode,
+    project_id: settings.projectId ?? null,
+    repo_id: settings.repoId ?? null,
+    assignee_id: settings.assigneeId ?? null,
+    max_duration_min: settings.maxDurationMin,
+    allow_codex: settings.allowCodex,
+    confirm_external_execution: settings.confirmExternalExecution,
+  };
+}
+
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  handle("coding-tools:execution:read", async (event, input) => {
+    assertFocusedMainWindow(event, false);
+    if (!headlessHost) throw new Error("Local execution service is unavailable");
+    return headlessHost.request("/api/v1/execution/read", {
+      workspace_id: input.workspaceId,
+      mission_id: input.missionId ?? null,
+      refresh_source: input.refreshSource === true,
+    });
+  });
+  handle("coding-tools:execution:provider", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!headlessHost) throw new Error("Local execution service is unavailable");
+    return headlessHost.request("/api/v1/execution/provider", {
+      workspace_id: input.workspaceId,
+      operation: input.operation,
+      expected_revision: input.expectedRevision ?? null,
+      binding_id: input.bindingId ?? null,
+      settings: executionSettingsPayload(input.settings),
+      credential: input.credential ?? "",
+      confirm: input.confirm === true,
+    });
+  });
+  handle("coding-tools:execution:update", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!headlessHost) throw new Error("Local execution service is unavailable");
+    return headlessHost.request("/api/v1/execution/update", {
+      workspace_id: input.workspaceId,
+      expected_revision: input.expectedRevision,
+      change: input.change,
+      confirm: input.confirm === true,
+    });
+  });
+
   handle("launcher:snapshot", async () => ({
     profile: LAUNCHER_PROFILE.kind,
     profilePaths: {
@@ -878,6 +945,7 @@ async function requestQuit() {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
     quitting = true;
     await browserHost?.persistSession();
@@ -963,6 +1031,11 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  headlessHost = new HeadlessHost({
+    app,
+    logger,
+    sourceRoot: SOURCE_ROOT,
+  });
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
     logger,
