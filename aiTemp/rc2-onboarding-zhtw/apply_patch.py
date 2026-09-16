@@ -8,9 +8,11 @@ ROOT = Path(__file__).resolve().parents[2]
 def replace_once(relative: str, old: str, new: str) -> None:
     path = ROOT / relative
     text = path.read_text(encoding="utf-8")
-    if new in text:
-        return
     count = text.count(old)
+    if count == 0:
+        if new in text:
+            return
+        raise SystemExit(f"{relative}: neither old nor replacement text was found: {old[:80]!r}")
     if count != 1:
         raise SystemExit(f"{relative}: expected one match, found {count}: {old[:80]!r}")
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
@@ -19,9 +21,11 @@ def replace_once(relative: str, old: str, new: str) -> None:
 def replace_count(relative: str, old: str, new: str, expected: int) -> None:
     path = ROOT / relative
     text = path.read_text(encoding="utf-8")
-    if text.count(new) == expected:
-        return
     count = text.count(old)
+    if count == 0:
+        if text.count(new) == expected:
+            return
+        raise SystemExit(f"{relative}: neither expected old nor replacement blocks were found")
     if count != expected:
         raise SystemExit(f"{relative}: expected {expected} matches, found {count}: {old[:80]!r}")
     path.write_text(text.replace(old, new), encoding="utf-8")
@@ -53,6 +57,19 @@ replace_once(
     "desktop-electron/src/App.tsx",
     '          disabled={busy || (stage === "support" && (!snapshot.state.githubOpened || !snapshot.state.xOpened))}',
     '          disabled={busy}',
+)
+replace_once(
+    "desktop-electron/src/App.tsx",
+    '''    { label: copy.chinese, value: "zh-CN" },
+    { label: copy.japanese, value: "ja" },''',
+    '''    { label: copy.chinese, value: "zh-CN" },
+    { label: copy.traditionalChinese, value: "zh-TW" },
+    { label: copy.japanese, value: "ja" },''',
+)
+replace_once(
+    "desktop-electron/src/App.tsx",
+    '''language === "ja" ? "ja-JP" : language === "zh-CN" ? "zh-CN" : "en"''',
+    '''language === "ja" ? "ja-JP" : language === "zh-TW" ? "zh-TW" : language === "zh-CN" ? "zh-CN" : "en"''',
 )
 
 replace_once(
@@ -122,6 +139,11 @@ replace_once(
     if (current.autoStart) setAutostart(app, true);''',
     '''    const current = stateStore.read();
     if (current.autoStart) setAutostart(app, true);''',
+)
+replace_once(
+    "desktop-electron/electron/state.cjs",
+    '''    if (state.language !== null && state.language !== "en" && state.language !== "zh-CN" && state.language !== "ja") {''',
+    '''    if (state.language !== null && state.language !== "en" && state.language !== "zh-CN" && state.language !== "zh-TW" && state.language !== "ja") {''',
 )
 
 replace_once(
