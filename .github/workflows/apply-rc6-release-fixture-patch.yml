@@ -1,0 +1,68 @@
+name: Apply rc.6 release fixture repair
+
+on:
+  push:
+    branches:
+      - fix/rc6-legacy-uninstall-fixture-dotnet
+    paths:
+      - 'aiTemp/rc6-release-fixture/apply_release_workflow_patch.py'
+      - '.github/workflows/apply-rc6-release-fixture-patch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc6-release-fixture-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/rc6-legacy-uninstall-fixture-dotnet
+          fetch-depth: 0
+
+      - name: Apply exact release workflow repair
+        run: python aiTemp/rc6-release-fixture/apply_release_workflow_patch.py
+
+      - name: Run focused release fixture contract
+        run: node --test desktop-electron/tests/rc6-legacy-uninstall-fixture.test.cjs
+
+      - name: Verify bounded change and no deletion
+        shell: bash
+        run: |
+          git diff --check
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = '.github/workflows/codex-router-multiprovider-release-rc6.yml'
+
+      - name: Commit verified release repair
+        run: |
+          if git diff --quiet; then
+            echo 'Release fixture workflow repair is already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/codex-router-multiprovider-release-rc6.yml
+          git commit -m 'fix(rc6): build legacy uninstall fixture with dotnet publish'
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin fix/rc6-legacy-uninstall-fixture-dotnet
+            git rebase origin/fix/rc6-legacy-uninstall-fixture-dotnet
+            if git push origin HEAD:fix/rc6-legacy-uninstall-fixture-dotnet; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+
+          echo 'Unable to publish release fixture repair after five attempts.' >&2
+          exit 1
