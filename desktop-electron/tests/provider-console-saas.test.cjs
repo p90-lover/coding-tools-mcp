@@ -70,8 +70,10 @@ test("Provider Hub localizes the new management controls in Traditional Chinese"
 });
 
 test("The application exposes one active Provider destination and imports the SaaS surface", () => {
-  const providerNavigationCalls = app.match(/navigateSurface\("providers"\)/g) ?? [];
-  assert.equal(providerNavigationCalls.length, 1);
+  const providerDestinations = app.match(/active=\{surface === "providers"\}/g) ?? [];
+  const providerSurfaceMounts = app.match(/<ProviderCenterSurface\b/g) ?? [];
+  assert.equal(providerDestinations.length, 1);
+  assert.equal(providerSurfaceMounts.length, 1);
   assert.match(app, /ProviderHubSaasSurface/);
   assert.doesNotMatch(app, /from "\.\/features\/ProviderHubSurface"/);
 });
