@@ -103,8 +103,25 @@ jobs:
             git diff --name-only --diff-filter=U | LC_ALL=C sort \
               > aiTemp/rc7-main-union/conflicts.txt
             cat > aiTemp/rc7-main-union/expected-conflicts.txt <<'EOF'
+          desktop-electron/electron/main.cjs
+          desktop-electron/electron/preload.cjs
+          desktop-electron/electron/upstream-tools.cjs
+          desktop-electron/src/features/UpstreamToolSurface.tsx
+          desktop-electron/src/types.ts
           src-tauri/src/auth/oauth_authorization_response.rs
+          src-tauri/src/commands/mod.rs
+          src-tauri/src/commands/orchestrators.rs
+          src-tauri/src/commands/providers.rs
           src-tauri/src/data/mod.rs
+          src-tauri/src/integrations/execution/model.rs
+          src-tauri/src/integrations/execution/protocol.rs
+          src-tauri/src/integrations/execution/schema.rs
+          src-tauri/src/integrations/execution/service.rs
+          src-tauri/src/lib.rs
+          src-tauri/src/media.rs
+          src-tauri/src/orchestrator_run.rs
+          src-tauri/src/orchestrators.rs
+          src-tauri/src/providers.rs
           EOF
             if ! cmp -s aiTemp/rc7-main-union/conflicts.txt aiTemp/rc7-main-union/expected-conflicts.txt; then
               echo 'Unexpected current-main snapshot conflicts:' >&2
@@ -112,12 +129,34 @@ jobs:
               exit 1
             fi
 
-            # The main-side OAuth file differs only by an explanatory safety
-            # comment and already contains the same hardened implementation.
+            # These paths are the rc.7 Provider Hub, CommandCode, managed
+            # upstream runtime, Paseo, Anneal, image, and orchestration surfaces.
+            # The release tip is the verified source of truth and is a strict
+            # superset of the older main-side integration points.
+            git checkout --theirs -- \
+              desktop-electron/electron/main.cjs \
+              desktop-electron/electron/preload.cjs \
+              desktop-electron/electron/upstream-tools.cjs \
+              desktop-electron/src/features/UpstreamToolSurface.tsx \
+              desktop-electron/src/types.ts \
+              src-tauri/src/commands/mod.rs \
+              src-tauri/src/commands/orchestrators.rs \
+              src-tauri/src/commands/providers.rs \
+              src-tauri/src/integrations/execution/model.rs \
+              src-tauri/src/integrations/execution/protocol.rs \
+              src-tauri/src/integrations/execution/schema.rs \
+              src-tauri/src/integrations/execution/service.rs \
+              src-tauri/src/lib.rs \
+              src-tauri/src/media.rs \
+              src-tauri/src/orchestrator_run.rs \
+              src-tauri/src/orchestrators.rs \
+              src-tauri/src/providers.rs
+
+            # Main contains the same hardened issuer implementation plus the
+            # retained explanatory safety note.
             git checkout --ours -- src-tauri/src/auth/oauth_authorization_response.rs
 
-            # Preserve both test helpers from the release line and the newer
-            # main-line test-data path helper.
+            # Preserve both release test helpers and main's test-data path helper.
             cat > src-tauri/src/data/mod.rs <<'EOF'
           mod migrate;
           mod model;
@@ -136,9 +175,27 @@ jobs:
               migrate::data_file_path().ok()
           }
           EOF
+
             git add \
+              desktop-electron/electron/main.cjs \
+              desktop-electron/electron/preload.cjs \
+              desktop-electron/electron/upstream-tools.cjs \
+              desktop-electron/src/features/UpstreamToolSurface.tsx \
+              desktop-electron/src/types.ts \
               src-tauri/src/auth/oauth_authorization_response.rs \
-              src-tauri/src/data/mod.rs
+              src-tauri/src/commands/mod.rs \
+              src-tauri/src/commands/orchestrators.rs \
+              src-tauri/src/commands/providers.rs \
+              src-tauri/src/data/mod.rs \
+              src-tauri/src/integrations/execution/model.rs \
+              src-tauri/src/integrations/execution/protocol.rs \
+              src-tauri/src/integrations/execution/schema.rs \
+              src-tauri/src/integrations/execution/service.rs \
+              src-tauri/src/lib.rs \
+              src-tauri/src/media.rs \
+              src-tauri/src/orchestrator_run.rs \
+              src-tauri/src/orchestrators.rs \
+              src-tauri/src/providers.rs
           fi
 
           if git diff --name-only --diff-filter=U | grep -q .; then
@@ -298,7 +355,8 @@ jobs:
             desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
             desktop-electron/tests/proxy-provider-contract.test.cjs \
             desktop-electron/tests/update.test.cjs \
-            desktop-electron/tests/rc7-full-integration-contract.test.cjs
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            desktop-electron/tests/upstream-tool-runtime.test.cjs
           bun run --cwd desktop-electron typecheck
           renderer_dir="$GITHUB_WORKSPACE/aiTemp/rc7-main-union/renderer-dist"
           (
@@ -327,6 +385,7 @@ jobs:
           test -z "$(git diff --cached --name-only -- .github/workflows)"
           git diff --cached --check -- \
             src-tauri \
+            desktop-electron \
             aiTemp/rc7-main-union \
             aiTemp/Trash/rc7-main-union/release-workflows
           git commit \
