@@ -99,3 +99,30 @@ test("the app contains pinned, licensed full upstream Paseo and Anneal integrati
   assert.match(surface, /openEmbeddedTool/);
   assert.match(app, /UpstreamToolSurface/);
 });
+
+test("architecture B exposes one GUI control plane for Provider Hub and external services", () => {
+  for (const relativePath of [
+    "electron/external-services.cjs",
+    "src/features/ExternalServicesSurface.tsx",
+    "src/features/external-services.css",
+    "vendor/upstream/codex-router.json",
+    "vendor/upstream/commandcode-proxy.json",
+  ]) {
+    assert.equal(exists(relativePath), true, `${relativePath} is missing`);
+  }
+
+  const main = read("electron/main.cjs");
+  const providerBootstrap = read("electron/provider-bootstrap.cjs");
+  const app = read("src/App.tsx");
+  const surface = read("src/features/ExternalServicesSurface.tsx");
+
+  assert.match(providerBootstrap, /setProviderBrowserHost/);
+  assert.match(main, /launcher:external-services-snapshot/);
+  assert.match(main, /launcher:codex-router-sync/);
+  assert.match(app, /surface === "integrations"/);
+  assert.match(surface, /providerSnapshot/);
+  assert.match(surface, /Codex Router/);
+  assert.match(surface, /CommandCode Proxy/);
+  assert.match(surface, /Paseo/);
+  assert.match(surface, /Anneal/);
+});
