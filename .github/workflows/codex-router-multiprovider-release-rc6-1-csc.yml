@@ -1,0 +1,482 @@
+name: Coding Tools v0.7.0-rc.6.1 exact release
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.6.1
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: coding-tools-v0.7.0-rc.6.1-release
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: '1.4.0'
+  NODE_VERSION: '22'
+  RUST_TOOLCHAIN: '1.98.1'
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/cache/bun-release-rc6-1
+  PYTHONDONTWRITEBYTECODE: '1'
+  RELEASE_VERSION: '0.7.0-rc.6.1'
+  RELEASE_TAG: v0.7.0-rc.6.1
+  SOURCE_SHA: ${{ github.sha }}
+  VALIDATION_WORKFLOW: .github/workflows/codex-router-multiprovider-release-rc6-1-csc.yml
+  WINDOWS_INSTALLER: Coding.Tools_0.7.0-rc.6.1_windows_x64_setup.exe
+  TUNNEL_ARCHIVE: tunnel-client-v0.0.12-windows-amd64.zip
+  TUNNEL_ARCHIVE_SHA256: '2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356'
+  TUNNEL_RELEASE_URL: https://github.com/openai/tunnel-client/releases/download/v0.0.12
+  CARGO_TERM_COLOR: always
+
+jobs:
+  exact-source-contract:
+    name: Exact source and provider contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Prepare retained validation roots
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            aiTemp/tmp/release-0.7.0-rc.6.1 \
+            aiTemp/evidence \
+            aiTemp/rc6-1/renderer \
+            aiTemp/Trash/release-0.7.0-rc.6.1
+
+      - name: Install exact dependencies
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          temp="$PWD/aiTemp/tmp/release-0.7.0-rc.6.1"
+          TMPDIR="$temp" TMP="$temp" TEMP="$temp" \
+            bun install --cwd runtime-web --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/runtime-install.txt
+          TMPDIR="$temp" TMP="$temp" TEMP="$temp" \
+            bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/desktop-install.txt
+
+      - name: Run release and Antigravity regressions
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          temp="$PWD/aiTemp/tmp/release-0.7.0-rc.6.1"
+
+          TMPDIR="$temp" TMP="$temp" TEMP="$temp" \
+            bun test --cwd runtime-web tests/runtime-bundle-version.test.ts \
+            2>&1 | tee aiTemp/evidence/runtime-bundle-version-tests.txt
+          grep -F '0 fail' aiTemp/evidence/runtime-bundle-version-tests.txt
+          TMPDIR="$temp" TMP="$temp" TEMP="$temp" \
+            bun run --cwd runtime-web typecheck \
+            2>&1 | tee aiTemp/evidence/runtime-typecheck.txt
+
+          node --test \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/packaging-contract.test.cjs \
+            desktop-electron/tests/prepare-runtime.test.cjs \
+            desktop-electron/tests/antigravity-session-binding.test.cjs \
+            desktop-electron/tests/antigravity-provider-session.test.cjs \
+            desktop-electron/tests/provider-console-saas.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs \
+            2>&1 | tee aiTemp/evidence/release-regressions.txt
+          grep -E '^# pass [1-9][0-9]*$' aiTemp/evidence/release-regressions.txt
+          grep -F '# fail 0' aiTemp/evidence/release-regressions.txt
+
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/main-with-provider.cjs
+          node --check desktop-electron/electron/browser-host.cjs
+          node --check desktop-electron/electron/update.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/preload.cjs
+          TMPDIR="$temp" TMP="$temp" TEMP="$temp" \
+            bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
+
+          node --input-type=module <<'NODE' | tee aiTemp/evidence/release-version.txt
+          import fs from 'node:fs';
+          const desktop = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
+          if (desktop.version !== process.env.RELEASE_VERSION) {
+            throw new Error(`DESKTOP_RELEASE_VERSION_MISMATCH:${desktop.version}`);
+          }
+          process.stdout.write(`DESKTOP_RELEASE_VERSION_OK ${desktop.version}\n`);
+          NODE
+
+      - name: Build and inspect retained production renderer
+        run: |
+          set -euo pipefail
+          renderer="$GITHUB_WORKSPACE/aiTemp/rc6-1/renderer"
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer" --emptyOutDir
+          )
+          CODING_TOOLS_RENDERER_DIST="$renderer" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs \
+            2>&1 | tee aiTemp/evidence/renderer-provider-bundle-tests.txt
+          grep -F '# pass 1' aiTemp/evidence/renderer-provider-bundle-tests.txt
+          grep -F '# fail 0' aiTemp/evidence/renderer-provider-bundle-tests.txt
+
+      - name: Require unchanged tracked source and no deletion
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test -z "$(git diff --diff-filter=D --name-only)"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          git diff --check
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coding-tools-0.7.0-rc.6.1-contract-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-package:
+    name: Windows installer, package smoke, and upgrade migration
+    needs: exact-source-contract
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/Trash/release-0.7.0-rc.6.1-windows
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/aiTemp/cache/electron-builder
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Prepare retained package roots and dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            aiTemp/cache/electron-builder \
+            aiTemp/evidence \
+            aiTemp/tmp \
+            aiTemp/Trash/release-0.7.0-rc.6.1-windows \
+            aiTemp/release-output
+          printf 'source=%s\nrunner=%s\n' "$SOURCE_SHA" "$RUNNER_OS" \
+            > aiTemp/evidence/windows-run-identity.txt
+          preload="$(node -e 'const {pathToFileURL}=require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href)' "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          export NODE_OPTIONS="--import=$preload"
+          absolute_tmp="$PWD/aiTemp/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --frozen-lockfile --cwd runtime-web \
+            2>&1 | tee aiTemp/evidence/runtime-install-windows.txt
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --frozen-lockfile --cwd runtime-web/launcher \
+            2>&1 | tee aiTemp/evidence/launcher-install-windows.txt
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --frozen-lockfile --cwd desktop-electron \
+            2>&1 | tee aiTemp/evidence/desktop-install-windows.txt
+
+      - name: Acquire checksum-pinned tunnel client
+        run: |
+          set -euo pipefail
+          input_dir="aiTemp/input/tunnel-client/v0.0.12/windows-amd64"
+          archive="$input_dir/$TUNNEL_ARCHIVE"
+          partial="$archive.partial"
+          url="$TUNNEL_RELEASE_URL/$TUNNEL_ARCHIVE"
+          mkdir -p "$input_dir"
+          test ! -e "$archive"
+          test ! -e "$partial"
+          curl.exe --fail --location --proto '=https' --tlsv1.2 \
+            --retry 5 --retry-all-errors --connect-timeout 30 \
+            --output "$partial" "$url"
+          test -s "$partial"
+          actual="$(sha256sum "$partial" | awk '{print $1}')"
+          test "$actual" = "$TUNNEL_ARCHIVE_SHA256"
+          mv --no-clobber "$partial" "$archive"
+          echo "CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE=$PWD/$archive" >> "$GITHUB_ENV"
+          printf 'archive=%s\nsha256=%s\nurl=%s\n' "$archive" "$actual" "$url" \
+            > aiTemp/evidence/tunnel-client-archive.txt
+
+      - name: Build Rust sidecar and Windows installer
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+            2>&1 | tee aiTemp/evidence/rust-headless-release.txt
+          preload="$(node -e 'const {pathToFileURL}=require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href)' "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron package:win \
+            2>&1 | tee aiTemp/evidence/windows-package.txt
+
+      - name: Verify package contents, identity, renderer, and launcher smoke
+        run: |
+          set -euo pipefail
+          mapfile -t roots < <(
+            for candidate in desktop-electron/artifacts desktop-electron/release; do
+              test -d "$candidate" && printf '%s\n' "$candidate"
+            done
+          )
+          test "${#roots[@]}" -eq 1
+          root="${roots[0]}"
+          node desktop-electron/scripts/verify-package.cjs "$root" \
+            --source "$SOURCE_SHA" \
+            --json-out aiTemp/evidence/package-verification.json \
+            2>&1 | tee aiTemp/evidence/package-verification.txt
+          node --test desktop-electron/tests/package-contents.test.cjs \
+            2>&1 | tee aiTemp/evidence/package-contents-tests.txt
+          node --test desktop-electron/tests/renderer-provider-bundle.test.cjs \
+            2>&1 | tee aiTemp/evidence/renderer-provider-bundle-tests.txt
+          preload="$(node -e 'const {pathToFileURL}=require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href)' "$PWD/runtime-web/scripts/no-delete-preload.mjs")"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron smoke:package \
+            2>&1 | tee aiTemp/evidence/package-smoke.txt
+          mapfile -t installers < <(find "$root" -maxdepth 1 -type f -iname '*.exe' -print)
+          test "${#installers[@]}" -eq 1
+          output="aiTemp/release-output/$WINDOWS_INSTALLER"
+          cp --no-clobber "${installers[0]}" "$output"
+          test -s "$output"
+          sha256sum "$output" > aiTemp/evidence/windows-installer.sha256
+          printf 'source=%s\ninstaller=%s\n' "$SOURCE_SHA" "$WINDOWS_INSTALLER" \
+            > aiTemp/evidence/windows-installer-source.txt
+
+      - name: Create retained legacy uninstall fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\installer-upgrade\legacy-uninstall-fixture'
+          $trash = Join-Path $env:CODING_TOOLS_RETENTION_ROOT 'legacy-uninstall-fixture'
+          & "$env:GITHUB_WORKSPACE\desktop-electron\scripts\create-legacy-uninstall-fixture.ps1" `
+            -RootPath $root -TrashPath $trash |
+            Tee-Object -FilePath (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\evidence\legacy-uninstall-fixture.txt')
+          if (-not (Test-Path -LiteralPath (Join-Path $root 'Coding Tools MCP\uninstall.exe'))) {
+            throw 'legacy uninstall fixture executable is missing'
+          }
+
+      - name: Verify legacy uninstall and rc.6.1 reinstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\installer-upgrade\legacy-uninstall-fixture'
+          $trash = Join-Path $env:CODING_TOOLS_RETENTION_ROOT 'legacy-uninstall-fixture'
+          $install = Join-Path $root 'Coding Tools MCP'
+          $marker = Join-Path $root 'legacy-uninstaller-ran.txt'
+          $env:CODING_TOOLS_LEGACY_UNINSTALL_MARKER = $marker
+          $env:CODING_TOOLS_LEGACY_INSTALL_LOCATION = $install
+          $env:CODING_TOOLS_LEGACY_TRASH_DIR = $trash
+          $installer = Join-Path $env:GITHUB_WORKSPACE ('aiTemp\release-output\' + $env:WINDOWS_INSTALLER)
+          $process = Start-Process -FilePath $installer -ArgumentList '/S', '/currentuser' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "rc.6.1 installer failed with exit code $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $marker)) { throw 'legacy uninstaller was not executed' }
+          if (Test-Path -LiteralPath (Join-Path $install 'legacy-app.bin')) { throw 'legacy payload remains' }
+          $legacyUninstaller = Join-Path $install 'uninstall.exe'
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path -LiteralPath $legacyUninstaller) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (Test-Path -LiteralPath $legacyUninstaller) { throw 'legacy uninstaller remains' }
+          $preservedPayload = Join-Path $trash 'legacy-app.bin'
+          $preservedUninstaller = Join-Path $trash 'uninstall.exe'
+          if (-not (Test-Path -LiteralPath $preservedPayload)) { throw 'legacy payload was not preserved' }
+          if (-not (Test-Path -LiteralPath $preservedUninstaller)) { throw 'legacy uninstaller was not preserved' }
+          $legacyKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Coding Tools MCP'
+          if (Test-Path -LiteralPath $legacyKey) { throw 'legacy uninstall key remains' }
+          $currentKey = 'HKCU:\Software\3cb2ea96-3319-55b8-95a5-7f180a5f3ed4'
+          $location = (Get-ItemPropertyValue -Path $currentKey -Name InstallLocation).Trim('"')
+          $application = Join-Path $location 'Coding Tools.exe'
+          if (-not (Test-Path -LiteralPath $application)) { throw "reinstalled app missing: $application" }
+          [ordered]@{
+            source = $env:SOURCE_SHA
+            installer = $installer
+            installerExitCode = $process.ExitCode
+            legacyUninstallerRan = $true
+            legacyRegistryRemoved = $true
+            legacyPayloadPreserved = $true
+            legacyUninstallerPreserved = $true
+            currentInstallLocation = $location
+            currentApplication = $application
+          } | ConvertTo-Json -Depth 4 |
+            Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\evidence\installer-upgrade-migration.json')
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: coding-tools-0.7.0-rc.6.1-windows-x64-${{ github.sha }}
+          path: aiTemp/release-output/Coding.Tools_0.7.0-rc.6.1_windows_x64_setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coding-tools-0.7.0-rc.6.1-windows-evidence-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-prerelease:
+    name: Publish exact v0.7.0-rc.6.1 prerelease
+    needs: windows-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Require current exact release source
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-input/installer aiTemp/release-input/validation \
+            aiTemp/release-assets aiTemp/publication-evidence
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          remote="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote" = "$SOURCE_SHA"
+          git fetch --no-tags origin \
+            refs/heads/release/codex-router-multiprovider-0.7.0-rc.6.1:refs/remotes/origin/release/codex-router-multiprovider-0.7.0-rc.6.1
+          node scripts/release/verify-source-scope.mjs \
+            --tag "$RELEASE_TAG" \
+            --source "$SOURCE_SHA" \
+            --allowed-ref origin/release/codex-router-multiprovider-0.7.0-rc.6.1 \
+            --json-out aiTemp/publication-evidence/source-scope.json
+
+      - name: Download exact successful Windows assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "coding-tools-0.7.0-rc.6.1-windows-x64-$SOURCE_SHA" \
+            --dir aiTemp/release-input/installer
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "coding-tools-0.7.0-rc.6.1-windows-evidence-$SOURCE_SHA" \
+            --dir aiTemp/release-input/validation
+          installer="$(find aiTemp/release-input/installer -type f -name "$WINDOWS_INSTALLER" -print -quit)"
+          test -n "$installer"
+          cp --no-clobber "$installer" "aiTemp/release-assets/$WINDOWS_INSTALLER"
+          source_record="$(find aiTemp/release-input/validation -type f -name windows-installer-source.txt -print -quit)"
+          migration_record="$(find aiTemp/release-input/validation -type f -name installer-upgrade-migration.json -print -quit)"
+          package_record="$(find aiTemp/release-input/validation -type f -name package-verification.json -print -quit)"
+          test -n "$source_record"
+          test -n "$migration_record"
+          test -n "$package_record"
+          grep -F "source=$SOURCE_SHA" "$source_record"
+          grep -F "installer=$WINDOWS_INSTALLER" "$source_record"
+          test -s "$migration_record"
+          test -s "$package_record"
+
+      - name: Materialize provenance, validation disclosure, and checksums
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const root = 'aiTemp/release-assets';
+          const name = process.env.WINDOWS_INSTALLER;
+          const bytes = fs.readFileSync(path.join(root, name));
+          const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+          const runId = Number(process.env.GITHUB_RUN_ID);
+          const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+          const provenance = {
+            schema: 1,
+            release_tag: process.env.RELEASE_TAG,
+            version: process.env.RELEASE_VERSION,
+            source_sha: process.env.SOURCE_SHA,
+            product: { name: 'Coding Tools', app_id: 'dev.codingtools.fullharness' },
+            upstream: {
+              repository: 'miuuyy/codex-chatgpt-web',
+              version: 'v5.0.6',
+              commit: 'e85e3693fdb4e3e033348c08df0298c20fcdb612',
+            },
+            validation_run: { id: runId, url: runUrl, workflow: process.env.VALIDATION_WORKFLOW },
+            assets: [{ name, sha256, size: bytes.length }],
+          };
+          const validation = {
+            automated_gates: 'passed',
+            antigravity_session_binding: 'passed',
+            installer_upgrade_migration: 'passed',
+            live_account_acceptance: 'pending_manual',
+            source_sha: process.env.SOURCE_SHA,
+            validation_run_id: runId,
+            validation_workflow: process.env.VALIDATION_WORKFLOW,
+            validation_conclusion: 'success',
+          };
+          fs.writeFileSync(path.join(root, 'provenance.json'), `${JSON.stringify(provenance, null, 2)}\n`);
+          fs.writeFileSync(path.join(root, 'validation-evidence.json'), `${JSON.stringify(validation, null, 2)}\n`);
+          const names = fs.readdirSync(root).filter((item) => item !== 'SHA256SUMS.txt').sort();
+          const sums = names.map((item) => {
+            const value = fs.readFileSync(path.join(root, item));
+            return `${crypto.createHash('sha256').update(value).digest('hex')}  ${item}`;
+          });
+          fs.writeFileSync(path.join(root, 'SHA256SUMS.txt'), `${sums.join('\n')}\n`);
+          NODE
+          node scripts/release/verify-assets.mjs \
+            --directory aiTemp/release-assets \
+            --tag "$RELEASE_TAG" \
+            --version "$RELEASE_VERSION" \
+            --source "$SOURCE_SHA" \
+            --json-out aiTemp/publication-evidence/asset-verification.json
+
+      - name: Publish after verified asset readback
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node scripts/release/publish-v0.6.0-rc.1.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --source "$SOURCE_SHA" \
+            --assets aiTemp/release-assets \
+            --notes docs/releases/v0.7.0-rc.6.1.md \
+            --json-out aiTemp/publication-evidence/publication.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coding-tools-0.7.0-rc.6.1-publication-${{ github.sha }}
+          path: |
+            aiTemp/release-assets/
+            aiTemp/publication-evidence/
+          if-no-files-found: error
+          retention-days: 14
