@@ -1,0 +1,232 @@
+name: Compose SaaS Provider Hub on rc.6
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.6-provider-console-saas-current
+    paths:
+      - .github/workflows/apply-provider-console-saas-rc6.yml
+      - desktop-electron/src/App.tsx
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
+      - desktop-electron/src/features/provider-hub-saas.css
+      - desktop-electron/src/providers/provider-console-metadata.ts
+      - desktop-electron/tests/provider-console-saas.test.cjs
+      - desktop-electron/tests/provider-center-account-wiring.test.cjs
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.6
+    paths:
+      - desktop-electron/src/App.tsx
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
+      - desktop-electron/src/features/provider-hub-saas.css
+      - desktop-electron/src/providers/provider-console-metadata.ts
+      - desktop-electron/tests/provider-console-saas.test.cjs
+      - desktop-electron/tests/provider-center-account-wiring.test.cjs
+      - .github/workflows/apply-provider-console-saas-rc6.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: compose-provider-console-rc6-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/provider-console-rc6/bun-cache
+
+jobs:
+  compose-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained work roots
+        run: mkdir -p aiTemp/provider-console-rc6/evidence aiTemp/Trash/provider-console-rc6
+
+      - name: Compose verified Provider Console source onto current rc.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_ref='refs/heads/fix/v0.7.0-rc.5-provider-console-saas'
+          remote_ref='refs/remotes/origin/fix/v0.7.0-rc.5-provider-console-saas'
+          git fetch --no-tags origin "$source_ref:$remote_ref"
+          git checkout "$remote_ref" -- \
+            desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+            desktop-electron/src/features/provider-hub-saas.css \
+            desktop-electron/src/providers/provider-console-metadata.ts \
+            desktop-electron/tests/provider-console-saas.test.cjs
+
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('desktop-electron/src/App.tsx')
+          text = app.read_text(encoding='utf-8')
+          old = 'import { ProviderCenterSurface } from "./features/ProviderHubSurface";'
+          new = 'import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";'
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('Provider Center import anchor missing from current rc.6 App.tsx')
+              text = text.replace(old, new, 1)
+              app.write_text(text, encoding='utf-8')
+
+          test_path = Path('desktop-electron/tests/provider-center-account-wiring.test.cjs')
+          test_text = test_path.read_text(encoding='utf-8')
+          replacements = {
+              'src/features/ProviderHubSurface.tsx': 'src/features/ProviderHubSaasSurface.tsx',
+              'focused Provider Hub component': 'canonical SaaS Provider Hub component',
+              '\\.\\/features\\/ProviderHubSurface': '\\.\\/features\\/ProviderHubSaasSurface',
+              'ProviderHubSurface.tsx must exist': 'ProviderHubSaasSurface.tsx must exist',
+          }
+          for before, after in replacements.items():
+              if before not in test_text and after not in test_text:
+                  raise SystemExit(f'Provider account contract anchor missing: {before}')
+              test_text = test_text.replace(before, after)
+          test_path.write_text(test_text, encoding='utf-8')
+
+          surface_path = Path('desktop-electron/src/features/ProviderHubSaasSurface.tsx')
+          surface = surface_path.read_text(encoding='utf-8')
+          helper = '''function providerAccountCounts(
+            accounts: readonly ProviderAccountRecord[],
+            providerId: string,
+          ): { accounts: number; models: number; connected: number } {
+            const providerAccounts = accounts.filter((account) => account.providerId === providerId);
+            return {
+              accounts: providerAccounts.length,
+              models: new Set(providerAccounts.flatMap((account) => account.models)).size,
+              connected: providerAccounts.filter((account) => (
+                account.enabled && account.status === "connected"
+              )).length,
+            };
+          }
+
+          '''
+          normalize_anchor = 'function normalizeSearch(value: string): string {'
+          if 'function providerAccountCounts(' not in surface:
+              if normalize_anchor not in surface:
+                  raise SystemExit('Provider account-count helper anchor missing')
+              surface = surface.replace(normalize_anchor, helper + normalize_anchor, 1)
+
+          old_counts = '''              const accounts = activeAccounts.filter((account) => account.providerId === provider.id);
+                        const connected = accounts.filter((account) => account.enabled && account.status === "connected").length;
+          '''
+          new_counts = '''              const counts = providerAccountCounts(activeAccounts, provider.id);
+          '''
+          if old_counts in surface:
+              surface = surface.replace(old_counts, new_counts, 1)
+          elif new_counts not in surface:
+              raise SystemExit('Provider directory count calculation anchor missing')
+
+          old_markup = '''                  <span className="provider-directory-counts">
+                              <strong>{accounts.length}</strong>
+                              <small>{connected > 0
+                                ? text(language, `${connected} active`, `${connected} 個啟用中`)
+          '''
+          new_markup = '''                  <span
+                            className="provider-directory-counts"
+                            data-provider-account-summary={`${counts.accounts}:${counts.models}:${counts.connected}`}
+                          >
+                              <strong>{counts.accounts}</strong>
+                              <small>{counts.connected > 0
+                                ? text(language, `${counts.connected} active`, `${counts.connected} 個啟用中`)
+          '''
+          if old_markup in surface:
+              surface = surface.replace(old_markup, new_markup, 1)
+          elif 'data-provider-account-summary' not in surface:
+              raise SystemExit('Provider directory summary markup anchor missing')
+          surface_path.write_text(surface, encoding='utf-8')
+          PY
+
+          printf 'PROVIDER_CONSOLE_RC6_COMPOSED\n' | tee aiTemp/provider-console-rc6/evidence/composition.txt
+
+      - name: Verify bounded composition and retained rc.6 behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+          grep -F 'ProviderHubSaasSurface' desktop-electron/src/App.tsx
+          grep -F 'Codex OAuth' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F 'Claude OAuth' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F 'CommandCode Proxy' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F 'Gemini Antigravity Reverse Proxy' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F 'providerAccountCounts' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F 'data-provider-account-summary' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          grep -F '個帳戶' desktop-electron/src/features/ProviderHubSaasSurface.tsx
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run Provider Hub, routing, proxy and renderer contracts
+        run: >-
+          node --test
+          desktop-electron/tests/provider-console-saas.test.cjs
+          desktop-electron/tests/provider-center-account-wiring.test.cjs
+          desktop-electron/tests/provider-execution-router.test.cjs
+          desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+          desktop-electron/tests/proxy-provider-contract.test.cjs
+          desktop-electron/tests/execution-bridge-contract.test.cjs
+          desktop-electron/tests/renderer-wiring.test.cjs
+
+      - name: Validate Electron runtime and production renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/main-with-provider.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/preload.cjs
+          bun run --cwd desktop-electron typecheck
+          bunx --cwd desktop-electron vite build
+          node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+
+      - name: Enforce no file deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit verified current-base composition
+        if: github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.7.0-rc.6-provider-console-saas-current'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+            desktop-electron/src/features/provider-hub-saas.css \
+            desktop-electron/src/providers/provider-console-metadata.ts \
+            desktop-electron/tests/provider-console-saas.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs
+          if git diff --cached --quiet; then
+            echo PROVIDER_CONSOLE_RC6_ALREADY_COMMITTED
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix(rc6): integrate compact SaaS Provider Hub'
+          git push origin HEAD:refs/heads/integration/v0.7.0-rc.6-provider-console-saas-current
+
+      - name: Preserve transient build output and dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p aiTemp/Trash/provider-console-rc6
+          if [ -d desktop-electron/dist ]; then
+            mv desktop-electron/dist "aiTemp/Trash/provider-console-rc6/renderer-$GITHUB_RUN_ID"
+          fi
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "aiTemp/Trash/provider-console-rc6/node_modules-$GITHUB_RUN_ID"
+          fi
