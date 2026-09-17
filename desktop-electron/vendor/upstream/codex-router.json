@@ -1,0 +1,11 @@
+{
+  "id": "codex-router",
+  "name": "Codex Router",
+  "mode": "external-local-service",
+  "defaultEndpoint": "http://127.0.0.1:4202/",
+  "environmentEndpoint": "CODING_TOOLS_CODEX_ROUTER_URL",
+  "environmentCallerKey": "CODING_TOOLS_CODEX_ROUTER_CALLER_KEY",
+  "healthPath": "/_codex-router/{callerKey}/v1/models",
+  "managedBy": "Coding Tools external services control plane",
+  "credentials": "encrypted-main-process-only"
+}
