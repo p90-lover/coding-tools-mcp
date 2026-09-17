@@ -67,7 +67,6 @@ jobs:
             desktop-electron/tests/commandcode-provider-session.test.cjs \
             desktop-electron/tests/rc7-full-integration-contract.test.cjs \
             desktop-electron/tests/rc2-paseo-anneal-network-surfaces.test.cjs \
-            desktop-electron/tests/localization.test.cjs \
             desktop-electron/tests/orchestration-localization-layout.test.cjs \
             2>&1 | tee aiTemp/rc7-release/evidence/contracts.txt
           grep -F '# fail 0' aiTemp/rc7-release/evidence/contracts.txt

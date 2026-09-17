@@ -39,15 +39,18 @@ test("Paseo surface can plan ChatGPT Web work and control an owned mission", () 
   }
 });
 
-test("Anneal task menu lists tasks and can dispatch through Paseo", () => {
+test("Anneal task menu lists tasks and can dispatch through localized Paseo controls", () => {
   const source = read("desktop-electron/src/features/AnnealTasksSurface.tsx");
+  const copy = read("desktop-electron/src/features/orchestration-copy.ts");
 
   assert.match(source, /tasks\.list/);
   assert.match(source, /providerExecutionPlan/);
   assert.match(source, /workload:\s*dispatchThroughPaseo\s*\?\s*"paseo"\s*:\s*"anneal"/);
   assert.match(source, /agent_prepare/);
   assert.match(source, /agent_control/);
-  assert.match(source, /Dispatch through Paseo|透過 Paseo 執行/);
+  assert.match(source, /copy\.annealDispatchThroughPaseo/);
+  assert.match(copy, /annealDispatchThroughPaseo:\s*"Dispatch through Paseo"/);
+  assert.match(copy, /annealDispatchThroughPaseo:\s*"透過 Paseo 執行"/);
 });
 
 test("Network surface manages app-wide and per-provider proxy routing", () => {
