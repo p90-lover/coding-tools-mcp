@@ -133,6 +133,61 @@ test("Antigravity login uses CLIProxyAPI management OAuth, polls status, and dis
   assert.ok(requests.every(({ options }) => options.headers.Authorization === "Bearer management-secret"));
 });
 
+test("Antigravity login binds the newly created auth file when other accounts already exist", async () => {
+  let authFileReads = 0;
+  const existing = {
+    name: "antigravity-existing@example.test.json",
+    provider: "antigravity",
+    label: "existing@example.test",
+    email: "existing@example.test",
+    status: "ready",
+    status_message: "",
+    disabled: false,
+    unavailable: false,
+  };
+  const created = {
+    name: "antigravity-created@example.test.json",
+    provider: "antigravity",
+    label: "created@example.test",
+    email: "created@example.test",
+    status: "ready",
+    status_message: "",
+    disabled: false,
+    unavailable: false,
+  };
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v0/management/auth-files") {
+      authFileReads += 1;
+      return jsonResponse({ files: authFileReads === 1 ? [existing] : [existing, created] });
+    }
+    if (parsed.pathname === "/v0/management/antigravity-auth-url") {
+      return jsonResponse({
+        status: "ok",
+        url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=multi-account",
+        state: "state-multi-account",
+      });
+    }
+    if (parsed.pathname === "/v0/management/get-auth-status") {
+      return jsonResponse({ status: "ok" });
+    }
+    if (parsed.pathname === "/v0/management/auth-files/models") {
+      assert.equal(parsed.searchParams.get("name"), created.name);
+      return jsonResponse({ models: [{ id: "gemini-created-account" }] });
+    }
+    throw new Error(`Unexpected request: ${parsed.pathname}`);
+  };
+
+  const { controller } = controllerFixture(fetchImpl);
+  const account = saveAntigravityAccount(controller, { label: "New Antigravity login" });
+  const result = await controller.openProviderLogin(account.id);
+  const connected = result.snapshot.accounts.find((item) => item.id === account.id);
+
+  assert.equal(authFileReads, 2);
+  assert.equal(connected.identity, "created@example.test");
+  assert.deepEqual(connected.models, ["gemini-created-account"]);
+});
+
 test("Antigravity probe maps missing, expired, and healthy sessions without exposing the management key", async () => {
   const responses = [
     { files: [] },
@@ -180,6 +235,34 @@ test("Antigravity probe maps missing, expired, and healthy sessions without expo
   assert.equal(ready.status, "connected");
   assert.deepEqual(ready.models, ["gemini-ready"]);
   assert.equal(JSON.stringify(snapshot).includes("management-secret"), false);
+});
+
+test("temporary CLIProxyAPI unavailability is an error, not an expired OAuth session", async () => {
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v0/management/auth-files") {
+      return jsonResponse({
+        files: [{
+          name: "temporarily-blocked.json",
+          provider: "antigravity",
+          label: "blocked@example.test",
+          status: "ready",
+          status_message: "temporarily blocked until retry window",
+          disabled: false,
+          unavailable: true,
+        }],
+      });
+    }
+    throw new Error(`Unexpected request: ${parsed.pathname}`);
+  };
+
+  const { controller } = controllerFixture(fetchImpl);
+  const account = saveAntigravityAccount(controller);
+  const snapshot = await controller.probeProviderAccount(account.id);
+  const blocked = snapshot.accounts.find((item) => item.id === account.id);
+
+  assert.equal(blocked.status, "error");
+  assert.match(blocked.error, /temporarily blocked/i);
 });
 
 test("provider management URLs reject unsafe remote HTTP and unsafe OAuth redirects", async () => {
