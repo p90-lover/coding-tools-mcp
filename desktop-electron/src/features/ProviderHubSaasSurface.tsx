@@ -1255,7 +1255,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                 <div>
                   {selectedAccount && ["antigravity_management", "commandcode_oauth"].includes(selectedProvider.loginMode ?? "") ? (
                     <button className="provider-secondary-button" disabled={busy !== null} onClick={() => void testProviderConnection()} type="button">
-                      {busy === "provider-probe" ? "…" : text(language, "Test reverse proxy", "測試反向代理")}
+                      {busy === "provider-probe" ? "…" : text(language, "Test connection", "測試連線")}
                     </button>
                   ) : null}
                   {selectedProvider.loginMode === "commandcode_oauth" ? (
