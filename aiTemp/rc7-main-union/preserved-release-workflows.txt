@@ -15,6 +15,7 @@
 .github/workflows/apply-rc6-ui-parity.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/apply-rc6-ui-parity.yml
 .github/workflows/apply-rc7-commandcode-provider.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/apply-rc7-commandcode-provider.yml
 .github/workflows/apply-rc7-updater.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/apply-rc7-updater.yml
+.github/workflows/apply-rc7-upstream-runtime-current.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/apply-rc7-upstream-runtime-current.yml
 .github/workflows/apply-rc7-upstream-tools.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/apply-rc7-upstream-tools.yml
 .github/workflows/apply-runtime-version-fix.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/apply-runtime-version-fix.yml
 .github/workflows/apply-v0.7-rc2-execution-bridge-compile-fix.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/apply-v0.7-rc2-execution-bridge-compile-fix.yml
@@ -85,6 +86,7 @@
 .github/workflows/rc7-provider-updater-base-sync-v2.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/rc7-provider-updater-base-sync-v2.yml
 .github/workflows/rc7-provider-updater-base-sync.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/rc7-provider-updater-base-sync.yml
 .github/workflows/rc7-release-gate-contract.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/rc7-release-gate-contract.yml
+.github/workflows/rc7-upstream-runtime-hardening-current.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/rc7-upstream-runtime-hardening-current.yml
 .github/workflows/runtime-web-goal-ci.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/runtime-web-goal-ci.yml
 .github/workflows/rust-core-cross-platform.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/rust-core-cross-platform.yml
 .github/workflows/rust-core-green.yml -> aiTemp/Trash/rc7-main-union/release-workflows/.github/workflows/rust-core-green.yml

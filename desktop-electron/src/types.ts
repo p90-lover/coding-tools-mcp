@@ -368,6 +368,7 @@ export interface LauncherApi {
   setUpstreamToolEndpoint(toolId: UpstreamToolId, endpoint: string): Promise<UpstreamToolSnapshot>;
   startUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
   stopUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
+  restartUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
   openEmbeddedTool(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
   openUpstreamToolExternal(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
   providerSnapshot(): Promise<ProviderNetworkSnapshot>;
