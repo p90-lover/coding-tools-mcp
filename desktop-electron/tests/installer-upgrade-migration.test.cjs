@@ -44,8 +44,10 @@ test("the installer detects the exact legacy Tauri uninstall identity in every r
   const source = readInstallerInclude();
   assert.match(
     source,
-    /Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Coding Tools MCP/,
+    /!define LEGACY_UNINSTALL_ROOT "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"/,
   );
+  assert.match(source, /!define LEGACY_PRODUCT_NAME "Coding Tools MCP"/);
+  assert.match(source, /EnumRegKey[^\n]*LEGACY_UNINSTALL_ROOT/);
   assert.match(source, /ReadRegStr[^\n]*\$\{ROOT\}/);
   for (const root of ["HKCU", "HKLM"]) {
     for (const view of ["64", "32"]) {
@@ -85,23 +87,44 @@ test("legacy removal is silent, bounded, fail-closed, and preserves application 
   assert.doesNotMatch(source, /Delete\s+\"?\$LOCALAPPDATA/i);
 });
 
-test("the release gate runs a real no-delete Windows old-install to reinstall migration smoke", () => {
+test("the authoritative release gate runs a real no-delete Windows old-install to reinstall migration smoke", () => {
   const workflowPath = path.resolve(
     desktopRoot,
     "..",
     ".github",
     "workflows",
-    "v0.7-installer-upgrade-migration.yml",
+    "codex-router-multiprovider-release-rc7.yml",
+  );
+  const fixtureScriptPath = path.resolve(
+    desktopRoot,
+    "scripts",
+    "create-legacy-uninstall-fixture.ps1",
   );
   const workflow = fs.readFileSync(workflowPath, "utf8");
+  const fixtureScript = fs.readFileSync(fixtureScriptPath, "utf8");
+
   assert.match(workflow, /windows-latest/);
   assert.match(workflow, /installer-upgrade-migration\.test\.cjs/);
+  assert.match(workflow, /create-legacy-uninstall-fixture\.ps1/);
   assert.match(workflow, /legacy-uninstall-fixture/i);
   assert.match(workflow, /\/S/);
-  assert.match(workflow, /Coding\.Tools_0\.7\.0-rc\.5_windows_x64_setup\.exe/);
+  assert.match(workflow, /Coding\.Tools_0\.7\.0-rc\.7_windows_x64_setup\.exe/);
   assert.match(workflow, /CODING_TOOLS_LEGACY_TRASH_DIR/);
-  assert.match(workflow, /Move-Item/);
   assert.match(workflow, /legacyUninstallerPreserved/);
-  assert.doesNotMatch(workflow, /File\.Delete\(/);
   assert.match(workflow, /git diff --diff-filter=D/);
+
+  assert.ok(
+    fixtureScript.includes("Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"),
+    "the Windows migration fixture must use the built-in Framework64 C# compiler",
+  );
+  assert.match(fixtureScript, /\/target:exe/);
+  assert.match(fixtureScript, /\/out:/);
+  assert.match(fixtureScript, /Wait-Process -Id/);
+  assert.match(fixtureScript, /Move-Item/);
+  assert.match(fixtureScript, /LEGACY_FIXTURE_READY/);
+  assert.doesNotMatch(
+    fixtureScript,
+    /Add-Type[^\n]*OutputType\s+ConsoleApplication/,
+  );
+  assert.doesNotMatch(fixtureScript, /File\.Delete\(/);
 });

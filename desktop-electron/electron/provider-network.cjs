@@ -1,6 +1,8 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const http = require("node:http");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
@@ -28,6 +30,15 @@ const PROVIDER_LOGIN_URLS = Object.freeze({
   "ai-studio-reverse-proxy": "https://aistudio.google.com/",
   "gemini-reverse-proxy": "https://aistudio.google.com/",
 });
+const ANTIGRAVITY_PROVIDER_ID = "cliproxyapi-antigravity";
+const DEFAULT_ANTIGRAVITY_BASE_URL = "http://127.0.0.1:8317";
+const COMMANDCODE_PROVIDER_ID = "commandcode-proxy";
+const DEFAULT_COMMANDCODE_PROXY_URL = "http://127.0.0.1:9090";
+const COMMANDCODE_API_URL = "https://api.commandcode.ai";
+const COMMANDCODE_LOGIN_URL = "https://commandcode.ai/studio/auth/cli";
+const DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_OAUTH_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_OAUTH_TIMEOUT_MS = 5 * 60_000;
 
 function defaultState() {
   return {
@@ -118,6 +129,7 @@ function normalizeAccount(account) {
       providerId: requiredText(account.providerId, "Provider ID", 160),
       label: requiredText(account.label, "Account label", 160),
       identity: optionalText(account.identity, 320),
+      endpoint: optionalText(account.endpoint, 2_048),
       auth,
       status,
       enabled: account.enabled !== false,
@@ -382,7 +394,11 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       )))
       : null;
     if (suppliedSecret && Object.keys(suppliedSecret).length > 0) {
-      state.secrets.accounts[id] = codec.encrypt(suppliedSecret);
+      const previousSecret = codec.decrypt(state.secrets.accounts[id]) || {};
+      state.secrets.accounts[id] = codec.encrypt({
+        ...previousSecret,
+        ...suppliedSecret,
+      });
     }
     const hasCredential = Boolean(state.secrets.accounts[id]);
     const statusInput = input.status ?? previous?.status;
@@ -397,6 +413,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       providerId,
       label: input.label,
       identity: input.identity,
+      endpoint: input.endpoint ?? previous?.endpoint,
       auth,
       status,
       enabled: input.enabled ?? previous?.enabled ?? true,
@@ -466,6 +483,29 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       archivedAt: now,
       updatedAt: now,
     });
+    state.accounts = normalizeAccountDefaults(state.accounts);
+    write();
+    return publicSnapshot();
+  }
+
+  function updateAccountConnection(accountId, input = {}) {
+    const account = findAccount(accountId);
+    if (!account || account.archivedAt) throw new Error("Provider account was not found");
+    const now = new Date().toISOString();
+    if (ACCOUNT_STATUS.has(input.status)) account.status = input.status;
+    if (Object.hasOwn(input, "identity")) account.identity = optionalText(input.identity, 320);
+    if (Object.hasOwn(input, "endpoint")) account.endpoint = optionalText(input.endpoint, 2_048);
+    if (Array.isArray(input.models)) account.models = normalizeModels(input.models).sort();
+    account.error = optionalText(input.error, 500);
+    account.updatedAt = now;
+    if (account.status === "connected") {
+      account.enabled = true;
+      account.lastUsedAt = now;
+    }
+    if (account.status === "disabled") {
+      account.enabled = false;
+      account.isDefault = false;
+    }
     state.accounts = normalizeAccountDefaults(state.accounts);
     write();
     return publicSnapshot();
@@ -612,6 +652,20 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     return codec.decrypt(state.secrets.accounts[accountId]);
   }
 
+  function mergeAccountSecret(accountId, patch = {}) {
+    const account = findAccount(accountId);
+    if (!account || account.archivedAt) throw new Error("Provider account was not found");
+    const current = accountSecret(accountId) || {};
+    for (const key of ["antigravityAuthName", "antigravityAuthIndex"]) {
+      if (!Object.hasOwn(patch, key)) continue;
+      const value = optionalText(patch[key], 512);
+      if (value) current[key] = value;
+      else delete current[key];
+    }
+    state.secrets.accounts[accountId] = codec.encrypt(current);
+    write();
+  }
+
   function proxySecret(profileId) {
     return codec.decrypt(state.secrets.proxies[profileId]);
   }
@@ -622,6 +676,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     setDefaultAccount,
     setAccountEnabled,
     archiveAccount,
+    updateAccountConnection,
     saveProxyProfile,
     archiveProxyProfile,
     setGlobalRouting,
@@ -629,6 +684,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     setAccountPolicy,
     recordProxyHealth,
     accountSecret,
+    mergeAccountSecret,
     proxySecret,
     activeProxy,
   };
@@ -663,6 +719,133 @@ function testTcpEndpoint(profile, timeoutMs = 7_000) {
   });
 }
 
+
+function loopbackHost(url) {
+  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "::1"
+    || hostname.startsWith("127.");
+}
+
+function normalizeProviderBaseUrl(value) {
+  const normalized = requiredText(value, "Provider endpoint", 2_048);
+  let url;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new Error("Provider endpoint is invalid");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("Provider endpoint must not contain credentials, query parameters, or fragments");
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopbackHost(url))) {
+    throw new Error("Provider endpoints require HTTPS; plain HTTP is limited to loopback");
+  }
+  let pathname = url.pathname.replace(/\/+$/u, "");
+  if (pathname.toLowerCase().endsWith("/v1")) pathname = pathname.slice(0, -3);
+  url.pathname = pathname || "/";
+  return url.toString().replace(/\/$/u, "");
+}
+
+function safeProviderLoginUrl(value) {
+  let url;
+  try {
+    url = new URL(requiredText(value, "Provider login URL", 8_192));
+  } catch {
+    throw new Error("Provider login URL is invalid");
+  }
+  if (url.username || url.password) throw new Error("Provider login URL is unsafe");
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopbackHost(url))) {
+    throw new Error("Provider login URLs require HTTPS; plain HTTP is limited to loopback");
+  }
+  return url.toString();
+}
+
+function providerSessionFailureStatus(message) {
+  return /expired|invalid[_ -]?grant|refresh token|reauth/i.test(String(message || ""))
+    ? "expired"
+    : "error";
+}
+
+function antigravityAuthFiles(value) {
+  const files = Array.isArray(value?.files) ? value.files : [];
+  return files.filter((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const provider = String(entry.provider ?? entry.type ?? "").trim().toLowerCase();
+    return provider === "antigravity";
+  });
+}
+
+function antigravityAuthFileName(entry) {
+  const value = String(entry?.name ?? entry?.id ?? "").trim();
+  return value || null;
+}
+
+function antigravityAuthIndex(entry) {
+  const value = String(entry?.auth_index ?? entry?.authIndex ?? "").trim();
+  return value || null;
+}
+
+function antigravityIdentity(entry) {
+  const value = String(entry?.email ?? entry?.account ?? entry?.label ?? "").trim();
+  return value || null;
+}
+
+function providerModelIds(value) {
+  const models = Array.isArray(value?.models) ? value.models : [];
+  return [...new Set(models.flatMap((entry) => {
+    const id = typeof entry === "string"
+      ? entry
+      : entry && typeof entry === "object"
+        ? entry.id
+        : null;
+    return typeof id === "string" && id.trim() ? [id.trim()] : [];
+  }))].sort().slice(0, 128);
+}
+
+function commandCodeAuthFilePath(homeDirectory = os.homedir()) {
+  return path.join(homeDirectory, ".commandcode", "auth.json");
+}
+
+function commandCodeToken(value) {
+  const roots = [value, value?.auth, value?.data].filter((candidate) => (
+    candidate && typeof candidate === "object"
+  ));
+  for (const root of roots) {
+    for (const key of ["apiKey", "api_key", "token", "credential", "key"]) {
+      const candidate = root[key];
+      if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+    }
+  }
+  return "";
+}
+
+function commandCodeModelIds(value) {
+  const rows = Array.isArray(value)
+    ? value
+    : Array.isArray(value?.data)
+      ? value.data
+      : Array.isArray(value?.models)
+        ? value.models
+        : [];
+  return [...new Set(rows.flatMap((entry) => {
+    const id = typeof entry === "string"
+      ? entry
+      : entry && typeof entry === "object"
+        ? (entry.id ?? entry.name ?? entry.model)
+        : null;
+    return typeof id === "string" && id.trim() ? [id.trim()] : [];
+  }))].sort().slice(0, 128);
+}
+
+function commandCodeIdentity(value) {
+  for (const candidate of [value?.email, value?.user?.email, value?.username, value?.id, value?.user?.id]) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
+}
+
 function createProviderNetworkController({
   app,
   browserPartition,
@@ -672,6 +855,12 @@ function createProviderNetworkController({
   session,
   shell,
   userData,
+  homeDirectory = os.homedir(),
+  fetchImpl = globalThis.fetch,
+  sleepImpl = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  oauthPollIntervalMs = DEFAULT_OAUTH_POLL_INTERVAL_MS,
+  oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,
+  requestTimeoutMs = DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS,
 }) {
   const directory = path.join(userData, "providers");
   const store = createProviderNetworkStore({
@@ -680,6 +869,7 @@ function createProviderNetworkController({
     safeStorage,
   });
   const ownedEnvironment = new Set();
+  if (typeof fetchImpl !== "function") throw new Error("Provider network fetch implementation is unavailable");
 
   function clearOwnedEnvironment() {
     for (const name of ownedEnvironment) delete process.env[name];
@@ -727,17 +917,484 @@ function createProviderNetworkController({
     return snapshot;
   }
 
-  async function openProviderLogin(accountId) {
-    const snapshot = store.snapshot();
-    const account = snapshot.accounts.find((item) => item.id === accountId && !item.archivedAt);
+  function accountRecord(accountId) {
+    const account = store.snapshot().accounts.find((item) => item.id === accountId && !item.archivedAt);
     if (!account) throw new Error("Provider account was not found");
+    return account;
+  }
+
+  function antigravityConnection(account) {
+    const secret = store.accountSecret(account.id) || {};
+    const managementKey = String(secret.managementKey ?? secret.credential ?? "").trim();
+    if (!managementKey) throw new Error("Enter the CLIProxyAPI management key before login or testing");
+    const baseUrl = normalizeProviderBaseUrl(
+      account.endpoint || secret.baseUrl || DEFAULT_ANTIGRAVITY_BASE_URL,
+    );
+    return { baseUrl, managementKey };
+  }
+
+  function antigravitySessionBinding(account) {
+    const secret = store.accountSecret(account.id) || {};
+    return {
+      name: String(secret.antigravityAuthName ?? "").trim() || null,
+      authIndex: String(secret.antigravityAuthIndex ?? "").trim() || null,
+    };
+  }
+
+  async function managementJson(account, pathname) {
+    const { baseUrl, managementKey } = antigravityConnection(account);
+    const url = new URL(pathname, `${baseUrl}/`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1, requestTimeoutMs));
+    timeout.unref?.();
+    try {
+      const response = await fetchImpl(url.toString(), {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${managementKey}`,
+          "X-Management-Key": managementKey,
+        },
+        signal: controller.signal,
+      });
+      let value = {};
+      try {
+        value = await response.json();
+      } catch {
+        value = {};
+      }
+      if (!response.ok) {
+        const detail = typeof value?.error === "string" ? `: ${value.error.slice(0, 240)}` : "";
+        throw new Error(`CLIProxyAPI management request failed (HTTP ${response.status})${detail}`);
+      }
+      return value;
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error("CLIProxyAPI management request timed out");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function providerJson(rawUrl, { headers = {}, label = "Provider request" } = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1, requestTimeoutMs));
+    timeout.unref?.();
+    try {
+      const response = await fetchImpl(String(rawUrl), {
+        method: "GET",
+        headers: { Accept: "application/json", ...headers },
+        signal: controller.signal,
+      });
+      let value = {};
+      try {
+        value = await response.json();
+      } catch {
+        value = {};
+      }
+      if (!response.ok) {
+        const detail = typeof value?.error === "string"
+          ? `: ${value.error.slice(0, 240)}`
+          : typeof value?.message === "string"
+            ? `: ${value.message.slice(0, 240)}`
+            : "";
+        throw new Error(`${label} failed (HTTP ${response.status})${detail}`);
+      }
+      return value;
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error(`${label} timed out`);
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function inspectAntigravitySession(
+    account,
+    { baselineAuthNames = new Set(), baselineAuthIndexes = new Set() } = {},
+  ) {
+    const binding = antigravitySessionBinding(account);
+    const query = new URLSearchParams();
+    if (binding.name) query.set("name", binding.name);
+    if (binding.authIndex) query.set("auth_index", binding.authIndex);
+    const pathname = query.size > 0
+      ? `/v0/management/auth-files?${query.toString()}`
+      : "/v0/management/auth-files";
+    const listing = await managementJson(account, pathname);
+    const files = antigravityAuthFiles(listing);
+    if (files.length === 0) {
+      return store.updateAccountConnection(account.id, {
+        status: "pending",
+        models: [],
+        error: binding.name || binding.authIndex
+          ? "The bound Antigravity session is unavailable; log in again"
+          : undefined,
+      });
+    }
+
+    const exactBound = files.find((entry) => (
+      (binding.authIndex && antigravityAuthIndex(entry) === binding.authIndex)
+        || (binding.name && antigravityAuthFileName(entry) === binding.name)
+    ));
+    if ((binding.name || binding.authIndex) && !exactBound) {
+      return store.updateAccountConnection(account.id, {
+        status: "pending",
+        models: [],
+        error: "The bound Antigravity session is unavailable; log in again",
+      });
+    }
+
+    const identity = String(account.identity || "").trim().toLowerCase();
+    const newlyCreated = files.find((entry) => {
+      const name = antigravityAuthFileName(entry);
+      const authIndex = antigravityAuthIndex(entry);
+      return (name && !baselineAuthNames.has(name))
+        || (authIndex && !baselineAuthIndexes.has(authIndex));
+    });
+    const selected = exactBound ?? files.find((entry) => {
+      const candidate = String(antigravityIdentity(entry) || "").toLowerCase();
+      return identity && candidate === identity;
+    }) ?? newlyCreated ?? files.find((entry) => {
+      const detail = `${entry.status ?? ""} ${entry.status_message ?? ""}`.trim();
+      return entry.disabled !== true
+        && entry.unavailable !== true
+        && providerSessionFailureStatus(detail) !== "expired"
+        && !/error|failed|invalid/i.test(detail);
+    }) ?? files.find((entry) => entry.disabled !== true) ?? files[0];
+
+    const selectedName = antigravityAuthFileName(selected);
+    const selectedAuthIndex = antigravityAuthIndex(selected);
+    const detail = `${selected.status ?? ""} ${selected.status_message ?? ""}`.trim();
+    let status = "connected";
+    if (selected.disabled === true) status = "disabled";
+    else if (providerSessionFailureStatus(detail) === "expired") status = "expired";
+    else if (selected.unavailable === true || /error|failed|invalid/i.test(detail)) status = "error";
+
+    if (status === "connected") {
+      store.mergeAccountSecret(account.id, {
+        antigravityAuthName: selectedName,
+        antigravityAuthIndex: selectedAuthIndex,
+      });
+    }
+
+    let models = Array.isArray(account.models) ? account.models : [];
+    let modelError;
+    if (status === "connected" && selectedName) {
+      try {
+        const catalogue = await managementJson(
+          account,
+          `/v0/management/auth-files/models?name=${encodeURIComponent(selectedName)}`,
+        );
+        const discovered = providerModelIds(catalogue);
+        if (discovered.length > 0) models = discovered;
+      } catch (error) {
+        modelError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    return store.updateAccountConnection(account.id, {
+      status,
+      identity: antigravityIdentity(selected) ?? account.identity,
+      models,
+      error: status === "connected" ? modelError : (selected.status_message || detail || undefined),
+    });
+  }
+
+  function commandCodeConnection(account) {
+    const secret = store.accountSecret(account.id) || {};
+    const apiKey = commandCodeToken(secret);
+    if (!apiKey) throw new Error("Login with CommandCode or import ~/.commandcode/auth.json first");
+    const baseUrl = normalizeProviderBaseUrl(
+      account.endpoint || secret.baseUrl || DEFAULT_COMMANDCODE_PROXY_URL,
+    );
+    return { apiKey, baseUrl };
+  }
+
+  function commandCodeHeaders(apiKey) {
+    return {
+      Authorization: `Bearer ${apiKey}`,
+      "User-Agent": "cli",
+      "x-cli-environment": "cli",
+      "x-command-code-version": "coding-tools-rc7",
+    };
+  }
+
+  async function inspectCommandCodeSession(account) {
+    const { apiKey, baseUrl } = commandCodeConnection(account);
+    const headers = commandCodeHeaders(apiKey);
+    const identityPayload = await providerJson(
+      `${COMMANDCODE_API_URL}/alpha/whoami`,
+      { headers, label: "CommandCode session probe" },
+    );
+
+    let models = [];
+    let modelError;
+    try {
+      const catalogue = await providerJson(
+        new URL("/v1/models", `${baseUrl}/`).toString(),
+        { headers, label: "CommandCode reverse-proxy model discovery" },
+      );
+      models = commandCodeModelIds(catalogue);
+    } catch (localError) {
+      try {
+        const catalogue = await providerJson(
+          `${COMMANDCODE_API_URL}/provider/v1/models`,
+          { headers, label: "CommandCode model discovery" },
+        );
+        models = commandCodeModelIds(catalogue);
+      } catch (remoteError) {
+        modelError = remoteError instanceof Error
+          ? remoteError.message
+          : String(remoteError || localError);
+      }
+    }
+
+    return store.updateAccountConnection(account.id, {
+      status: "connected",
+      identity: commandCodeIdentity(identityPayload) ?? account.identity,
+      endpoint: baseUrl,
+      models: models.length > 0 ? models : account.models,
+      error: modelError,
+    });
+  }
+
+  async function importProviderSession(accountId) {
+    const account = accountRecord(accountId);
+    if (account.providerId !== COMMANDCODE_PROVIDER_ID) {
+      throw new Error("Session import is only configured for CommandCode Proxy");
+    }
+    const authPath = commandCodeAuthFilePath(homeDirectory);
+    let stat;
+    try {
+      stat = fs.lstatSync(authPath);
+    } catch {
+      throw new Error(`CommandCode CLI session was not found at ${authPath}`);
+    }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 64 * 1024) {
+      throw new Error("CommandCode CLI session file is unsafe or invalid");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(authPath, "utf8"));
+    } catch {
+      throw new Error("CommandCode CLI session file is not valid JSON");
+    }
+    const apiKey = commandCodeToken(parsed);
+    if (!apiKey) throw new Error("CommandCode CLI session does not contain an API key");
+    const baseUrl = account.endpoint || DEFAULT_COMMANDCODE_PROXY_URL;
+    store.saveAccount({
+      ...account,
+      status: "pending",
+      secret: { apiKey, baseUrl },
+    });
+    return inspectCommandCodeSession(accountRecord(account.id));
+  }
+
+  async function commandCodeCallbackPayload(request, callbackBase) {
+    const requestUrl = new URL(request.url || "/", callbackBase);
+    const values = Object.fromEntries(requestUrl.searchParams.entries());
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of request) {
+        size += chunk.length;
+        if (size > 64 * 1024) throw new Error("CommandCode login callback is too large");
+        chunks.push(chunk);
+      }
+      if (chunks.length > 0) {
+        const text = Buffer.concat(chunks).toString("utf8");
+        const contentType = String(request.headers["content-type"] || "").toLowerCase();
+        if (contentType.includes("application/json")) {
+          Object.assign(values, JSON.parse(text));
+        } else {
+          Object.assign(values, Object.fromEntries(new URLSearchParams(text).entries()));
+        }
+      }
+    }
+    return values;
+  }
+
+  async function startCommandCodeLogin(account) {
+    const state = crypto.randomBytes(24).toString("hex");
+    let settleCallback;
+    let rejectCallback;
+    const callback = new Promise((resolve, reject) => {
+      settleCallback = resolve;
+      rejectCallback = reject;
+    });
+    const server = http.createServer(async (request, response) => {
+      try {
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("CommandCode callback server is unavailable");
+        const callbackBase = `http://127.0.0.1:${address.port}`;
+        const url = new URL(request.url || "/", callbackBase);
+        if (url.pathname !== "/commandcode/callback") {
+          response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          response.end("Not found");
+          return;
+        }
+        const values = await commandCodeCallbackPayload(request, callbackBase);
+        if (String(values.state || "") !== state) throw new Error("CommandCode login state did not match");
+        const apiKey = commandCodeToken(values);
+        if (!apiKey) throw new Error("CommandCode login did not return an API key");
+        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        response.end("<!doctype html><title>CommandCode connected</title><h1>CommandCode connected</h1><p>You can close this window and return to Coding Tools.</p>");
+        settleCallback(apiKey);
+      } catch (error) {
+        response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+        response.end("CommandCode login failed. Return to Coding Tools for details.");
+        rejectCallback(error);
+      }
+    });
+
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      server.close();
+      throw new Error("CommandCode callback server did not start");
+    }
+    const callbackUrl = `http://127.0.0.1:${address.port}/commandcode/callback`;
+    const loginUrl = new URL(COMMANDCODE_LOGIN_URL);
+    loginUrl.searchParams.set("callback", callbackUrl);
+    loginUrl.searchParams.set("state", state);
+    store.updateAccountConnection(account.id, { status: "pending", error: undefined });
+
+    let timer;
+    try {
+      await shell.openExternal(safeProviderLoginUrl(loginUrl.toString()));
+      const apiKey = await Promise.race([
+        callback,
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("CommandCode authentication timed out")),
+            Math.max(1, oauthTimeoutMs),
+          );
+          timer.unref?.();
+        }),
+      ]);
+      const baseUrl = account.endpoint || DEFAULT_COMMANDCODE_PROXY_URL;
+      store.saveAccount({
+        ...account,
+        status: "pending",
+        secret: { apiKey, baseUrl },
+      });
+      return {
+        opened: true,
+        mode: "external",
+        state,
+        snapshot: await inspectCommandCodeSession(accountRecord(account.id)),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const snapshot = store.updateAccountConnection(account.id, {
+        status: providerSessionFailureStatus(message),
+        error: message,
+      });
+      error.snapshot = snapshot;
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+
+  async function probeProviderAccount(accountId) {
+    const account = accountRecord(accountId);
+    try {
+      if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+        return await inspectAntigravitySession(account);
+      }
+      if (account.providerId === COMMANDCODE_PROVIDER_ID) {
+        return await inspectCommandCodeSession(account);
+      }
+      throw new Error("Provider account health probing is not configured for this provider");
+    } catch (error) {
+      store.updateAccountConnection(account.id, {
+        status: providerSessionFailureStatus(error instanceof Error ? error.message : String(error)),
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  async function openProviderLogin(accountId) {
+    const account = accountRecord(accountId);
     if (account.providerId === "chatgpt-web" || account.providerId === "codex-oauth") {
       const browser = await getBrowserHost()?.openLogin();
       return { opened: true, mode: "embedded", browser: browser || null };
     }
+    if (account.providerId === COMMANDCODE_PROVIDER_ID) {
+      return startCommandCodeLogin(account);
+    }
+    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+      let baselineAuthNames = new Set();
+      let baselineAuthIndexes = new Set();
+      try {
+        const baseline = await managementJson(account, "/v0/management/auth-files");
+        const baselineFiles = antigravityAuthFiles(baseline);
+        baselineAuthNames = new Set(
+          baselineFiles.map(antigravityAuthFileName).filter(Boolean),
+        );
+        baselineAuthIndexes = new Set(
+          baselineFiles.map(antigravityAuthIndex).filter(Boolean),
+        );
+      } catch (error) {
+        logger.warn("provider.antigravity_baseline_failed", {
+          accountId: account.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      store.updateAccountConnection(account.id, { status: "pending", error: undefined });
+      const login = await managementJson(
+        account,
+        "/v0/management/antigravity-auth-url?is_webui=true",
+      );
+      const state = String(login?.state ?? "").trim();
+      if (!state || login?.status !== "ok") throw new Error("CLIProxyAPI did not start Antigravity authentication");
+      const loginUrl = safeProviderLoginUrl(login?.url);
+      await shell.openExternal(loginUrl);
+
+      const deadline = Date.now() + Math.max(1, oauthTimeoutMs);
+      while (Date.now() <= deadline) {
+        const status = await managementJson(
+          account,
+          `/v0/management/get-auth-status?state=${encodeURIComponent(state)}`,
+        );
+        if (status?.status === "ok") {
+          return {
+            opened: true,
+            mode: "external",
+            state,
+            snapshot: await inspectAntigravitySession(accountRecord(account.id), {
+              baselineAuthNames,
+              baselineAuthIndexes,
+            }),
+          };
+        }
+        if (status?.status === "error") {
+          const message = String(status.error || "Antigravity authentication failed");
+          const snapshot = store.updateAccountConnection(account.id, {
+            status: providerSessionFailureStatus(message),
+            error: message,
+          });
+          const error = new Error(message);
+          error.snapshot = snapshot;
+          throw error;
+        }
+        await sleepImpl(Math.max(0, oauthPollIntervalMs));
+      }
+      const message = "Antigravity authentication timed out";
+      const snapshot = store.updateAccountConnection(account.id, { status: "error", error: message });
+      const error = new Error(message);
+      error.snapshot = snapshot;
+      throw error;
+    }
     const url = PROVIDER_LOGIN_URLS[account.providerId];
     if (!url) throw new Error("This provider uses API key or custom endpoint authentication");
-    await shell.openExternal(url);
+    await shell.openExternal(safeProviderLoginUrl(url));
     return { opened: true, mode: "external" };
   }
 
@@ -770,16 +1427,26 @@ function createProviderNetworkController({
     store,
     applyGlobalRouting,
     openProviderLogin,
+    importProviderSession,
+    probeProviderAccount,
     testProxyProfile,
     handleProxyLogin,
   };
 }
 
 module.exports = {
+  ANTIGRAVITY_PROVIDER_ID,
+  COMMANDCODE_PROVIDER_ID,
+  DEFAULT_ANTIGRAVITY_BASE_URL,
+  DEFAULT_COMMANDCODE_PROXY_URL,
+  commandCodeAuthFilePath,
+  commandCodeModelIds,
+  commandCodeToken,
   DEFAULT_BYPASS,
   PROVIDER_LOGIN_URLS,
   createProviderNetworkController,
   createProviderNetworkStore,
+  normalizeProviderBaseUrl,
   proxyUrl,
   testTcpEndpoint,
 };

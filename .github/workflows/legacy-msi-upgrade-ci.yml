@@ -1,0 +1,180 @@
+name: Legacy MSI upgrade compatibility
+
+on:
+  push:
+    branches:
+      - fix/rc7-legacy-msi-upgrade-detection
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/scripts/create-legacy-msi-upgrade-fixture.ps1
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+      - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
+      - .github/workflows/legacy-msi-upgrade-ci.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.6
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/scripts/create-legacy-msi-upgrade-fixture.ps1
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+      - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
+      - .github/workflows/legacy-msi-upgrade-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legacy-msi-upgrade-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run legacy installer contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/legacy-msi-upgrade/evidence
+          node --test \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs \
+            2>&1 | tee aiTemp/legacy-msi-upgrade/evidence/contracts.txt
+          grep -F '# fail 0' aiTemp/legacy-msi-upgrade/evidence/contracts.txt
+
+      - name: Enforce no-delete diff
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.6 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: legacy-msi-upgrade-contract-${{ github.sha }}
+          path: aiTemp/legacy-msi-upgrade/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-harness:
+    needs: contract
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - name: Install NSIS compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install nsis --no-progress -y
+
+      - name: Create legacy MSI registration and compile migration harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-msi-upgrade\fixture'
+          $trash = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\Trash\legacy-msi-upgrade'
+          $include = Join-Path $env:GITHUB_WORKSPACE 'desktop-electron\build\installer.nsh'
+          New-Item -ItemType Directory -Path (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-msi-upgrade\evidence') -Force | Out-Null
+          & (Join-Path $env:GITHUB_WORKSPACE 'desktop-electron\scripts\create-legacy-msi-upgrade-fixture.ps1') `
+            -RootPath $root `
+            -TrashPath $trash `
+            -InstallerIncludePath $include `
+            | Tee-Object -FilePath (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-msi-upgrade\evidence\fixture.txt')
+
+          $searchRoots = @(
+            (Join-Path ${env:ProgramFiles(x86)} 'NSIS'),
+            (Join-Path $env:ProgramFiles 'NSIS'),
+            (Join-Path $env:ChocolateyInstall 'bin')
+          ) | Where-Object { -not [String]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_) }
+          $makensis = $searchRoots |
+            ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter 'makensis.exe' -File -Recurse -ErrorAction SilentlyContinue } |
+            Select-Object -First 1
+          if ($null -eq $makensis) { throw 'makensis.exe was not found after installing NSIS' }
+          $harness = Join-Path $root 'legacy-msi-upgrade-harness.nsi'
+          & $makensis.FullName '/V4' $harness `
+            | Tee-Object -FilePath (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-msi-upgrade\evidence\makensis.txt')
+          if ($LASTEXITCODE -ne 0) { throw "makensis.exe failed with exit code $LASTEXITCODE" }
+
+      - name: Execute migration harness and verify retained evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-msi-upgrade\fixture'
+          $trash = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\Trash\legacy-msi-upgrade'
+          $marker = Join-Path $root 'legacy-msiexec-ran.txt'
+          $payload = Join-Path $root 'legacy-msi-payload.bin'
+          $retainedPayload = Join-Path $trash 'legacy-msi-payload.bin'
+          $env:CODING_TOOLS_LEGACY_MSI_MARKER = $marker
+          $env:CODING_TOOLS_LEGACY_MSI_PAYLOAD = $payload
+          $env:CODING_TOOLS_LEGACY_MSI_RETAINED_PAYLOAD = $retainedPayload
+
+          $harness = Join-Path $root 'legacy-msi-upgrade-harness.exe'
+          $process = Start-Process -FilePath $harness -ArgumentList '/S' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "migration harness failed with exit code $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $marker)) { throw 'legacy-msiexec-ran.txt was not created' }
+          $markerText = Get-Content -LiteralPath $marker -Raw
+          if ($markerText -notmatch 'LEGACY_MSIEXEC_RAN') { throw "unexpected marker: $markerText" }
+          if ($markerText -notmatch '/x') { throw 'the MSI uninstall argument was not passed' }
+          if ($markerText -notmatch '/qn') { throw 'the MSI quiet argument was not passed' }
+          if ($markerText -notmatch '/norestart') { throw 'the MSI no-restart argument was not passed' }
+          if (Test-Path -LiteralPath $payload) { throw 'legacy MSI payload remains in its old location' }
+          if (-not (Test-Path -LiteralPath $retainedPayload)) { throw 'legacy MSI payload was not preserved under aiTemp/Trash' }
+
+          $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::CurrentUser,
+            [Microsoft.Win32.RegistryView]::Registry64
+          )
+          try {
+            $remaining = $baseKey.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Uninstall\{11111111-2222-3333-4444-555555555555}')
+            if ($null -ne $remaining) {
+              $remaining.Dispose()
+              throw 'legacy MSI registry entry remains after migration'
+            }
+          }
+          finally {
+            $baseKey.Dispose()
+          }
+
+          [ordered]@{
+            harnessExitCode = $process.ExitCode
+            marker = $markerText.Trim()
+            registryRemoved = $true
+            retainedPayload = $retainedPayload
+          } | ConvertTo-Json -Depth 3 |
+            Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-msi-upgrade\evidence\windows-harness.json') -Encoding UTF8
+
+      - name: Enforce exact source and no deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          test -s aiTemp/legacy-msi-upgrade/evidence/windows-harness.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: legacy-msi-upgrade-windows-${{ github.sha }}
+          path: aiTemp/legacy-msi-upgrade/
+          if-no-files-found: error
+          retention-days: 14

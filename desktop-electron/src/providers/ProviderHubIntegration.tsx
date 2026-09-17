@@ -8,6 +8,7 @@ import {
 import { createPortal } from "react-dom";
 import { PROVIDER_CATALOG, type ProviderDefinition } from "./provider-types";
 import type {
+  Language,
   ProviderAccountInput,
   ProviderAccountRecord,
   ProviderAuth,
@@ -24,6 +25,10 @@ const api = window.codexWebLauncher;
 
 type ProviderLocale = "en" | "zh-TW";
 type ManagerView = "accounts" | "proxies";
+
+function providerLocale(language: Language | null): ProviderLocale {
+  return language === "zh-TW" || language === "zh-CN" ? "zh-TW" : "en";
+}
 
 const COPY = {
   en: {
@@ -312,12 +317,24 @@ export function ProviderHubIntegration({ children }: { children: ReactNode }) {
   const [workspaceHost, setWorkspaceHost] = useState<HTMLElement | null>(null);
   const [open, setOpen] = useState(false);
   const [accountCount, setAccountCount] = useState(0);
-  const [locale, setLocale] = useState<ProviderLocale>(() => {
-    const saved = window.localStorage.getItem("coding-tools-provider-locale");
-    if (saved === "en" || saved === "zh-TW") return saved;
-    return navigator.language.toLowerCase().includes("zh") ? "zh-TW" : "en";
-  });
+  const [locale, setLocale] = useState<ProviderLocale>("en");
   const copy = COPY[locale];
+
+  useEffect(() => {
+    let cancelled = false;
+    void api?.snapshot()
+      .then((snapshot) => {
+        if (!cancelled) setLocale(providerLocale(snapshot.state.language));
+      })
+      .catch(() => undefined);
+    const unsubscribe = api?.onStateChanged((state) => {
+      setLocale(providerLocale(state.language));
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, []);
 
   useEffect(() => {
     const resolveHosts = () => {
@@ -346,9 +363,10 @@ export function ProviderHubIntegration({ children }: { children: ReactNode }) {
   }, [open]);
 
   const changeLocale = () => {
-    const next = locale === "en" ? "zh-TW" : "en";
-    window.localStorage.setItem("coding-tools-provider-locale", next);
-    setLocale(next);
+    const next: Language = locale === "en" ? "zh-TW" : "en";
+    void api?.setLanguage(next)
+      .then(() => setLocale(providerLocale(next)))
+      .catch(() => undefined);
   };
 
   return (

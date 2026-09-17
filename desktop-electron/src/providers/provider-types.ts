@@ -26,6 +26,7 @@ export type ProviderCapability =
   | "image_generation";
 
 export type ProxyMode = "inherit" | "direct" | "custom";
+export type ProviderLoginMode = "browser" | "antigravity_management" | "commandcode_oauth";
 
 export interface ProviderDefinition {
   id: string;
@@ -38,6 +39,7 @@ export interface ProviderDefinition {
   proxyMode: ProxyMode;
   baseUrl?: string;
   modelsEndpoint?: string;
+  loginMode?: ProviderLoginMode;
   paseoEnabled: boolean;
   annealEnabled: boolean;
   priority: number;
@@ -137,6 +139,9 @@ export const DEFAULT_PROVIDERS = [
     capabilities: ["text", "reasoning", "tools", "vision"],
     models: [],
     proxyMode: "custom",
+    baseUrl: "http://127.0.0.1:8317",
+    modelsEndpoint: "/v0/management/auth-files/models",
+    loginMode: "antigravity_management",
     paseoEnabled: true,
     annealEnabled: true,
     priority: 40,
@@ -150,6 +155,9 @@ export const DEFAULT_PROVIDERS = [
     capabilities: ["text", "reasoning", "tools"],
     models: [],
     proxyMode: "custom",
+    baseUrl: "http://127.0.0.1:9090",
+    modelsEndpoint: "/v1/models",
+    loginMode: "commandcode_oauth",
     paseoEnabled: true,
     annealEnabled: true,
     priority: 30,

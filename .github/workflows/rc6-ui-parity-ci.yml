@@ -1,0 +1,113 @@
+name: rc.6 UI parity CI
+
+on:
+  push:
+    branches:
+      - fix/rc6-paseo-anneal-zhTW-ui-parity
+      - release/codex-router-multiprovider-0.7.0-rc.6
+    paths:
+      - 'desktop-electron/src/features/PaseoOrchestratorSurface.tsx'
+      - 'desktop-electron/src/features/AnnealTasksSurface.tsx'
+      - 'desktop-electron/src/features/orchestration-copy.ts'
+      - 'desktop-electron/src/features/orchestration-control.css'
+      - 'desktop-electron/src/features/ProviderHubSurface.tsx'
+      - 'desktop-electron/src/providers/ProviderHubIntegration.tsx'
+      - 'desktop-electron/tests/rc6-ui-parity-contract.test.cjs'
+      - 'desktop-electron/tests/rc6-provider-hub-i18n-contract.test.cjs'
+      - 'desktop-electron/tests/orchestration-localization-layout.test.cjs'
+      - 'desktop-electron/package.json'
+      - 'desktop-electron/bun.lock'
+      - '.github/workflows/rc6-ui-parity-ci.yml'
+  pull_request:
+    paths:
+      - 'desktop-electron/src/features/PaseoOrchestratorSurface.tsx'
+      - 'desktop-electron/src/features/AnnealTasksSurface.tsx'
+      - 'desktop-electron/src/features/orchestration-copy.ts'
+      - 'desktop-electron/src/features/orchestration-control.css'
+      - 'desktop-electron/src/features/ProviderHubSurface.tsx'
+      - 'desktop-electron/src/providers/ProviderHubIntegration.tsx'
+      - 'desktop-electron/tests/rc6-ui-parity-contract.test.cjs'
+      - 'desktop-electron/tests/rc6-provider-hub-i18n-contract.test.cjs'
+      - 'desktop-electron/tests/orchestration-localization-layout.test.cjs'
+      - 'desktop-electron/package.json'
+      - 'desktop-electron/bun.lock'
+      - '.github/workflows/rc6-ui-parity-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc6-ui-parity-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc6-ui-parity-ci/bun-cache
+
+jobs:
+  verify:
+    name: Locales, layout, types, and production renderer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/rc6-ui-parity-ci/renderer-dist aiTemp/Trash/rc6-ui-parity-ci
+
+      - name: Run focused localization and layout contracts
+        run: |
+          node --test \
+            desktop-electron/tests/rc6-ui-parity-contract.test.cjs \
+            desktop-electron/tests/rc6-provider-hub-i18n-contract.test.cjs \
+            desktop-electron/tests/orchestration-localization-layout.test.cjs
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build production renderer into aiTemp evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/rc6-ui-parity-ci/renderer-dist \
+            --emptyOutDir
+
+      - name: Verify production bundle contains the repaired surfaces
+        shell: bash
+        run: |
+          bundle="$(find aiTemp/rc6-ui-parity-ci/renderer-dist/assets -maxdepth 1 -type f -name '*.js' -print -quit)"
+          test -n "$bundle"
+          grep -F '建立工作階段' "$bundle"
+          grep -F '待整理' "$bundle"
+          grep -F '供應商中心' "$bundle"
+
+      - name: Enforce no source-file deletion
+        shell: bash
+        run: |
+          base_ref='origin/release/codex-router-multiprovider-0.7.0-rc.5'
+          if ! git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+            base_ref='HEAD^'
+          fi
+          deleted="$(git diff -M --diff-filter=D --name-only "$base_ref"...HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "aiTemp/Trash/rc6-ui-parity-ci/node_modules-$GITHUB_RUN_ID"
+          fi

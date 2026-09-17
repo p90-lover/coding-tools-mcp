@@ -7,19 +7,19 @@ const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
 const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
-const providerHubPath = path.join(root, "src/features/ProviderHubSurface.tsx");
+const providerHubPath = path.join(root, "src/features/ProviderHubSaasSurface.tsx");
 const surface = fs.existsSync(providerHubPath)
   ? fs.readFileSync(providerHubPath, "utf8")
   : "";
 const preload = fs.readFileSync(path.join(root, "electron/preload.cjs"), "utf8");
 const types = fs.readFileSync(path.join(root, "src/types.ts"), "utf8");
 
-test("the active Provider Center uses the focused Provider Hub component", () => {
+test("the active Provider Center uses the canonical SaaS Provider Hub component", () => {
   assert.match(
     app,
-    /import \{ ProviderCenterSurface \} from "\.\/features\/ProviderHubSurface"/,
+    /import \{ ProviderCenterSurface \} from "\.\/features\/ProviderHubSaasSurface"/,
   );
-  assert.ok(surface.length > 0, "ProviderHubSurface.tsx must exist");
+  assert.ok(surface.length > 0, "ProviderHubSaasSurface.tsx must exist");
   assert.doesNotMatch(app, /ProviderOrchestratorSurfaces/);
 });
 
