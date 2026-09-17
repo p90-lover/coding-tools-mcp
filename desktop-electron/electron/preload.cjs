@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   ),
   startUpstreamTool: (toolId) => ipcRenderer.invoke("launcher:upstream-tool-start", toolId),
   stopUpstreamTool: (toolId) => ipcRenderer.invoke("launcher:upstream-tool-stop", toolId),
+  restartUpstreamTool: (toolId) => ipcRenderer.invoke("launcher:upstream-tool-restart", toolId),
   openEmbeddedTool: (toolId, section) => ipcRenderer.invoke(
     "launcher:upstream-tool-open-embedded",
     toolId,
