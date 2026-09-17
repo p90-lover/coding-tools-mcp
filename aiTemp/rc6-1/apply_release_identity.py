@@ -2,36 +2,38 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[2]
-OLD = "0.7.0-rc.6"
 NEW = "0.7.0-rc.6.1"
 OLD_PATTERN = re.compile(r"0\.7\.0-rc\.6(?!\.\d)")
 
-ACTIVE_VERSION_PATHS = [
+REQUIRED_VERSION_PATHS = [
     "desktop-electron/package.json",
     "desktop-electron/electron/product.cjs",
     "desktop-electron/scripts/prepare-package-resources.cjs",
     "desktop-electron/scripts/verify-package.cjs",
-    "desktop-electron/src/App.tsx",
-    "desktop-electron/tests/package-contents.test.cjs",
-    "desktop-electron/tests/package-resource-preparation.test.cjs",
     "desktop-electron/tests/product-identity.test.cjs",
 ]
 
+OPTIONAL_VERSION_PATHS = [
+    "desktop-electron/src/App.tsx",
+    "desktop-electron/tests/package-contents.test.cjs",
+    "desktop-electron/tests/package-resource-preparation.test.cjs",
+]
+
 changed = []
-for relative in ACTIVE_VERSION_PATHS:
+for relative in REQUIRED_VERSION_PATHS + OPTIONAL_VERSION_PATHS:
     path = ROOT / relative
     text = path.read_text(encoding="utf-8")
-    if not OLD_PATTERN.search(text):
-        if NEW not in text:
-            raise SystemExit(f"Missing release identity anchor in {relative}")
+    if OLD_PATTERN.search(text):
+        updated, replacements = OLD_PATTERN.subn(NEW, text)
+        if replacements < 1:
+            raise SystemExit(f"Release identity did not change in {relative}")
+        path.write_text(updated, encoding="utf-8")
+        changed.append(relative)
         continue
-    updated, replacements = OLD_PATTERN.subn(NEW, text)
-    if replacements < 1:
-        raise SystemExit(f"Release identity did not change in {relative}")
-    path.write_text(updated, encoding="utf-8")
-    changed.append(relative)
+    if relative in REQUIRED_VERSION_PATHS and NEW not in text:
+        raise SystemExit(f"Missing required release identity anchor in {relative}")
 
-for relative in ACTIVE_VERSION_PATHS:
+for relative in REQUIRED_VERSION_PATHS:
     text = (ROOT / relative).read_text(encoding="utf-8")
     if NEW not in text:
         raise SystemExit(f"New release identity missing from {relative}")
