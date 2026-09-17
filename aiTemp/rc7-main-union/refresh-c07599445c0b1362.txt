@@ -1,0 +1,3 @@
+release_sha=c07599445c0b136210fea14dd193674320dc0981
+reason=refresh verified current-main union after rc.7 managed-runtime merge
+retention=keep under aiTemp; do not delete
