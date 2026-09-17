@@ -35,6 +35,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch --no-tags origin main
           main_sha="$(git rev-parse origin/main)"
           base_sha="$(git rev-parse HEAD)"
@@ -59,14 +61,26 @@ jobs:
           fi
 
           git diff --name-only --diff-filter=U | LC_ALL=C sort > aiTemp/rc7-main-sync/conflicts.txt
+          conflict_count="$(wc -l < aiTemp/rc7-main-sync/conflicts.txt | tr -d ' ')"
+          if [[ "$conflict_count" -gt 0 ]]; then
+            diagnostic_status='conflicts'
+          else
+            diagnostic_status='merge-error'
+          fi
           {
             printf 'main=%s\n' "$main_sha"
             printf 'base=%s\n' "$base_sha"
-            printf 'status=conflicts\n'
-            printf 'count=%s\n' "$(wc -l < aiTemp/rc7-main-sync/conflicts.txt | tr -d ' ')"
+            printf 'status=%s\n' "$diagnostic_status"
+            printf 'merge_exit=%s\n' "$merge_status"
+            printf 'count=%s\n' "$conflict_count"
           } > aiTemp/rc7-main-sync/status.txt
-          git merge --abort
-          echo "conflicts=true" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            git merge --abort
+          else
+            git reset --hard HEAD
+          fi
+          echo "diagnostic=true" >> "$GITHUB_OUTPUT"
 
       - name: Commit a clean merge
         if: steps.merge.outputs.clean_merge == 'true'
@@ -75,24 +89,20 @@ jobs:
           MAIN_SHA: ${{ steps.merge.outputs.main_sha }}
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m "integrate(rc7): merge current main into verified rc6 source" -m "Merge exact main SHA $MAIN_SHA without deleting retained branches or evidence."
           git push origin HEAD:${GITHUB_REF_NAME}
 
-      - name: Retain exact conflict evidence
-        if: steps.merge.outputs.conflicts == 'true'
+      - name: Retain exact merge diagnostic evidence
+        if: steps.merge.outputs.diagnostic == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add aiTemp/rc7-main-sync/status.txt aiTemp/rc7-main-sync/conflicts.txt aiTemp/rc7-main-sync/merge.stdout.txt aiTemp/rc7-main-sync/merge.stderr.txt
           if ! git diff --cached --quiet; then
-            git commit -m "ci(rc7): record exact current-main merge conflicts"
+            git commit -m "ci(rc7): record exact current-main merge diagnostics"
             git push origin HEAD:${GITHUB_REF_NAME}
           fi
-          echo 'Current main does not merge cleanly; retained conflict evidence has been committed.' >&2
+          echo 'Current main did not merge cleanly; retained diagnostic evidence has been committed.' >&2
           exit 1
 
       - name: Verify no project deletion
