@@ -1,6 +1,6 @@
 name: Supersede stale rc.6 publishers
 
-# Retriggered after the authoritative Windows runner stalled during dependency preparation.
+# Supersede the pre-csc installer run so the fixed legacy fixture executes immediately.
 on:
   push:
     branches:
@@ -32,7 +32,7 @@ jobs:
           mkdir -p aiTemp/release-supersession
           marker="aiTemp/release-supersession/retrigger-$GITHUB_SHA.txt"
           test ! -e "$marker"
-          printf 'superseded_by=%s\nsource_branch=%s\n' \
+          printf 'superseded_by=%s\nsource_branch=%s\nreason=csc_fixture_compiler\n' \
             "$GITHUB_SHA" "$GITHUB_REF_NAME" > "$marker"
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
@@ -43,5 +43,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add aiTemp/release-supersession/
-          git commit -m 'release(rc6): retrigger exact UI parity source after supersession'
+          git commit -m 'release(rc6): retrigger csc-based installer migration proof'
           git push origin HEAD:release/codex-router-multiprovider-0.7.0-rc.6
