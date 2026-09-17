@@ -26,12 +26,23 @@ function loadManifest(toolId) {
   return Object.freeze({ ...manifest, sections: Object.freeze([...manifest.sections]) });
 }
 
+function canonicalHostname(value) {
+  const hostname = String(value || "").toLowerCase();
+  return hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
+function isLoopbackHostname(value) {
+  return LOOPBACK_HOSTS.has(canonicalHostname(value));
+}
+
 function normalizeLoopbackEndpoint(value) {
   const parsed = new URL(String(value || ""));
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("Upstream tool endpoints must use HTTP or HTTPS");
   }
-  if (!LOOPBACK_HOSTS.has(parsed.hostname)) {
+  if (!isLoopbackHostname(parsed.hostname)) {
     throw new Error("Upstream tools are restricted to 127.0.0.1 or [::1]");
   }
   if (parsed.username || parsed.password) {
@@ -49,7 +60,7 @@ function sectionUrl(manifest, endpoint, section) {
   }
   const pathname = manifest.sectionPaths?.[section] || `/${section}`;
   const target = new URL(pathname, normalizeLoopbackEndpoint(endpoint));
-  if (!LOOPBACK_HOSTS.has(target.hostname)) {
+  if (!isLoopbackHostname(target.hostname)) {
     throw new Error("Upstream section URL escaped the loopback boundary");
   }
   return target.toString();
