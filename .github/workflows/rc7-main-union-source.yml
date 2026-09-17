@@ -64,7 +64,7 @@ jobs:
         run: mkdir -p aiTemp/rc7-main-union/renderer-dist aiTemp/Trash/rc7-main-union
 
       - id: compose
-        name: Merge exact verified provider release into current main
+        name: Apply exact verified provider release snapshot to current main
         shell: bash
         run: |
           set -euo pipefail
@@ -74,18 +74,24 @@ jobs:
           release_sha="$(git rev-parse "origin/$RELEASE_BRANCH")"
           main_sha="$(git rev-parse origin/main)"
           head_sha="$(git rev-parse HEAD)"
+          marker='aiTemp/rc7-main-union/applied-release-sha.txt'
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
-          if git merge-base --is-ancestor "$release_sha" HEAD; then
+          if [[ -f "$marker" ]] && [[ "$(tr -d '\r\n' < "$marker")" == "$release_sha" ]]; then
             echo "already_composed=true" >> "$GITHUB_OUTPUT"
             echo "ready=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          # Apply only the verified release tip's resulting file snapshot. The
+          # release branch permanently retains its complete history, while this
+          # main-bound branch avoids importing historical synthetic credential
+          # fixtures that GitHub Push Protection correctly refuses to expose on
+          # an additional ref.
           set +e
-          git merge --no-commit --no-ff "$release_sha" \
+          git merge --squash --no-commit "$release_sha" \
             > aiTemp/rc7-main-union/merge.stdout.txt \
             2> aiTemp/rc7-main-union/merge.stderr.txt
           merge_status=$?
@@ -99,7 +105,7 @@ jobs:
           src-tauri/src/data/mod.rs
           EOF
             if ! cmp -s aiTemp/rc7-main-union/conflicts.txt aiTemp/rc7-main-union/expected-conflicts.txt; then
-              echo 'Unexpected current-main union conflicts:' >&2
+              echo 'Unexpected current-main snapshot conflicts:' >&2
               cat aiTemp/rc7-main-union/conflicts.txt >&2
               exit 1
             fi
@@ -134,15 +140,17 @@ jobs:
           fi
 
           if git diff --name-only --diff-filter=U | grep -q .; then
-            echo 'Union still contains unresolved paths.' >&2
+            echo 'Snapshot still contains unresolved paths.' >&2
             git diff --name-only --diff-filter=U >&2
             exit 1
           fi
 
+          printf '%s\n' "$release_sha" > "$marker"
+          git add "$marker"
           echo "merge_pending=true" >> "$GITHUB_OUTPUT"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - name: Preserve every file from both parents
+      - name: Preserve every file from both source tips
         if: steps.compose.outputs.ready == 'true'
         shell: bash
         env:
@@ -154,11 +162,11 @@ jobs:
             deleted_from_release="$(git diff --cached --name-only --diff-filter=D "$RELEASE_SHA")"
             deleted_from_main="$(git diff --cached --name-only --diff-filter=D "$MAIN_SHA")"
           else
-            deleted_from_release="$(git diff --name-only --diff-filter=D "$RELEASE_SHA"...HEAD)"
-            deleted_from_main="$(git diff --name-only --diff-filter=D "$MAIN_SHA"...HEAD)"
+            deleted_from_release="$(git diff --name-only --diff-filter=D "$RELEASE_SHA" HEAD)"
+            deleted_from_main="$(git diff --name-only --diff-filter=D "$MAIN_SHA" HEAD)"
           fi
           if [[ -n "$deleted_from_release" || -n "$deleted_from_main" ]]; then
-            echo 'The union would delete a path retained by one parent:' >&2
+            echo 'The snapshot would delete a path retained by one source tip:' >&2
             printf 'From release:\n%s\nFrom main:\n%s\n' "$deleted_from_release" "$deleted_from_main" >&2
             exit 1
           fi
@@ -229,7 +237,7 @@ jobs:
           CODING_TOOLS_RENDERER_DIST="$renderer_dir" \
             node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
 
-      - name: Commit and push exact verified history union
+      - name: Commit and push exact verified snapshot union
         if: steps.compose.outputs.merge_pending == 'true'
         shell: bash
         env:
@@ -243,15 +251,12 @@ jobs:
           if [[ "$remote_head" != "$ORIGINAL_HEAD" ]]; then
             printf 'Branch advanced from %s to %s; stale verified run will not push.\n' \
               "$ORIGINAL_HEAD" "$remote_head"
-            if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-              git merge --abort
-            fi
             exit 0
           fi
-          git diff --cached --check -- src-tauri
+          git diff --cached --check -- src-tauri aiTemp/rc7-main-union/applied-release-sha.txt
           git commit \
-            -m 'integrate(rc7): unite current main with verified provider release' \
-            -m "Merge main SHA $MAIN_SHA with release SHA $RELEASE_SHA, retaining both histories, hardened OAuth/Codex/listener changes, full Provider Hub/Codex Router/Paseo/Anneal/updater behavior, deterministic Rust formatting, and all files from both parents."
+            -m 'integrate(rc7): apply verified provider release snapshot to current main' \
+            -m "Apply release SHA $RELEASE_SHA onto main SHA $MAIN_SHA as a push-safe file snapshot. The release branch retains full history; this commit retains all files from both source tips, hardened OAuth/Codex/listener changes, full Provider Hub/Codex Router/Paseo/Anneal/updater behavior, and deterministic Rust formatting without re-exporting historical synthetic credential fixtures."
           git push origin HEAD:${GITHUB_REF_NAME}
 
       - name: Preserve transient build material in Trash
