@@ -29,6 +29,8 @@ if (target !== nativeTarget) {
 }
 
 const env = { ...process.env };
+delete env.GH_TOKEN;
+delete env.GITHUB_TOKEN;
 if (!env.CSC_LINK && !env.CSC_NAME) env.CSC_IDENTITY_AUTO_DISCOVERY = "false";
 const builderArgs = [
   electronBuilderCli,
