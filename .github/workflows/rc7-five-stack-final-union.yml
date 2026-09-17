@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc7-five-stack-final-union/bun-cache
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache/rc7-five-stack-final-union
 
 jobs:
   verify:
@@ -42,6 +42,7 @@ jobs:
       - name: Prepare retained validation directories
         run: |
           mkdir -p aiTemp/rc7-five-stack-final-union/renderer-dist
+          mkdir -p aiTemp/bun-cache/rc7-five-stack-final-union
           mkdir -p aiTemp/Trash/rc7-five-stack-final-union
 
       - name: Materialize production integration twice and prove idempotency
@@ -49,10 +50,13 @@ jobs:
         run: |
           set -euo pipefail
           node --check aiTemp/rc7-five-stack-final-union/apply.cjs
+          node --check aiTemp/rc7-five-stack-final-union/fix-main-credential-boundary.cjs
           node aiTemp/rc7-five-stack-final-union/apply.cjs
+          node aiTemp/rc7-five-stack-final-union/fix-main-credential-boundary.cjs
           git restore .github/workflows/provider-execution-gates-ci.yml
           git diff --binary > aiTemp/rc7-five-stack-final-union/first-materialization.patch
           node aiTemp/rc7-five-stack-final-union/apply.cjs
+          node aiTemp/rc7-five-stack-final-union/fix-main-credential-boundary.cjs
           git restore .github/workflows/provider-execution-gates-ci.yml
           git diff --binary > aiTemp/rc7-five-stack-final-union/second-materialization.patch
           cmp \
@@ -159,4 +163,8 @@ jobs:
           if [ -d desktop-electron/node_modules ]; then
             mv desktop-electron/node_modules \
               "aiTemp/Trash/rc7-five-stack-final-union/node_modules-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          if [ -d aiTemp/bun-cache/rc7-five-stack-final-union ]; then
+            mv aiTemp/bun-cache/rc7-five-stack-final-union \
+              "aiTemp/Trash/rc7-five-stack-final-union/bun-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           fi
