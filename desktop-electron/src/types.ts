@@ -1,7 +1,7 @@
 export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "providers" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -164,8 +164,64 @@ export interface ProviderExecutionPlan {
   };
 }
 
+export type ExternalServiceId = "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+export type ExternalServiceStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
+
+export interface ExternalServiceSnapshot {
+  id: ExternalServiceId;
+  name: string;
+  endpoint: string;
+  home: string;
+  executable: string;
+  arguments: string[];
+  enabled: boolean;
+  autoStart: boolean;
+  status: ExternalServiceStatus;
+  pid: number | null;
+  owned: boolean;
+  startedAt: string | null;
+  checkedAt: string | null;
+  latencyMs: number | null;
+  statusCode: number | null;
+  modelCount: number | null;
+  error: string | null;
+  secretConfigured: boolean;
+  sourceConfigured: boolean;
+  routerCli?: string;
+  curateCli?: string;
+  webBaseUrl?: string;
+  accountCount?: number;
+  connectedAccountCount?: number;
+  providerModelCount?: number;
+}
+
+export interface ExternalServicesSnapshot {
+  version: 1;
+  services: ExternalServiceSnapshot[];
+}
+
+export interface ExternalServiceConfigurationInput {
+  endpoint?: string;
+  home?: string;
+  executable?: string;
+  arguments?: string[];
+  enabled?: boolean;
+  autoStart?: boolean;
+  callerKey?: string;
+  routerCli?: string;
+  curateCli?: string;
+  webBaseUrl?: string;
+}
+
+export interface CodexRouterSyncResult {
+  ok: boolean;
+  args: string[];
+  stdout: string;
+  stderr: string;
+}
+
 export type UpstreamToolId = "anneal" | "paseo";
-export type UpstreamToolStatus = "unknown" | "offline" | "starting" | "ready" | "error";
+export type UpstreamToolStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 
 export interface UpstreamToolSnapshot {
   id: UpstreamToolId;
@@ -313,6 +369,7 @@ export interface LauncherSnapshot {
   smokePassed: boolean;
   operation: OperationState | null;
   upstreamTools: UpstreamToolsSnapshot;
+  externalServices: ExternalServicesSnapshot;
   update: UpdateState;
 }
 
@@ -363,6 +420,13 @@ export interface LauncherApi {
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
+  externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
+  configureExternalService(serviceId: ExternalServiceId, input: ExternalServiceConfigurationInput): Promise<ExternalServiceSnapshot>;
+  inspectExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  startExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  stopExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  restartExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  syncCodexRouter(): Promise<CodexRouterSyncResult>;
   upstreamToolsSnapshot(): Promise<UpstreamToolsSnapshot>;
   inspectUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
   setUpstreamToolEndpoint(toolId: UpstreamToolId, endpoint: string): Promise<UpstreamToolSnapshot>;
@@ -420,6 +484,7 @@ export interface LauncherApi {
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
+  onExternalServicesChanged(listener: (state: ExternalServicesSnapshot) => void): () => void;
   onProviderNetworkChanged(listener: (state: ProviderNetworkSnapshot) => void): () => void;
 }
 

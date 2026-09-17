@@ -12,6 +12,7 @@ const {
   nativeImage,
   nativeTheme,
   screen,
+  safeStorage,
   shell,
   Tray,
 } = require("electron");
@@ -32,8 +33,12 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
-const { providerNetworkReady } = require("./provider-bootstrap.cjs");
+const {
+  providerNetworkReady,
+  setProviderBrowserHost,
+} = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
+const { createExternalServicesController } = require("./external-services.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const {
   createStateStore,
@@ -98,6 +103,7 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
+let externalServicesController = null;
 let upstreamToolController = null;
 
 function findFreePort() {
@@ -578,6 +584,7 @@ function registerIpc({ logger, stateStore }) {
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
     upstreamTools: upstreamToolController?.snapshot() ?? { version: 1, tools: [] },
+    externalServices: externalServicesController?.snapshot() ?? { version: 1, services: [] },
     update: updateController?.getState() ?? { status: "disabled" },
   }));
 
@@ -613,6 +620,42 @@ function registerIpc({ logger, stateStore }) {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
     await openWebUrl(url);
     return true;
+  });
+
+  handle("launcher:external-services-snapshot", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    return externalServicesController.snapshot();
+  });
+  handle("launcher:external-service-configure", (event, serviceId, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    return externalServicesController.configure(serviceId, input);
+  });
+  handle("launcher:external-service-inspect", (event, serviceId) => {
+    assertFocusedMainWindow(event, false);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    return externalServicesController.inspect(serviceId);
+  });
+  handle("launcher:external-service-start", (event, serviceId) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    return externalServicesController.start(serviceId);
+  });
+  handle("launcher:external-service-stop", (event, serviceId) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    return externalServicesController.stop(serviceId);
+  });
+  handle("launcher:external-service-restart", (event, serviceId) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    return externalServicesController.restart(serviceId);
+  });
+  handle("launcher:codex-router-sync", (event) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    return externalServicesController.syncCodexRouter();
   });
 
   handle("launcher:upstream-tools-snapshot", (event) => {
@@ -1069,6 +1112,7 @@ async function requestQuit() {
     await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
+    externalServicesController?.dispose();
     upstreamToolController?.dispose();
     quitting = true;
     await browserHost?.persistSession();
@@ -1154,12 +1198,41 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  externalServicesController = createExternalServicesController({
+    filePath: path.join(app.getPath("userData"), "external-services.json"),
+    keyPath: path.join(app.getPath("userData"), "external-services.key"),
+    safeStorage,
+    env: process.env,
+    logger,
+    publish: (value) => send("launcher:external-services-changed", value),
+    runRuntimeCommand: async (args) => {
+      if (!runtimeSupervisor) throw new Error("Packaged runtime is not ready");
+      const invocation = runtimeSupervisor.runtimeCommand(args);
+      const result = spawnSync(invocation.executable, invocation.args, {
+        cwd: invocation.cwd,
+        env: { ...process.env },
+        encoding: "utf8",
+        timeout: 120_000,
+        windowsHide: true,
+      });
+      if (result.error) throw result.error;
+      if (result.status !== 0) {
+        const detail = String(result.stderr || result.stdout || "").trim();
+        throw new Error(`Codex Router integration failed (${result.status ?? "unknown"})${detail ? `: ${detail}` : ""}`);
+      }
+      return { stdout: String(result.stdout || ""), stderr: String(result.stderr || "") };
+    },
+  });
   upstreamToolController = createUpstreamToolController({
     env: process.env,
     logger,
     openExternal: openWebUrl,
+    externalServices: externalServicesController,
   });
-  app.once("before-quit", () => upstreamToolController?.dispose());
+  app.once("before-quit", () => {
+    externalServicesController?.dispose();
+    upstreamToolController?.dispose();
+  });
   headlessHost = new HeadlessHost({
     app,
     logger,
@@ -1224,6 +1297,16 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   await browserHost.ready();
+  setProviderBrowserHost(() => browserHost);
+  for (const service of externalServicesController?.snapshot().services ?? []) {
+    if (!service.enabled || !service.autoStart) continue;
+    void externalServicesController.start(service.id).catch((error) => {
+      logger.warn("external-service.autostart-failed", {
+        serviceId: service.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),

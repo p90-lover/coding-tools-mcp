@@ -16,6 +16,7 @@ import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
 import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
+import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -633,6 +634,12 @@ function LauncherShell({
                   onClick={() => navigateSurface("providers")}
                 />
                 <SidebarItem
+                  active={surface === "integrations"}
+                  icon="globe"
+                  label={language === "zh-TW" ? "整合服務" : language === "zh-CN" ? "集成服务" : language === "ja" ? "統合サービス" : "Integrations"}
+                  onClick={() => navigateSurface("integrations")}
+                />
+                <SidebarItem
                   active={surface === "paseo"}
                   icon="orchestrator"
                   label={language === "zh-TW" ? "Paseo 協調器" : language === "zh-CN" ? "Paseo 协调器" : language === "ja" ? "Paseo オーケストレーター" : "Paseo Orchestrator"}
@@ -736,6 +743,15 @@ function LauncherShell({
             ) : null}
             {surface === "providers" ? (
               <ProviderCenterSurface language={language} setError={setError} />
+            ) : null}
+            {surface === "integrations" ? (
+              <ExternalServicesSurface
+                language={language}
+                openAnneal={() => navigateSurface("anneal")}
+                openPaseo={() => navigateSurface("paseo")}
+                openProviders={() => navigateSurface("providers")}
+                setError={setError}
+              />
             ) : null}
             {surface === "paseo" ? (
               <UpstreamToolSurface

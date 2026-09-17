@@ -45,6 +45,17 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setBrowserInteractionMode: (mode) => ipcRenderer.invoke("launcher:browser-interaction-mode", mode),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
+  externalServicesSnapshot: () => ipcRenderer.invoke("launcher:external-services-snapshot"),
+  configureExternalService: (serviceId, input) => ipcRenderer.invoke(
+    "launcher:external-service-configure",
+    serviceId,
+    input,
+  ),
+  inspectExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-inspect", serviceId),
+  startExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-start", serviceId),
+  stopExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-stop", serviceId),
+  restartExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-restart", serviceId),
+  syncCodexRouter: () => ipcRenderer.invoke("launcher:codex-router-sync"),
   upstreamToolsSnapshot: () => ipcRenderer.invoke("launcher:upstream-tools-snapshot"),
   inspectUpstreamTool: (toolId) => ipcRenderer.invoke("launcher:upstream-tool-inspect", toolId),
   setUpstreamToolEndpoint: (toolId, endpoint) => ipcRenderer.invoke(
@@ -104,6 +115,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onOperation: (listener) => subscription("launcher:operation", listener),
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
+  onExternalServicesChanged: (listener) => subscription("launcher:external-services-changed", listener),
   onProviderNetworkChanged: (listener) => subscription("launcher:provider-network-changed", listener),
 });
 
