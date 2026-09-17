@@ -6,6 +6,7 @@ on:
       - fix/rc6-renderer-bundle-release-path
     paths:
       - 'aiTemp/rc6-renderer-output/apply_patch.py'
+      - 'desktop-electron/tests/rc6-renderer-output-contract.test.cjs'
       - '.github/workflows/apply-rc6-renderer-output-repair.yml'
   workflow_dispatch:
 
