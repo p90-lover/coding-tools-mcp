@@ -11,6 +11,7 @@ export type ProxyScope =
   | "browser"
   | "provider"
   | "oauth"
+  | "subagent"
   | "paseo"
   | "anneal"
   | "mcp"
@@ -114,7 +115,7 @@ export interface ProviderNetworkSnapshot {
   };
 }
 
-export type ProviderExecutionWorkload = "paseo" | "anneal";
+export type ProviderExecutionWorkload = "subagent" | "paseo" | "anneal";
 export type ProviderExecutionProtocol =
   | "openai_chat"
   | "openai_responses"
@@ -171,6 +172,7 @@ export interface ExternalServiceSnapshot {
   id: ExternalServiceId;
   name: string;
   endpoint: string;
+  executionEndpoint?: string;
   home: string;
   executable: string;
   arguments: string[];
@@ -202,6 +204,7 @@ export interface ExternalServicesSnapshot {
 
 export interface ExternalServiceConfigurationInput {
   endpoint?: string;
+  executionEndpoint?: string;
   home?: string;
   executable?: string;
   arguments?: string[];

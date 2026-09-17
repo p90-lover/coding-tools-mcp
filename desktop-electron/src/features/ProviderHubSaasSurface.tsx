@@ -4,6 +4,7 @@ import {
   type ProviderDefinition,
 } from "../providers/provider-types";
 import type {
+  ExternalServicesSnapshot,
   Language,
   ProviderAccountInput,
   ProviderAccountRecord,
@@ -69,6 +70,8 @@ const EMPTY_SNAPSHOT: ProviderNetworkSnapshot = {
     accounts: [],
   },
 };
+
+const EMPTY_EXTERNAL_SERVICES: ExternalServicesSnapshot = { version: 1, services: [] };
 
 const ACCOUNT_STATUSES: readonly ProviderAccountStatus[] = [
   "pending",
@@ -381,7 +384,13 @@ function bindingId(account: ProviderAccountRecord, workload: ProviderExecutionWo
     .slice(0, 100);
 }
 
-function defaultEngineEndpoint(workload: ProviderExecutionWorkload): string {
+function defaultEngineEndpoint(
+  workload: ProviderExecutionWorkload,
+  services: ExternalServicesSnapshot,
+): string {
+  if (workload === "subagent") return "http://127.0.0.1:4202/";
+  const configured = services.services.find((service) => service.id === workload)?.executionEndpoint;
+  if (configured) return configured;
   return workload === "paseo"
     ? "ws://127.0.0.1:6767/ws"
     : "http://127.0.0.1:3000/";
@@ -407,6 +416,7 @@ function normalizeSearch(value: string): string {
 
 export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot>(EMPTY_SNAPSHOT);
+  const [externalServices, setExternalServices] = useState<ExternalServicesSnapshot>(EMPTY_EXTERNAL_SERVICES);
   const [providerSearch, setProviderSearch] = useState("");
   const [providerCategory, setProviderCategory] = useState<ProviderCategoryFilter>("all");
   const [selectedProviderId, setSelectedProviderId] = useState(PROVIDER_CATALOG[0].id);
@@ -418,7 +428,9 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const [workspaceId, setWorkspaceId] = useState("");
   const [bindings, setBindings] = useState<ExecutionBinding[]>([]);
   const [workload, setWorkload] = useState<ProviderExecutionWorkload>("anneal");
-  const [engineEndpoint, setEngineEndpoint] = useState(defaultEngineEndpoint("anneal"));
+  const [engineEndpoint, setEngineEndpoint] = useState(
+    defaultEngineEndpoint("anneal", EMPTY_EXTERNAL_SERVICES),
+  );
   const [mode, setMode] = useState("default");
   const [projectId, setProjectId] = useState("");
   const [repoId, setRepoId] = useState("");
@@ -569,19 +581,28 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       return;
     }
     let active = true;
-    void launcher.providerSnapshot()
-      .then((next) => {
-        if (active) adoptSnapshot(next);
+    void Promise.all([
+      launcher.providerSnapshot(),
+      launcher.externalServicesSnapshot(),
+    ])
+      .then(([nextProviders, nextServices]) => {
+        if (!active) return;
+        adoptSnapshot(nextProviders);
+        setExternalServices(nextServices);
       })
       .catch((cause) => {
         if (active) setError(messageOf(cause));
       });
-    const unsubscribe = launcher.onProviderNetworkChanged((next) => {
+    const unsubscribeProviders = launcher.onProviderNetworkChanged((next) => {
       if (active) adoptSnapshot(next);
+    });
+    const unsubscribeServices = launcher.onExternalServicesChanged((next) => {
+      if (active) setExternalServices(next);
     });
     return () => {
       active = false;
-      unsubscribe();
+      unsubscribeProviders();
+      unsubscribeServices();
     };
   }, [adoptSnapshot, language, setError]);
 
@@ -610,6 +631,10 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   useEffect(() => {
     void refreshBindings().catch((cause) => setError(messageOf(cause)));
   }, [refreshBindings, setError]);
+
+  useEffect(() => {
+    setEngineEndpoint(defaultEngineEndpoint(workload, externalServices));
+  }, [externalServices, workload]);
 
   const selectProvider = (providerId: string) => {
     setSelectedProviderId(providerId);
@@ -1297,7 +1322,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                       <select value={workload} onChange={(event) => {
                         const next = event.target.value as ProviderExecutionWorkload;
                         setWorkload(next);
-                        setEngineEndpoint(defaultEngineEndpoint(next));
+                        setEngineEndpoint(defaultEngineEndpoint(next, externalServices));
                       }}>
                         <option value="paseo">Paseo</option>
                         <option value="anneal">Anneal</option>

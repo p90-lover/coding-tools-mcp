@@ -44,6 +44,7 @@ const DEFAULTS = Object.freeze({
   paseo: Object.freeze({
     name: "Paseo",
     endpoint: "http://127.0.0.1:6768/",
+    executionEndpoint: "ws://127.0.0.1:6767/ws",
     home: "",
     executable: process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm",
     arguments: process.platform === "win32"
@@ -55,6 +56,7 @@ const DEFAULTS = Object.freeze({
   anneal: Object.freeze({
     name: "Anneal",
     endpoint: "http://127.0.0.1:3000/",
+    executionEndpoint: "http://127.0.0.1:3000/",
     home: "",
     executable: process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm",
     arguments: process.platform === "win32"
@@ -112,6 +114,38 @@ function normalizeLoopbackServiceEndpoint(value) {
   parsed.search = "";
   parsed.hash = "";
   if (!parsed.pathname.endsWith("/")) parsed.pathname += "/";
+  return parsed.toString();
+}
+
+function normalizeLoopbackExecutionEndpoint(value, serviceId) {
+  const id = requiredServiceId(serviceId);
+  if (id !== "paseo" && id !== "anneal") {
+    throw new Error(`Service ${id} does not expose an execution endpoint`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(String(value || ""));
+  } catch {
+    throw new Error(`${DEFAULTS[id].name} execution endpoint must be a valid URL`);
+  }
+  const allowed = id === "paseo"
+    ? new Set(["ws:", "wss:"])
+    : new Set(["http:", "https:"]);
+  if (!allowed.has(parsed.protocol)) {
+    throw new Error(
+      id === "paseo"
+        ? "Paseo execution endpoint must use WebSocket (WS or WSS)"
+        : "Anneal execution endpoint must use HTTP or HTTPS",
+    );
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!LOOPBACK_HOSTS.has(hostname)) {
+    throw new Error("Execution endpoints are restricted to loopback hosts");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("Execution endpoints must not contain credentials, query parameters, or fragments");
+  }
+  if (id === "anneal" && !parsed.pathname.endsWith("/")) parsed.pathname += "/";
   return parsed.toString();
 }
 
@@ -202,9 +236,20 @@ function initialState(env) {
           : id === "codex-router"
             ? env.CODING_TOOLS_CODEX_ROUTER_URL
             : env.CODING_TOOLS_COMMANDCODE_URL;
+      const environmentExecutionEndpoint = id === "paseo"
+        ? env.CODING_TOOLS_PASEO_EXECUTION_URL
+        : id === "anneal"
+          ? env.CODING_TOOLS_ANNEAL_EXECUTION_URL
+          : undefined;
       return [id, {
         ...defaults,
         endpoint: normalizeLoopbackServiceEndpoint(environmentEndpoint || defaults.endpoint),
+        ...(defaults.executionEndpoint ? {
+          executionEndpoint: normalizeLoopbackExecutionEndpoint(
+            environmentExecutionEndpoint || defaults.executionEndpoint,
+            id,
+          ),
+        } : {}),
         home: optionalText(environmentHome) || defaults.home,
       }];
     })),
@@ -223,9 +268,19 @@ function normalizeState(value, env) {
       : {};
     let endpoint = defaults.endpoint;
     try { endpoint = normalizeLoopbackServiceEndpoint(input.endpoint || defaults.endpoint); } catch {}
+    let executionEndpoint = defaults.executionEndpoint;
+    if (executionEndpoint) {
+      try {
+        executionEndpoint = normalizeLoopbackExecutionEndpoint(
+          input.executionEndpoint || defaults.executionEndpoint,
+          id,
+        );
+      } catch {}
+    }
     services[id] = {
       ...defaults,
       endpoint,
+      ...(executionEndpoint ? { executionEndpoint } : {}),
       home: typeof input.home === "string" ? input.home : defaults.home,
       executable: typeof input.executable === "string" ? input.executable : defaults.executable,
       arguments: Array.isArray(input.arguments)
@@ -345,6 +400,7 @@ function createExternalServicesController({
       id,
       name: DEFAULTS[id].name,
       endpoint: config.endpoint,
+      ...(config.executionEndpoint ? { executionEndpoint: config.executionEndpoint } : {}),
       home: config.home,
       executable: config.executable,
       arguments: [...config.arguments],
@@ -388,6 +444,9 @@ function createExternalServicesController({
       ...current,
       ...(input.endpoint !== undefined
         ? { endpoint: normalizeLoopbackServiceEndpoint(input.endpoint) }
+        : {}),
+      ...((id === "paseo" || id === "anneal") && input.executionEndpoint !== undefined
+        ? { executionEndpoint: normalizeLoopbackExecutionEndpoint(input.executionEndpoint, id) }
         : {}),
       ...(input.home !== undefined ? { home: optionalText(input.home) || "" } : {}),
       ...(input.executable !== undefined ? { executable: optionalText(input.executable) || "" } : {}),
@@ -655,6 +714,8 @@ function createExternalServicesController({
       CODING_TOOLS_CODEX_ROUTER_URL: router.endpoint.replace(/\/$/, ""),
       ...(callerKey ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey } : {}),
       CODING_TOOLS_COMMANDCODE_URL: commandCode.endpoint.replace(/\/$/, ""),
+      CODING_TOOLS_PASEO_EXECUTION_URL: state.services.paseo.executionEndpoint,
+      CODING_TOOLS_ANNEAL_EXECUTION_URL: state.services.anneal.executionEndpoint,
     });
   }
 
@@ -666,6 +727,7 @@ function createExternalServicesController({
     const config = state.services[id];
     return {
       endpoint: config.endpoint,
+      executionEndpoint: config.executionEndpoint,
       home: config.home,
       executable: config.executable,
       arguments: [...config.arguments],
@@ -705,5 +767,6 @@ function createExternalServicesController({
 module.exports = {
   SERVICE_IDS,
   createExternalServicesController,
+  normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
 };

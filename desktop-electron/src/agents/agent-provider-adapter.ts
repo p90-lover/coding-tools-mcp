@@ -1,10 +1,27 @@
-import type { ProviderDefinition } from "../providers/provider-types";
+import type {
+  LauncherApi,
+  ProviderExecutionPlan,
+} from "../types";
+import {
+  PROVIDER_CATALOG,
+  type ProviderDefinition,
+} from "../providers/provider-types";
 import type { AgentProfile, ModelAgentProfile } from "./subagent-types";
 
 export interface AgentProviderResolution {
   compatible: boolean;
   provider?: ProviderDefinition;
   errors: string[];
+}
+
+export interface AgentExecutionOptions {
+  accountId?: string;
+  allowFallback?: boolean;
+}
+
+export interface AgentProviderExecution {
+  provider: ProviderDefinition;
+  plan: ProviderExecutionPlan;
 }
 
 export function resolveAgentProvider(
@@ -40,6 +57,9 @@ function resolveModelAgentProvider(
     (capability) => `provider ${provider.id} does not support ${capability}`,
   );
 
+  if (!provider.subagentEnabled) {
+    errors.push(`provider ${provider.id} is not enabled for subagent execution`);
+  }
   if (provider.models.length > 0 && !provider.models.includes(agent.model)) {
     errors.push(`provider ${provider.id} does not advertise model ${agent.model}`);
   }
@@ -49,4 +69,32 @@ function resolveModelAgentProvider(
     provider,
     errors,
   };
+}
+
+export async function planAgentExecution(
+  agent: ModelAgentProfile,
+  api: Pick<LauncherApi, "providerExecutionPlan">,
+  options: AgentExecutionOptions = {},
+  providers: readonly ProviderDefinition[] = PROVIDER_CATALOG,
+): Promise<AgentProviderExecution> {
+  const resolution = resolveModelAgentProvider(agent, providers);
+  if (!resolution.compatible || !resolution.provider) {
+    throw new Error(resolution.errors.join("; ") || "Agent provider is unavailable");
+  }
+
+  const plan = await api.providerExecutionPlan({
+    workload: "subagent",
+    providerId: resolution.provider.id,
+    accountId: options.accountId,
+    model: agent.model,
+    allowFallback: options.allowFallback ?? true,
+  });
+
+  if (plan.workload !== "subagent") {
+    throw new Error("Codex Router returned a non-subagent execution plan");
+  }
+  if (!plan.credentialHandle?.providerId || !plan.credentialHandle?.accountId) {
+    throw new Error("Codex Router returned an invalid credential handle");
+  }
+  return { provider: resolution.provider, plan };
 }

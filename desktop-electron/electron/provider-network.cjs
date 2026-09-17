@@ -15,6 +15,7 @@ const PROXY_SCOPES = new Set([
   "browser",
   "provider",
   "oauth",
+  "subagent",
   "paseo",
   "anneal",
   "mcp",
@@ -1320,11 +1321,34 @@ function createProviderNetworkController({
     }
   }
 
+  async function syncBrowserProviderAccount(account) {
+    const browserHost = typeof getBrowserHost === "function" ? getBrowserHost() : null;
+    if (!browserHost || typeof browserHost.openLogin !== "function") {
+      throw new Error("Browser provider login is unavailable");
+    }
+    store.updateAccountConnection(account.id, { status: "pending", error: undefined });
+    const browser = await browserHost.openLogin();
+    if (!browser || browser.authenticated !== true) {
+      const snapshot = store.updateAccountConnection(account.id, {
+        status: "pending",
+        error: "Complete the ChatGPT sign-in before connecting this provider account",
+      });
+      const error = new Error("Browser provider login did not establish an authenticated session");
+      error.snapshot = snapshot;
+      throw error;
+    }
+    const snapshot = store.updateAccountConnection(account.id, {
+      status: "connected",
+      error: undefined,
+      models: account.models,
+    });
+    return { opened: true, mode: "embedded", browser, snapshot };
+  }
+
   async function openProviderLogin(accountId) {
     const account = accountRecord(accountId);
     if (account.providerId === "chatgpt-web" || account.providerId === "codex-oauth") {
-      const browser = await getBrowserHost()?.openLogin();
-      return { opened: true, mode: "embedded", browser: browser || null };
+      return syncBrowserProviderAccount(account);
     }
     if (account.providerId === COMMANDCODE_PROVIDER_ID) {
       return startCommandCodeLogin(account);
