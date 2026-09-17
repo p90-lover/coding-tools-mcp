@@ -1,1 +1,1 @@
-desktop-electron/electron/provider-network.cjs
+desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
