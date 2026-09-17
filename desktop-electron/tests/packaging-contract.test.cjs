@@ -42,7 +42,11 @@ test("launcher publishes native packages for all supported desktop operating sys
   assert.ok(fs.existsSync(path.join(launcherRoot, "assets", "icon.ico")));
   assert.equal(manifest.build.nsis.oneClick, false);
   assert.equal(manifest.build.nsis.perMachine, false);
-  assert.equal(manifest.build.nsis.allowElevation, false);
+  assert.equal(
+    manifest.build.nsis.allowElevation,
+    true,
+    "assisted elevation is required to remove legacy per-machine MSI installs before a current-user upgrade",
+  );
   assert.equal(manifest.build.nsis.runAfterFinish, true);
   assert.match(manifest.build.nsis.guid, /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
 });
