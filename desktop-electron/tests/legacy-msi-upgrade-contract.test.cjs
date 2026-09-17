@@ -56,21 +56,21 @@ test("MSI migration invokes only the system Windows Installer and handles restar
   assert.doesNotMatch(installer, /RMDir\s+\/r/i);
 });
 
-test("focused Windows gate uses an overridable MSI executable fixture", () => {
+test("rc.7 gate compiles and executes an overridable MSI fixture", () => {
   const workflowPath = path.resolve(
     desktopRoot,
     "..",
     ".github",
     "workflows",
-    "legacy-msi-upgrade-ci.yml",
+    "rc7-installer-migration-port-ci.yml",
   );
   const workflow = fs.readFileSync(workflowPath, "utf8");
-  assert.match(workflow, /windows-latest/);
+  assert.match(workflow, /windows-2022/);
   assert.match(workflow, /create-legacy-msi-upgrade-fixture\.ps1/);
   assert.match(workflow, /makensis\.exe/);
-  assert.match(workflow, /LEGACY_MSIEXEC/);
   assert.match(workflow, /legacy-msiexec-ran\.txt/);
   assert.match(workflow, /git diff --diff-filter=D/);
+  assert.match(fixtureScript, /!define LEGACY_MSIEXEC/);
   assert.match(fixtureScript, /Function \.onInit[\s\S]*!insertmacro customInit[\s\S]*FunctionEnd/);
   assert.doesNotMatch(
     fixtureScript,
