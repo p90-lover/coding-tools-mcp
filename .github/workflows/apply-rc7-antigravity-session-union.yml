@@ -136,7 +136,7 @@ jobs:
             mv desktop-electron/node_modules \
               aiTemp/Trash/rc7-antigravity-session-union/node_modules
           fi
-          git mv .github/workflows/apply-rc7-antigravity-session-union.yml \
+          cp .github/workflows/apply-rc7-antigravity-session-union.yml \
             aiTemp/Trash/rc7-antigravity-session-union/one-shot-workflows/apply-rc7-antigravity-session-union.yml
 
       - name: Enforce conflict-free and no-delete union
