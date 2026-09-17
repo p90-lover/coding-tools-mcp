@@ -40,6 +40,7 @@ interface AccountDraft {
   providerId: string;
   label: string;
   identity: string;
+  endpoint: string;
   auth: ProviderAuth;
   status: ProviderAccountStatus;
   enabled: boolean;
@@ -242,6 +243,12 @@ function providerDefinition(providerId: string): ProviderDefinition {
     ?? PROVIDER_CATALOG[0];
 }
 
+function supportsProviderLogin(provider: ProviderDefinition): boolean {
+  return provider.auth === "oauth"
+    || provider.auth === "browser_session"
+    || provider.loginMode === "antigravity_management";
+}
+
 function presentation(provider: ProviderDefinition): ProviderPresentation {
   return PROVIDER_PRESENTATION[provider.id] ?? {
     english: provider.name,
@@ -321,6 +328,7 @@ function emptyDraft(providerId = PROVIDER_CATALOG[0].id): AccountDraft {
     providerId: provider.id,
     label: provider.name,
     identity: "",
+    endpoint: provider.baseUrl ?? "",
     auth: provider.auth,
     status: "pending",
     enabled: true,
@@ -335,6 +343,7 @@ function accountDraft(account: ProviderAccountRecord): AccountDraft {
     providerId: account.providerId,
     label: account.label,
     identity: account.identity ?? "",
+    endpoint: account.endpoint ?? providerDefinition(account.providerId).baseUrl ?? "",
     auth: account.auth,
     status: account.status,
     enabled: account.enabled,
@@ -604,13 +613,17 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     if (!api) throw new Error(text(language, "Provider Hub is unavailable in this window.", "此視窗無法使用供應商樞紐。"));
     if (!draft.label.trim()) throw new Error(text(language, "Account label is required.", "必須填寫帳戶名稱。"));
     const models = parseModels(draft.modelsText);
+    const provider = providerDefinition(draft.providerId);
     const requiresCredential = draft.auth === "api_key" || draft.auth === "local_proxy";
-    const status = requiresCredential && secret.trim() ? "connected" : draft.status;
+    const status = provider.loginMode === "antigravity_management"
+      ? draft.status
+      : requiresCredential && secret.trim() ? "connected" : draft.status;
     const input: ProviderAccountInput = {
       id: draft.id,
       providerId: draft.providerId,
       label: draft.label.trim(),
       identity: draft.identity.trim() || undefined,
+      endpoint: draft.endpoint.trim() || undefined,
       auth: draft.auth,
       status,
       enabled: draft.enabled,
@@ -655,12 +668,36 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     setError(null);
     try {
       const saved = await persistAccount();
-      await api.beginProviderLogin(saved.id);
+      const result = await api.beginProviderLogin(saved.id);
+      if (result.snapshot) adoptSnapshot(result.snapshot, saved.id);
       setNotice(text(
         language,
-        "The login page opened. Return here after sign-in and set the account status to Connected.",
-        "登入頁面已開啟。完成登入後返回此處，並將帳戶狀態設為「已連線」。",
+        result.snapshot
+          ? "The provider session is connected and its model catalogue was refreshed."
+          : "The login page opened. Complete the provider sign-in to continue.",
+        result.snapshot
+          ? "供應商工作階段已連線，模型清單亦已更新。"
+          : "登入頁面已開啟。請完成供應商登入以繼續。",
       ));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const testProviderConnection = async () => {
+    const api = window.codexWebLauncher;
+    if (!api || !selectedAccount) return;
+    setBusy("provider-probe");
+    setError(null);
+    try {
+      const next = await api.probeProviderAccount(selectedAccount.id);
+      adoptSnapshot(next, selectedAccount.id);
+      const probed = next.accounts.find((account) => account.id === selectedAccount.id);
+      setNotice(probed?.status === "connected"
+        ? text(language, "Connection succeeded and models were refreshed.", "連線成功，模型清單已更新。")
+        : text(language, "Provider session is not connected yet.", "供應商工作階段尚未連線。"));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1022,6 +1059,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                         providerId: provider.id,
                         auth: provider.auth,
                         label: provider.name,
+                        endpoint: provider.baseUrl ?? "",
                         modelsText: provider.models.join("\n"),
                       }));
                       setSelectedModel(provider.models[0] ?? "");
@@ -1079,7 +1117,17 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   />
                 </label>
                 <label className="provider-full-row">
-                  <span>{text(language, "Credential (encrypted by Electron main process)", "憑證（由 Electron 主程序加密）")}</span>
+                  <span>{text(language, "Provider / management endpoint", "供應商／管理端點")}</span>
+                  <input
+                    placeholder={selectedProvider.baseUrl ?? "https://…"}
+                    value={draft.endpoint}
+                    onChange={(event) => setDraft((current) => ({ ...current, endpoint: event.target.value }))}
+                  />
+                </label>
+                <label className="provider-full-row">
+                  <span>{selectedProvider.loginMode === "antigravity_management"
+                    ? text(language, "CLIProxyAPI management key (encrypted by Electron main process)", "CLIProxyAPI 管理金鑰（由 Electron 主程序加密）")
+                    : text(language, "Credential (encrypted by Electron main process)", "憑證（由 Electron 主程序加密）")}</span>
                   <input
                     autoComplete="off"
                     placeholder={selectedAccount?.hasCredential
@@ -1125,9 +1173,18 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   ) : null}
                 </div>
                 <div>
-                  {(draft.auth === "oauth" || draft.auth === "browser_session") ? (
+                  {selectedAccount && selectedProvider.loginMode === "antigravity_management" ? (
+                    <button className="provider-secondary-button" disabled={busy !== null} onClick={() => void testProviderConnection()} type="button">
+                      {busy === "provider-probe" ? "…" : text(language, "Test connection", "測試連線")}
+                    </button>
+                  ) : null}
+                  {supportsProviderLogin(selectedProvider) ? (
                     <button className="provider-secondary-button" disabled={busy !== null} onClick={() => void openLogin()} type="button">
-                      {busy === "provider-login" ? "…" : text(language, "Login account", "登入帳戶")}
+                      {busy === "provider-login"
+                        ? "…"
+                        : selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
+                          ? text(language, "Refresh session", "更新工作階段")
+                          : text(language, "Login account", "登入帳戶")}
                     </button>
                   ) : null}
                   <button className="provider-primary-button" disabled={busy !== null} onClick={() => void saveAccount()} type="button">

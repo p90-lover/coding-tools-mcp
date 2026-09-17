@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
     accountId,
   ),
   beginProviderLogin: (accountId) => ipcRenderer.invoke("launcher:provider-login", accountId),
+  probeProviderAccount: (accountId) => ipcRenderer.invoke("launcher:provider-account-probe", accountId),
   saveProxyProfile: (input) => ipcRenderer.invoke("launcher:proxy-profile-save", input),
   archiveProxyProfile: (profileId) => ipcRenderer.invoke("launcher:proxy-profile-archive", profileId),
   testProxyProfile: (profileId) => ipcRenderer.invoke("launcher:proxy-profile-test", profileId),
