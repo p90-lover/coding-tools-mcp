@@ -6,6 +6,7 @@ on:
       - fix/rc8-five-stack-routing-completion
     paths:
       - 'aiTemp/rc8-five-stack/apply.py'
+      - 'aiTemp/rc8-five-stack/apply_provider_scope_copy.py'
       - 'desktop-electron/tests/five-stack-routing-completion.test.cjs'
       - '.github/workflows/apply-rc8-five-stack-routing.yml'
   workflow_dispatch:
@@ -49,6 +50,10 @@ jobs:
             2>&1 | tee aiTemp/rc8-five-stack/evidence/materializer.txt
           grep -F RC8_FIVE_STACK_ROUTING_APPLIED \
             aiTemp/rc8-five-stack/evidence/materializer.txt
+          python aiTemp/rc8-five-stack/apply_provider_scope_copy.py \
+            2>&1 | tee aiTemp/rc8-five-stack/evidence/provider-scope-copy.txt
+          grep -F RC8_PROVIDER_SCOPE_COPY_APPLIED \
+            aiTemp/rc8-five-stack/evidence/provider-scope-copy.txt
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
 
@@ -63,6 +68,7 @@ jobs:
             desktop-electron/src/agents/agent-provider-adapter.ts \
             desktop-electron/src/features/ExternalServicesSurface.tsx \
             desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+            desktop-electron/src/providers/ProviderHubIntegration.tsx \
             desktop-electron/src/providers/provider-types.ts \
             desktop-electron/src/types.ts | sort)"
           printf 'changed files:\n%s\n' "$changed" \
@@ -126,6 +132,7 @@ jobs:
             desktop-electron/src/agents/agent-provider-adapter.ts \
             desktop-electron/src/features/ExternalServicesSurface.tsx \
             desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+            desktop-electron/src/providers/ProviderHubIntegration.tsx \
             desktop-electron/src/providers/provider-types.ts \
             desktop-electron/src/types.ts
           git diff --cached --check
