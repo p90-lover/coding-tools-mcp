@@ -6,7 +6,7 @@
   "version": "0.8.0",
   "license": "Apache-2.0",
   "licenseFile": "LICENSE",
-  "defaultEndpoint": "http://127.0.0.1:6768/",
+  "defaultEndpoint": "http://127.0.0.1:6767/",
   "environmentEndpoint": "CODING_TOOLS_PASEO_URL",
   "environmentHome": "CODING_TOOLS_PASEO_HOME",
   "sections": [
@@ -27,9 +27,52 @@
     "voice": "/voice",
     "settings": "/settings"
   },
-  "launch": {
-    "executable": "npm",
-    "arguments": ["run", "dev:server"],
-    "workingDirectoryEnvironment": "CODING_TOOLS_PASEO_HOME"
+  "managed": {
+    "strategy": "pinned-source",
+    "autoInstall": true,
+    "platformModes": {
+      "win32": "native",
+      "linux": "native",
+      "darwin": "native"
+    },
+    "source": {
+      "repositoryUrl": "https://github.com/getpaseo/paseo.git",
+      "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96"
+    },
+    "prerequisites": [
+      { "id": "git", "executable": "git", "arguments": ["--version"] },
+      { "id": "node", "executable": "node", "arguments": ["--version"] },
+      { "id": "npm", "executable": "npm", "arguments": ["--version"] }
+    ],
+    "setup": [
+      { "id": "npm-ci", "executable": "npm", "arguments": ["ci"] },
+      { "id": "build-server", "executable": "npm", "arguments": ["run", "build:server"] }
+    ],
+    "services": [
+      {
+        "id": "daemon",
+        "executable": "npm",
+        "arguments": ["start"],
+        "environment": { "PASEO_LISTEN": "127.0.0.1:6767" },
+        "readyEndpoint": "http://127.0.0.1:6767/"
+      }
+    ],
+    "stop": [],
+    "officialRelease": {
+      "repository": "getpaseo/paseo",
+      "version": "v0.8.0",
+      "win32": {
+        "x64": {
+          "asset": "Paseo-Setup-0.8.0-x64.exe",
+          "size": 138271232,
+          "sha256": "4ce06552a725afcf048c06a3c14ea6b412973eddf9b97fbffbb9270f90e3e53b"
+        },
+        "arm64": {
+          "asset": "Paseo-Setup-0.8.0-arm64.exe",
+          "size": 138773226,
+          "sha256": "808609727c8653e11418b4e2008c278e3b39aa64b4d9d1cb612ed9e52b6cd526"
+        }
+      }
+    }
   }
 }
