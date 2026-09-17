@@ -1,0 +1,91 @@
+name: rc.7 upstream runtime hardening
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.7-upstream-runtime-hardening
+    paths:
+      - '.github/workflows/rc7-upstream-runtime-hardening.yml'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/electron/upstream-tools.cjs'
+      - 'desktop-electron/src/App.tsx'
+      - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
+      - 'desktop-electron/src/features/upstream-tool.css'
+      - 'desktop-electron/tests/upstream-tool-runtime.test.cjs'
+      - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
+      - 'desktop-electron/vendor/upstream/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc7-upstream-runtime-hardening-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc7-upstream-runtime-hardening/bun-cache
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          clean: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: |
+          mkdir -p \
+            aiTemp/rc7-upstream-runtime-hardening/renderer-dist \
+            aiTemp/Trash/rc7-upstream-runtime-hardening
+
+      - name: Run focused upstream runtime contracts
+        run: |
+          node --test \
+            desktop-electron/tests/upstream-tool-runtime.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs
+
+      - name: Validate Electron runtime syntax
+        run: |
+          node --check desktop-electron/electron/upstream-tools.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/preload.cjs
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Typecheck and build retained renderer
+        run: |
+          set -euo pipefail
+          bun run --cwd desktop-electron typecheck
+          renderer_dir="$GITHUB_WORKSPACE/aiTemp/rc7-upstream-runtime-hardening/renderer-dist"
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_dir" --emptyOutDir false
+          )
+          CODING_TOOLS_RENDERER_DIST="$renderer_dir" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+
+      - name: Enforce no-delete contract
+        run: |
+          set -euo pipefail
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD)"
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          mkdir -p aiTemp/Trash/rc7-upstream-runtime-hardening
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc7-upstream-runtime-hardening/node_modules-$GITHUB_RUN_ID"
+          fi
