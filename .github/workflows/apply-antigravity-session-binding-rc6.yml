@@ -1,3 +1,4 @@
+# Exact-head verification after the implementation commit is present on the branch.
 name: Apply stable Antigravity session binding on rc.6
 
 on:
