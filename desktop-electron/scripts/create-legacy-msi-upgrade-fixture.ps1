@@ -128,7 +128,6 @@ OutFile "$harnessExeNsis"
 
 Function .onInit
   !insertmacro customInit
-  Quit
 FunctionEnd
 
 Section
