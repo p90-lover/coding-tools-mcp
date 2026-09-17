@@ -53,10 +53,44 @@ jobs:
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
 
-      - name: Commit verified non-workflow rc.6 source
+      - name: Preserve generated release workflow as an unattached Git blob
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow_path='.github/workflows/codex-router-multiprovider-release-rc6.yml'
+          payload='aiTemp/installer-upgrade/rc6-release-workflow-blob-request.json'
+          reference='aiTemp/installer-upgrade/rc6-release-workflow-blob.txt'
+          python - "$workflow_path" "$payload" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          source = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2])
+          destination.write_text(
+              json.dumps({"content": source.read_text(encoding="utf-8"), "encoding": "utf-8"}),
+              encoding="utf-8",
+          )
+          PY
+          blob_sha="$(gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/blobs" \
+            --input "$payload" \
+            --jq '.sha')"
+          test "${#blob_sha}" -eq 40
+          workflow_sha256="$(sha256sum "$workflow_path" | awk '{print $1}')"
+          printf 'path=%s\nblob_sha=%s\nsha256=%s\nmaterialized_from=%s\n' \
+            "$workflow_path" "$blob_sha" "$workflow_sha256" "$GITHUB_SHA" \
+            > "$reference"
+          grep -E '^blob_sha=[0-9a-f]{40}$' "$reference"
+          grep -E '^sha256=[0-9a-f]{64}$' "$reference"
+
+      - name: Commit verified non-workflow rc.6 source and blob reference
         run: |
           set -euo pipefail
           git add \
+            aiTemp/installer-upgrade/rc6-release-workflow-blob.txt \
             docs/releases/v0.7.0-rc.6.md \
             desktop-electron/package.json \
             desktop-electron/electron/product.cjs \
@@ -67,10 +101,10 @@ jobs:
             desktop-electron/tests/package-resource-preparation.test.cjs \
             desktop-electron/tests/product-identity.test.cjs
           if git diff --cached --quiet; then
-            echo 'rc.6 non-workflow source is already materialized'
+            echo 'rc.6 non-workflow source and blob reference are already materialized'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'release: materialize v0.7.0-rc.6 installer migration source'
+          git commit -m 'release: preserve v0.7.0-rc.6 workflow blob reference'
           git push origin "HEAD:${GITHUB_REF_NAME}"
