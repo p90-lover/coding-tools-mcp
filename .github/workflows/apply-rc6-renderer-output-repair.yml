@@ -1,0 +1,59 @@
+name: Apply rc.6 renderer output repair
+
+on:
+  push:
+    branches:
+      - fix/rc6-renderer-bundle-release-path
+    paths:
+      - 'aiTemp/rc6-renderer-output/apply_patch.py'
+      - '.github/workflows/apply-rc6-renderer-output-repair.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc6-renderer-output-repair
+  cancel-in-progress: true
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/rc6-renderer-bundle-release-path
+          fetch-depth: 0
+
+      - name: Prepare retained temporary root
+        run: mkdir -p aiTemp/rc6-renderer-output aiTemp/Trash/rc6-renderer-output
+
+      - name: Apply exact guarded repair
+        run: python aiTemp/rc6-renderer-output/apply_patch.py
+
+      - name: Verify renderer output-path contract
+        run: node --test desktop-electron/tests/rc6-renderer-output-contract.test.cjs
+
+      - name: Verify bounded change and no deletion
+        run: |
+          git diff --check
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+          changed="$(git diff --name-only)"
+          test "$changed" = '.github/workflows/codex-router-multiprovider-release-rc6-csc.yml'
+
+      - name: Commit verified release-gate repair
+        run: |
+          if git diff --quiet; then
+            echo 'Release gate is already repaired.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/codex-router-multiprovider-release-rc6-csc.yml
+          git commit -m 'fix(rc6): inspect the freshly built renderer bundle'
+          git push origin HEAD:fix/rc6-renderer-bundle-release-path
