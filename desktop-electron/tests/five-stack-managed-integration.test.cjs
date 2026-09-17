@@ -78,6 +78,7 @@ test("existing Codex Router, CPA multi-account, and CommandCode execution paths 
   const providerNetwork = read("electron/provider-network.cjs");
   const providerRouter = read("electron/provider-execution-router.cjs");
   const providerTypes = read("src/providers/provider-types.ts");
+  const accountManager = read("src/providers/provider-account-manager.ts");
   const packageJson = readJson("package.json");
 
   assert.match(runtime, /proxyHealthPayload/);
@@ -85,6 +86,8 @@ test("existing Codex Router, CPA multi-account, and CommandCode execution paths 
   assert.match(providerNetwork, /commandCodeAuthFilePath/);
   assert.match(providerRouter, /commandcode-proxy/);
   assert.match(providerTypes, /commandcode_oauth/);
-  assert.match(providerTypes, /ProviderAccount/);
+  assert.match(accountManager, /upsertProviderAccount/);
+  assert.match(accountManager, /setDefaultProviderAccount/);
+  assert.match(accountManager, /selectProviderAccount/);
   assert.ok(packageJson.build.files.includes("vendor/upstream/**"));
 });
