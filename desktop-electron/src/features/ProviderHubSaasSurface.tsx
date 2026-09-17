@@ -246,7 +246,8 @@ function providerDefinition(providerId: string): ProviderDefinition {
 function supportsProviderLogin(provider: ProviderDefinition): boolean {
   return provider.auth === "oauth"
     || provider.auth === "browser_session"
-    || provider.loginMode === "antigravity_management";
+    || provider.loginMode === "antigravity_management"
+    || provider.loginMode === "commandcode_oauth";
 }
 
 function presentation(provider: ProviderDefinition): ProviderPresentation {
@@ -448,6 +449,47 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     [activeAccounts],
   );
 
+  const accountValidation = useMemo(() => {
+    if (!draft.providerId) return text(language, "Choose a provider.", "請選擇供應商。");
+    if (!draft.label.trim()) return text(language, "Account label is required.", "必須填寫帳戶名稱。");
+    if (draft.endpoint.trim()) {
+      try {
+        const endpoint = new URL(draft.endpoint.trim());
+        const loopback = ["localhost", "127.0.0.1", "::1"].includes(endpoint.hostname)
+          || endpoint.hostname.startsWith("127.");
+        if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) {
+          return text(
+            language,
+            "Provider endpoint requires HTTPS; HTTP is only allowed on loopback.",
+            "供應商端點必須使用 HTTPS；HTTP 只允許本機 Loopback。",
+          );
+        }
+      } catch {
+        return text(language, "Provider endpoint is invalid.", "供應商端點無效。");
+      }
+    }
+    return "";
+  }, [draft.endpoint, draft.label, draft.providerId, language]);
+
+  const routingRequirements = useMemo(() => {
+    if (!selectedAccount) return text(language, "Save an account before configuring task routing.", "請先儲存帳戶，再設定任務路由。");
+    if (!workspaceId) return text(language, "Choose a workspace to configure routing.", "請選擇工作區以設定路由。");
+    if (!selectedAccount.enabled || selectedAccount.status !== "connected") {
+      return text(language, "The account must be enabled and connected before routing.", "帳戶必須已啟用並已連線，先可以設定路由。");
+    }
+    if (!(selectedModel.trim() || selectedAccount.models[0])) {
+      return text(language, "Choose or enter a task model.", "請選擇或輸入任務模型。");
+    }
+    if (workload === "anneal" && (!projectId.trim() || !repoId.trim() || !assigneeId.trim())) {
+      return text(
+        language,
+        "Anneal routing requires project, repository and assigned-agent IDs.",
+        "Anneal 路由需要專案、儲存庫及獲指派代理 ID。",
+      );
+    }
+    return "";
+  }, [assigneeId, language, projectId, repoId, selectedAccount, selectedModel, workload, workspaceId]);
+
   const filteredProviders = useMemo(() => {
     const query = normalizeSearch(providerSearch);
     return PROVIDER_CATALOG.filter((provider) => {
@@ -611,12 +653,14 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const persistAccount = async (): Promise<ProviderAccountRecord> => {
     const api = window.codexWebLauncher;
     if (!api) throw new Error(text(language, "Provider Hub is unavailable in this window.", "此視窗無法使用供應商樞紐。"));
-    if (!draft.label.trim()) throw new Error(text(language, "Account label is required.", "必須填寫帳戶名稱。"));
+    if (accountValidation) throw new Error(accountValidation);
     const models = parseModels(draft.modelsText);
     const provider = providerDefinition(draft.providerId);
     const requiresCredential = draft.auth === "api_key" || draft.auth === "local_proxy";
-    const status = provider.loginMode === "antigravity_management"
-      ? draft.status
+    const managedLogin = provider.loginMode === "antigravity_management"
+      || provider.loginMode === "commandcode_oauth";
+    const status = managedLogin
+      ? (secret.trim() ? "connected" : draft.status)
       : requiresCredential && secret.trim() ? "connected" : draft.status;
     const input: ProviderAccountInput = {
       id: draft.id,
@@ -629,7 +673,16 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       enabled: draft.enabled,
       isDefault: draft.isDefault,
       models,
-      ...(secret.trim() ? { secret: { credential: secret.trim() } } : {}),
+      ...(secret.trim()
+        ? {
+            secret: provider.loginMode === "commandcode_oauth"
+              ? {
+                  apiKey: secret.trim(),
+                  baseUrl: draft.endpoint.trim() || provider.baseUrl || "http://127.0.0.1:9090",
+                }
+              : { credential: secret.trim() },
+          }
+        : {}),
     };
     const next = await api.saveProviderAccount(input);
     const saved = newestMatchingAccount(next, input);
@@ -678,6 +731,27 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         result.snapshot
           ? "供應商工作階段已連線，模型清單亦已更新。"
           : "登入頁面已開啟。請完成供應商登入以繼續。",
+      ));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const importCommandCodeSession = async () => {
+    const api = window.codexWebLauncher;
+    if (!api) return;
+    setBusy("provider-import");
+    setError(null);
+    try {
+      const saved = selectedAccount ?? await persistAccount();
+      const next = await api.importProviderSession(saved.id);
+      adoptSnapshot(next, saved.id);
+      setNotice(text(
+        language,
+        "CommandCode CLI session imported; identity and models were refreshed.",
+        "已匯入 CommandCode CLI 工作階段；身份及模型清單已更新。",
       ));
     } catch (cause) {
       setError(messageOf(cause));
@@ -1127,7 +1201,9 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                 <label className="provider-full-row">
                   <span>{selectedProvider.loginMode === "antigravity_management"
                     ? text(language, "CLIProxyAPI management key (encrypted by Electron main process)", "CLIProxyAPI 管理金鑰（由 Electron 主程序加密）")
-                    : text(language, "Credential (encrypted by Electron main process)", "憑證（由 Electron 主程序加密）")}</span>
+                    : selectedProvider.loginMode === "commandcode_oauth"
+                      ? text(language, "CommandCode API key (or use login/import below)", "CommandCode API Key（或使用下方登入／匯入）")
+                      : text(language, "Credential (encrypted by Electron main process)", "憑證（由 Electron 主程序加密）")}</span>
                   <input
                     autoComplete="off"
                     placeholder={selectedAccount?.hasCredential
@@ -1156,6 +1232,10 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                 </label>
               </div>
 
+              {accountValidation ? (
+                <p className="provider-account-inline-error" role="alert">{accountValidation}</p>
+              ) : null}
+
               <div className="provider-editor-actions">
                 <div>
                   {selectedAccount ? (
@@ -1173,21 +1253,30 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   ) : null}
                 </div>
                 <div>
-                  {selectedAccount && selectedProvider.loginMode === "antigravity_management" ? (
+                  {selectedAccount && ["antigravity_management", "commandcode_oauth"].includes(selectedProvider.loginMode ?? "") ? (
                     <button className="provider-secondary-button" disabled={busy !== null} onClick={() => void testProviderConnection()} type="button">
                       {busy === "provider-probe" ? "…" : text(language, "Test connection", "測試連線")}
                     </button>
                   ) : null}
-                  {supportsProviderLogin(selectedProvider) ? (
-                    <button className="provider-secondary-button" disabled={busy !== null} onClick={() => void openLogin()} type="button">
-                      {busy === "provider-login"
+                  {selectedProvider.loginMode === "commandcode_oauth" ? (
+                    <button className="provider-secondary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void importCommandCodeSession()} type="button">
+                      {busy === "provider-import"
                         ? "…"
-                        : selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
-                          ? text(language, "Refresh session", "更新工作階段")
-                          : text(language, "Login account", "登入帳戶")}
+                        : text(language, "Import CommandCode CLI session", "匯入 CommandCode CLI 工作階段")}
                     </button>
                   ) : null}
-                  <button className="provider-primary-button" disabled={busy !== null} onClick={() => void saveAccount()} type="button">
+                  {supportsProviderLogin(selectedProvider) ? (
+                    <button className="provider-secondary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void openLogin()} type="button">
+                      {busy === "provider-login"
+                        ? "…"
+                        : selectedProvider.loginMode === "commandcode_oauth"
+                          ? text(language, "Login with CommandCode", "使用 CommandCode 登入")
+                          : selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
+                            ? text(language, "Refresh session", "更新工作階段")
+                            : text(language, "Login account", "登入帳戶")}
+                    </button>
+                  ) : null}
+                  <button className="provider-primary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void saveAccount()} type="button">
                     {busy === "save-account" ? "…" : text(language, "Save account", "儲存帳戶")}
                   </button>
                 </div>
@@ -1238,10 +1327,13 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                       </>
                     ) : null}
                   </div>
+                  {routingRequirements ? (
+                    <p className="provider-account-inline-error" role="status">{routingRequirements}</p>
+                  ) : null}
                   <div className="provider-routing-actions">
                     <button
                       className="provider-primary-button"
-                      disabled={busy !== null || !workspaceId}
+                      disabled={busy !== null || Boolean(routingRequirements)}
                       onClick={() => void connectProvider()}
                       type="button"
                     >

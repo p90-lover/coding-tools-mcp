@@ -108,6 +108,9 @@ function installProviderNetwork({
   handle("launcher:provider-account-probe", async (active, _event, accountId) => (
     publish(await active.probeProviderAccount(accountId))
   ));
+  handle("launcher:provider-session-import", async (active, _event, accountId) => (
+    publish(await active.importProviderSession(accountId))
+  ));
 
   handle("launcher:proxy-profile-save", (active, _event, input) => {
     const current = active.store.snapshot();
