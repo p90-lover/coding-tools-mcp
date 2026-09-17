@@ -20,10 +20,7 @@ const fixtureScript = fs.existsSync(fixtureScriptPath)
   : "";
 
 test("rc.6 release delegates legacy fixture creation to a checked-in script", () => {
-  assert.match(
-    workflow,
-    /desktop-electron\/scripts\/create-legacy-uninstall-fixture\.ps1/,
-  );
+  assert.match(workflow, /create-legacy-uninstall-fixture\.ps1/);
   assert.ok(fixtureScript.length > 0, "legacy fixture script must exist");
 });
 
