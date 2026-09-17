@@ -388,7 +388,11 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       )))
       : null;
     if (suppliedSecret && Object.keys(suppliedSecret).length > 0) {
-      state.secrets.accounts[id] = codec.encrypt(suppliedSecret);
+      const previousSecret = codec.decrypt(state.secrets.accounts[id]) || {};
+      state.secrets.accounts[id] = codec.encrypt({
+        ...previousSecret,
+        ...suppliedSecret,
+      });
     }
     const hasCredential = Boolean(state.secrets.accounts[id]);
     const statusInput = input.status ?? previous?.status;
@@ -642,6 +646,20 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     return codec.decrypt(state.secrets.accounts[accountId]);
   }
 
+  function mergeAccountSecret(accountId, patch = {}) {
+    const account = findAccount(accountId);
+    if (!account || account.archivedAt) throw new Error("Provider account was not found");
+    const current = accountSecret(accountId) || {};
+    for (const key of ["antigravityAuthName", "antigravityAuthIndex"]) {
+      if (!Object.hasOwn(patch, key)) continue;
+      const value = optionalText(patch[key], 512);
+      if (value) current[key] = value;
+      else delete current[key];
+    }
+    state.secrets.accounts[accountId] = codec.encrypt(current);
+    write();
+  }
+
   function proxySecret(profileId) {
     return codec.decrypt(state.secrets.proxies[profileId]);
   }
@@ -660,6 +678,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     setAccountPolicy,
     recordProxyHealth,
     accountSecret,
+    mergeAccountSecret,
     proxySecret,
     activeProxy,
   };
@@ -754,6 +773,16 @@ function antigravityAuthFiles(value) {
 
 function antigravityAuthFileName(entry) {
   const value = String(entry?.name ?? entry?.id ?? "").trim();
+  return value || null;
+}
+
+function antigravityAuthIndex(entry) {
+  const value = String(entry?.auth_index ?? entry?.authIndex ?? "").trim();
+  return value || null;
+}
+
+function antigravityIdentity(entry) {
+  const value = String(entry?.email ?? entry?.account ?? entry?.label ?? "").trim();
   return value || null;
 }
 
@@ -855,6 +884,14 @@ function createProviderNetworkController({
     return { baseUrl, managementKey };
   }
 
+  function antigravitySessionBinding(account) {
+    const secret = store.accountSecret(account.id) || {};
+    return {
+      name: String(secret.antigravityAuthName ?? "").trim() || null,
+      authIndex: String(secret.antigravityAuthIndex ?? "").trim() || null,
+    };
+  }
+
   async function managementJson(account, pathname) {
     const { baseUrl, managementKey } = antigravityConnection(account);
     const url = new URL(pathname, `${baseUrl}/`);
@@ -890,45 +927,84 @@ function createProviderNetworkController({
     }
   }
 
-  async function inspectAntigravitySession(account, { baselineAuthNames = new Set() } = {}) {
-    const listing = await managementJson(account, "/v0/management/auth-files");
+  async function inspectAntigravitySession(
+    account,
+    { baselineAuthNames = new Set(), baselineAuthIndexes = new Set() } = {},
+  ) {
+    const binding = antigravitySessionBinding(account);
+    const query = new URLSearchParams();
+    if (binding.name) query.set("name", binding.name);
+    if (binding.authIndex) query.set("auth_index", binding.authIndex);
+    const pathname = query.size > 0
+      ? `/v0/management/auth-files?${query.toString()}`
+      : "/v0/management/auth-files";
+    const listing = await managementJson(account, pathname);
     const files = antigravityAuthFiles(listing);
     if (files.length === 0) {
       return store.updateAccountConnection(account.id, {
         status: "pending",
         models: [],
-        error: undefined,
+        error: binding.name || binding.authIndex
+          ? "The bound Antigravity session is unavailable; log in again"
+          : undefined,
+      });
+    }
+
+    const exactBound = files.find((entry) => (
+      (binding.authIndex && antigravityAuthIndex(entry) === binding.authIndex)
+        || (binding.name && antigravityAuthFileName(entry) === binding.name)
+    ));
+    if ((binding.name || binding.authIndex) && !exactBound) {
+      return store.updateAccountConnection(account.id, {
+        status: "pending",
+        models: [],
+        error: "The bound Antigravity session is unavailable; log in again",
       });
     }
 
     const identity = String(account.identity || "").trim().toLowerCase();
     const newlyCreated = files.find((entry) => {
       const name = antigravityAuthFileName(entry);
-      return name && !baselineAuthNames.has(name);
+      const authIndex = antigravityAuthIndex(entry);
+      return (name && !baselineAuthNames.has(name))
+        || (authIndex && !baselineAuthIndexes.has(authIndex));
     });
-    const selected = files.find((entry) => {
-      const candidate = String(entry.email ?? entry.label ?? "").trim().toLowerCase();
+    const selected = exactBound ?? files.find((entry) => {
+      const candidate = String(antigravityIdentity(entry) || "").toLowerCase();
       return identity && candidate === identity;
-    }) ?? newlyCreated ?? files.find((entry) => entry.disabled !== true) ?? files[0];
+    }) ?? newlyCreated ?? files.find((entry) => {
+      const detail = `${entry.status ?? ""} ${entry.status_message ?? ""}`.trim();
+      return entry.disabled !== true
+        && entry.unavailable !== true
+        && providerSessionFailureStatus(detail) !== "expired"
+        && !/error|failed|invalid/i.test(detail);
+    }) ?? files.find((entry) => entry.disabled !== true) ?? files[0];
+
+    const selectedName = antigravityAuthFileName(selected);
+    const selectedAuthIndex = antigravityAuthIndex(selected);
     const detail = `${selected.status ?? ""} ${selected.status_message ?? ""}`.trim();
     let status = "connected";
     if (selected.disabled === true) status = "disabled";
     else if (providerSessionFailureStatus(detail) === "expired") status = "expired";
     else if (selected.unavailable === true || /error|failed|invalid/i.test(detail)) status = "error";
 
+    if (status === "connected") {
+      store.mergeAccountSecret(account.id, {
+        antigravityAuthName: selectedName,
+        antigravityAuthIndex: selectedAuthIndex,
+      });
+    }
+
     let models = Array.isArray(account.models) ? account.models : [];
     let modelError;
-    if (status === "connected") {
+    if (status === "connected" && selectedName) {
       try {
-        const name = String(selected.name ?? selected.id ?? "").trim();
-        if (name) {
-          const catalogue = await managementJson(
-            account,
-            `/v0/management/auth-files/models?name=${encodeURIComponent(name)}`,
-          );
-          const discovered = providerModelIds(catalogue);
-          if (discovered.length > 0) models = discovered;
-        }
+        const catalogue = await managementJson(
+          account,
+          `/v0/management/auth-files/models?name=${encodeURIComponent(selectedName)}`,
+        );
+        const discovered = providerModelIds(catalogue);
+        if (discovered.length > 0) models = discovered;
       } catch (error) {
         modelError = error instanceof Error ? error.message : String(error);
       }
@@ -936,7 +1012,7 @@ function createProviderNetworkController({
 
     return store.updateAccountConnection(account.id, {
       status,
-      identity: selected.email ?? selected.label ?? account.identity,
+      identity: antigravityIdentity(selected) ?? account.identity,
       models,
       error: status === "connected" ? modelError : (selected.status_message || detail || undefined),
     });
@@ -966,12 +1042,15 @@ function createProviderNetworkController({
     }
     if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
       let baselineAuthNames = new Set();
+      let baselineAuthIndexes = new Set();
       try {
         const baseline = await managementJson(account, "/v0/management/auth-files");
+        const baselineFiles = antigravityAuthFiles(baseline);
         baselineAuthNames = new Set(
-          antigravityAuthFiles(baseline)
-            .map(antigravityAuthFileName)
-            .filter(Boolean),
+          baselineFiles.map(antigravityAuthFileName).filter(Boolean),
+        );
+        baselineAuthIndexes = new Set(
+          baselineFiles.map(antigravityAuthIndex).filter(Boolean),
         );
       } catch (error) {
         logger.warn("provider.antigravity_baseline_failed", {
@@ -1002,6 +1081,7 @@ function createProviderNetworkController({
             state,
             snapshot: await inspectAntigravitySession(accountRecord(account.id), {
               baselineAuthNames,
+              baselineAuthIndexes,
             }),
           };
         }
