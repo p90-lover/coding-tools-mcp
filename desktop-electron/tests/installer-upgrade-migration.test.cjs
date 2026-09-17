@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const desktopRoot = path.resolve(__dirname, "..");
+const repositoryRoot = path.resolve(desktopRoot, "..");
 const manifestPath = path.join(desktopRoot, "package.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 const includePath = path.join(desktopRoot, "build", "installer.nsh");
@@ -87,31 +88,54 @@ test("legacy removal is silent, bounded, fail-closed, and preserves application 
   assert.doesNotMatch(source, /Delete\s+\"?\$LOCALAPPDATA/i);
 });
 
-test("the authoritative release gate runs a real no-delete Windows old-install to reinstall migration smoke", () => {
-  const workflowPath = path.resolve(
-    desktopRoot,
-    "..",
+test("the authoritative release workflow delegates to the exact-source Windows migration gate", () => {
+  const workflowPath = path.join(
+    repositoryRoot,
     ".github",
     "workflows",
     "codex-router-multiprovider-release-rc7.yml",
   );
-  const fixtureScriptPath = path.resolve(
+  const releaseRunnerPath = path.join(
+    repositoryRoot,
+    "aiTemp",
+    "rc7-release",
+    "run-windows-release.mjs",
+  );
+  const migrationRunnerPath = path.join(
+    repositoryRoot,
+    "aiTemp",
+    "rc7-release",
+    "verify-windows-migration.ps1",
+  );
+  const fixtureScriptPath = path.join(
     desktopRoot,
     "scripts",
     "create-legacy-uninstall-fixture.ps1",
   );
+
   const workflow = fs.readFileSync(workflowPath, "utf8");
+  const releaseRunner = fs.readFileSync(releaseRunnerPath, "utf8");
+  const migrationRunner = fs.readFileSync(migrationRunnerPath, "utf8");
   const fixtureScript = fs.readFileSync(fixtureScriptPath, "utf8");
 
   assert.match(workflow, /windows-latest/);
-  assert.match(workflow, /installer-upgrade-migration\.test\.cjs/);
-  assert.match(workflow, /create-legacy-uninstall-fixture\.ps1/);
-  assert.match(workflow, /legacy-uninstall-fixture/i);
-  assert.match(workflow, /\/S/);
-  assert.match(workflow, /Coding\.Tools_0\.7\.0-rc\.7_windows_x64_setup\.exe/);
-  assert.match(workflow, /CODING_TOOLS_LEGACY_TRASH_DIR/);
-  assert.match(workflow, /legacyUninstallerPreserved/);
-  assert.match(workflow, /git diff --diff-filter=D/);
+  assert.match(workflow, /run-windows-release\.mjs/);
+  assert.match(workflow, /verify-windows-migration\.ps1/);
+
+  assert.match(releaseRunner, /installer-upgrade-migration\.test\.cjs/);
+  assert.match(releaseRunner, /verify-windows-migration\.ps1/);
+  assert.ok(
+    releaseRunner.includes("Coding.Tools_${releaseVersion}_windows_x64_setup.exe"),
+    "the exact-source release runner must derive the rc.7 Windows installer filename",
+  );
+  assert.match(releaseRunner, /--diff-filter=D/);
+
+  assert.match(migrationRunner, /create-legacy-uninstall-fixture\.ps1/);
+  assert.match(migrationRunner, /legacy-uninstall-fixture/i);
+  assert.match(migrationRunner, /'\/S', '\/currentuser'/);
+  assert.match(migrationRunner, /CODING_TOOLS_LEGACY_TRASH_DIR/);
+  assert.match(migrationRunner, /legacyUninstallerPreserved/);
+  assert.match(migrationRunner, /RC7_WINDOWS_MIGRATION_ACCEPTANCE_OK/);
 
   assert.ok(
     fixtureScript.includes("Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"),
