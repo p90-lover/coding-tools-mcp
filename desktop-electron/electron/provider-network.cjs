@@ -752,6 +752,11 @@ function antigravityAuthFiles(value) {
   });
 }
 
+function antigravityAuthFileName(entry) {
+  const value = String(entry?.name ?? entry?.id ?? "").trim();
+  return value || null;
+}
+
 function providerModelIds(value) {
   const models = Array.isArray(value?.models) ? value.models : [];
   return [...new Set(models.flatMap((entry) => {
@@ -885,7 +890,7 @@ function createProviderNetworkController({
     }
   }
 
-  async function inspectAntigravitySession(account) {
+  async function inspectAntigravitySession(account, { baselineAuthNames = new Set() } = {}) {
     const listing = await managementJson(account, "/v0/management/auth-files");
     const files = antigravityAuthFiles(listing);
     if (files.length === 0) {
@@ -897,15 +902,19 @@ function createProviderNetworkController({
     }
 
     const identity = String(account.identity || "").trim().toLowerCase();
+    const newlyCreated = files.find((entry) => {
+      const name = antigravityAuthFileName(entry);
+      return name && !baselineAuthNames.has(name);
+    });
     const selected = files.find((entry) => {
       const candidate = String(entry.email ?? entry.label ?? "").trim().toLowerCase();
       return identity && candidate === identity;
-    }) ?? files.find((entry) => entry.disabled !== true) ?? files[0];
+    }) ?? newlyCreated ?? files.find((entry) => entry.disabled !== true) ?? files[0];
     const detail = `${selected.status ?? ""} ${selected.status_message ?? ""}`.trim();
     let status = "connected";
     if (selected.disabled === true) status = "disabled";
-    else if (selected.unavailable === true || providerSessionFailureStatus(detail) === "expired") status = "expired";
-    else if (/error|failed|invalid/i.test(detail)) status = "error";
+    else if (providerSessionFailureStatus(detail) === "expired") status = "expired";
+    else if (selected.unavailable === true || /error|failed|invalid/i.test(detail)) status = "error";
 
     let models = Array.isArray(account.models) ? account.models : [];
     let modelError;
@@ -956,6 +965,20 @@ function createProviderNetworkController({
       return { opened: true, mode: "embedded", browser: browser || null };
     }
     if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+      let baselineAuthNames = new Set();
+      try {
+        const baseline = await managementJson(account, "/v0/management/auth-files");
+        baselineAuthNames = new Set(
+          antigravityAuthFiles(baseline)
+            .map(antigravityAuthFileName)
+            .filter(Boolean),
+        );
+      } catch (error) {
+        logger.warn("provider.antigravity_baseline_failed", {
+          accountId: account.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       store.updateAccountConnection(account.id, { status: "pending", error: undefined });
       const login = await managementJson(
         account,
@@ -977,7 +1000,9 @@ function createProviderNetworkController({
             opened: true,
             mode: "external",
             state,
-            snapshot: await inspectAntigravitySession(accountRecord(account.id)),
+            snapshot: await inspectAntigravitySession(accountRecord(account.id), {
+              baselineAuthNames,
+            }),
           };
         }
         if (status?.status === "error") {
