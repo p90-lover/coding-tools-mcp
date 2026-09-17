@@ -42,6 +42,7 @@ jobs:
         run: |
           mkdir -p \
             aiTemp/antigravity-session-binding/evidence \
+            aiTemp/antigravity-session-binding/renderer-dist \
             aiTemp/Trash/antigravity-session-binding
 
       - name: Capture the missing binding regression before patching
@@ -114,17 +115,19 @@ jobs:
           desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
           desktop-electron/tests/proxy-provider-contract.test.cjs
 
-      - name: Validate runtime syntax, TypeScript, and production renderer
+      - name: Validate runtime syntax, TypeScript, and retained production renderer
         shell: bash
         run: |
           set -euo pipefail
+          renderer_dir="$GITHUB_WORKSPACE/aiTemp/antigravity-session-binding/renderer-dist"
           node --check desktop-electron/electron/provider-network.cjs
           bun run --cwd desktop-electron typecheck
           (
             cd desktop-electron
-            bunx vite build
+            bunx vite build --outDir "$renderer_dir" --emptyOutDir false
           )
-          node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+          CODING_TOOLS_RENDERER_DIST="$renderer_dir" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
 
       - name: Enforce branch no-delete contract
         shell: bash
@@ -149,15 +152,11 @@ jobs:
           git commit -m 'fix(rc6): keep Antigravity accounts bound to their auth session'
           git push origin HEAD:refs/heads/fix/rc6-antigravity-session-binding
 
-      - name: Preserve transient dependencies and build output in Trash
+      - name: Preserve transient dependencies in Trash
         if: always()
         shell: bash
         run: |
           mkdir -p aiTemp/Trash/antigravity-session-binding
-          if [ -d desktop-electron/dist ]; then
-            mv desktop-electron/dist \
-              "aiTemp/Trash/antigravity-session-binding/renderer-$GITHUB_RUN_ID"
-          fi
           if [ -d desktop-electron/node_modules ]; then
             mv desktop-electron/node_modules \
               "aiTemp/Trash/antigravity-session-binding/node_modules-$GITHUB_RUN_ID"
