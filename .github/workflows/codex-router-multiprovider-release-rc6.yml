@@ -360,7 +360,10 @@ jobs:
                   using (RegistryKey key = Registry.CurrentUser.OpenSubKey(
                       @"Software\Microsoft\Windows\CurrentVersion\Uninstall", true))
                   {
-                      key?.DeleteSubKeyTree("Coding Tools MCP", false);
+                      if (key != null)
+                      {
+                          key.DeleteSubKeyTree("Coding Tools MCP", false);
+                      }
                   }
 
                   int processId = Process.GetCurrentProcess().Id;
@@ -388,7 +391,34 @@ jobs:
           $sourcePath = Join-Path $root 'LegacyUninstallFixture.cs'
           $uninstaller = Join-Path $install 'uninstall.exe'
           Set-Content -LiteralPath $sourcePath -Value $source
-          Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $uninstaller -OutputType ConsoleApplication
+          $compilerCandidates = @(
+            (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
+            (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+          )
+          $compiler = $compilerCandidates |
+            Where-Object { Test-Path -LiteralPath $_ } |
+            Select-Object -First 1
+          if (-not $compiler) {
+            throw 'The Windows .NET Framework C# compiler was not found'
+          }
+          $compileOutput = & $compiler \
+            '/nologo' \
+            '/target:exe' \
+            '/platform:x64' \
+            "/out:$uninstaller" \
+            $sourcePath 2>&1
+          $compileExitCode = $LASTEXITCODE
+          @(
+            "compiler=$compiler"
+            "exit_code=$compileExitCode"
+            $compileOutput
+          ) | Set-Content -LiteralPath (Join-Path $root 'csc-output.txt')
+          if ($compileExitCode -ne 0) {
+            throw "Legacy fixture compiler failed with exit code $compileExitCode"
+          }
+          if (-not (Test-Path -LiteralPath $uninstaller)) {
+            throw 'Legacy fixture compiler did not create uninstall.exe'
+          }
 
           $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Coding Tools MCP'
           New-Item -Path $key -Force | Out-Null
