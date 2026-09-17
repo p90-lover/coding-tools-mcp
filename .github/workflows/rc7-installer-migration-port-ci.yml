@@ -4,12 +4,14 @@ on:
   push:
     branches:
       - fix/rc7-integration-installer-migration-port
+      - fix/rc7-packaging-elevation-contract
     paths:
       - desktop-electron/package.json
       - desktop-electron/build/installer.nsh
       - desktop-electron/scripts/create-legacy-msi-upgrade-fixture.ps1
       - desktop-electron/tests/installer-upgrade-migration.test.cjs
       - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
+      - desktop-electron/tests/packaging-contract.test.cjs
       - .github/workflows/rc7-installer-migration-port-ci.yml
   pull_request:
     branches:
@@ -20,6 +22,7 @@ on:
       - desktop-electron/scripts/create-legacy-msi-upgrade-fixture.ps1
       - desktop-electron/tests/installer-upgrade-migration.test.cjs
       - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
+      - desktop-electron/tests/packaging-contract.test.cjs
       - .github/workflows/rc7-installer-migration-port-ci.yml
   workflow_dispatch:
 
@@ -46,10 +49,19 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Run NSIS and MSI migration contracts
+      - name: Run focused packaging elevation contract
         run: |
           set -euo pipefail
           mkdir -p aiTemp/rc7-installer-migration/evidence
+          node --test \
+            --test-name-pattern="launcher publishes native packages" \
+            desktop-electron/tests/packaging-contract.test.cjs \
+            2>&1 | tee aiTemp/rc7-installer-migration/evidence/packaging-elevation.txt
+          grep -F '# fail 0' aiTemp/rc7-installer-migration/evidence/packaging-elevation.txt
+
+      - name: Run NSIS and MSI migration contracts
+        run: |
+          set -euo pipefail
           node --test \
             desktop-electron/tests/installer-upgrade-migration.test.cjs \
             desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs \
