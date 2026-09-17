@@ -1,0 +1,72 @@
+name: Apply launcher runtime version contract
+
+on:
+  push:
+    branches:
+      - fix/0.7-smoke-runtime-version-contract
+    paths:
+      - .github/workflows/apply-runtime-version-fix.yml
+      - aiTemp/codex-router-runtime-version/apply-runtime-version-fix.py
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/smoke-exit.cjs
+      - desktop-electron/tests/launcher-smoke-exit.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-launcher-runtime-version-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Apply exact-count source patch
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/Trash/launcher-smoke-exit-tests
+          python aiTemp/codex-router-runtime-version/apply-runtime-version-fix.py \
+            | tee aiTemp/evidence/runtime-version-patch.txt
+          grep -E 'RUNTIME_VERSION_PATCH_(APPLIED|ALREADY_APPLIED)' \
+            aiTemp/evidence/runtime-version-patch.txt
+
+      - name: Verify focused launcher contracts
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/smoke-exit.cjs
+          node --check desktop-electron/tests/launcher-smoke-exit.test.cjs
+          node --test desktop-electron/tests/launcher-smoke-exit.test.cjs \
+            2>&1 | tee aiTemp/evidence/runtime-version-tests.txt
+          grep -F '# fail 0' aiTemp/evidence/runtime-version-tests.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit only the verified launcher call-site patch
+        run: |
+          set -euo pipefail
+          git add desktop-electron/electron/main.cjs
+          if git diff --cached --quiet; then
+            echo RUNTIME_VERSION_SOURCE_ALREADY_CURRENT
+            exit 0
+          fi
+          remote_head="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote_head" = "$GITHUB_SHA"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix: use packaged runtime CLI version in launcher smoke'
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"

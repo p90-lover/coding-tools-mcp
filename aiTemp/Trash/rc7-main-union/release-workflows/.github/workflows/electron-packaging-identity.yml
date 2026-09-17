@@ -1,0 +1,73 @@
+name: Verify Plan C packaging identity split
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-packaging-identity.yml
+      - aiTemp/electron-packaging-identity/repair.py
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-packaging-identity-060rc1
+  cancel-in-progress: false
+jobs:
+  packaging_identity:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions: {contents: write, actions: read}
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Require retained packaging failure and apply the scoped adaptation
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download 34846781213 --repo "$GITHUB_REPOSITORY" \
+            --name electron-js-security-34846781213 --dir aiTemp/red
+          cp aiTemp/red/runtime-verify-green.txt aiTemp/evidence/packaging-red.txt
+          grep -F 'release installers resolve checksummed native launcher assets' aiTemp/evidence/packaging-red.txt
+          grep -F 'WINDOWS_LAUNCHER_GUID = "${manifest.build.nsis.guid}"' aiTemp/evidence/packaging-red.txt
+          python aiTemp/electron-packaging-identity/repair.py 2>&1 \
+            | tee aiTemp/evidence/repair.txt
+      - name: Run the exact packaging contract
+        run: |
+          set -euo pipefail
+          node --test \
+            --test-name-pattern='release installers resolve checksummed native launcher assets' \
+            runtime-web/launcher/tests/packaging-contract.test.cjs 2>&1 \
+            | tee aiTemp/evidence/packaging-green.txt
+          grep -F '# fail 0' aiTemp/evidence/packaging-green.txt
+          grep -F 'WINDOWS_LAUNCHER_GUID' runtime-web/src/dev-chat/profile.ts
+      - name: Commit only the verified test adaptation to the feature branch
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'test: distinguish pinned and primary Windows launcher identities'
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          git rev-parse HEAD > aiTemp/evidence/source.commit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-packaging-identity-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

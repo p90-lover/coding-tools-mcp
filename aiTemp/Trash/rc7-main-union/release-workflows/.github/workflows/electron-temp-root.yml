@@ -1,0 +1,53 @@
+name: Verify aiTemp-backed short verification paths
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-temp-root.yml
+      - runtime-web/scripts/temp-root.ts
+      - runtime-web/scripts/verify.ts
+      - runtime-web/tests/temp-root.test.ts
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-temp-root-060rc1
+  cancel-in-progress: false
+jobs:
+  temp_root:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Install the pinned runtime without deletion cleanup
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/tmp aiTemp/evidence
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          NODE_OPTIONS="--import=$preload" \
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd runtime-web 2>&1 | tee aiTemp/evidence/install.txt
+      - name: Run the focused real-path boundary contract
+        run: |
+          set -euo pipefail
+          bun test --cwd runtime-web tests/temp-root.test.ts 2>&1 | tee aiTemp/evidence/temp-root.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-temp-root-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

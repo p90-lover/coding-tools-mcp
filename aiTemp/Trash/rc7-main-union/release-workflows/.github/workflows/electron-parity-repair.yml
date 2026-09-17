@@ -1,0 +1,102 @@
+name: Repair split-layout parity contracts
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-parity-repair.yml
+      - aiTemp/electron-parity/repair-layout-tests.py
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-parity-repair-060rc1
+  cancel-in-progress: false
+jobs:
+  repair:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {contents: write, actions: read}
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+      CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}/aiTemp/source/aiTemp/Trash/upstream-suite
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Require all twelve retained parity failures
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download 34826034585 --repo "$GITHUB_REPOSITORY" \
+            --name electron-upstream-parity-ubuntu-24.04-34826034585 --dir aiTemp/red
+          cp aiTemp/red/desktop-tests.txt aiTemp/evidence/desktop-tests-red.txt
+          test "$(grep -c '^not ok ' aiTemp/evidence/desktop-tests-red.txt)" -eq 12
+          for marker in \
+            'exact launcher idle surface' \
+            'localization.test.cjs' \
+            'public launcher command' \
+            'launcher update transaction upgrades' \
+            'connector verification uses the current identity'; do
+            grep -F "$marker" aiTemp/evidence/desktop-tests-red.txt
+          done
+      - name: Apply scoped test adaptations and retain originals
+        run: python aiTemp/electron-parity/repair-layout-tests.py 2>&1 | tee aiTemp/evidence/repair.txt
+      - name: Run the complete adapted Electron test suite
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/tmp aiTemp/Trash/upstream-suite
+          short_tmp="/tmp/ctm-${GITHUB_RUN_ID}-repair"
+          test ! -e "$short_tmp" && test ! -L "$short_tmp"
+          ln -s "$PWD/aiTemp/tmp" "$short_tmp"
+          test "$(realpath "$short_tmp")" = "$PWD/aiTemp/tmp"
+          printf 'short_tmp=%s\nbacking=%s\n' "$short_tmp" "$PWD/aiTemp/tmp" > aiTemp/evidence/temp-paths.txt
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          absolute_tmp="$PWD/aiTemp/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --frozen-lockfile --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
+          TMPDIR="$short_tmp" TMP="$short_tmp" TEMP="$short_tmp" \
+            node --test desktop-electron/tests/*.test.cjs 2>&1 | tee aiTemp/evidence/desktop-tests-green.txt
+          grep -F '# fail 0' aiTemp/evidence/desktop-tests-green.txt
+          TMPDIR="$short_tmp" TMP="$short_tmp" TEMP="$short_tmp" \
+            bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
+          TMPDIR="$short_tmp" TMP="$short_tmp" TEMP="$short_tmp" \
+            node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
+      - name: Persist only verified test-layout adaptations
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'test: adapt pinned harness contracts to the split Coding Tools layout'
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          git rev-parse HEAD > aiTemp/evidence/source.commit
+          git diff --stat "$GITHUB_SHA" HEAD > aiTemp/evidence/change-stat.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-parity-repair-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,61 @@
+name: RC2 Onboarding and Traditional Chinese
+
+on:
+  push:
+    branches:
+      - fix/v0.7-rc2-onboarding-zhtw-links
+    paths:
+      - desktop-electron/src/App.tsx
+      - desktop-electron/src/i18n.ts
+      - desktop-electron/src/i18n/locales/zh-TW.ts
+      - desktop-electron/src/types.ts
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/tests/rc2-onboarding-localization.test.cjs
+      - .github/workflows/rc2-onboarding-localization.yml
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - desktop-electron/src/App.tsx
+      - desktop-electron/src/i18n.ts
+      - desktop-electron/src/i18n/locales/zh-TW.ts
+      - desktop-electron/src/types.ts
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/tests/rc2-onboarding-localization.test.cjs
+      - .github/workflows/rc2-onboarding-localization.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc2-onboarding-zhtw-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+      - name: Run focused onboarding and localization contract
+        run: node --test desktop-electron/tests/rc2-onboarding-localization.test.cjs
+      - name: Validate Electron main syntax
+        run: node --check desktop-electron/electron/main.cjs
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+      - name: Enforce no-delete changes
+        shell: bash
+        run: |
+          deleted="$(git diff --diff-filter=D --name-only HEAD^ HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi

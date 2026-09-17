@@ -1,0 +1,103 @@
+name: Provider Center account wiring
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.4-provider-hub-account-wiring
+    paths:
+      - desktop-electron/electron/**
+      - desktop-electron/src/**
+      - desktop-electron/tests/provider-center-account-wiring.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - desktop-electron/package.json
+      - desktop-electron/bun.lock
+      - .github/workflows/provider-center-account-wiring-ci.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.3
+      - release/codex-router-multiprovider-0.7.0-rc.4
+    paths:
+      - desktop-electron/electron/**
+      - desktop-electron/src/**
+      - desktop-electron/tests/provider-center-account-wiring.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - desktop-electron/package.json
+      - desktop-electron/bun.lock
+      - .github/workflows/provider-center-account-wiring-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-center-account-wiring-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache-provider-center-account-wiring
+
+jobs:
+  exact-head:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          clean: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/provider-center-account-wiring/renderer aiTemp/Trash/provider-center-account-wiring
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run Provider Center red-green contracts
+        run: >-
+          node --test
+          desktop-electron/tests/provider-center-account-wiring.test.cjs
+          desktop-electron/tests/provider-execution-router.test.cjs
+          desktop-electron/tests/execution-bridge-contract.test.cjs
+
+      - name: Validate Electron runtime syntax
+        run: |
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/main-with-provider.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/preload.cjs
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build renderer into retained aiTemp evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/provider-center-account-wiring/renderer \
+            --emptyOutDir
+
+      - name: Enforce no file deletion
+        shell: bash
+        run: |
+          deleted="$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          target="aiTemp/Trash/provider-center-account-wiring/node_modules-$GITHUB_RUN_ID"
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "$target"
+          fi

@@ -1,0 +1,61 @@
+name: Reusable Rust core cross-platform verification
+on:
+  push:
+    branches: [subagent/rust-core-extraction-0.6.0-20260914]
+    paths: [.github/workflows/rust-core-cross-platform.yml]
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: rust-core-cross-platform-060rc1
+  cancel-in-progress: false
+env:
+  CARGO_INCREMENTAL: '0'
+jobs:
+  compatibility:
+    if: github.actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/rust-core-${{ matrix.os }}
+    defaults:
+      run: {shell: bash, working-directory: aiTemp/source}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with: {toolchain: '1.98.1', components: 'rustfmt,clippy'}
+      - name: Verify the shared 71-tool and isolated-state contract
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          cargo test --manifest-path rust-core/coding-tools-core/Cargo.toml \
+            --test catalog_compat -- --nocapture 2>&1 | tee "aiTemp/evidence/core-${RUNNER_OS}.txt"
+          grep -F '1 passed; 0 failed' "aiTemp/evidence/core-${RUNNER_OS}.txt"
+      - name: Verify the retained desktop library on the same platform
+        run: |
+          set -euo pipefail
+          cargo check --manifest-path src-tauri/Cargo.toml --locked 2>&1 | tee "aiTemp/evidence/tauri-${RUNNER_OS}.txt"
+          cargo clippy --manifest-path rust-core/coding-tools-core/Cargo.toml --all-targets -- -D warnings 2>&1 | tee "aiTemp/evidence/clippy-${RUNNER_OS}.txt"
+      - name: Keep the generated library lock under aiTemp
+        if: always()
+        run: |
+          if test -f rust-core/coding-tools-core/Cargo.lock; then
+            mkdir -p "aiTemp/Trash/rust-core-lock/$GITHUB_RUN_ID/$RUNNER_OS"
+            mv rust-core/coding-tools-core/Cargo.lock "aiTemp/Trash/rust-core-lock/$GITHUB_RUN_ID/$RUNNER_OS/Cargo.lock"
+          fi
+          git status --short > "aiTemp/evidence/status-${RUNNER_OS}.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rust-core-${{ runner.os }}-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

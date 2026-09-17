@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "upstream": {
+    "repository": "miuuyy/codex-chatgpt-web",
+    "tag": "v5.0.6",
+    "commit": "e85e3693fdb4e3e033348c08df0298c20fcdb612",
+    "tunnelClientVersion": "0.0.12"
+  },
+  "targetVersion": "0.6.0-rc.1",
+  "launcherFiles": 67,
+  "runtimeFiles": 234,
+  "deletedFiles": 0,
+  "retained": [
+    "Trash/electron-materialization/2026-09-14T08-53-33-088Z/desktop-electron"
+  ],
+  "strategy": "adapted launcher root plus exact runtime-web source copy"
+}

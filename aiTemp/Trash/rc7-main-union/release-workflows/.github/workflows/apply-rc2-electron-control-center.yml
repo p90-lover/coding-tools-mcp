@@ -1,0 +1,130 @@
+name: Apply rc2 Electron provider control center
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.2-final-union
+    paths:
+      - aiTemp/rc2-electron-control-center/apply.py
+      - desktop-electron/src/features/**
+      - .github/workflows/apply-rc2-electron-control-center.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc2-electron-provider-control-center
+  cancel-in-progress: false
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Prepare retained evidence roots
+        run: mkdir -p aiTemp/evidence aiTemp/tmp
+
+      - name: Apply idempotent control-center patch
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc2-electron-control-center/apply.py \
+            2>&1 | tee aiTemp/evidence/electron-control-center-patch.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only -- desktop-electron/src)"
+
+      - name: Install locked Electron dependencies
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/electron-install.txt
+
+      - name: Typecheck and build the Electron GUI
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/evidence/electron-typecheck.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron build:renderer \
+            2>&1 | tee aiTemp/evidence/electron-renderer-build.txt
+
+      - name: Run focused desktop contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/subagent-orchestrator-contract.test.cjs \
+            desktop-electron/tests/anneal-monitor-contract.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            2>&1 | tee aiTemp/evidence/electron-control-center-tests.txt
+          grep -F '# fail 0' aiTemp/evidence/electron-control-center-tests.txt
+
+      - name: Enforce focused no-delete source scope
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only -- desktop-electron/src)"
+          git status --short | tee aiTemp/evidence/electron-control-center-status.txt
+          changed="$(git diff --name-only -- desktop-electron/src | sort)"
+          if [ -z "$changed" ]; then
+            echo 'Source wiring is already committed.'
+            exit 0
+          fi
+          expected="$(printf '%s\n' \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx \
+            desktop-electron/src/icons.tsx \
+            desktop-electron/src/types.ts | sort)"
+          printf 'changed source files:\n%s\n' "$changed"
+          test "$changed" = "$expected"
+
+      - name: Commit verified GUI wiring
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx \
+            desktop-electron/src/icons.tsx \
+            desktop-electron/src/types.ts; then
+            echo 'Electron provider control-center wiring is already committed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx \
+            desktop-electron/src/icons.tsx \
+            desktop-electron/src/types.ts
+          git diff --cached --check
+          git commit -m 'feat(rc2): wire Provider Center and Anneal orchestrator into Electron'
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc2-electron-control-center-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

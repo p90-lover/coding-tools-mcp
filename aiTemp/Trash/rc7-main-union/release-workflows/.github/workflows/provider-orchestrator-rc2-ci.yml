@@ -1,0 +1,148 @@
+name: Provider Center and Anneal orchestrator rc2
+
+on:
+  push:
+    branches:
+      - feature/0.7-rc2-provider-orchestrator
+  pull_request:
+    paths:
+      - 'src-tauri/src/providers.rs'
+      - 'src-tauri/src/orchestrators.rs'
+      - 'src-tauri/src/orchestrator_run.rs'
+      - 'src-tauri/src/commands/providers.rs'
+      - 'src-tauri/src/commands/orchestrators.rs'
+      - 'src-tauri/src/data/model.rs'
+      - 'src-tauri/src/lib.rs'
+      - 'src-tauri/src/auth/**'
+      - 'src-tauri/src/mcp/listener.rs'
+      - 'src-tauri/src/mcp/transport.rs'
+      - 'src/lib/provider-center.ts'
+      - 'src/lib/orchestrator-center.ts'
+      - 'src/lib/components/AppShell.svelte'
+      - 'src/routes/providers/**'
+      - 'src/routes/orchestrators/**'
+      - 'src/routes/orchestrator-run/**'
+      - 'aiTemp/rc2/**'
+      - 'aiTemp/oauth-issuer/**'
+      - 'aiTemp/oauth-prm/**'
+      - 'aiTemp/connection-tests/http.rs'
+      - '.github/workflows/provider-orchestrator-rc2-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-orchestrator-rc2-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  focused-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+      - name: Prepare retained evidence root
+        run: mkdir -p aiTemp/evidence
+      - name: Enforce no deleted repository paths
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin release/codex-router-multiprovider-0.7.0-rc.1
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.1...HEAD)"
+      - name: Run provider and orchestrator integration contract
+        run: |
+          set -euo pipefail
+          python aiTemp/rc2/provider_orchestrator_contract.py \
+            2>&1 | tee aiTemp/evidence/provider-orchestrator-contract.txt
+          grep -F PROVIDER_ORCHESTRATOR_RC2_CONTRACT_OK aiTemp/evidence/provider-orchestrator-contract.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: provider-orchestrator-rc2-contract-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/npm-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          clean: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Prepare retained frontend evidence root
+        run: mkdir -p aiTemp/evidence
+      - name: Install exact frontend dependencies
+        run: npm ci
+      - name: Run Svelte type and accessibility checks
+        run: npm run check 2>&1 | tee aiTemp/evidence/frontend-check.txt
+      - name: Build provider and orchestrator routes
+        run: npm run build 2>&1 | tee aiTemp/evidence/frontend-build.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: provider-orchestrator-rc2-frontend-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/aiTemp/cargo-target-provider-orchestrator
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          clean: false
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev libgtk-3-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libpipewire-0.3-dev libgbm-dev
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - name: Prepare retained Rust evidence root
+        run: mkdir -p aiTemp/evidence
+      - name: Rustfmt
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check 2>&1 | tee ../aiTemp/evidence/rustfmt.txt
+      - name: Compile desktop provider and orchestrator runtime
+        working-directory: src-tauri
+        run: cargo check --locked 2>&1 | tee ../aiTemp/evidence/cargo-check.txt
+      - name: Run provider, orchestrator and OAuth unit contracts
+        working-directory: src-tauri
+        run: |
+          cargo test --locked providers::tests 2>&1 | tee ../aiTemp/evidence/provider-tests.txt
+          cargo test --locked orchestrators::tests 2>&1 | tee ../aiTemp/evidence/orchestrator-tests.txt
+          cargo test --locked orchestrator_run::tests 2>&1 | tee ../aiTemp/evidence/orchestrator-run-tests.txt
+          cargo test --locked oauth_authorization_response_contract 2>&1 | tee ../aiTemp/evidence/oauth-issuer-tests.txt
+          cargo test --locked oauth_prm_path_contract 2>&1 | tee ../aiTemp/evidence/oauth-prm-tests.txt
+      - name: Strict focused Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --lib -- -D warnings 2>&1 | tee ../aiTemp/evidence/clippy.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: provider-orchestrator-rc2-rust-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
