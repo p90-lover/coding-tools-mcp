@@ -6,6 +6,7 @@ on:
       - release/codex-router-multiprovider-0.7.0-rc.6
     paths:
       - aiTemp/installer-upgrade/materialize_rc6_release.py
+      - aiTemp/installer-upgrade/patch_rc6_fixture_compiler.py
       - .github/workflows/materialize-v0.7-rc6-installer-migration.yml
   workflow_dispatch:
 
@@ -39,6 +40,14 @@ jobs:
             | tee aiTemp/installer-upgrade/rc6-materialization.txt
           grep -F RC6_INSTALLER_MIGRATION_RELEASE_MATERIALIZED \
             aiTemp/installer-upgrade/rc6-materialization.txt
+
+      - name: Replace unsupported PowerShell Add-Type fixture compiler
+        run: |
+          set -euo pipefail
+          python aiTemp/installer-upgrade/patch_rc6_fixture_compiler.py \
+            | tee aiTemp/installer-upgrade/rc6-fixture-compiler-patch.txt
+          grep -F RC6_FIXTURE_CSC_PATCH_OK \
+            aiTemp/installer-upgrade/rc6-fixture-compiler-patch.txt
 
       - name: Verify generated identity and migration release contract
         run: |
@@ -90,6 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           git add \
+            aiTemp/installer-upgrade/materialize_rc6_release.py \
+            aiTemp/installer-upgrade/patch_rc6_fixture_compiler.py \
             aiTemp/installer-upgrade/rc6-release-workflow-blob.txt \
             docs/releases/v0.7.0-rc.6.md \
             desktop-electron/package.json \
@@ -106,5 +117,5 @@ jobs:
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'release: preserve v0.7.0-rc.6 workflow blob reference'
+          git commit -m 'fix(rc6): compile legacy uninstall fixture with csc.exe'
           git push origin "HEAD:${GITHUB_REF_NAME}"
