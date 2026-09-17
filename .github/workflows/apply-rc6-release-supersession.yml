@@ -1,0 +1,80 @@
+name: Apply rc.6 release supersession
+
+on:
+  push:
+    branches:
+      - fix/rc6-cancel-stale-release-runs
+    paths:
+      - '.github/workflows/apply-rc6-release-supersession.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc6-release-supersession
+  cancel-in-progress: true
+
+env:
+  TARGET_BRANCH: release/codex-router-multiprovider-0.7.0-rc.6
+  TARGET_WORKFLOW: .github/workflows/codex-router-multiprovider-release-rc6.yml
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: release/codex-router-multiprovider-0.7.0-rc.6
+          fetch-depth: 0
+
+      - name: Make the newest exact-source release supersede stale publishers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/codex-router-multiprovider-release-rc6.yml')
+          old = '  cancel-in-progress: false\n'
+          new = '  cancel-in-progress: true\n'
+          text = path.read_text(encoding='utf-8')
+          if new in text and old not in text:
+              print('Release supersession is already enabled.')
+          elif text.count(old) == 1:
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+              print('Enabled release supersession.')
+          else:
+              raise SystemExit(f'Expected exactly one stale concurrency setting, found {text.count(old)}')
+          PY
+
+      - name: Verify bounded change and no deletion
+        run: |
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          changed="$(git diff --name-only)"
+          test "$changed" = "$TARGET_WORKFLOW"
+          grep -F '  cancel-in-progress: true' "$TARGET_WORKFLOW"
+          test "$(grep -c '  cancel-in-progress: true' "$TARGET_WORKFLOW")" -eq 1
+
+      - name: Commit and publish the exact release queue fix
+        run: |
+          if git diff --quiet; then
+            echo 'No release queue change required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$TARGET_WORKFLOW"
+          git commit -m 'fix(release): supersede stale rc.6 publisher runs'
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$TARGET_BRANCH"
+            git rebase "origin/$TARGET_BRANCH"
+            if git push origin "HEAD:$TARGET_BRANCH"; then
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+
+          echo 'Unable to publish release supersession after five attempts.' >&2
+          exit 1
