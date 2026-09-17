@@ -47,7 +47,9 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch --no-tags origin "$BASE_BRANCH"
           base_sha="$(git rev-parse "origin/$BASE_BRANCH")"
+          head_sha="$(git rev-parse HEAD)"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
           if git merge-base --is-ancestor "$base_sha" HEAD; then
             echo "already_current=true" >> "$GITHUB_OUTPUT"
@@ -72,7 +74,7 @@ jobs:
               exit 1
             fi
 
-            # Start with the already verified rc.6 Antigravity implementation, then
+            # Start with the verified rc.6 Antigravity implementation, then
             # deterministically re-apply the retained CommandCode integration.
             git checkout --theirs -- "$expected"
             python aiTemp/rc7-provider-updater-sync/prepare_current_base_commandcode_patch.py
@@ -104,6 +106,38 @@ jobs:
           echo "merge_pending=true" >> "$GITHUB_OUTPUT"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
+      - id: health_label
+        name: Use the canonical provider connection label
+        if: steps.compose.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("desktop-electron/src/features/ProviderHubSaasSurface.tsx")
+          text = path.read_text(encoding="utf-8")
+          old = 'text(language, "Test reverse proxy", "測試反向代理")'
+          new = 'text(language, "Test connection", "測試連線")'
+          if new in text:
+              print("RC7_PROVIDER_CONNECTION_LABEL_ALREADY_CANONICAL")
+          elif text.count(old) == 1:
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+              print("RC7_PROVIDER_CONNECTION_LABEL_UPDATED")
+          else:
+              raise SystemExit("Provider connection-label anchor drifted unexpectedly")
+          PY
+          if ! git diff --quiet -- desktop-electron/src/features/ProviderHubSaasSurface.tsx; then
+            git add desktop-electron/src/features/ProviderHubSaasSurface.tsx
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install exact Electron dependencies
+        if: steps.compose.outputs.ready == 'true'
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
       - name: Validate Electron runtime syntax
         if: steps.compose.outputs.ready == 'true'
         shell: bash
@@ -115,7 +149,7 @@ jobs:
           node --check desktop-electron/electron/update.cjs
           node --check desktop-electron/electron/main.cjs
 
-      - name: Run focused Antigravity, CommandCode, Provider Hub, router, and updater contracts
+      - name: Run focused Antigravity, CommandCode, Provider Hub, router, updater, and upstream contracts
         if: steps.compose.outputs.ready == 'true'
         shell: bash
         run: |
@@ -131,10 +165,6 @@ jobs:
             desktop-electron/tests/proxy-provider-contract.test.cjs \
             desktop-electron/tests/update.test.cjs \
             desktop-electron/tests/rc7-full-integration-contract.test.cjs
-
-      - name: Install exact Electron dependencies
-        if: steps.compose.outputs.ready == 'true'
-        run: bun install --cwd desktop-electron --frozen-lockfile
 
       - name: Typecheck and build retained production renderer
         if: steps.compose.outputs.ready == 'true'
@@ -170,16 +200,28 @@ jobs:
           fi
 
       - name: Commit and push the verified provider union
-        if: steps.compose.outputs.merge_pending == 'true'
+        if: steps.compose.outputs.merge_pending == 'true' || steps.health_label.outputs.changed == 'true'
         shell: bash
         env:
           BASE_SHA: ${{ steps.compose.outputs.base_sha }}
+          ORIGINAL_HEAD: ${{ steps.compose.outputs.head_sha }}
         run: |
           set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_REF_NAME"
+          remote_head="$(git rev-parse "origin/$GITHUB_REF_NAME")"
+          if [[ "$remote_head" != "$ORIGINAL_HEAD" ]]; then
+            printf 'Branch advanced from %s to %s; stale verified run will not push.\n' \
+              "$ORIGINAL_HEAD" "$remote_head"
+            if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+              git merge --abort
+            fi
+            exit 0
+          fi
+
           git diff --cached --check
           git commit \
             -m 'integrate(rc7): unite CommandCode with current rc6 provider sessions' \
-            -m "Merge exact rc.6 base SHA $BASE_SHA while preserving stable Antigravity binding, CommandCode OAuth/session import, provider routing, and retained evidence."
+            -m "Merge exact rc.6 base SHA $BASE_SHA while preserving stable Antigravity binding, CommandCode OAuth/session import, canonical provider health controls, provider routing, and retained evidence."
           git push origin HEAD:${GITHUB_REF_NAME}
 
       - name: Preserve transient dependencies in Trash
