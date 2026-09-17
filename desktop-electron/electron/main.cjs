@@ -1260,6 +1260,7 @@ async function start() {
     browserDescriptorPath: BROWSER_DESCRIPTOR_PATH,
     launcherProfile: LAUNCHER_PROFILE.kind,
     publishOperation,
+    getRuntimeEnvironment: () => externalServicesController.runtimeEnvironment(),
   });
   runtimeHost = new RuntimeHost({
     app,

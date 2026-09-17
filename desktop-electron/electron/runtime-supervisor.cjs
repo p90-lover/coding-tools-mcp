@@ -323,6 +323,7 @@ class RuntimeSupervisor {
     launcherProfile = "production",
     publishOperation,
     runtimeInvocationFactory = runtimeInvocation,
+    getRuntimeEnvironment = () => ({}),
   }) {
     this.app = app;
     this.logger = logger;
@@ -337,6 +338,9 @@ class RuntimeSupervisor {
     this.launcherProfile = launcherProfile;
     this.publishOperation = publishOperation;
     this.runtimeInvocationFactory = runtimeInvocationFactory;
+    this.getRuntimeEnvironment = typeof getRuntimeEnvironment === "function"
+      ? getRuntimeEnvironment
+      : () => ({});
     this.configPath = path.join(coreHome, "config.json");
     this.statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
     this.daemon = null;
@@ -478,11 +482,21 @@ class RuntimeSupervisor {
   }
 
   spawnChild(name, invocation) {
+    const suppliedRuntimeEnvironment = this.getRuntimeEnvironment() || {};
+    if (typeof suppliedRuntimeEnvironment !== "object" || Array.isArray(suppliedRuntimeEnvironment)) {
+      throw new Error("Runtime environment provider returned an invalid value");
+    }
+    const runtimeEnvironment = Object.fromEntries(
+      Object.entries(suppliedRuntimeEnvironment).filter(([key, value]) => (
+        /^[A-Z][A-Z0-9_]*$/.test(key) && typeof value === "string" && value.length > 0
+      )),
+    );
     const child = spawn(invocation.executable, invocation.args, {
       cwd: invocation.cwd,
       detached: DETACH_OWNED_CHILD,
       env: {
         ...process.env,
+        ...runtimeEnvironment,
         CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
       },
       stdio: ["ignore", "pipe", "pipe"],

@@ -85,6 +85,11 @@ test("external service settings persist while caller keys stay out of snapshots"
   assert.equal(configured.secretConfigured, true);
   assert.equal(configured.endpoint, "http://127.0.0.1:4202/");
   assert.equal(JSON.stringify(controller.snapshot()).includes("caller_key_"), false);
+  assert.deepEqual(controller.runtimeEnvironment(), {
+    CODING_TOOLS_CODEX_ROUTER_URL: "http://127.0.0.1:4202",
+    CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: "caller_key_abcdefghijklmnopqrstuvwxyz_0123456789",
+    CODING_TOOLS_COMMANDCODE_URL: "http://127.0.0.1:9090",
+  });
 
   const inspection = await controller.inspect("codex-router");
   assert.equal(inspection.status, "ready");
@@ -108,6 +113,64 @@ test("external service settings persist while caller keys stay out of snapshots"
   reopened.dispose();
 });
 
+test("environment router settings remain compatible and inspection errors redact the caller key", async () => {
+  const { createExternalServicesController } = require("../electron/external-services.cjs");
+  const root = retainedTestRoot("environment");
+  const callerKey = "environment_caller_key_abcdefghijklmnopqrstuvwxyz_0123456789";
+  const controller = createExternalServicesController({
+    filePath: path.join(root, "external-services.json"),
+    keyPath: path.join(root, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    env: {
+      CODING_TOOLS_CODEX_ROUTER_URL: "http://127.0.0.1:4312",
+      CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey,
+      CODING_TOOLS_COMMANDCODE_URL: "http://127.0.0.1:9191",
+    },
+    fetchImpl: async (url) => {
+      throw new Error(`connection failed for ${url}`);
+    },
+  });
+
+  const router = controller.snapshot().services.find((service) => service.id === "codex-router");
+  assert.equal(router.secretConfigured, true);
+  assert.equal(JSON.stringify(router).includes(callerKey), false);
+  assert.deepEqual(controller.runtimeEnvironment(), {
+    CODING_TOOLS_CODEX_ROUTER_URL: "http://127.0.0.1:4312",
+    CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey,
+    CODING_TOOLS_COMMANDCODE_URL: "http://127.0.0.1:9191",
+  });
+
+  const inspected = await controller.inspect("codex-router");
+  assert.equal(inspected.status, "offline");
+  assert.equal(inspected.error.includes(callerKey), false);
+  assert.match(inspected.error, /\[REDACTED\]/);
+  controller.dispose();
+});
+
+test("default Paseo and Anneal launch configuration is explicit on every platform", () => {
+  const { createExternalServicesController } = require("../electron/external-services.cjs");
+  const root = retainedTestRoot("launch-defaults");
+  const controller = createExternalServicesController({
+    filePath: path.join(root, "external-services.json"),
+    keyPath: path.join(root, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    env: {},
+  });
+  for (const id of ["paseo", "anneal"]) {
+    const service = controller.snapshot().services.find((candidate) => candidate.id === id);
+    assert.ok(service.executable);
+    assert.ok(service.arguments.length >= 2);
+    if (process.platform === "win32") {
+      assert.match(path.basename(service.executable).toLowerCase(), /^cmd(?:\.exe)?$/);
+      assert.deepEqual(service.arguments.slice(0, 4), ["/d", "/s", "/c", "npm"]);
+    } else {
+      assert.equal(service.executable, "npm");
+      assert.deepEqual(service.arguments.slice(0, 2), ["run", id === "paseo" ? "dev:server" : "dev:web"]);
+    }
+  }
+  controller.dispose();
+});
+
 test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired together", () => {
   const providerBootstrap = read("electron/provider-bootstrap.cjs");
   const main = read("electron/main.cjs");
@@ -116,13 +179,18 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   const app = read("src/App.tsx");
   const surface = read("src/features/ExternalServicesSurface.tsx");
   const packageScript = read("scripts/package.cjs");
+  const runtimeSupervisor = read("electron/runtime-supervisor.cjs");
 
   assert.match(providerBootstrap, /setProviderBrowserHost/);
   assert.match(main, /setProviderBrowserHost\(\(\) => browserHost\)/);
   assert.match(main, /createExternalServicesController/);
+  assert.match(main, /getRuntimeEnvironment:\s*\(\)\s*=>\s*externalServicesController\.runtimeEnvironment\(\)/);
   assert.match(main, /launcher:external-services-snapshot/);
   assert.match(main, /launcher:external-service-configure/);
   assert.match(main, /launcher:codex-router-sync/);
+  assert.match(runtimeSupervisor, /getRuntimeEnvironment/);
+  assert.match(runtimeSupervisor, /const suppliedRuntimeEnvironment = this\.getRuntimeEnvironment\(\)/);
+  assert.match(runtimeSupervisor, /\.\.\.runtimeEnvironment/);
   assert.match(preload, /externalServicesSnapshot/);
   assert.match(preload, /configureExternalService/);
   assert.match(preload, /syncCodexRouter/);

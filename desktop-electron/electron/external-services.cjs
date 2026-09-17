@@ -45,8 +45,10 @@ const DEFAULTS = Object.freeze({
     name: "Paseo",
     endpoint: "http://127.0.0.1:6768/",
     home: "",
-    executable: process.platform === "win32" ? "npm.cmd" : "npm",
-    arguments: ["run", "dev:server"],
+    executable: process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm",
+    arguments: process.platform === "win32"
+      ? ["/d", "/s", "/c", "npm", "run", "dev:server"]
+      : ["run", "dev:server"],
     enabled: true,
     autoStart: false,
   }),
@@ -54,8 +56,10 @@ const DEFAULTS = Object.freeze({
     name: "Anneal",
     endpoint: "http://127.0.0.1:3000/",
     home: "",
-    executable: process.platform === "win32" ? "npm.cmd" : "npm",
-    arguments: ["run", "dev:web"],
+    executable: process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm",
+    arguments: process.platform === "win32"
+      ? ["/d", "/s", "/c", "npm", "run", "dev:web"]
+      : ["run", "dev:web"],
     enabled: true,
     autoStart: false,
   }),
@@ -82,6 +86,7 @@ function normalizeArguments(value) {
   if (value.length > 64) throw new Error("Service argument limit exceeded");
   return value.map((argument) => {
     if (typeof argument !== "string") throw new Error("Service arguments must be strings");
+    if (argument.includes("\0")) throw new Error("Service arguments must not contain null bytes");
     if (argument.length > 2_048) throw new Error("Service argument is too long");
     return argument;
   });
@@ -296,7 +301,25 @@ function createExternalServicesController({
   }
 
   function secretFor(id) {
-    return codec.decrypt(state.secrets[id]) || {};
+    const stored = codec.decrypt(state.secrets[id]) || {};
+    if (id !== "codex-router" || stored.callerKey) return stored;
+    const environmentCallerKey = typeof env.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY === "string"
+      ? env.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY.trim()
+      : "";
+    return CALLER_KEY.test(environmentCallerKey)
+      ? { callerKey: environmentCallerKey }
+      : stored;
+  }
+
+  function redactServiceSecrets(value) {
+    let result = String(value || "");
+    const callerKey = secretFor("codex-router").callerKey;
+    if (callerKey) {
+      result = result
+        .split(callerKey).join("[REDACTED]")
+        .split(encodeURIComponent(callerKey)).join("[REDACTED]");
+    }
+    return result;
   }
 
   function providerMetrics(id) {
@@ -434,8 +457,11 @@ function createExternalServicesController({
         const contentType = response.headers?.get?.("content-type") || "";
         if (contentType.includes("json")) modelCount = countModels(await response.clone().json());
       } catch {}
+      const toleratesApplicationResponse = id === "commandcode-proxy"
+        || id === "paseo"
+        || id === "anneal";
       const reachable = response.ok
-        || (id === "commandcode-proxy" && response.status >= 400 && response.status < 500);
+        || (toleratesApplicationResponse && response.status >= 400 && response.status < 500);
       runtime.set(id, {
         ...runtime.get(id),
         status: reachable ? "ready" : "error",
@@ -457,7 +483,7 @@ function createExternalServicesController({
         latencyMs: Date.now() - started,
         statusCode: null,
         modelCount: null,
-        error: error instanceof Error ? error.message : String(error),
+        error: redactServiceSecrets(error instanceof Error ? error.message : String(error)),
       });
     } finally {
       clearTimeout(timer);
@@ -621,6 +647,17 @@ function createExternalServicesController({
     };
   }
 
+  function runtimeEnvironment() {
+    const router = state.services["codex-router"];
+    const commandCode = state.services["commandcode-proxy"];
+    const callerKey = secretFor("codex-router").callerKey;
+    return Object.freeze({
+      CODING_TOOLS_CODEX_ROUTER_URL: router.endpoint.replace(/\/$/, ""),
+      ...(callerKey ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey } : {}),
+      CODING_TOOLS_COMMANDCODE_URL: commandCode.endpoint.replace(/\/$/, ""),
+    });
+  }
+
   function upstreamConfiguration(idValue) {
     const id = requiredServiceId(idValue);
     if (id !== "paseo" && id !== "anneal") {
@@ -659,6 +696,7 @@ function createExternalServicesController({
     stop,
     restart,
     syncCodexRouter,
+    runtimeEnvironment,
     upstreamConfiguration,
     dispose,
   });
