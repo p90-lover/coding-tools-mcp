@@ -7,10 +7,12 @@ on:
       - fix/v0.7.0-rc.2-provider-execution-gates
       - 'integration/v0.7.0-rc.*'
       - 'release/codex-router-multiprovider-0.7.0-rc.*'
+      - 'fix/rc7-complete-five-stack-integration'
     paths:
       - 'aiTemp/rc7-commandcode/apply_commandcode.py'
       - 'aiTemp/rc7-commandcode/fix_materializer.py'
       - 'aiTemp/rc7-upstream-tools/apply_upstream_tools.py'
+      - 'desktop-electron/electron/main-with-provider.cjs'
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/provider-bootstrap.cjs'
       - 'desktop-electron/electron/provider-execution-router.cjs'
@@ -29,6 +31,7 @@ on:
       - 'desktop-electron/vendor/upstream/**'
       - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
       - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
+      - 'desktop-electron/tests/five-stack-managed-integration.test.cjs'
       - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
       - 'desktop-electron/tests/provider-console-saas.test.cjs'
       - 'desktop-electron/tests/provider-execution-router.test.cjs'
@@ -45,6 +48,7 @@ on:
       - 'aiTemp/rc7-commandcode/apply_commandcode.py'
       - 'aiTemp/rc7-commandcode/fix_materializer.py'
       - 'aiTemp/rc7-upstream-tools/apply_upstream_tools.py'
+      - 'desktop-electron/electron/main-with-provider.cjs'
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/provider-bootstrap.cjs'
       - 'desktop-electron/electron/provider-execution-router.cjs'
@@ -63,6 +67,7 @@ on:
       - 'desktop-electron/vendor/upstream/**'
       - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
       - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
+      - 'desktop-electron/tests/five-stack-managed-integration.test.cjs'
       - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
       - 'desktop-electron/tests/provider-console-saas.test.cjs'
       - 'desktop-electron/tests/provider-execution-router.test.cjs'
@@ -123,6 +128,7 @@ jobs:
           node --test \
             desktop-electron/tests/commandcode-provider-session.test.cjs \
             desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/five-stack-managed-integration.test.cjs \
             desktop-electron/tests/provider-center-account-wiring.test.cjs \
             desktop-electron/tests/provider-console-saas.test.cjs \
             desktop-electron/tests/provider-execution-router.test.cjs \
