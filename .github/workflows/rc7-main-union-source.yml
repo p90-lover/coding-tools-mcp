@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      RELEASE_BRANCH: release/codex-router-multiprovider-0.7.0-rc.6
+      RELEASE_BRANCH: release/codex-router-multiprovider-0.7.0-rc.7
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -64,7 +64,7 @@ jobs:
         run: mkdir -p aiTemp/rc7-main-union/renderer-dist aiTemp/Trash/rc7-main-union
 
       - id: compose
-        name: Apply exact verified provider release snapshot to current main
+        name: Apply exact verified rc.7 provider release snapshot to current main
         shell: bash
         run: |
           set -euo pipefail
@@ -75,6 +75,8 @@ jobs:
           main_sha="$(git rev-parse origin/main)"
           head_sha="$(git rev-parse HEAD)"
           marker='aiTemp/rc7-main-union/applied-release-sha.txt'
+          release_workflow_archive='aiTemp/Trash/rc7-main-union/release-workflows'
+          workflow_preservation_record='aiTemp/rc7-main-union/preserved-release-workflows.txt'
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
@@ -145,8 +147,36 @@ jobs:
             exit 1
           fi
 
+          # GitHub Actions' repository token cannot create or update workflow
+          # files. Keep this branch's already-authorized workflow tree exactly
+          # unchanged, and preserve every differing release workflow under
+          # aiTemp/Trash instead of deleting or discarding it.
+          mkdir -p "$release_workflow_archive"
+          : > "$workflow_preservation_record"
+          while IFS= read -r workflow_path; do
+            [[ -n "$workflow_path" ]] || continue
+            if git cat-file -e "$release_sha:$workflow_path" 2>/dev/null; then
+              archived="$release_workflow_archive/$workflow_path"
+              mkdir -p "$(dirname "$archived")"
+              git show "$release_sha:$workflow_path" > "$archived"
+              printf '%s -> %s\n' "$workflow_path" "$archived" \
+                >> "$workflow_preservation_record"
+            fi
+          done < <(
+            git diff --name-only "$head_sha" "$release_sha" -- .github/workflows |
+              LC_ALL=C sort -u
+          )
+
+          git restore --source="$head_sha" --staged --worktree -- .github/workflows
+          git add -f "$release_workflow_archive" "$workflow_preservation_record"
+          if git diff --cached --name-only -- .github/workflows | grep -q .; then
+            echo 'The snapshot still attempts to mutate GitHub workflow files:' >&2
+            git diff --cached --name-only -- .github/workflows >&2
+            exit 1
+          fi
+
           printf '%s\n' "$release_sha" > "$marker"
-          git add "$marker"
+          git add -f "$marker"
           echo "merge_pending=true" >> "$GITHUB_OUTPUT"
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
@@ -158,18 +188,59 @@ jobs:
           MAIN_SHA: ${{ steps.compose.outputs.main_sha }}
         run: |
           set -euo pipefail
+          release_workflow_archive='aiTemp/Trash/rc7-main-union/release-workflows'
+          unpreserved_release='aiTemp/rc7-main-union/unpreserved-release-deletions.txt'
+          unpreserved_main='aiTemp/rc7-main-union/unpreserved-main-deletions.txt'
+          preserved_workflow_deletions='aiTemp/rc7-main-union/preserved-workflow-deletions.txt'
+
           if [[ "${{ steps.compose.outputs.merge_pending }}" == 'true' ]]; then
-            deleted_from_release="$(git diff --cached --name-only --diff-filter=D "$RELEASE_SHA")"
-            deleted_from_main="$(git diff --cached --name-only --diff-filter=D "$MAIN_SHA")"
+            git diff --cached --name-only --diff-filter=D "$RELEASE_SHA" \
+              > aiTemp/rc7-main-union/release-deletions.txt
+            git diff --cached --name-only --diff-filter=D "$MAIN_SHA" \
+              > aiTemp/rc7-main-union/main-deletions.txt
           else
-            deleted_from_release="$(git diff --name-only --diff-filter=D "$RELEASE_SHA" HEAD)"
-            deleted_from_main="$(git diff --name-only --diff-filter=D "$MAIN_SHA" HEAD)"
+            git diff --name-only --diff-filter=D "$RELEASE_SHA" HEAD \
+              > aiTemp/rc7-main-union/release-deletions.txt
+            git diff --name-only --diff-filter=D "$MAIN_SHA" HEAD \
+              > aiTemp/rc7-main-union/main-deletions.txt
           fi
-          if [[ -n "$deleted_from_release" || -n "$deleted_from_main" ]]; then
-            echo 'The snapshot would delete a path retained by one source tip:' >&2
-            printf 'From release:\n%s\nFrom main:\n%s\n' "$deleted_from_release" "$deleted_from_main" >&2
+
+          : > "$unpreserved_release"
+          : > "$unpreserved_main"
+          : > "$preserved_workflow_deletions"
+
+          while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            if [[ "$path" == .github/workflows/* ]] &&
+               [[ -f "$release_workflow_archive/$path" ]]; then
+              printf '%s -> %s\n' "$path" "$release_workflow_archive/$path" \
+                >> "$preserved_workflow_deletions"
+            else
+              printf '%s\n' "$path" >> "$unpreserved_release"
+            fi
+          done < aiTemp/rc7-main-union/release-deletions.txt
+
+          while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            printf '%s\n' "$path" >> "$unpreserved_main"
+          done < aiTemp/rc7-main-union/main-deletions.txt
+
+          if [[ -s "$unpreserved_release" || -s "$unpreserved_main" ]]; then
+            echo 'The snapshot would discard an unpreserved path from a source tip:' >&2
+            printf '%s\n' 'From release:' >&2
+            cat "$unpreserved_release" >&2
+            printf '%s\n' 'From main:' >&2
+            cat "$unpreserved_main" >&2
             exit 1
           fi
+
+          test -z "$(git diff --cached --name-only -- .github/workflows)"
+          git add -f \
+            aiTemp/rc7-main-union/release-deletions.txt \
+            aiTemp/rc7-main-union/main-deletions.txt \
+            "$unpreserved_release" \
+            "$unpreserved_main" \
+            "$preserved_workflow_deletions"
           git diff --check
 
       - name: Run main-line release, OAuth, and Codex contracts
@@ -253,10 +324,14 @@ jobs:
               "$ORIGINAL_HEAD" "$remote_head"
             exit 0
           fi
-          git diff --cached --check -- src-tauri aiTemp/rc7-main-union/applied-release-sha.txt
+          test -z "$(git diff --cached --name-only -- .github/workflows)"
+          git diff --cached --check -- \
+            src-tauri \
+            aiTemp/rc7-main-union \
+            aiTemp/Trash/rc7-main-union/release-workflows
           git commit \
-            -m 'integrate(rc7): apply verified provider release snapshot to current main' \
-            -m "Apply release SHA $RELEASE_SHA onto main SHA $MAIN_SHA as a push-safe file snapshot. The release branch retains full history; this commit retains all files from both source tips, hardened OAuth/Codex/listener changes, full Provider Hub/Codex Router/Paseo/Anneal/updater behavior, and deterministic Rust formatting without re-exporting historical synthetic credential fixtures."
+            -m 'integrate(rc7): apply verified rc.7 provider snapshot to current main' \
+            -m "Apply release SHA $RELEASE_SHA onto main SHA $MAIN_SHA as a push-safe file snapshot. The release branch retains full history; this commit retains all non-workflow files and archives every differing release workflow under aiTemp/Trash without mutating the authorized workflow tree."
           git push origin HEAD:${GITHUB_REF_NAME}
 
       - name: Preserve transient build material in Trash
