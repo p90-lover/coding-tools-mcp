@@ -39,6 +39,50 @@ function patchMain() {
       "browser host declaration",
     );
   }
+
+  if (!content.includes('managedRoot: path.join(app.getPath("userData"), "upstream")')) {
+    content = replaceOnce(
+      content,
+      `  upstreamToolController = createUpstreamToolController({
+    env: process.env,
+    logger,
+    openExternal: openWebUrl,
+  });`,
+      `  upstreamToolController = createUpstreamToolController({
+    env: process.env,
+    logger,
+    managedRoot: path.join(app.getPath("userData"), "upstream"),
+    openExternal: openWebUrl,
+    platform: process.platform,
+    resourcesPath: process.resourcesPath,
+  });`,
+      "upstream controller construction",
+    );
+  }
+
+  if (!content.includes('handle("launcher:upstream-tool-provision"')) {
+    content = replaceOnce(
+      content,
+      `  handle("launcher:upstream-tools-snapshot", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.snapshot();
+  });
+`,
+      `  handle("launcher:upstream-tools-snapshot", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.snapshot();
+  });
+  handle("launcher:upstream-tool-provision", (event, toolId) => {
+    assertFocusedMainWindow(event, true);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.provision(toolId);
+  });
+`,
+      "upstream provision IPC",
+    );
+  }
   write(relativePath, content);
 }
 
@@ -149,5 +193,79 @@ function patchProviderNetwork() {
   write(relativePath, content);
 }
 
+function patchPreload() {
+  const relativePath = "desktop-electron/electron/preload.cjs";
+  let content = read(relativePath);
+  if (!content.includes("provisionUpstreamTool:")) {
+    content = replaceOnce(
+      content,
+      '  upstreamToolsSnapshot: () => ipcRenderer.invoke("launcher:upstream-tools-snapshot"),\n',
+      '  upstreamToolsSnapshot: () => ipcRenderer.invoke("launcher:upstream-tools-snapshot"),\n  provisionUpstreamTool: (toolId) => ipcRenderer.invoke("launcher:upstream-tool-provision", toolId),\n',
+      "upstream provision preload",
+    );
+  }
+  write(relativePath, content);
+}
+
+function patchTypes() {
+  const relativePath = "desktop-electron/src/types.ts";
+  let content = read(relativePath);
+  if (!content.includes('| "subagent";')) {
+    content = replaceOnce(
+      content,
+      '  | "update";\n',
+      '  | "update"\n  | "subagent";\n',
+      "subagent proxy scope",
+    );
+  }
+  if (!content.includes('ProviderExecutionWorkload = "subagent"')) {
+    content = replaceOnce(
+      content,
+      'export type ProviderExecutionWorkload = "paseo" | "anneal";',
+      'export type ProviderExecutionWorkload = "subagent" | "paseo" | "anneal";',
+      "provider execution workload",
+    );
+  }
+  if (!content.includes("export type UpstreamToolRuntimeMode")) {
+    content = replaceOnce(
+      content,
+      'export type UpstreamToolId = "anneal" | "paseo";\n',
+      'export type UpstreamToolId = "anneal" | "paseo";\nexport type UpstreamToolRuntimeMode = "packaged" | "managed" | "external" | "unavailable";\n',
+      "upstream runtime mode type",
+    );
+  }
+  if (!content.includes("runtimeMode: UpstreamToolRuntimeMode")) {
+    content = replaceOnce(
+      content,
+      `  sourceConfigured: boolean;
+  sourceAvailable: boolean;
+}`,
+      `  sourceConfigured: boolean;
+  sourceAvailable: boolean;
+  sourcePath: string | null;
+  runtimeMode: UpstreamToolRuntimeMode;
+  managedRoot: string;
+  prerequisites: string[];
+  platforms: string[];
+  supported: boolean;
+  provisionable: boolean;
+  provisioning: boolean;
+}`,
+      "upstream snapshot runtime fields",
+    );
+  }
+  if (!content.includes("provisionUpstreamTool(toolId")) {
+    content = replaceOnce(
+      content,
+      '  upstreamToolsSnapshot(): Promise<UpstreamToolsSnapshot>;\n',
+      '  upstreamToolsSnapshot(): Promise<UpstreamToolsSnapshot>;\n  provisionUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;\n',
+      "upstream provision API type",
+    );
+  }
+  write(relativePath, content);
+}
+
 patchMain();
 patchProviderNetwork();
+patchPreload();
+patchTypes();
