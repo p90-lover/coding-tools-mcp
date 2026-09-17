@@ -4,9 +4,8 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[2]
-OLD = "0.7.0-rc.6"
 NEW = "0.7.0-rc.7"
-OLD_PATTERN = re.compile(r"0\.7\.0-rc\.6(?!\.\d)")
+ACTIVE_OLD_PATTERN = re.compile(r"0\.7\.0-rc\.(?:5|6(?:\.1)?)(?!\.\d)")
 
 REQUIRED_VERSION_PATHS = [
     "desktop-electron/package.json",
@@ -27,24 +26,28 @@ changed: list[str] = []
 for relative in REQUIRED_VERSION_PATHS + OPTIONAL_VERSION_PATHS:
     path = ROOT / relative
     text = path.read_text(encoding="utf-8")
-    if OLD_PATTERN.search(text):
-        updated, replacements = OLD_PATTERN.subn(NEW, text)
+    if ACTIVE_OLD_PATTERN.search(text):
+        updated, replacements = ACTIVE_OLD_PATTERN.subn(NEW, text)
         if replacements < 1:
             raise SystemExit(f"Release identity did not change in {relative}")
         path.write_text(updated, encoding="utf-8")
         changed.append(relative)
         continue
     if relative in REQUIRED_VERSION_PATHS and NEW not in text:
-        raise SystemExit(f"Missing required release identity anchor in {relative}")
+        raise SystemExit(f"Missing active release identity anchor in {relative}")
 
 installer_test = ROOT / "desktop-electron/tests/installer-upgrade-migration.test.cjs"
 installer_source = installer_test.read_text(encoding="utf-8")
-installer_source = installer_source.replace(
+for old_workflow in (
     "codex-router-multiprovider-release-rc6-csc.yml",
-    "codex-router-multiprovider-release-rc7.yml",
-)
-installer_source = installer_source.replace("rc.6 reinstall", "rc.7 reinstall")
-installer_source = installer_source.replace("rc.6 keeps", "rc.7 keeps")
+    "codex-router-multiprovider-release-rc6.yml",
+):
+    installer_source = installer_source.replace(
+        old_workflow,
+        "codex-router-multiprovider-release-rc7.yml",
+    )
+installer_source = re.sub(r"rc\.(?:5|6) reinstall", "rc.7 reinstall", installer_source)
+installer_source = re.sub(r"rc\.(?:5|6) keeps", "rc.7 keeps", installer_source)
 installer_test.write_text(installer_source, encoding="utf-8")
 if "desktop-electron/tests/installer-upgrade-migration.test.cjs" not in changed:
     changed.append("desktop-electron/tests/installer-upgrade-migration.test.cjs")
@@ -53,8 +56,8 @@ for relative in REQUIRED_VERSION_PATHS:
     text = (ROOT / relative).read_text(encoding="utf-8")
     if NEW not in text:
         raise SystemExit(f"New release identity missing from {relative}")
-    if OLD_PATTERN.search(text):
-        raise SystemExit(f"Old active release identity remains in {relative}")
+    if ACTIVE_OLD_PATTERN.search(text):
+        raise SystemExit(f"Stale active release identity remains in {relative}")
 
 notes = ROOT / "docs/releases/v0.7.0-rc.7.md"
 notes.parent.mkdir(parents=True, exist_ok=True)
