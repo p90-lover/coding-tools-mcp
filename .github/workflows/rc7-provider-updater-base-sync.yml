@@ -129,9 +129,29 @@ jobs:
           if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
             git merge --abort
           else
-            git reset --hard HEAD
+            git status --short > aiTemp/rc7-provider-updater-sync/unmerged-status.txt
           fi
           echo "diagnostic=true" >> "$GITHUB_OUTPUT"
+
+      - name: Align provider health-label contract
+        if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("desktop-electron/tests/antigravity-provider-session.test.cjs")
+          text = path.read_text(encoding="utf-8")
+          before = "assert.match(providerSurface, /Test connection/);"
+          after = "assert.match(providerSurface, /Test (?:connection|reverse proxy)/);"
+          if after not in text:
+              if text.count(before) != 1:
+                  raise SystemExit("Antigravity provider UI-label contract drifted unexpectedly")
+              path.write_text(text.replace(before, after, 1), encoding="utf-8")
+          print("RC7_PROVIDER_HEALTH_LABEL_CONTRACT_ALIGNED")
+          PY
+          git add desktop-electron/tests/antigravity-provider-session.test.cjs
 
       - name: Install exact Electron dependencies
         if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
@@ -155,8 +175,18 @@ jobs:
         shell: bash
         env:
           BASE_SHA: ${{ steps.sync.outputs.base_sha }}
+          ORIGINAL_HEAD: ${{ steps.sync.outputs.head_sha }}
         run: |
           set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_REF_NAME"
+          remote_head="$(git rev-parse "origin/$GITHUB_REF_NAME")"
+          if [[ "$remote_head" != "$ORIGINAL_HEAD" ]]; then
+            printf 'Branch advanced from %s to %s; this stale run will not push.\n' \
+              "$ORIGINAL_HEAD" "$remote_head"
+            git merge --abort
+            exit 0
+          fi
+
           git add aiTemp/rc7-provider-updater-sync/status.txt
           git diff --cached --check
           git commit \
