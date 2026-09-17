@@ -19,8 +19,8 @@ function readInstallerInclude() {
   return fs.readFileSync(includePath, "utf8");
 }
 
-test("rc.5 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
-  assert.equal(manifest.version, "0.7.0-rc.5");
+test("rc.6 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
+  assert.equal(manifest.version, "0.7.0-rc.6");
   assert.equal(manifest.build.appId, "dev.codingtools.fullharness");
   assert.equal(manifest.build.productName, "Coding Tools");
   assert.equal(manifest.build.nsis.guid, "3cb2ea96-3319-55b8-95a5-7f180a5f3ed4");
@@ -91,14 +91,14 @@ test("the release gate runs a real no-delete Windows old-install to reinstall mi
     "..",
     ".github",
     "workflows",
-    "v0.7-installer-upgrade-migration.yml",
+    "codex-router-multiprovider-release-rc6.yml",
   );
   const workflow = fs.readFileSync(workflowPath, "utf8");
   assert.match(workflow, /windows-latest/);
   assert.match(workflow, /installer-upgrade-migration\.test\.cjs/);
   assert.match(workflow, /legacy-uninstall-fixture/i);
   assert.match(workflow, /\/S/);
-  assert.match(workflow, /Coding\.Tools_0\.7\.0-rc\.5_windows_x64_setup\.exe/);
+  assert.match(workflow, /Coding\.Tools_0\.7\.0-rc\.6_windows_x64_setup\.exe/);
   assert.match(workflow, /CODING_TOOLS_LEGACY_TRASH_DIR/);
   assert.match(workflow, /Move-Item/);
   assert.match(workflow, /legacyUninstallerPreserved/);
