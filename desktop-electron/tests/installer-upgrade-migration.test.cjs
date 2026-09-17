@@ -19,8 +19,8 @@ function readInstallerInclude() {
   return fs.readFileSync(includePath, "utf8");
 }
 
-test("rc.5 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
-  assert.equal(manifest.version, "0.7.0-rc.5");
+test("rc.7 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
+  assert.equal(manifest.version, "0.7.0-rc.7");
   assert.equal(manifest.build.appId, "dev.codingtools.fullharness");
   assert.equal(manifest.build.productName, "Coding Tools");
   assert.equal(manifest.build.nsis.guid, "3cb2ea96-3319-55b8-95a5-7f180a5f3ed4");

@@ -14,7 +14,7 @@ const {
   findWindowsInstaller,
 } = require("../scripts/verify-package.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.5";
+const PRODUCT_VERSION = "0.7.0-rc.7";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
