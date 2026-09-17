@@ -97,7 +97,7 @@
       "guid": "3cb2ea96-3319-55b8-95a5-7f180a5f3ed4",
       "oneClick": false,
       "perMachine": false,
-      "allowElevation": false,
+      "allowElevation": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "runAfterFinish": true,
