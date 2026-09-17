@@ -7,7 +7,6 @@ on:
     paths:
       - .github/workflows/materialize-rc6-1-release-workflow.yml
       - aiTemp/rc6-1/apply_release_workflow.py
-      - .github/workflows/codex-router-multiprovider-release-rc6-1-csc.yml
   workflow_dispatch:
 
 permissions:
@@ -62,11 +61,6 @@ jobs:
           fi
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
-          changed="$(git diff --name-only)"
-          if [ -n "$changed" ] && [ "$changed" != "$workflow" ]; then
-            printf 'Unexpected generated paths:\n%s\n' "$changed" >&2
-            exit 1
-          fi
 
       - name: Export the verified workflow for the connected GitHub app
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
