@@ -60,20 +60,32 @@ internal static class LegacyUninstallFixture
         int processId = Process.GetCurrentProcess().Id;
         string currentExecutable = Assembly.GetExecutingAssembly().Location;
         string retainedUninstaller = Path.Combine(trash, "uninstall.exe");
-        string script = "$ErrorActionPreference='Stop'; Wait-Process -Id "
-            + processId
-            + "; Move-Item -LiteralPath "
-            + PowerShellLiteral(currentExecutable)
-            + " -Destination "
-            + PowerShellLiteral(retainedUninstaller);
+        string retentionLog = Path.Combine(trash, "legacy-uninstall-retention.log");
+        string script = "$ErrorActionPreference='Stop'; "
+            + "Wait-Process -Id " + processId + " -ErrorAction SilentlyContinue; "
+            + "$deadline=(Get-Date).AddSeconds(60); "
+            + "while ((Test-Path -LiteralPath " + PowerShellLiteral(currentExecutable)
+            + ") -and (Get-Date) -lt $deadline) { "
+            + "try { Move-Item -LiteralPath " + PowerShellLiteral(currentExecutable)
+            + " -Destination " + PowerShellLiteral(retainedUninstaller)
+            + " -Force; break } catch { Start-Sleep -Milliseconds 250 } }; "
+            + "if (Test-Path -LiteralPath " + PowerShellLiteral(currentExecutable)
+            + ") { throw 'legacy uninstaller could not be moved to retained storage' }; "
+            + "Set-Content -LiteralPath " + PowerShellLiteral(retentionLog)
+            + " -Value 'LEGACY_UNINSTALLER_RETAINED' -Encoding UTF8";
         string encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-        Process.Start(new ProcessStartInfo
+        string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        string powershell = Path.Combine(
+            systemDirectory,
+            @"WindowsPowerShell\v1.0\powershell.exe");
+        Process child = Process.Start(new ProcessStartInfo
         {
-            FileName = "pwsh.exe",
-            Arguments = "-NoProfile -NonInteractive -EncodedCommand " + encodedScript,
+            FileName = powershell,
+            Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " + encodedScript,
             CreateNoWindow = true,
             UseShellExecute = false,
         });
+        if (child == null) return 42;
         return 0;
     }
 }
