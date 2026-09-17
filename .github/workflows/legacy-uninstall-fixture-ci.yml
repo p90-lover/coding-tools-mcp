@@ -1,0 +1,86 @@
+name: Legacy uninstall fixture contract
+
+on:
+  push:
+    branches:
+      - fix/rc6-legacy-uninstall-fixture-csc
+    paths:
+      - .github/workflows/codex-router-multiprovider-release-rc6.yml
+      - .github/workflows/legacy-uninstall-fixture-ci.yml
+      - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
+      - desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.6
+    paths:
+      - .github/workflows/codex-router-multiprovider-release-rc6.yml
+      - .github/workflows/legacy-uninstall-fixture-ci.yml
+      - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
+      - desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legacy-uninstall-fixture-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          clean: false
+
+      - name: Run legacy fixture regression contract
+        run: node --test desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
+
+      - name: Enforce no file deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          deleted="$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
+          test -z "$deleted"
+
+  windows-fixture:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          clean: false
+
+      - name: Compile and execute the retained legacy fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-fixture-ci'
+          $trash = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\Trash\legacy-fixture-ci'
+          & "$env:GITHUB_WORKSPACE\desktop-electron\scripts\create-legacy-uninstall-fixture.ps1" `
+            -RootPath $root `
+            -TrashPath $trash
+
+          $install = Join-Path $root 'Coding Tools MCP'
+          $marker = Join-Path $root 'legacy-uninstaller-ran.txt'
+          $uninstaller = Join-Path $install 'uninstall.exe'
+          $env:CODING_TOOLS_LEGACY_UNINSTALL_MARKER = $marker
+          $env:CODING_TOOLS_LEGACY_INSTALL_LOCATION = $install
+          $env:CODING_TOOLS_LEGACY_TRASH_DIR = $trash
+
+          $process = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "fixture exited with $($process.ExitCode)" }
+          if (-not (Test-Path -LiteralPath $marker)) { throw 'fixture marker was not written' }
+          if (Test-Path -LiteralPath (Join-Path $install 'legacy-app.bin')) { throw 'legacy payload was not retained' }
+          if (-not (Test-Path -LiteralPath (Join-Path $trash 'legacy-app.bin'))) { throw 'retained payload is missing' }
+
+          $deadline = (Get-Date).AddSeconds(15)
+          while ((Test-Path -LiteralPath $uninstaller) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 250
+          }
+          if (Test-Path -LiteralPath $uninstaller) { throw 'fixture uninstaller was not moved to Trash' }
+          if (-not (Test-Path -LiteralPath (Join-Path $trash 'uninstall.exe'))) { throw 'retained uninstaller is missing' }
