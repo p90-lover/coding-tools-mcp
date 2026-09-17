@@ -1,0 +1,82 @@
+name: Materialize rc.6.1 exact release pipeline
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.6.1
+    paths:
+      - .github/workflows/materialize-rc6-1-release-workflow.yml
+      - aiTemp/rc6-1/apply_release_workflow.py
+      - .github/workflows/codex-router-multiprovider-release-rc6-1-csc.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-rc6-1-release-workflow
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: release/codex-router-multiprovider-0.7.0-rc.6.1
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - name: Prepare retained evidence root
+        run: mkdir -p aiTemp/rc6-1/evidence aiTemp/Trash/rc6-1
+
+      - name: Generate the exact rc.6.1 pipeline from the proven rc.6 workflow
+        run: |
+          set -euo pipefail
+          python aiTemp/rc6-1/apply_release_workflow.py \
+            | tee aiTemp/rc6-1/evidence/release-workflow-materializer.txt
+          grep -E 'RC6_1_RELEASE_WORKFLOW_(MATERIALIZED|ALREADY_MATERIALIZED)' \
+            aiTemp/rc6-1/evidence/release-workflow-materializer.txt
+
+      - name: Verify the generated release workflow contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/codex-router-multiprovider-release-rc6-1-csc.yml
+          test -s "$workflow"
+          grep -F 'release/codex-router-multiprovider-0.7.0-rc.6.1' "$workflow"
+          grep -F "RELEASE_VERSION: '0.7.0-rc.6.1'" "$workflow"
+          grep -F 'RELEASE_TAG: v0.7.0-rc.6.1' "$workflow"
+          grep -F 'Coding.Tools_0.7.0-rc.6.1_windows_x64_setup.exe' "$workflow"
+          grep -F 'desktop-electron/tests/antigravity-session-binding.test.cjs' "$workflow"
+          grep -F 'desktop-electron/tests/antigravity-provider-session.test.cjs' "$workflow"
+          grep -F 'docs/releases/v0.7.0-rc.6.1.md' "$workflow"
+          if grep -Fq "RELEASE_VERSION: '0.7.0-rc.6'" "$workflow"; then
+            echo 'Stale rc.6 release version remains in generated workflow.' >&2
+            exit 1
+          fi
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          changed="$(git diff --name-only)"
+          if [ -n "$changed" ] && [ "$changed" != "$workflow" ]; then
+            printf 'Unexpected generated paths:\n%s\n' "$changed" >&2
+            exit 1
+          fi
+
+      - name: Commit the verified release pipeline
+        run: |
+          set -euo pipefail
+          git add .github/workflows/codex-router-multiprovider-release-rc6-1-csc.yml
+          if git diff --cached --quiet; then
+            echo RC6_1_RELEASE_WORKFLOW_ALREADY_COMMITTED
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'ci(rc6.1): add exact-source Windows release pipeline'
+          git push origin HEAD:refs/heads/release/codex-router-multiprovider-0.7.0-rc.6.1
