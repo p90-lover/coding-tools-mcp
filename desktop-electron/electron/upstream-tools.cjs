@@ -283,10 +283,43 @@ function createUpstreamToolController({
   async function stop(toolId) {
     requireTool(toolId);
     const child = processes.get(toolId);
-    if (child && !child.killed) child.kill("SIGTERM");
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const exited = await new Promise((resolve) => {
+        let settled = false;
+        let timer = null;
+        const finish = (value) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          child.removeListener("exit", onExit);
+          child.removeListener("error", onError);
+          resolve(value);
+        };
+        const onExit = () => finish(true);
+        const onError = () => finish(true);
+        child.once("exit", onExit);
+        child.once("error", onError);
+        timer = setTimeout(() => finish(false), 5_000);
+        timer.unref?.();
+        try {
+          if (!child.kill("SIGTERM")) finish(false);
+        } catch {
+          finish(false);
+        }
+      });
+      if (!exited && child.exitCode === null && child.signalCode === null) {
+        try { child.kill("SIGKILL"); } catch {}
+      }
+    }
     processes.delete(toolId);
     publish(toolId, { status: "offline", pid: null, checkedAt: now(), error: null });
     return project(toolId);
+  }
+
+  async function restart(toolId) {
+    requireTool(toolId);
+    await stop(toolId);
+    return start(toolId);
   }
 
   function dispose() {
@@ -303,6 +336,7 @@ function createUpstreamToolController({
     setEndpoint,
     start,
     stop,
+    restart,
     openEmbeddedTool,
     openExternalTool,
     dispose,

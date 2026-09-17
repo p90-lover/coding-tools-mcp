@@ -26,7 +26,27 @@ function toolFrom(snapshot: UpstreamToolsSnapshot | null, toolId: UpstreamToolId
   return snapshot?.tools.find((candidate) => candidate.id === toolId) ?? null;
 }
 
-function sectionLabel(section: string): string {
+const SECTION_LABELS: Readonly<Record<string, readonly [string, string]>> = {
+  tasks: ["Tasks", "任務"],
+  projects: ["Projects", "專案"],
+  agents: ["Agents", "代理"],
+  sessions: ["Sessions", "工作階段"],
+  inbox: ["Inbox", "收件匣"],
+  automations: ["Automations", "自動化"],
+  triggers: ["Triggers", "觸發器"],
+  costs: ["Costs", "成本"],
+  goals: ["Goals", "目標"],
+  connections: ["Connections", "連線"],
+  settings: ["Settings", "設定"],
+  workspaces: ["Workspaces", "工作區"],
+  providers: ["Providers", "供應商"],
+  plugins: ["Plugins", "外掛"],
+  voice: ["Voice", "語音"],
+};
+
+function sectionLabel(language: Language, section: string): string {
+  const labels = SECTION_LABELS[section];
+  if (labels) return localize(language, labels[0], labels[1]);
   return section.replaceAll("-", " ").replace(/(^|\s)\S/g, (value) => value.toUpperCase());
 }
 
@@ -106,9 +126,19 @@ export function UpstreamToolSurface({
     await api.inspectUpstreamTool(toolId);
   });
 
+  const openEmbedded = () => run("open", async () => {
+    await openEmbeddedTool();
+  });
+
   const start = () => run("start", async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
     await api.startUpstreamTool(toolId);
+    await openEmbeddedTool();
+  });
+
+  const restart = () => run("restart", async () => {
+    if (!api) throw new Error("Launcher IPC is unavailable");
+    await api.restartUpstreamTool(toolId);
     await openEmbeddedTool();
   });
 
@@ -146,7 +176,9 @@ export function UpstreamToolSurface({
     <section className="upstream-tool-surface" data-tool={toolId}>
       <header className="upstream-tool-heading">
         <div>
-          <span className="upstream-tool-kicker">PINNED UPSTREAM</span>
+          <span className="upstream-tool-kicker">
+            {localize(language, "PINNED UPSTREAM", "固定上游版本")}
+          </span>
           <h1>{tool.name}</h1>
           <p>
             {localize(
@@ -175,13 +207,16 @@ export function UpstreamToolSurface({
         <button disabled={busy !== null} onClick={() => void probe()} type="button">
           {busy === "probe" ? "…" : localize(language, "Check", "檢查")}
         </button>
-        <button className="primary" disabled={busy !== null} onClick={() => void (ready ? openEmbeddedTool() : start())} type="button">
-          {busy === "start" ? "…" : ready
+        <button className="primary" disabled={busy !== null} onClick={() => void (ready ? openEmbedded() : start())} type="button">
+          {busy === "start" || busy === "open" ? "…" : ready
             ? localize(language, "Open full UI", "開啟完整介面")
             : localize(language, "Start pinned source", "啟動固定版本")}
         </button>
         <button disabled={busy !== null || !ready} onClick={() => void openExternal()} type="button">
           {busy === "external" ? "…" : localize(language, "Open externally", "外部開啟")}
+        </button>
+        <button disabled={busy !== null || tool.pid === null} onClick={() => void restart()} type="button">
+          {busy === "restart" ? "…" : localize(language, "Restart", "重新啟動")}
         </button>
         <button disabled={busy !== null || (!ready && tool.pid === null)} onClick={() => void stop()} type="button">
           {busy === "stop" ? "…" : localize(language, "Stop", "停止")}
@@ -199,7 +234,7 @@ export function UpstreamToolSurface({
             }}
             type="button"
           >
-            {sectionLabel(section)}
+            {sectionLabel(language, section)}
           </button>
         ))}
       </nav>
