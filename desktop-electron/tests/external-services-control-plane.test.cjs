@@ -89,6 +89,8 @@ test("external service settings persist while caller keys stay out of snapshots"
     CODING_TOOLS_CODEX_ROUTER_URL: "http://127.0.0.1:4202",
     CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: "caller_key_abcdefghijklmnopqrstuvwxyz_0123456789",
     CODING_TOOLS_COMMANDCODE_URL: "http://127.0.0.1:9090",
+    CODING_TOOLS_PASEO_EXECUTION_URL: "ws://127.0.0.1:6767/ws",
+    CODING_TOOLS_ANNEAL_EXECUTION_URL: "http://127.0.0.1:3000/",
   });
 
   const inspection = await controller.inspect("codex-router");
@@ -138,6 +140,8 @@ test("environment router settings remain compatible and inspection errors redact
     CODING_TOOLS_CODEX_ROUTER_URL: "http://127.0.0.1:4312",
     CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey,
     CODING_TOOLS_COMMANDCODE_URL: "http://127.0.0.1:9191",
+    CODING_TOOLS_PASEO_EXECUTION_URL: "ws://127.0.0.1:6767/ws",
+    CODING_TOOLS_ANNEAL_EXECUTION_URL: "http://127.0.0.1:3000/",
   });
 
   const inspected = await controller.inspect("codex-router");
