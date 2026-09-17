@@ -104,7 +104,7 @@ test("external service state owns persisted execution endpoints for Paseo and An
     "http://localhost:3100/api/",
   );
   assert.throws(
-    () => controller.configure("paseo", { executionEndpoint: "https://example.com/ws" }),
+    () => controller.configure("paseo", { executionEndpoint: "ws://example.com/ws" }),
     /loopback/i,
   );
   assert.throws(
