@@ -26,6 +26,10 @@ concurrency:
   group: rc7-provider-updater-current-base-union-${{ github.sha }}
   cancel-in-progress: true
 
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc7-provider-updater-union/bun-cache
+  npm_config_cache: ${{ github.workspace }}/aiTemp/rc7-provider-updater-union/npm-cache
+
 jobs:
   compose-and-verify:
     runs-on: ubuntu-24.04
@@ -44,6 +48,10 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
       - name: Record retired union boundary
         shell: bash
         run: |
@@ -56,6 +64,10 @@ jobs:
             echo "source_sha=$GITHUB_SHA"
             echo 'legacy_rc6_union_path=retained-but-disabled'
           } | tee "$evidence/status.txt"
+
+      - name: Install exact renderer test dependencies
+        shell: bash
+        run: bun install --cwd desktop-electron --frozen-lockfile
 
       - name: Validate current provider, proxy, updater, and integration surface
         shell: bash
@@ -91,3 +103,13 @@ jobs:
           path: aiTemp/rc7-provider-updater-union/evidence/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p aiTemp/Trash/rc7-provider-updater-union
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc7-provider-updater-union/node_modules-$GITHUB_RUN_ID"
+          fi
