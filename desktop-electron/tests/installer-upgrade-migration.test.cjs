@@ -85,34 +85,44 @@ test("legacy removal is silent, bounded, fail-closed, and preserves application 
   assert.doesNotMatch(source, /Delete\s+\"?\$LOCALAPPDATA/i);
 });
 
-test("the release gate runs a real no-delete Windows old-install to reinstall migration smoke", () => {
+test("the authoritative release gate runs a real no-delete Windows old-install to reinstall migration smoke", () => {
   const workflowPath = path.resolve(
     desktopRoot,
     "..",
     ".github",
     "workflows",
-    "codex-router-multiprovider-release-rc6.yml",
+    "codex-router-multiprovider-release-rc6-csc.yml",
+  );
+  const fixtureScriptPath = path.resolve(
+    desktopRoot,
+    "scripts",
+    "create-legacy-uninstall-fixture.ps1",
   );
   const workflow = fs.readFileSync(workflowPath, "utf8");
+  const fixtureScript = fs.readFileSync(fixtureScriptPath, "utf8");
+
   assert.match(workflow, /windows-latest/);
   assert.match(workflow, /installer-upgrade-migration\.test\.cjs/);
+  assert.match(workflow, /create-legacy-uninstall-fixture\.ps1/);
   assert.match(workflow, /legacy-uninstall-fixture/i);
   assert.match(workflow, /\/S/);
   assert.match(workflow, /Coding\.Tools_0\.7\.0-rc\.6_windows_x64_setup\.exe/);
   assert.match(workflow, /CODING_TOOLS_LEGACY_TRASH_DIR/);
-  assert.match(workflow, /Move-Item/);
   assert.match(workflow, /legacyUninstallerPreserved/);
+  assert.match(workflow, /git diff --diff-filter=D/);
+
   assert.ok(
-    workflow.includes("Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"),
+    fixtureScript.includes("Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"),
     "the Windows migration fixture must use the built-in Framework64 C# compiler",
   );
-  assert.match(workflow, /\/target:exe/);
-  assert.match(workflow, /\/platform:x64/);
-  assert.match(workflow, /csc-output\.txt/);
+  assert.match(fixtureScript, /\/target:exe/);
+  assert.match(fixtureScript, /\/out:/);
+  assert.match(fixtureScript, /Wait-Process -Id/);
+  assert.match(fixtureScript, /Move-Item/);
+  assert.match(fixtureScript, /LEGACY_FIXTURE_READY/);
   assert.doesNotMatch(
-    workflow,
+    fixtureScript,
     /Add-Type[^\n]*OutputType\s+ConsoleApplication/,
   );
-  assert.doesNotMatch(workflow, /File\.Delete\(/);
-  assert.match(workflow, /git diff --diff-filter=D/);
+  assert.doesNotMatch(fixtureScript, /File\.Delete\(/);
 });
