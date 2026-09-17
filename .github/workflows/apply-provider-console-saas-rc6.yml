@@ -188,18 +188,47 @@ jobs:
           node --check desktop-electron/electron/provider-network.cjs
           node --check desktop-electron/electron/preload.cjs
           bun run --cwd desktop-electron typecheck
+
+          original_dist="aiTemp/Trash/provider-console-rc6/original-dist-$GITHUB_RUN_ID"
+          validated_dist="aiTemp/Trash/provider-console-rc6/validated-renderer-$GITHUB_RUN_ID"
+          had_original_dist=false
+          if [ -d desktop-electron/dist ]; then
+            mv desktop-electron/dist "$original_dist"
+            had_original_dist=true
+          fi
+
+          restore_original_dist() {
+            if [ -d desktop-electron/dist ]; then
+              mv desktop-electron/dist "$validated_dist"
+            fi
+            if [ "$had_original_dist" = true ] && [ -d "$original_dist" ]; then
+              mv "$original_dist" desktop-electron/dist
+            fi
+          }
+          trap restore_original_dist EXIT
+
           (
             cd desktop-electron
             bunx vite build
           )
           node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+          restore_original_dist
+          trap - EXIT
 
       - name: Enforce no file deletion
         shell: bash
         run: |
           set -euo pipefail
-          test -z "$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
-          test -z "$(git diff --diff-filter=D --name-only)"
+          committed_deleted="$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
+          working_deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$committed_deleted" ]; then
+            printf 'Deleted paths in latest commit are forbidden:\n%s\n' "$committed_deleted" >&2
+            exit 1
+          fi
+          if [ -n "$working_deleted" ]; then
+            printf 'Deleted working-tree paths are forbidden:\n%s\n' "$working_deleted" >&2
+            exit 1
+          fi
 
       - name: Commit verified current-base composition
         if: github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.7.0-rc.6-provider-console-saas-current'
