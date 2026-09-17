@@ -189,7 +189,8 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.match(main, /launcher:external-service-configure/);
   assert.match(main, /launcher:codex-router-sync/);
   assert.match(runtimeSupervisor, /getRuntimeEnvironment/);
-  assert.match(runtimeSupervisor, /\.\.\.this\.getRuntimeEnvironment\(\)/);
+  assert.match(runtimeSupervisor, /const suppliedRuntimeEnvironment = this\.getRuntimeEnvironment\(\)/);
+  assert.match(runtimeSupervisor, /\.\.\.runtimeEnvironment/);
   assert.match(preload, /externalServicesSnapshot/);
   assert.match(preload, /configureExternalService/);
   assert.match(preload, /syncCodexRouter/);
