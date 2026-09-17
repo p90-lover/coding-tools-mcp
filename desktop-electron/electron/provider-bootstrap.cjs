@@ -6,6 +6,11 @@ const { createProviderExecutionPlan } = require("./provider-execution-router.cjs
 const { resolveLauncherProfile } = require("./profile.cjs");
 
 let providerNetworkControllerPromise = null;
+let providerBrowserHostResolver = () => null;
+
+function setProviderBrowserHostResolver(resolver) {
+  providerBrowserHostResolver = typeof resolver === "function" ? resolver : () => null;
+}
 
 function providerNetworkReady() {
   if (!providerNetworkControllerPromise) {
@@ -47,7 +52,7 @@ function installProviderNetwork({
     controller = createProviderNetworkController({
       app,
       browserPartition: launcherProfile.browserPartition,
-      getBrowserHost: () => null,
+      getBrowserHost: () => providerBrowserHostResolver(),
       logger,
       safeStorage,
       session,
@@ -80,6 +85,55 @@ function installProviderNetwork({
     return publish(snapshot);
   }
 
+  function browserProviderAccount(active, accountId) {
+    const account = active.store.snapshot().accounts.find((candidate) => (
+      candidate.id === accountId && !candidate.archivedAt
+    ));
+    return account && (account.providerId === "codex-oauth" || account.providerId === "chatgpt-web")
+      ? account
+      : null;
+  }
+
+  async function syncBrowserProviderAccount(active, accountId, { openLogin = false } = {}) {
+    const account = browserProviderAccount(active, accountId);
+    if (!account) throw new Error("Browser provider account was not found");
+    const browserHost = providerBrowserHostResolver();
+    if (!browserHost) throw new Error("Browser provider login is unavailable");
+
+    let browser;
+    try {
+      browser = openLogin
+        ? await browserHost.openLogin()
+        : await browserHost.probeAuthentication();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      const snapshot = active.store.updateAccountConnection(account.id, {
+        status: openLogin ? "pending" : "expired",
+        error: message,
+      });
+      const error = cause instanceof Error ? cause : new Error(message);
+      error.snapshot = snapshot;
+      throw error;
+    }
+
+    if (browser?.authenticated !== true) {
+      const message = "ChatGPT browser session is not authenticated";
+      const snapshot = active.store.updateAccountConnection(account.id, {
+        status: openLogin ? "pending" : "expired",
+        error: message,
+      });
+      const error = new Error(message);
+      error.snapshot = snapshot;
+      throw error;
+    }
+
+    const snapshot = active.store.updateAccountConnection(account.id, {
+      status: "connected",
+      error: undefined,
+    });
+    return { browser, snapshot };
+  }
+
   handle("launcher:provider-snapshot", (active) => active.store.snapshot());
   handle("launcher:provider-execution-plan", (active, _event, input) => (
     createProviderExecutionPlan(active.store.snapshot(), input)
@@ -101,13 +155,31 @@ function installProviderNetwork({
     () => active.store.archiveAccount(accountId),
   ));
   handle("launcher:provider-login", async (active, _event, accountId) => {
+    if (browserProviderAccount(active, accountId)) {
+      try {
+        const result = await syncBrowserProviderAccount(active, accountId, { openLogin: true });
+        publish(result.snapshot);
+        return { opened: true, mode: "embedded", ...result };
+      } catch (error) {
+        if (error?.snapshot) publish(error.snapshot);
+        throw error;
+      }
+    }
     const result = await active.openProviderLogin(accountId);
     if (result?.snapshot) publish(result.snapshot);
     return result;
   });
-  handle("launcher:provider-account-probe", async (active, _event, accountId) => (
-    publish(await active.probeProviderAccount(accountId))
-  ));
+  handle("launcher:provider-account-probe", async (active, _event, accountId) => {
+    if (browserProviderAccount(active, accountId)) {
+      try {
+        return publish((await syncBrowserProviderAccount(active, accountId)).snapshot);
+      } catch (error) {
+        if (error?.snapshot) publish(error.snapshot);
+        throw error;
+      }
+    }
+    return publish(await active.probeProviderAccount(accountId));
+  });
   handle("launcher:provider-session-import", async (active, _event, accountId) => (
     publish(await active.importProviderSession(accountId))
   ));
@@ -152,4 +224,5 @@ function installProviderNetwork({
 module.exports = {
   installProviderNetwork,
   providerNetworkReady,
+  setProviderBrowserHostResolver,
 };
