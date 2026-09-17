@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: materialize-rc6-1-release-workflow
@@ -30,7 +30,7 @@ jobs:
           ref: release/codex-router-multiprovider-0.7.0-rc.6.1
           fetch-depth: 0
           clean: false
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Prepare retained evidence root
         run: mkdir -p aiTemp/rc6-1/evidence aiTemp/Trash/rc6-1
@@ -68,15 +68,10 @@ jobs:
             exit 1
           fi
 
-      - name: Commit the verified release pipeline
-        run: |
-          set -euo pipefail
-          git add .github/workflows/codex-router-multiprovider-release-rc6-1-csc.yml
-          if git diff --cached --quiet; then
-            echo RC6_1_RELEASE_WORKFLOW_ALREADY_COMMITTED
-            exit 0
-          fi
-          git config user.name 'p90-lover'
-          git config user.email '146848721+p90-lover@users.noreply.github.com'
-          git commit -m 'ci(rc6.1): add exact-source Windows release pipeline'
-          git push origin HEAD:refs/heads/release/codex-router-multiprovider-0.7.0-rc.6.1
+      - name: Export the verified workflow for the connected GitHub app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rc6-1-exact-release-workflow-${{ github.sha }}
+          path: .github/workflows/codex-router-multiprovider-release-rc6-1-csc.yml
+          if-no-files-found: error
+          retention-days: 14
