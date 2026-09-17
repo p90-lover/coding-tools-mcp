@@ -43,10 +43,17 @@ test("main, preload, types, and renderer expose the same upstream runtime surfac
   const surface = read("src/features/UpstreamToolSurface.tsx");
 
   assert.match(main, /launcher:upstream-tool-restart/);
-  assert.match(main, /upstreamToolController\.restart\(toolId\)/);
+  assert.match(
+    main,
+    /handle\("launcher:upstream-tool-restart",[\s\S]*?assertFocusedMainWindow\(event, true\);[\s\S]*?upstreamToolController\.restart\(toolId\)/,
+  );
   assert.match(main, /upstreamToolController\.openEmbeddedTool\(toolId, section\)/);
   assert.match(main, /upstreamToolController\.openExternalTool\(toolId, section\)/);
-  assert.match(preload, /restartUpstreamTool/);
+  assert.match(main, /upstreamToolController\?\.dispose\(\)/);
+  assert.match(
+    preload,
+    /restartUpstreamTool:\s*\(toolId\)\s*=>\s*ipcRenderer\.invoke\("launcher:upstream-tool-restart", toolId\)/,
+  );
   assert.match(types, /restartUpstreamTool\(toolId: UpstreamToolId\)/);
   assert.match(app, /<UpstreamToolSurface/);
   assert.match(surface, /restartUpstreamTool/);
