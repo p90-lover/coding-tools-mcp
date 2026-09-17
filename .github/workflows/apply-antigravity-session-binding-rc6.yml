@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/apply-antigravity-session-binding-rc6.yml
       - aiTemp/antigravity-session-binding/apply_patch.py
+      - aiTemp/antigravity-session-binding/apply_connected_binding.py
       - desktop-electron/electron/provider-network.cjs
       - desktop-electron/tests/antigravity-session-binding.test.cjs
   workflow_dispatch:
@@ -66,13 +67,17 @@ jobs:
           printf 'EXPECTED_RED_STATUS=%s\n' "$status" \
             | tee aiTemp/antigravity-session-binding/evidence/red-state.txt
 
-      - name: Apply the retained binding patch
+      - name: Apply the retained binding patches
         run: |
           set -euo pipefail
           python aiTemp/antigravity-session-binding/apply_patch.py \
             | tee aiTemp/antigravity-session-binding/evidence/materializer.txt
           grep -E 'ANTIGRAVITY_SESSION_BINDING_PATCH_(APPLIED|ALREADY_APPLIED)' \
             aiTemp/antigravity-session-binding/evidence/materializer.txt
+          python aiTemp/antigravity-session-binding/apply_connected_binding.py \
+            | tee aiTemp/antigravity-session-binding/evidence/connected-binding.txt
+          grep -E 'ANTIGRAVITY_CONNECTED_BINDING_(APPLIED|ALREADY_APPLIED)' \
+            aiTemp/antigravity-session-binding/evidence/connected-binding.txt
 
       - name: Check the bounded source diff
         run: |
