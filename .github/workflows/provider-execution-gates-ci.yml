@@ -1,5 +1,6 @@
 name: Provider Execution Gates CI
 
+# Exact-head gate for Provider Hub, CommandCode, Paseo, Anneal, and updater integration.
 on:
   push:
     branches:
