@@ -35,9 +35,37 @@
     "connections": "/connections",
     "settings": "/settings"
   },
+  "runtime": {
+    "managed": true,
+    "platforms": ["darwin", "linux"],
+    "prerequisites": [
+      "Git",
+      "Node.js 22.13 or newer",
+      "npm 10.9.2 or newer",
+      "Docker Compose",
+      "Official Codex CLI"
+    ],
+    "provisionCommands": [
+      { "executable": "npm", "arguments": ["ci"] },
+      { "executable": "npm", "arguments": ["run", "setup:local"] },
+      { "executable": "npm", "arguments": ["run", "build"] },
+      {
+        "executable": "docker",
+        "arguments": ["compose", "up", "-d", "--wait", "--wait-timeout", "60", "postgres"]
+      },
+      {
+        "executable": "npm",
+        "arguments": ["run", "db:migrate:release", "--", "--fresh"]
+      }
+    ]
+  },
   "launch": {
-    "executable": "npm",
-    "arguments": ["run", "dev:web"],
+    "processes": [
+      { "executable": "npm", "arguments": ["run", "dev:api"] },
+      { "executable": "npm", "arguments": ["run", "dev:web"] },
+      { "executable": "npm", "arguments": ["run", "dev:runner"] },
+      { "executable": "npm", "arguments": ["run", "dev:inbox"] }
+    ],
     "workingDirectoryEnvironment": "CODING_TOOLS_ANNEAL_HOME"
   }
 }
