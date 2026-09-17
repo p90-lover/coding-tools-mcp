@@ -102,6 +102,17 @@ test("the release gate runs a real no-delete Windows old-install to reinstall mi
   assert.match(workflow, /CODING_TOOLS_LEGACY_TRASH_DIR/);
   assert.match(workflow, /Move-Item/);
   assert.match(workflow, /legacyUninstallerPreserved/);
+  assert.ok(
+    workflow.includes("Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"),
+    "the Windows migration fixture must use the built-in Framework64 C# compiler",
+  );
+  assert.match(workflow, /\/target:exe/);
+  assert.match(workflow, /\/platform:x64/);
+  assert.match(workflow, /csc-output\.txt/);
+  assert.doesNotMatch(
+    workflow,
+    /Add-Type[^\n]*OutputType\s+ConsoleApplication/,
+  );
   assert.doesNotMatch(workflow, /File\.Delete\(/);
   assert.match(workflow, /git diff --diff-filter=D/);
 });
