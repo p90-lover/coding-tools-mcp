@@ -1,0 +1,44 @@
+name: rc.7 package publish boundary
+
+on:
+  push:
+    branches:
+      - fix/rc7-electron-builder-publish-boundary
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.7
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc7-package-publish-boundary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Run package publication-boundary contract
+        run: node --test desktop-electron/tests/package-publish-boundary.test.cjs desktop-electron/tests/packaging-contract.test.cjs
+      - name: Validate packaging script syntax
+        run: node --check desktop-electron/scripts/package.cjs
+      - name: Enforce no deleted paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_ref='origin/release/codex-router-multiprovider-0.7.0-rc.7'
+          deleted="$(git diff -M --diff-filter=D --name-only "$base_ref"...HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
