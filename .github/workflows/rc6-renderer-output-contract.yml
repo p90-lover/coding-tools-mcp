@@ -1,0 +1,48 @@
+name: rc.6 renderer output contract
+
+on:
+  push:
+    branches:
+      - fix/rc6-renderer-bundle-release-path
+    paths:
+      - '.github/workflows/codex-router-multiprovider-release-rc6-csc.yml'
+      - '.github/workflows/rc6-renderer-output-contract.yml'
+      - 'desktop-electron/tests/rc6-renderer-output-contract.test.cjs'
+  pull_request:
+    paths:
+      - '.github/workflows/codex-router-multiprovider-release-rc6-csc.yml'
+      - '.github/workflows/rc6-renderer-output-contract.yml'
+      - 'desktop-electron/tests/rc6-renderer-output-contract.test.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc6-renderer-output-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Prepare retained temporary root
+        run: mkdir -p aiTemp/rc6-renderer-output aiTemp/Trash/rc6-renderer-output
+
+      - name: Verify release renderer path contract
+        run: node --test desktop-electron/tests/rc6-renderer-output-contract.test.cjs
+
+      - name: Enforce no file deletion
+        if: always()
+        run: |
+          deleted="$(git diff -M --diff-filter=D --name-only HEAD^ HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
