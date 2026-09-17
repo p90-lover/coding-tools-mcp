@@ -188,7 +188,10 @@ jobs:
           node --check desktop-electron/electron/provider-network.cjs
           node --check desktop-electron/electron/preload.cjs
           bun run --cwd desktop-electron typecheck
-          bunx --cwd desktop-electron vite build
+          (
+            cd desktop-electron
+            bunx vite build
+          )
           node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
 
       - name: Enforce no file deletion
