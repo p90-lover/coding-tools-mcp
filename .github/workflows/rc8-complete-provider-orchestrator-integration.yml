@@ -1,0 +1,33 @@
+name: rc.8 complete provider and orchestrator integration
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.8-complete-provider-orchestrator-integration
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.7
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc8-complete-provider-orchestrator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run complete integration contract
+        run: node --test desktop-electron/tests/complete-provider-orchestrator-integration.test.cjs
