@@ -14,6 +14,10 @@ const catalog = fs.readFileSync(
   path.join(root, "src/providers/provider-types.ts"),
   "utf8",
 );
+const metadata = fs.readFileSync(
+  path.join(root, "src/providers/provider-console-metadata.ts"),
+  "utf8",
+);
 const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
 
 test("Provider Hub exposes every requested OAuth and reverse-proxy provider", () => {
@@ -24,12 +28,18 @@ test("Provider Hub exposes every requested OAuth and reverse-proxy provider", ()
     "cliproxyapi-antigravity",
   ]) {
     assert.match(catalog, new RegExp(`id:\\s*["']${providerId}["']`));
+    assert.match(metadata, new RegExp(`["']${providerId}["']`));
   }
 
-  assert.match(surface, /Codex OAuth/);
-  assert.match(surface, /Claude OAuth/);
-  assert.match(surface, /CommandCode Proxy/);
-  assert.match(surface, /Gemini Antigravity Reverse Proxy/);
+  for (const providerName of [
+    "Codex OAuth",
+    "Claude OAuth",
+    "CommandCode Proxy",
+    "Gemini Antigravity Reverse Proxy",
+  ]) {
+    assert.match(surface, new RegExp(providerName));
+    assert.match(metadata, new RegExp(providerName));
+  }
   assert.match(surface, /PROVIDER_CATALOG\.map|PROVIDER_CATALOG\.filter/);
 });
 
