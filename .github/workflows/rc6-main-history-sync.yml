@@ -136,6 +136,18 @@ jobs:
           test -z "$(git diff --diff-filter=U --name-only)"
           git diff --cached --check
 
+      - name: Apply deterministic union blocker repairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc6-main-union/apply-union-fixes.py \
+            2>&1 | tee aiTemp/evidence/rc6-main-union/union-fixes.txt
+          grep -F 'RC6_MAIN_UNION_FIXES_OK' \
+            aiTemp/evidence/rc6-main-union/union-fixes.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+          test -z "$(git diff --diff-filter=U --name-only)"
+          git diff --check
+
       - name: Install exact locked dependencies
         shell: bash
         run: |
