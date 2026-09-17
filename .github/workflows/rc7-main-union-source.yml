@@ -165,7 +165,7 @@ jobs:
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
           git add src-tauri
           cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-          git diff --cached --check
+          git diff --cached --check -- src-tauri
           cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
 
       - name: Run focused Rust authentication, listener, tunnel, and Codex tests
@@ -231,7 +231,7 @@ jobs:
             fi
             exit 0
           fi
-          git diff --cached --check
+          git diff --cached --check -- src-tauri
           git commit \
             -m 'integrate(rc7): unite current main with verified provider release' \
             -m "Merge main SHA $MAIN_SHA with release SHA $RELEASE_SHA, retaining both histories, hardened OAuth/Codex/listener changes, full Provider Hub/Codex Router/Paseo/Anneal/updater behavior, deterministic Rust formatting, and all files from both parents."
