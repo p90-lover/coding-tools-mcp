@@ -57,26 +57,27 @@ required = (
     "desktop-electron/electron/upstream-tools.cjs",
     "git diff --diff-filter=D",
 )
-for marker in required:
-    if marker not in workflow:
-        raise SystemExit(f"RC7_RELEASE_REQUIRED_MARKER_MISSING:{marker}")
 
-if re.search(r"0\.7\.0-rc\.6(?!\.\d)", workflow):
-    raise SystemExit("RC7_RELEASE_STALE_VERSION_REMAINS")
-if "codex-router-multiprovider-release-rc6-csc.yml" in workflow:
-    raise SystemExit("RC7_RELEASE_STALE_WORKFLOW_REMAINS")
+
+def validate(candidate: str) -> None:
+    for marker in required:
+        if marker not in candidate:
+            raise SystemExit(f"RC7_RELEASE_REQUIRED_MARKER_MISSING:{marker}")
+    if re.search(r"0\.7\.0-rc\.6(?!\.\d)", candidate):
+        raise SystemExit("RC7_RELEASE_STALE_VERSION_REMAINS")
+    if "codex-router-multiprovider-release-rc6-csc.yml" in candidate:
+        raise SystemExit("RC7_RELEASE_STALE_WORKFLOW_REMAINS")
+
 
 if TARGET.exists():
     current = TARGET.read_text(encoding="utf-8")
-    if current == workflow:
-        print("RC7_RELEASE_WORKFLOW_ALREADY_MATERIALIZED")
-        print(f"SHA256 {sha256(workflow.encode()).hexdigest()}")
-        raise SystemExit(0)
-    TRASH.mkdir(parents=True, exist_ok=True)
-    retained = TRASH / f"{TARGET.stem}-{sha256(current.encode()).hexdigest()[:12]}.yml"
-    if not retained.exists():
-        TARGET.replace(retained)
+    validate(current)
+    print("RC7_RELEASE_WORKFLOW_ALREADY_MATERIALIZED")
+    print(f"SHA256 {sha256(current.encode()).hexdigest()}")
+    print(f"LINES {len(current.splitlines())}")
+    raise SystemExit(0)
 
+validate(workflow)
 TARGET.parent.mkdir(parents=True, exist_ok=True)
 TARGET.write_text(workflow, encoding="utf-8")
 print("RC7_RELEASE_WORKFLOW_READY")
