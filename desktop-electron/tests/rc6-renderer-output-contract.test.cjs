@@ -23,7 +23,8 @@ test("rc.6 release gate builds the renderer at the path inspected by the bundle 
 
   assert.ok(buildStep, "renderer build step is missing");
   assert.match(buildStep[1], /if \[ -d desktop-electron\/dist \]; then/u);
-  assert.match(buildStep[1], /mv desktop-electron\/dist[\s\S]*aiTemp\/Trash/u);
+  assert.match(buildStep[1], /previous="aiTemp\/Trash\/[^\n]+dist-before-\$GITHUB_RUN_ID"/u);
+  assert.match(buildStep[1], /mv desktop-electron\/dist "\$previous"/u);
   assert.match(buildStep[1], /bun run --cwd desktop-electron build/u);
   assert.match(buildStep[1], /renderer-provider-bundle\.test\.cjs/u);
 });
