@@ -284,6 +284,1088 @@
   font-weight: 400;
 }
 
+/* Paseo — session rail, workbench, and inspector follow the upstream desktop
+   information architecture while preserving Coding Tools' routed mission API. */
+.control-surface.paseo-studio {
+  background:
+    radial-gradient(circle at 50% 0%, rgb(91 116 210 / 9%), transparent 42%),
+    var(--background, #111315);
+  display: grid;
+  grid-template-columns: minmax(190px, 232px) minmax(300px, 1fr) minmax(230px, 292px);
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.paseo-session-rail,
+.paseo-inspector {
+  background: color-mix(in srgb, var(--panel-bg, #17191d) 96%, transparent);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.paseo-session-rail {
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 12px;
+}
+
+.paseo-rail-header,
+.paseo-workbench-toolbar,
+.paseo-inspector-header,
+.paseo-mission-hero,
+.paseo-activity-stream > header,
+.anneal-drawer-header,
+.anneal-board-toolbar,
+.anneal-column-head,
+.anneal-heading-actions {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.paseo-rail-header {
+  gap: 10px;
+  padding: 0 5px 14px;
+}
+
+.paseo-rail-header h1,
+.paseo-workbench-toolbar h2,
+.paseo-inspector-header h2,
+.paseo-mission-hero h3,
+.paseo-activity-stream h3,
+.anneal-board-toolbar h2,
+.anneal-drawer-header h2 {
+  margin: 0;
+}
+
+.paseo-rail-header h1 {
+  font-size: 15px;
+  margin-top: 3px;
+}
+
+.paseo-new-session-button,
+.anneal-drawer-header > button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 20px;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+
+.paseo-new-session-card {
+  align-items: center;
+  background: rgb(89 119 255 / 10%);
+  border: 1px solid rgb(104 134 255 / 24%);
+  border-radius: 11px;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  gap: 9px;
+  margin: 0 2px 12px;
+  min-height: 42px;
+  padding: 0 11px;
+  text-align: left;
+}
+
+.paseo-new-session-card > span {
+  color: var(--accent, #8ab4ff);
+  font-size: 18px;
+}
+
+.paseo-session-list {
+  display: grid;
+  gap: 6px;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px;
+}
+
+.paseo-session-item {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 8px minmax(0, 1fr);
+  padding: 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.paseo-session-item:hover,
+.paseo-session-item.is-selected {
+  background: rgb(255 255 255 / 5%);
+  border-color: var(--border-subtle);
+}
+
+.paseo-session-item > em {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-style: normal;
+  grid-column: 2;
+}
+
+.paseo-session-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.paseo-session-copy strong,
+.paseo-session-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paseo-session-copy strong {
+  font-size: 12px;
+}
+
+.paseo-session-copy small,
+.paseo-empty-sessions {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.paseo-empty-sessions {
+  line-height: 1.5;
+  padding: 16px 10px;
+  text-align: center;
+}
+
+.paseo-status-dot,
+.paseo-activity-marker,
+.anneal-column-dot {
+  background: #69707c;
+  border-radius: 999px;
+  display: inline-block;
+  height: 8px;
+  width: 8px;
+}
+
+.paseo-status-dot.is-success,
+.paseo-activity-marker.is-success,
+.paseo-phase-badge.is-success,
+.anneal-phase-label.is-success {
+  background: #3bc982;
+}
+
+.paseo-status-dot.is-warning,
+.paseo-activity-marker.is-warning,
+.paseo-phase-badge.is-warning,
+.anneal-phase-label.is-warning {
+  background: #d9a441;
+}
+
+.paseo-status-dot.is-error,
+.paseo-activity-marker.is-error,
+.paseo-phase-badge.is-error,
+.anneal-phase-label.is-error {
+  background: #ef626c;
+}
+
+.paseo-status-dot.is-running,
+.paseo-activity-marker.is-running,
+.paseo-phase-badge.is-running,
+.anneal-phase-label.is-running {
+  background: #6d8dff;
+  box-shadow: 0 0 0 4px rgb(109 141 255 / 10%);
+}
+
+.paseo-workbench {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.paseo-workbench-toolbar {
+  border-bottom: 1px solid var(--border-subtle);
+  flex: 0 0 auto;
+  gap: 12px;
+  min-height: 66px;
+  padding: 10px 18px;
+}
+
+.paseo-workbench-toolbar > div:first-child {
+  min-width: 0;
+}
+
+.paseo-workbench-toolbar h2 {
+  font-size: 16px;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paseo-workspace-picker {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.paseo-workspace-picker > span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.paseo-workspace-picker select,
+.paseo-meta-chip select,
+.paseo-meta-chip input,
+.anneal-heading-actions select,
+.anneal-route-fields select,
+.anneal-route-fields input {
+  background: var(--input-bg, rgb(14 18 26 / 72%));
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  color: var(--text-primary);
+  min-height: 34px;
+  min-width: 0;
+  padding: 6px 9px;
+}
+
+.paseo-workspace-picker select {
+  max-width: 220px;
+}
+
+.paseo-empty-workspace {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+  overflow: auto;
+  padding: 28px clamp(18px, 5vw, 70px);
+}
+
+.paseo-composer-heading {
+  margin-bottom: 24px;
+  max-width: 670px;
+  text-align: center;
+}
+
+.paseo-composer-heading h2 {
+  font-size: clamp(26px, 3vw, 38px);
+  letter-spacing: -0.035em;
+  margin: 14px 0 8px;
+}
+
+.paseo-composer-heading p {
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.paseo-orbit-mark {
+  display: inline-flex;
+  height: 34px;
+  position: relative;
+  width: 34px;
+}
+
+.paseo-orbit-mark::before,
+.paseo-orbit-mark::after {
+  border: 1px solid rgb(121 145 255 / 55%);
+  border-radius: 50%;
+  content: "";
+  inset: 5px;
+  position: absolute;
+  transform: rotate(38deg) scaleX(1.45);
+}
+
+.paseo-orbit-mark::after {
+  transform: rotate(-38deg) scaleX(1.45);
+}
+
+.paseo-orbit-mark i {
+  background: #89a0ff;
+  border-radius: 50%;
+  height: 5px;
+  left: 15px;
+  position: absolute;
+  top: 15px;
+  width: 5px;
+}
+
+.paseo-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: center;
+  margin-bottom: 10px;
+  max-width: 780px;
+  width: 100%;
+}
+
+.paseo-meta-chip,
+.paseo-fallback-chip {
+  align-items: center;
+  background: rgb(255 255 255 / 3%);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+  padding: 4px 6px 4px 10px;
+}
+
+.paseo-meta-chip > span,
+.paseo-fallback-chip > span {
+  color: var(--text-secondary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.paseo-meta-chip select,
+.paseo-meta-chip input {
+  border: 0;
+  border-radius: 999px;
+  max-width: 165px;
+  min-height: 28px;
+  padding: 4px 7px;
+}
+
+.paseo-fallback-chip {
+  padding-right: 11px;
+}
+
+.paseo-composer {
+  background: color-mix(in srgb, var(--panel-bg, #181b20) 95%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 85%, #6d8dff 15%);
+  border-radius: 18px;
+  box-shadow: 0 22px 70px rgb(0 0 0 / 28%);
+  max-width: 780px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.paseo-composer:focus-within {
+  border-color: rgb(109 141 255 / 52%);
+  box-shadow: 0 22px 70px rgb(0 0 0 / 28%), 0 0 0 3px rgb(109 141 255 / 8%);
+}
+
+.paseo-composer textarea {
+  background: transparent;
+  border: 0;
+  box-sizing: border-box;
+  color: var(--text-primary);
+  font: inherit;
+  line-height: 1.55;
+  min-height: 132px;
+  outline: none;
+  padding: 18px;
+  resize: vertical;
+  width: 100%;
+}
+
+.paseo-composer footer {
+  align-items: center;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.paseo-composer footer > small {
+  color: var(--text-secondary);
+  line-height: 1.4;
+  max-width: 380px;
+}
+
+.paseo-composer footer > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.paseo-submit-button {
+  align-items: center;
+  display: inline-flex;
+  gap: 9px;
+}
+
+.paseo-submit-button > span {
+  opacity: 0.62;
+}
+
+.paseo-provider-warning {
+  color: #e0ad57;
+  font-size: 11px;
+  margin: 12px 0 0;
+  text-align: center;
+}
+
+.paseo-transcript {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 22px;
+}
+
+.paseo-mission-hero {
+  gap: 18px;
+  margin: 0 auto 22px;
+  max-width: 850px;
+}
+
+.paseo-mission-hero h3 {
+  font-size: 22px;
+  margin-top: 10px;
+}
+
+.paseo-mission-hero p {
+  color: var(--text-secondary);
+  margin: 5px 0 0;
+}
+
+.paseo-phase-badge,
+.anneal-phase-label {
+  background: #69707c;
+  border-radius: 999px;
+  color: white;
+  display: inline-flex;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 750;
+  padding: 4px 8px;
+}
+
+.paseo-inline-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
+.paseo-activity-stream {
+  margin: 0 auto;
+  max-width: 850px;
+}
+
+.paseo-activity-stream > header {
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+}
+
+.paseo-activity-stream > header span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.paseo-activity-card {
+  align-items: start;
+  background: rgb(255 255 255 / 2.5%);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 10px minmax(0, 1fr);
+  padding: 16px;
+}
+
+.paseo-activity-marker {
+  margin-top: 5px;
+}
+
+.paseo-activity-card p,
+.paseo-activity-card small {
+  color: var(--text-secondary);
+  margin: 5px 0 0;
+}
+
+.paseo-inline-notice {
+  margin-top: 14px;
+}
+
+.paseo-inspector {
+  border-left: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+}
+
+.paseo-inspector-header {
+  border-bottom: 1px solid var(--border-subtle);
+  gap: 12px;
+  min-height: 66px;
+  padding: 10px 14px;
+}
+
+.paseo-inspector-header h2 {
+  font-size: 13px;
+}
+
+.paseo-inspector-header > div {
+  background: rgb(0 0 0 / 18%);
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  display: flex;
+  padding: 2px;
+}
+
+.paseo-inspector-header button {
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 6px 9px;
+}
+
+.paseo-inspector-header button.is-active {
+  background: rgb(255 255 255 / 8%);
+  color: var(--text-primary);
+}
+
+.paseo-inspector-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.paseo-route-ready {
+  background: rgb(59 201 130 / 10%);
+  border: 1px solid rgb(59 201 130 / 20%);
+  border-radius: 9px;
+  color: #7de0ae;
+  display: block;
+  font-size: 10px;
+  margin-bottom: 13px;
+  padding: 8px 9px;
+}
+
+.paseo-detail-list,
+.anneal-task-details {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.paseo-detail-list > div,
+.anneal-task-details > div {
+  border-bottom: 1px solid var(--border-subtle);
+  display: grid;
+  gap: 4px;
+  padding: 11px 0;
+}
+
+.paseo-detail-list dt,
+.anneal-task-details dt {
+  color: var(--text-secondary);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.paseo-detail-list dd,
+.anneal-task-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.paseo-inspector-empty {
+  color: var(--text-secondary);
+  line-height: 1.55;
+  margin: 0;
+  padding: 24px 18px;
+}
+
+/* Anneal — five-column task board with a selected-task dispatch drawer. */
+.control-surface.anneal-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 22px 24px 20px;
+}
+
+.anneal-heading {
+  flex: 0 0 auto;
+  margin-bottom: 16px;
+  max-width: none;
+  width: 100%;
+}
+
+.anneal-heading h1 {
+  font-size: clamp(27px, 3vw, 38px);
+}
+
+.anneal-heading-actions {
+  gap: 9px;
+}
+
+.anneal-heading-actions label {
+  display: grid;
+  gap: 4px;
+}
+
+.anneal-heading-actions label > span {
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+
+.anneal-heading-actions select {
+  max-width: 260px;
+  min-width: 180px;
+}
+
+.anneal-board-layout {
+  display: grid;
+  flex: 1;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) minmax(270px, 330px);
+  min-height: 0;
+}
+
+.anneal-board-shell {
+  background: color-mix(in srgb, var(--panel-bg, #17191d) 92%, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: 17px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.anneal-board-toolbar {
+  border-bottom: 1px solid var(--border-subtle);
+  flex: 0 0 auto;
+  min-height: 54px;
+  padding: 10px 14px;
+}
+
+.anneal-board-toolbar > div {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.anneal-board-toolbar h2 {
+  font-size: 14px;
+}
+
+.anneal-board-toolbar span {
+  align-items: center;
+  background: rgb(255 255 255 / 7%);
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 9px;
+  height: 20px;
+  justify-content: center;
+  min-width: 20px;
+  padding: 0 5px;
+}
+
+.anneal-board-toolbar p {
+  color: #e0ad57;
+  font-size: 10px;
+  margin: 0;
+}
+
+.anneal-board {
+  display: grid;
+  flex: 1;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(210px, 1fr));
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+.anneal-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  min-width: 0;
+}
+
+.anneal-column-head {
+  flex: 0 0 auto;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 3px 8px;
+}
+
+.anneal-column-head strong {
+  font-size: 11px;
+}
+
+.anneal-column-head em {
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-style: normal;
+  margin-left: auto;
+}
+
+.anneal-column.is-backlog .anneal-column-dot {
+  background: #7a808b;
+}
+
+.anneal-column.is-todo .anneal-column-dot {
+  background: #6288ff;
+}
+
+.anneal-column.is-doing .anneal-column-dot {
+  background: #d9a441;
+}
+
+.anneal-column.is-review .anneal-column-dot {
+  background: #a779ea;
+}
+
+.anneal-column.is-done .anneal-column-dot {
+  background: #3bc982;
+}
+
+.anneal-column-body {
+  background: rgb(255 255 255 / 1.7%);
+  border: 1px solid var(--border-subtle);
+  border-radius: 13px;
+  display: grid;
+  gap: 8px;
+  min-height: 180px;
+  padding: 8px;
+  align-content: start;
+}
+
+.anneal-task-card {
+  background: color-mix(in srgb, var(--panel-bg, #191c21) 97%, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  gap: 7px;
+  padding: 11px;
+  text-align: left;
+  width: 100%;
+}
+
+.anneal-task-card:hover,
+.anneal-task-card.is-selected {
+  border-color: rgb(105 136 255 / 44%);
+  box-shadow: 0 7px 22px rgb(0 0 0 / 16%);
+  transform: translateY(-1px);
+}
+
+.anneal-card-state {
+  color: var(--text-secondary);
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.anneal-task-card strong {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.anneal-task-card p {
+  color: var(--text-secondary);
+  display: -webkit-box;
+  font-size: 9px;
+  line-height: 1.45;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.anneal-task-card footer {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.anneal-task-card code {
+  color: var(--text-secondary);
+  font-size: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.anneal-empty-column {
+  color: var(--text-secondary);
+  font-size: 9px;
+  line-height: 1.45;
+  margin: 0;
+  padding: 20px 8px;
+  text-align: center;
+}
+
+.anneal-dispatch-drawer {
+  background: color-mix(in srgb, var(--panel-bg, #17191d) 96%, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: 17px;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.anneal-dispatch-drawer.is-empty {
+  align-items: center;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+}
+
+.anneal-dispatch-drawer.is-empty h2 {
+  color: var(--text-primary);
+  font-size: 15px;
+  margin: 12px 0 5px;
+}
+
+.anneal-dispatch-drawer.is-empty p {
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 220px;
+}
+
+.anneal-empty-drawer-mark {
+  align-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  display: inline-flex;
+  font-size: 24px;
+  height: 48px;
+  justify-content: center;
+  width: 48px;
+}
+
+.anneal-drawer-header {
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.anneal-drawer-header h2 {
+  font-size: 16px;
+  line-height: 1.35;
+  margin-top: 5px;
+}
+
+.anneal-task-details {
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 16px;
+  padding-bottom: 5px;
+}
+
+.anneal-task-details dd {
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.anneal-dispatch-section,
+.anneal-related-section {
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 0 0 16px;
+}
+
+.anneal-related-section {
+  border-bottom: 0;
+  padding-top: 16px;
+}
+
+.anneal-dispatch-section h3,
+.anneal-related-section h3 {
+  font-size: 12px;
+  margin: 0 0 10px;
+}
+
+.anneal-engine-toggle {
+  background: rgb(0 0 0 / 18%);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  display: grid;
+  gap: 3px;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 12px;
+  padding: 3px;
+}
+
+.anneal-engine-toggle button {
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 9px;
+  min-height: 31px;
+  padding: 5px 7px;
+}
+
+.anneal-engine-toggle button.is-active {
+  background: rgb(109 141 255 / 16%);
+  color: #cbd4ff;
+}
+
+.anneal-route-fields {
+  display: grid;
+  gap: 9px;
+}
+
+.anneal-route-fields label {
+  display: grid;
+  gap: 5px;
+}
+
+.anneal-route-fields label > span {
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+
+.anneal-fallback-row > span {
+  font-size: 9px !important;
+}
+
+.anneal-dispatch-actions {
+  margin-top: 12px;
+}
+
+.anneal-route-preview {
+  font-size: 10px;
+}
+
+.anneal-related-section .mission-row {
+  padding: 9px;
+}
+
+.anneal-related-section .mission-row strong {
+  font-size: 10px;
+}
+
+.anneal-phase-label {
+  color: white !important;
+  font-size: 8px !important;
+  white-space: nowrap;
+}
+
+.anneal-inline-notice {
+  font-size: 10px;
+  margin-top: 14px;
+}
+
+@media (max-width: 1180px) {
+  .control-surface.paseo-studio {
+    grid-template-columns: minmax(176px, 205px) minmax(290px, 1fr) minmax(210px, 248px);
+  }
+
+  .paseo-workspace-picker > span {
+    display: none;
+  }
+
+  .anneal-board-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(250px, 290px);
+  }
+}
+
+@media (max-width: 900px) {
+  .control-surface.paseo-studio {
+    grid-template-columns: 184px minmax(0, 1fr);
+  }
+
+  .paseo-inspector {
+    display: none;
+  }
+
+  .paseo-meta-row {
+    justify-content: flex-start;
+  }
+
+  .anneal-board-layout {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .anneal-board-shell {
+    min-height: 430px;
+  }
+
+  .anneal-dispatch-drawer {
+    min-height: 340px;
+  }
+}
+
+@media (max-width: 720px) {
+  .control-surface.paseo-studio {
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .paseo-session-rail {
+    border-bottom: 1px solid var(--border-subtle);
+    border-right: 0;
+    flex: 0 0 auto;
+    max-height: 220px;
+  }
+
+  .paseo-workbench {
+    min-height: 560px;
+  }
+
+  .paseo-workbench-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .paseo-workspace-picker {
+    order: 3;
+    width: 100%;
+  }
+
+  .paseo-workspace-picker select {
+    max-width: none;
+    width: 100%;
+  }
+
+  .paseo-composer footer,
+  .control-heading.anneal-heading,
+  .anneal-heading-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .paseo-composer footer > div {
+    justify-content: flex-end;
+  }
+
+  .control-surface.anneal-shell {
+    overflow: auto;
+    padding: 18px;
+  }
+
+  .anneal-heading-actions select {
+    max-width: none;
+    width: 100%;
+  }
+}
+
 @media (max-width: 980px) {
   .control-grid.two-column,
   .control-grid.proxy-grid,
