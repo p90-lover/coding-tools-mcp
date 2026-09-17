@@ -1,0 +1,123 @@
+name: rc.8 external services control plane
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.8-external-services-control-plane
+    paths:
+      - '.github/workflows/rc8-external-services-control-plane.yml'
+      - 'desktop-electron/electron/**'
+      - 'desktop-electron/src/**'
+      - 'desktop-electron/tests/external-services-control-plane.test.cjs'
+      - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
+      - 'desktop-electron/vendor/upstream/**'
+      - 'desktop-electron/scripts/package.cjs'
+      - 'docs/superpowers/specs/2026-09-18-external-services-control-plane-design.md'
+      - 'docs/superpowers/plans/2026-09-18-external-services-control-plane.md'
+  pull_request:
+    paths:
+      - '.github/workflows/rc8-external-services-control-plane.yml'
+      - 'desktop-electron/electron/**'
+      - 'desktop-electron/src/**'
+      - 'desktop-electron/tests/external-services-control-plane.test.cjs'
+      - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
+      - 'desktop-electron/vendor/upstream/**'
+      - 'desktop-electron/scripts/package.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc8-external-services-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc8-external-services/bun-cache
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          clean: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: |
+          mkdir -p \
+            aiTemp/rc8-external-services/renderer-dist \
+            aiTemp/rc8-external-services/evidence \
+            aiTemp/Trash/rc8-external-services
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run external-service and integration contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/upstream-tool-runtime.test.cjs \
+            2>&1 | tee aiTemp/rc8-external-services/evidence/contracts.txt
+
+      - name: Validate runtime syntax
+        run: |
+          node --check desktop-electron/electron/external-services.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/preload.cjs
+          node --check desktop-electron/electron/upstream-tools.cjs
+
+      - name: Typecheck and build isolated renderer
+        run: |
+          set -euo pipefail
+          bun run --cwd desktop-electron typecheck
+          renderer_dir="$GITHUB_WORKSPACE/aiTemp/rc8-external-services/renderer-dist"
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_dir" --emptyOutDir false
+          )
+          CODING_TOOLS_RENDERER_DIST="$renderer_dir" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+
+      - name: Enforce no-delete contract
+        run: |
+          set -euo pipefail
+          git diff --check
+          base='origin/release/codex-router-multiprovider-0.7.0-rc.7'
+          git fetch --no-tags origin \
+            +refs/heads/release/codex-router-multiprovider-0.7.0-rc.7:refs/remotes/origin/release/codex-router-multiprovider-0.7.0-rc.7
+          merge_base="$(git merge-base "$base" HEAD)"
+          test -n "$merge_base"
+          test -z "$(git diff --diff-filter=D --name-only "$merge_base"..HEAD)"
+          printf 'base=%s\nmerge_base=%s\nhead=%s\n' \
+            "$base" "$merge_base" "$(git rev-parse HEAD)" \
+            | tee aiTemp/rc8-external-services/evidence/no-delete.txt
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc8-external-services/node_modules-$GITHUB_RUN_ID"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc8-external-services-${{ github.sha }}
+          path: aiTemp/rc8-external-services/evidence/
+          if-no-files-found: warn
+          retention-days: 14
