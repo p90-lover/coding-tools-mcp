@@ -1,0 +1,75 @@
+name: rc.7 delegated release gate contract
+
+on:
+  push:
+    branches:
+      - fix/rc7-release-gate-delegation-contract
+    paths:
+      - .github/workflows/rc7-release-gate-contract.yml
+      - .github/workflows/codex-router-multiprovider-release-rc7.yml
+      - aiTemp/rc7-release/run-windows-release.mjs
+      - aiTemp/rc7-release/verify-windows-migration.ps1
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.7
+    paths:
+      - .github/workflows/rc7-release-gate-contract.yml
+      - .github/workflows/codex-router-multiprovider-release-rc7.yml
+      - aiTemp/rc7-release/run-windows-release.mjs
+      - aiTemp/rc7-release/verify-windows-migration.ps1
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc7-release-gate-contract-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Delegated exact-source migration gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Validate release runners and migration contract
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc7-release-gate/evidence
+          node --check aiTemp/rc7-release/run-windows-release.mjs
+          node --test desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            2>&1 | tee aiTemp/rc7-release-gate/evidence/contract.txt
+          grep -F '# pass 5' aiTemp/rc7-release-gate/evidence/contract.txt
+          grep -F '# fail 0' aiTemp/rc7-release-gate/evidence/contract.txt
+
+      - name: Enforce safe diff
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.7 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.7...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.7...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc7-release-gate-contract-${{ github.sha }}
+          path: aiTemp/rc7-release-gate/evidence/
+          if-no-files-found: error
+          retention-days: 14
