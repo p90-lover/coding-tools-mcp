@@ -9,18 +9,23 @@ on:
     paths:
       - 'aiTemp/rc7-commandcode/apply_commandcode.py'
       - 'aiTemp/rc7-commandcode/fix_materializer.py'
+      - 'aiTemp/rc7-upstream-tools/apply_upstream_tools.py'
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/provider-bootstrap.cjs'
       - 'desktop-electron/electron/provider-execution-router.cjs'
       - 'desktop-electron/electron/provider-network.cjs'
+      - 'desktop-electron/electron/upstream-tools.cjs'
       - 'desktop-electron/electron/ipc-schema.cjs'
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/src/api/contracts.ts'
       - 'desktop-electron/src/features/ProviderHubSaasSurface.tsx'
       - 'desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx'
+      - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
       - 'desktop-electron/src/features/provider-hub-saas.css'
+      - 'desktop-electron/src/features/upstream-tool.css'
       - 'desktop-electron/src/providers/provider-types.ts'
       - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/vendor/upstream/**'
       - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
       - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
       - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
@@ -30,6 +35,7 @@ on:
       - 'desktop-electron/tests/provider-proxy-domain.test.cjs'
       - 'desktop-electron/tests/proxy-provider-contract.test.cjs'
       - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
+      - 'desktop-electron/tests/upstream-tools.test.cjs'
       - 'desktop-electron/package.json'
       - 'desktop-electron/bun.lock'
       - '.github/workflows/provider-execution-gates-ci.yml'
@@ -37,18 +43,23 @@ on:
     paths:
       - 'aiTemp/rc7-commandcode/apply_commandcode.py'
       - 'aiTemp/rc7-commandcode/fix_materializer.py'
+      - 'aiTemp/rc7-upstream-tools/apply_upstream_tools.py'
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/provider-bootstrap.cjs'
       - 'desktop-electron/electron/provider-execution-router.cjs'
       - 'desktop-electron/electron/provider-network.cjs'
+      - 'desktop-electron/electron/upstream-tools.cjs'
       - 'desktop-electron/electron/ipc-schema.cjs'
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/src/api/contracts.ts'
       - 'desktop-electron/src/features/ProviderHubSaasSurface.tsx'
       - 'desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx'
+      - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
       - 'desktop-electron/src/features/provider-hub-saas.css'
+      - 'desktop-electron/src/features/upstream-tool.css'
       - 'desktop-electron/src/providers/provider-types.ts'
       - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/vendor/upstream/**'
       - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
       - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
       - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
@@ -58,6 +69,7 @@ on:
       - 'desktop-electron/tests/provider-proxy-domain.test.cjs'
       - 'desktop-electron/tests/proxy-provider-contract.test.cjs'
       - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
+      - 'desktop-electron/tests/upstream-tools.test.cjs'
       - 'desktop-electron/package.json'
       - 'desktop-electron/bun.lock'
       - '.github/workflows/provider-execution-gates-ci.yml'
@@ -98,13 +110,14 @@ jobs:
           node --check desktop-electron/electron/provider-bootstrap.cjs
           node --check desktop-electron/electron/provider-execution-router.cjs
           node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/upstream-tools.cjs
           node --check desktop-electron/electron/ipc-schema.cjs
           node --check desktop-electron/electron/preload.cjs
 
       - name: Install exact Electron dependencies
         run: bun install --cwd desktop-electron --frozen-lockfile
 
-      - name: Run focused execution and Provider Hub contracts
+      - name: Run focused execution, Provider Hub, and upstream contracts
         run: |
           node --test \
             desktop-electron/tests/commandcode-provider-session.test.cjs \
@@ -115,7 +128,8 @@ jobs:
             desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
             desktop-electron/tests/provider-proxy-domain.test.cjs \
             desktop-electron/tests/proxy-provider-contract.test.cjs \
-            desktop-electron/tests/rc7-full-integration-contract.test.cjs
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            desktop-electron/tests/upstream-tools.test.cjs
 
       - name: Typecheck Electron renderer
         run: bun run --cwd desktop-electron typecheck
