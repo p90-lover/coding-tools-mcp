@@ -1,0 +1,68 @@
+name: Cancel stale rc.6 release publishers
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.6-provider-console-saas-current
+    paths:
+      - .github/workflows/cancel-stale-rc6-publishers.yml
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cancel-stale-rc6-provider-console-publishers
+  cancel-in-progress: true
+
+jobs:
+  cancel-stale:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Cancel release runs that do not match the current rc.6 branch head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: release/codex-router-multiprovider-0.7.0-rc.6
+          RELEASE_WORKFLOW: codex-router-multiprovider-release-rc6.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/provider-console-rc6/evidence
+          current_sha="$(
+            gh api \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/branches/${RELEASE_BRANCH//\//%2F}" \
+              --jq '.commit.sha'
+          )"
+          test -n "$current_sha"
+
+          runs_json='aiTemp/provider-console-rc6/evidence/rc6-release-runs.json'
+          stale_ids='aiTemp/provider-console-rc6/evidence/stale-rc6-run-ids.txt'
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/${RELEASE_WORKFLOW}/runs?branch=${RELEASE_BRANCH//\//%2F}&per_page=100" \
+            > "$runs_json"
+
+          jq -r --arg sha "$current_sha" '
+            .workflow_runs[]
+            | select(.head_sha != $sha)
+            | select(.status == "queued" or .status == "pending" or .status == "waiting" or .status == "in_progress")
+            | .id
+          ' "$runs_json" | sort -u > "$stale_ids"
+
+          while IFS= read -r run_id; do
+            test -n "$run_id" || continue
+            gh api \
+              --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel"
+            printf 'cancelled=%s\n' "$run_id"
+          done < "$stale_ids"
+
+          printf 'authoritative_sha=%s\n' "$current_sha"
+          printf 'retained_run_ids=%s\n' "$(jq -r --arg sha "$current_sha" '[.workflow_runs[] | select(.head_sha == $sha) | .id] | join(",")' "$runs_json")"
