@@ -58,6 +58,15 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rc6-legacy-fixture-patched-workflow-${{ github.sha }}
+          path: |
+            .github/workflows/codex-router-multiprovider-release-rc6.yml
+            aiTemp/rc6-legacy-fixture/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Commit the verified release-workflow repair
         shell: bash
         run: |
