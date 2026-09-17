@@ -972,6 +972,22 @@ function registerIpc({ logger, stateStore }) {
     logger.info("launcher.logs_exported", { recordCount });
     return result.filePath;
   });
+  handle("launcher:update-check", async () => {
+    if (!updateController) throw new Error("Launcher updates are unavailable");
+    return updateController.checkNow({ force: true });
+  });
+  handle("launcher:update-automatic", async (_event, enabled) => {
+    const state = stateStore.update({ automaticUpdates: enabled === true });
+    send("launcher:state-changed", state);
+    if (state.automaticUpdates && updateController) {
+      void updateController.checkNow({ force: true }).catch((error) => {
+        logger.warn("launcher.update_check_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+    return state;
+  });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
     const launch = await updateController.beginInstall();
@@ -1008,6 +1024,7 @@ async function requestQuit() {
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
+    updateController?.stopPeriodicChecks?.();
     quitting = true;
     await browserHost?.persistSession();
     browserHost?.destroy();
@@ -1183,7 +1200,33 @@ async function start() {
     });
   }
   await loadRenderer(mainWindow);
-  if (!launcherSmokeTest) void updateController.checkOnce();
+  if (!launcherSmokeTest) {
+    const maybeInstallAutomaticUpdate = async (next) => {
+      if (next?.status !== "available" || stateStore.read().automaticUpdates !== true) return;
+      if (runtimeHost?.currentOperation() || browserHost?.currentOperation() || browserHost?.activeTraceId) {
+        logger.info("launcher.automatic_update_deferred", { version: next.version });
+        return;
+      }
+      try {
+        const launch = await updateController.beginInstall();
+        const result = await requestQuit();
+        if (!result.ok) {
+          updateController.cancelInstall(launch);
+          logger.warn("launcher.automatic_update_deferred", {
+            version: next.version,
+            message: result.message,
+          });
+        }
+      } catch (error) {
+        logger.warn("launcher.automatic_update_failed", {
+          version: next.version,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    void updateController.checkNow({ force: true }).then(maybeInstallAutomaticUpdate);
+    updateController.startPeriodicChecks({ onAvailable: maybeInstallAutomaticUpdate });
+  }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
     if (app.isPackaged && !smokeRuntimeRoot) {

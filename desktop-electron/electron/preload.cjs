@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setAccountProxyPolicy: (input) => ipcRenderer.invoke("launcher:proxy-account-policy", input),
   logs: (limit) => ipcRenderer.invoke("launcher:logs", limit),
   exportLogs: () => ipcRenderer.invoke("launcher:export-logs"),
+  checkForUpdates: () => ipcRenderer.invoke("launcher:update-check"),
+  setAutomaticUpdates: (enabled) => ipcRenderer.invoke("launcher:update-automatic", enabled),
   installUpdate: () => ipcRenderer.invoke("launcher:update-install"),
   windowState: () => ipcRenderer.invoke("launcher:window-state"),
   windowControl: (action) => ipcRenderer.send("launcher:window-control", action),
