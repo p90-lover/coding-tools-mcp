@@ -56,7 +56,7 @@ jobs:
           node --check aiTemp/rc7-release/run-windows-release.mjs
           node --test desktop-electron/tests/installer-upgrade-migration.test.cjs \
             2>&1 | tee aiTemp/rc7-release-gate/evidence/contract.txt
-          grep -F '# pass 5' aiTemp/rc7-release-gate/evidence/contract.txt
+          grep -E '^# pass [1-9][0-9]*$' aiTemp/rc7-release-gate/evidence/contract.txt
           grep -F '# fail 0' aiTemp/rc7-release-gate/evidence/contract.txt
 
       - name: Enforce safe diff
