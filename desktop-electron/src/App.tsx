@@ -11,11 +11,10 @@ import {
 import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
-import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
+import { ProviderCenterSurface } from "./features/ProviderHubSurface";
 import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
 import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
-import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -738,20 +737,10 @@ function LauncherShell({
               <ProviderCenterSurface language={language} setError={setError} />
             ) : null}
             {surface === "paseo" ? (
-              <UpstreamToolSurface
-                language={language}
-                nativeControl={<PaseoOrchestratorSurface language={language} setError={setError} />}
-                setError={setError}
-                toolId="paseo"
-              />
+              <PaseoOrchestratorSurface language={language} setError={setError} />
             ) : null}
             {surface === "anneal" ? (
-              <UpstreamToolSurface
-                language={language}
-                nativeControl={<AnnealTasksSurface language={language} setError={setError} />}
-                setError={setError}
-                toolId="anneal"
-              />
+              <AnnealTasksSurface language={language} setError={setError} />
             ) : null}
             {surface === "network" ? (
               <NetworkProxySurface language={language} setError={setError} />
@@ -1657,7 +1646,6 @@ function SettingsSurface({
   const [busy, setBusy] = useState(false);
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
-  const [updateNotice, setUpdateNotice] = useState("");
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1712,35 +1700,6 @@ function SettingsSurface({
       setBusy(false);
     }
   };
-  const checkForUpdates = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await api!.checkForUpdates();
-      setUpdateNotice(next.status === "available"
-        ? (language === "zh-TW" ? `已找到 Coding Tools v${next.version}` : `Coding Tools v${next.version} is available`)
-        : next.status === "up-to-date"
-          ? (language === "zh-TW" ? "目前已是最新版本。" : "Coding Tools is up to date.")
-          : next.status === "error"
-            ? next.message
-            : (language === "zh-TW" ? "正在檢查更新…" : "Checking for updates…"));
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const setAutomaticUpdates = async (enabled: boolean) => {
-    setBusy(true);
-    setError(null);
-    try {
-      updateState(await api!.setAutomaticUpdates(enabled));
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
   const uninstallIntegration = async () => {
     setBusy(true);
     setError(null);
@@ -1768,23 +1727,6 @@ function SettingsSurface({
               .then((result) => updateState(result.state))
               .catch((cause) => setError(messageOf(cause)))}
           />
-        </SettingRow> : null}
-        {!devProfile ? <SettingRow
-          body={updateNotice || (language === "zh-TW"
-            ? "定期尋找完整而相容的 Coding Tools release；閒置時可自動安裝，亦可立即手動檢查。"
-            : "Periodically discover complete compatible Coding Tools releases, install while idle, or check immediately.")}
-          label={language === "zh-TW" ? "自動更新" : "Automatic updates"}
-        >
-          <div className="inline-actions">
-            <SecondaryButton disabled={busy} onClick={() => void checkForUpdates()}>
-              {language === "zh-TW" ? "立即檢查" : "Check now"}
-            </SecondaryButton>
-            <Switch
-              checked={snapshot.state.automaticUpdates}
-              disabled={busy}
-              onChange={(checked) => void setAutomaticUpdates(checked)}
-            />
-          </div>
         </SettingRow> : null}
         <InteractionModePicker
           copy={copy}

@@ -11,7 +11,6 @@ const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases?per
 const CHECKSUM_ASSET_NAME = "SHA256SUMS.txt";
 const USER_AGENT = "coding-tools-launcher-updater";
 const MAX_REDIRECTS = 5;
-const DEFAULT_UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
 function parseVersion(value) {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(String(value || "").trim());
@@ -285,10 +284,8 @@ function createUpdateController({
   const supportedAsset = releaseAssetName(currentVersion, platform, arch);
   let state = packaged && supportedAsset ? { status: "idle" } : { status: "disabled" };
   let checked = false;
-  let checking = null;
   let pending = null;
   let candidate = null;
-  let periodicTimer = null;
 
   const transition = (next) => {
     state = next;
@@ -296,77 +293,34 @@ function createUpdateController({
     return state;
   };
 
-  async function checkNow({ force = true } = {}) {
-    if (state.status === "disabled") return state;
-    if (state.status === "downloading" || state.status === "installing") return state;
-    if (checking) return checking;
-    if (!force && checked) return state;
-    checked = true;
-    checking = (async () => {
-      transition({ status: "checking" });
-      try {
-        const selected = selectCompatibleRelease(await deps.fetchRelease(), platform, arch);
-        if (!selected || compareVersions(selected.version, currentVersion) <= 0) {
-          candidate = null;
-          return transition({ status: "up-to-date" });
-        }
-        const { version, assetName, asset, checksums } = selected;
-        candidate = {
-          version,
-          assetName,
-          assetUrl: validateReleaseAssetUrl(asset.browser_download_url, version, assetName),
-          checksumsUrl: validateReleaseAssetUrl(
-            checksums.browser_download_url,
-            version,
-            CHECKSUM_ASSET_NAME,
-          ),
-        };
-        logger?.info("launcher.update_available", { currentVersion, version, platform, arch });
-        return transition({ status: "available", version });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger?.warn("launcher.update_check_failed", { message });
-        return transition({ status: "error", message });
-      }
-    })();
-    try {
-      return await checking;
-    } finally {
-      checking = null;
-    }
-  }
-
   async function checkOnce() {
-    return checkNow({ force: false });
-  }
-
-  function stopPeriodicChecks() {
-    if (periodicTimer !== null) clearInterval(periodicTimer);
-    periodicTimer = null;
-  }
-
-  function startPeriodicChecks({
-    intervalMs = DEFAULT_UPDATE_CHECK_INTERVAL_MS,
-    onAvailable,
-  } = {}) {
-    if (!Number.isFinite(intervalMs) || intervalMs < 1_000) {
-      throw new Error("Update check interval must be at least one second");
+    if (state.status === "disabled" || checked) return state;
+    checked = true;
+    transition({ status: "checking" });
+    try {
+      const selected = selectCompatibleRelease(await deps.fetchRelease(), platform, arch);
+      if (!selected || compareVersions(selected.version, currentVersion) <= 0) {
+        candidate = null;
+        return transition({ status: "up-to-date" });
+      }
+      const { version, assetName, asset, checksums } = selected;
+      candidate = {
+        version,
+        assetName,
+        assetUrl: validateReleaseAssetUrl(asset.browser_download_url, version, assetName),
+        checksumsUrl: validateReleaseAssetUrl(
+          checksums.browser_download_url,
+          version,
+          CHECKSUM_ASSET_NAME,
+        ),
+      };
+      logger?.info("launcher.update_available", { currentVersion, version, platform, arch });
+      return transition({ status: "available", version });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger?.warn("launcher.update_check_failed", { message });
+      return transition({ status: "error", message });
     }
-    stopPeriodicChecks();
-    const tick = async () => {
-      const next = await checkNow({ force: true });
-      if (next.status === "available") await onAvailable?.(next);
-      return next;
-    };
-    periodicTimer = setInterval(() => {
-      void tick().catch((error) => {
-        logger?.warn("launcher.periodic_update_check_failed", {
-          message: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }, intervalMs);
-    periodicTimer.unref?.();
-    return { tick, stop: stopPeriodicChecks };
   }
 
   async function beginInstall() {
@@ -434,16 +388,12 @@ function createUpdateController({
   return {
     getState: () => state,
     checkOnce,
-    checkNow,
-    startPeriodicChecks,
-    stopPeriodicChecks,
     beginInstall,
     cancelInstall,
   };
 }
 
 module.exports = {
-  DEFAULT_UPDATE_CHECK_INTERVAL_MS,
   buildJob,
   compareVersions,
   createUpdateController,

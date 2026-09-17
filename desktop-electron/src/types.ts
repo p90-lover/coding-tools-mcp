@@ -24,7 +24,6 @@ export interface ProviderAccountRecord {
   providerId: string;
   label: string;
   identity?: string;
-  endpoint?: string;
   auth: ProviderAuth;
   status: ProviderAccountStatus;
   enabled: boolean;
@@ -44,7 +43,6 @@ export interface ProviderAccountInput {
   providerId: string;
   label: string;
   identity?: string;
-  endpoint?: string;
   auth: ProviderAuth;
   status?: ProviderAccountStatus;
   enabled?: boolean;
@@ -164,40 +162,6 @@ export interface ProviderExecutionPlan {
   };
 }
 
-export type UpstreamToolId = "anneal" | "paseo";
-export type UpstreamToolStatus = "unknown" | "offline" | "starting" | "ready" | "error";
-
-export interface UpstreamToolSnapshot {
-  id: UpstreamToolId;
-  name: string;
-  repository: string;
-  commit: string;
-  version: string | null;
-  license: string;
-  sections: string[];
-  endpoint: string;
-  status: UpstreamToolStatus;
-  pid: number | null;
-  startedAt: string | null;
-  checkedAt: string | null;
-  latencyMs: number | null;
-  error: string | null;
-  sourceConfigured: boolean;
-  sourceAvailable: boolean;
-}
-
-export interface UpstreamToolsSnapshot {
-  version: 1;
-  tools: UpstreamToolSnapshot[];
-}
-
-export interface UpstreamToolOpenResult {
-  tool: UpstreamToolSnapshot;
-  section: string;
-  url: string;
-  embedded: boolean;
-}
-
 export interface LauncherState {
   version: 1;
   language: Language | null;
@@ -205,7 +169,6 @@ export interface LauncherState {
   githubOpened: boolean;
   xOpened: boolean;
   autoStart: boolean;
-  automaticUpdates: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
   browserInteractionMode: BrowserInteractionMode;
@@ -312,7 +275,6 @@ export interface LauncherSnapshot {
   version: string;
   smokePassed: boolean;
   operation: OperationState | null;
-  upstreamTools: UpstreamToolsSnapshot;
   update: UpdateState;
 }
 
@@ -363,27 +325,13 @@ export interface LauncherApi {
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
-  upstreamToolsSnapshot(): Promise<UpstreamToolsSnapshot>;
-  inspectUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
-  setUpstreamToolEndpoint(toolId: UpstreamToolId, endpoint: string): Promise<UpstreamToolSnapshot>;
-  startUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
-  stopUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
-  openEmbeddedTool(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
-  openUpstreamToolExternal(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
   providerSnapshot(): Promise<ProviderNetworkSnapshot>;
   providerExecutionPlan(input: ProviderExecutionPlanInput): Promise<ProviderExecutionPlan>;
   saveProviderAccount(input: ProviderAccountInput): Promise<ProviderNetworkSnapshot>;
   setDefaultProviderAccount(providerId: string, accountId: string): Promise<ProviderNetworkSnapshot>;
   setProviderAccountEnabled(accountId: string, enabled: boolean): Promise<ProviderNetworkSnapshot>;
   archiveProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
-  beginProviderLogin(accountId: string): Promise<{
-    opened: boolean;
-    mode: "embedded" | "external";
-    state?: string;
-    snapshot?: ProviderNetworkSnapshot;
-  }>;
-  importProviderSession(accountId: string): Promise<ProviderNetworkSnapshot>;
-  probeProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
+  beginProviderLogin(accountId: string): Promise<{ opened: boolean; mode: "embedded" | "external" }>;
   saveProxyProfile(input: ProxyProfileInput): Promise<ProviderNetworkSnapshot>;
   archiveProxyProfile(profileId: string): Promise<ProviderNetworkSnapshot>;
   testProxyProfile(profileId: string): Promise<{
@@ -408,8 +356,6 @@ export interface LauncherApi {
   }): Promise<ProviderNetworkSnapshot>;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
-  checkForUpdates(): Promise<UpdateState>;
-  setAutomaticUpdates(enabled: boolean): Promise<LauncherState>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;

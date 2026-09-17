@@ -1,4 +1,5 @@
 const {
+  PROVIDER_LOGIN_URLS,
   createProviderNetworkController,
   createProviderNetworkStore,
 } = require("./provider-network.cjs");
@@ -101,16 +102,17 @@ function installProviderNetwork({
     () => active.store.archiveAccount(accountId),
   ));
   handle("launcher:provider-login", async (active, _event, accountId) => {
-    const result = await active.openProviderLogin(accountId);
-    if (result?.snapshot) publish(result.snapshot);
-    return result;
+    const account = active.store.snapshot().accounts.find((item) => (
+      item.id === accountId && !item.archivedAt
+    ));
+    if (!account) throw new Error("Provider account was not found");
+    const externalUrl = PROVIDER_LOGIN_URLS[account.providerId];
+    if (!externalUrl) {
+      throw new Error("This provider uses API key or custom endpoint authentication");
+    }
+    await shell.openExternal(externalUrl);
+    return { opened: true, mode: "external" };
   });
-  handle("launcher:provider-account-probe", async (active, _event, accountId) => (
-    publish(await active.probeProviderAccount(accountId))
-  ));
-  handle("launcher:provider-session-import", async (active, _event, accountId) => (
-    publish(await active.importProviderSession(accountId))
-  ));
 
   handle("launcher:proxy-profile-save", (active, _event, input) => {
     const current = active.store.snapshot();

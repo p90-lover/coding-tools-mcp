@@ -145,66 +145,6 @@ test("startup check runs once and exposes only a newer complete release", async 
   assert.deepEqual(published.map((state) => state.status), ["checking", "available"]);
 });
 
-test("manual and periodic checks can discover a release published after startup", async () => {
-  let latest = "1.1.4";
-  let calls = 0;
-  let periodicCallback = null;
-  const controller = createUpdateController({
-    currentVersion: "1.1.4",
-    platform: "win32",
-    arch: "x64",
-    packaged: true,
-    executablePath: "C:\\Coding Tools\\Coding Tools.exe",
-    runtimeExecutable: process.execPath,
-    logsDirectory: os.tmpdir(),
-    dependencies: {
-      fetchRelease: async () => {
-        calls += 1;
-        const version = latest;
-        return [{
-          tag_name: `v${version}`,
-          prerelease: version.includes("-"),
-          assets: [
-            {
-              name: `Coding.Tools_${version}_windows_x64_setup.exe`,
-              browser_download_url: `https://github.com/p90-lover/coding-tools-mcp/releases/download/v${version}/Coding.Tools_${version}_windows_x64_setup.exe`,
-            },
-            {
-              name: "SHA256SUMS.txt",
-              browser_download_url: `https://github.com/p90-lover/coding-tools-mcp/releases/download/v${version}/SHA256SUMS.txt`,
-            },
-          ],
-        }];
-      },
-    },
-  });
-
-  assert.equal((await controller.checkOnce()).status, "up-to-date");
-  latest = "1.2.0";
-  assert.equal((await controller.checkOnce()).status, "up-to-date", "startup check remains idempotent");
-  assert.deepEqual(await controller.checkNow({ force: true }), { status: "available", version: "1.2.0" });
-
-  const originalSetInterval = global.setInterval;
-  const originalClearInterval = global.clearInterval;
-  global.setInterval = (callback) => {
-    periodicCallback = callback;
-    return { unref() {} };
-  };
-  global.clearInterval = () => {};
-  try {
-    const periodic = controller.startPeriodicChecks({ intervalMs: 1_000 });
-    latest = "1.3.0";
-    await periodic.tick();
-    assert.deepEqual(controller.getState(), { status: "available", version: "1.3.0" });
-    assert.equal(typeof periodicCallback, "function");
-    periodic.stop();
-  } finally {
-    global.setInterval = originalSetInterval;
-    global.clearInterval = originalClearInterval;
-  }
-  assert.ok(calls >= 3);
-});
-
 test("verified update is handed to one detached worker", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "launcher-update-test-"));
   const oldAppImage = path.join(root, "versions", "1.1.4", "Codex Web GPT.AppImage");

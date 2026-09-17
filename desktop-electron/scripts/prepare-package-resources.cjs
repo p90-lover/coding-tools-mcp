@@ -7,7 +7,7 @@ const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
 
-const PRODUCT_VERSION = "0.7.0-rc.6";
+const PRODUCT_VERSION = "0.7.0-rc.5";
 const PRODUCT_NAME = "Coding Tools";
 const APP_ID = "dev.codingtools.fullharness";
 const SOURCE_REPOSITORY = "p90-lover/coding-tools-mcp";
