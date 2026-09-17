@@ -94,9 +94,13 @@ jobs:
           git fetch --no-tags origin \
             +refs/heads/release/codex-router-multiprovider-0.7.0-rc.7:refs/remotes/origin/release/codex-router-multiprovider-0.7.0-rc.7
           base='origin/release/codex-router-multiprovider-0.7.0-rc.7'
-          git merge-base "$base" HEAD >/dev/null
-          git diff --check "$base"..HEAD
-          test -z "$(git diff --diff-filter=D --name-only "$base"..HEAD)"
+          merge_base="$(git merge-base "$base" HEAD)"
+          test -n "$merge_base"
+          printf 'base=%s\nmerge_base=%s\nhead=%s\n' \
+            "$base" "$merge_base" "$(git rev-parse HEAD)" \
+            | tee aiTemp/rc7-upstream-runtime-current/evidence/no-delete-scope.txt
+          git diff --check "$merge_base"..HEAD
+          test -z "$(git diff --diff-filter=D --name-only "$merge_base"..HEAD)"
           test -z "$(git diff --diff-filter=D --name-only)"
 
       - name: Commit verified runtime bridge
