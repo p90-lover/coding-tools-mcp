@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - fix/v0.7.0-rc.2-provider-execution-gates
-      - release/codex-router-multiprovider-0.7.0-rc.2
-      - release/codex-router-multiprovider-0.7.0-rc.3
+      - 'integration/v0.7.0-rc.*'
+      - 'release/codex-router-multiprovider-0.7.0-rc.*'
     paths:
+      - 'aiTemp/rc7-commandcode/apply_commandcode.py'
+      - 'aiTemp/rc7-commandcode/fix_materializer.py'
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/provider-bootstrap.cjs'
       - 'desktop-electron/electron/provider-execution-router.cjs'
@@ -14,18 +16,27 @@ on:
       - 'desktop-electron/electron/ipc-schema.cjs'
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ProviderHubSaasSurface.tsx'
       - 'desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx'
+      - 'desktop-electron/src/features/provider-hub-saas.css'
+      - 'desktop-electron/src/providers/provider-types.ts'
       - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
       - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
+      - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
+      - 'desktop-electron/tests/provider-console-saas.test.cjs'
       - 'desktop-electron/tests/provider-execution-router.test.cjs'
       - 'desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs'
       - 'desktop-electron/tests/provider-proxy-domain.test.cjs'
       - 'desktop-electron/tests/proxy-provider-contract.test.cjs'
+      - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
       - 'desktop-electron/package.json'
       - 'desktop-electron/bun.lock'
       - '.github/workflows/provider-execution-gates-ci.yml'
   pull_request:
     paths:
+      - 'aiTemp/rc7-commandcode/apply_commandcode.py'
+      - 'aiTemp/rc7-commandcode/fix_materializer.py'
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/provider-bootstrap.cjs'
       - 'desktop-electron/electron/provider-execution-router.cjs'
@@ -33,13 +44,20 @@ on:
       - 'desktop-electron/electron/ipc-schema.cjs'
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ProviderHubSaasSurface.tsx'
       - 'desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx'
+      - 'desktop-electron/src/features/provider-hub-saas.css'
+      - 'desktop-electron/src/providers/provider-types.ts'
       - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
       - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
+      - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
+      - 'desktop-electron/tests/provider-console-saas.test.cjs'
       - 'desktop-electron/tests/provider-execution-router.test.cjs'
       - 'desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs'
       - 'desktop-electron/tests/provider-proxy-domain.test.cjs'
       - 'desktop-electron/tests/proxy-provider-contract.test.cjs'
+      - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
       - 'desktop-electron/package.json'
       - 'desktop-electron/bun.lock'
       - '.github/workflows/provider-execution-gates-ci.yml'
@@ -89,11 +107,15 @@ jobs:
       - name: Run focused execution and Provider Hub contracts
         run: |
           node --test \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
             desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-console-saas.test.cjs \
             desktop-electron/tests/provider-execution-router.test.cjs \
             desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
             desktop-electron/tests/provider-proxy-domain.test.cjs \
-            desktop-electron/tests/proxy-provider-contract.test.cjs
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs
 
       - name: Typecheck Electron renderer
         run: bun run --cwd desktop-electron typecheck
@@ -108,7 +130,11 @@ jobs:
       - name: Enforce no source-file deletion
         shell: bash
         run: |
-          base_ref='origin/release/codex-router-multiprovider-0.7.0-rc.2'
+          if [ -n "${{ github.base_ref }}" ]; then
+            base_ref="origin/${{ github.base_ref }}"
+          else
+            base_ref='HEAD^'
+          fi
           if ! git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
             base_ref='HEAD^'
           fi
