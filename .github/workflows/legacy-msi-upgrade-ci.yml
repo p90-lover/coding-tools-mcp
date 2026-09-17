@@ -1,0 +1,79 @@
+name: Legacy MSI upgrade compatibility
+
+on:
+  push:
+    branches:
+      - fix/rc7-legacy-msi-upgrade-detection
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/scripts/create-legacy-msi-upgrade-fixture.ps1
+      - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
+      - .github/workflows/legacy-msi-upgrade-ci.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.6
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/scripts/create-legacy-msi-upgrade-fixture.ps1
+      - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
+      - .github/workflows/legacy-msi-upgrade-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legacy-msi-upgrade-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run legacy installer contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/legacy-msi-upgrade/evidence
+          node --test \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs \
+            2>&1 | tee aiTemp/legacy-msi-upgrade/evidence/contracts.txt
+          grep -F '# fail 0' aiTemp/legacy-msi-upgrade/evidence/contracts.txt
+
+      - name: Enforce no-delete diff
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.6 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: legacy-msi-upgrade-contract-${{ github.sha }}
+          path: aiTemp/legacy-msi-upgrade/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-harness:
+    needs: contract
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Test-first placeholder
+        shell: pwsh
+        run: |
+          throw 'create-legacy-msi-upgrade-fixture.ps1 and the makensis.exe harness are not implemented yet'
