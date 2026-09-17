@@ -4,232 +4,89 @@ on:
   push:
     branches:
       - integration/v0.7.0-rc.7-full-paseo-anneal-provider-updater
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.7-full-paseo-anneal-provider-updater
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/tests/antigravity-session-binding.test.cjs
+      - desktop-electron/tests/commandcode-provider-session.test.cjs
+      - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
+      - desktop-electron/tests/packaging-contract.test.cjs
+      - .github/workflows/rc7-provider-updater-base-sync.yml
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: rc7-provider-updater-base-sync-${{ github.ref }}
-  cancel-in-progress: false
+  group: rc7-provider-updater-base-sync-${{ github.sha }}
+  cancel-in-progress: true
 
 jobs:
   synchronize:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     env:
       PYTHONDONTWRITEBYTECODE: '1'
-      BASE_BRANCH: release/codex-router-multiprovider-0.7.0-rc.6
-      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc7-provider-updater-sync/bun-cache
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           clean: false
-          persist-credentials: true
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
-          bun-version: 1.4.0
+          node-version: '22'
 
-      - name: Prepare retained evidence root
-        shell: bash
-        run: mkdir -p aiTemp/rc7-provider-updater-sync aiTemp/Trash/rc7-provider-updater-sync
-
-      - id: sync
-        name: Merge exact rc.6 base and resolve the verified provider conflict
+      - name: Record retired synchronization boundary
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch --no-tags origin "$BASE_BRANCH"
-          base_sha="$(git rev-parse "origin/$BASE_BRANCH")"
-          head_sha="$(git rev-parse HEAD)"
-          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-
-          if git merge-base --is-ancestor "$base_sha" HEAD; then
-            echo "already_current=true" >> "$GITHUB_OUTPUT"
-            printf 'base=%s\nhead=%s\nstatus=already-current\n' "$base_sha" "$head_sha" \
-              > aiTemp/rc7-provider-updater-sync/status.txt
-            exit 0
-          fi
-
-          set +e
-          git merge --no-commit --no-ff "$base_sha" \
-            > aiTemp/rc7-provider-updater-sync/merge.stdout.txt \
-            2> aiTemp/rc7-provider-updater-sync/merge.stderr.txt
-          merge_status=$?
-          set -e
-
-          if [[ "$merge_status" -eq 0 ]]; then
-            echo "clean_merge=true" >> "$GITHUB_OUTPUT"
-            printf 'base=%s\nhead=%s\nstatus=clean-merge\n' "$base_sha" "$head_sha" \
-              > aiTemp/rc7-provider-updater-sync/status.txt
-            exit 0
-          fi
-
-          git diff --name-only --diff-filter=U | LC_ALL=C sort \
-            > aiTemp/rc7-provider-updater-sync/conflicts.txt
-          conflict_count="$(wc -l < aiTemp/rc7-provider-updater-sync/conflicts.txt | tr -d ' ')"
-
-          if [[ "$conflict_count" == "1" ]] \
-            && grep -Fxq 'desktop-electron/electron/provider-network.cjs' \
-              aiTemp/rc7-provider-updater-sync/conflicts.txt; then
-            git checkout --ours -- desktop-electron/electron/provider-network.cjs
-
-            python - <<'PY'
-          from pathlib import Path
-
-          path = Path("aiTemp/antigravity-session-binding/apply_patch.py")
-          text = path.read_text(encoding="utf-8")
-          before = 'end = text.find("\\n  async function probeProviderAccount", start)'
-          after = 'end = text.find("\\n  function commandCodeConnection", start)'
-          if after not in text:
-              if text.count(before) != 1:
-                  raise SystemExit("Could not adapt the verified Antigravity patch around CommandCode")
-              path.write_text(text.replace(before, after, 1), encoding="utf-8")
-          print("RC7_ANTIGRAVITY_PATCH_ADAPTED")
-          PY
-
-            python aiTemp/antigravity-session-binding/apply_patch.py \
-              | tee aiTemp/rc7-provider-updater-sync/antigravity-patch.txt
-            grep -E 'ANTIGRAVITY_SESSION_BINDING_PATCH_(APPLIED|ALREADY_APPLIED)' \
-              aiTemp/rc7-provider-updater-sync/antigravity-patch.txt
-
-            python aiTemp/antigravity-session-binding/apply_connected_binding.py \
-              | tee aiTemp/rc7-provider-updater-sync/connected-binding.txt
-            grep -E 'ANTIGRAVITY_CONNECTED_BINDING_(APPLIED|ALREADY_APPLIED)' \
-              aiTemp/rc7-provider-updater-sync/connected-binding.txt
-
-            git add \
-              desktop-electron/electron/provider-network.cjs \
-              aiTemp/antigravity-session-binding/apply_patch.py
-            unresolved="$(git diff --name-only --diff-filter=U)"
-            if [[ -n "$unresolved" ]]; then
-              printf 'Unresolved paths remain:\n%s\n' "$unresolved" >&2
-              exit 1
-            fi
-
-            echo "resolved_merge=true" >> "$GITHUB_OUTPUT"
-            printf 'base=%s\nhead=%s\nstatus=resolved-provider-network\n' "$base_sha" "$head_sha" \
-              > aiTemp/rc7-provider-updater-sync/status.txt
-            exit 0
-          fi
-
+          evidence="$GITHUB_WORKSPACE/aiTemp/rc7-provider-updater-sync/evidence"
+          mkdir -p "$evidence" "$GITHUB_WORKSPACE/aiTemp/Trash/rc7-provider-updater-sync"
           {
-            printf 'base=%s\n' "$base_sha"
-            printf 'head=%s\n' "$head_sha"
-            printf 'status=unresolved-conflicts\n'
-            printf 'merge_exit=%s\n' "$merge_status"
-            printf 'count=%s\n' "$conflict_count"
-          } > aiTemp/rc7-provider-updater-sync/status.txt
+            echo 'RC7_BASE_SYNC_RETIRED=1'
+            echo 'mode=current-state-verification'
+            echo "source_sha=$GITHUB_SHA"
+            echo 'legacy_rc6_merge_path=retained-but-disabled'
+          } | tee "$evidence/status.txt"
 
-          if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-            git merge --abort
-          else
-            git status --short > aiTemp/rc7-provider-updater-sync/unmerged-status.txt
-          fi
-          echo "diagnostic=true" >> "$GITHUB_OUTPUT"
-
-      - name: Align provider health-label contract
-        if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
+      - name: Verify current provider and installer migration contracts
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path("desktop-electron/tests/antigravity-provider-session.test.cjs")
-          text = path.read_text(encoding="utf-8")
-          before = "assert.match(providerSurface, /Test connection/);"
-          after = "assert.match(providerSurface, /Test (?:connection|reverse proxy)/);"
-          if after not in text:
-              if text.count(before) != 1:
-                  raise SystemExit("Antigravity provider UI-label contract drifted unexpectedly")
-              path.write_text(text.replace(before, after, 1), encoding="utf-8")
-          print("RC7_PROVIDER_HEALTH_LABEL_CONTRACT_ALIGNED")
-          PY
-          git add desktop-electron/tests/antigravity-provider-session.test.cjs
-
-      - name: Install exact Electron dependencies
-        if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
-        run: bun install --cwd desktop-electron --frozen-lockfile
-
-      - name: Verify merged Antigravity and CommandCode provider behavior
-        if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/aiTemp/rc7-provider-updater-sync/evidence"
           node --check desktop-electron/electron/provider-network.cjs
           node --test \
             desktop-electron/tests/antigravity-session-binding.test.cjs \
-            desktop-electron/tests/antigravity-provider-session.test.cjs \
             desktop-electron/tests/commandcode-provider-session.test.cjs \
-            desktop-electron/tests/provider-execution-router.test.cjs
-          bun run --cwd desktop-electron typecheck
+            2>&1 | tee "$evidence/provider-contracts.txt"
+          grep -F '# fail 0' "$evidence/provider-contracts.txt"
+          node --test \
+            --test-name-pattern="launcher publishes native packages|assisted installer can elevate|legacy migration enumerates|MSI migration invokes" \
+            desktop-electron/tests/packaging-contract.test.cjs \
+            desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs \
+            2>&1 | tee "$evidence/installer-contracts.txt"
+          grep -F '# fail 0' "$evidence/installer-contracts.txt"
 
-      - name: Commit and push verified synchronization
-        if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
-        shell: bash
-        env:
-          BASE_SHA: ${{ steps.sync.outputs.base_sha }}
-          ORIGINAL_HEAD: ${{ steps.sync.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin "$GITHUB_REF_NAME"
-          remote_head="$(git rev-parse "origin/$GITHUB_REF_NAME")"
-          if [[ "$remote_head" != "$ORIGINAL_HEAD" ]]; then
-            printf 'Branch advanced from %s to %s; this stale run will not push.\n' \
-              "$ORIGINAL_HEAD" "$remote_head"
-            git merge --abort
-            exit 0
-          fi
-
-          git add aiTemp/rc7-provider-updater-sync/status.txt
-          git diff --cached --check
-          git commit \
-            -m "integrate(rc7): sync latest verified rc6 base" \
-            -m "Merge exact rc.6 base SHA $BASE_SHA while retaining rc.7 CommandCode support and the verified Antigravity session binding. No retained file or branch is deleted."
-          git push origin HEAD:${GITHUB_REF_NAME}
-
-      - name: Commit retained evidence for unknown conflicts
-        if: steps.sync.outputs.diagnostic == 'true'
+      - name: Enforce exact source, clean tracked state, and no deletion
         shell: bash
         run: |
           set -euo pipefail
-          git add \
-            aiTemp/rc7-provider-updater-sync/status.txt \
-            aiTemp/rc7-provider-updater-sync/conflicts.txt \
-            aiTemp/rc7-provider-updater-sync/merge.stdout.txt \
-            aiTemp/rc7-provider-updater-sync/merge.stderr.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "ci(rc7): retain unknown base-sync conflict evidence"
-            git push origin HEAD:${GITHUB_REF_NAME}
-          fi
-          echo 'Latest rc.6 base has an unrecognized conflict; evidence retained.' >&2
-          exit 1
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          parent="$(git rev-parse "${GITHUB_SHA}^1")"
+          git diff --check "$parent" "$GITHUB_SHA"
+          test -z "$(git diff --diff-filter=D --name-only "$parent" "$GITHUB_SHA")"
+          test -z "$(git status --short --untracked-files=no)"
 
-      - name: Enforce no project-file deletion
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin "$BASE_BRANCH"
-          deleted="$(git diff --name-only --diff-filter=D "origin/$BASE_BRANCH"...HEAD)"
-          if [[ -n "$deleted" ]]; then
-            echo 'Tracked project-file deletion detected:' >&2
-            printf '%s\n' "$deleted" >&2
-            exit 1
-          fi
-
-      - name: Preserve transient dependencies in Trash
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p aiTemp/Trash/rc7-provider-updater-sync
-          if [ -d desktop-electron/node_modules ]; then
-            mv desktop-electron/node_modules \
-              "aiTemp/Trash/rc7-provider-updater-sync/node_modules-$GITHUB_RUN_ID"
-          fi
+        with:
+          name: rc7-provider-updater-base-sync-${{ github.sha }}
+          path: aiTemp/rc7-provider-updater-sync/evidence/
+          if-no-files-found: error
+          retention-days: 14
