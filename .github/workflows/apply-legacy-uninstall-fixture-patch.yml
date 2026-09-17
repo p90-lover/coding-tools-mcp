@@ -1,0 +1,73 @@
+name: Apply rc.6 legacy uninstall fixture repair
+
+on:
+  push:
+    branches:
+      - fix/rc6-legacy-uninstall-fixture-csc
+    paths:
+      - aiTemp/rc6-legacy-fixture/apply_release_workflow_patch.py
+      - .github/workflows/apply-legacy-uninstall-fixture-patch.yml
+      - .github/workflows/codex-router-multiprovider-release-rc6.yml
+      - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
+      - desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc6-legacy-uninstall-fixture-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/fix/rc6-legacy-uninstall-fixture-csc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          clean: false
+          persist-credentials: true
+
+      - name: Prepare retained evidence roots
+        run: mkdir -p aiTemp/rc6-legacy-fixture/evidence aiTemp/Trash/rc6-legacy-fixture
+
+      - name: Apply deterministic release-workflow patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python aiTemp/rc6-legacy-fixture/apply_release_workflow_patch.py \
+            | tee aiTemp/rc6-legacy-fixture/evidence/workflow-patch.txt
+          grep -E 'RC6_LEGACY_FIXTURE_WORKFLOW_(PATCHED|ALREADY_PATCHED)' \
+            aiTemp/rc6-legacy-fixture/evidence/workflow-patch.txt
+
+      - name: Verify the regression contract and bounded changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+          grep -F 'create-legacy-uninstall-fixture.ps1' \
+            .github/workflows/codex-router-multiprovider-release-rc6.yml
+          if grep -E 'Add-Type.*-OutputType (ConsoleApplication|WindowsApplication)' \
+            .github/workflows/codex-router-multiprovider-release-rc6.yml; then
+            echo 'Unsupported Add-Type output kind remains in release workflow' >&2
+            exit 1
+          fi
+
+      - name: Commit the verified release-workflow repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add .github/workflows/codex-router-multiprovider-release-rc6.yml
+          if git diff --cached --quiet; then
+            echo RC6_LEGACY_FIXTURE_WORKFLOW_ALREADY_COMMITTED
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix(rc6): use csc for legacy uninstall fixture'
+          git push origin HEAD:refs/heads/fix/rc6-legacy-uninstall-fixture-csc
