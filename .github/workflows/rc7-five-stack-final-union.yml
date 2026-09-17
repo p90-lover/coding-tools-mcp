@@ -50,15 +50,14 @@ jobs:
           set -euo pipefail
           node --check aiTemp/rc7-five-stack-final-union/apply.cjs
           node aiTemp/rc7-five-stack-final-union/apply.cjs
+          git restore .github/workflows/provider-execution-gates-ci.yml
           git diff --binary > aiTemp/rc7-five-stack-final-union/first-materialization.patch
           node aiTemp/rc7-five-stack-final-union/apply.cjs
+          git restore .github/workflows/provider-execution-gates-ci.yml
           git diff --binary > aiTemp/rc7-five-stack-final-union/second-materialization.patch
           cmp \
             aiTemp/rc7-five-stack-final-union/first-materialization.patch \
             aiTemp/rc7-five-stack-final-union/second-materialization.patch
-          # The shared provider gate is already exercised on the pull-request merge ref.
-          # Keep this self-materializing run from committing a workflow-file rewrite.
-          git restore .github/workflows/provider-execution-gates-ci.yml
           git diff --check
 
       - name: Validate Electron runtime syntax
