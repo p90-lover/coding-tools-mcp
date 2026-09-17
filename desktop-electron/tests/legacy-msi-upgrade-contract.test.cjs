@@ -13,6 +13,10 @@ const installer = fs.readFileSync(
   path.join(desktopRoot, "build", "installer.nsh"),
   "utf8",
 );
+const fixtureScript = fs.readFileSync(
+  path.join(desktopRoot, "scripts", "create-legacy-msi-upgrade-fixture.ps1"),
+  "utf8",
+);
 
 test("assisted installer can elevate when a legacy per-machine MSI needs removal", () => {
   assert.equal(manifest.build.nsis.oneClick, false);
@@ -67,4 +71,9 @@ test("focused Windows gate uses an overridable MSI executable fixture", () => {
   assert.match(workflow, /LEGACY_MSIEXEC/);
   assert.match(workflow, /legacy-msiexec-ran\.txt/);
   assert.match(workflow, /git diff --diff-filter=D/);
+  assert.match(fixtureScript, /Function \.onInit[\s\S]*!insertmacro customInit[\s\S]*FunctionEnd/);
+  assert.doesNotMatch(
+    fixtureScript,
+    /Function \.onInit[\s\S]*\n\s*Quit\s*\n[\s\S]*FunctionEnd/,
+  );
 });
