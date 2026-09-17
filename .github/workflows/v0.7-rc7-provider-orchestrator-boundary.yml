@@ -1,0 +1,77 @@
+name: v0.7 rc.7 provider orchestrator boundary
+
+on:
+  push:
+    branches:
+      - fix/v0.7-rc7-orchestration-credential-provider-sync
+    paths:
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/electron/provider-execution-router.cjs
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
+      - desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - .github/workflows/v0.7-rc7-provider-orchestrator-boundary.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.7
+    paths:
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/electron/provider-execution-router.cjs
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
+      - desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - .github/workflows/v0.7-rc7-provider-orchestrator-boundary.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc7-provider-orchestrator-boundary-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Provider and orchestrator boundary contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run focused boundary contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc7-provider-orchestrator-boundary
+          node --test \
+            desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            2>&1 | tee aiTemp/rc7-provider-orchestrator-boundary/results.txt
+          grep -F '# fail 0' aiTemp/rc7-provider-orchestrator-boundary/results.txt
+
+      - name: Enforce no-delete integration diff
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.7 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.7...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.7...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc7-provider-orchestrator-boundary-${{ github.sha }}
+          path: aiTemp/rc7-provider-orchestrator-boundary/
+          if-no-files-found: error
+          retention-days: 14
