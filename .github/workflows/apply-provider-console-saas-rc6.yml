@@ -4,25 +4,38 @@ on:
   push:
     branches:
       - integration/v0.7.0-rc.6-provider-console-saas-current
+      - fix/rc6-antigravity-session-auth
     paths:
       - .github/workflows/apply-provider-console-saas-rc6.yml
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/preload.cjs
       - desktop-electron/src/App.tsx
       - desktop-electron/src/features/ProviderHubSaasSurface.tsx
       - desktop-electron/src/features/provider-hub-saas.css
       - desktop-electron/src/providers/provider-console-metadata.ts
+      - desktop-electron/src/providers/provider-types.ts
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/antigravity-provider-session.test.cjs
       - desktop-electron/tests/provider-console-saas.test.cjs
       - desktop-electron/tests/provider-center-account-wiring.test.cjs
   pull_request:
     branches:
       - release/codex-router-multiprovider-0.7.0-rc.6
     paths:
+      - .github/workflows/apply-provider-console-saas-rc6.yml
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/preload.cjs
       - desktop-electron/src/App.tsx
       - desktop-electron/src/features/ProviderHubSaasSurface.tsx
       - desktop-electron/src/features/provider-hub-saas.css
       - desktop-electron/src/providers/provider-console-metadata.ts
+      - desktop-electron/src/providers/provider-types.ts
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/antigravity-provider-session.test.cjs
       - desktop-electron/tests/provider-console-saas.test.cjs
       - desktop-electron/tests/provider-center-account-wiring.test.cjs
-      - .github/workflows/apply-provider-console-saas-rc6.yml
   workflow_dispatch:
 
 permissions:
@@ -54,6 +67,7 @@ jobs:
         run: mkdir -p aiTemp/provider-console-rc6/evidence aiTemp/Trash/provider-console-rc6
 
       - name: Compose verified Provider Console source onto current rc.6
+        if: github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.7.0-rc.6-provider-console-saas-current'
         shell: bash
         run: |
           set -euo pipefail
@@ -169,6 +183,7 @@ jobs:
       - name: Run Provider Hub, routing, proxy and renderer contracts
         run: >-
           node --test
+          desktop-electron/tests/antigravity-provider-session.test.cjs
           desktop-electron/tests/provider-console-saas.test.cjs
           desktop-electron/tests/provider-center-account-wiring.test.cjs
           desktop-electron/tests/provider-execution-router.test.cjs
