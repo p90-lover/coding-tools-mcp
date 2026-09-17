@@ -157,12 +157,15 @@ jobs:
             tests/stable-release-workflows.test.mjs \
             tests/version-alignment.test.mjs
 
-      - name: Verify Rust formatting and compile all targets
+      - name: Normalize Rust formatting and compile all targets
         if: steps.compose.outputs.ready == 'true'
         shell: bash
         run: |
           set -euo pipefail
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git add src-tauri
           cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+          git diff --cached --check
           cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
 
       - name: Run focused Rust authentication, listener, tunnel, and Codex tests
@@ -231,7 +234,7 @@ jobs:
           git diff --cached --check
           git commit \
             -m 'integrate(rc7): unite current main with verified provider release' \
-            -m "Merge main SHA $MAIN_SHA with release SHA $RELEASE_SHA, retaining both histories, hardened OAuth/Codex/listener changes, full Provider Hub/Codex Router/Paseo/Anneal/updater behavior, and all files from both parents."
+            -m "Merge main SHA $MAIN_SHA with release SHA $RELEASE_SHA, retaining both histories, hardened OAuth/Codex/listener changes, full Provider Hub/Codex Router/Paseo/Anneal/updater behavior, deterministic Rust formatting, and all files from both parents."
           git push origin HEAD:${GITHUB_REF_NAME}
 
       - name: Preserve transient build material in Trash
