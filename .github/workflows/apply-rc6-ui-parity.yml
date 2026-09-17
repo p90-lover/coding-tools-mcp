@@ -5,6 +5,15 @@ on:
     branches:
       - fix/rc6-paseo-anneal-zhTW-ui-parity
     paths:
+      - 'desktop-electron/src/features/PaseoOrchestratorSurface.tsx'
+      - 'desktop-electron/src/features/AnnealTasksSurface.tsx'
+      - 'desktop-electron/src/features/orchestration-copy.ts'
+      - 'desktop-electron/src/features/orchestration-control.css'
+      - 'desktop-electron/src/features/ProviderHubSurface.tsx'
+      - 'desktop-electron/src/providers/ProviderHubIntegration.tsx'
+      - 'desktop-electron/tests/rc6-ui-parity-contract.test.cjs'
+      - 'desktop-electron/tests/rc6-provider-hub-i18n-contract.test.cjs'
+      - 'desktop-electron/tests/orchestration-localization-layout.test.cjs'
       - 'aiTemp/rc6-ui-parity/apply_provider_hub_i18n.py'
       - 'aiTemp/rc6-ui-parity/apply_provider_hub_legacy_locale.py'
       - '.github/workflows/apply-rc6-ui-parity.yml'
