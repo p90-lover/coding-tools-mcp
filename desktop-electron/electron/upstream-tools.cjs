@@ -101,13 +101,31 @@ function createUpstreamToolController({
   openExternal = null,
   spawnProcess = spawn,
   now = () => new Date().toISOString(),
+  externalServices = null,
 } = {}) {
   const manifests = new Map(TOOL_IDS.map((toolId) => [toolId, loadManifest(toolId)]));
   const processes = new Map();
   const runtime = new Map();
 
+  function managedConfiguration(toolId) {
+    try {
+      return externalServices?.upstreamConfiguration?.(toolId) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function managedSnapshot(toolId) {
+    try {
+      return externalServices?.snapshot?.().services?.find((service) => service.id === toolId) || null;
+    } catch {
+      return null;
+    }
+  }
+
   for (const [toolId, manifest] of manifests) {
-    const configured = env[manifest.environmentEndpoint];
+    const managed = managedConfiguration(toolId);
+    const configured = managed?.endpoint || env[manifest.environmentEndpoint];
     const endpoint = normalizeLoopbackEndpoint(configured || manifest.defaultEndpoint);
     runtime.set(toolId, {
       endpoint,
@@ -135,8 +153,10 @@ function createUpstreamToolController({
 
   function project(toolId) {
     const manifest = requireTool(toolId);
+    const managed = managedSnapshot(toolId);
+    const managedConfig = managedConfiguration(toolId);
     const state = runtime.get(toolId);
-    const sourceHome = env[manifest.environmentHome]?.trim() || "";
+    const sourceHome = managedConfig?.home || env[manifest.environmentHome]?.trim() || "";
     return {
       id: manifest.id,
       name: manifest.name,
@@ -145,14 +165,14 @@ function createUpstreamToolController({
       version: manifest.version || null,
       license: manifest.license,
       sections: [...manifest.sections],
-      endpoint: state.endpoint,
-      status: state.status,
-      pid: state.pid,
-      startedAt: state.startedAt,
-      checkedAt: state.checkedAt,
-      latencyMs: state.latencyMs,
-      error: state.error,
-      sourceConfigured: Boolean(sourceHome),
+      endpoint: managed?.endpoint || state.endpoint,
+      status: managed?.status || state.status,
+      pid: managed?.pid ?? state.pid,
+      startedAt: managed?.startedAt ?? state.startedAt,
+      checkedAt: managed?.checkedAt ?? state.checkedAt,
+      latencyMs: managed?.latencyMs ?? state.latencyMs,
+      error: managed?.error ?? state.error,
+      sourceConfigured: managed ? managed.sourceConfigured : Boolean(sourceHome),
       sourceAvailable: Boolean(sourceHome && fs.existsSync(sourceHome)),
     };
   }
@@ -163,6 +183,20 @@ function createUpstreamToolController({
 
   async function inspect(toolId) {
     requireTool(toolId);
+    if (externalServices) {
+      await externalServices.inspect(toolId);
+      const value = project(toolId);
+      publish(toolId, {
+        endpoint: value.endpoint,
+        status: value.status,
+        pid: value.pid,
+        startedAt: value.startedAt,
+        checkedAt: value.checkedAt,
+        latencyMs: value.latencyMs,
+        error: value.error,
+      });
+      return value;
+    }
     const state = runtime.get(toolId);
     const result = await probeEndpoint(state.endpoint);
     publish(toolId, {
@@ -176,6 +210,18 @@ function createUpstreamToolController({
 
   function setEndpoint(toolId, endpoint) {
     requireTool(toolId);
+    if (externalServices) {
+      externalServices.configure(toolId, { endpoint });
+      const value = project(toolId);
+      publish(toolId, {
+        endpoint: value.endpoint,
+        status: "unknown",
+        checkedAt: null,
+        latencyMs: null,
+        error: null,
+      });
+      return value;
+    }
     publish(toolId, {
       endpoint: normalizeLoopbackEndpoint(endpoint),
       status: "unknown",
@@ -222,6 +268,10 @@ function createUpstreamToolController({
 
   async function start(toolId) {
     const manifest = requireTool(toolId);
+    if (externalServices) {
+      await externalServices.start(toolId);
+      return waitUntilReady(toolId);
+    }
     const existing = await inspect(toolId);
     if (existing.status === "ready") return existing;
     if (processes.has(toolId)) return waitUntilReady(toolId);
@@ -282,6 +332,10 @@ function createUpstreamToolController({
 
   async function stop(toolId) {
     requireTool(toolId);
+    if (externalServices) {
+      await externalServices.stop(toolId);
+      return project(toolId);
+    }
     const child = processes.get(toolId);
     if (child && child.exitCode === null && child.signalCode === null) {
       const exited = await new Promise((resolve) => {
@@ -318,11 +372,16 @@ function createUpstreamToolController({
 
   async function restart(toolId) {
     requireTool(toolId);
+    if (externalServices) {
+      await externalServices.restart(toolId);
+      return waitUntilReady(toolId);
+    }
     await stop(toolId);
     return start(toolId);
   }
 
   function dispose() {
+    if (externalServices) return;
     for (const [toolId, child] of processes) {
       if (!child.killed) child.kill("SIGTERM");
       publish(toolId, { status: "offline", pid: null, checkedAt: now() });
