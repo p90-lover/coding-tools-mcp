@@ -6,6 +6,14 @@ const { createProviderExecutionPlan } = require("./provider-execution-router.cjs
 const { resolveLauncherProfile } = require("./profile.cjs");
 
 let providerNetworkControllerPromise = null;
+let providerBrowserHostResolver = () => null;
+
+function setProviderBrowserHostResolver(resolver) {
+  if (typeof resolver !== "function") {
+    throw new Error("Provider browser-host resolver must be a function");
+  }
+  providerBrowserHostResolver = resolver;
+}
 
 function providerNetworkReady() {
   if (!providerNetworkControllerPromise) {
@@ -47,7 +55,7 @@ function installProviderNetwork({
     controller = createProviderNetworkController({
       app,
       browserPartition: launcherProfile.browserPartition,
-      getBrowserHost: () => null,
+      getBrowserHost: () => providerBrowserHostResolver(),
       logger,
       safeStorage,
       session,
@@ -152,4 +160,5 @@ function installProviderNetwork({
 module.exports = {
   installProviderNetwork,
   providerNetworkReady,
+  setProviderBrowserHostResolver,
 };
