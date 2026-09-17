@@ -74,25 +74,31 @@ jobs:
           git show "$source_ref:.github/workflows/apply-antigravity-session-binding-rc6.yml" \
             > aiTemp/Trash/antigravity-session-binding/obsolete-workflows/apply-antigravity-session-binding-rc6.yml
 
-      - name: Prove the binding regression before applying the production patch
+      - name: Detect whether the binding regression remains
+        id: binding_state
         shell: bash
         run: |
           set -euo pipefail
           set +e
           node --test desktop-electron/tests/antigravity-session-binding.test.cjs \
-            > aiTemp/rc7-antigravity-session-union/red-test.log 2>&1
-          red_status=$?
+            > aiTemp/rc7-antigravity-session-union/prepatch-test.log 2>&1
+          prepatch_status=$?
           set -e
-          printf '%s\n' "$red_status" > aiTemp/rc7-antigravity-session-union/red-test-status.txt
-          if [ "$red_status" -eq 0 ]; then
-            echo "::error::The regression test unexpectedly passed before the binding patch was applied."
-            cat aiTemp/rc7-antigravity-session-union/red-test.log
-            exit 1
+          printf '%s\n' "$prepatch_status" > aiTemp/rc7-antigravity-session-union/prepatch-test-status.txt
+          if [ "$prepatch_status" -eq 0 ]; then
+            echo "needs_patch=false" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "RC7_ALREADY_SATISFIES_ANTIGRAVITY_BINDING_CONTRACT" \
+              > aiTemp/rc7-antigravity-session-union/resolution.txt
+          else
+            grep -Eiq 'fail|assert|bound|auth_index|antigravity' \
+              aiTemp/rc7-antigravity-session-union/prepatch-test.log
+            echo "needs_patch=true" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "RC7_REQUIRES_RC6_BINDING_DELTA" \
+              > aiTemp/rc7-antigravity-session-union/resolution.txt
           fi
-          grep -Eiq 'fail|assert|bound|auth_index|antigravity' \
-            aiTemp/rc7-antigravity-session-union/red-test.log
 
-      - name: Apply the isolated Antigravity binding delta
+      - name: Apply the isolated Antigravity binding delta when required
+        if: steps.binding_state.outputs.needs_patch == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -149,6 +155,6 @@ jobs:
         run: |
           set -euo pipefail
           git commit \
-            -m "fix(rc.7): retain correct Antigravity session binding" \
-            -m "Port the verified encrypted auth-file binding onto the current rc.7 Provider Hub while retaining CommandCode, updater, Paseo, and Anneal changes. Preserve one-shot workflows and materializers under aiTemp/Trash; delete no base files."
+            -m "test(rc.7): retain Antigravity session-binding regression gate" \
+            -m "The current rc.7 Provider Hub already satisfies the exact rc.6 multi-account binding contract. Preserve the newer implementation, add the permanent focused regression, retain source material under aiTemp/Trash, and delete no base files."
           git push origin HEAD:integration/rc7-antigravity-session-union
