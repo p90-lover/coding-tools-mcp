@@ -640,6 +640,11 @@ function registerIpc({ logger, stateStore }) {
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.stop(toolId);
   });
+  handle("launcher:upstream-tool-restart", (event, toolId) => {
+    assertFocusedMainWindow(event, true);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.restart(toolId);
+  });
   handle("launcher:upstream-tool-open-embedded", (event, toolId, section) => {
     assertFocusedMainWindow(event, false);
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
@@ -1064,6 +1069,7 @@ async function requestQuit() {
     await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
+    upstreamToolController?.dispose();
     quitting = true;
     await browserHost?.persistSession();
     browserHost?.destroy();
