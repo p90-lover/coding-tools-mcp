@@ -27,9 +27,26 @@
     "voice": "/voice",
     "settings": "/settings"
   },
+  "runtime": {
+    "managed": true,
+    "platforms": ["win32", "darwin", "linux"],
+    "prerequisites": [
+      "Git",
+      "Node.js 24 or newer",
+      "npm 10.9.2 or newer"
+    ],
+    "provisionCommands": [
+      { "executable": "npm", "arguments": ["ci"] },
+      { "executable": "npm", "arguments": ["run", "build:server"] },
+      { "executable": "npm", "arguments": ["run", "build:daemon-web-ui"] }
+    ]
+  },
   "launch": {
     "executable": "npm",
-    "arguments": ["run", "dev:server"],
+    "arguments": ["start"],
+    "environment": {
+      "PASEO_LISTEN": "127.0.0.1:6768"
+    },
     "workingDirectoryEnvironment": "CODING_TOOLS_PASEO_HOME"
   }
 }
