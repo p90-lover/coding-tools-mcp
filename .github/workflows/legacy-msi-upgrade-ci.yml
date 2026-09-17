@@ -8,6 +8,7 @@ on:
       - desktop-electron/package.json
       - desktop-electron/build/installer.nsh
       - desktop-electron/scripts/create-legacy-msi-upgrade-fixture.ps1
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
       - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
       - .github/workflows/legacy-msi-upgrade-ci.yml
   pull_request:
@@ -17,6 +18,7 @@ on:
       - desktop-electron/package.json
       - desktop-electron/build/installer.nsh
       - desktop-electron/scripts/create-legacy-msi-upgrade-fixture.ps1
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
       - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
       - .github/workflows/legacy-msi-upgrade-ci.yml
   workflow_dispatch:
