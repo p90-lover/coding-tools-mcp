@@ -164,6 +164,40 @@ export interface ProviderExecutionPlan {
   };
 }
 
+export type UpstreamToolId = "anneal" | "paseo";
+export type UpstreamToolStatus = "unknown" | "offline" | "starting" | "ready" | "error";
+
+export interface UpstreamToolSnapshot {
+  id: UpstreamToolId;
+  name: string;
+  repository: string;
+  commit: string;
+  version: string | null;
+  license: string;
+  sections: string[];
+  endpoint: string;
+  status: UpstreamToolStatus;
+  pid: number | null;
+  startedAt: string | null;
+  checkedAt: string | null;
+  latencyMs: number | null;
+  error: string | null;
+  sourceConfigured: boolean;
+  sourceAvailable: boolean;
+}
+
+export interface UpstreamToolsSnapshot {
+  version: 1;
+  tools: UpstreamToolSnapshot[];
+}
+
+export interface UpstreamToolOpenResult {
+  tool: UpstreamToolSnapshot;
+  section: string;
+  url: string;
+  embedded: boolean;
+}
+
 export interface LauncherState {
   version: 1;
   language: Language | null;
@@ -278,6 +312,7 @@ export interface LauncherSnapshot {
   version: string;
   smokePassed: boolean;
   operation: OperationState | null;
+  upstreamTools: UpstreamToolsSnapshot;
   update: UpdateState;
 }
 
@@ -328,6 +363,13 @@ export interface LauncherApi {
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
+  upstreamToolsSnapshot(): Promise<UpstreamToolsSnapshot>;
+  inspectUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
+  setUpstreamToolEndpoint(toolId: UpstreamToolId, endpoint: string): Promise<UpstreamToolSnapshot>;
+  startUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
+  stopUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
+  openEmbeddedTool(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
+  openUpstreamToolExternal(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
   providerSnapshot(): Promise<ProviderNetworkSnapshot>;
   providerExecutionPlan(input: ProviderExecutionPlanInput): Promise<ProviderExecutionPlan>;
   saveProviderAccount(input: ProviderAccountInput): Promise<ProviderNetworkSnapshot>;

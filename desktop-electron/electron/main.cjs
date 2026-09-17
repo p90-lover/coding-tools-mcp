@@ -34,6 +34,7 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createUpdateController } = require("./update.cjs");
 const { providerNetworkReady } = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
+const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -97,6 +98,7 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
+let upstreamToolController = null;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -575,6 +577,7 @@ function registerIpc({ logger, stateStore }) {
     version: app.getVersion(),
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
+    upstreamTools: upstreamToolController?.snapshot() ?? { version: 1, tools: [] },
     update: updateController?.getState() ?? { status: "disabled" },
   }));
 
@@ -610,6 +613,42 @@ function registerIpc({ logger, stateStore }) {
     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
     await openWebUrl(url);
     return true;
+  });
+
+  handle("launcher:upstream-tools-snapshot", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.snapshot();
+  });
+  handle("launcher:upstream-tool-inspect", (event, toolId) => {
+    assertFocusedMainWindow(event, false);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.inspect(toolId);
+  });
+  handle("launcher:upstream-tool-endpoint", (event, toolId, endpoint) => {
+    assertFocusedMainWindow(event, true);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.setEndpoint(toolId, endpoint);
+  });
+  handle("launcher:upstream-tool-start", (event, toolId) => {
+    assertFocusedMainWindow(event, true);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.start(toolId);
+  });
+  handle("launcher:upstream-tool-stop", (event, toolId) => {
+    assertFocusedMainWindow(event, true);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.stop(toolId);
+  });
+  handle("launcher:upstream-tool-open-embedded", (event, toolId, section) => {
+    assertFocusedMainWindow(event, false);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.openEmbeddedTool(toolId, section);
+  });
+  handle("launcher:upstream-tool-open-external", (event, toolId, section) => {
+    assertFocusedMainWindow(event, true);
+    if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
+    return upstreamToolController.openExternalTool(toolId, section);
   });
 
   handle("launcher:browser-bounds", (event, bounds) => {
@@ -1109,6 +1148,12 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  upstreamToolController = createUpstreamToolController({
+    env: process.env,
+    logger,
+    openExternal: openWebUrl,
+  });
+  app.once("before-quit", () => upstreamToolController?.dispose());
   headlessHost = new HeadlessHost({
     app,
     logger,

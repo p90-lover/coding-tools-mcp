@@ -15,6 +15,7 @@ import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
 import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
+import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -737,10 +738,20 @@ function LauncherShell({
               <ProviderCenterSurface language={language} setError={setError} />
             ) : null}
             {surface === "paseo" ? (
-              <PaseoOrchestratorSurface language={language} setError={setError} />
+              <UpstreamToolSurface
+                language={language}
+                nativeControl={<PaseoOrchestratorSurface language={language} setError={setError} />}
+                setError={setError}
+                toolId="paseo"
+              />
             ) : null}
             {surface === "anneal" ? (
-              <AnnealTasksSurface language={language} setError={setError} />
+              <UpstreamToolSurface
+                language={language}
+                nativeControl={<AnnealTasksSurface language={language} setError={setError} />}
+                setError={setError}
+                toolId="anneal"
+              />
             ) : null}
             {surface === "network" ? (
               <NetworkProxySurface language={language} setError={setError} />
