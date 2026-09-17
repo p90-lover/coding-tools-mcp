@@ -1,0 +1,115 @@
+name: rc.7 provider-updater base sync
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.7-full-paseo-anneal-provider-updater
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc7-provider-updater-base-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  synchronize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      BASE_BRANCH: release/codex-router-multiprovider-0.7.0-rc.6
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - name: Prepare retained evidence root
+        shell: bash
+        run: mkdir -p aiTemp/rc7-provider-updater-sync aiTemp/Trash/rc7-provider-updater-sync
+
+      - id: sync
+        name: Attempt exact base merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin "$BASE_BRANCH"
+          base_sha="$(git rev-parse "origin/$BASE_BRANCH")"
+          head_sha="$(git rev-parse HEAD)"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "$base_sha" HEAD; then
+            echo "already_current=true" >> "$GITHUB_OUTPUT"
+            printf 'base=%s\nhead=%s\nstatus=already-current\n' "$base_sha" "$head_sha" > aiTemp/rc7-provider-updater-sync/status.txt
+            exit 0
+          fi
+
+          set +e
+          git merge --no-commit --no-ff "$base_sha" > aiTemp/rc7-provider-updater-sync/merge.stdout.txt 2> aiTemp/rc7-provider-updater-sync/merge.stderr.txt
+          merge_status=$?
+          set -e
+
+          if [[ "$merge_status" -eq 0 ]]; then
+            echo "clean_merge=true" >> "$GITHUB_OUTPUT"
+            printf 'base=%s\nhead=%s\nstatus=clean-merge\n' "$base_sha" "$head_sha" > aiTemp/rc7-provider-updater-sync/status.txt
+            exit 0
+          fi
+
+          git diff --name-only --diff-filter=U | LC_ALL=C sort > aiTemp/rc7-provider-updater-sync/conflicts.txt
+          conflict_count="$(wc -l < aiTemp/rc7-provider-updater-sync/conflicts.txt | tr -d ' ')"
+          {
+            printf 'base=%s\n' "$base_sha"
+            printf 'head=%s\n' "$head_sha"
+            printf 'status=conflicts\n'
+            printf 'merge_exit=%s\n' "$merge_status"
+            printf 'count=%s\n' "$conflict_count"
+          } > aiTemp/rc7-provider-updater-sync/status.txt
+
+          if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            git merge --abort
+          else
+            git reset --hard HEAD
+          fi
+          echo "diagnostic=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push clean synchronization
+        if: steps.sync.outputs.clean_merge == 'true'
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.sync.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git commit -m "integrate(rc7): sync latest verified rc6 base" -m "Merge exact rc.6 base SHA $BASE_SHA before rc.7 verification. No retained file or branch is deleted."
+          git push origin HEAD:${GITHUB_REF_NAME}
+
+      - name: Commit retained conflict evidence
+        if: steps.sync.outputs.diagnostic == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add aiTemp/rc7-provider-updater-sync/status.txt aiTemp/rc7-provider-updater-sync/conflicts.txt aiTemp/rc7-provider-updater-sync/merge.stdout.txt aiTemp/rc7-provider-updater-sync/merge.stderr.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "ci(rc7): record provider-updater base-sync conflicts"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+          echo 'Latest rc.6 base needs an explicit conflict repair; evidence retained.' >&2
+          exit 1
+
+      - name: Enforce no project-file deletion
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_BRANCH"
+          deleted="$(git diff --name-only --diff-filter=D "origin/$BASE_BRANCH"...HEAD)"
+          if [[ -n "$deleted" ]]; then
+            echo 'Tracked project-file deletion detected:' >&2
+            printf '%s\n' "$deleted" >&2
+            exit 1
+          fi
