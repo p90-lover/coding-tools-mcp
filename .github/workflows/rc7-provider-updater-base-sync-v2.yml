@@ -1,0 +1,193 @@
+name: rc.7 provider-updater current-base union
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.7-full-paseo-anneal-provider-updater
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc7-provider-updater-current-base-union-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc7-provider-updater-union/bun-cache
+
+jobs:
+  compose-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      BASE_BRANCH: release/codex-router-multiprovider-0.7.0-rc.6
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary roots
+        shell: bash
+        run: mkdir -p aiTemp/rc7-provider-updater-union/renderer-dist aiTemp/Trash/rc7-provider-updater-union
+
+      - id: compose
+        name: Compose CommandCode work with the exact verified rc.6 provider base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags origin "$BASE_BRANCH"
+          base_sha="$(git rev-parse "origin/$BASE_BRANCH")"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "$base_sha" HEAD; then
+            echo "already_current=true" >> "$GITHUB_OUTPUT"
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          set +e
+          git merge --no-commit --no-ff "$base_sha" \
+            > aiTemp/rc7-provider-updater-union/merge.stdout.txt \
+            2> aiTemp/rc7-provider-updater-union/merge.stderr.txt
+          merge_status=$?
+          set -e
+
+          if [[ "$merge_status" -ne 0 ]]; then
+            git diff --name-only --diff-filter=U | LC_ALL=C sort \
+              > aiTemp/rc7-provider-updater-union/conflicts.txt
+            expected='desktop-electron/electron/provider-network.cjs'
+            if [[ "$(cat aiTemp/rc7-provider-updater-union/conflicts.txt)" != "$expected" ]]; then
+              echo 'Unexpected current-base conflicts:' >&2
+              cat aiTemp/rc7-provider-updater-union/conflicts.txt >&2
+              exit 1
+            fi
+
+            # Start with the already verified rc.6 Antigravity implementation, then
+            # deterministically re-apply the retained CommandCode integration.
+            git checkout --theirs -- "$expected"
+            python aiTemp/rc7-provider-updater-sync/prepare_current_base_commandcode_patch.py
+            python aiTemp/rc7-provider-updater-sync/apply_commandcode_current_base.py
+            git add "$expected"
+          fi
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo 'The provider-network union still contains an unmerged path.' >&2
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+
+          unexpected_unstaged="$(git diff --name-only | grep -Ev '^desktop-electron/electron/provider-network\.cjs$' || true)"
+          if [[ -n "$unexpected_unstaged" ]]; then
+            printf 'Unexpected unstaged materializer changes:\n%s\n' "$unexpected_unstaged" >&2
+            exit 1
+          fi
+          git add desktop-electron/electron/provider-network.cjs
+
+          network='desktop-electron/electron/provider-network.cjs'
+          grep -Fq 'function antigravitySessionBinding(account)' "$network"
+          grep -Fq 'baselineAuthIndexes' "$network"
+          grep -Fq 'mergeAccountSecret' "$network"
+          grep -Fq 'const COMMANDCODE_PROVIDER_ID = "commandcode-proxy"' "$network"
+          grep -Fq 'async function startCommandCodeLogin(account)' "$network"
+          grep -Fq 'async function importProviderSession(accountId)' "$network"
+
+          echo "merge_pending=true" >> "$GITHUB_OUTPUT"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Electron runtime syntax
+        if: steps.compose.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/preload.cjs
+          node --check desktop-electron/electron/update.cjs
+          node --check desktop-electron/electron/main.cjs
+
+      - name: Run focused Antigravity, CommandCode, Provider Hub, router, and updater contracts
+        if: steps.compose.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/antigravity-session-binding.test.cjs \
+            desktop-electron/tests/antigravity-provider-session.test.cjs \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/provider-console-saas.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/update.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs
+
+      - name: Install exact Electron dependencies
+        if: steps.compose.outputs.ready == 'true'
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Typecheck and build retained production renderer
+        if: steps.compose.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run --cwd desktop-electron typecheck
+          renderer_dir="$GITHUB_WORKSPACE/aiTemp/rc7-provider-updater-union/renderer-dist"
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_dir" --emptyOutDir false
+          )
+          CODING_TOOLS_RENDERER_DIST="$renderer_dir" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+
+      - name: Enforce no project-file deletion
+        if: steps.compose.outputs.ready == 'true'
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.compose.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          if [[ "${{ steps.compose.outputs.merge_pending }}" == 'true' ]]; then
+            deleted="$(git diff --cached --name-only --diff-filter=D "$BASE_SHA")"
+          else
+            deleted="$(git diff --name-only --diff-filter=D "$BASE_SHA"...HEAD)"
+          fi
+          if [[ -n "$deleted" ]]; then
+            echo 'Tracked project-file deletion detected:' >&2
+            printf '%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit and push the verified provider union
+        if: steps.compose.outputs.merge_pending == 'true'
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.compose.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          git commit \
+            -m 'integrate(rc7): unite CommandCode with current rc6 provider sessions' \
+            -m "Merge exact rc.6 base SHA $BASE_SHA while preserving stable Antigravity binding, CommandCode OAuth/session import, provider routing, and retained evidence."
+          git push origin HEAD:${GITHUB_REF_NAME}
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p aiTemp/Trash/rc7-provider-updater-union
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc7-provider-updater-union/node_modules-$GITHUB_RUN_ID"
+          fi
