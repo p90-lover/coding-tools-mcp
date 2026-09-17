@@ -1,0 +1,94 @@
+name: rc.6 legacy uninstall fixture CI
+
+on:
+  push:
+    branches:
+      - fix/rc6-legacy-uninstall-fixture-dotnet
+      - release/codex-router-multiprovider-0.7.0-rc.6
+    paths:
+      - '.github/workflows/codex-router-multiprovider-release-rc6.yml'
+      - '.github/workflows/rc6-legacy-uninstall-fixture-ci.yml'
+      - 'scripts/build-legacy-uninstall-fixture.ps1'
+      - 'desktop-electron/tests/rc6-legacy-uninstall-fixture.test.cjs'
+  pull_request:
+    paths:
+      - '.github/workflows/codex-router-multiprovider-release-rc6.yml'
+      - '.github/workflows/rc6-legacy-uninstall-fixture-ci.yml'
+      - 'scripts/build-legacy-uninstall-fixture.ps1'
+      - 'desktop-electron/tests/rc6-legacy-uninstall-fixture.test.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc6-legacy-uninstall-fixture-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Contract and Windows executable smoke
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare retained temporary directories
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path 'aiTemp\legacy-fixture-smoke' -Force | Out-Null
+          New-Item -ItemType Directory -Path 'aiTemp\Trash\legacy-fixture-smoke' -Force | Out-Null
+
+      - name: Run focused release-fixture contract
+        run: node --test desktop-electron/tests/rc6-legacy-uninstall-fixture.test.cjs
+
+      - name: Build and execute a real fixture through the shared helper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-fixture-smoke\Program.cs'
+          $output = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-fixture-smoke\LegacyFixture.exe'
+          @'
+          using System;
+          using System.IO;
+
+          internal static class LegacyFixture
+          {
+              public static int Main(string[] args)
+              {
+                  if (args.Length != 2 || args[0] != "--write-marker") return 41;
+                  File.WriteAllText(args[1], "LEGACY_FIXTURE_EXECUTED");
+                  return 0;
+              }
+          }
+          '@ | Set-Content -LiteralPath $source
+
+          & "$env:GITHUB_WORKSPACE\scripts\build-legacy-uninstall-fixture.ps1" `
+            -SourcePath $source `
+            -OutputPath $output
+
+          if (-not (Test-Path -LiteralPath $output -PathType Leaf)) {
+            throw 'fixture executable was not created'
+          }
+          $marker = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\legacy-fixture-smoke\executed.txt'
+          $process = Start-Process -FilePath $output -ArgumentList '--write-marker', ('"' + $marker + '"') -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "fixture exited with $($process.ExitCode)" }
+          if ((Get-Content -LiteralPath $marker -Raw).Trim() -ne 'LEGACY_FIXTURE_EXECUTED') {
+            throw 'fixture marker was not written correctly'
+          }
+
+      - name: Enforce no source-file deletion
+        shell: bash
+        run: |
+          base_ref='origin/release/codex-router-multiprovider-0.7.0-rc.6'
+          if ! git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+            base_ref='HEAD^'
+          fi
+          deleted="$(git diff -M --diff-filter=D --name-only "$base_ref"...HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
