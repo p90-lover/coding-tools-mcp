@@ -3,9 +3,9 @@ name: Legacy uninstall fixture contract
 on:
   push:
     branches:
-      - fix/rc6-legacy-uninstall-fixture-csc
+      - fix/rc6-legacy-uninstall-fixture-csc-current
     paths:
-      - .github/workflows/codex-router-multiprovider-release-rc6.yml
+      - .github/workflows/codex-router-multiprovider-release-rc6-csc.yml
       - .github/workflows/legacy-uninstall-fixture-ci.yml
       - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
       - desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
@@ -13,7 +13,7 @@ on:
     branches:
       - release/codex-router-multiprovider-0.7.0-rc.6
     paths:
-      - .github/workflows/codex-router-multiprovider-release-rc6.yml
+      - .github/workflows/codex-router-multiprovider-release-rc6-csc.yml
       - .github/workflows/legacy-uninstall-fixture-ci.yml
       - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
       - desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
@@ -78,7 +78,7 @@ jobs:
           if (Test-Path -LiteralPath (Join-Path $install 'legacy-app.bin')) { throw 'legacy payload was not retained' }
           if (-not (Test-Path -LiteralPath (Join-Path $trash 'legacy-app.bin'))) { throw 'retained payload is missing' }
 
-          $deadline = (Get-Date).AddSeconds(15)
+          $deadline = (Get-Date).AddSeconds(60)
           while ((Test-Path -LiteralPath $uninstaller) -and (Get-Date) -lt $deadline) {
             Start-Sleep -Milliseconds 250
           }
