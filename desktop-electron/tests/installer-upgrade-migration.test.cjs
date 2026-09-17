@@ -157,3 +157,34 @@ test("the authoritative release workflow delegates to the exact-source Windows m
   );
   assert.doesNotMatch(fixtureScript, /File\.Delete\(/);
 });
+
+test("renderer verification uses an isolated aiTemp output before the package build", () => {
+  const releaseRunnerPath = path.join(
+    repositoryRoot,
+    "aiTemp",
+    "rc7-release",
+    "run-windows-release.mjs",
+  );
+  const releaseRunner = fs.readFileSync(releaseRunnerPath, "utf8");
+
+  assert.match(
+    releaseRunner,
+    /const verificationRenderer = path\.join\(aiTemp, 'rc7-release', 'renderer-dist', sourceSha\);/,
+    "verification renderer output must be isolated under aiTemp and source-scoped",
+  );
+  assert.match(
+    releaseRunner,
+    /\['x', 'vite', 'build', '--outDir', verificationRenderer, '--emptyOutDir', 'false'\]/,
+    "verification renderer must use a dedicated non-emptying Vite output",
+  );
+  assert.match(
+    releaseRunner,
+    /CODING_TOOLS_RENDERER_DIST:\s*verificationRenderer/,
+    "the bundle contract must inspect the isolated verification renderer",
+  );
+  assert.doesNotMatch(
+    releaseRunner,
+    /run\('bun', \['run', 'build:renderer'\]/,
+    "the release runner must not build desktop-electron/dist before package:win",
+  );
+});
