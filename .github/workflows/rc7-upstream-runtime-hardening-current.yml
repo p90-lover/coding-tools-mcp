@@ -91,9 +91,12 @@ jobs:
       - name: Enforce no-delete contract
         run: |
           set -euo pipefail
-          git fetch origin release/codex-router-multiprovider-0.7.0-rc.7 --depth=1
-          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.7...HEAD
-          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.7...HEAD)"
+          git fetch --no-tags origin \
+            +refs/heads/release/codex-router-multiprovider-0.7.0-rc.7:refs/remotes/origin/release/codex-router-multiprovider-0.7.0-rc.7
+          base='origin/release/codex-router-multiprovider-0.7.0-rc.7'
+          git merge-base "$base" HEAD >/dev/null
+          git diff --check "$base"..HEAD
+          test -z "$(git diff --diff-filter=D --name-only "$base"..HEAD)"
 
       - name: Preserve transient dependencies in Trash
         if: always()
