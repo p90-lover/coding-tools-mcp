@@ -16,10 +16,11 @@ concurrency:
 jobs:
   synchronize:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       BASE_BRANCH: release/codex-router-multiprovider-0.7.0-rc.6
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc7-provider-updater-sync/bun-cache
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -27,12 +28,16 @@ jobs:
           clean: false
           persist-credentials: true
 
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
       - name: Prepare retained evidence root
         shell: bash
         run: mkdir -p aiTemp/rc7-provider-updater-sync aiTemp/Trash/rc7-provider-updater-sync
 
       - id: sync
-        name: Attempt exact base merge
+        name: Merge exact rc.6 base and resolve the verified provider conflict
         shell: bash
         run: |
           set -euo pipefail
@@ -46,27 +51,313 @@ jobs:
 
           if git merge-base --is-ancestor "$base_sha" HEAD; then
             echo "already_current=true" >> "$GITHUB_OUTPUT"
-            printf 'base=%s\nhead=%s\nstatus=already-current\n' "$base_sha" "$head_sha" > aiTemp/rc7-provider-updater-sync/status.txt
+            printf 'base=%s\nhead=%s\nstatus=already-current\n' "$base_sha" "$head_sha" \
+              > aiTemp/rc7-provider-updater-sync/status.txt
             exit 0
           fi
 
           set +e
-          git merge --no-commit --no-ff "$base_sha" > aiTemp/rc7-provider-updater-sync/merge.stdout.txt 2> aiTemp/rc7-provider-updater-sync/merge.stderr.txt
+          git merge --no-commit --no-ff "$base_sha" \
+            > aiTemp/rc7-provider-updater-sync/merge.stdout.txt \
+            2> aiTemp/rc7-provider-updater-sync/merge.stderr.txt
           merge_status=$?
           set -e
 
           if [[ "$merge_status" -eq 0 ]]; then
             echo "clean_merge=true" >> "$GITHUB_OUTPUT"
-            printf 'base=%s\nhead=%s\nstatus=clean-merge\n' "$base_sha" "$head_sha" > aiTemp/rc7-provider-updater-sync/status.txt
+            printf 'base=%s\nhead=%s\nstatus=clean-merge\n' "$base_sha" "$head_sha" \
+              > aiTemp/rc7-provider-updater-sync/status.txt
             exit 0
           fi
 
-          git diff --name-only --diff-filter=U | LC_ALL=C sort > aiTemp/rc7-provider-updater-sync/conflicts.txt
+          git diff --name-only --diff-filter=U | LC_ALL=C sort \
+            > aiTemp/rc7-provider-updater-sync/conflicts.txt
           conflict_count="$(wc -l < aiTemp/rc7-provider-updater-sync/conflicts.txt | tr -d ' ')"
+
+          if [[ "$conflict_count" == "1" ]] \
+            && grep -Fxq 'desktop-electron/electron/provider-network.cjs' \
+              aiTemp/rc7-provider-updater-sync/conflicts.txt; then
+            git checkout --ours -- desktop-electron/electron/provider-network.cjs
+
+            python - <<'PY'
+          from pathlib import Path
+
+          target = Path("desktop-electron/electron/provider-network.cjs")
+          text = target.read_text(encoding="utf-8")
+
+          def replace_once(before: str, after: str, label: str) -> None:
+              global text
+              if after in text:
+                  return
+              count = text.count(before)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one anchor, found {count}")
+              text = text.replace(before, after, 1)
+
+          replace_once(
+              '''    if (suppliedSecret && Object.keys(suppliedSecret).length > 0) {
+                state.secrets.accounts[id] = codec.encrypt(suppliedSecret);
+              }
+          ''',
+              '''    if (suppliedSecret && Object.keys(suppliedSecret).length > 0) {
+                const previousSecret = codec.decrypt(state.secrets.accounts[id]) || {};
+                state.secrets.accounts[id] = codec.encrypt({
+                  ...previousSecret,
+                  ...suppliedSecret,
+                });
+              }
+          ''',
+              "preserve encrypted provider-session metadata",
+          )
+
+          replace_once(
+              '''  function accountSecret(accountId) {
+              return codec.decrypt(state.secrets.accounts[accountId]);
+            }
+
+            function proxySecret(profileId) {
+          ''',
+              '''  function accountSecret(accountId) {
+              return codec.decrypt(state.secrets.accounts[accountId]);
+            }
+
+            function mergeAccountSecret(accountId, patch = {}) {
+              const account = findAccount(accountId);
+              if (!account || account.archivedAt) throw new Error("Provider account was not found");
+              const current = accountSecret(accountId) || {};
+              for (const key of ["antigravityAuthName", "antigravityAuthIndex"]) {
+                if (!Object.hasOwn(patch, key)) continue;
+                const value = optionalText(patch[key], 512);
+                if (value) current[key] = value;
+                else delete current[key];
+              }
+              state.secrets.accounts[accountId] = codec.encrypt(current);
+              write();
+            }
+
+            function proxySecret(profileId) {
+          ''',
+              "add encrypted Antigravity binding merge",
+          )
+
+          replace_once(
+              '''    recordProxyHealth,
+              accountSecret,
+              proxySecret,
+          ''',
+              '''    recordProxyHealth,
+              accountSecret,
+              mergeAccountSecret,
+              proxySecret,
+          ''',
+              "expose encrypted Antigravity binding merge",
+          )
+
+          replace_once(
+              '''function antigravityAuthFileName(entry) {
+            const value = String(entry?.name ?? entry?.id ?? "").trim();
+            return value || null;
+          }
+
+          function providerModelIds(value) {
+          ''',
+              '''function antigravityAuthFileName(entry) {
+            const value = String(entry?.name ?? entry?.id ?? "").trim();
+            return value || null;
+          }
+
+          function antigravityAuthIndex(entry) {
+            const value = String(entry?.auth_index ?? entry?.authIndex ?? "").trim();
+            return value || null;
+          }
+
+          function antigravityIdentity(entry) {
+            const value = String(entry?.email ?? entry?.account ?? entry?.label ?? "").trim();
+            return value || null;
+          }
+
+          function providerModelIds(value) {
+          ''',
+              "add stable Antigravity identity helpers",
+          )
+
+          replace_once(
+              '''    return { baseUrl, managementKey };
+            }
+
+            async function managementJson(account, pathname) {
+          ''',
+              '''    return { baseUrl, managementKey };
+            }
+
+            function antigravitySessionBinding(account) {
+              const secret = store.accountSecret(account.id) || {};
+              return {
+                name: String(secret.antigravityAuthName ?? "").trim() || null,
+                authIndex: String(secret.antigravityAuthIndex ?? "").trim() || null,
+              };
+            }
+
+            async function managementJson(account, pathname) {
+          ''',
+              "read encrypted Antigravity session binding",
+          )
+
+          start = text.find("  async function inspectAntigravitySession(")
+          end = text.find("\n  function commandCodeConnection", start)
+          if start < 0 or end < 0:
+              raise SystemExit("Could not isolate the Antigravity inspector without touching CommandCode")
+
+          inspector = '''  async function inspectAntigravitySession(
+            account,
+            { baselineAuthNames = new Set(), baselineAuthIndexes = new Set() } = {},
+          ) {
+            const binding = antigravitySessionBinding(account);
+            const query = new URLSearchParams();
+            if (binding.name) query.set("name", binding.name);
+            if (binding.authIndex) query.set("auth_index", binding.authIndex);
+            const pathname = query.size > 0
+              ? `/v0/management/auth-files?${query.toString()}`
+              : "/v0/management/auth-files";
+            const listing = await managementJson(account, pathname);
+            const files = antigravityAuthFiles(listing);
+            if (files.length === 0) {
+              return store.updateAccountConnection(account.id, {
+                status: "pending",
+                models: [],
+                error: binding.name || binding.authIndex
+                  ? "The bound Antigravity session is unavailable; log in again"
+                  : undefined,
+              });
+            }
+
+            const exactBound = files.find((entry) => (
+              (binding.authIndex && antigravityAuthIndex(entry) === binding.authIndex)
+                || (binding.name && antigravityAuthFileName(entry) === binding.name)
+            ));
+            if ((binding.name || binding.authIndex) && !exactBound) {
+              return store.updateAccountConnection(account.id, {
+                status: "pending",
+                models: [],
+                error: "The bound Antigravity session is unavailable; log in again",
+              });
+            }
+
+            const identity = String(account.identity || "").trim().toLowerCase();
+            const newlyCreated = files.find((entry) => {
+              const name = antigravityAuthFileName(entry);
+              const authIndex = antigravityAuthIndex(entry);
+              return (name && !baselineAuthNames.has(name))
+                || (authIndex && !baselineAuthIndexes.has(authIndex));
+            });
+            const selected = exactBound ?? files.find((entry) => {
+              const candidate = String(antigravityIdentity(entry) || "").toLowerCase();
+              return identity && candidate === identity;
+            }) ?? newlyCreated ?? files.find((entry) => {
+              const detail = `${entry.status ?? ""} ${entry.status_message ?? ""}`.trim();
+              return entry.disabled !== true
+                && entry.unavailable !== true
+                && providerSessionFailureStatus(detail) !== "expired"
+                && !/error|failed|invalid/i.test(detail);
+            }) ?? files.find((entry) => entry.disabled !== true) ?? files[0];
+
+            const selectedName = antigravityAuthFileName(selected);
+            const selectedAuthIndex = antigravityAuthIndex(selected);
+            const detail = `${selected.status ?? ""} ${selected.status_message ?? ""}`.trim();
+            let status = "connected";
+            if (selected.disabled === true) status = "disabled";
+            else if (providerSessionFailureStatus(detail) === "expired") status = "expired";
+            else if (selected.unavailable === true || /error|failed|invalid/i.test(detail)) status = "error";
+
+            if (status === "connected") {
+              store.mergeAccountSecret(account.id, {
+                antigravityAuthName: selectedName,
+                antigravityAuthIndex: selectedAuthIndex,
+              });
+            }
+
+            let models = Array.isArray(account.models) ? account.models : [];
+            let modelError;
+            if (status === "connected" && selectedName) {
+              try {
+                const catalogue = await managementJson(
+                  account,
+                  `/v0/management/auth-files/models?name=${encodeURIComponent(selectedName)}`,
+                );
+                const discovered = providerModelIds(catalogue);
+                if (discovered.length > 0) models = discovered;
+              } catch (error) {
+                modelError = error instanceof Error ? error.message : String(error);
+              }
+            }
+
+            return store.updateAccountConnection(account.id, {
+              status,
+              identity: antigravityIdentity(selected) ?? account.identity,
+              models,
+              error: status === "connected" ? modelError : (selected.status_message || detail || undefined),
+            });
+          }
+          '''
+          text = text[:start] + inspector + text[end:]
+
+          replace_once(
+              '''      let baselineAuthNames = new Set();
+                try {
+                  const baseline = await managementJson(account, "/v0/management/auth-files");
+                  baselineAuthNames = new Set(
+                    antigravityAuthFiles(baseline)
+                      .map(antigravityAuthFileName)
+                      .filter(Boolean),
+                  );
+          ''',
+              '''      let baselineAuthNames = new Set();
+                let baselineAuthIndexes = new Set();
+                try {
+                  const baseline = await managementJson(account, "/v0/management/auth-files");
+                  const baselineFiles = antigravityAuthFiles(baseline);
+                  baselineAuthNames = new Set(
+                    baselineFiles.map(antigravityAuthFileName).filter(Boolean),
+                  );
+                  baselineAuthIndexes = new Set(
+                    baselineFiles.map(antigravityAuthIndex).filter(Boolean),
+                  );
+          ''',
+              "record Antigravity auth indexes before login",
+          )
+
+          replace_once(
+              '''            snapshot: await inspectAntigravitySession(accountRecord(account.id), {
+                      baselineAuthNames,
+                    }),
+          ''',
+              '''            snapshot: await inspectAntigravitySession(accountRecord(account.id), {
+                      baselineAuthNames,
+                      baselineAuthIndexes,
+                    }),
+          ''',
+              "bind the newly authenticated Antigravity session",
+          )
+
+          target.write_text(text, encoding="utf-8")
+          print("RC7_PROVIDER_NETWORK_CONFLICT_RESOLVED")
+          PY
+
+            git add desktop-electron/electron/provider-network.cjs
+            if [[ -n "$(git diff --name-only --diff-filter=U)" ]]; then
+              echo 'Provider-network conflict remains unresolved.' >&2
+              exit 1
+            fi
+            echo "resolved_merge=true" >> "$GITHUB_OUTPUT"
+            printf 'base=%s\nhead=%s\nstatus=resolved-provider-network\n' "$base_sha" "$head_sha" \
+              > aiTemp/rc7-provider-updater-sync/status.txt
+            exit 0
+          fi
+
           {
             printf 'base=%s\n' "$base_sha"
             printf 'head=%s\n' "$head_sha"
-            printf 'status=conflicts\n'
+            printf 'status=unresolved-conflicts\n'
             printf 'merge_exit=%s\n' "$merge_status"
             printf 'count=%s\n' "$conflict_count"
           } > aiTemp/rc7-provider-updater-sync/status.txt
@@ -78,27 +369,52 @@ jobs:
           fi
           echo "diagnostic=true" >> "$GITHUB_OUTPUT"
 
-      - name: Commit and push clean synchronization
-        if: steps.sync.outputs.clean_merge == 'true'
+      - name: Install exact Electron dependencies
+        if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Verify merged Antigravity and CommandCode provider behavior
+        if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/provider-network.cjs
+          node --test \
+            desktop-electron/tests/antigravity-session-binding.test.cjs \
+            desktop-electron/tests/antigravity-provider-session.test.cjs \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs
+          bun run --cwd desktop-electron typecheck
+
+      - name: Commit and push verified synchronization
+        if: steps.sync.outputs.clean_merge == 'true' || steps.sync.outputs.resolved_merge == 'true'
         shell: bash
         env:
           BASE_SHA: ${{ steps.sync.outputs.base_sha }}
         run: |
           set -euo pipefail
-          git commit -m "integrate(rc7): sync latest verified rc6 base" -m "Merge exact rc.6 base SHA $BASE_SHA before rc.7 verification. No retained file or branch is deleted."
+          git add aiTemp/rc7-provider-updater-sync/status.txt
+          git diff --cached --check
+          git commit \
+            -m "integrate(rc7): sync latest verified rc6 base" \
+            -m "Merge exact rc.6 base SHA $BASE_SHA while retaining rc.7 CommandCode support and the verified Antigravity session binding. No retained file or branch is deleted."
           git push origin HEAD:${GITHUB_REF_NAME}
 
-      - name: Commit retained conflict evidence
+      - name: Commit retained evidence for unknown conflicts
         if: steps.sync.outputs.diagnostic == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          git add aiTemp/rc7-provider-updater-sync/status.txt aiTemp/rc7-provider-updater-sync/conflicts.txt aiTemp/rc7-provider-updater-sync/merge.stdout.txt aiTemp/rc7-provider-updater-sync/merge.stderr.txt
+          git add \
+            aiTemp/rc7-provider-updater-sync/status.txt \
+            aiTemp/rc7-provider-updater-sync/conflicts.txt \
+            aiTemp/rc7-provider-updater-sync/merge.stdout.txt \
+            aiTemp/rc7-provider-updater-sync/merge.stderr.txt
           if ! git diff --cached --quiet; then
-            git commit -m "ci(rc7): record provider-updater base-sync conflicts"
+            git commit -m "ci(rc7): retain unknown base-sync conflict evidence"
             git push origin HEAD:${GITHUB_REF_NAME}
           fi
-          echo 'Latest rc.6 base needs an explicit conflict repair; evidence retained.' >&2
+          echo 'Latest rc.6 base has an unrecognized conflict; evidence retained.' >&2
           exit 1
 
       - name: Enforce no project-file deletion
@@ -112,4 +428,14 @@ jobs:
             echo 'Tracked project-file deletion detected:' >&2
             printf '%s\n' "$deleted" >&2
             exit 1
+          fi
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p aiTemp/Trash/rc7-provider-updater-sync
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc7-provider-updater-sync/node_modules-$GITHUB_RUN_ID"
           fi
