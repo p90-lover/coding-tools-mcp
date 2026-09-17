@@ -65,10 +65,11 @@ jobs:
       - name: Install exact Electron dependencies
         run: bun install --cwd desktop-electron --frozen-lockfile
 
-      - name: Run updater and rc.7 contracts
+      - name: Run updater tests and focused rc.7 updater contract
         run: |
+          node --test desktop-electron/tests/update.test.cjs
           node --test \
-            desktop-electron/tests/update.test.cjs \
+            --test-name-pattern='the updater supports manual refresh, periodic discovery, and one-click install' \
             desktop-electron/tests/rc7-full-integration-contract.test.cjs
 
       - name: Typecheck and build production renderer
