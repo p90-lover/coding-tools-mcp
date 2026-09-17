@@ -53,11 +53,10 @@ jobs:
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
 
-      - name: Commit the verified rc.6 release source
+      - name: Commit verified non-workflow rc.6 source
         run: |
           set -euo pipefail
           git add \
-            .github/workflows/codex-router-multiprovider-release-rc6.yml \
             docs/releases/v0.7.0-rc.6.md \
             desktop-electron/package.json \
             desktop-electron/electron/product.cjs \
@@ -68,10 +67,10 @@ jobs:
             desktop-electron/tests/package-resource-preparation.test.cjs \
             desktop-electron/tests/product-identity.test.cjs
           if git diff --cached --quiet; then
-            echo 'rc.6 release source is already materialized'
+            echo 'rc.6 non-workflow source is already materialized'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'release: materialize v0.7.0-rc.6 installer migration gate'
+          git commit -m 'release: materialize v0.7.0-rc.6 installer migration source'
           git push origin "HEAD:${GITHUB_REF_NAME}"
