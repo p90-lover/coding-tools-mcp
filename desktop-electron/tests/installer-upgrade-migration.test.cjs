@@ -44,8 +44,10 @@ test("the installer detects the exact legacy Tauri uninstall identity in every r
   const source = readInstallerInclude();
   assert.match(
     source,
-    /Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Coding Tools MCP/,
+    /!define LEGACY_UNINSTALL_ROOT "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"/,
   );
+  assert.match(source, /!define LEGACY_PRODUCT_NAME "Coding Tools MCP"/);
+  assert.match(source, /EnumRegKey[^\n]*LEGACY_UNINSTALL_ROOT/);
   assert.match(source, /ReadRegStr[^\n]*\$\{ROOT\}/);
   for (const root of ["HKCU", "HKLM"]) {
     for (const view of ["64", "32"]) {
