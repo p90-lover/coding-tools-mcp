@@ -8,11 +8,13 @@ on:
       - aiTemp/provider-console-saas/**
       - desktop-electron/src/features/ProviderHubSaasSurface.tsx
       - desktop-electron/src/features/provider-hub-saas.css
+      - desktop-electron/src/providers/provider-console-metadata.ts
       - desktop-electron/src/providers/provider-types.ts
       - desktop-electron/src/App.tsx
       - desktop-electron/tests/provider-console-saas.test.cjs
       - desktop-electron/tests/provider-center-account-wiring.test.cjs
       - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
       - desktop-electron/package.json
       - desktop-electron/bun.lock
       - .github/workflows/provider-console-saas-ci.yml
@@ -20,11 +22,13 @@ on:
     paths:
       - desktop-electron/src/features/ProviderHubSaasSurface.tsx
       - desktop-electron/src/features/provider-hub-saas.css
+      - desktop-electron/src/providers/provider-console-metadata.ts
       - desktop-electron/src/providers/provider-types.ts
       - desktop-electron/src/App.tsx
       - desktop-electron/tests/provider-console-saas.test.cjs
       - desktop-electron/tests/provider-center-account-wiring.test.cjs
       - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
       - desktop-electron/package.json
       - desktop-electron/bun.lock
       - .github/workflows/provider-console-saas-ci.yml
