@@ -41,7 +41,7 @@ test("Electron registers typed execution IPC instead of exposing dead preload me
   assert.match(main, /assertFocusedMainWindow\(/);
 });
 
-test("provider credentials remain main-process only and are rejected from renderer responses", () => {
+test("provider credentials stay vault-bound while Paseo and Anneal use a separate control credential", () => {
   const schema = read("desktop-electron/electron/ipc-schema.cjs");
   const contracts = read("desktop-electron/src/api/contracts.ts");
   const surface = read("desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx");
@@ -49,27 +49,32 @@ test("provider credentials remain main-process only and are rejected from render
   const bootstrap = read("desktop-electron/electron/provider-bootstrap.cjs");
 
   assert.match(schema, /SENSITIVE_RESPONSE_KEYS[\s\S]*[\"']credential[\"']/);
+  assert.match(schema, /SENSITIVE_RESPONSE_KEYS[\s\S]*[\"']control_credential[\"']/);
   assert.match(schema, /rejectSensitiveKeys:\s*true/);
 
   const schemaRequest = schema.match(/const executionProviderRequest = Object\.freeze\(\{([\s\S]*?)\n\}\);/);
   assert.ok(schemaRequest, "execution provider request schema is missing");
-  assert.doesNotMatch(schemaRequest[1], /\bcredential\b/);
+  assert.match(schemaRequest[1], /controlCredential:\s*Object\.freeze\(\{\s*type:\s*"string",\s*maxLength:\s*4096/);
+  assert.doesNotMatch(schemaRequest[1], /\n\s*credential:/);
 
   const contractRequest = contracts.match(/provider\(input: \{([\s\S]*?)\n    \}\): Promise<JsonObject>/);
   assert.ok(contractRequest, "typed execution provider request is missing");
-  assert.doesNotMatch(contractRequest[1], /\bcredential\b/);
+  assert.match(contractRequest[1], /readonly controlCredential\?: string/);
+  assert.doesNotMatch(contractRequest[1], /\n\s*readonly credential\??:/);
 
   const connectBlock = surface.match(/const connectProvider = async \(\) => \{([\s\S]*?)\n  const addProvider/);
   assert.ok(connectBlock, "provider connect handler is missing");
   const providerCall = connectBlock[1].match(/api\.execution\.provider\(\{([\s\S]*?)\n      \}\);/);
   assert.ok(providerCall, "provider execution call is missing");
-  assert.doesNotMatch(providerCall[1], /\bcredential\b/);
+  assert.doesNotMatch(providerCall[1], /\n\s*credential:/);
 
   assert.match(bootstrap, /providerNetworkReady/);
   const handler = main.match(/handle\("coding-tools:execution:provider"([\s\S]*?)\n  handle\("coding-tools:execution:update"/);
   assert.ok(handler, "execution provider handler is missing");
   assert.match(handler[1], /createProviderExecutionPlan/);
   assert.match(handler[1], /providerNetworkReady/);
-  assert.match(handler[1], /accountSecret/);
+  assert.doesNotMatch(handler[1], /accountSecret\s*\(/);
+  assert.doesNotMatch(handler[1], /storedProviderCredential/);
   assert.doesNotMatch(handler[1], /credential:\s*input\.credential/);
+  assert.match(handler[1], /credential:\s*input\.controlCredential\s*\?\?\s*""/);
 });
