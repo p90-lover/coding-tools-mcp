@@ -121,6 +121,11 @@ test("the authoritative release workflow delegates to the exact-source Windows m
   assert.match(workflow, /windows-latest/);
   assert.match(workflow, /run-windows-release\.mjs/);
   assert.match(workflow, /verify-windows-migration\.ps1/);
+  assert.match(
+    workflow,
+    /concurrency:[\s\S]*?cancel-in-progress:\s*true/,
+    "a newer rc.7 source must cancel stale Windows release runs",
+  );
 
   assert.match(releaseRunner, /installer-upgrade-migration\.test\.cjs/);
   assert.match(releaseRunner, /verify-windows-migration\.ps1/);
