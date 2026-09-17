@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/rc7-upstream-runtime-hardening.yml'
       - 'aiTemp/rc7-upstream-runtime-hardening/apply_runtime_hardening.py'
+      - 'aiTemp/rc7-upstream-runtime-hardening/apply_preload_restart.py'
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/electron/upstream-tools.cjs'
@@ -55,8 +56,12 @@ jobs:
         run: |
           python aiTemp/rc7-upstream-runtime-hardening/apply_runtime_hardening.py \
             | tee aiTemp/rc7-upstream-runtime-hardening/evidence/materializer.txt
+          python aiTemp/rc7-upstream-runtime-hardening/apply_preload_restart.py \
+            | tee aiTemp/rc7-upstream-runtime-hardening/evidence/preload-materializer.txt
           grep -F RC7_UPSTREAM_RUNTIME_HARDENING_APPLIED \
             aiTemp/rc7-upstream-runtime-hardening/evidence/materializer.txt
+          grep -F RC7_UPSTREAM_PRELOAD_RESTART_APPLIED \
+            aiTemp/rc7-upstream-runtime-hardening/evidence/preload-materializer.txt
 
       - name: Validate bounded source changes
         run: |
@@ -64,7 +69,7 @@ jobs:
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
           git diff --name-only | tee aiTemp/rc7-upstream-runtime-hardening/evidence/changed-files.txt
-          allowed='^(desktop-electron/electron/(main|upstream-tools)\.cjs|desktop-electron/src/(types\.ts|features/UpstreamToolSurface\.tsx))$'
+          allowed='^(desktop-electron/electron/(main|preload|upstream-tools)\.cjs|desktop-electron/src/(types\.ts|features/UpstreamToolSurface\.tsx))$'
           unexpected="$(grep -Ev "$allowed" aiTemp/rc7-upstream-runtime-hardening/evidence/changed-files.txt || true)"
           if [ -n "$unexpected" ]; then
             printf 'Unexpected upstream runtime paths:\n%s\n' "$unexpected" >&2
@@ -112,6 +117,7 @@ jobs:
           git add \
             desktop-electron/electron/upstream-tools.cjs \
             desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
             desktop-electron/src/types.ts \
             desktop-electron/src/features/UpstreamToolSurface.tsx
           git diff --cached --check
