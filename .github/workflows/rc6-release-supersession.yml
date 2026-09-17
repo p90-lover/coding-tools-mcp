@@ -1,5 +1,6 @@
 name: Supersede stale rc.6 publishers
 
+# Retriggered after the authoritative Windows runner stalled during dependency preparation.
 on:
   push:
     branches:
