@@ -17,10 +17,18 @@ const temp = path.join(aiTemp, 'tmp', `release-${releaseVersion}`);
 const evidence = path.join(aiTemp, 'evidence');
 const trash = path.join(aiTemp, 'Trash', `release-${releaseVersion}-windows`);
 const assets = path.join(aiTemp, 'release-assets');
+const verificationRenderer = path.join(aiTemp, 'rc7-release', 'renderer-dist', sourceSha);
 const preload = pathToFileURL(path.join(root, 'runtime-web', 'scripts', 'no-delete-preload.mjs')).href;
 const commandLog = [];
 
-for (const directory of [temp, evidence, trash, assets, path.join(aiTemp, 'cache', 'electron-builder')]) {
+for (const directory of [
+  temp,
+  evidence,
+  trash,
+  assets,
+  verificationRenderer,
+  path.join(aiTemp, 'cache', 'electron-builder'),
+]) {
   fs.mkdirSync(directory, { recursive: true });
 }
 
@@ -156,8 +164,17 @@ async function main() {
   ]) run('node', ['--check', file], { label: `syntax ${file}` });
 
   run('bun', ['run', 'typecheck'], { cwd: path.join(root, 'desktop-electron'), label: 'desktop typecheck' });
-  run('bun', ['run', 'build:renderer'], { cwd: path.join(root, 'desktop-electron'), label: 'renderer build' });
-  run('node', ['--test', 'desktop-electron/tests/renderer-provider-bundle.test.cjs'], { label: 'renderer Provider Center bundle contract' });
+  run('bun', ['x', 'vite', 'build', '--outDir', verificationRenderer, '--emptyOutDir', 'false'], {
+    cwd: path.join(root, 'desktop-electron'),
+    label: 'isolated renderer verification build',
+  });
+  run('node', ['--test', 'desktop-electron/tests/renderer-provider-bundle.test.cjs'], {
+    env: {
+      ...childEnv,
+      CODING_TOOLS_RENDERER_DIST: verificationRenderer,
+    },
+    label: 'isolated renderer Provider Center bundle contract',
+  });
 
   await downloadTunnelClient();
   run('cargo', ['build', '--release', '--locked', '--manifest-path', 'rust-core/coding-tools-headless/Cargo.toml'], { label: 'Rust headless release build' });
