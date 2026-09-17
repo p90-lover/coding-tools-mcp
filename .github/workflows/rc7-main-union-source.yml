@@ -108,6 +108,7 @@ jobs:
           desktop-electron/electron/upstream-tools.cjs
           desktop-electron/src/features/UpstreamToolSurface.tsx
           desktop-electron/src/types.ts
+          desktop-electron/tests/installer-upgrade-migration.test.cjs
           src-tauri/src/auth/oauth_authorization_response.rs
           src-tauri/src/commands/mod.rs
           src-tauri/src/commands/orchestrators.rs
@@ -130,15 +131,16 @@ jobs:
             fi
 
             # These paths are the rc.7 Provider Hub, CommandCode, managed
-            # upstream runtime, Paseo, Anneal, image, and orchestration surfaces.
-            # The release tip is the verified source of truth and is a strict
-            # superset of the older main-side integration points.
+            # upstream runtime, Paseo, Anneal, image, installer-migration, and
+            # orchestration surfaces. The release tip is the verified source of
+            # truth and is a strict superset of the older main-side integration.
             git checkout --theirs -- \
               desktop-electron/electron/main.cjs \
               desktop-electron/electron/preload.cjs \
               desktop-electron/electron/upstream-tools.cjs \
               desktop-electron/src/features/UpstreamToolSurface.tsx \
               desktop-electron/src/types.ts \
+              desktop-electron/tests/installer-upgrade-migration.test.cjs \
               src-tauri/src/commands/mod.rs \
               src-tauri/src/commands/orchestrators.rs \
               src-tauri/src/commands/providers.rs \
@@ -182,6 +184,7 @@ jobs:
               desktop-electron/electron/upstream-tools.cjs \
               desktop-electron/src/features/UpstreamToolSurface.tsx \
               desktop-electron/src/types.ts \
+              desktop-electron/tests/installer-upgrade-migration.test.cjs \
               src-tauri/src/auth/oauth_authorization_response.rs \
               src-tauri/src/commands/mod.rs \
               src-tauri/src/commands/orchestrators.rs \
