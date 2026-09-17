@@ -1,0 +1,109 @@
+name: rc.7 current-base main sync
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.7-main-sync-current
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc7-main-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose-or-merge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - name: Prepare retained diagnostic root
+        shell: bash
+        run: mkdir -p aiTemp/rc7-main-sync aiTemp/Trash/rc7-main-sync
+
+      - id: merge
+        name: Attempt exact current-main merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          main_sha="$(git rev-parse origin/main)"
+          base_sha="$(git rev-parse HEAD)"
+          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "$main_sha" HEAD; then
+            echo "already_integrated=true" >> "$GITHUB_OUTPUT"
+            printf 'main=%s\nhead=%s\nstatus=already-integrated\n' "$main_sha" "$base_sha" > aiTemp/rc7-main-sync/status.txt
+            exit 0
+          fi
+
+          set +e
+          git merge --no-commit --no-ff "$main_sha" > aiTemp/rc7-main-sync/merge.stdout.txt 2> aiTemp/rc7-main-sync/merge.stderr.txt
+          merge_status=$?
+          set -e
+
+          if [[ "$merge_status" -eq 0 ]]; then
+            echo "clean_merge=true" >> "$GITHUB_OUTPUT"
+            printf 'main=%s\nbase=%s\nstatus=clean-merge\n' "$main_sha" "$base_sha" > aiTemp/rc7-main-sync/status.txt
+            exit 0
+          fi
+
+          git diff --name-only --diff-filter=U | LC_ALL=C sort > aiTemp/rc7-main-sync/conflicts.txt
+          {
+            printf 'main=%s\n' "$main_sha"
+            printf 'base=%s\n' "$base_sha"
+            printf 'status=conflicts\n'
+            printf 'count=%s\n' "$(wc -l < aiTemp/rc7-main-sync/conflicts.txt | tr -d ' ')"
+          } > aiTemp/rc7-main-sync/status.txt
+          git merge --abort
+          echo "conflicts=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit a clean merge
+        if: steps.merge.outputs.clean_merge == 'true'
+        shell: bash
+        env:
+          MAIN_SHA: ${{ steps.merge.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "integrate(rc7): merge current main into verified rc6 source" -m "Merge exact main SHA $MAIN_SHA without deleting retained branches or evidence."
+          git push origin HEAD:${GITHUB_REF_NAME}
+
+      - name: Retain exact conflict evidence
+        if: steps.merge.outputs.conflicts == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add aiTemp/rc7-main-sync/status.txt aiTemp/rc7-main-sync/conflicts.txt aiTemp/rc7-main-sync/merge.stdout.txt aiTemp/rc7-main-sync/merge.stderr.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "ci(rc7): record exact current-main merge conflicts"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+          echo 'Current main does not merge cleanly; retained conflict evidence has been committed.' >&2
+          exit 1
+
+      - name: Verify no project deletion
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin release/codex-router-multiprovider-0.7.0-rc.6
+          deleted="$(git diff --name-only --diff-filter=D origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD)"
+          if [[ -n "$deleted" ]]; then
+            echo 'Project-file deletion detected:' >&2
+            printf '%s\n' "$deleted" >&2
+            exit 1
+          fi
