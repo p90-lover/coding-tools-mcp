@@ -28,6 +28,11 @@ const PROVIDER_LOGIN_URLS = Object.freeze({
   "ai-studio-reverse-proxy": "https://aistudio.google.com/",
   "gemini-reverse-proxy": "https://aistudio.google.com/",
 });
+const ANTIGRAVITY_PROVIDER_ID = "cliproxyapi-antigravity";
+const DEFAULT_ANTIGRAVITY_BASE_URL = "http://127.0.0.1:8317";
+const DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_OAUTH_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_OAUTH_TIMEOUT_MS = 5 * 60_000;
 
 function defaultState() {
   return {
@@ -118,6 +123,7 @@ function normalizeAccount(account) {
       providerId: requiredText(account.providerId, "Provider ID", 160),
       label: requiredText(account.label, "Account label", 160),
       identity: optionalText(account.identity, 320),
+      endpoint: optionalText(account.endpoint, 2_048),
       auth,
       status,
       enabled: account.enabled !== false,
@@ -397,6 +403,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       providerId,
       label: input.label,
       identity: input.identity,
+      endpoint: input.endpoint ?? previous?.endpoint,
       auth,
       status,
       enabled: input.enabled ?? previous?.enabled ?? true,
@@ -466,6 +473,29 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       archivedAt: now,
       updatedAt: now,
     });
+    state.accounts = normalizeAccountDefaults(state.accounts);
+    write();
+    return publicSnapshot();
+  }
+
+  function updateAccountConnection(accountId, input = {}) {
+    const account = findAccount(accountId);
+    if (!account || account.archivedAt) throw new Error("Provider account was not found");
+    const now = new Date().toISOString();
+    if (ACCOUNT_STATUS.has(input.status)) account.status = input.status;
+    if (Object.hasOwn(input, "identity")) account.identity = optionalText(input.identity, 320);
+    if (Object.hasOwn(input, "endpoint")) account.endpoint = optionalText(input.endpoint, 2_048);
+    if (Array.isArray(input.models)) account.models = normalizeModels(input.models).sort();
+    account.error = optionalText(input.error, 500);
+    account.updatedAt = now;
+    if (account.status === "connected") {
+      account.enabled = true;
+      account.lastUsedAt = now;
+    }
+    if (account.status === "disabled") {
+      account.enabled = false;
+      account.isDefault = false;
+    }
     state.accounts = normalizeAccountDefaults(state.accounts);
     write();
     return publicSnapshot();
@@ -622,6 +652,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     setDefaultAccount,
     setAccountEnabled,
     archiveAccount,
+    updateAccountConnection,
     saveProxyProfile,
     archiveProxyProfile,
     setGlobalRouting,
@@ -663,6 +694,81 @@ function testTcpEndpoint(profile, timeoutMs = 7_000) {
   });
 }
 
+
+function loopbackHost(url) {
+  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "::1"
+    || hostname.startsWith("127.");
+}
+
+function normalizeProviderBaseUrl(value) {
+  const normalized = requiredText(value, "Provider endpoint", 2_048);
+  let url;
+  try {
+    url = new URL(normalized);
+  } catch {
+    throw new Error("Provider endpoint is invalid");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("Provider endpoint must not contain credentials, query parameters, or fragments");
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopbackHost(url))) {
+    throw new Error("Provider endpoints require HTTPS; plain HTTP is limited to loopback");
+  }
+  let pathname = url.pathname.replace(/\/+$/u, "");
+  if (pathname.toLowerCase().endsWith("/v1")) pathname = pathname.slice(0, -3);
+  url.pathname = pathname || "/";
+  return url.toString().replace(/\/$/u, "");
+}
+
+function safeProviderLoginUrl(value) {
+  let url;
+  try {
+    url = new URL(requiredText(value, "Provider login URL", 8_192));
+  } catch {
+    throw new Error("Provider login URL is invalid");
+  }
+  if (url.username || url.password) throw new Error("Provider login URL is unsafe");
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopbackHost(url))) {
+    throw new Error("Provider login URLs require HTTPS; plain HTTP is limited to loopback");
+  }
+  return url.toString();
+}
+
+function providerSessionFailureStatus(message) {
+  return /expired|invalid[_ -]?grant|refresh token|reauth/i.test(String(message || ""))
+    ? "expired"
+    : "error";
+}
+
+function antigravityAuthFiles(value) {
+  const files = Array.isArray(value?.files) ? value.files : [];
+  return files.filter((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const provider = String(entry.provider ?? entry.type ?? "").trim().toLowerCase();
+    return provider === "antigravity";
+  });
+}
+
+function antigravityAuthFileName(entry) {
+  const value = String(entry?.name ?? entry?.id ?? "").trim();
+  return value || null;
+}
+
+function providerModelIds(value) {
+  const models = Array.isArray(value?.models) ? value.models : [];
+  return [...new Set(models.flatMap((entry) => {
+    const id = typeof entry === "string"
+      ? entry
+      : entry && typeof entry === "object"
+        ? entry.id
+        : null;
+    return typeof id === "string" && id.trim() ? [id.trim()] : [];
+  }))].sort().slice(0, 128);
+}
+
 function createProviderNetworkController({
   app,
   browserPartition,
@@ -672,6 +778,11 @@ function createProviderNetworkController({
   session,
   shell,
   userData,
+  fetchImpl = globalThis.fetch,
+  sleepImpl = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  oauthPollIntervalMs = DEFAULT_OAUTH_POLL_INTERVAL_MS,
+  oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,
+  requestTimeoutMs = DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS,
 }) {
   const directory = path.join(userData, "providers");
   const store = createProviderNetworkStore({
@@ -680,6 +791,7 @@ function createProviderNetworkController({
     safeStorage,
   });
   const ownedEnvironment = new Set();
+  if (typeof fetchImpl !== "function") throw new Error("Provider network fetch implementation is unavailable");
 
   function clearOwnedEnvironment() {
     for (const name of ownedEnvironment) delete process.env[name];
@@ -727,17 +839,193 @@ function createProviderNetworkController({
     return snapshot;
   }
 
-  async function openProviderLogin(accountId) {
-    const snapshot = store.snapshot();
-    const account = snapshot.accounts.find((item) => item.id === accountId && !item.archivedAt);
+  function accountRecord(accountId) {
+    const account = store.snapshot().accounts.find((item) => item.id === accountId && !item.archivedAt);
     if (!account) throw new Error("Provider account was not found");
+    return account;
+  }
+
+  function antigravityConnection(account) {
+    const secret = store.accountSecret(account.id) || {};
+    const managementKey = String(secret.managementKey ?? secret.credential ?? "").trim();
+    if (!managementKey) throw new Error("Enter the CLIProxyAPI management key before login or testing");
+    const baseUrl = normalizeProviderBaseUrl(
+      account.endpoint || secret.baseUrl || DEFAULT_ANTIGRAVITY_BASE_URL,
+    );
+    return { baseUrl, managementKey };
+  }
+
+  async function managementJson(account, pathname) {
+    const { baseUrl, managementKey } = antigravityConnection(account);
+    const url = new URL(pathname, `${baseUrl}/`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1, requestTimeoutMs));
+    timeout.unref?.();
+    try {
+      const response = await fetchImpl(url.toString(), {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${managementKey}`,
+          "X-Management-Key": managementKey,
+        },
+        signal: controller.signal,
+      });
+      let value = {};
+      try {
+        value = await response.json();
+      } catch {
+        value = {};
+      }
+      if (!response.ok) {
+        const detail = typeof value?.error === "string" ? `: ${value.error.slice(0, 240)}` : "";
+        throw new Error(`CLIProxyAPI management request failed (HTTP ${response.status})${detail}`);
+      }
+      return value;
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error("CLIProxyAPI management request timed out");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function inspectAntigravitySession(account, { baselineAuthNames = new Set() } = {}) {
+    const listing = await managementJson(account, "/v0/management/auth-files");
+    const files = antigravityAuthFiles(listing);
+    if (files.length === 0) {
+      return store.updateAccountConnection(account.id, {
+        status: "pending",
+        models: [],
+        error: undefined,
+      });
+    }
+
+    const identity = String(account.identity || "").trim().toLowerCase();
+    const newlyCreated = files.find((entry) => {
+      const name = antigravityAuthFileName(entry);
+      return name && !baselineAuthNames.has(name);
+    });
+    const selected = files.find((entry) => {
+      const candidate = String(entry.email ?? entry.label ?? "").trim().toLowerCase();
+      return identity && candidate === identity;
+    }) ?? newlyCreated ?? files.find((entry) => entry.disabled !== true) ?? files[0];
+    const detail = `${selected.status ?? ""} ${selected.status_message ?? ""}`.trim();
+    let status = "connected";
+    if (selected.disabled === true) status = "disabled";
+    else if (providerSessionFailureStatus(detail) === "expired") status = "expired";
+    else if (selected.unavailable === true || /error|failed|invalid/i.test(detail)) status = "error";
+
+    let models = Array.isArray(account.models) ? account.models : [];
+    let modelError;
+    if (status === "connected") {
+      try {
+        const name = String(selected.name ?? selected.id ?? "").trim();
+        if (name) {
+          const catalogue = await managementJson(
+            account,
+            `/v0/management/auth-files/models?name=${encodeURIComponent(name)}`,
+          );
+          const discovered = providerModelIds(catalogue);
+          if (discovered.length > 0) models = discovered;
+        }
+      } catch (error) {
+        modelError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    return store.updateAccountConnection(account.id, {
+      status,
+      identity: selected.email ?? selected.label ?? account.identity,
+      models,
+      error: status === "connected" ? modelError : (selected.status_message || detail || undefined),
+    });
+  }
+
+  async function probeProviderAccount(accountId) {
+    const account = accountRecord(accountId);
+    if (account.providerId !== ANTIGRAVITY_PROVIDER_ID) {
+      throw new Error("Provider account health probing is not configured for this provider");
+    }
+    try {
+      return await inspectAntigravitySession(account);
+    } catch (error) {
+      store.updateAccountConnection(account.id, {
+        status: providerSessionFailureStatus(error instanceof Error ? error.message : String(error)),
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  async function openProviderLogin(accountId) {
+    const account = accountRecord(accountId);
     if (account.providerId === "chatgpt-web" || account.providerId === "codex-oauth") {
       const browser = await getBrowserHost()?.openLogin();
       return { opened: true, mode: "embedded", browser: browser || null };
     }
+    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+      let baselineAuthNames = new Set();
+      try {
+        const baseline = await managementJson(account, "/v0/management/auth-files");
+        baselineAuthNames = new Set(
+          antigravityAuthFiles(baseline)
+            .map(antigravityAuthFileName)
+            .filter(Boolean),
+        );
+      } catch (error) {
+        logger.warn("provider.antigravity_baseline_failed", {
+          accountId: account.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      store.updateAccountConnection(account.id, { status: "pending", error: undefined });
+      const login = await managementJson(
+        account,
+        "/v0/management/antigravity-auth-url?is_webui=true",
+      );
+      const state = String(login?.state ?? "").trim();
+      if (!state || login?.status !== "ok") throw new Error("CLIProxyAPI did not start Antigravity authentication");
+      const loginUrl = safeProviderLoginUrl(login?.url);
+      await shell.openExternal(loginUrl);
+
+      const deadline = Date.now() + Math.max(1, oauthTimeoutMs);
+      while (Date.now() <= deadline) {
+        const status = await managementJson(
+          account,
+          `/v0/management/get-auth-status?state=${encodeURIComponent(state)}`,
+        );
+        if (status?.status === "ok") {
+          return {
+            opened: true,
+            mode: "external",
+            state,
+            snapshot: await inspectAntigravitySession(accountRecord(account.id), {
+              baselineAuthNames,
+            }),
+          };
+        }
+        if (status?.status === "error") {
+          const message = String(status.error || "Antigravity authentication failed");
+          const snapshot = store.updateAccountConnection(account.id, {
+            status: providerSessionFailureStatus(message),
+            error: message,
+          });
+          const error = new Error(message);
+          error.snapshot = snapshot;
+          throw error;
+        }
+        await sleepImpl(Math.max(0, oauthPollIntervalMs));
+      }
+      const message = "Antigravity authentication timed out";
+      const snapshot = store.updateAccountConnection(account.id, { status: "error", error: message });
+      const error = new Error(message);
+      error.snapshot = snapshot;
+      throw error;
+    }
     const url = PROVIDER_LOGIN_URLS[account.providerId];
     if (!url) throw new Error("This provider uses API key or custom endpoint authentication");
-    await shell.openExternal(url);
+    await shell.openExternal(safeProviderLoginUrl(url));
     return { opened: true, mode: "external" };
   }
 
@@ -770,16 +1058,20 @@ function createProviderNetworkController({
     store,
     applyGlobalRouting,
     openProviderLogin,
+    probeProviderAccount,
     testProxyProfile,
     handleProxyLogin,
   };
 }
 
 module.exports = {
+  ANTIGRAVITY_PROVIDER_ID,
+  DEFAULT_ANTIGRAVITY_BASE_URL,
   DEFAULT_BYPASS,
   PROVIDER_LOGIN_URLS,
   createProviderNetworkController,
   createProviderNetworkStore,
+  normalizeProviderBaseUrl,
   proxyUrl,
   testTcpEndpoint,
 };

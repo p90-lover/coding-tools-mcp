@@ -24,6 +24,7 @@ export interface ProviderAccountRecord {
   providerId: string;
   label: string;
   identity?: string;
+  endpoint?: string;
   auth: ProviderAuth;
   status: ProviderAccountStatus;
   enabled: boolean;
@@ -43,6 +44,7 @@ export interface ProviderAccountInput {
   providerId: string;
   label: string;
   identity?: string;
+  endpoint?: string;
   auth: ProviderAuth;
   status?: ProviderAccountStatus;
   enabled?: boolean;
@@ -331,7 +333,13 @@ export interface LauncherApi {
   setDefaultProviderAccount(providerId: string, accountId: string): Promise<ProviderNetworkSnapshot>;
   setProviderAccountEnabled(accountId: string, enabled: boolean): Promise<ProviderNetworkSnapshot>;
   archiveProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
-  beginProviderLogin(accountId: string): Promise<{ opened: boolean; mode: "embedded" | "external" }>;
+  beginProviderLogin(accountId: string): Promise<{
+    opened: boolean;
+    mode: "embedded" | "external";
+    state?: string;
+    snapshot?: ProviderNetworkSnapshot;
+  }>;
+  probeProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
   saveProxyProfile(input: ProxyProfileInput): Promise<ProviderNetworkSnapshot>;
   archiveProxyProfile(profileId: string): Promise<ProviderNetworkSnapshot>;
   testProxyProfile(profileId: string): Promise<{
