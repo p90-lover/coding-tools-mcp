@@ -3,20 +3,24 @@ name: Legacy uninstall fixture contract
 on:
   push:
     branches:
-      - fix/rc6-legacy-uninstall-fixture-csc-current
+      - fix/rc6-installer-migration-contract-csc
     paths:
       - .github/workflows/codex-router-multiprovider-release-rc6-csc.yml
+      - .github/workflows/codex-router-multiprovider-release-rc6.yml
       - .github/workflows/legacy-uninstall-fixture-ci.yml
       - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
       - desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
   pull_request:
     branches:
       - release/codex-router-multiprovider-0.7.0-rc.6
     paths:
       - .github/workflows/codex-router-multiprovider-release-rc6-csc.yml
+      - .github/workflows/codex-router-multiprovider-release-rc6.yml
       - .github/workflows/legacy-uninstall-fixture-ci.yml
       - desktop-electron/scripts/create-legacy-uninstall-fixture.ps1
       - desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
   workflow_dispatch:
 
 permissions:
@@ -36,8 +40,11 @@ jobs:
           fetch-depth: 2
           clean: false
 
-      - name: Run legacy fixture regression contract
-        run: node --test desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
+      - name: Run installer migration and fixture contracts
+        run: >-
+          node --test
+          desktop-electron/tests/installer-upgrade-migration.test.cjs
+          desktop-electron/tests/legacy-uninstall-fixture-contract.test.cjs
 
       - name: Enforce no file deletion
         shell: bash
