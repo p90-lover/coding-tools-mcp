@@ -1,0 +1,7 @@
+Auto-merging .github/workflows/ci.yml
+Auto-merging src-tauri/src/auth/oauth_authorization_response.rs
+CONFLICT (add/add): Merge conflict in src-tauri/src/auth/oauth_authorization_response.rs
+Auto-merging src-tauri/src/data/mod.rs
+CONFLICT (content): Merge conflict in src-tauri/src/data/mod.rs
+Auto-merging src-tauri/src/tools/registry_definitions.rs
+Automatic merge failed; fix conflicts and then commit the result.

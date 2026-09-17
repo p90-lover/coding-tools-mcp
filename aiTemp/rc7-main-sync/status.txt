@@ -1,0 +1,5 @@
+main=546fbb37a82bd2e57ec019d8c361813af7615447
+base=12f5c651c41e196b60ec77968f6a64d2e7eded00
+status=conflicts
+merge_exit=1
+count=2
