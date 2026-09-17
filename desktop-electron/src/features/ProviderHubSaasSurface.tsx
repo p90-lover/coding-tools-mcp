@@ -413,6 +413,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [draft, setDraft] = useState<AccountDraft>(() => emptyDraft());
   const [secret, setSecret] = useState("");
+  const [controlCredential, setControlCredential] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
@@ -427,6 +428,10 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const [editorOpen, setEditorOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    setControlCredential("");
+  }, [selectedAccountId, workload]);
 
   const activeAccounts = useMemo(
     () => snapshot.accounts.filter((account) => !account.archivedAt),
@@ -872,6 +877,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         bindingId: null,
         providerAccountId: selectedAccount.id,
         allowProviderFallback,
+        controlCredential: controlCredential.trim(),
         settings: {
           id: bindingId(selectedAccount, workload),
           engine: workload,
@@ -889,6 +895,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         confirm: true,
       });
       await refreshBindings();
+      setControlCredential("");
       setNotice(text(
         language,
         `${selectedAccount.label} is routed to ${workload} through ${plan.provider.name} / ${plan.account.label}.`,
@@ -1306,6 +1313,24 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                     <label>
                       <span>{text(language, "Engine endpoint", "引擎端點")}</span>
                       <input value={engineEndpoint} onChange={(event) => setEngineEndpoint(event.target.value)} />
+                    </label>
+                    <label className="provider-full-row">
+                      <span>{text(
+                        language,
+                        "Paseo / Anneal control credential",
+                        "Paseo／Anneal 控制憑證",
+                      )}</span>
+                      <input
+                        autoComplete="off"
+                        placeholder={text(
+                          language,
+                          "Optional token used only to authenticate the local orchestrator",
+                          "可選 Token，只用於驗證本機 Orchestrator",
+                        )}
+                        type="password"
+                        value={controlCredential}
+                        onChange={(event) => setControlCredential(event.target.value)}
+                      />
                     </label>
                     <label>
                       <span>{text(language, "Mode", "模式")}</span>

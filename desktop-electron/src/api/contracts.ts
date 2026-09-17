@@ -68,6 +68,7 @@ export interface CodingToolsApi {
       readonly settings?: JsonObject | null;
       readonly providerAccountId?: string | null;
       readonly allowProviderFallback?: boolean;
+      readonly controlCredential?: string;
       readonly confirm: boolean;
     }): Promise<JsonObject>;
     update(input: {

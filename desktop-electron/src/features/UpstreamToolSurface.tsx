@@ -157,7 +157,7 @@ export function UpstreamToolSurface({
     return (
       <section className="upstream-tool-surface">
         <div className="upstream-tool-empty">
-          <strong>{localize(language, "Loading upstream integration…", "正在載入上游整合…")}</strong>
+          <strong>{localize(language, "Loading managed integration…", "正在載入受管理整合…")}</strong>
         </div>
       </section>
     );
@@ -167,7 +167,7 @@ export function UpstreamToolSurface({
   const statusText = ready
     ? localize(language, "Connected", "已連線")
     : tool.status === "starting"
-      ? localize(language, "Starting", "正在啟動")
+      ? localize(language, "Installing / starting", "正在安裝／啟動")
       : tool.status === "error"
         ? localize(language, "Error", "錯誤")
         : localize(language, "Offline", "離線");
@@ -177,14 +177,14 @@ export function UpstreamToolSurface({
       <header className="upstream-tool-heading">
         <div>
           <span className="upstream-tool-kicker">
-            {localize(language, "PINNED UPSTREAM", "固定上游版本")}
+            {localize(language, "MANAGED PINNED UPSTREAM", "受管理固定上游版本")}
           </span>
           <h1>{tool.name}</h1>
           <p>
             {localize(
               language,
-              `Full ${tool.name} interface pinned to ${tool.commit.slice(0, 12)} under ${tool.license}.`,
-              `完整 ${tool.name} 介面，固定於 ${tool.commit.slice(0, 12)}，授權為 ${tool.license}。`,
+              `Coding Tools manages the complete ${tool.name} runtime pinned to ${tool.commit.slice(0, 12)} under ${tool.license}.`,
+              `Coding Tools 會管理完整 ${tool.name} runtime，固定於 ${tool.commit.slice(0, 12)}，授權為 ${tool.license}。`,
             )}
           </p>
         </div>
@@ -210,7 +210,7 @@ export function UpstreamToolSurface({
         <button className="primary" disabled={busy !== null} onClick={() => void (ready ? openEmbedded() : start())} type="button">
           {busy === "start" || busy === "open" ? "…" : ready
             ? localize(language, "Open full UI", "開啟完整介面")
-            : localize(language, "Start pinned source", "啟動固定版本")}
+            : localize(language, "Install / Start", "安裝／啟動")}
         </button>
         <button disabled={busy !== null || !ready} onClick={() => void openExternal()} type="button">
           {busy === "external" ? "…" : localize(language, "Open externally", "外部開啟")}
@@ -240,12 +240,12 @@ export function UpstreamToolSurface({
       </nav>
 
       {tool.error ? <p className="upstream-tool-error">{tool.error}</p> : null}
-      {!tool.sourceConfigured && !ready ? (
+      {!tool.sourceAvailable && !ready ? (
         <p className="upstream-tool-hint">
           {localize(
             language,
-            `Run ${tool.name} at ${tool.endpoint}, or configure its pinned source directory before using Start.`,
-            `請先喺 ${tool.endpoint} 執行 ${tool.name}，或者設定固定版本嘅原始碼目錄後再使用「啟動」。`,
+            `Install / Start prepares the pinned ${tool.name} runtime automatically. Superseded or incomplete copies are preserved under Trash, and staging stays under aiTemp.`,
+            `「安裝／啟動」會自動準備固定版本嘅 ${tool.name} runtime。舊版本或未完成副本會保留喺 Trash，暫存工作只會放喺 aiTemp。`,
           )}
         </p>
       ) : null}
@@ -265,7 +265,7 @@ export function UpstreamToolSurface({
             <span>
               {ready
                 ? localize(language, "Choose a section and open the embedded interface.", "選擇頁面並開啟內嵌介面。")
-                : localize(language, "Connect to the local loopback service to continue.", "連接本機 loopback 服務後繼續。")}
+                : localize(language, "Use Install / Start to prepare and connect the managed loopback service.", "使用「安裝／啟動」準備並連接受管理嘅 loopback 服務。")}
             </span>
           </div>
         )}

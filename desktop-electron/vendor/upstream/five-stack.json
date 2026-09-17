@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "product": "Coding Tools",
+  "integrations": [
+    {
+      "id": "codex-router",
+      "name": "Codex Router",
+      "insideApp": true,
+      "surface": "setup",
+      "controller": "electron/runtime-supervisor.cjs",
+      "healthContract": "runtime supervisor and proxy health payload",
+      "credentialBoundary": "Codex credentials stay in the managed runtime profile"
+    },
+    {
+      "id": "cpa-provider-hub",
+      "name": "CPA-style Provider Hub",
+      "insideApp": true,
+      "surface": "providers",
+      "controller": "electron/provider-network.cjs",
+      "healthContract": "multi-account snapshot, model probe, default and fallback selection",
+      "credentialBoundary": "encrypted main-process store; renderer receives redacted records only"
+    },
+    {
+      "id": "commandcode-proxy",
+      "name": "CommandCode Proxy",
+      "insideApp": true,
+      "surface": "providers",
+      "controller": "electron/provider-network.cjs",
+      "healthContract": "CLI session import, identity, models and OpenAI-compatible endpoint probe",
+      "credentialBoundary": "encrypted main-process token storage"
+    },
+    {
+      "id": "paseo",
+      "name": "Paseo",
+      "insideApp": true,
+      "surface": "paseo",
+      "controller": "electron/upstream-tools.cjs",
+      "healthContract": "managed pinned daemon reachable on loopback"
+    },
+    {
+      "id": "anneal",
+      "name": "Anneal",
+      "insideApp": true,
+      "surface": "anneal",
+      "controller": "electron/upstream-tools.cjs",
+      "healthContract": "PostgreSQL, API, runner and web topology with loopback web health"
+    }
+  ]
+}

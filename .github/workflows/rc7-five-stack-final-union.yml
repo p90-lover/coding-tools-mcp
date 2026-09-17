@@ -1,0 +1,170 @@
+name: rc.7 five-stack final union
+
+on:
+  push:
+    branches:
+      - integration/rc7-five-stack-final-union
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.7
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: rc7-five-stack-final-union-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache/rc7-five-stack-final-union
+
+jobs:
+  verify:
+    name: Materialize, test, typecheck, and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained validation directories
+        run: |
+          mkdir -p aiTemp/rc7-five-stack-final-union/renderer-dist
+          mkdir -p aiTemp/bun-cache/rc7-five-stack-final-union
+          mkdir -p aiTemp/Trash/rc7-five-stack-final-union
+
+      - name: Materialize production integration twice and prove idempotency
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check aiTemp/rc7-five-stack-final-union/apply.cjs
+          node --check aiTemp/rc7-five-stack-final-union/fix-main-credential-boundary.cjs
+          node aiTemp/rc7-five-stack-final-union/apply.cjs
+          node aiTemp/rc7-five-stack-final-union/fix-main-credential-boundary.cjs
+          git restore .github/workflows/provider-execution-gates-ci.yml
+          git diff --binary > aiTemp/rc7-five-stack-final-union/first-materialization.patch
+          node aiTemp/rc7-five-stack-final-union/apply.cjs
+          node aiTemp/rc7-five-stack-final-union/fix-main-credential-boundary.cjs
+          git restore .github/workflows/provider-execution-gates-ci.yml
+          git diff --binary > aiTemp/rc7-five-stack-final-union/second-materialization.patch
+          cmp \
+            aiTemp/rc7-five-stack-final-union/first-materialization.patch \
+            aiTemp/rc7-five-stack-final-union/second-materialization.patch
+          git diff --check
+
+      - name: Validate Electron runtime syntax
+        run: |
+          node --check desktop-electron/electron/main-with-provider.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/upstream-tools.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+          node --check desktop-electron/electron/preload.cjs
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run five-stack, provider, execution, and upstream contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/five-stack-managed-integration.test.cjs \
+            desktop-electron/tests/five-stack-final-union.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-console-saas.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/provider-proxy-domain.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            desktop-electron/tests/upstream-tools.test.cjs \
+            2>&1 | tee aiTemp/rc7-five-stack-final-union/focused-tests.txt
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build production renderer into aiTemp evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/rc7-five-stack-final-union/renderer-dist \
+            --emptyOutDir
+
+      - name: Enforce no deleted project paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_ref='origin/release/codex-router-multiprovider-0.7.0-rc.7'
+          deleted="$(git diff -M --diff-filter=D --name-only "$base_ref"...HEAD)"
+          deleted_worktree="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ] || [ -n "$deleted_worktree" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n%s\n' "$deleted" "$deleted_worktree" >&2
+            exit 1
+          fi
+
+      - name: Promote the verified production patch
+        id: promote
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/electron/provider-bootstrap.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/ipc-schema.cjs \
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          if git diff --cached --quiet; then
+            echo 'pushed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(rc7): close five-stack credential and browser-session gaps'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo 'pushed=true' >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch exact-head verification
+        if: steps.promote.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run rc7-five-stack-final-union.yml --repo "${{ github.repository }}" --ref "${GITHUB_REF_NAME}"
+
+      - name: Upload retained validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rc7-five-stack-final-union-${{ github.sha }}-${{ github.run_attempt }}
+          path: aiTemp/rc7-five-stack-final-union/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc7-five-stack-final-union/node_modules-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          if [ -d aiTemp/bun-cache/rc7-five-stack-final-union ]; then
+            mv aiTemp/bun-cache/rc7-five-stack-final-union \
+              "aiTemp/Trash/rc7-five-stack-final-union/bun-cache-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
