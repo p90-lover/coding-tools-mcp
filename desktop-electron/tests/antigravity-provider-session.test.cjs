@@ -127,10 +127,12 @@ test("Antigravity login uses CLIProxyAPI management OAuth, polls status, and dis
   const connected = result.snapshot.accounts.find((item) => item.id === account.id);
   assert.equal(connected.status, "connected");
   assert.equal(connected.identity, "user@example.test");
+  assert.equal(connected.endpoint, "http://127.0.0.1:8317");
   assert.deepEqual(connected.models, ["gemini-2.5-flash", "gemini-2.5-pro"]);
   assert.equal(connected.hasCredential, true);
   assert.equal(JSON.stringify(result.snapshot).includes("management-secret"), false);
   assert.ok(requests.every(({ options }) => options.headers.Authorization === "Bearer management-secret"));
+  assert.ok(requests.every(({ options }) => options.headers["X-Management-Key"] === "management-secret"));
 });
 
 test("Antigravity login binds the newly created auth file when other accounts already exist", async () => {
