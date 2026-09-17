@@ -878,3 +878,14 @@
     text-align: left;
   }
 }
+
+.provider-account-inline-error {
+  border: 1px solid color-mix(in srgb, #ff6b75 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, #ff6b75 10%, transparent);
+  color: #ffb3b9;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+}

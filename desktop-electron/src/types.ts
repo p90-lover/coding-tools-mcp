@@ -340,6 +340,7 @@ export interface LauncherApi {
     state?: string;
     snapshot?: ProviderNetworkSnapshot;
   }>;
+  importProviderSession(accountId: string): Promise<ProviderNetworkSnapshot>;
   probeProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
   saveProxyProfile(input: ProxyProfileInput): Promise<ProviderNetworkSnapshot>;
   archiveProxyProfile(profileId: string): Promise<ProviderNetworkSnapshot>;

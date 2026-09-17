@@ -453,9 +453,21 @@ replace_once(
 
 replace_once(
     "desktop-electron/electron/provider-network.cjs",
-    '''    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+    '''  async function openProviderLogin(accountId) {
+    const account = accountRecord(accountId);
+    if (account.providerId === "chatgpt-web" || account.providerId === "codex-oauth") {
+      const browser = await getBrowserHost()?.openLogin();
+      return { opened: true, mode: "embedded", browser: browser || null };
+    }
+    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
 ''',
-    '''    if (account.providerId === COMMANDCODE_PROVIDER_ID) {
+    '''  async function openProviderLogin(accountId) {
+    const account = accountRecord(accountId);
+    if (account.providerId === "chatgpt-web" || account.providerId === "codex-oauth") {
+      const browser = await getBrowserHost()?.openLogin();
+      return { opened: true, mode: "embedded", browser: browser || null };
+    }
+    if (account.providerId === COMMANDCODE_PROVIDER_ID) {
       return startCommandCodeLogin(account);
     }
     if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
