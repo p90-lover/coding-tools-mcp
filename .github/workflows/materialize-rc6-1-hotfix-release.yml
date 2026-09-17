@@ -1,0 +1,103 @@
+name: Materialize rc.6.1 hotfix release identity
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.6.1
+    paths:
+      - .github/workflows/materialize-rc6-1-hotfix-release.yml
+      - aiTemp/rc6-1/apply_release_identity.py
+      - desktop-electron/package.json
+      - desktop-electron/electron/product.cjs
+      - desktop-electron/scripts/prepare-package-resources.cjs
+      - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/src/App.tsx
+      - desktop-electron/tests/package-contents.test.cjs
+      - desktop-electron/tests/package-resource-preparation.test.cjs
+      - desktop-electron/tests/product-identity.test.cjs
+      - docs/releases/v0.7.0-rc.6.1.md
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-rc6-1-hotfix-release
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: release/codex-router-multiprovider-0.7.0-rc.6.1
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - name: Prepare retained evidence root
+        run: mkdir -p aiTemp/rc6-1/evidence aiTemp/Trash/rc6-1
+
+      - name: Materialize the new immutable release identity
+        run: |
+          set -euo pipefail
+          python aiTemp/rc6-1/apply_release_identity.py \
+            | tee aiTemp/rc6-1/evidence/materializer.txt
+          grep -F RC6_1_RELEASE_IDENTITY_READY \
+            aiTemp/rc6-1/evidence/materializer.txt
+
+      - name: Verify focused release identity contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            2>&1 | tee aiTemp/rc6-1/evidence/release-identity-tests.txt
+          grep -F '# fail 0' aiTemp/rc6-1/evidence/release-identity-tests.txt
+          node --check desktop-electron/electron/product.cjs
+          node --check desktop-electron/scripts/prepare-package-resources.cjs
+          node --check desktop-electron/scripts/verify-package.cjs
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const pkg = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
+          if (pkg.version !== '0.7.0-rc.6.1') throw new Error(`version mismatch: ${pkg.version}`);
+          NODE
+
+      - name: Enforce bounded non-destructive changes
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --name-only | tee aiTemp/rc6-1/evidence/changed-files.txt
+          unexpected="$(grep -Ev '^(desktop-electron/package\.json|desktop-electron/electron/product\.cjs|desktop-electron/scripts/prepare-package-resources\.cjs|desktop-electron/scripts/verify-package\.cjs|desktop-electron/src/App\.tsx|desktop-electron/tests/package-contents\.test\.cjs|desktop-electron/tests/package-resource-preparation\.test\.cjs|desktop-electron/tests/product-identity\.test\.cjs|docs/releases/v0\.7\.0-rc\.6\.1\.md)$' aiTemp/rc6-1/evidence/changed-files.txt || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected release identity paths:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Commit verified release identity
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/package.json \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/src/App.tsx \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            docs/releases/v0.7.0-rc.6.1.md
+          if git diff --cached --quiet; then
+            echo RC6_1_RELEASE_IDENTITY_ALREADY_COMMITTED
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'build(rc6.1): advance immutable hotfix release identity'
+          git push origin HEAD:refs/heads/release/codex-router-multiprovider-0.7.0-rc.6.1
