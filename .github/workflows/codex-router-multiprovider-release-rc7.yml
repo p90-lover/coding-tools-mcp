@@ -21,7 +21,7 @@ permissions:
 
 concurrency:
   group: coding-tools-v0.7.0-rc.7-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   RELEASE_VERSION: 0.7.0-rc.7
