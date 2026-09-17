@@ -2,44 +2,50 @@ from pathlib import Path
 
 path = Path(__file__).with_name("apply_commandcode.py")
 text = path.read_text(encoding="utf-8")
-old = '''replace_once(
-    "desktop-electron/electron/provider-network.cjs",
-    \'\'\'    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {\n
-\'\'\',
-    \'\'\'    if (account.providerId === COMMANDCODE_PROVIDER_ID) {\n
-      return startCommandCodeLogin(account);\n
-    }\n
-    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {\n
-\'\'\',
+
+ambiguous = """replace_once(
+    \"desktop-electron/electron/provider-network.cjs\",
+    '''    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+''',
+    '''    if (account.providerId === COMMANDCODE_PROVIDER_ID) {
+      return startCommandCodeLogin(account);
+    }
+    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+''',
 )
-'''
-new = '''replace_once(
-    "desktop-electron/electron/provider-network.cjs",
-    \'\'\'  async function openProviderLogin(accountId) {\n
-    const account = accountRecord(accountId);\n
-    if (account.providerId === "chatgpt-web" || account.providerId === "codex-oauth") {\n
-      const browser = await getBrowserHost()?.openLogin();\n
-      return { opened: true, mode: "embedded", browser: browser || null };\n
-    }\n
-    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {\n
-\'\'\',
-    \'\'\'  async function openProviderLogin(accountId) {\n
-    const account = accountRecord(accountId);\n
-    if (account.providerId === "chatgpt-web" || account.providerId === "codex-oauth") {\n
-      const browser = await getBrowserHost()?.openLogin();\n
-      return { opened: true, mode: "embedded", browser: browser || null };\n
-    }\n
-    if (account.providerId === COMMANDCODE_PROVIDER_ID) {\n
-      return startCommandCodeLogin(account);\n
-    }\n
-    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {\n
-\'\'\',
+"""
+
+safe = """replace_once(
+    \"desktop-electron/electron/provider-network.cjs\",
+    '''  async function openProviderLogin(accountId) {
+    const account = accountRecord(accountId);
+    if (account.providerId === \"chatgpt-web\" || account.providerId === \"codex-oauth\") {
+      const browser = await getBrowserHost()?.openLogin();
+      return { opened: true, mode: \"embedded\", browser: browser || null };
+    }
+    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+''',
+    '''  async function openProviderLogin(accountId) {
+    const account = accountRecord(accountId);
+    if (account.providerId === \"chatgpt-web\" || account.providerId === \"codex-oauth\") {
+      const browser = await getBrowserHost()?.openLogin();
+      return { opened: true, mode: \"embedded\", browser: browser || null };
+    }
+    if (account.providerId === COMMANDCODE_PROVIDER_ID) {
+      return startCommandCodeLogin(account);
+    }
+    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
+''',
 )
-'''
-if new in text:
+"""
+
+if safe in text:
     print("RC7_COMMANDCODE_MATERIALIZER_ALREADY_FIXED")
-elif text.count(old) == 1:
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+elif text.count(ambiguous) == 1:
+    path.write_text(text.replace(ambiguous, safe, 1), encoding="utf-8")
     print("RC7_COMMANDCODE_MATERIALIZER_FIXED")
 else:
-    raise SystemExit(f"expected one ambiguous CommandCode patch block, found {text.count(old)}")
+    raise SystemExit(
+        "expected exactly one legacy CommandCode materializer block; "
+        f"legacy={text.count(ambiguous)} safe={text.count(safe)}"
+    )
