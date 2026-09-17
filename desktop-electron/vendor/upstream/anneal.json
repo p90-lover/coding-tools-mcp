@@ -6,7 +6,7 @@
   "version": "0.9.0",
   "license": "MIT",
   "licenseFile": "LICENSE",
-  "defaultEndpoint": "http://127.0.0.1:3000/",
+  "defaultEndpoint": "http://127.0.0.1:5173/",
   "environmentEndpoint": "CODING_TOOLS_ANNEAL_URL",
   "environmentHome": "CODING_TOOLS_ANNEAL_HOME",
   "sections": [
@@ -35,9 +35,67 @@
     "connections": "/connections",
     "settings": "/settings"
   },
-  "launch": {
-    "executable": "npm",
-    "arguments": ["run", "dev:web"],
-    "workingDirectoryEnvironment": "CODING_TOOLS_ANNEAL_HOME"
+  "managed": {
+    "strategy": "pinned-source",
+    "autoInstall": true,
+    "platformModes": {
+      "win32": "wsl2",
+      "linux": "native",
+      "darwin": "native"
+    },
+    "source": {
+      "repositoryUrl": "https://github.com/mosonlab/anneal.git",
+      "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e"
+    },
+    "prerequisites": [
+      { "id": "git", "executable": "git", "arguments": ["--version"] },
+      { "id": "node", "executable": "node", "arguments": ["--version"], "execution": "managed-mode" },
+      { "id": "npm", "executable": "npm", "arguments": ["--version"], "execution": "managed-mode" },
+      { "id": "docker", "executable": "docker", "arguments": ["--version"], "execution": "managed-mode" },
+      { "id": "docker-compose", "executable": "docker", "arguments": ["compose", "version"], "execution": "managed-mode" },
+      { "id": "codex", "executable": "codex", "arguments": ["--version"], "execution": "managed-mode" }
+    ],
+    "setup": [
+      { "id": "npm-ci", "executable": "npm", "arguments": ["ci"], "execution": "managed-mode" },
+      { "id": "setup-local", "executable": "npm", "arguments": ["run", "setup:local"], "execution": "managed-mode" },
+      { "id": "build", "executable": "npm", "arguments": ["run", "build"], "execution": "managed-mode" },
+      { "id": "postgres-ready", "executable": "docker", "arguments": ["compose", "up", "-d", "--wait", "--wait-timeout", "60", "postgres"], "execution": "managed-mode" },
+      { "id": "db-migrate", "executable": "npm", "arguments": ["run", "db:migrate:release", "--", "--fresh"], "execution": "managed-mode" }
+    ],
+    "services": [
+      {
+        "id": "postgres",
+        "executable": "docker",
+        "arguments": ["compose", "up", "-d", "--wait", "--wait-timeout", "60", "postgres"],
+        "execution": "managed-mode",
+        "detached": true
+      },
+      {
+        "id": "api",
+        "executable": "npm",
+        "arguments": ["run", "dev:api"],
+        "execution": "managed-mode"
+      },
+      {
+        "id": "runner",
+        "executable": "npm",
+        "arguments": ["run", "dev:runner"],
+        "execution": "managed-mode"
+      },
+      {
+        "id": "web",
+        "executable": "npm",
+        "arguments": ["run", "dev:web"],
+        "execution": "managed-mode",
+        "readyEndpoint": "http://127.0.0.1:5173/"
+      }
+    ],
+    "stop": [
+      { "id": "postgres-stop", "executable": "docker", "arguments": ["compose", "stop", "postgres"], "execution": "managed-mode" }
+    ],
+    "windows": {
+      "requires": "WSL2 with Node.js, npm, Docker integration, Git and Codex CLI",
+      "launcher": "wsl.exe"
+    }
   }
 }
