@@ -64,6 +64,9 @@ jobs:
             aiTemp/rc9-managed-five-stack/renderer-dist/$GITHUB_RUN_ID \
             aiTemp/Trash/rc9-managed-five-stack
 
+      - name: Repair materializer idempotency
+        run: python aiTemp/rc9-managed-five-stack/repair_materializer.py
+
       - name: Apply exact guarded production patch
         run: python aiTemp/rc9-managed-five-stack/apply_integration.py
 
@@ -126,6 +129,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add \
+            aiTemp/rc9-managed-five-stack/apply_integration.py \
             desktop-electron/electron/managed-components.cjs \
             desktop-electron/electron/managed-external-services.cjs \
             desktop-electron/electron/main.cjs \
