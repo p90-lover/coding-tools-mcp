@@ -21,6 +21,9 @@ if [[ "$actual_source" != "$source_head" ]]; then
   exit 1
 fi
 
+git config user.name 'github-actions[bot]'
+git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
 set +e
 git merge --no-commit --no-ff "$source_head" > "$evidence/merge-output.txt" 2>&1
 merge_status=$?
