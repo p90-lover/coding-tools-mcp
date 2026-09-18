@@ -246,6 +246,7 @@ test("managed Start injects peer loopbacks and does not override PROXY_PORT", as
   const controller = createManagedComponentController({
     manifestRoot,
     dataRoot,
+    allowNetworkInstall: true,
     safeStorage: { isEncryptionAvailable: () => false },
     fetchImpl: async () => new Response(payload, {
       status: 200,
