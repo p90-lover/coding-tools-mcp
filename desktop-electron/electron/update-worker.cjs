@@ -62,7 +62,7 @@ function updateMac(job) {
 
 function updateWindows(job) {
   requireFile(job.source, "Windows installer");
-  const result = spawnSync(job.source, ["/S"], { encoding: "utf8", timeout: 15 * 60_000, windowsHide: true });
+  const result = spawnSync(job.source, ["/S"], { encoding: "utf8", timeout: 45 * 60_000, windowsHide: true });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`Windows installer exited with code ${result.status}`);
   requireFile(job.target, "Installed Windows launcher");

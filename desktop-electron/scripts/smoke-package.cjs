@@ -12,7 +12,9 @@ const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
 );
 const expectedVersion = launcherManifest.version;
-const WINDOWS_INSTALLER_TIMEOUT_MS = 15 * 60_000;
+// Pruned production node_modules in extraResources make NSIS /S unpack
+// slower than the previous 15-minute budget on windows-2025.
+const WINDOWS_INSTALLER_TIMEOUT_MS = 45 * 60_000;
 const preservation = createPreservationSession({
   repositoryRoot,
   label: `electron-package-smoke-${process.platform}`,

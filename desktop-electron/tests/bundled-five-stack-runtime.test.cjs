@@ -689,10 +689,11 @@ test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal",
   assert.equal(fs.existsSync(path.join(outputRoot, "anneal", "source", "package.json")), true);
 });
 
-test("Windows installer smoke uses the 15-minute bundled-payload budget", () => {
+test("Windows installer smoke uses the 45-minute bundled-payload budget", () => {
   const smoke = read("scripts/smoke-package.cjs");
-  assert.match(smoke, /WINDOWS_INSTALLER_TIMEOUT_MS = 15 \* 60_000/);
+  assert.match(smoke, /WINDOWS_INSTALLER_TIMEOUT_MS = 45 \* 60_000/);
   assert.match(smoke, /timeout: WINDOWS_INSTALLER_TIMEOUT_MS/);
+  assert.match(read("electron/update-worker.cjs"), /timeout: 45 \* 60_000/);
   assert.match(read("vendor/managed-components/cpa-codex-provider-backends.openapi.json"), /127\.0\.0\.1:8317/);
   assert.match(read("vendor/managed-components/cpa-codex-provider-backends.openapi.json"), /127\.0\.0\.1:4202/);
 });
