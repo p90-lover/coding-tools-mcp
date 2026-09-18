@@ -271,6 +271,18 @@ test("CommandCode inspect uses a 12s timeout, packaged 9090, and probes 3050 wit
   controller.dispose();
 });
 
+test("runtimeEnvironment exposes the shared in-app loopback mesh without OPENAI_BASE_URL", () => {
+  const { controller, directory } = controllerFixture();
+  const env = controller.runtimeEnvironment();
+  assert.equal(env.CODING_TOOLS_PASEO_URL, "http://127.0.0.1:6768");
+  assert.equal(env.CODING_TOOLS_ANNEAL_URL, "http://127.0.0.1:5173");
+  assert.equal(env.CODING_TOOLS_COMMANDCODE_OPENAI_BASE_URL, "http://127.0.0.1:9090/v1");
+  assert.equal(env.OPENAI_BASE_URL, undefined);
+  assert.equal(JSON.stringify(env).includes("proxyApiKey"), false);
+  assert.equal(fs.existsSync(path.join(directory, "loopback-mesh.json")), true);
+  controller.dispose();
+});
+
 test("owned CommandCode start forces HOST=127.0.0.1 and keep-alive does not spawn", async () => {
   const { controller, calls } = controllerFixture({
     fetchImpl: async () => {

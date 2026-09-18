@@ -425,6 +425,7 @@ function createManagedComponentController({
   resolveCrossUseEnvironment = null,
   publish = null,
   now = () => new Date().toISOString(),
+  peerEnvironment = null,
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   const downloadFetch = typeof fetchImpl === "function" ? fetchImpl : null;
@@ -784,6 +785,24 @@ function createManagedComponentController({
       });
   }
 
+  function peerEnv(context) {
+    if (typeof peerEnvironment !== "function") return {};
+    try {
+      const value = peerEnvironment(manifestFor(context.id)) || {};
+      return Object.fromEntries(
+        Object.entries(value).filter(([key, entry]) => (
+          /^[A-Z][A-Z0-9_]*$/.test(key) && typeof entry === "string" && entry.length > 0
+        )),
+      );
+    } catch (error) {
+      logger?.warn?.("managed-component.peer-environment-failed", {
+        componentId: context.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return {};
+    }
+  }
+
   function commandSpec(entry, context) {
     const executable = expandToken(entry.executable, context);
     const args = (entry.arguments || []).map((value) => expandToken(value, context));
@@ -791,10 +810,10 @@ function createManagedComponentController({
       key,
       expandToken(value, context),
     ]));
-    const peerEnvironment = typeof resolveCrossUseEnvironment === "function"
+    const crossUseEnvironment = typeof resolveCrossUseEnvironment === "function"
       ? (resolveCrossUseEnvironment(context.id, context) || {})
       : {};
-    const mergedEnvironment = { ...peerEnvironment, ...environment };
+    const mergedEnvironment = { ...crossUseEnvironment, ...peerEnv(context), ...environment };
     const managedMode = entry.execution === "managed-mode";
     if (context.mode === "wsl2" && managedMode) {
       const linuxHome = context.wslHome || wslPath(context.home);
@@ -813,7 +832,7 @@ function createManagedComponentController({
         key,
         expandToken(value, wslContext),
       ]));
-      const exported = Object.entries({ ...peerEnvironment, ...wslEnvironment })
+      const exported = Object.entries({ ...crossUseEnvironment, ...peerEnv(context), ...wslEnvironment })
         .map(([key, value]) => `export ${key}=${quoteBash(value)}`)
         .join("; ");
       const command = [wslExecutable, ...wslArgs].map(quoteBash).join(" ");

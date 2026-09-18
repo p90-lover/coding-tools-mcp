@@ -7,7 +7,10 @@ import {
   forwardCodexRouterResponse,
   parseCodexRouterModelId,
   redactRouterError,
+  resolveAnnealExecutionLoopback,
   resolveCodexRouterConnection,
+  resolveCommandCodeLoopback,
+  resolvePaseoExecutionLoopback,
 } from "../src/routed-providers";
 
 const CALLER_KEY = "test_router_caller_key_abcdefghijklmnopqrstuvwxyz012345";
@@ -102,6 +105,39 @@ describe("Codex Router provider contract", () => {
       });
     expect(() => commandCodeProxyProviderProfile("http://commandcode.example/v1"))
       .toThrow("loopback or HTTPS");
+  });
+
+  test("resolves in-app CommandCode, Paseo, and Anneal loopbacks from Desktop env", () => {
+    expect(resolveCommandCodeLoopback({})).toBeUndefined();
+    expect(resolveCommandCodeLoopback({
+      CODING_TOOLS_COMMANDCODE_URL: "http://127.0.0.1:9090/",
+    })).toEqual({
+      id: "commandcode-proxy",
+      name: "CommandCode Proxy",
+      baseUrl: "http://127.0.0.1:9090/v1",
+      adapter: "openai-chat",
+      modelEndpoint: "/models",
+    });
+    expect(resolveCommandCodeLoopback({
+      CODING_TOOLS_COMMANDCODE_OPENAI_BASE_URL: "http://127.0.0.1:9090/v1",
+    })?.baseUrl).toBe("http://127.0.0.1:9090/v1");
+    expect(() => resolveCommandCodeLoopback({
+      CODING_TOOLS_COMMANDCODE_URL: "https://commandcode.example/v1",
+    })).toThrow("loopback");
+
+    expect(resolvePaseoExecutionLoopback({
+      CODING_TOOLS_PASEO_EXECUTION_URL: "ws://127.0.0.1:6768/ws",
+    })).toBe("ws://127.0.0.1:6768/ws");
+    expect(() => resolvePaseoExecutionLoopback({
+      CODING_TOOLS_PASEO_EXECUTION_URL: "ws://paseo.example/ws",
+    })).toThrow("loopback");
+
+    expect(resolveAnnealExecutionLoopback({
+      CODING_TOOLS_ANNEAL_EXECUTION_URL: "http://127.0.0.1:3000/",
+    })).toBe("http://127.0.0.1:3000");
+    expect(() => resolveAnnealExecutionLoopback({
+      CODING_TOOLS_ANNEAL_EXECUTION_URL: "http://anneal.example:3000",
+    })).toThrow("loopback");
   });
 
   test("imports router models as isolated native-subagent catalog rows", async () => {

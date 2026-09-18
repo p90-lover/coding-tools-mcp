@@ -6,6 +6,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { publicUrlMap } = require("./five-stack-cross-use.cjs");
+const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
 const STORE_VERSION = 1;
 const SERVICE_IDS = Object.freeze([
@@ -424,6 +425,7 @@ function staleWindowMs(id) {
 function createExternalServicesController({
   filePath,
   keyPath,
+  loopbackMeshPath = null,
   safeStorage = null,
   logger = null,
   env = process.env,
@@ -436,6 +438,7 @@ function createExternalServicesController({
   now = () => new Date().toISOString(),
 } = {}) {
   if (!filePath || !keyPath) throw new Error("External service state paths are required");
+  const meshFilePath = loopbackMeshPath || path.join(path.dirname(filePath), "loopback-mesh.json");
   const codec = createSecretCodec({ safeStorage, keyPath });
   let state;
   try {
@@ -563,6 +566,13 @@ function createExternalServicesController({
 
   function emit() {
     const value = snapshot();
+    try {
+      persistLoopbackMesh(meshFilePath, buildLoopbackMesh(value.services));
+    } catch (error) {
+      logger?.warn?.("external-service.loopback-mesh-persist-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     try { publish?.(value); } catch {}
     return value;
   }
@@ -1014,6 +1024,8 @@ function createExternalServicesController({
     const router = state.services["codex-router"];
     const commandCode = state.services["commandcode-proxy"];
     const cpa = state.services.cpa;
+    const mesh = buildLoopbackMesh(snapshot().services);
+    try { persistLoopbackMesh(meshFilePath, mesh); } catch {}
     const callerKey = secretFor("codex-router").callerKey;
     return Object.freeze({
       ...publicUrlMap({
@@ -1025,6 +1037,7 @@ function createExternalServicesController({
         annealWeb: state.services.anneal.endpoint,
         annealApi: state.services.anneal.executionEndpoint,
       }),
+      ...loopbackMeshEnvironment(mesh, { meshPath: meshFilePath }),
       ...(callerKey ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey } : {}),
     });
   }
@@ -1145,6 +1158,7 @@ function createExternalServicesController({
     restart,
     syncCodexRouter,
     runtimeEnvironment,
+    loopbackMesh: () => buildLoopbackMesh(snapshot().services),
     upstreamConfiguration,
     startKeepAlive,
     startKeepAliveSupervisors,
