@@ -1969,6 +1969,9 @@ input[type=checkbox] {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 22px;
 }
+.cc-integrations-grid > .cc-commandcode {
+  grid-column: 1 / -1;
+}
 .cc-integration {
   padding: 25px;
 }

@@ -5,6 +5,7 @@ use crate::{
     integrations::{
         self,
         board::{Board, Change},
+        commandcode::{CommandCodeProxyApplyResult, CommandCodeProxyStatus},
         Snapshot, Source,
     },
 };
@@ -37,6 +38,28 @@ pub async fn integration_read(
 ) -> AppResult<Snapshot> {
     local(&window)?;
     integrations::read(source, &endpoint, credential.as_deref().unwrap_or("")).await
+}
+#[tauri::command]
+pub async fn commandcode_proxy_status(
+    window: WebviewWindow,
+    endpoint: String,
+) -> AppResult<CommandCodeProxyStatus> {
+    local(&window)?;
+    integrations::commandcode::status(&endpoint).await
+}
+#[tauri::command]
+pub async fn commandcode_proxy_apply(
+    window: WebviewWindow,
+    base_url: String,
+    router_cli: String,
+    curate_cli: String,
+) -> AppResult<CommandCodeProxyApplyResult> {
+    local(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        integrations::commandcode::apply(&base_url, &router_cli, &curate_cli)
+    })
+    .await
+    .map_err(|_| AppError::Message("CommandCode Proxy apply was interrupted".into()))?
 }
 #[tauri::command]
 pub fn control_board_read(window: WebviewWindow) -> AppResult<Board> {
