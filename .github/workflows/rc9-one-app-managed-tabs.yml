@@ -1,0 +1,96 @@
+name: rc.9 one-app managed tabs
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.9-one-app-managed
+    paths:
+      - '.github/workflows/rc9-one-app-managed-tabs.yml'
+      - 'aiTemp/rc9-one-app-managed/materialize-managed-app-tabs.mjs'
+      - 'desktop-electron/src/features/ManagedAppsSurface.tsx'
+      - 'desktop-electron/src/features/managed-apps.css'
+      - 'desktop-electron/tests/managed-app-tabs.test.cjs'
+      - 'docs/superpowers/specs/2026-09-18-one-app-tabbed-ui-amendment.md'
+      - 'docs/superpowers/plans/2026-09-18-one-app-tabbed-workspace.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-one-app-managed-tabs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc9-one-app-managed/bun-cache
+
+jobs:
+  materialize-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc9-one-app-managed/bun-cache
+          mkdir -p aiTemp/Trash/rc9-one-app-managed
+
+      - name: Materialize managed app tabs
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc9-one-app-managed/materialize-managed-app-tabs.mjs
+
+      - name: Install exact Electron dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run tab and renderer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/managed-app-tabs.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/renderer-wiring.test.cjs
+          bun run --cwd desktop-electron typecheck
+
+      - name: Enforce preservation contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Tracked deletions are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit materialized source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/types.ts \
+            desktop-electron/src/features/ExternalServicesSurface.tsx
+          if git diff --cached --quiet; then
+            echo 'Managed app tabs already materialized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(rc9): wire one-window managed app tabs'
+          git push origin HEAD:integration/v0.7.0-rc.9-one-app-managed
