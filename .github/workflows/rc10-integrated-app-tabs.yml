@@ -1,0 +1,154 @@
+name: rc.10 integrated app UI tabs
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.10-app-ui-tabs
+    paths:
+      - .github/workflows/rc10-integrated-app-tabs.yml
+      - aiTemp/rc10-app-tabs/materialize.py
+      - desktop-electron/src/**
+      - desktop-electron/tests/integrated-app-tabs.test.cjs
+      - desktop-electron/vendor/upstream/**
+      - docs/superpowers/specs/2026-09-18-integrated-app-ui-tabs-design.md
+      - docs/superpowers/plans/2026-09-18-integrated-app-ui-tabs.md
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.9
+    paths:
+      - desktop-electron/src/**
+      - desktop-electron/tests/integrated-app-tabs.test.cjs
+      - desktop-electron/vendor/upstream/**
+      - .github/workflows/rc10-integrated-app-tabs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc10-integrated-app-tabs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Prepare retained evidence and Trash roots
+        run: mkdir -p aiTemp/evidence aiTemp/Trash/rc10-app-tabs aiTemp/tmp
+
+      - name: Record the pre-materialization contract result
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          node --test desktop-electron/tests/integrated-app-tabs.test.cjs \
+            2>&1 | tee aiTemp/evidence/rc10-app-tabs-before.txt
+
+      - name: Apply deterministic app-tab materialization
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc10-app-tabs/materialize.py \
+            2>&1 | tee aiTemp/evidence/rc10-app-tabs-materialize.txt
+          grep -F RC10_APP_TABS_MATERIALIZED aiTemp/evidence/rc10-app-tabs-materialize.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Install exact Electron dependencies
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/rc10-app-tabs-install.txt
+
+      - name: Run focused contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/integrated-app-tabs.test.cjs \
+            desktop-electron/tests/upstream-tools.test.cjs \
+            desktop-electron/tests/upstream-tool-runtime.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs \
+            2>&1 | tee aiTemp/evidence/rc10-app-tabs-tests.txt
+          grep -F '# fail 0' aiTemp/evidence/rc10-app-tabs-tests.txt
+
+      - name: Typecheck and build production renderer
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/evidence/rc10-app-tabs-typecheck.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron build:renderer \
+            2>&1 | tee aiTemp/evidence/rc10-app-tabs-renderer.txt
+
+      - name: Retain generated renderer and restore tracked source
+        run: |
+          set -euo pipefail
+          if [ -d desktop-electron/dist ]; then
+            retained="aiTemp/Trash/rc10-app-tabs/generated-renderer-${GITHUB_SHA}"
+            test ! -e "$retained"
+            mv desktop-electron/dist "$retained"
+            git restore --source=HEAD --worktree -- desktop-electron/dist || true
+          fi
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Enforce bounded source scope
+        run: |
+          set -euo pipefail
+          git status --short | tee aiTemp/evidence/rc10-app-tabs-status.txt
+          changed="$(git diff --name-only | sort)"
+          allowed='^(desktop-electron/src/(App\.tsx|types\.ts|features/(ExternalServicesSurface|UpstreamToolSurface)\.tsx|features/integrated-apps\.css)|desktop-electron/vendor/upstream/(paseo|anneal)\.json)$'
+          unexpected="$(printf '%s\n' "$changed" | grep -Ev "$allowed" || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected paths:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Commit verified materialized wiring
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Integrated app tabs are already materialized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/types.ts \
+            desktop-electron/src/features/ExternalServicesSurface.tsx \
+            desktop-electron/src/features/UpstreamToolSurface.tsx \
+            desktop-electron/src/features/integrated-apps.css \
+            desktop-electron/vendor/upstream/paseo.json \
+            desktop-electron/vendor/upstream/anneal.json
+          git diff --cached --check
+          git commit -m 'feat(rc10): wire all integrated app UIs into tabs'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc10-integrated-app-tabs-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14
