@@ -9,17 +9,21 @@ const read = (relativePath) => fs.readFileSync(path.join(repo, relativePath), 'u
 
 test('CPA management key is copied by privileged Rust code and never returned to renderer JavaScript', () => {
   const cargo = read('src-tauri/Cargo.toml');
+  const lock = read('src-tauri/Cargo.lock');
   const app = read('src-tauri/src/lib.rs');
   const command = read('src-tauri/src/commands/five_stack.rs');
   const panel = read('src/lib/components/control-center/OriginalUiPanel.svelte');
 
   assert.match(cargo, /tauri-plugin-clipboard-manager\s*=\s*"=2\.3\.3"/);
+  assert.match(lock, /name = "tauri-plugin-clipboard-manager"\nversion = "2\.3\.3"/);
   assert.match(app, /\.plugin\(tauri_plugin_clipboard_manager::init\(\)\)/);
   assert.match(command, /use tauri_plugin_clipboard_manager::ClipboardExt;/);
   assert.match(command, /pub struct CpaClipboardResult/);
   assert.match(command, /window\.clipboard\(\)\.write_text\(key\)/);
   assert.match(command, /AppResult<CpaClipboardResult>/);
+  assert.match(command, /Ok\(CpaClipboardResult \{\s*copied: true,\s*length,/);
   assert.doesNotMatch(command, /five_stack_copy_cpa_management_key[\s\S]{0,300}AppResult<String>/);
+  assert.doesNotMatch(command, /println!\([^\n]*key|tracing::[^\n]*key/);
 
   assert.match(panel, /invoke<\{ copied: boolean; length: number \}>\('five_stack_copy_cpa_management_key'\)/);
   assert.doesNotMatch(panel, /invoke<string>\('five_stack_copy_cpa_management_key'\)/);
