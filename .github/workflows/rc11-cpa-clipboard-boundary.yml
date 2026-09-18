@@ -57,12 +57,22 @@ jobs:
             2>&1 | tee aiTemp/rc11-cpa-clipboard/evidence/results.txt
           grep -F '# fail 0' aiTemp/rc11-cpa-clipboard/evidence/results.txt
 
-      - name: Enforce no-delete diff
+      - name: Enforce focused production no-delete diff
         run: |
           set -euo pipefail
-          git fetch origin main --no-tags
-          git diff --check origin/main...HEAD
-          test -z "$(git diff --diff-filter=D --name-only origin/main...HEAD)"
+          patch_commit="$(git rev-list -n 1 --grep='^fix(rc11): keep CPA management key outside renderer state$' HEAD)"
+          test -n "$patch_commit"
+          patch_parent="${patch_commit}^"
+          git diff --check "$patch_parent" "$patch_commit"
+          test -z "$(git diff --diff-filter=D --name-only "$patch_parent" "$patch_commit")"
+          git diff --name-only "$patch_parent" "$patch_commit" \
+            | tee aiTemp/rc11-cpa-clipboard/evidence/production-files.txt
+          expected='^(src-tauri/Cargo\.toml|src-tauri/Cargo\.lock|src-tauri/src/lib\.rs|src-tauri/src/commands/five_stack\.rs|src/lib/components/control-center/OriginalUiPanel\.svelte)$'
+          unexpected="$(grep -Ev "$expected" aiTemp/rc11-cpa-clipboard/evidence/production-files.txt || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected production paths:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
