@@ -187,17 +187,18 @@ function createManagedBootstrap({
     }
 
     let action = null;
+    let lastResult = null;
     try {
       switch (managed.state) {
         case "not-installed":
           action = "install";
           updateComponent(id, { status: "installing", action });
-          assertHealthyResult(id, await install(id));
+          lastResult = assertHealthyResult(id, await install(id));
           break;
         case "repair-required":
           action = "repair";
           updateComponent(id, { status: "repairing", action });
-          assertHealthyResult(id, await repair(id));
+          lastResult = assertHealthyResult(id, await repair(id));
           break;
         case "error":
           action = managed.installedAt ? "repair" : "install";
@@ -205,20 +206,20 @@ function createManagedBootstrap({
             status: action === "repair" ? "repairing" : "installing",
             action,
           });
-          assertHealthyResult(id, await (action === "repair" ? repair(id) : install(id)));
+          lastResult = assertHealthyResult(id, await (action === "repair" ? repair(id) : install(id)));
           break;
         case "installed":
           action = "start";
           updateComponent(id, { status: "starting", action });
-          assertHealthyResult(id, await start(id));
+          lastResult = assertHealthyResult(id, await start(id));
           action = "inspect";
           updateComponent(id, { status: "starting", action });
-          assertHealthyResult(id, await inspect(id));
+          lastResult = assertHealthyResult(id, await inspect(id));
           break;
         case "external":
           action = "inspect";
           updateComponent(id, { status: "starting", action });
-          assertHealthyResult(id, await inspect(id));
+          lastResult = assertHealthyResult(id, await inspect(id));
           break;
         case "installing":
           updateComponent(id, {
@@ -231,11 +232,20 @@ function createManagedBootstrap({
           throw new Error(`Unsupported managed installation state for ${id}: ${managed.state || "missing"}`);
       }
 
+      const liveStatus = lastResult?.status;
       updateComponent(id, {
-        status: "ready",
+        status: liveStatus === "ready"
+          ? "ready"
+          : liveStatus === "starting"
+            ? "starting"
+            : liveStatus === "error"
+              ? "error"
+              : "error",
         action,
         missingCredentials: [],
-        message: null,
+        message: liveStatus === "ready"
+          ? null
+          : lastResult?.error || `${id} is not listening on loopback`,
       });
     } catch (error) {
       const message = boundedMessage(error);

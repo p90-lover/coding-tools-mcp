@@ -2,11 +2,10 @@
 
 const path = require("node:path");
 const { ORIGINAL_SECTIONS, openOriginalControlCenter } = require("./codex-router-original-ui.cjs");
+const { READY_POLL_MS, READY_WAIT_MS, waitUntilHealthy } = require("./loopback-health.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
-const READY_WAIT_MS = 20_000;
-const READY_POLL_MS = 250;
 
 function manifestPath(toolId) {
   return path.join(__dirname, "..", "vendor", "upstream", `${toolId}.json`);
@@ -66,6 +65,7 @@ function createOriginalUiController({
   electronExecutable = process.execPath,
   npm = "npm",
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now = () => Date.now(),
 } = {}) {
   const manifests = new Map(TOOL_IDS.map((toolId) => [toolId, loadManifest(toolId)]));
   let controlCenterChild = null;
@@ -134,18 +134,19 @@ function createOriginalUiController({
   }
 
   async function waitUntilReady(toolId) {
-    const started = Date.now();
-    while (true) {
-      const state = await inspect(toolId);
-      if (state.status === "ready") return state;
-      if (state.status === "error") {
-        throw new Error(state.error || `${requireTool(toolId).name} failed to start`);
-      }
-      if (Date.now() - started >= READY_WAIT_MS) {
-        throw new Error(`${requireTool(toolId).name} is not ready`);
-      }
-      await sleep(READY_POLL_MS);
+    const state = await waitUntilHealthy({
+      inspect,
+      id: toolId,
+      sleep,
+      now,
+      timeoutMs: READY_WAIT_MS[toolId],
+      pollMs: READY_POLL_MS,
+    });
+    if (state.status === "ready") return state;
+    if (state.status === "error") {
+      throw new Error(state.error || `${requireTool(toolId).name} failed to start`);
     }
+    throw new Error(`${requireTool(toolId).name} is not listening on loopback`);
   }
 
   async function start(toolId) {
@@ -164,7 +165,7 @@ function createOriginalUiController({
     } else {
       throw new Error(`${requireTool(toolId).name} lifecycle is unavailable`);
     }
-    return inspect(toolId);
+    return waitUntilReady(toolId);
   }
 
   async function stop(toolId) {
@@ -180,7 +181,7 @@ function createOriginalUiController({
     if (toolId === "codex-router") stopControlCenter();
     if (!externalServices?.restart) throw new Error(`${requireTool(toolId).name} lifecycle is unavailable`);
     await externalServices.restart(toolId);
-    return inspect(toolId);
+    return waitUntilReady(toolId);
   }
 
   async function openEmbedded(toolId, section) {
@@ -263,6 +264,7 @@ function createOriginalUiController({
 
 module.exports = {
   TOOL_IDS,
+  READY_WAIT_MS,
   createOriginalUiController,
   loadManifest,
   normalizeLoopbackEndpoint,

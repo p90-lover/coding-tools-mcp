@@ -234,3 +234,19 @@ test("dispose prevents future reconciliation", () => {
     /disposed/i,
   );
 });
+
+test("bootstrap does not mark ready when the process is only starting without loopback health", async () => {
+  const { bootstrap } = bootstrapFixture(
+    [managedService("cpa", "installed")],
+    {
+      start: async ({ id, update }) => update(id, { status: "starting", error: null, pid: 8317 }),
+      inspect: async ({ id, update }) => update(id, { status: "starting", error: "CPA / CLIProxyAPI is not reachable on loopback" }),
+    },
+  );
+
+  const result = await bootstrap.reconcile({ reason: "startup" });
+  const cpa = result.components.find((component) => component.id === "cpa");
+  assert.equal(cpa.status, "starting");
+  assert.match(cpa.message, /not reachable|not listening/i);
+  assert.notEqual(result.status, "ready");
+});

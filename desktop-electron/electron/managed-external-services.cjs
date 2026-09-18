@@ -6,6 +6,7 @@ const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createFiveStackLongRun, HEARTBEAT_MS } = require("./five-stack-long-run.cjs");
+const { waitUntilHealthy } = require("./loopback-health.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
@@ -29,6 +30,7 @@ function createManagedExternalServicesController({
   longRun: injectedLongRun = null,
   now = null,
   enableHeartbeat = true,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   ...options
 } = {}) {
   let baseController = null;
@@ -89,6 +91,8 @@ function createManagedExternalServicesController({
     const configuration = managed.installState === "installed"
       ? managedConfiguration(service.id)
       : null;
+    // A live pid is "starting", never "ready". Ready is only HTTP health
+    // (CPA GET /v1/models, Codex Router GET /_codex-router/{callerKey}/v1/models).
     const mergedStatus = running
       ? (service.status === "error" ? "error" : service.status === "ready" ? "ready" : "starting")
       : service.status;
@@ -169,40 +173,64 @@ function createManagedExternalServicesController({
     return serviceFromSnapshot(serviceId);
   }
 
-  async function installManagedComponent(serviceId) {
-    longRun.setDesired(serviceId, "running");
-    await managedController.installComponent(serviceId);
-    applyManagedConfiguration(serviceId);
-    await managedController.startComponent(serviceId);
+  async function inspectProjected(serviceId) {
     await baseController.inspect(serviceId);
     publishCombined();
     return serviceFromSnapshot(serviceId);
   }
 
-  async function repairManagedComponent(serviceId) {
-    longRun.setDesired(serviceId, "running");
-    try { await managedController.stopComponent(serviceId); } catch {}
-    await managedController.repairComponent(serviceId);
-    applyManagedConfiguration(serviceId);
-    await managedController.startComponent(serviceId);
-    await baseController.inspect(serviceId);
-    publishCombined();
-    return serviceFromSnapshot(serviceId);
+  async function waitUntilListen(serviceId) {
+    const snapshot = await waitUntilHealthy({
+      inspect: inspectProjected,
+      id: serviceId,
+      sleep,
+      now: now || (() => Date.now()),
+    });
+    if (snapshot.status === "ready") longRun.noteHealthy(serviceId);
+    return snapshot;
   }
 
-  async function start(serviceId, { supervised = false } = {}) {
-    if (!supervised) longRun.setDesired(serviceId, "running");
-    const managed = managedController.project(serviceId);
-    if (managed.installState === "installed") {
-      applyManagedConfiguration(serviceId);
-      await managedController.startComponent(serviceId);
+  async function startManagedProcess(serviceId, { waitForHealth = true } = {}) {
+    applyManagedConfiguration(serviceId);
+    const before = managedController.project(serviceId);
+    const alreadyRunning = before.processes.some((entry) => entry.running);
+    await managedController.startComponent(serviceId);
+    if (!waitForHealth) {
       await baseController.inspect(serviceId);
       publishCombined();
       const snapshot = serviceFromSnapshot(serviceId);
       if (snapshot.status === "ready") longRun.noteHealthy(serviceId);
       return snapshot;
     }
+    let snapshot = await waitUntilListen(serviceId);
+    if (snapshot.status !== "ready" && alreadyRunning) {
+      await managedController.restartComponent(serviceId);
+      snapshot = await waitUntilListen(serviceId);
+    }
+    return snapshot;
+  }
+
+  async function installManagedComponent(serviceId) {
+    longRun.setDesired(serviceId, "running");
+    await managedController.installComponent(serviceId);
+    return startManagedProcess(serviceId, { waitForHealth: true });
+  }
+
+  async function repairManagedComponent(serviceId) {
+    longRun.setDesired(serviceId, "running");
+    try { await managedController.stopComponent(serviceId); } catch {}
+    await managedController.repairComponent(serviceId);
+    return startManagedProcess(serviceId, { waitForHealth: true });
+  }
+
+  async function start(serviceId, { supervised = false } = {}) {
+    if (!supervised) longRun.setDesired(serviceId, "running");
+    const managed = managedController.project(serviceId);
+    if (managed.installState === "installed") {
+      return startManagedProcess(serviceId, { waitForHealth: !supervised });
+    }
     const started = mergeService(await baseController.start(serviceId));
+    if (!supervised) return waitUntilListen(serviceId);
     if (started.status === "ready") longRun.noteHealthy(serviceId);
     return started;
   }
@@ -225,11 +253,7 @@ function createManagedExternalServicesController({
     if (managed.installState === "installed") {
       applyManagedConfiguration(serviceId);
       await managedController.restartComponent(serviceId);
-      await baseController.inspect(serviceId);
-      publishCombined();
-      const snapshot = serviceFromSnapshot(serviceId);
-      if (snapshot.status === "ready") longRun.noteHealthy(serviceId);
-      return snapshot;
+      return waitUntilListen(serviceId);
     }
     return mergeService(await baseController.restart(serviceId));
   }
@@ -347,6 +371,8 @@ function createManagedExternalServicesController({
       void tick();
     }, HEARTBEAT_MS);
     heartbeatTimer.unref?.();
+    // Resume desired=running stacks after Desktop restart without waiting a full heartbeat.
+    void tick();
   }
 
   return Object.freeze({

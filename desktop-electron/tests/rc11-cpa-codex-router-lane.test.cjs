@@ -36,6 +36,9 @@ test("this rc.11 lane owns Codex Router and CPA original UI plus 7-day keep-aliv
   assert.match(longRun, /"codex-router"/);
   assert.match(longRun, /TARGET_UPTIME_MS = 7 \* 24 \* 60 \* 60 \* 1000/);
   assert.match(main, /powerMonitor\.on\("resume"/);
+  assert.match(originalMain, /return waitUntilReady\(toolId\)/);
+  assert.match(read("electron/loopback-health.cjs"), /READY_WAIT_MS/);
+  assert.match(read("electron/managed-external-services.cjs"), /waitUntilListen/);
 });
 
 test("CommandCode Check/Copy/Apply and Paseo/Anneal original-function engines stay out of this lane", () => {

@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
 
 const LOOPBACK: [&str; 3] = ["127.0.0.1", "::1", "localhost"];
@@ -81,7 +81,8 @@ pub const TOOLS: [ToolSpec; 5] = [
         id: ToolId::CodexRouter,
         name: "Codex Router",
         default_endpoint: "http://127.0.0.1:4202/",
-        health_path: "/",
+        // Real health is `/_codex-router/{callerKey}/v1/models`; see inspect_live.
+        health_path: "/v1/models",
         sections: &[
             "dashboard",
             "usage",
@@ -109,7 +110,7 @@ pub const TOOLS: [ToolSpec; 5] = [
         id: ToolId::Cpa,
         name: "CPA / CLIProxyAPI",
         default_endpoint: "http://127.0.0.1:8317/",
-        health_path: "/management.html",
+        health_path: "/v1/models",
         sections: &[
             "dashboard",
             "ai-providers",
@@ -482,6 +483,58 @@ fn record_child(id: ToolId, child: Child) {
     }
 }
 
+fn router_caller_key() -> Result<String, String> {
+    let path = state_root()
+        .join("codex-router")
+        .join("router")
+        .join("caller-secret");
+    let raw = fs::read_to_string(path)
+        .map_err(|_| "Codex Router caller key is not configured".to_string())?;
+    let key = raw.trim();
+    if key.is_empty() {
+        return Err("Codex Router caller key is not configured".into());
+    }
+    Ok(key.to_string())
+}
+
+fn health_target(id: ToolId) -> Result<(&'static str, String), String> {
+    match id {
+        ToolId::Cpa => Ok(("http://127.0.0.1:8317/", "/v1/models".into())),
+        ToolId::CodexRouter => {
+            let key = router_caller_key()?;
+            Ok((
+                "http://127.0.0.1:4202/",
+                format!("/_codex-router/{key}/v1/models"),
+            ))
+        }
+        _ => Ok((spec(id).default_endpoint, spec(id).health_path.into())),
+    }
+}
+
+fn probe_headers(id: ToolId) -> Vec<(String, String)> {
+    if id != ToolId::Cpa {
+        return Vec::new();
+    }
+    ensure_secrets(id)
+        .ok()
+        .and_then(|secrets| {
+            secrets
+                .get("proxyApiKey")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(|key| vec![("Authorization".into(), format!("Bearer {key}"))])
+        })
+        .unwrap_or_default()
+}
+
+fn ready_wait(id: ToolId) -> Duration {
+    match id {
+        ToolId::Cpa => Duration::from_millis(45_000),
+        ToolId::CodexRouter => Duration::from_millis(90_000),
+        _ => Duration::from_millis(20_000),
+    }
+}
+
 pub(crate) async fn inspect_live(id: ToolId) -> ToolSnapshot {
     let tool = spec(id);
     let endpoint = tool.default_endpoint.to_string();
@@ -491,7 +544,10 @@ pub(crate) async fn inspect_live(id: ToolId) -> ToolSnapshot {
     } else {
         "not-installed"
     };
-    let health = probe(&endpoint, tool.health_path, id).await;
+    let health = match health_target(id) {
+        Ok((base, path)) => probe(base, &path, id).await,
+        Err(message) => Err(message),
+    };
     let (status, error, health_value) = match health {
         Ok(value) => ("ready".into(), None, Some(value)),
         Err(message) => {
@@ -564,14 +620,18 @@ async fn probe(endpoint: &str, health_path: &str, id: ToolId) -> Result<serde_js
         .timeout(Duration::from_secs(6))
         .build()
         .map_err(|error| error.to_string())?;
-    let response = client
+    let mut request = client
         .get(url)
-        .header("Accept", "application/json, text/html;q=0.9,*/*;q=0.8")
+        .header("Accept", "application/json, text/html;q=0.9,*/*;q=0.8");
+    for (name, value) in probe_headers(id) {
+        request = request.header(name, value);
+    }
+    let response = request
         .send()
         .await
         .map_err(|_| format!("{} is not reachable on loopback", spec(id).name))?;
     let status = response.status().as_u16();
-    if status >= 500 {
+    if !response.status().is_success() {
         return Err(format!("{} returned HTTP {status}", spec(id).name));
     }
     let bytes = response.bytes().await.unwrap_or_default();
@@ -627,17 +687,30 @@ pub(crate) async fn start_supervised(id: ToolId) -> AppResult<ToolSnapshot> {
     if current.status == "ready" {
         return Ok(decorate(current));
     }
-    if current.pid.is_some() {
-        return Ok(decorate(current));
+    if current.pid.is_none() {
+        match id {
+            ToolId::Cpa => start_cpa().await?,
+            ToolId::CommandCodeProxy => start_commandcode()?,
+            ToolId::Paseo => start_npm(id, &["start"])?,
+            ToolId::Anneal => start_npm(id, &["run", "dev:web"])?,
+            ToolId::CodexRouter => start_codex_router()?,
+        }
     }
-    match id {
-        ToolId::Cpa => start_cpa().await?,
-        ToolId::CommandCodeProxy => start_commandcode()?,
-        ToolId::Paseo => start_npm(id, &["start"])?,
-        ToolId::Anneal => start_npm(id, &["run", "dev:web"])?,
-        ToolId::CodexRouter => start_codex_router()?,
+    if matches!(id, ToolId::Cpa | ToolId::CodexRouter) {
+        return Ok(wait_until_healthy(id).await);
     }
     Ok(decorate(inspect_live(id).await))
+}
+
+async fn wait_until_healthy(id: ToolId) -> ToolSnapshot {
+    let deadline = Instant::now() + ready_wait(id);
+    loop {
+        let snapshot = inspect_live(id).await;
+        if snapshot.status == "ready" || Instant::now() >= deadline {
+            return decorate(snapshot);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 fn npm_executable() -> PathBuf {
@@ -964,6 +1037,64 @@ mod tests {
             .iter()
             .any(|tool| tool.id == ToolId::CodexRouter && tool.original_window));
         assert_eq!(spec(ToolId::CommandCodeProxy).health_path, "/");
+        assert_eq!(spec(ToolId::Cpa).health_path, "/v1/models");
+        assert_eq!(spec(ToolId::CodexRouter).health_path, "/v1/models");
+        assert_eq!(ready_wait(ToolId::Cpa), Duration::from_millis(45_000));
+        assert_eq!(
+            ready_wait(ToolId::CodexRouter),
+            Duration::from_millis(90_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_ready_only_on_http_success() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let body = br#"{"data":[{"id":"model-a"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let value = probe(
+            &format!("http://127.0.0.1:{}/", addr.port()),
+            "/v1/models",
+            ToolId::Paseo,
+        )
+        .await
+        .expect("loopback health should succeed");
+        assert_eq!(value["httpStatus"], 200);
+        assert_eq!(value["reachable"], true);
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_non_success_even_with_a_listener() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        });
+        let error = probe(
+            &format!("http://127.0.0.1:{}/", addr.port()),
+            "/v1/models",
+            ToolId::Paseo,
+        )
+        .await
+        .expect_err("401 must not be ready");
+        assert!(error.contains("HTTP 401"), "{error}");
     }
 
     #[test]

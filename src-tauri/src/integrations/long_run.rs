@@ -436,7 +436,6 @@ pub fn ensure_five_stack_health_loop() {
     }
     tauri::async_runtime::spawn(async {
         loop {
-            tokio::time::sleep(Duration::from_millis(HEARTBEAT_MS)).await;
             let mut live = HashMap::new();
             for id in ToolId::all() {
                 let snapshot = super::five_stack::inspect_live(id).await;
@@ -454,6 +453,7 @@ pub fn ensure_five_stack_health_loop() {
                     let _ = super::five_stack::start_supervised(id).await;
                 }
             }
+            tokio::time::sleep(Duration::from_millis(HEARTBEAT_MS)).await;
         }
     });
 }
