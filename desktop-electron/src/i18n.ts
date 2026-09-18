@@ -2,7 +2,7 @@ import zhTWOverrides from "./i18n/locales/zh-TW";
 import type { Language } from "./types";
 
 const en = {
-  product: "Codex Web GPT",
+  product: "Coding Tools",
   devBadge: "DEV",
   devSetupTitle: "Set up the isolated DEV profile",
   devSetupSubtitle: "This browser, account, configuration, and runtime data stay separate from the normal launcher and Codex.",
@@ -192,10 +192,24 @@ const en = {
   sessionReminderTitle: "Refresh your ChatGPT session",
   sessionReminderBody: "We recommend signing in again every two days. A stale ChatGPT session can interrupt Web model turns and MCP tools.",
   logOut: "Log out",
+  moreTools: "More",
+  providers: "Providers",
+  integrations: "Integrations",
+  paseoOrchestrator: "Paseo Orchestrator",
+  annealTasks: "Anneal Tasks",
+  networkProxy: "Network Proxy",
+  liveMcpTools: "Live MCP tools",
+  liveMcpToolsBody: "List the local Coding Tools catalog and run a tool against a real workspace. Results come from the headless runtime, not a preview fixture.",
+  refreshTools: "Refresh",
+  runTool: "Run tool",
+  selectWorkspace: "Workspace",
+  selectTool: "Tool",
+  toolArguments: "Arguments (JSON)",
+  noWorkspaces: "No local workspaces yet. Profiles stay in the Coding Tools application data folder.",
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
-  product: "Codex Web GPT",
+  product: "Coding Tools",
   devBadge: "DEV",
   devSetupTitle: "设置隔离的 DEV 配置",
   devSetupSubtitle: "此浏览器、账户、配置和运行数据与普通启动器及 Codex 完全分离。",
@@ -385,10 +399,24 @@ const zh: Record<keyof typeof en, string> = {
   sessionReminderTitle: "刷新 ChatGPT 会话",
   sessionReminderBody: "建议每两天重新登录一次。失效的 ChatGPT 会话可能会中断 Web 模型任务和 MCP 工具。",
   logOut: "退出登录",
+  moreTools: "更多",
+  providers: "供应商",
+  integrations: "集成服务",
+  paseoOrchestrator: "Paseo 协调器",
+  annealTasks: "Anneal 任务",
+  networkProxy: "网络代理",
+  liveMcpTools: "实时 MCP 工具",
+  liveMcpToolsBody: "列出本地 Coding Tools 目录，并对真实工作区运行工具。结果来自无头运行时，不是预览数据。",
+  refreshTools: "刷新",
+  runTool: "运行工具",
+  selectWorkspace: "工作区",
+  selectTool: "工具",
+  toolArguments: "参数（JSON）",
+  noWorkspaces: "还没有本地工作区。配置文件保存在 Coding Tools 应用数据目录中。",
 };
 
 const ja: Record<keyof typeof en, string> = {
-  product: "Codex Web GPT",
+  product: "Coding Tools",
   devBadge: "DEV",
   devSetupTitle: "隔離された DEV プロファイルをセットアップ",
   devSetupSubtitle: "このブラウザー、アカウント、設定、ランタイムデータは、通常のランチャーおよび Codex から完全に分離されます。",
@@ -578,6 +606,20 @@ const ja: Record<keyof typeof en, string> = {
   sessionReminderTitle: "ChatGPT セッションを更新してください",
   sessionReminderBody: "2 日ごとの再サインインを推奨します。古い ChatGPT セッションは、Web モデルのターンや MCP ツールを中断する場合があります。",
   logOut: "ログアウト",
+  moreTools: "その他",
+  providers: "プロバイダー",
+  integrations: "統合サービス",
+  paseoOrchestrator: "Paseo オーケストレーター",
+  annealTasks: "Anneal タスク",
+  networkProxy: "ネットワークプロキシ",
+  liveMcpTools: "ライブ MCP ツール",
+  liveMcpToolsBody: "ローカル Coding Tools カタログを表示し、実際のワークスペースでツールを実行します。結果はプレビューではなくヘッドレスランタイムから返されます。",
+  refreshTools: "更新",
+  runTool: "ツールを実行",
+  selectWorkspace: "ワークスペース",
+  selectTool: "ツール",
+  toolArguments: "引数（JSON）",
+  noWorkspaces: "ローカルワークスペースはまだありません。プロファイルは Coding Tools のデータフォルダーに保存されます。",
 };
 
 export type Copy = typeof en;
