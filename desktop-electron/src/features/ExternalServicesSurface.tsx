@@ -7,6 +7,7 @@ import type {
   Language,
   ProviderNetworkSnapshot,
 } from "../types";
+import { CommandCodeProxySurface } from "./CommandCodeProxySurface";
 import "./external-services.css";
 
 interface ExternalServicesSurfaceProps {
@@ -361,6 +362,19 @@ export function ExternalServicesSurface({
             </div>
             <span className={`external-service-status status-${selected.status}`}>{statusLabel(language, selected)}</span>
           </header>
+
+          {selected.id === "commandcode-proxy" ? (
+            <CommandCodeProxySurface
+              busy={busy}
+              language={language}
+              onCheck={() => void inspect()}
+              onOpenProviders={openProviders}
+              onRestart={() => void restart()}
+              onStart={() => void start()}
+              onStop={() => void stop()}
+              service={selected}
+            />
+          ) : null}
 
           <section className={`managed-install-panel state-${selected.managedInstall.state}`}>
             <div>

@@ -219,6 +219,19 @@ export interface ManagedComponentsSnapshot {
   }>;
 }
 
+export interface CommandCodeProxyHealth {
+  status?: string;
+  proxy?: string;
+  version?: string;
+  endpoints?: Record<string, string>;
+  user?: {
+    id?: string;
+    email?: string;
+  };
+  credits?: number;
+  models?: string[];
+}
+
 export interface ExternalServiceSnapshot {
   id: ExternalServiceId;
   name: string;
@@ -246,6 +259,7 @@ export interface ExternalServiceSnapshot {
   accountCount?: number;
   connectedAccountCount?: number;
   providerModelCount?: number;
+  health?: CommandCodeProxyHealth;
   managedInstall: ManagedComponentInstallSnapshot;
 }
 

@@ -62,7 +62,9 @@ export function UpstreamToolSurface({
   const [endpoint, setEndpoint] = useState("");
   const [frameUrl, setFrameUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [chromeOpen, setChromeOpen] = useState(false);
   const tool = useMemo(() => toolFrom(snapshot, toolId), [snapshot, toolId]);
+  const windowsHost = /windows/iu.test(navigator.userAgent);
 
   const refresh = async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
@@ -79,15 +81,32 @@ export function UpstreamToolSurface({
   useEffect(() => {
     let cancelled = false;
     if (!api) return;
-    void api.upstreamToolsSnapshot().then((next) => {
-      if (cancelled) return;
-      setSnapshot(next);
-      const current = toolFrom(next, toolId);
-      if (current) {
+    void (async () => {
+      try {
+        await api.inspectUpstreamTool(toolId);
+        const next = await api.upstreamToolsSnapshot();
+        if (cancelled) return;
+        setSnapshot(next);
+        const current = toolFrom(next, toolId);
+        if (!current) return;
         setEndpoint(current.endpoint);
-        setSelectedSection(current.sections[0] || "");
+        const section = current.sections[0] || "";
+        setSelectedSection(section);
+        if (current.status === "ready" && section) {
+          const result = await api.openEmbeddedTool(toolId, section);
+          if (cancelled) return;
+          setFrameUrl(result.url);
+          setSnapshot((value) => value
+            ? {
+                ...value,
+                tools: value.tools.map((candidate) => candidate.id === result.tool.id ? result.tool : candidate),
+              }
+            : { version: 1, tools: [result.tool] });
+        }
+      } catch (cause) {
+        if (!cancelled) setError(messageOf(cause));
       }
-    }).catch((cause) => setError(messageOf(cause)));
+    })();
     return () => { cancelled = true; };
   }, [api, setError, toolId]);
 
@@ -172,26 +191,44 @@ export function UpstreamToolSurface({
         ? localize(language, "Error", "錯誤")
         : localize(language, "Offline", "離線");
 
+  const immersive = Boolean(frameUrl);
+  const annealWindowsHint = toolId === "anneal"
+    ? localize(
+      language,
+      `${windowsHost ? "This host looks like Windows. " : ""}Anneal's upstream supports macOS/Linux, not native Windows. If the API runs elsewhere, use a user-managed secure local port forward to 127.0.0.1:3000. The board works as soon as that loopback service is reachable.`,
+      `${windowsHost ? "目前主機看起來是 Windows。" : ""}Anneal 上游支援 macOS／Linux，不是原生 Windows。若 API 在其他機器，請自行建立安全的本機 port-forward 到 127.0.0.1:3000。服務可達後，原版看板即可使用。`,
+    )
+    : null;
+
   return (
-    <section className="upstream-tool-surface" data-tool={toolId}>
+    <section className={`upstream-tool-surface${immersive ? " is-immersive" : ""}${immersive && chromeOpen ? " chrome-open" : ""}`} data-tool={toolId}>
       <header className="upstream-tool-heading">
         <div>
           <span className="upstream-tool-kicker">
             {localize(language, "PINNED UPSTREAM", "固定上游版本")}
           </span>
           <h1>{tool.name}</h1>
-          <p>
-            {localize(
-              language,
-              `Full ${tool.name} interface pinned to ${tool.commit.slice(0, 12)} under ${tool.license}.`,
-              `完整 ${tool.name} 介面，固定於 ${tool.commit.slice(0, 12)}，授權為 ${tool.license}。`,
-            )}
-          </p>
+          {immersive ? null : (
+            <p>
+              {localize(
+                language,
+                `Full ${tool.name} interface pinned to ${tool.commit.slice(0, 12)} under ${tool.license}.`,
+                `完整 ${tool.name} 介面，固定於 ${tool.commit.slice(0, 12)}，授權為 ${tool.license}。`,
+              )}
+            </p>
+          )}
         </div>
         <span className={`upstream-tool-status status-${tool.status}`}>{statusText}</span>
+        {immersive ? (
+          <button className="upstream-chrome-toggle" onClick={() => setChromeOpen((value) => !value)} type="button">
+            {chromeOpen
+              ? localize(language, "Hide connection controls", "隱藏連線控制")
+              : localize(language, "Connection controls", "連線控制")}
+          </button>
+        ) : null}
       </header>
 
-      <div className="upstream-tool-toolbar">
+      <div className={`upstream-tool-toolbar${immersive && !chromeOpen ? " is-collapsed" : ""}`}>
         <label className="upstream-endpoint-field">
           <span>{localize(language, "Local endpoint", "本機端點")}</span>
           <input
@@ -240,6 +277,7 @@ export function UpstreamToolSurface({
       </nav>
 
       {tool.error ? <p className="upstream-tool-error">{tool.error}</p> : null}
+      {annealWindowsHint ? <p className="upstream-tool-hint">{annealWindowsHint}</p> : null}
       {!tool.sourceConfigured && !ready ? (
         <p className="upstream-tool-hint">
           {localize(
