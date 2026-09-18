@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   Language,
+  UpstreamToolActInput,
   UpstreamToolActResult,
   UpstreamToolId,
   UpstreamToolSnapshot,
@@ -161,7 +162,7 @@ export function UpstreamToolSurface({
     await api.openUpstreamToolExternal(toolId, selectedSection);
   });
 
-  const act = async (name: string, input: Record<string, string>) => {
+  const act = async (name: string, input: Omit<UpstreamToolActInput, "toolId">) => {
     if (!api) throw new Error("Launcher IPC is unavailable");
     setBusy(name);
     setError(null);
