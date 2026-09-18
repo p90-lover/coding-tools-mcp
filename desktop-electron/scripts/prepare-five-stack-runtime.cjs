@@ -151,13 +151,33 @@ function envPathParts(env) {
   return String(env[envPathKey(env)] || "").split(path.delimiter).filter(Boolean);
 }
 
+function isBunExecutable(filePath) {
+  return /^bun(\.exe)?$/i.test(path.basename(filePath || ""));
+}
+
+function resolveNodeExecutable(env = process.env, platform = process.platform) {
+  const nodeName = platform === "win32" ? "node.exe" : "node";
+  const searchDirs = [...envPathParts(env)];
+  if (!isBunExecutable(process.execPath) && new RegExp(`^${nodeName}$`, "i").test(path.basename(process.execPath))) {
+    searchDirs.unshift(path.dirname(process.execPath));
+  }
+  for (const dir of searchDirs) {
+    const candidate = path.join(dir, nodeName);
+    if (isFile(candidate) && !isBunExecutable(candidate)) return candidate;
+  }
+  return nodeName;
+}
+
 function resolveNpmExecutable(env = process.env, platform = process.platform) {
   const names = platform === "win32" ? ["npm.cmd", "npm.CMD", "npm"] : ["npm"];
-  const searchDirs = [path.dirname(process.execPath), ...envPathParts(env)];
+  const nodeExecutable = resolveNodeExecutable(env, platform);
+  const searchDirs = [];
+  if (path.isAbsolute(nodeExecutable)) searchDirs.push(path.dirname(nodeExecutable));
+  searchDirs.push(...envPathParts(env));
   for (const dir of searchDirs) {
     for (const name of names) {
       const candidate = path.join(dir, name);
-      if (isFile(candidate)) return candidate;
+      if (isFile(candidate) && !isBunExecutable(candidate)) return candidate;
     }
   }
   return platform === "win32" ? "npm.cmd" : "npm";
@@ -165,23 +185,23 @@ function resolveNpmExecutable(env = process.env, platform = process.platform) {
 
 function withNpmOnPath(env = process.env, platform = process.platform) {
   const next = { ...env };
-  const key = envPathKey(env);
+  const nodeExecutable = resolveNodeExecutable(env, platform);
   const npmExecutable = resolveNpmExecutable(env, platform);
-  const extras = [path.dirname(process.execPath)];
-  if (path.isAbsolute(npmExecutable)) extras.unshift(path.dirname(npmExecutable));
+  const extras = [];
+  if (path.isAbsolute(nodeExecutable)) extras.push(path.dirname(nodeExecutable));
+  if (path.isAbsolute(npmExecutable)) extras.push(path.dirname(npmExecutable));
   const merged = [];
   for (const dir of [...extras, ...envPathParts(env)]) {
     const resolved = path.resolve(dir);
     if (!merged.some((existing) => path.resolve(existing) === resolved)) merged.push(dir);
   }
-  next[key] = merged.join(path.delimiter);
-  if (path.isAbsolute(npmExecutable)) {
-    const nodeSibling = path.join(
-      path.dirname(npmExecutable),
-      platform === "win32" ? "node.exe" : "node",
-    );
-    if (isFile(nodeSibling)) next.npm_node_execpath = nodeSibling;
+  const pathValue = merged.join(path.delimiter);
+  for (const key of Object.keys(next)) {
+    if (key.toLowerCase() === "path") delete next[key];
   }
+  next[platform === "win32" ? "Path" : "PATH"] = pathValue;
+  if (platform === "win32") next.PATH = pathValue;
+  if (path.isAbsolute(nodeExecutable)) next.npm_node_execpath = nodeExecutable;
   return next;
 }
 

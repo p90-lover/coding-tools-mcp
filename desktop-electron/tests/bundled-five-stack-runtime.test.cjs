@@ -196,6 +196,8 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   const source = read("scripts/prepare-five-stack-runtime.cjs");
   assert.match(source, /npm\.cmd/);
   assert.match(source, /withNpmOnPath/);
+  assert.match(source, /resolveNodeExecutable/);
+  assert.match(source, /isBunExecutable/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
     Path: "C:\\nodejs;C:\\Windows\\system32",
