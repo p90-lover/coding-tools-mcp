@@ -8,7 +8,6 @@ const test = require("node:test");
 const desktopRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(desktopRoot, "..");
 const readDesktop = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
-const readRepository = (relativePath) => fs.readFileSync(path.join(repositoryRoot, relativePath), "utf8");
 
 function executionProviderHandler(source) {
   const start = source.indexOf('handle("coding-tools:execution:provider"');
@@ -63,7 +62,7 @@ test("Codex Router, CPA Antigravity, and CommandCode route to subagents, Paseo, 
 test("the packaged five-stack control plane retains every external runtime manifest", () => {
   const services = readDesktop("electron/external-services.cjs");
   const packageManifest = JSON.parse(readDesktop("package.json"));
-  const extraResources = JSON.stringify(packageManifest.build?.extraResources ?? []);
+  const packagedFiles = JSON.stringify(packageManifest.build?.files ?? []);
 
   for (const serviceId of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
     assert.match(services, new RegExp(`\\"${serviceId}\\"`), `missing external service ${serviceId}`);
@@ -76,5 +75,5 @@ test("the packaged five-stack control plane retains every external runtime manif
   ]) {
     assert.equal(fs.existsSync(path.join(repositoryRoot, manifest)), true, `missing ${manifest}`);
   }
-  assert.match(extraResources, /vendor\/upstream|vendor\\\\upstream/);
+  assert.match(packagedFiles, /vendor\/upstream\/\*\*/);
 });
