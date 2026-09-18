@@ -20,6 +20,7 @@ on:
       - 'desktop-electron/electron/upstream-tools.cjs'
       - 'desktop-electron/electron/ipc-schema.cjs'
       - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/scripts/verify-package.cjs'
       - 'desktop-electron/src/api/contracts.ts'
       - 'desktop-electron/src/features/ProviderHubSaasSurface.tsx'
       - 'desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx'
@@ -32,6 +33,7 @@ on:
       - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
       - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
       - 'desktop-electron/tests/five-stack-managed-integration.test.cjs'
+      - 'desktop-electron/tests/five-stack-package-contract.test.cjs'
       - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
       - 'desktop-electron/tests/provider-console-saas.test.cjs'
       - 'desktop-electron/tests/provider-execution-router.test.cjs'
@@ -56,6 +58,7 @@ on:
       - 'desktop-electron/electron/upstream-tools.cjs'
       - 'desktop-electron/electron/ipc-schema.cjs'
       - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/scripts/verify-package.cjs'
       - 'desktop-electron/src/api/contracts.ts'
       - 'desktop-electron/src/features/ProviderHubSaasSurface.tsx'
       - 'desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx'
@@ -68,6 +71,7 @@ on:
       - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
       - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
       - 'desktop-electron/tests/five-stack-managed-integration.test.cjs'
+      - 'desktop-electron/tests/five-stack-package-contract.test.cjs'
       - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
       - 'desktop-electron/tests/provider-console-saas.test.cjs'
       - 'desktop-electron/tests/provider-execution-router.test.cjs'
@@ -119,16 +123,18 @@ jobs:
           node --check desktop-electron/electron/upstream-tools.cjs
           node --check desktop-electron/electron/ipc-schema.cjs
           node --check desktop-electron/electron/preload.cjs
+          node --check desktop-electron/scripts/verify-package.cjs
 
       - name: Install exact Electron dependencies
         run: bun install --cwd desktop-electron --frozen-lockfile
 
-      - name: Run focused execution, Provider Hub, and upstream contracts
+      - name: Run focused execution, Provider Hub, upstream, and package contracts
         run: |
           node --test \
             desktop-electron/tests/commandcode-provider-session.test.cjs \
             desktop-electron/tests/execution-bridge-contract.test.cjs \
             desktop-electron/tests/five-stack-managed-integration.test.cjs \
+            desktop-electron/tests/five-stack-package-contract.test.cjs \
             desktop-electron/tests/provider-center-account-wiring.test.cjs \
             desktop-electron/tests/provider-console-saas.test.cjs \
             desktop-electron/tests/provider-execution-router.test.cjs \
