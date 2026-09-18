@@ -185,12 +185,15 @@ jobs:
           set -euo pipefail
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only)"
+          git status --short --untracked-files=all \
+            | tee aiTemp/rc9-cpa-oauth/evidence/scope-status.txt
           if [[ '${{ steps.patch_state.outputs.applied }}' == 'false' ]]; then
             changed="$(git status --short --untracked-files=all \
               | awk '{print $2}' \
               | grep -v '^aiTemp/rc9-cpa-oauth/evidence/' \
               | grep -v '^aiTemp/rc9-cpa-oauth/renderer/' \
               | grep -v '^aiTemp/rc9-cpa-oauth/tmp/' \
+              | grep -v '^desktop-electron/aiTemp/' \
               | grep -v '^desktop-electron/node_modules/' \
               | sort)"
             expected="$(printf '%s\n' \
@@ -228,7 +231,7 @@ jobs:
           git commit -m 'feat(rc9): unify CPA OAuth account login adapters'
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
-      - name: Preserve transient dependencies under Trash
+      - name: Preserve transient dependencies and test fixtures under Trash
         if: always()
         shell: bash
         run: |
@@ -237,6 +240,12 @@ jobs:
             destination="aiTemp/Trash/rc9-cpa-oauth/node_modules-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             if [[ ! -e "$destination" ]]; then
               mv desktop-electron/node_modules "$destination"
+            fi
+          fi
+          if [[ -d desktop-electron/aiTemp ]]; then
+            destination="aiTemp/Trash/rc9-cpa-oauth/desktop-electron-aiTemp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            if [[ ! -e "$destination" ]]; then
+              mv desktop-electron/aiTemp "$destination"
             fi
           fi
 
