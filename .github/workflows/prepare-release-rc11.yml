@@ -1,0 +1,151 @@
+name: Prepare Coding Tools v0.7.0-rc.11
+
+on:
+  push:
+    branches:
+      - automation/prepare-v0.7.0-rc.11-app-tabs
+    paths:
+      - .github/workflows/prepare-release-rc11.yml
+      - aiTemp/rc11-release/**
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: prepare-coding-tools-v0.7.0-rc.11
+  cancel-in-progress: true
+
+jobs:
+  materialize-and-promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/cache/bun-rc11-prep
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Prepare retained temporary roots
+        run: mkdir -p aiTemp/evidence aiTemp/Trash/rc11-prep aiTemp/tmp
+
+      - name: Materialize the rc.11 exact-source release
+        run: |
+          set -euo pipefail
+          node --check aiTemp/rc11-release/run-materializer.mjs
+          node aiTemp/rc11-release/run-materializer.mjs \
+            2>&1 | tee aiTemp/evidence/rc11-materialize.txt
+          grep -F RC11_RELEASE_MATERIALIZED aiTemp/evidence/rc11-materialize.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Install exact desktop dependencies
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/rc11-install.txt
+
+      - name: Run focused app-tabs and release contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/integrated-app-tabs.test.cjs \
+            desktop-electron/tests/provider-console-saas.test.cjs \
+            desktop-electron/tests/rc11-release-identity.test.cjs \
+            desktop-electron/tests/rc9-package-identity-alignment.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            2>&1 | tee aiTemp/evidence/rc11-focused-tests.txt
+          grep -F '# fail 0' aiTemp/evidence/rc11-focused-tests.txt
+
+      - name: Typecheck and build the renderer
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/evidence/rc11-typecheck.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron build:renderer \
+            2>&1 | tee aiTemp/evidence/rc11-renderer.txt
+
+      - name: Retain generated material and restore tracked source
+        run: |
+          set -euo pipefail
+          if [ -d desktop-electron/dist ]; then
+            retained="aiTemp/Trash/rc11-prep/renderer-${GITHUB_SHA}"
+            test ! -e "$retained"
+            mv desktop-electron/dist "$retained"
+            git restore --source=HEAD --worktree -- desktop-electron/dist || true
+          fi
+          if [ -d aiTemp/runtime/rc11-release ]; then
+            retained="aiTemp/Trash/rc11-prep/materializer-runtime-${GITHUB_SHA}"
+            test ! -e "$retained"
+            mv aiTemp/runtime/rc11-release "$retained"
+          fi
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Enforce the bounded release-preparation scope
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only | sort)"
+          printf '%s\n' "$changed" | tee aiTemp/evidence/rc11-changed-paths.txt
+          allowed='^(\.github/workflows/codex-router-multiprovider-release-rc11\.yml|desktop-electron/(package\.json|electron/product\.cjs|scripts/(prepare-package-resources|verify-package)\.cjs|tests/(product-identity|package-contents|package-resource-preparation|installer-upgrade-migration|rc9-package-identity-alignment|rc11-release-identity)\.test\.cjs)|docs/releases/v0\.7\.0-rc\.11\.md)$'
+          unexpected="$(printf '%s\n' "$changed" | grep -Ev "$allowed" || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected paths:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Commit and promote the exact verified source
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            .github/workflows/codex-router-multiprovider-release-rc11.yml \
+            desktop-electron/package.json \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/rc9-package-identity-alignment.test.cjs \
+            desktop-electron/tests/rc11-release-identity.test.cjs \
+            docs/releases/v0.7.0-rc.11.md
+          git diff --cached --check
+          git commit -m 'release(rc11): publish the unified app-tabs source'
+          target_sha="$(git rev-parse HEAD)"
+          remote_sha="$(git ls-remote origin refs/heads/release/codex-router-multiprovider-0.7.0-rc.11 | awk '{print $1}')"
+          if [ -n "$remote_sha" ] && [ "$remote_sha" != "$target_sha" ]; then
+            printf 'RC11_RELEASE_BRANCH_ALREADY_MOVED:%s\n' "$remote_sha" >&2
+            exit 1
+          fi
+          if [ -z "$remote_sha" ]; then
+            git push origin HEAD:refs/heads/release/codex-router-multiprovider-0.7.0-rc.11
+          fi
+          printf 'RC11_RELEASE_BRANCH_READY %s\n' "$target_sha" | tee aiTemp/evidence/rc11-promoted.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coding-tools-v0.7.0-rc.11-preparation-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14
