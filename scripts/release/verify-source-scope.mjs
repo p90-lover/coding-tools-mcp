@@ -50,8 +50,17 @@ export function auditSourceScope({
   if (nsis.perMachine !== false) {
     add(errors, 'NSIS_SCOPE_MISMATCH', 'Windows installer must remain per-user (perMachine=false)');
   }
-  if (nsis.allowElevation !== false) {
-    add(errors, 'NSIS_ELEVATION_MISMATCH', 'Windows installer must not request elevation (allowElevation=false)');
+  const assistedLegacyMigration = nsis.allowElevation === true
+    && nsis.perMachine === false
+    && nsis.oneClick === false
+    && nsis.include === 'build/installer.nsh'
+    && nsis.deleteAppDataOnUninstall === false;
+  if (nsis.allowElevation !== false && !assistedLegacyMigration) {
+    add(
+      errors,
+      'NSIS_ELEVATION_MISMATCH',
+      'Windows installer elevation is allowed only for the bounded legacy NSIS/MSI migration include',
+    );
   }
   if (!/^[0-9a-f]{40}$/.test(normalizedSource)) {
     add(errors, 'SOURCE_SHA_INVALID', 'source SHA must be a full 40-character Git commit');
@@ -81,6 +90,7 @@ export function auditSourceScope({
       productName,
       perMachine: nsis.perMachine,
       allowElevation: nsis.allowElevation,
+      assistedLegacyMigration,
       upstream: {
         repository: upstreamManifest?.repository ?? null,
         tag: upstreamManifest?.tag ?? null,
