@@ -431,7 +431,7 @@ test("packaging ships bundled CPA and Codex Router outside the download path", (
   assert.match(verifier, /bundled-cpa/);
   assert.match(verifier, /bundled-codex-router/);
   assert.match(verifier, /bundledRouterVendorPath/);
-  assert.match(read("scripts/smoke-package.cjs"), /WINDOWS_INSTALLER_TIMEOUT_MS = 15 \* 60_000/);
+  assert.match(read("scripts/smoke-package.cjs"), /WINDOWS_INSTALLER_TIMEOUT_MS = 45 \* 60_000/);
   assert.match(read("scripts/smoke-package.cjs"), /timeout: WINDOWS_INSTALLER_TIMEOUT_MS/);
   assert.match(manager, /copy-bundled-archive/);
   assert.match(manager, /copy-bundled-source/);
