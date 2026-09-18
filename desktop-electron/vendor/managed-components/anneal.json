@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "id": "anneal",
+  "name": "Anneal",
+  "managedBy": "Coding Tools",
+  "loopbackOnly": true,
+  "repository": "mosonlab/anneal",
+  "repositoryUrl": "https://github.com/mosonlab/anneal.git",
+  "version": "0.9.0",
+  "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e",
+  "strategy": "bundled-source",
+  "license": "MIT",
+  "bundle": {
+    "required": true,
+    "entrypoint": "package.json",
+    "prebuilt": false
+  },
+  "platformModes": {
+    "win32": "wsl2",
+    "linux": "native",
+    "darwin": "native"
+  },
+  "credentials": {
+    "githubReadToken": {
+      "required": false,
+      "minimumLength": 20,
+      "secret": true
+    }
+  },
+  "install": {
+    "steps": [
+      {
+        "id": "unpack-bundled-source",
+        "kind": "unpack-bundle"
+      },
+      {
+        "id": "install-dependencies",
+        "kind": "command",
+        "executable": "{npm}",
+        "arguments": [
+          "ci"
+        ],
+        "skipIfFile": "node_modules",
+        "skipIfExists": "node_modules",
+        "execution": "managed-mode"
+      },
+      {
+        "id": "restore-or-create-config",
+        "kind": "command",
+        "executable": "bash",
+        "arguments": [
+          "-lc",
+          "set -euo pipefail; state=\"$ANNEAL_STATE_DIR\"; mkdir -p \"$state/config\"; if [ -f \"$state/config/.env\" ]; then ln -sfn \"$state/config/.env\" .env; elif [ -f .env.example ]; then cp .env.example \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; elif [ -n \"${GITHUB_READ_TOKEN:-}\" ]; then npm run setup:local; mv .env \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; else npm run setup:local; mv .env \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; fi"
+        ],
+        "environment": {
+          "ANNEAL_STATE_DIR": "{state}",
+          "GITHUB_READ_TOKEN": "{secret:githubReadToken}"
+        },
+        "execution": "managed-mode"
+      },
+      {
+        "id": "build-anneal",
+        "kind": "command",
+        "executable": "{npm}",
+        "arguments": [
+          "run",
+          "build"
+        ],
+        "skipIfFile": "dist",
+        "execution": "managed-mode"
+      },
+      {
+        "id": "initialize-dedicated-database",
+        "kind": "command",
+        "executable": "bash",
+        "arguments": [
+          "-lc",
+          "set -euo pipefail; state=\"$ANNEAL_STATE_DIR\"; project=coding-tools-anneal; export COMPOSE_PROJECT_NAME=\"$project\"; set -a; . ./.env; set +a; initialized=\"$state/database-v0.9.0.initialized\"; initializing=\"$state/database-v0.9.0.initializing\"; existing=\"$(docker volume ls --filter label=com.docker.compose.project=$project --filter label=com.docker.compose.volume=agentos_postgres_data -q)\"; if [ -n \"$existing\" ] && [ ! -f \"$initialized\" ]; then echo 'Anneal dedicated database exists without a completed Coding Tools initialization marker; refusing a fresh reset.' >&2; exit 42; fi; if [ -z \"$existing\" ]; then mkdir -p \"$state\"; printf 'started\\n' > \"$initializing\"; docker compose -p $project up -d --wait postgres; npm run db:migrate:release -- --fresh; printf 'complete\\n' > \"$initialized\"; else docker compose -p $project up -d --wait postgres; fi"
+        ],
+        "environment": {
+          "ANNEAL_STATE_DIR": "{state}"
+        },
+        "execution": "managed-mode"
+      },
+      {
+        "id": "activate",
+        "kind": "activate"
+      }
+    ]
+  },
+  "launch": {
+    "primaryProcessId": "web",
+    "processes": [
+      {
+        "id": "postgres",
+        "mode": "command",
+        "detached": true,
+        "executable": "docker",
+        "arguments": [
+          "compose",
+          "-p",
+          "coding-tools-anneal",
+          "up",
+          "-d",
+          "--wait",
+          "postgres"
+        ],
+        "execution": "managed-mode"
+      },
+      {
+        "id": "api",
+        "mode": "foreground",
+        "executable": "{npm}",
+        "arguments": [
+          "run",
+          "dev:api"
+        ],
+        "execution": "managed-mode"
+      },
+      {
+        "id": "runner",
+        "mode": "foreground",
+        "executable": "{npm}",
+        "arguments": [
+          "run",
+          "dev:runner"
+        ],
+        "execution": "managed-mode"
+      },
+      {
+        "id": "web",
+        "mode": "foreground",
+        "executable": "{npm}",
+        "arguments": [
+          "run",
+          "dev:web"
+        ],
+        "execution": "managed-mode"
+      }
+    ]
+  },
+  "health": {
+    "endpoint": "http://127.0.0.1:5173/",
+    "acceptStatus": [
+      200
+    ]
+  },
+  "executionEndpoint": "http://127.0.0.1:3000/"
+}

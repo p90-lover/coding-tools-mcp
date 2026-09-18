@@ -10,12 +10,27 @@ pub use codex_runtime::{
     codex_local_command, codex_local_connect, codex_local_control, codex_local_disconnect,
     codex_local_read, codex_local_status,
 };
+mod execution;
+pub use execution::{execution_local_provider, execution_local_read, execution_local_update};
+mod providers;
+pub use providers::{
+    provider_image_generate, provider_profile_archive, provider_profile_connect,
+    provider_profile_disable, provider_profile_probe, provider_profile_save,
+    provider_profiles_read,
+};
+mod orchestrators;
+pub use orchestrators::{
+    orchestrator_profile_archive, orchestrator_profile_run, orchestrator_profile_save,
+    orchestrator_profiles_read,
+};
 mod task_monitor;
 pub use task_monitor::task_monitor_read;
 mod control_center;
 pub use control_center::{
-    commandcode_proxy_apply, commandcode_proxy_status, control_board_change, control_board_read,
-    integration_read, provider_config_preview,
+    commandcode_proxy_apply, commandcode_proxy_control, commandcode_proxy_status,
+    control_board_change, control_board_read, integration_act, integration_live_connect,
+    integration_live_disconnect, integration_live_status, integration_read,
+    provider_config_preview,
 };
 mod computer;
 mod sandbox;

@@ -1,0 +1,112 @@
+name: Materialize Coding Tools v0.7.0-rc.8 release
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.8
+    paths:
+      - aiTemp/rc8-release/materialize_release.py
+      - .github/workflows/materialize-v0.7-rc8-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-coding-tools-v0.7.0-rc.8
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Prepare retained evidence roots
+        run: mkdir -p aiTemp/evidence aiTemp/Trash/rc8-release-materialization
+
+      - name: Finalize deterministic materializer and apply it
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('aiTemp/rc8-release/materialize_release.py')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace('    "desktop-electron/src/App.tsx",\n', '')
+          path.write_text(text, encoding='utf-8')
+          PY
+          python3 aiTemp/rc8-release/materialize_release.py \
+            2>&1 | tee aiTemp/evidence/rc8-release-materialization.txt
+          grep -F RC8_RELEASE_MATERIALIZED aiTemp/evidence/rc8-release-materialization.txt
+
+      - name: Verify generated release source
+        run: |
+          set -euo pipefail
+          python3 -m py_compile aiTemp/rc8-release/materialize_release.py
+          node --check aiTemp/rc8-release/run-windows-release.mjs
+          node --test \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-publish-boundary.test.cjs \
+            desktop-electron/tests/rc8-release-identity.test.cjs \
+            2>&1 | tee aiTemp/evidence/rc8-release-focused-tests.txt
+          grep -F '# fail 0' aiTemp/evidence/rc8-release-focused-tests.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Enforce bounded materialization scope
+        run: |
+          set -euo pipefail
+          git status --short | tee aiTemp/evidence/rc8-release-status.txt
+          changed="$(git diff --name-only | sort)"
+          allowed='^(aiTemp/rc8-release/(materialize_release\.py|run-windows-release\.mjs|verify-windows-migration\.ps1)|desktop-electron/(package\.json|electron/product\.cjs|scripts/(package|prepare-package-resources|verify-package)\.cjs|tests/(product-identity|installer-upgrade-migration|package-contents|package-resource-preparation|package-publish-boundary|rc8-release-identity)\.test\.cjs)|docs/releases/v0\.7\.0-rc\.8\.md)$'
+          unexpected="$(printf '%s\n' "$changed" | grep -Ev "$allowed" || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected materialized paths:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Commit exact rc.8 release source
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'The rc.8 release identity is already materialized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            aiTemp/rc8-release/materialize_release.py \
+            aiTemp/rc8-release/run-windows-release.mjs \
+            aiTemp/rc8-release/verify-windows-migration.ps1 \
+            desktop-electron/package.json \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/scripts/package.cjs \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/package-publish-boundary.test.cjs \
+            desktop-electron/tests/rc8-release-identity.test.cjs \
+            docs/releases/v0.7.0-rc.8.md
+          git diff --cached --check
+          git commit -m 'release(rc8): materialize exact five-stack source identity'
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc8-release-materialization-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14

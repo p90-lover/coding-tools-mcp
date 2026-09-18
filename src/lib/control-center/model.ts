@@ -8,8 +8,9 @@ export interface Item {
   updated_at: string; pending_permissions: number; requires_attention: boolean;
   attention_reason?: string | null;
   chain_id: string | null; chain_index: number | null; chain_layer: number | null; chain_name: string | null;
+  persistence_provider?: string | null; persistence_session?: string | null; pending_permission_id?: string | null;
 }
-export interface Snapshot { source: Source; endpoint: string; checked_at: number; read_only: true; items: Item[]; has_more: boolean; server_version: string | null }
+export interface Snapshot { source: Source; endpoint: string; checked_at: number; read_only: boolean; items: Item[]; has_more: boolean; server_version: string | null }
 export interface Evidence { step: number; note: string; recorded_at: number; source: 'operator_attestation' | 'mcp_observation' }
 export interface Task { id: string; workspace_id: string; title: string; description: string; state: string; step: number; created_at: number; updated_at: number; evidence: Evidence[] }
 export interface Board { revision: number; tasks: Task[] }

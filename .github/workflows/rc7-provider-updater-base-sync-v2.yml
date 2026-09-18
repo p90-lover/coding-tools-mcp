@@ -1,0 +1,111 @@
+name: rc.7 provider-updater current-base union
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.7-full-paseo-anneal-provider-updater
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.7-full-paseo-anneal-provider-updater
+    paths:
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/update.cjs
+      - desktop-electron/tests/commandcode-provider-session.test.cjs
+      - desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+      - desktop-electron/tests/rc7-full-integration-contract.test.cjs
+      - desktop-electron/tests/update.test.cjs
+      - .github/workflows/rc7-provider-updater-base-sync-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc7-provider-updater-current-base-union-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  compose-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc7-provider-updater-union/bun-cache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Record retired union boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/aiTemp/rc7-provider-updater-union/evidence"
+          mkdir -p "$evidence" "$GITHUB_WORKSPACE/aiTemp/Trash/rc7-provider-updater-union"
+          {
+            echo 'RC7_BASE_SYNC_RETIRED=1'
+            echo 'mode=current-state-verification'
+            echo "source_sha=$GITHUB_SHA"
+            echo 'legacy_rc6_union_path=retained-but-disabled'
+          } | tee "$evidence/status.txt"
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Validate current provider, proxy, updater, and integration surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/aiTemp/rc7-provider-updater-union/evidence"
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/update.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --test \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/update.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            2>&1 | tee "$evidence/current-base-contracts.txt"
+          grep -F '# fail 0' "$evidence/current-base-contracts.txt"
+
+      - name: Enforce exact source, clean tracked state, and no deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          parent="$(git rev-parse "${GITHUB_SHA}^1")"
+          git diff --check "$parent" "$GITHUB_SHA"
+          test -z "$(git diff --diff-filter=D --name-only "$parent" "$GITHUB_SHA")"
+          test -z "$(git status --short --untracked-files=no)"
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p aiTemp/Trash/rc7-provider-updater-union
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc7-provider-updater-union/node_modules-$GITHUB_RUN_ID"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc7-provider-updater-current-base-union-${{ github.sha }}
+          path: aiTemp/rc7-provider-updater-union/evidence/
+          if-no-files-found: error
+          retention-days: 14

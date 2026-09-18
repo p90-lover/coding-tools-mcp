@@ -1,0 +1,168 @@
+name: Provider Execution Gates CI
+
+# Exact-head gate for Provider Hub, CommandCode, Paseo, Anneal, and updater integration.
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.2-provider-execution-gates
+      - 'integration/v0.7.0-rc.*'
+      - 'release/codex-router-multiprovider-0.7.0-rc.*'
+    paths:
+      - 'aiTemp/rc7-commandcode/apply_commandcode.py'
+      - 'aiTemp/rc7-commandcode/fix_materializer.py'
+      - 'aiTemp/rc7-upstream-tools/apply_upstream_tools.py'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/provider-bootstrap.cjs'
+      - 'desktop-electron/electron/provider-execution-router.cjs'
+      - 'desktop-electron/electron/provider-network.cjs'
+      - 'desktop-electron/electron/upstream-tools.cjs'
+      - 'desktop-electron/electron/ipc-schema.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ProviderHubSaasSurface.tsx'
+      - 'desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx'
+      - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
+      - 'desktop-electron/src/features/provider-hub-saas.css'
+      - 'desktop-electron/src/features/upstream-tool.css'
+      - 'desktop-electron/src/providers/provider-types.ts'
+      - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/vendor/upstream/**'
+      - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
+      - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
+      - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
+      - 'desktop-electron/tests/provider-console-saas.test.cjs'
+      - 'desktop-electron/tests/provider-execution-router.test.cjs'
+      - 'desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs'
+      - 'desktop-electron/tests/provider-proxy-domain.test.cjs'
+      - 'desktop-electron/tests/proxy-provider-contract.test.cjs'
+      - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
+      - 'desktop-electron/tests/upstream-tools.test.cjs'
+      - 'desktop-electron/package.json'
+      - 'desktop-electron/bun.lock'
+      - '.github/workflows/provider-execution-gates-ci.yml'
+  pull_request:
+    paths:
+      - 'aiTemp/rc7-commandcode/apply_commandcode.py'
+      - 'aiTemp/rc7-commandcode/fix_materializer.py'
+      - 'aiTemp/rc7-upstream-tools/apply_upstream_tools.py'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/provider-bootstrap.cjs'
+      - 'desktop-electron/electron/provider-execution-router.cjs'
+      - 'desktop-electron/electron/provider-network.cjs'
+      - 'desktop-electron/electron/upstream-tools.cjs'
+      - 'desktop-electron/electron/ipc-schema.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ProviderHubSaasSurface.tsx'
+      - 'desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx'
+      - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
+      - 'desktop-electron/src/features/provider-hub-saas.css'
+      - 'desktop-electron/src/features/upstream-tool.css'
+      - 'desktop-electron/src/providers/provider-types.ts'
+      - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/vendor/upstream/**'
+      - 'desktop-electron/tests/commandcode-provider-session.test.cjs'
+      - 'desktop-electron/tests/execution-bridge-contract.test.cjs'
+      - 'desktop-electron/tests/provider-center-account-wiring.test.cjs'
+      - 'desktop-electron/tests/provider-console-saas.test.cjs'
+      - 'desktop-electron/tests/provider-execution-router.test.cjs'
+      - 'desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs'
+      - 'desktop-electron/tests/provider-proxy-domain.test.cjs'
+      - 'desktop-electron/tests/proxy-provider-contract.test.cjs'
+      - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
+      - 'desktop-electron/tests/upstream-tools.test.cjs'
+      - 'desktop-electron/package.json'
+      - 'desktop-electron/bun.lock'
+      - '.github/workflows/provider-execution-gates-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-execution-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/provider-execution-gates-ci/bun-cache
+
+jobs:
+  verify:
+    name: Runtime, contracts, types, and renderer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/provider-execution-gates-ci/renderer-dist aiTemp/Trash/provider-execution-gates-ci
+
+      - name: Validate runtime syntax
+        run: |
+          node --check desktop-electron/electron/main-with-provider.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-execution-router.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --check desktop-electron/electron/upstream-tools.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+          node --check desktop-electron/electron/preload.cjs
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run focused execution, Provider Hub, and upstream contracts
+        run: |
+          node --test \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-console-saas.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/provider-proxy-domain.test.cjs \
+            desktop-electron/tests/proxy-provider-contract.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            desktop-electron/tests/upstream-tools.test.cjs
+
+      - name: Typecheck Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build production renderer into aiTemp evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/provider-execution-gates-ci/renderer-dist \
+            --emptyOutDir
+
+      - name: Enforce no source-file deletion
+        shell: bash
+        run: |
+          if [ -n "${{ github.base_ref }}" ]; then
+            base_ref="origin/${{ github.base_ref }}"
+          else
+            base_ref='HEAD^'
+          fi
+          if ! git rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+            base_ref='HEAD^'
+          fi
+          deleted="$(git diff -M --diff-filter=D --name-only "$base_ref"...HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "aiTemp/Trash/provider-execution-gates-ci/node_modules-$GITHUB_RUN_ID"
+          fi

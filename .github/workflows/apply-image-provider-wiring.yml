@@ -1,0 +1,47 @@
+name: Apply image provider wiring
+
+on:
+  push:
+    branches:
+      - feature/0.7-rc2-image-providers
+    paths:
+      - 'aiTemp/rc2/apply_image_wiring.py'
+      - '.github/workflows/apply-image-provider-wiring.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-image-provider-wiring
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+      - name: Apply exact idempotent wiring
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          python aiTemp/rc2/apply_image_wiring.py | tee aiTemp/evidence/image-wiring.txt
+          grep -F IMAGE_PROVIDER_WIRING_OK aiTemp/evidence/image-wiring.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+      - name: Commit verified wiring only
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src-tauri/src/lib.rs src-tauri/src/media.rs src/lib/components/AppShell.svelte
+          git commit -m 'feat: wire image provider into desktop and navigation'
+          git push origin "HEAD:${GITHUB_REF_NAME}"

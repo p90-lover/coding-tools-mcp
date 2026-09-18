@@ -1,0 +1,11 @@
+{
+  "id": "commandcode-proxy",
+  "name": "CommandCode Proxy",
+  "mode": "external-local-service",
+  "defaultEndpoint": "http://127.0.0.1:9090/",
+  "environmentEndpoint": "CODING_TOOLS_COMMANDCODE_URL",
+  "healthPath": "/v1/models",
+  "providerId": "commandcode-proxy",
+  "accountAuthority": "CPA Provider Hub",
+  "credentials": "encrypted-main-process-only"
+}

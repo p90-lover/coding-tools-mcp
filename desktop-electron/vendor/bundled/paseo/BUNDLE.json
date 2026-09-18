@@ -1,0 +1,9 @@
+{
+  "id": "paseo",
+  "strategy": "bundled-source",
+  "repository": "getpaseo/paseo",
+  "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96",
+  "entrypoint": "package.json",
+  "prebuilt": false,
+  "source": "package-time extraResources"
+}

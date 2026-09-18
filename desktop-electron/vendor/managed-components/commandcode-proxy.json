@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "commandcode-proxy",
+  "name": "CommandCode Proxy",
+  "managedBy": "Coding Tools",
+  "loopbackOnly": true,
+  "repository": "zahidhussaina2l/commandcode-proxy",
+  "repositoryUrl": "https://github.com/zahidhussaina2l/commandcode-proxy.git",
+  "commit": "c123a3ebe017415ef45e619600a1110198dea7f8",
+  "version": "1.0.0",
+  "strategy": "bundled-source",
+  "license": "MIT",
+  "bundle": {
+    "required": true,
+    "entrypoint": "proxy.mjs",
+    "prebuilt": true
+  },
+  "credentials": {
+    "accountAuthority": "CPA Provider Hub",
+    "sessionSource": "~/.commandcode/auth.json",
+    "proxyKey": "generated-main-process-only"
+  },
+  "install": {
+    "steps": [
+      { "id": "unpack-bundled-source", "kind": "unpack-bundle" },
+      { "id": "copy-bundled-source", "kind": "bundled-copy" },
+      { "id": "verify-entrypoint", "kind": "assert-file", "path": "proxy.mjs" },
+      { "id": "activate", "kind": "activate" }
+    ]
+  },
+  "launch": {
+    "processes": [
+      {
+        "id": "proxy",
+        "mode": "foreground",
+        "executable": "{runtime}",
+        "arguments": ["{home}/proxy.mjs"],
+        "environment": {
+          "PROXY_HOST": "127.0.0.1",
+          "PROXY_PORT": "9090",
+          "PROXY_API_KEY": "{secret:proxyApiKey}"
+        }
+      }
+    ]
+  },
+  "health": {
+    "endpoint": "http://127.0.0.1:9090/v1/models",
+    "authorization": "Bearer {secret:proxyApiKey}",
+    "acceptStatus": [200]
+  }
+}

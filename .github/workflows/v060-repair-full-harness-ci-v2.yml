@@ -1,0 +1,160 @@
+name: Repair v0.6 full-harness CI v2
+
+on:
+  push:
+    branches:
+      - feature/electron-full-codex-harness-0.6.0
+    paths:
+      - .github/workflows/v060-repair-full-harness-ci-v2.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: v060-repair-full-harness-ci-v2
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  repair:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+      - name: Patch Windows preload URLs and the tested history scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/v060-ci-repair-evidence Trash/v060-release-bootstrap/${GITHUB_RUN_ID}
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/electron-full-harness-ci.yml')
+          text = path.read_text(encoding='utf-8')
+
+          portable_old = '\n'.join([
+              '          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"',
+              '          if [[ "$RUNNER_OS" == "Windows" ]]; then',
+              '            preload="$(cygpath -w "$preload")"',
+              '          fi',
+              '          export NODE_OPTIONS="--import=$preload"',
+              '',
+          ])
+          portable_new = '\n'.join([
+              '          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"',
+              '          if [[ "$RUNNER_OS" == "Windows" ]]; then',
+              '            preload="$(cygpath -w "$preload")"',
+              '          fi',
+              '          preload="$(node -e \'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);\' "$preload")"',
+              '          export NODE_OPTIONS="--import=$preload"',
+              '',
+          ])
+          portable_count = text.count(portable_old)
+          if portable_count != 3:
+              raise SystemExit(f'Expected 3 portable preload blocks, found {portable_count}')
+          text = text.replace(portable_old, portable_new)
+
+          windows_old = '\n'.join([
+              '          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"',
+              '          export NODE_OPTIONS="--import=$preload"',
+              '',
+          ])
+          windows_new = '\n'.join([
+              '          preload="$(cygpath -w "$PWD/runtime-web/scripts/no-delete-preload.mjs")"',
+              '          preload="$(node -e \'const { pathToFileURL } = require("node:url"); process.stdout.write(pathToFileURL(process.argv[1]).href);\' "$preload")"',
+              '          export NODE_OPTIONS="--import=$preload"',
+              '',
+          ])
+          windows_count = text.count(windows_old)
+          if windows_count != 3:
+              raise SystemExit(f'Expected 3 Windows package preload blocks, found {windows_count}')
+          text = text.replace(windows_old, windows_new)
+
+          start_marker = '      - name: Screen reachable Git history for credential patterns\n'
+          end_marker = '      - name: Audit every Rust release lockfile against RustSec\n'
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          replacement = '\n'.join([
+              '      - name: Screen reachable Git history for credential patterns',
+              '        run: |',
+              '          set -euo pipefail',
+              '          mkdir -p aiTemp/audit-evidence aiTemp/audit-tool',
+              '          git rev-list --objects --all > aiTemp/audit-evidence/reachable-objects.txt',
+              '          test -s aiTemp/audit-evidence/reachable-objects.txt',
+              '          python tests/test_release_credential_history_scan.py -v \\',
+              '            2>&1 | tee aiTemp/audit-evidence/credential-screen-tests.txt',
+              '          python scripts/release/scan_credential_history.py \\',
+              '            --output aiTemp/audit-evidence/credential-screen.json \\',
+              '            > aiTemp/audit-evidence/credential-screen.stdout.json',
+              '          cat aiTemp/audit-evidence/credential-screen.json',
+              '',
+              '',
+          ])
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff -- .github/workflows/electron-full-harness-ci.yml \
+            > aiTemp/v060-ci-repair-evidence/workflow.diff
+          test -s aiTemp/v060-ci-repair-evidence/workflow.diff
+      - name: Run focused regression and policy checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test desktop-electron/tests/no-delete-preload.test.cjs \
+            2>&1 | tee aiTemp/v060-ci-repair-evidence/no-delete-test.txt
+          python tests/test_release_credential_history_scan.py -v \
+            2>&1 | tee aiTemp/v060-ci-repair-evidence/credential-tests.txt
+          python scripts/release/scan_credential_history.py \
+            --output aiTemp/v060-ci-repair-evidence/credential-screen.json \
+            > aiTemp/v060-ci-repair-evidence/credential-screen.stdout.json
+          ruby -e "require 'yaml'; YAML.load_file('.github/workflows/electron-full-harness-ci.yml'); puts 'workflow YAML parsed'" \
+            | tee aiTemp/v060-ci-repair-evidence/yaml.txt
+          grep -F '# fail 0' aiTemp/v060-ci-repair-evidence/no-delete-test.txt
+          grep -F 'OK' aiTemp/v060-ci-repair-evidence/credential-tests.txt
+          git diff --check
+      - name: Retain both one-shot workflows and commit only intended files
+        shell: bash
+        run: |
+          set -euo pipefail
+          retained_root="Trash/v060-release-bootstrap/${GITHUB_RUN_ID}"
+          retained_v1="$retained_root/v060-repair-full-harness-ci.yml"
+          retained_v2="$retained_root/v060-repair-full-harness-ci-v2.yml"
+          git mv .github/workflows/v060-repair-full-harness-ci.yml "$retained_v1"
+          git mv .github/workflows/v060-repair-full-harness-ci-v2.yml "$retained_v2"
+          git add -- \
+            .github/workflows/electron-full-harness-ci.yml \
+            "$retained_v1" \
+            "$retained_v2"
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          expected=$(printf '%s\n' \
+            .github/workflows/electron-full-harness-ci.yml \
+            .github/workflows/v060-repair-full-harness-ci.yml \
+            .github/workflows/v060-repair-full-harness-ci-v2.yml \
+            "$retained_v1" \
+            "$retained_v2" | sort)
+          actual=$(git diff --cached --name-only --no-renames | sort)
+          test "$actual" = "$expected"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'ci: repair v0.6 full-harness cross-platform gates'
+          git push origin "HEAD:feature/electron-full-codex-harness-0.6.0"
+          git rev-parse HEAD > aiTemp/v060-ci-repair-evidence/source.commit
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: v060-ci-repair-v2-${{ github.run_id }}
+          path: aiTemp/v060-ci-repair-evidence/
+          if-no-files-found: error
+          retention-days: 14

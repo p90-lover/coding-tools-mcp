@@ -19,7 +19,19 @@ pub struct OAuthRefreshTokenRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppData {
     #[serde(default)]
+    pub execution_book: crate::integrations::execution::book::Book,
+    #[serde(default)]
     pub control_board: crate::integrations::board::Board,
+    #[serde(default)]
+    pub provider_registry_revision: u64,
+    #[serde(default)]
+    pub provider_profiles: Vec<crate::providers::ProviderProfile>,
+    #[serde(default)]
+    pub orchestrator_registry_revision: u64,
+    #[serde(default)]
+    pub orchestrator_profiles: Vec<crate::orchestrators::OrchestratorProfile>,
+    #[serde(default)]
+    pub integration_leases: crate::integrations::lease::IntegrationLeases,
     #[serde(default)]
     pub sandbox_permissions: Vec<crate::tools::native_sandbox::SandboxGrant>,
     #[serde(default)]

@@ -12,7 +12,7 @@ export const snapshots = writable<Partial<Record<Source, Snapshot>>>({});
 export const integrationErrors = writable<Partial<Record<Source, string>>>({});
 export const integrationBusy = writable<Partial<Record<Source, boolean>>>({});
 // Only non-secret preferences persist in the browser. Tokens and snapshots stay in RAM.
-export const endpoints = writable<Record<Source, string>>({paseo:'ws://127.0.0.1:6767/ws',anneal:'http://127.0.0.1:3000/'});
+export const endpoints = writable<Record<Source, string>>({paseo:'ws://127.0.0.1:6768/ws',anneal:'http://127.0.0.1:3000/'});
 export function initializePreferences() {
  try { const v=localStorage.getItem('control-center-locale');if(v==='en'||v==='zh-Hant')locale.set(v); } catch { /* Storage is optional. */ }
 }
@@ -61,7 +61,7 @@ export async function readIntegration(source:Source,endpoint:string,credential:s
  try {
   const result=await invoke<Snapshot>('integration_read',{source,endpoint,credential:credential||null});
   if(!current())return;
-  if(result.source!==source||result.read_only!==true||snapshotEndpoint(source,result.endpoint)!==snapshotEndpoint(source,endpoint)) {
+  if(result.source!==source||snapshotEndpoint(source,result.endpoint)!==snapshotEndpoint(source,endpoint)) {
    throw new Error('Integration response does not match this source/endpoint. / 整合回應與目前來源／端點不相符。');
   }
   snapshots.update(v=>({...v,[source]:result}));
@@ -79,4 +79,45 @@ export async function refreshBoard() {
   if(!get(boardBusy)&&get(board).revision===revision&&next.revision>revision)board.set(next);
  } catch { /* Retain verified data and drafts; manual refresh displays actionable errors. */ }
  finally {boardRefreshing=false;}
+}
+
+export interface LiveStatus {
+ source: string; endpoint: string; web_ui: string; status: string; keep_alive: boolean; stale: boolean;
+ last_ok_at: number | null; last_error: string | null; reconnect_attempts: number; web_ui_reachable: boolean;
+ snapshot: Snapshot | null; banner: { version: string | null; listen: string; cursor_base_url: string; anthropic_base_url: string } | null;
+ health: string | null; model_count: number | null; owned_process: boolean; credential_needed: boolean;
+}
+export const liveStatus = writable<LiveStatus[]>([]);
+export async function refreshLive() {
+ try {
+  const rows = await invoke<LiveStatus[]>('integration_live_status');
+  liveStatus.set(rows);
+  const next = { ...get(snapshots) };
+  for (const row of rows) {
+   if ((row.source === 'paseo' || row.source === 'anneal') && row.snapshot) {
+    next[row.source] = row.snapshot;
+   }
+  }
+  snapshots.set(next);
+ } catch { /* Keep last live status; the next poll retries. */ }
+}
+export async function connectLive(source: string, endpoint: string, webUi: string, credential: string, keepAlive: boolean, remember: boolean) {
+ integrationBusy.update(v => source === 'paseo' || source === 'anneal' ? ({ ...v, [source]: true }) : v);
+ integrationErrors.update(v => ({ ...v, [source]: '' }));
+ try {
+  await invoke('integration_live_connect', { source, endpoint, webUi, credential: credential || null, keepAlive, remember });
+  await refreshLive();
+ } catch (e) {
+  if (source === 'paseo' || source === 'anneal') integrationErrors.update(v => ({ ...v, [source]: String(e) }));
+  else throw e;
+ } finally {
+  if (source === 'paseo' || source === 'anneal') integrationBusy.update(v => ({ ...v, [source]: false }));
+ }
+}
+export async function disconnectLive(source: string) {
+ await invoke('integration_live_disconnect', { source });
+ await refreshLive();
+}
+export async function actIntegration(source: string, endpoint: string, request: Record<string, string>) {
+ return invoke('integration_act', { source, endpoint, credential: null, request: { source, ...request } });
 }

@@ -1,0 +1,35 @@
+{
+  "id": "paseo",
+  "name": "Paseo",
+  "repository": "getpaseo/paseo",
+  "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96",
+  "version": "0.8.0",
+  "license": "Apache-2.0",
+  "licenseFile": "LICENSE",
+  "defaultEndpoint": "http://127.0.0.1:6768/",
+  "environmentEndpoint": "CODING_TOOLS_PASEO_URL",
+  "environmentHome": "CODING_TOOLS_PASEO_HOME",
+  "sections": [
+    "agents",
+    "sessions",
+    "workspaces",
+    "providers",
+    "plugins",
+    "voice",
+    "settings"
+  ],
+  "sectionPaths": {
+    "agents": "/sessions",
+    "sessions": "/sessions",
+    "workspaces": "/open-project",
+    "providers": "/settings",
+    "plugins": "/settings",
+    "voice": "/settings",
+    "settings": "/settings"
+  },
+  "launch": {
+    "executable": "npm",
+    "arguments": ["run", "dev:server"],
+    "workingDirectoryEnvironment": "CODING_TOOLS_PASEO_HOME"
+  }
+}

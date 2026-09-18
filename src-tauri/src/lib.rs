@@ -1,20 +1,24 @@
 #![cfg_attr(target_os = "windows", allow(linker_messages))]
 
 mod codex_bridge;
-mod integrations;
+pub mod integrations;
+pub mod media;
+pub mod orchestrator_run;
+pub mod orchestrators;
+pub mod providers;
 
 mod actions;
 mod app_state;
 mod auth;
 mod commands;
 pub mod config_compat;
-mod data;
-mod error;
+pub mod data;
+pub mod error;
 pub mod harness;
 mod health;
 mod mcp;
 mod platform;
-mod runtime;
+pub mod runtime;
 mod secret;
 mod settings;
 pub mod tools;
@@ -26,15 +30,21 @@ use app_state::AppState;
 use commands::{
     check_app_update, codex_local_command, codex_local_connect, codex_local_control,
     codex_local_disconnect, codex_local_read, codex_local_status, commandcode_proxy_apply,
-    commandcode_proxy_status, computer_local_forget, computer_local_pause,
-    computer_local_permissions, computer_local_poll, computer_local_preview, computer_local_resume,
-    computer_local_start, computer_local_stop, computer_local_targets, control_board_change,
-    control_board_read, create_workspace, delete_frp_profile, delete_workspace,
+    commandcode_proxy_control, commandcode_proxy_status, computer_local_forget,
+    computer_local_pause, computer_local_permissions, computer_local_poll, computer_local_preview,
+    computer_local_resume, computer_local_start, computer_local_stop, computer_local_targets,
+    control_board_change, control_board_read, create_workspace, delete_frp_profile,
+    delete_workspace, execution_local_provider, execution_local_read, execution_local_update,
     get_actions_runtime_status, get_app_settings, get_download_config, get_frp_snippet,
     get_last_workspace_id, get_proxy, get_runtime_status, get_shared_secret,
     get_tunnel_connection_status, get_webview_memory_sample, get_workspace_secret, hide_to_tray,
-    install_software, integration_read, list_frp_profiles, list_linked_projects, list_software,
-    list_workspaces, open_url, open_workspace_directory, provider_config_preview,
+    install_software, integration_act, integration_live_connect, integration_live_disconnect,
+    integration_live_status, integration_read, list_frp_profiles, list_linked_projects,
+    list_software, list_workspaces, open_url, open_workspace_directory,
+    orchestrator_profile_archive, orchestrator_profile_run, orchestrator_profile_save,
+    orchestrator_profiles_read, provider_config_preview, provider_image_generate,
+    provider_profile_archive, provider_profile_connect, provider_profile_disable,
+    provider_profile_probe, provider_profile_save, provider_profiles_read,
     quick_add_linked_project, quit_app, read_workspace_logs, recreate_ui_webview,
     regenerate_shared_secret, regenerate_workspace_secret, restart_actions_runtime,
     restart_runtime, restart_tunnel, run_health_checks, sandbox_local_disable,
@@ -174,6 +184,7 @@ pub fn run() {
             // Recover FRP clients that stay alive while the public proxy dies
             // (common after install/restart network blips).
             tunnel::ensure_frp_health_loop();
+            integrations::live::start();
             setup_tray(app)?;
             commands::computer_restore::start(app.handle().clone());
             #[cfg(target_os = "windows")]
@@ -190,12 +201,31 @@ pub fn run() {
             codex_local_control,
             codex_local_read,
             integration_read,
+            integration_live_connect,
+            integration_live_disconnect,
+            integration_live_status,
+            integration_act,
             commandcode_proxy_status,
             commandcode_proxy_apply,
+            commandcode_proxy_control,
             control_board_read,
             provider_config_preview,
             control_board_change,
             task_monitor_read,
+            execution_local_read,
+            execution_local_provider,
+            execution_local_update,
+            provider_image_generate,
+            provider_profiles_read,
+            provider_profile_save,
+            provider_profile_connect,
+            provider_profile_disable,
+            provider_profile_archive,
+            provider_profile_probe,
+            orchestrator_profiles_read,
+            orchestrator_profile_save,
+            orchestrator_profile_archive,
+            orchestrator_profile_run,
             sandbox_local_prepare,
             sandbox_local_status,
             sandbox_local_disable,

@@ -1,0 +1,147 @@
+name: rc.9 five-stack CPA union
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.9-five-stack-cpa-union
+    paths:
+      - aiTemp/rc9-five-stack-cpa-union/**
+      - aiTemp/rc9-managed-five-stack/**
+      - desktop-electron/**
+      - docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
+      - .github/workflows/rc9-five-stack-cpa-union.yml
+      - .github/workflows/rc9-managed-five-stack.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.8
+    paths:
+      - aiTemp/rc9-five-stack-cpa-union/**
+      - aiTemp/rc9-managed-five-stack/**
+      - desktop-electron/**
+      - docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
+      - .github/workflows/rc9-five-stack-cpa-union.yml
+      - .github/workflows/rc9-managed-five-stack.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-five-stack-cpa-union-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  union:
+    name: Materialize and verify all five stacks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref_name || github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: ${{ github.event_name == 'push' }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Materialize the shared preload and type contracts
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            aiTemp/rc9-five-stack-cpa-union/evidence \
+            aiTemp/rc9-five-stack-cpa-union/renderer-build
+          python aiTemp/rc9-five-stack-cpa-union/materialize_union.py \
+            | tee aiTemp/rc9-five-stack-cpa-union/evidence/materialize.txt
+          grep -F RC9_FIVE_STACK_CPA_UNION_OK \
+            aiTemp/rc9-five-stack-cpa-union/evidence/materialize.txt
+
+      - name: Install locked desktop dependencies
+        run: |
+          set -euo pipefail
+          bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run exact combined contracts
+        run: |
+          set -euo pipefail
+          test -s docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
+          grep -F 'Combined validation branch: `integration/v0.7.0-rc.9-five-stack-cpa-union`' \
+            docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
+          (
+            node --check desktop-electron/electron/codex-router-managed.cjs
+            node --check desktop-electron/electron/external-services.cjs
+            node --check desktop-electron/electron/main.cjs
+            node --check desktop-electron/electron/managed-components.cjs
+            node --check desktop-electron/electron/managed-external-services.cjs
+            node --check desktop-electron/electron/five-stack-cross-use.cjs
+            node --check desktop-electron/electron/preload.cjs
+            node --check desktop-electron/scripts/prepare-five-stack-runtime.cjs
+            node --test \
+              desktop-electron/tests/cpa-oauth-adapter.test.cjs \
+              desktop-electron/tests/cpa-provider-login-routing.test.cjs \
+              desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs \
+              desktop-electron/tests/provider-center-account-wiring.test.cjs \
+              desktop-electron/tests/proxy-provider-contract.test.cjs \
+              desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs \
+              desktop-electron/tests/provider-execution-router.test.cjs \
+              desktop-electron/tests/execution-bridge-contract.test.cjs \
+              desktop-electron/tests/commandcode-provider-session.test.cjs \
+              desktop-electron/tests/external-services-control-plane.test.cjs \
+              desktop-electron/tests/managed-bootstrap.test.cjs \
+              desktop-electron/tests/managed-components-runtime.test.cjs \
+              desktop-electron/tests/bundled-five-stack-runtime.test.cjs \
+              desktop-electron/tests/five-stack-cross-use.test.cjs \
+              desktop-electron/tests/five-stack-control-plane.test.cjs \
+              desktop-electron/tests/rc9-five-stack-completion.test.cjs \
+              desktop-electron/tests/rc9-managed-five-stack.test.cjs
+            bun run --cwd desktop-electron typecheck
+            (
+              cd desktop-electron
+              bunx vite build --outDir ../aiTemp/rc9-five-stack-cpa-union/renderer-build
+            )
+          ) 2>&1 | tee aiTemp/rc9-five-stack-cpa-union/evidence/contracts.txt
+          grep -F '# fail 0' aiTemp/rc9-five-stack-cpa-union/evidence/contracts.txt
+          test -s aiTemp/rc9-five-stack-cpa-union/renderer-build/index.html
+
+      - name: Enforce no-delete integration safety
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.8 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD
+          branch_deletions="$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD)"
+          worktree_deletions="$(git diff --diff-filter=D --name-only)"
+          if [[ -n "$branch_deletions" || -n "$worktree_deletions" ]]; then
+            printf 'Committed deletions:\n%s\nWorking-tree deletions:\n%s\n' \
+              "$branch_deletions" "$worktree_deletions"
+            exit 1
+          fi
+
+      - name: Commit the verified shared API resolution
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/src/types.ts
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(rc9): reconcile CPA and managed-runtime APIs'
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-five-stack-cpa-union-${{ github.sha }}
+          path: |
+            aiTemp/rc9-five-stack-cpa-union/evidence/
+            aiTemp/rc9-five-stack-cpa-union/renderer-build/
+          if-no-files-found: error
+          retention-days: 14

@@ -2,6 +2,7 @@
 use crate::error::{AppError, AppResult};
 use serde::Serialize;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
@@ -18,7 +19,15 @@ fn now() -> u64 {
         .as_secs()
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Clone, Serialize, Debug)]
+pub struct CommandCodeBanner {
+    pub version: Option<String>,
+    pub listen: String,
+    pub cursor_base_url: String,
+    pub anthropic_base_url: String,
+}
+
+#[derive(Clone, Serialize, Debug)]
 pub struct CommandCodeProxyStatus {
     pub endpoint: String,
     pub checked_at: u64,
@@ -26,6 +35,9 @@ pub struct CommandCodeProxyStatus {
     pub http_status: Option<u16>,
     pub model_count: Option<usize>,
     pub read_only: bool,
+    pub health: Option<String>,
+    pub banner: Option<CommandCodeBanner>,
+    pub owned_process: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -102,10 +114,58 @@ fn count_models(body: &str) -> Option<usize> {
     None
 }
 
+fn origin_urls(parsed: &Url) -> (String, String) {
+    let mut cursor = parsed.clone();
+    let path = cursor.path().trim_end_matches('/').to_string();
+    if path.is_empty() || path == "/" {
+        cursor.set_path("/v1");
+    } else if !path.ends_with("/v1") {
+        cursor.set_path(&format!("{path}/v1"));
+    }
+    let mut anthropic = parsed.clone();
+    anthropic.set_path("/");
+    (
+        cursor.to_string().trim_end_matches('/').to_string(),
+        anthropic.to_string().trim_end_matches('/').to_string(),
+    )
+}
+
+fn health_url(parsed: &Url) -> Url {
+    let mut u = parsed.clone();
+    u.set_path("/health");
+    u.set_query(None);
+    u
+}
+
+fn banner_for(parsed: &Url, version: Option<String>) -> CommandCodeBanner {
+    let (cursor_base_url, anthropic_base_url) = origin_urls(parsed);
+    CommandCodeBanner {
+        version,
+        listen: parsed.to_string(),
+        cursor_base_url,
+        anthropic_base_url,
+    }
+}
+
+static OWNED: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+pub fn owned_running() -> bool {
+    let mut guard = OWNED.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(child) = guard.as_mut() {
+        match child.try_wait() {
+            Ok(None) => return true,
+            _ => *guard = None,
+        }
+    }
+    false
+}
+
 pub async fn status(raw: &str) -> AppResult<CommandCodeProxyStatus> {
     let parsed = parse_loopback_http(raw)?;
     let endpoint = parsed.to_string();
-    let target = models_url(parsed);
+    let target = models_url(parsed.clone());
+    let health_target = health_url(&parsed);
+    let banner = banner_for(&parsed, None);
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -114,6 +174,13 @@ pub async fn status(raw: &str) -> AppResult<CommandCodeProxyStatus> {
         .build()
         .map_err(|_| err("Cannot initialize CommandCode Proxy probe"))?;
     let result = tokio::time::timeout(Duration::from_secs(8), async {
+        let health = match client.get(health_target).send().await {
+            Ok(response) if response.status().as_u16() < 500 => {
+                let body = response.text().await.unwrap_or_default();
+                Some(body.chars().filter(|c| !c.is_control()).take(32).collect())
+            }
+            _ => None,
+        };
         match client
             .get(target)
             .header("Accept", "application/json")
@@ -122,7 +189,7 @@ pub async fn status(raw: &str) -> AppResult<CommandCodeProxyStatus> {
         {
             Ok(response) => {
                 let http_status = response.status().as_u16();
-                let reachable = http_status < 500;
+                let reachable = http_status < 500 || health.is_some();
                 let model_count = if http_status == 200 {
                     let bytes = response.bytes().await.unwrap_or_default();
                     if bytes.len() <= MAX_BYTES {
@@ -140,15 +207,21 @@ pub async fn status(raw: &str) -> AppResult<CommandCodeProxyStatus> {
                     http_status: Some(http_status),
                     model_count,
                     read_only: true,
+                    health,
+                    banner: Some(banner),
+                    owned_process: owned_running(),
                 })
             }
             Err(_) => Ok(CommandCodeProxyStatus {
                 endpoint,
                 checked_at: now(),
-                reachable: false,
+                reachable: health.is_some(),
                 http_status: None,
                 model_count: None,
                 read_only: true,
+                health,
+                banner: Some(banner),
+                owned_process: owned_running(),
             }),
         }
     })
@@ -299,4 +372,94 @@ pub fn apply(
             .map(|(name, argv)| run_step(&name, &argv))
             .collect(),
     })
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct CommandCodeProcessResult {
+    pub ok: bool,
+    pub action: String,
+    pub detail: String,
+    pub owned_process: bool,
+}
+
+pub fn control(action: &str, endpoint: &str, bin: &str) -> AppResult<CommandCodeProcessResult> {
+    match action {
+        "start" => start(endpoint, bin),
+        "stop" => stop(),
+        "restart" => {
+            let _ = stop();
+            start(endpoint, bin)
+        }
+        _ => Err(err(
+            "CommandCode process action must be start, stop or restart",
+        )),
+    }
+}
+
+fn start(endpoint: &str, bin: &str) -> AppResult<CommandCodeProcessResult> {
+    if owned_running() {
+        return Ok(CommandCodeProcessResult {
+            ok: true,
+            action: "start".into(),
+            detail: "Owned CommandCode Proxy is already running".into(),
+            owned_process: true,
+        });
+    }
+    let parsed = parse_loopback_http(endpoint)?;
+    let port = parsed
+        .port()
+        .ok_or_else(|| err("Specify the CommandCode Proxy port"))?;
+    let exe = safe_cli(bin, "CommandCode Proxy binary")?;
+    let mut command = if exe.ends_with(".mjs") || exe.ends_with(".js") {
+        let mut c = std::process::Command::new("node");
+        c.arg(&exe);
+        c
+    } else {
+        std::process::Command::new(&exe)
+    };
+    command
+        .env("HOST", "127.0.0.1")
+        .env("PORT", port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match command.spawn() {
+        Ok(child) => {
+            *OWNED.lock().unwrap_or_else(|p| p.into_inner()) = Some(child);
+            Ok(CommandCodeProcessResult {
+                ok: true,
+                action: "start".into(),
+                detail: format!("Started owned proxy on 127.0.0.1:{port}"),
+                owned_process: true,
+            })
+        }
+        Err(error) => Ok(CommandCodeProcessResult {
+            ok: false,
+            action: "start".into(),
+            detail: format!("Cannot start CommandCode Proxy ({error})"),
+            owned_process: false,
+        }),
+    }
+}
+
+fn stop() -> AppResult<CommandCodeProcessResult> {
+    let mut guard = OWNED.lock().unwrap_or_else(|p| p.into_inner());
+    match guard.take() {
+        Some(mut child) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Ok(CommandCodeProcessResult {
+                ok: true,
+                action: "stop".into(),
+                detail: "Stopped the owned CommandCode Proxy process".into(),
+                owned_process: false,
+            })
+        }
+        None => Ok(CommandCodeProcessResult {
+            ok: false,
+            action: "stop".into(),
+            detail: "No owned CommandCode Proxy process. Stop it where it was started.".into(),
+            owned_process: false,
+        }),
+    }
 }

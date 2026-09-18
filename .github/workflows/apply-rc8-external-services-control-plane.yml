@@ -1,0 +1,130 @@
+name: Apply rc.8 external services control plane
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.8-external-services-control-plane
+    paths:
+      - 'aiTemp/rc8-external-services/apply_control_plane.py'
+      - '.github/workflows/apply-rc8-external-services-control-plane.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc8-external-services-control-plane
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc8-external-services/bun-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: integration/v0.7.0-rc.8-external-services-control-plane
+          fetch-depth: 0
+          clean: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: |
+          mkdir -p \
+            aiTemp/rc8-external-services/evidence \
+            aiTemp/rc8-external-services/renderer-dist \
+            aiTemp/Trash/rc8-external-services
+
+      - name: Apply guarded control-plane wiring
+        run: |
+          set -euo pipefail
+          python aiTemp/rc8-external-services/apply_control_plane.py \
+            2>&1 | tee aiTemp/rc8-external-services/evidence/materializer.txt
+          grep -F RC8_EXTERNAL_SERVICES_CONTROL_PLANE_APPLIED \
+            aiTemp/rc8-external-services/evidence/materializer.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Enforce bounded source scope
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf '%s\n' \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/types.ts | sort)"
+          printf 'changed files:\n%s\n' "$changed" \
+            | tee aiTemp/rc8-external-services/evidence/changed-files.txt
+          test "$changed" = "$expected"
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run focused contracts and syntax checks
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/upstream-tool-runtime.test.cjs \
+            2>&1 | tee aiTemp/rc8-external-services/evidence/contracts.txt
+          node --check desktop-electron/electron/external-services.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/preload.cjs
+          node --check desktop-electron/electron/upstream-tools.cjs
+
+      - name: Typecheck and build isolated renderer
+        run: |
+          set -euo pipefail
+          bun run --cwd desktop-electron typecheck
+          renderer_dir="$GITHUB_WORKSPACE/aiTemp/rc8-external-services/renderer-dist"
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_dir" --emptyOutDir false
+          )
+          CODING_TOOLS_RENDERER_DIST="$renderer_dir" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+
+      - name: Commit verified wiring
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/types.ts
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'External services wiring is already committed.'
+            exit 0
+          fi
+          git commit -m 'feat(rc8): wire unified external services control plane'
+          git push origin HEAD:integration/v0.7.0-rc.8-external-services-control-plane
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc8-external-services/node_modules-$GITHUB_RUN_ID"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: apply-rc8-external-services-${{ github.sha }}
+          path: aiTemp/rc8-external-services/evidence/
+          if-no-files-found: warn
+          retention-days: 14
