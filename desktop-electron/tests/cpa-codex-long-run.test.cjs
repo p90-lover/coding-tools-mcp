@@ -113,6 +113,7 @@ test("Codex Router long-run environment outlasts a seven-day task instead of the
   assert.equal(launched.MODEL_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS, String(EXECUTION_TIMEOUT_MS));
   assert.equal(launched.CODEX_ROUTER_GROK_STREAM_STALL_MS, String(2 * 60 * 60_000));
   assert.equal(launched.CODING_TOOLS_CPA_URL, "http://127.0.0.1:8317");
+  assert.equal(launched.CODING_TOOLS_CPA_OPENAI_BASE_URL, "http://127.0.0.1:8317/v1");
   assert.equal(launched.CODING_TOOLS_CODEX_ROUTER_URL, "http://127.0.0.1:4202");
 });
 

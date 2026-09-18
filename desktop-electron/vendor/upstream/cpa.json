@@ -8,6 +8,9 @@
   "licenseFile": "LICENSE",
   "defaultEndpoint": "http://127.0.0.1:8317/",
   "environmentEndpoint": "CODING_TOOLS_CPA_URL",
+  "healthPath": "/v1/models",
+  "openaiBasePath": "/v1",
+  "role": "provider-backend",
   "sections": [
     "dashboard",
     "ai-providers",

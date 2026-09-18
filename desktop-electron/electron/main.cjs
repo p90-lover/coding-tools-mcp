@@ -679,6 +679,11 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.restart(serviceId);
   });
+  handle("launcher:provider-backend-contract", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    return externalServicesController.providerBackendContract();
+  });
   handle("launcher:codex-router-sync", (event) => {
     assertFocusedMainWindow(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");

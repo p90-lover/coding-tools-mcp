@@ -10,6 +10,12 @@ export interface CodexRouterConnection {
   baseUrl: string;
 }
 
+export interface CpaConnection {
+  origin: string;
+  proxyApiKey: string;
+  baseUrl: string;
+}
+
 export interface CommandCodeProxyProviderProfile {
   id: "commandcode-proxy";
   name: "CommandCode Proxy";
@@ -68,6 +74,32 @@ export function resolveCodexRouterConnection(
     origin: normalizedOrigin,
     callerKey,
     baseUrl: `${normalizedOrigin}/_codex-router/${callerKey}/v1`,
+  };
+}
+
+export function resolveCpaConnection(
+  env: Record<string, string | undefined> = process.env,
+): CpaConnection | undefined {
+  const configuredOrigin = env.CODING_TOOLS_CPA_URL?.trim() || env.CODING_TOOLS_CPA_OPENAI_BASE_URL?.trim();
+  const proxyApiKey = env.CODING_TOOLS_CPA_PROXY_API_KEY?.trim();
+  if (!configuredOrigin && !proxyApiKey) return undefined;
+  if (!proxyApiKey || proxyApiKey.length < 32 || proxyApiKey.includes("\0")) {
+    throw new Error("CPA proxy API key must be at least 32 characters");
+  }
+  const origin = normalizeOrigin(
+    configuredOrigin || "http://127.0.0.1:8317",
+    "CPA URL",
+    false,
+  );
+  const parsed = new URL(origin);
+  if (parsed.pathname !== "/" && parsed.pathname !== "/v1") {
+    throw new Error("CPA URL must be an origin or /v1 OpenAI base");
+  }
+  const normalizedOrigin = origin.replace(/\/v1$/, "").replace(/\/$/, "");
+  return {
+    origin: normalizedOrigin,
+    proxyApiKey,
+    baseUrl: `${normalizedOrigin}/v1`,
   };
 }
 

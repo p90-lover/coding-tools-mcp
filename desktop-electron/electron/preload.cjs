@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   startExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-start", serviceId),
   stopExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-stop", serviceId),
   restartExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-restart", serviceId),
+  providerBackendContract: () => ipcRenderer.invoke("launcher:provider-backend-contract"),
   syncCodexRouter: () => ipcRenderer.invoke("launcher:codex-router-sync"),
   upstreamToolsSnapshot: () => ipcRenderer.invoke("launcher:upstream-tools-snapshot"),
   inspectUpstreamTool: (toolId) => ipcRenderer.invoke("launcher:upstream-tool-inspect", toolId),

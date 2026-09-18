@@ -1,0 +1,83 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Coding Tools CPA and Codex Router provider backends",
+    "version": "1.0.0",
+    "description": "Stable loopback OpenAI-compatible APIs for Desktop, MCP, and Paseo. Paseo/Anneal orchestration is owned elsewhere."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8317",
+      "description": "CPA main provider"
+    },
+    {
+      "url": "http://127.0.0.1:4202",
+      "description": "Codex Router subagent provider"
+    }
+  ],
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "tags": ["cpa"],
+        "operationId": "cpaListModels",
+        "security": [{ "cpaProxyApiKey": [] }],
+        "responses": {
+          "200": { "description": "OpenAI-compatible model list" }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": ["cpa"],
+        "operationId": "cpaChatCompletions",
+        "security": [{ "cpaProxyApiKey": [] }],
+        "responses": {
+          "200": { "description": "OpenAI-compatible chat completion" }
+        }
+      }
+    },
+    "/_codex-router/{callerKey}/v1/models": {
+      "get": {
+        "tags": ["codex-router"],
+        "operationId": "routerListModels",
+        "parameters": [
+          {
+            "name": "callerKey",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 32 }
+          }
+        ],
+        "responses": {
+          "200": { "description": "OpenAI-compatible model list" }
+        }
+      }
+    },
+    "/_codex-router/{callerKey}/v1/chat/completions": {
+      "post": {
+        "tags": ["codex-router"],
+        "operationId": "routerChatCompletions",
+        "parameters": [
+          {
+            "name": "callerKey",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 32 }
+          }
+        ],
+        "responses": {
+          "200": { "description": "OpenAI-compatible chat completion" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "cpaProxyApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "CODING_TOOLS_CPA_PROXY_API_KEY"
+      }
+    }
+  }
+}

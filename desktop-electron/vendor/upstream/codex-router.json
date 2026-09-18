@@ -10,6 +10,8 @@
   "environmentEndpoint": "CODING_TOOLS_CODEX_ROUTER_URL",
   "environmentCallerKey": "CODING_TOOLS_CODEX_ROUTER_CALLER_KEY",
   "healthPath": "/_codex-router/{callerKey}/v1/models",
+  "openaiBasePath": "/_codex-router/{callerKey}/v1",
+  "role": "provider-backend",
   "managedBy": "Coding Tools external services control plane",
   "credentials": "encrypted-main-process-only",
   "sections": [

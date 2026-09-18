@@ -255,6 +255,54 @@ export interface ExternalServiceSnapshot {
 export interface ExternalServicesSnapshot {
   version: 1;
   services: ExternalServiceSnapshot[];
+  providerBackends?: ProviderBackendContract;
+}
+
+export interface ProviderBackendApiOperation {
+  method: "GET" | "POST";
+  path: string;
+}
+
+export interface ProviderBackendDescriptor {
+  id: "cpa" | "codex-router";
+  name: string;
+  role: "main-provider" | "subagent-provider";
+  protocol: "openai_chat";
+  workloadHints: string[];
+  origin: string;
+  openaiBaseUrl: string;
+  health: {
+    method: "GET";
+    url: string;
+    authorization?: string;
+    acceptStatus: number[];
+  };
+  api: {
+    models: ProviderBackendApiOperation;
+    chatCompletions: ProviderBackendApiOperation;
+  };
+  control: {
+    kind: "management.html" | "control-center";
+    url: string;
+    auth?: string;
+  };
+  env: Record<string, string>;
+}
+
+export interface ProviderBackendContract {
+  schemaVersion: 1;
+  kind: "coding-tools-provider-backends";
+  role: "provider-backend";
+  bundled: true;
+  consumers: Array<"desktop" | "mcp" | "paseo">;
+  orchestrators: {
+    paseo: { role: "orchestrator"; uses: Array<"cpa" | "codex-router">; implements: "other-owner" };
+    anneal: { role: "task-preview"; uses: Array<"cpa" | "codex-router">; implements: "other-owner" };
+  };
+  backends: {
+    cpa: ProviderBackendDescriptor;
+    "codex-router": ProviderBackendDescriptor;
+  };
 }
 
 export interface ExternalServiceConfigurationInput {
@@ -535,6 +583,7 @@ export interface LauncherApi {
   startExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   stopExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   restartExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  providerBackendContract(): Promise<ProviderBackendContract>;
   syncCodexRouter(): Promise<CodexRouterSyncResult>;
   upstreamToolsSnapshot(): Promise<UpstreamToolsSnapshot>;
   inspectUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;

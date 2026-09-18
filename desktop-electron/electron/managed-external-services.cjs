@@ -7,6 +7,8 @@ const {
   CPA_LOOPBACK,
   ROUTER_LOOPBACK,
   desktopCrossUseEnvironment,
+  launchConsumesProviderBackends,
+  providerBackendContract,
   startPeerIds,
 } = require("./cpa-codex-long-run.cjs");
 
@@ -56,11 +58,13 @@ function createManagedExternalServicesController({
     resourcesPath: options.resourcesPath,
     desktopRoot: options.desktopRoot,
     launchEnvironmentFor: (id) => {
-      if (id !== "codex-router") return {};
+      if (!launchConsumesProviderBackends(id)) return {};
       try {
         const secrets = managedController?.runtimeSecrets("cpa") || {};
+        const router = managedController?.runtimeConfiguration?.("codex-router") || {};
         return desktopCrossUseEnvironment({
           cpaProxyApiKey: secrets.proxyApiKey,
+          routerCallerKey: router.callerKey,
         });
       } catch {
         return desktopCrossUseEnvironment();
@@ -135,6 +139,7 @@ function createManagedExternalServicesController({
     return {
       ...snapshot,
       services: snapshot.services.map(mergeService),
+      providerBackends: providerBackendContract(),
     };
   }
 
@@ -302,6 +307,7 @@ function createManagedExternalServicesController({
     restart,
     syncCodexRouter,
     runtimeEnvironment,
+    providerBackendContract,
     upstreamConfiguration,
     cpaConnection,
     installManagedComponent,

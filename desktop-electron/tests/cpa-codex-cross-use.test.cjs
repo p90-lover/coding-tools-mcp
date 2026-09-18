@@ -12,7 +12,10 @@ const {
   ROUTER_LOOPBACK,
   attachCpaCodexLongRun,
   desktopCrossUseEnvironment,
+  launchConsumesProviderBackends,
   managedLoopbackHealthTargets,
+  providerBackendContract,
+  providerBackendOpenApi,
   startPeerIds,
 } = require("../electron/cpa-codex-long-run.cjs");
 const { createOriginalUiController } = require("../electron/original-ui.cjs");
@@ -54,9 +57,11 @@ test("CPA and Codex Router share frozen Desktop loopbacks for host routing", () 
     routerCallerKey: "k".repeat(32),
   });
   assert.equal(env.CODING_TOOLS_CPA_URL, "http://127.0.0.1:8317");
+  assert.equal(env.CODING_TOOLS_CPA_OPENAI_BASE_URL, "http://127.0.0.1:8317/v1");
   assert.equal(env.CODING_TOOLS_CODEX_ROUTER_URL, "http://127.0.0.1:4202");
   assert.equal(env.CODING_TOOLS_CPA_PROXY_API_KEY, "p".repeat(36));
   assert.equal(env.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY, "k".repeat(32));
+  assert.equal(env.CODING_TOOLS_CODEX_ROUTER_OPENAI_BASE_URL, `http://127.0.0.1:4202/_codex-router/${"k".repeat(32)}/v1`);
 
   const health = managedLoopbackHealthTargets({
     cpaProxyApiKey: "p".repeat(36),
@@ -75,8 +80,49 @@ test("managed health contracts stay on the shared CPA and Router loopbacks", () 
   assert.equal(router.health.endpoint, `${ROUTER_LOOPBACK.origin}/_codex-router/{callerKey}/v1/models`);
   assert.match(read("electron/managed-external-services.cjs"), /ensureStartPeers/);
   assert.match(read("electron/managed-external-services.cjs"), /desktopCrossUseEnvironment/);
+  assert.match(read("electron/managed-external-services.cjs"), /launchConsumesProviderBackends/);
   assert.match(read("electron/managed-components.cjs"), /launchEnvironmentFor/);
+  assert.equal(launchConsumesProviderBackends("codex-router"), true);
+  assert.equal(launchConsumesProviderBackends("paseo"), true);
+  assert.equal(launchConsumesProviderBackends("anneal"), true);
+  assert.equal(launchConsumesProviderBackends("commandcode-proxy"), false);
   assert.doesNotMatch(read("electron/managed-external-services.cjs"), /startPeerIds\("commandcode-proxy"\)/);
+});
+
+test("CPA and Codex Router publish a tiny OpenAPI/health contract as Paseo provider backends", () => {
+  const contract = providerBackendContract();
+  assert.equal(contract.kind, "coding-tools-provider-backends");
+  assert.equal(contract.role, "provider-backend");
+  assert.equal(contract.bundled, true);
+  assert.deepEqual([...contract.consumers], ["desktop", "mcp", "paseo"]);
+  assert.equal(contract.orchestrators.paseo.implements, "other-owner");
+  assert.equal(contract.orchestrators.anneal.implements, "other-owner");
+  assert.equal(contract.backends.cpa.role, "main-provider");
+  assert.equal(contract.backends.cpa.openaiBaseUrl, "http://127.0.0.1:8317/v1");
+  assert.equal(contract.backends.cpa.api.chatCompletions.path, "/v1/chat/completions");
+  assert.equal(contract.backends.cpa.control.url, "http://127.0.0.1:8317/management.html");
+  assert.equal(contract.backends["codex-router"].role, "subagent-provider");
+  assert.equal(contract.backends["codex-router"].api.chatCompletions.path, "/_codex-router/{callerKey}/v1/chat/completions");
+  assert.equal(JSON.stringify(contract).includes("Bearer {secret:proxyApiKey}"), true);
+  assert.doesNotMatch(JSON.stringify(contract), /Bearer [A-Za-z0-9_-]{32,}/);
+
+  const openapi = JSON.parse(read("vendor/managed-components/cpa-codex-provider-backends.openapi.json"));
+  assert.deepEqual(openapi, JSON.parse(JSON.stringify(providerBackendOpenApi())));
+  assert.equal(openapi.servers[0].url, "http://127.0.0.1:8317");
+  assert.equal(openapi.servers[1].url, "http://127.0.0.1:4202");
+  assert.ok(openapi.paths["/v1/models"]);
+  assert.ok(openapi.paths["/v1/chat/completions"]);
+  assert.ok(openapi.paths["/_codex-router/{callerKey}/v1/models"]);
+  assert.ok(openapi.paths["/_codex-router/{callerKey}/v1/chat/completions"]);
+
+  const combined = read("electron/managed-external-services.cjs");
+  const main = read("electron/main.cjs");
+  const preload = read("electron/preload.cjs");
+  const types = read("src/types.ts");
+  assert.match(combined, /providerBackends:\s*providerBackendContract\(\)/);
+  assert.match(main, /launcher:provider-backend-contract/);
+  assert.match(preload, /providerBackendContract/);
+  assert.match(types, /providerBackendContract\(\):\s*Promise<ProviderBackendContract>/);
 });
 
 test("Router launch env always pins the CPA loopback so Desktop can route without a separate app", () => {
@@ -87,6 +133,7 @@ test("Router launch env always pins the CPA loopback so Desktop can route withou
   try {
     const launched = environment(home, state);
     assert.equal(launched.CODING_TOOLS_CPA_URL, CPA_LOOPBACK.origin);
+    assert.equal(launched.CODING_TOOLS_CPA_OPENAI_BASE_URL, CPA_LOOPBACK.openaiBaseUrl);
     assert.equal(launched.CODING_TOOLS_CODEX_ROUTER_URL, ROUTER_LOOPBACK.origin);
     assert.equal(launched.CODING_TOOLS_CPA_PROXY_API_KEY, "p".repeat(36));
   } finally {
@@ -243,6 +290,7 @@ test("managed Router spawn receives the CPA loopback URL and proxy key without t
   await controller.startComponent("codex-router");
   const routerSpawn = spawned.at(-1);
   assert.equal(routerSpawn.env.CODING_TOOLS_CPA_URL, CPA_LOOPBACK.origin);
+  assert.equal(routerSpawn.env.CODING_TOOLS_CPA_OPENAI_BASE_URL, CPA_LOOPBACK.openaiBaseUrl);
   assert.equal(routerSpawn.env.CODING_TOOLS_CODEX_ROUTER_URL, ROUTER_LOOPBACK.origin);
   assert.equal(routerSpawn.env.CODING_TOOLS_CPA_PROXY_API_KEY, "p".repeat(36));
 

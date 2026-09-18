@@ -78,9 +78,13 @@ function writeWrapper(filePath, value, mode) {
 function wrapperExports(env, quote) {
   const extra = [
     ["CODING_TOOLS_CPA_URL", env.CODING_TOOLS_CPA_URL],
+    ["CODING_TOOLS_CPA_OPENAI_BASE_URL", env.CODING_TOOLS_CPA_OPENAI_BASE_URL],
     ["CODING_TOOLS_CODEX_ROUTER_URL", env.CODING_TOOLS_CODEX_ROUTER_URL],
     ...(env.CODING_TOOLS_CPA_PROXY_API_KEY
       ? [["CODING_TOOLS_CPA_PROXY_API_KEY", env.CODING_TOOLS_CPA_PROXY_API_KEY]]
+      : []),
+    ...(env.CODING_TOOLS_CODEX_ROUTER_OPENAI_BASE_URL
+      ? [["CODING_TOOLS_CODEX_ROUTER_OPENAI_BASE_URL", env.CODING_TOOLS_CODEX_ROUTER_OPENAI_BASE_URL]]
       : []),
   ].filter(([_name, value]) => typeof value === "string" && value);
   return [

@@ -8,6 +8,7 @@ import {
   parseCodexRouterModelId,
   redactRouterError,
   resolveCodexRouterConnection,
+  resolveCpaConnection,
 } from "../src/routed-providers";
 
 const CALLER_KEY = "test_router_caller_key_abcdefghijklmnopqrstuvwxyz012345";
@@ -66,6 +67,23 @@ describe("Codex Router provider contract", () => {
     expect(() => resolveCodexRouterConnection({
       CODING_TOOLS_CODEX_ROUTER_URL: "http://router.example:4202",
       CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: CALLER_KEY,
+    })).toThrow("loopback");
+  });
+
+  test("constructs a loopback CPA OpenAI backend from Desktop-managed env", () => {
+    const connection = resolveCpaConnection({
+      CODING_TOOLS_CPA_URL: "http://127.0.0.1:8317/",
+      CODING_TOOLS_CPA_PROXY_API_KEY: CALLER_KEY,
+    });
+    expect(connection).toEqual({
+      origin: "http://127.0.0.1:8317",
+      proxyApiKey: CALLER_KEY,
+      baseUrl: "http://127.0.0.1:8317/v1",
+    });
+    expect(resolveCpaConnection({})).toBeUndefined();
+    expect(() => resolveCpaConnection({
+      CODING_TOOLS_CPA_URL: "http://cpa.example:8317",
+      CODING_TOOLS_CPA_PROXY_API_KEY: CALLER_KEY,
     })).toThrow("loopback");
   });
 
