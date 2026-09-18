@@ -291,27 +291,42 @@ test("composes the exact Windows payload from the official seven-member client a
   );
 });
 
-test("five-stack package copy skips dangling npm workspace links, materializes real ones, and does not follow cycles", () => {
+test("five-stack package copy materializes dangling npm workspace links from packages/", () => {
   const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "coding-tools-five-stack-links-"));
   const source = path.join(root, "source");
   const destination = path.join(root, "destination");
   const scoped = path.join(source, "paseo", "source", "node_modules", "@getpaseo");
   const realApp = path.join(source, "paseo", "source", "packages", "app");
+  const realProtocol = path.join(source, "paseo", "source", "packages", "protocol");
   fs.mkdirSync(scoped, { recursive: true });
   fs.mkdirSync(realApp, { recursive: true });
-  fs.writeFileSync(path.join(realApp, "index.js"), "export {}\n");
+  fs.mkdirSync(realProtocol, { recursive: true });
+  fs.writeFileSync(path.join(realApp, "index.js"), "export const app = true\n");
+  fs.writeFileSync(path.join(realProtocol, "index.js"), "export {}\n");
   fs.symlinkSync(path.join("..", "missing-app"), path.join(scoped, "app"));
-  fs.symlinkSync(realApp, path.join(scoped, "protocol"));
+  fs.symlinkSync("/old/staging/paseo/source/packages/protocol", path.join(scoped, "protocol"));
+  fs.symlinkSync(realApp, path.join(scoped, "client"));
+  fs.symlinkSync(path.join("..", "missing-orphan"), path.join(scoped, "orphan"));
   fs.symlinkSync(realApp, path.join(realApp, "self"));
   fs.writeFileSync(path.join(source, "MANIFEST.json"), "{}\n");
 
   copyFiveStackTree(source, destination);
-  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app")), false);
+  assert.equal(
+    fs.readFileSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app", "index.js"), "utf8"),
+    "export const app = true\n",
+  );
   assert.equal(
     fs.readFileSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "protocol", "index.js"), "utf8"),
     "export {}\n",
   );
+  assert.equal(
+    fs.readFileSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "client", "index.js"), "utf8"),
+    "export const app = true\n",
+  );
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "orphan")), false);
+  assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app")).isSymbolicLink(), false);
   assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "protocol")).isSymbolicLink(), false);
+  assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "client")).isSymbolicLink(), false);
   assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "packages", "app", "self")), false);
   assert.equal(fs.readFileSync(path.join(destination, "MANIFEST.json"), "utf8"), "{}\n");
 });
@@ -437,13 +452,16 @@ test("package and runtime preparation use repository aiTemp retention without de
     ["runtime builder", runtimeBuilder],
   ]) {
     const scanned = label === "five-stack runtime preparation"
-      ? source.replace(/function removeWrittenFiles\([\s\S]*?\n\}/, "function removeWrittenFiles() {}")
+      ? source
+        .replace(/function removeWrittenFiles\([\s\S]*?\n\}/, "function removeWrittenFiles() {}")
+        .replace(/function unlinkFilesystemLink\([\s\S]*?\n\}/, "function unlinkFilesystemLink() {}")
       : source;
     assert.doesNotMatch(scanned, /\b(?:rmSync|unlinkSync)\s*\(/, `${label} must not delete files`);
     assert.doesNotMatch(scanned, /fs\.(?:rm|unlink)\s*\(/, `${label} must not delete files`);
     assert.doesNotMatch(source, /process\.exit\s*\(/, `${label} must unwind through retention`);
   }
   assert.match(fiveStackPreparation, /function removeWrittenFiles/);
+  assert.match(fiveStackPreparation, /function unlinkFilesystemLink/);
   assert.match(fiveStackPreparation, /prepare-only Windows shims must not ship CI node\.exe paths/);
   assert.match(composer, /aiTemp/);
   assert.match(composer, /Trash/);

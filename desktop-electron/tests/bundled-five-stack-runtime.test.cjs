@@ -11,6 +11,7 @@ const {
   installWindowsCwdLifecycleFallbacks,
   installWindowsCwdNodeCommands,
   installWindowsNodeBinShims,
+  materializeNpmWorkspaceLinks,
   npmSpawnInvocation,
   prepareFiveStackRuntime,
   rewritePackageScriptsToAbsoluteNode,
@@ -220,6 +221,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /installWindowsCwdLifecycleFallbacks/);
   assert.match(source, /windowsCmdWithInjectedPath/);
   assert.match(source, /--ignore-scripts/);
+  assert.match(source, /materializeNpmWorkspaceLinks/);
   assert.match(source, /next\.PATH = mergedPath/);
   assert.match(source, /RUNNER_TOOL_CACHE/);
   assert.match(source, /isUsableNodeExecutable/);
@@ -592,6 +594,24 @@ test("Windows five-stack npm prepare rejects bun node.exe in favor of hostedtool
     }, "win32"),
     path.join(nodeDir, "node.exe"),
   );
+});
+
+test("five-stack prepare replaces npm workspace links with real copies before publish", () => {
+  const root = temporaryDirectory("coding-tools-five-stack-workspace-links");
+  const source = path.join(root, "source");
+  const app = path.join(source, "packages", "app");
+  const scoped = path.join(source, "node_modules", "@getpaseo");
+  fs.mkdirSync(app, { recursive: true });
+  fs.mkdirSync(scoped, { recursive: true });
+  fs.writeFileSync(path.join(app, "index.js"), "export const app = true\n");
+  fs.symlinkSync(path.relative(scoped, app), path.join(scoped, "app"));
+
+  materializeNpmWorkspaceLinks(source);
+
+  const materialized = path.join(scoped, "app");
+  assert.equal(fs.lstatSync(materialized).isSymbolicLink(), false);
+  assert.equal(fs.readFileSync(path.join(materialized, "index.js"), "utf8"), "export const app = true\n");
+  assert.equal(fs.readFileSync(path.join(app, "index.js"), "utf8"), "export const app = true\n");
 });
 
 test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal", async () => {

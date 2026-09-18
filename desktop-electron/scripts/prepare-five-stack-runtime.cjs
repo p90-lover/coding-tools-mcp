@@ -79,6 +79,38 @@ function copyTree(sourceRoot, destinationRoot) {
   }
 }
 
+function copyTreeAcyclic(sourceRoot, destinationRoot, seen) {
+  const source = path.resolve(sourceRoot);
+  const destination = path.resolve(destinationRoot);
+  let real;
+  try {
+    real = fs.realpathSync(source);
+  } catch (error) {
+    fail("FIVE_STACK_BUNDLE_ENTRY_UNREADABLE", `${source}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let metadata;
+  try {
+    metadata = fs.statSync(source);
+  } catch (error) {
+    fail("FIVE_STACK_BUNDLE_ENTRY_UNREADABLE", `${source}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (metadata.isDirectory()) {
+    if (seen.has(real)) return;
+    const nextSeen = new Set(seen);
+    nextSeen.add(real);
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+      if (entry.name === ".git") continue;
+      copyTreeAcyclic(path.join(source, entry.name), path.join(destination, entry.name), nextSeen);
+    }
+    return;
+  }
+  if (!metadata.isFile()) fail("FIVE_STACK_BUNDLE_ENTRY_UNSUPPORTED", source);
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(destination, metadata.mode & 0o777 || 0o600);
+}
+
 function runGit(args, cwd, spawnSyncProcess) {
   const result = spawnSyncProcess("git", args, {
     cwd,
@@ -615,10 +647,84 @@ function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = [
     for (const script of extraScripts) {
       runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
     }
+    // Windows npm workspace junctions keep absolute targets. publishDirectory
+    // renames the staging tree afterward, which would leave @scope/name dangling.
+    materializeNpmWorkspaceLinks(sourceRoot);
   } finally {
     removeWrittenFiles(cleanup);
   }
   return true;
+}
+
+function unlinkFilesystemLink(pathname) {
+  // Replace a workspace junction/symlink in place. Payload files stay; only the
+  // reparse point is removed so publishDirectory rename cannot dangle it.
+  try {
+    fs.unlinkSync(pathname);
+  } catch (error) {
+    if (error && (error.code === "EPERM" || error.code === "EISDIR")) {
+      fs.rmdirSync(pathname);
+      return;
+    }
+    throw error;
+  }
+}
+
+function materializeNpmWorkspaceLinks(root) {
+  const stack = [path.resolve(root)];
+  const seen = new Set();
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let real;
+    try {
+      real = fs.realpathSync(dir);
+    } catch {
+      continue;
+    }
+    if (seen.has(real)) continue;
+    seen.add(real);
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git") continue;
+      const full = path.join(dir, entry.name);
+      let linkStat;
+      try {
+        linkStat = fs.lstatSync(full);
+      } catch {
+        continue;
+      }
+      if (linkStat.isSymbolicLink()) {
+        let targetStat;
+        try {
+          targetStat = fs.statSync(full);
+        } catch {
+          continue;
+        }
+        let resolved;
+        try {
+          resolved = fs.realpathSync(full);
+        } catch {
+          continue;
+        }
+        unlinkFilesystemLink(full);
+        if (targetStat.isDirectory()) {
+          copyTreeAcyclic(resolved, full, new Set());
+          stack.push(full);
+        } else if (targetStat.isFile()) {
+          fs.mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });
+          fs.copyFileSync(resolved, full, fs.constants.COPYFILE_EXCL);
+          fs.chmodSync(full, targetStat.mode & 0o777 || 0o600);
+        }
+        continue;
+      }
+      if (linkStat.isDirectory()) stack.push(full);
+    }
+  }
 }
 
 function writeBundledMarker(destination, manifest) {
@@ -784,6 +890,7 @@ module.exports = {
   installWindowsCwdLifecycleFallbacks,
   installWindowsCwdNodeCommands,
   installWindowsNodeBinShims,
+  materializeNpmWorkspaceLinks,
   npmSpawnInvocation,
   prepareFiveStackRuntime,
   resolveNpmCliJs,

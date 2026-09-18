@@ -723,31 +723,84 @@ function writeComponent(stagingRoot, relativePath, bytes, mode = 0o600) {
   return target;
 }
 
-function isDanglingLink(filePath, dirent) {
-  if (dirent && typeof dirent.isSymbolicLink === "function" && dirent.isSymbolicLink()) return true;
-  try {
-    return fs.lstatSync(filePath).isSymbolicLink();
-  } catch {
-    return false;
-  }
+function isMissingFsEntry(error) {
+  return Boolean(error && (error.code === "ENOENT" || error.code === "ENOTDIR" || error.code === "ELOOP"));
 }
 
-function realPathOr(filePath) {
+function recoverWorkspacePackage(fromPath) {
+  const candidates = [];
   try {
-    return fs.realpathSync(filePath);
+    const raw = fs.readlinkSync(fromPath);
+    candidates.push(path.resolve(path.dirname(fromPath), raw));
+    const normalized = String(raw).replace(/\\/g, "/");
+    const marker = "/packages/";
+    const index = normalized.toLowerCase().lastIndexOf(marker);
+    if (index !== -1) {
+      const suffixParts = normalized.slice(index + 1).split("/").filter(Boolean);
+      let cursor = path.dirname(fromPath);
+      while (true) {
+        candidates.push(path.join(cursor, ...suffixParts));
+        const parent = path.dirname(cursor);
+        if (parent === cursor) break;
+        cursor = parent;
+      }
+    }
   } catch {
-    return path.resolve(filePath);
+    // Windows junctions whose target was renamed away can fail readlink/lstat.
   }
+  const name = path.basename(fromPath);
+  let dir = path.dirname(fromPath);
+  if (path.basename(dir).startsWith("@")) dir = path.dirname(dir);
+  if (path.basename(dir) === "node_modules") {
+    candidates.push(path.join(path.dirname(dir), "packages", name));
+  }
+  for (const candidate of candidates) {
+    try {
+      const metadata = fs.statSync(candidate);
+      if (metadata.isFile() || metadata.isDirectory()) return candidate;
+    } catch {
+      // try the next mapping
+    }
+  }
+  return null;
 }
 
-function copyFiveStackTree(sourceRoot, destinationRoot, ancestors = new Set()) {
+function copyFiveStackResolved(from, to, seen) {
+  const metadata = fs.statSync(from);
+  if (metadata.isDirectory()) {
+    copyFiveStackTree(from, to, seen);
+    return;
+  }
+  if (!metadata.isFile()) fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNSUPPORTED", from);
+  fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
+  fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(to, metadata.mode & 0o777 || 0o600);
+}
+
+function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
+  let real;
+  try {
+    real = fs.realpathSync(source);
+  } catch {
+    real = source;
+  }
+  if (seen.has(real)) return;
+  const nextSeen = new Set(seen);
+  nextSeen.add(real);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   let entries;
   try {
     entries = fs.readdirSync(source, { withFileTypes: true });
   } catch (error) {
+    if (isMissingFsEntry(error)) {
+      const recovered = recoverWorkspacePackage(source);
+      if (recovered && path.resolve(recovered) !== path.resolve(source)) {
+        copyFiveStackTree(recovered, destination, seen);
+      }
+      return;
+    }
     fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${source}: ${error instanceof Error ? error.message : String(error)}`);
   }
   for (const entry of entries) {
@@ -758,29 +811,36 @@ function copyFiveStackTree(sourceRoot, destinationRoot, ancestors = new Set()) {
     try {
       linkStat = fs.lstatSync(from);
     } catch (error) {
+      if (isMissingFsEntry(error)) {
+        const recovered = recoverWorkspacePackage(from);
+        if (recovered) copyFiveStackResolved(recovered, to, nextSeen);
+        continue;
+      }
       fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${from}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    let metadata;
-    try {
-      metadata = fs.statSync(from);
-    } catch (error) {
-      // npm workspaces leave dangling junctions (Windows) / symlinks for
-      // packages such as @getpaseo/app after `npm ci --ignore-scripts`.
-      const code = error && typeof error === "object" ? error.code : "";
-      if (linkStat.isSymbolicLink() || code === "ENOENT" || code === "ELOOP" || isDanglingLink(from, entry)) continue;
-      fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${from}: ${error instanceof Error ? error.message : String(error)}`);
+    let resolvedFrom = from;
+    let metadata = linkStat;
+    if (linkStat.isSymbolicLink()) {
+      try {
+        metadata = fs.statSync(from);
+      } catch {
+        const recovered = recoverWorkspacePackage(from);
+        if (!recovered) continue;
+        resolvedFrom = recovered;
+        try {
+          metadata = fs.statSync(recovered);
+        } catch (error) {
+          fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${from}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     }
     if (metadata.isDirectory()) {
-      const realPath = realPathOr(from);
-      if (ancestors.has(realPath)) continue;
-      const next = new Set(ancestors);
-      next.add(realPath);
-      copyFiveStackTree(from, to, next);
+      copyFiveStackTree(resolvedFrom, to, nextSeen);
       continue;
     }
     if (!metadata.isFile()) fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNSUPPORTED", from);
     fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
-    fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
+    fs.copyFileSync(resolvedFrom, to, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(to, metadata.mode & 0o777 || 0o600);
   }
 }
