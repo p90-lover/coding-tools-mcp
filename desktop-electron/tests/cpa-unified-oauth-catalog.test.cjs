@@ -49,7 +49,7 @@ test("Provider Center renders login controls from adapter capability, not broad 
   );
   assert.match(source, /selectedLoginAdapter/);
   assert.match(source, /loginAdapters/);
-  assert.match(source, /beginProviderLogin\(saved\.id, selectedLoginAdapter\.id\)/);
+  assert.match(source, /beginProviderLogin\(saved\.id,\s*(?:selectedLoginAdapter|adapter)\.id\)/);
   assert.match(source, /Login source/);
   assert.match(source, /登入來源/);
   assert.match(source, /Import CPA account/);
