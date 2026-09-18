@@ -5,6 +5,7 @@ export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations"
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
+export type ProviderCredentialSource = "native_browser" | "cpa" | "commandcode" | "api_key" | "local_proxy";
 export type ProxyProtocol = "http" | "https" | "socks4" | "socks5";
 export type ProxyScope =
   | "all"
@@ -32,6 +33,8 @@ export interface ProviderAccountRecord {
   isDefault: boolean;
   hasCredential: boolean;
   models: string[];
+  loginAdapterId?: string;
+  credentialSource?: ProviderCredentialSource;
   proxyProfileId?: string;
   createdAt: string;
   updatedAt: string;
@@ -51,6 +54,8 @@ export interface ProviderAccountInput {
   enabled?: boolean;
   isDefault?: boolean;
   models?: string[];
+  loginAdapterId?: string;
+  credentialSource?: ProviderCredentialSource;
   proxyProfileId?: string;
   secret?: Record<string, string>;
   error?: string;
@@ -167,6 +172,52 @@ export interface ProviderExecutionPlan {
 
 export type ExternalServiceId = "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
 export type ExternalServiceStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
+export type ManagedComponentInstallState =
+  | "not-installed"
+  | "installing"
+  | "installed"
+  | "repair-required"
+  | "external"
+  | "error";
+
+export interface ManagedComponentProcessSnapshot {
+  id: string;
+  pid: number | null;
+  running: boolean;
+}
+
+export interface ManagedComponentInstallSnapshot {
+  state: ManagedComponentInstallState;
+  version: string;
+  commit: string | null;
+  strategy: "release-binary" | "git-source";
+  home: string;
+  installedAt: string | null;
+  currentStep: string | null;
+  error: string | null;
+  platformMode: "native" | "wsl2" | string;
+  processes: ManagedComponentProcessSnapshot[];
+  missingCredentials: string[];
+}
+
+export interface ManagedComponentsSnapshot {
+  version: 1;
+  components: Array<{
+    id: ExternalServiceId;
+    name: string;
+    version: string;
+    commit: string | null;
+    strategy: "release-binary" | "git-source";
+    installState: ManagedComponentInstallState;
+    managedHome: string;
+    installedAt: string | null;
+    currentStep: string | null;
+    error: string | null;
+    platformMode: "native" | "wsl2" | string;
+    processes: ManagedComponentProcessSnapshot[];
+    secretConfigured: boolean;
+  }>;
+}
 
 export interface ExternalServiceSnapshot {
   id: ExternalServiceId;
@@ -195,6 +246,7 @@ export interface ExternalServiceSnapshot {
   accountCount?: number;
   connectedAccountCount?: number;
   providerModelCount?: number;
+  managedInstall: ManagedComponentInstallSnapshot;
 }
 
 export interface ExternalServicesSnapshot {
@@ -424,6 +476,14 @@ export interface LauncherApi {
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
+  managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;
+  installManagedComponent(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  repairManagedComponent(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  setManagedComponentCredential(
+    serviceId: ExternalServiceId,
+    key: string,
+    value: string,
+  ): Promise<ExternalServiceSnapshot>;
   configureExternalService(serviceId: ExternalServiceId, input: ExternalServiceConfigurationInput): Promise<ExternalServiceSnapshot>;
   inspectExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   startExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
@@ -444,10 +504,11 @@ export interface LauncherApi {
   setDefaultProviderAccount(providerId: string, accountId: string): Promise<ProviderNetworkSnapshot>;
   setProviderAccountEnabled(accountId: string, enabled: boolean): Promise<ProviderNetworkSnapshot>;
   archiveProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
-  beginProviderLogin(accountId: string): Promise<{
+  beginProviderLogin(accountId: string, adapterId?: string): Promise<{
     opened: boolean;
-    mode: "embedded" | "external";
-    state?: string;
+    mode: "embedded" | "external" | "import";
+    state?: string | null;
+    adapterId?: string;
     snapshot?: ProviderNetworkSnapshot;
   }>;
   importProviderSession(accountId: string): Promise<ProviderNetworkSnapshot>;

@@ -38,7 +38,7 @@ test("Provider Center is backed by the encrypted multi-account Provider Hub", ()
   assert.match(preload, /saveProviderAccount/);
   assert.match(preload, /beginProviderLogin/);
   assert.match(types, /saveProviderAccount\(input: ProviderAccountInput\)/);
-  assert.match(types, /beginProviderLogin\(accountId: string\)/);
+  assert.match(types, /beginProviderLogin\(accountId: string, adapterId\?: string\)/);
 });
 
 test("Paseo and Anneal execution dispatch names the selected Provider Hub account", () => {

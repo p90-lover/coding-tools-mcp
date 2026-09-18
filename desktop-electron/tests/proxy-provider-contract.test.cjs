@@ -71,6 +71,7 @@ test("provider catalog contains every approved built-in surface", () => {
   assert.deepEqual(ids, [
     "codex-oauth",
     "claude-oauth",
+    "gemini-oauth",
     "chatgpt-web",
     "ai-studio-reverse-proxy",
     "gemini-reverse-proxy",

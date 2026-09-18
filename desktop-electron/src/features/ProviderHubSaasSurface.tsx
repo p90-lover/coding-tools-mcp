@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   PROVIDER_CATALOG,
   type ProviderDefinition,
+  type ProviderLoginAdapterDefinition,
 } from "../providers/provider-types";
 import type {
   ExternalServicesSnapshot,
@@ -47,6 +48,7 @@ interface AccountDraft {
   enabled: boolean;
   isDefault: boolean;
   modelsText: string;
+  loginAdapterId: string;
 }
 
 interface ProviderPresentation {
@@ -111,6 +113,13 @@ const PROVIDER_PRESENTATION: Readonly<Record<string, ProviderPresentation>> = {
     descriptionEnglish: "Manage multiple Claude sign-ins for approved Paseo and Anneal workloads.",
     descriptionTraditionalChinese: "管理多個 Claude 登入帳戶，供已批准的 Paseo 與 Anneal 工作使用。",
     aliases: ["anthropic claude", "claude login", "oauth"],
+  },
+  "gemini-oauth": {
+    english: "Gemini OAuth (CPA)",
+    traditionalChinese: "Gemini OAuth（CPA）",
+    descriptionEnglish: "Import a Gemini CLI account already authenticated by CPA without inventing an unsupported OAuth endpoint.",
+    descriptionTraditionalChinese: "匯入已由 CPA 驗證的 Gemini CLI 帳戶，不會虛構未支援的 OAuth 端點。",
+    aliases: ["gemini oauth", "gemini cli", "cpa gemini"],
   },
   "chatgpt-web": {
     english: "ChatGPT Web",
@@ -247,10 +256,19 @@ function providerDefinition(providerId: string): ProviderDefinition {
 }
 
 function supportsProviderLogin(provider: ProviderDefinition): boolean {
-  return provider.auth === "oauth"
-    || provider.auth === "browser_session"
-    || provider.loginMode === "antigravity_management"
-    || provider.loginMode === "commandcode_oauth";
+  return Array.isArray(provider.loginAdapters) && provider.loginAdapters.length > 0;
+}
+
+function loginAdapter(
+  provider: ProviderDefinition,
+  adapterId: string,
+): ProviderLoginAdapterDefinition | undefined {
+  return provider.loginAdapters?.find((adapter) => adapter.id === adapterId)
+    ?? provider.loginAdapters?.[0];
+}
+
+function loginAdapterLabel(language: Language, adapter: ProviderLoginAdapterDefinition): string {
+  return text(language, adapter.label, adapter.labelTraditionalChinese);
 }
 
 function presentation(provider: ProviderDefinition): ProviderPresentation {
@@ -338,6 +356,7 @@ function emptyDraft(providerId = PROVIDER_CATALOG[0].id): AccountDraft {
     enabled: true,
     isDefault: false,
     modelsText: provider.models.join("\n"),
+    loginAdapterId: provider.loginAdapters?.[0]?.id ?? "",
   };
 }
 
@@ -353,6 +372,9 @@ function accountDraft(account: ProviderAccountRecord): AccountDraft {
     enabled: account.enabled,
     isDefault: account.isDefault,
     modelsText: account.models.join("\n"),
+    loginAdapterId: account.loginAdapterId
+      ?? providerDefinition(account.providerId).loginAdapters?.[0]?.id
+      ?? "",
   };
 }
 
@@ -446,6 +468,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     [snapshot],
   );
   const selectedProvider = providerDefinition(selectedProviderId);
+  const selectedLoginAdapter = loginAdapter(selectedProvider, draft.loginAdapterId);
   const selectedAccount = activeAccounts.find((account) => account.id === selectedAccountId);
   const selectedProviderAccounts = useMemo(() => activeAccounts
     .filter((account) => account.providerId === selectedProviderId)
@@ -685,11 +708,10 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     if (accountValidation) throw new Error(accountValidation);
     const models = parseModels(draft.modelsText);
     const provider = providerDefinition(draft.providerId);
+    const adapter = loginAdapter(provider, draft.loginAdapterId);
     const requiresCredential = draft.auth === "api_key" || draft.auth === "local_proxy";
-    const managedLogin = provider.loginMode === "antigravity_management"
-      || provider.loginMode === "commandcode_oauth";
-    const status = managedLogin
-      ? (secret.trim() ? "connected" : draft.status)
+    const status = adapter
+      ? (draft.status === "connected" ? "connected" : "pending")
       : requiresCredential && secret.trim() ? "connected" : draft.status;
     const input: ProviderAccountInput = {
       id: draft.id,
@@ -702,14 +724,20 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       enabled: draft.enabled,
       isDefault: draft.isDefault,
       models,
+      loginAdapterId: adapter?.id,
       ...(secret.trim()
         ? {
-            secret: provider.loginMode === "commandcode_oauth"
+            secret: adapter?.kind === "commandcode_oauth"
               ? {
                   apiKey: secret.trim(),
                   baseUrl: draft.endpoint.trim() || provider.baseUrl || "http://127.0.0.1:9090",
                 }
-              : { credential: secret.trim() },
+              : adapter?.kind === "cpa_oauth" || adapter?.kind === "cpa_auth_file"
+                ? {
+                    managementKey: secret.trim(),
+                    baseUrl: draft.endpoint.trim() || provider.baseUrl || "http://127.0.0.1:8317",
+                  }
+                : { credential: secret.trim() },
           }
         : {}),
     };
@@ -750,15 +778,21 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     setError(null);
     try {
       const saved = await persistAccount();
-      const result = await api.beginProviderLogin(saved.id);
+      const adapter = loginAdapter(providerDefinition(saved.providerId), saved.loginAdapterId ?? draft.loginAdapterId);
+      if (!adapter) throw new Error(text(language, "Choose a supported login source.", "請選擇受支援的登入來源。"));
+      const result = await api.beginProviderLogin(saved.id, adapter.id);
       if (result.snapshot) adoptSnapshot(result.snapshot, saved.id);
       setNotice(text(
         language,
         result.snapshot
-          ? "The provider session is connected and its model catalogue was refreshed."
+          ? (result.mode === "import"
+              ? "The CPA account was imported and its model catalogue was refreshed."
+              : "The provider session is connected and its model catalogue was refreshed.")
           : "The login page opened. Complete the provider sign-in to continue.",
         result.snapshot
-          ? "供應商工作階段已連線，模型清單亦已更新。"
+          ? (result.mode === "import"
+              ? "CPA 帳戶已匯入，模型清單亦已更新。"
+              : "供應商工作階段已連線，模型清單亦已更新。")
           : "登入頁面已開啟。請完成供應商登入以繼續。",
       ));
     } catch (cause) {
@@ -1166,6 +1200,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                         label: provider.name,
                         endpoint: provider.baseUrl ?? "",
                         modelsText: provider.models.join("\n"),
+                        loginAdapterId: provider.loginAdapters?.[0]?.id ?? "",
                       }));
                       setSelectedModel(provider.models[0] ?? "");
                     }}
@@ -1193,6 +1228,30 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                     {AUTH_TYPES.map((auth) => <option key={auth} value={auth}>{authLabel(language, auth)}</option>)}
                   </select>
                 </label>
+                {selectedProvider.loginAdapters?.length ? (
+                  <label>
+                    <span>{text(language, "Login source", "登入來源")}</span>
+                    <select
+                      value={selectedLoginAdapter?.id ?? ""}
+                      onChange={(event) => {
+                        const adapter = loginAdapter(selectedProvider, event.target.value);
+                        setDraft((current) => ({
+                          ...current,
+                          loginAdapterId: adapter?.id ?? "",
+                          status: current.status === "connected" ? "pending" : current.status,
+                          endpoint: adapter?.kind === "cpa_oauth" || adapter?.kind === "cpa_auth_file"
+                            ? (current.endpoint || selectedProvider.baseUrl || "http://127.0.0.1:8317")
+                            : current.endpoint,
+                        }));
+                        setSecret("");
+                      }}
+                    >
+                      {selectedProvider.loginAdapters.map((adapter) => (
+                        <option key={adapter.id} value={adapter.id}>{loginAdapterLabel(language, adapter)}</option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
                 <label>
                   <span>{text(language, "Connection status", "連線狀態")}</span>
                   <select value={draft.status} onChange={(event) => setDraft((current) => ({
@@ -1230,9 +1289,9 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   />
                 </label>
                 <label className="provider-full-row">
-                  <span>{selectedProvider.loginMode === "antigravity_management"
-                    ? text(language, "CLIProxyAPI management key (encrypted by Electron main process)", "CLIProxyAPI 管理金鑰（由 Electron 主程序加密）")
-                    : selectedProvider.loginMode === "commandcode_oauth"
+                  <span>{selectedLoginAdapter?.kind === "cpa_oauth" || selectedLoginAdapter?.kind === "cpa_auth_file"
+                    ? text(language, "CPA / CLIProxyAPI management key (encrypted)", "CPA／CLIProxyAPI 管理金鑰（已加密）")
+                    : selectedLoginAdapter?.kind === "commandcode_oauth"
                       ? text(language, "CommandCode API key (or use login/import below)", "CommandCode API Key（或使用下方登入／匯入）")
                       : text(language, "Credential (encrypted by Electron main process)", "憑證（由 Electron 主程序加密）")}</span>
                   <input
@@ -1284,7 +1343,10 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   ) : null}
                 </div>
                 <div>
-                  {selectedAccount && ["antigravity_management", "commandcode_oauth"].includes(selectedProvider.loginMode ?? "") ? (
+                  {selectedAccount && (
+                    selectedAccount.loginAdapterId?.startsWith("cpa-")
+                    || selectedAccount.loginAdapterId === "commandcode-oauth"
+                  ) ? (
                     <button className="provider-secondary-button" disabled={busy !== null} onClick={() => void testProviderConnection()} type="button">
                       {busy === "provider-probe" ? "…" : text(language, "Test connection", "測試連線")}
                     </button>
@@ -1300,11 +1362,17 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                     <button className="provider-secondary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void openLogin()} type="button">
                       {busy === "provider-login"
                         ? "…"
-                        : selectedProvider.loginMode === "commandcode_oauth"
+                        : selectedLoginAdapter?.kind === "commandcode_oauth"
                           ? text(language, "Login with CommandCode", "使用 CommandCode 登入")
-                          : selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
-                            ? text(language, "Refresh session", "更新工作階段")
-                            : text(language, "Login account", "登入帳戶")}
+                          : selectedLoginAdapter?.kind === "cpa_auth_file"
+                            ? text(language, "Import CPA account", "匯入 CPA 帳戶")
+                            : selectedLoginAdapter?.kind === "cpa_oauth"
+                              ? (selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
+                                  ? text(language, "Refresh session", "更新工作階段")
+                                  : text(language, "Login with CPA", "使用 CPA 登入"))
+                              : selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
+                                ? text(language, "Refresh browser session", "更新瀏覽器工作階段")
+                                : text(language, "Login account", "登入帳戶")}
                     </button>
                   ) : null}
                   <button className="provider-primary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void saveAccount()} type="button">

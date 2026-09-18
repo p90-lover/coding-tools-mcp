@@ -327,6 +327,7 @@ function createExternalServicesController({
   spawnProcess = spawn,
   runRuntimeCommand = null,
   getProviderSnapshot = null,
+  getHealthHeaders = null,
   publish = null,
   now = () => new Date().toISOString(),
 } = {}) {
@@ -508,7 +509,10 @@ function createExternalServicesController({
     try {
       const response = await fetchImpl(healthUrl(id), {
         method: "GET",
-        headers: { accept: "application/json,text/html;q=0.8,*/*;q=0.1" },
+        headers: {
+          accept: "application/json,text/html;q=0.8,*/*;q=0.1",
+          ...(typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {}),
+        },
         signal: controller.signal,
       });
       let modelCount = null;
@@ -516,11 +520,7 @@ function createExternalServicesController({
         const contentType = response.headers?.get?.("content-type") || "";
         if (contentType.includes("json")) modelCount = countModels(await response.clone().json());
       } catch {}
-      const toleratesApplicationResponse = id === "commandcode-proxy"
-        || id === "paseo"
-        || id === "anneal";
-      const reachable = response.ok
-        || (toleratesApplicationResponse && response.status >= 400 && response.status < 500);
+      const reachable = response.ok;
       runtime.set(id, {
         ...runtime.get(id),
         status: reachable ? "ready" : "error",

@@ -9,6 +9,7 @@ const PROVIDER_EXECUTION_CATALOG = Object.freeze([
   { id: "claude-oauth", name: "Claude OAuth", protocol: "anthropic_messages", priority: 90, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "anthropic-api", name: "Anthropic API", protocol: "anthropic_messages", priority: 85, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "chatgpt-web", name: "ChatGPT Web", protocol: "openai_responses", priority: 80, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
+  { id: "gemini-oauth", name: "Gemini OAuth (CPA)", protocol: "gemini_native", priority: 78, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "gemini-api", name: "Gemini API", protocol: "gemini_native", priority: 75, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "ai-studio-reverse-proxy", name: "AI Studio Reverse Proxy", protocol: "gemini_native", priority: 70, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "openrouter", name: "OpenRouter", protocol: "openai_chat", priority: 65, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },

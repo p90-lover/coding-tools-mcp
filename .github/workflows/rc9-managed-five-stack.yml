@@ -1,0 +1,125 @@
+name: rc.9 managed five-stack
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.9-managed-five-stack
+      - integration/v0.7.0-rc.9-five-stack-cpa-union
+    paths:
+      - 'aiTemp/rc9-managed-five-stack/**'
+      - 'desktop-electron/**'
+      - 'docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md'
+      - '.github/workflows/rc9-managed-five-stack.yml'
+  pull_request:
+    paths:
+      - 'aiTemp/rc9-managed-five-stack/**'
+      - 'desktop-electron/**'
+      - 'docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md'
+      - '.github/workflows/rc9-managed-five-stack.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc9-managed-five-stack-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc9-managed-five-stack/bun-cache
+
+jobs:
+  verify:
+    name: Managed installs, runtime, renderer, and no-delete gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Verify retained historical integration driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            aiTemp/rc9-managed-five-stack/evidence \
+            aiTemp/rc9-managed-five-stack/renderer-build
+          cat aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.sh.gz.part-* \
+            > aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.sh.gz
+          printf '%s  %s\n' \
+            'b441ad85c9d35313311d6b55ee82bd4c7cde5fba7cad05259eee8d317b0fd40f' \
+            'aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.sh.gz' \
+            | sha256sum -c - \
+            | tee aiTemp/rc9-managed-five-stack/evidence/retained-driver.txt
+          gzip -dc aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.sh.gz \
+            > aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.generated.sh
+          printf '%s  %s\n' \
+            '0a8eecb158b9d5cf2ce997eeab591f094bb71fb8c885dfe3f5217475e56fe82c' \
+            'aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.generated.sh' \
+            | sha256sum -c - \
+            | tee -a aiTemp/rc9-managed-five-stack/evidence/retained-driver.txt
+          bash -n aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.generated.sh
+
+      - name: Install locked desktop dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Verify current managed five-stack source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
+          (
+            node --check desktop-electron/electron/codex-router-managed.cjs
+            node --check desktop-electron/electron/external-services.cjs
+            node --check desktop-electron/electron/main.cjs
+            node --check desktop-electron/electron/managed-components.cjs
+            node --check desktop-electron/electron/managed-external-services.cjs
+            node --check desktop-electron/electron/preload.cjs
+            node --test \
+              desktop-electron/tests/commandcode-provider-session.test.cjs \
+              desktop-electron/tests/external-services-control-plane.test.cjs \
+              desktop-electron/tests/managed-components-runtime.test.cjs \
+              desktop-electron/tests/rc9-five-stack-completion.test.cjs \
+              desktop-electron/tests/rc9-managed-five-stack.test.cjs
+            bun run --cwd desktop-electron typecheck
+            (
+              cd desktop-electron
+              bunx vite build --outDir ../aiTemp/rc9-managed-five-stack/renderer-build
+            )
+          ) 2>&1 | tee aiTemp/rc9-managed-five-stack/evidence/current-source.txt
+          grep -F '# fail 0' aiTemp/rc9-managed-five-stack/evidence/current-source.txt
+          test -s aiTemp/rc9-managed-five-stack/renderer-build/index.html
+
+      - name: Enforce no-delete integration safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.8 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD
+          committed_deletions="$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD)"
+          working_deletions="$(git diff --diff-filter=D --name-only)"
+          if [[ -n "$committed_deletions" || -n "$working_deletions" ]]; then
+            printf 'Committed deletions:\n%s\nWorking-tree deletions:\n%s\n' \
+              "$committed_deletions" "$working_deletions"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-managed-five-stack-${{ github.sha }}
+          path: |
+            aiTemp/rc9-managed-five-stack/evidence/
+            aiTemp/rc9-managed-five-stack/renderer-build/
+          if-no-files-found: error
+          retention-days: 14
