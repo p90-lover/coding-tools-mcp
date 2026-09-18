@@ -30,18 +30,18 @@ $harnessTimeoutMilliseconds = 10 * 60 * 1000
 function Stop-CodingToolsLeftovers {
     param([int[]] $KeepProcessIds = @())
     $keep = @{}
+    $keep[$PID] = $true
     foreach ($id in $KeepProcessIds) { $keep[$id] = $true }
     Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
         Where-Object {
             $_.ProcessId -and
             -not $keep.ContainsKey([int]$_.ProcessId) -and
+            $_.Name -ne 'pwsh.exe' -and
+            $_.Name -ne 'powershell.exe' -and
+            $_.Name -ne 'node.exe' -and
             (
                 $_.Name -eq 'Coding Tools.exe' -or
-                $_.Name -like 'Coding.Tools_*setup.exe' -or
-                ($_.CommandLine -and (
-                    $_.CommandLine -like '*Coding Tools.exe*' -or
-                    $_.CommandLine -like '*Coding.Tools_*setup*'
-                ))
+                $_.Name -like 'Coding.Tools_*setup.exe'
             )
         } |
         ForEach-Object {

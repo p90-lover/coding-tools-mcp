@@ -63,6 +63,13 @@ test("rc.11 migration waits for the installer process only and reaps leftover Co
   assert.doesNotMatch(migration, /Start-Process[^\n]*-Wait/);
 });
 
+test("rc.11 leftover killer matches installer process names only", () => {
+  const migration = read("aiTemp/rc11-release/verify-windows-migration.ps1");
+  assert.match(migration, /\$keep\[\$PID\] = \$true/);
+  assert.match(migration, /Name -ne 'pwsh\.exe'/);
+  assert.doesNotMatch(migration, /CommandLine -like '\*Coding\.Tools_\*setup\*'/);
+});
+
 test("rc.11 smokes the migrated install instead of a second silent NSIS upgrade", () => {
   const runner = read("aiTemp/rc11-release/run-windows-release.mjs");
   const smoke = runner.indexOf("packaged launcher smoke");
