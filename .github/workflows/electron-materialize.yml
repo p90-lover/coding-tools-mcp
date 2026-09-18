@@ -1,0 +1,88 @@
+name: Materialize Coding Tools Electron workspace
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-materialize.yml
+      - scripts/materialize-electron-base.mjs
+      - desktop-electron/tests/product-identity.test.cjs
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-materialize-060rc1
+  cancel-in-progress: false
+jobs:
+  materialize:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions: {contents: write, actions: read}
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Require the retained RED identity evidence
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download 34824832344 --repo "$GITHUB_REPOSITORY" --name electron-product-red-34824832344 --dir aiTemp/red
+          cp aiTemp/red/product-red.txt aiTemp/evidence/
+          grep -F 'electron/product.cjs' aiTemp/evidence/product-red.txt
+          grep -E 'MODULE_NOT_FOUND|Cannot find module' aiTemp/evidence/product-red.txt
+      - name: Materialize exact pinned source and Coding Tools identity
+        run: |
+          set -euo pipefail
+          node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
+          node scripts/materialize-electron-base.mjs 2>&1 | tee aiTemp/evidence/materialize.txt
+          node --test desktop-electron/tests/product-identity.test.cjs 2>&1 | tee aiTemp/evidence/product-green.txt
+          grep -F '# fail 0' aiTemp/evidence/product-green.txt
+      - name: Install locked dependencies and build both imported surfaces
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
+          bun install --frozen-lockfile --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
+          bun install --frozen-lockfile --cwd runtime-web/launcher 2>&1 | tee aiTemp/evidence/runtime-launcher-install.txt
+          bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
+          bun run --cwd desktop-electron build:renderer 2>&1 | tee aiTemp/evidence/desktop-renderer-build.txt
+          bun run --cwd runtime-web typecheck 2>&1 | tee aiTemp/evidence/runtime-typecheck.txt
+          bun run --cwd runtime-web build 2>&1 | tee aiTemp/evidence/runtime-build.txt
+      - name: Record exact materialized workspaces on the feature branch
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME --jq .object.sha)" = "$GITHUB_SHA"
+          git add -- desktop-electron runtime-web
+          if test -d Trash/electron-materialization; then git add -- Trash/electron-materialization; fi
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'build: materialize Coding Tools Electron full-harness workspaces'
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+          git rev-parse HEAD > aiTemp/evidence/source.commit
+          git diff --stat "$GITHUB_SHA" HEAD > aiTemp/evidence/materialized-stat.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-materialize-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

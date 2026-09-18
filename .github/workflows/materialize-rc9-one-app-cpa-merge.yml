@@ -1,0 +1,88 @@
+name: materialize rc.9 one-app CPA merge
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.9-one-app-managed-cpa-merge
+    paths:
+      - '.github/workflows/materialize-rc9-one-app-cpa-merge.yml'
+      - 'aiTemp/rc9-one-app-cpa-merge/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-one-app-cpa-materializer
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Merge verified managed CPA and reconcile the desktop shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_before="$(git rev-parse HEAD)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin fix/rc9-fully-managed-cpa-runtime:refs/remotes/origin/rc9-managed-cpa-source
+
+          if git merge-base --is-ancestor b9189dcfc8139259252df580769560fae4a39891 HEAD; then
+            echo 'Managed CPA source is already present.'
+            exit 0
+          fi
+
+          set +e
+          git merge --no-commit --no-ff refs/remotes/origin/rc9-managed-cpa-source
+          merge_status=$?
+          set -e
+
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$conflicts" ]; then
+            unexpected="$(printf '%s\n' "$conflicts" | grep -v '^desktop-electron/electron/main.cjs$' || true)"
+            if [ -n "$unexpected" ]; then
+              echo 'Unexpected merge conflicts:' >&2
+              printf '%s\n' "$unexpected" >&2
+              exit 1
+            fi
+            git checkout --theirs -- desktop-electron/electron/main.cjs
+          elif [ "$merge_status" -ne 0 ]; then
+            echo "Merge failed without a resolvable conflict set (status $merge_status)." >&2
+            exit 1
+          fi
+
+          python3 aiTemp/rc9-one-app-cpa-merge/reconcile_main.py
+          git add -A
+
+          unresolved="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$unresolved" ]; then
+            echo 'Unresolved merge conflicts remain:' >&2
+            printf '%s\n' "$unresolved" >&2
+            exit 1
+          fi
+
+          git diff --cached --diff-filter=D --exit-code "$base_before"
+
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/cpa-managed.cjs
+          node --check desktop-electron/electron/managed-components.cjs
+          node --test \
+            desktop-electron/tests/desktop-shell-fidelity.test.cjs \
+            desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/managed-components-runtime.test.cjs
+
+          git commit -m 'merge(rc9): reconcile app-managed CPA runtime'
+          git push origin HEAD:integration/v0.7.0-rc.9-one-app-managed-cpa-merge

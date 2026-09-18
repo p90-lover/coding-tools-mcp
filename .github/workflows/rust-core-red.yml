@@ -1,0 +1,48 @@
+name: Rust core extraction baseline
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/rust-core-red.yml
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: rust-core-red-060rc1
+  cancel-in-progress: false
+jobs:
+  red:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - name: Require the approved compatibility contract to fail before extraction
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          test -f rust-core/coding-tools-core/tests/catalog_compat.rs
+          set +e
+          cargo test --manifest-path rust-core/coding-tools-core/Cargo.toml \
+            --test catalog_compat > aiTemp/evidence/rust-core-red.txt 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -E 'manifest path .* does not exist|could not find `Cargo.toml`' \
+            aiTemp/evidence/rust-core-red.txt
+          echo 'RUST_CORE_RED: reusable core package and compatibility API are not implemented.'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rust-core-red-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

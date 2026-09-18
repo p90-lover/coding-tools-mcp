@@ -1,0 +1,110 @@
+name: Materialize rc.9 managed CPA runtime
+
+on:
+  push:
+    branches:
+      - fix/rc9-fully-managed-cpa-runtime
+    paths:
+      - aiTemp/rc9-managed-cpa-runtime/materialize.py
+      - desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
+      - .github/workflows/materialize-rc9-managed-cpa-runtime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-rc9-managed-cpa-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    name: Materialize and verify managed CPA
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Materialize the managed CPA integration
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc9-managed-cpa-runtime/evidence
+          python aiTemp/rc9-managed-cpa-runtime/materialize.py \
+            2>&1 | tee aiTemp/rc9-managed-cpa-runtime/evidence/materialize.txt
+          grep -F RC9_MANAGED_CPA_RUNTIME_MATERIALIZED \
+            aiTemp/rc9-managed-cpa-runtime/evidence/materialize.txt
+
+      - name: Run syntax and focused integration contracts
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/cpa-managed.cjs
+          node --check desktop-electron/electron/external-services.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/managed-components.cjs
+          node --check desktop-electron/electron/managed-external-services.cjs
+          node --check desktop-electron/electron/provider-bootstrap.cjs
+          node --check desktop-electron/electron/provider-network.cjs
+          node --test \
+            desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs \
+            desktop-electron/tests/cpa-oauth-adapter.test.cjs \
+            desktop-electron/tests/cpa-provider-login-routing.test.cjs \
+            desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs \
+            desktop-electron/tests/managed-components-runtime.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/rc9-managed-five-stack.test.cjs \
+            2>&1 | tee aiTemp/rc9-managed-cpa-runtime/evidence/contracts.txt
+          grep -F '# fail 0' aiTemp/rc9-managed-cpa-runtime/evidence/contracts.txt
+
+      - name: Enforce no-delete integration changes
+        run: |
+          set -euo pipefail
+          git fetch origin integration/v0.7.0-rc.9-five-stack-cpa-union --no-tags
+          git diff --check origin/integration/v0.7.0-rc.9-five-stack-cpa-union...HEAD
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.9-five-stack-cpa-union...HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit verified production integration
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/electron/cpa-managed.cjs \
+            desktop-electron/electron/external-services.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/managed-components.cjs \
+            desktop-electron/electron/managed-external-services.cjs \
+            desktop-electron/electron/provider-bootstrap.cjs \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/package.json \
+            desktop-electron/src/features/ExternalServicesSurface.tsx \
+            desktop-electron/src/types.ts \
+            desktop-electron/vendor/managed-components/cpa.json \
+            desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs \
+            desktop-electron/tests/managed-components-runtime.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/rc9-managed-five-stack.test.cjs
+          if git diff --cached --quiet; then
+            echo 'Managed CPA integration is already materialized'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(rc9): fully integrate managed CPA runtime'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-managed-cpa-materialization-${{ github.sha }}
+          path: aiTemp/rc9-managed-cpa-runtime/evidence/
+          if-no-files-found: error
+          retention-days: 14

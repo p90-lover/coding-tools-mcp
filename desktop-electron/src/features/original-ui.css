@@ -1,0 +1,143 @@
+.original-ui-surface {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--titlebar-height));
+  overflow: hidden;
+  background: #fff;
+}
+
+.original-ui-hostbar {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgb(15 23 42 / 10%);
+  background: #f6f7f9;
+  color: #1f2937;
+}
+
+.original-ui-hostbar strong {
+  margin-right: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.original-ui-hostbar span {
+  color: #4b5563;
+  font-size: 12px;
+}
+
+.original-ui-hostbar-actions {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.original-ui-hostbar button {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid rgb(15 23 42 / 12%);
+  border-radius: 6px;
+  background: #fff;
+  color: #111827;
+  font-size: 12px;
+}
+
+.original-ui-hostbar button.primary {
+  border-color: #1d4ed8;
+  background: #1d4ed8;
+  color: #fff;
+}
+
+.original-ui-hostbar button:disabled {
+  opacity: 0.55;
+}
+
+.original-ui-status {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid rgb(15 23 42 / 12%);
+  border-radius: 999px;
+  background: #fff;
+  color: #4b5563;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.original-ui-status.status-ready {
+  border-color: rgb(22 163 74 / 35%);
+  color: #15803d;
+}
+
+.original-ui-status.status-starting {
+  border-color: rgb(37 99 235 / 35%);
+  color: #1d4ed8;
+}
+
+.original-ui-status.status-error {
+  border-color: rgb(220 38 38 / 35%);
+  color: #b91c1c;
+}
+
+.original-ui-note,
+.original-ui-error {
+  margin: 0;
+  padding: 7px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.original-ui-note {
+  background: #eef4ff;
+  color: #1e3a8a;
+}
+
+.original-ui-error {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.original-ui-frame-shell {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #fff;
+}
+
+.original-ui-frame-shell iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.original-ui-frame-empty {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: #4b5563;
+  text-align: center;
+  background: #fff;
+}
+
+.original-ui-frame-empty strong {
+  color: #111827;
+  font-size: 18px;
+}
+
+.original-ui-frame-empty span {
+  max-width: 560px;
+  font-size: 13px;
+  line-height: 1.5;
+}

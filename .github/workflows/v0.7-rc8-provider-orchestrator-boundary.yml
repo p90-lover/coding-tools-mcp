@@ -1,0 +1,143 @@
+name: v0.7 rc.8 provider orchestrator boundary
+
+on:
+  push:
+    branches:
+      - fix/v0.7-rc8-provider-orchestrator-credential-boundary
+      - release/codex-router-multiprovider-0.7.0-rc.8
+    paths:
+      - aiTemp/rc8-provider-orchestrator-boundary/**
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/electron/provider-execution-router.cjs
+      - desktop-electron/electron/external-services.cjs
+      - desktop-electron/src/api/contracts.ts
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
+      - desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - desktop-electron/tests/five-stack-routing-completion.test.cjs
+      - desktop-electron/tests/external-services-control-plane.test.cjs
+      - .github/workflows/v0.7-rc8-provider-orchestrator-boundary.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.8
+    paths:
+      - aiTemp/rc8-provider-orchestrator-boundary/**
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/ipc-schema.cjs
+      - desktop-electron/electron/provider-execution-router.cjs
+      - desktop-electron/electron/external-services.cjs
+      - desktop-electron/src/api/contracts.ts
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
+      - desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs
+      - desktop-electron/tests/provider-execution-router.test.cjs
+      - desktop-electron/tests/execution-bridge-contract.test.cjs
+      - desktop-electron/tests/five-stack-routing-completion.test.cjs
+      - desktop-electron/tests/external-services-control-plane.test.cjs
+      - .github/workflows/v0.7-rc8-provider-orchestrator-boundary.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc8-provider-orchestrator-boundary-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Five-stack provider and orchestrator contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref_name || github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: ${{ github.event_name == 'push' && github.ref_name == 'fix/v0.7-rc8-provider-orchestrator-credential-boundary' }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Materialize provider and orchestrator credential separation
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            aiTemp/rc8-provider-orchestrator-boundary/renderer \
+            aiTemp/rc8-provider-orchestrator-boundary/tmp
+          python aiTemp/rc8-provider-orchestrator-boundary/apply_patch.py \
+            | tee aiTemp/rc8-provider-orchestrator-boundary/patch.txt
+          grep -F RC8_PROVIDER_ORCHESTRATOR_BOUNDARY_PATCH_OK \
+            aiTemp/rc8-provider-orchestrator-boundary/patch.txt
+
+      - name: Install locked desktop dependencies
+        run: |
+          set -euo pipefail
+          absolute_tmp="$PWD/aiTemp/rc8-provider-orchestrator-boundary/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run renderer, TypeScript, routing, and credential-boundary gates
+        run: |
+          set -euo pipefail
+          renderer_out="$PWD/aiTemp/rc8-provider-orchestrator-boundary/renderer"
+          (
+            bun run --cwd desktop-electron typecheck
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_out" --emptyOutDir false
+            cd ..
+            node --test \
+              desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs \
+              desktop-electron/tests/provider-execution-router.test.cjs \
+              desktop-electron/tests/execution-bridge-contract.test.cjs \
+              desktop-electron/tests/five-stack-routing-completion.test.cjs \
+              desktop-electron/tests/external-services-control-plane.test.cjs
+          ) 2>&1 | tee aiTemp/rc8-provider-orchestrator-boundary/results.txt
+          grep -F '# fail 0' aiTemp/rc8-provider-orchestrator-boundary/results.txt
+
+      - name: Enforce no-delete integration diff
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.8 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD
+          git diff --check
+          committed_deletions="$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD)"
+          working_deletions="$(git diff --diff-filter=D --name-only)"
+          if [[ -n "$committed_deletions" || -n "$working_deletions" ]]; then
+            printf 'Committed deletions:\n%s\nWorking-tree deletions:\n%s\n' \
+              "$committed_deletions" "$working_deletions"
+            exit 1
+          fi
+
+      - name: Commit verified provider and orchestrator boundary
+        if: github.event_name == 'push' && github.ref_name == 'fix/v0.7-rc8-provider-orchestrator-credential-boundary'
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/ipc-schema.cjs \
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ProviderHubSaasSurface.tsx
+          if git diff --cached --quiet; then
+            echo 'provider/orchestrator boundary is already materialized'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(rc8): separate provider and orchestrator credentials'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc8-provider-orchestrator-boundary-${{ github.sha }}
+          path: aiTemp/rc8-provider-orchestrator-boundary/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,25 @@
+name: Archived Provider Hub current materializer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archived-provider-hub-current-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  archived:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report preserved materializer location
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "The completed Provider Hub current-release materializer is archived."
+          echo "Workflow copy: aiTemp/Trash/provider-hub-current/obsolete-workflows/apply-provider-hub-current.yml"
+          echo "Recipe copy: aiTemp/Trash/provider-hub-current/obsolete-recipes/apply_current_release.py"
+          echo "This compatibility workflow performs no repository writes or deletions."

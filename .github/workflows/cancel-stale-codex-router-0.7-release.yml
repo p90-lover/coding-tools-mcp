@@ -1,0 +1,52 @@
+name: Cancel stale Codex Router 0.7 release runs
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.1
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cancel-stale-codex-router-release-0.7.0-rc.1
+  cancel-in-progress: true
+
+jobs:
+  cancel-superseded:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Cancel superseded release workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_WORKFLOW: codex-router-multiprovider-release.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          runs_json="aiTemp/evidence/codex-router-release-runs-${GITHUB_SHA}.json"
+          stale_ids="aiTemp/evidence/codex-router-stale-run-ids-${GITHUB_SHA}.txt"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/${RELEASE_WORKFLOW}/runs?per_page=100" \
+            > "$runs_json"
+          jq -r --arg sha "$GITHUB_SHA" '
+            .workflow_runs[]
+            | select(.head_sha != $sha)
+            | select(.status == "queued" or .status == "pending" or .status == "waiting" or .status == "in_progress")
+            | .id
+          ' "$runs_json" | sort -u > "$stale_ids"
+          while IFS= read -r run_id; do
+            test -n "$run_id" || continue
+            gh api \
+              --method POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel"
+            printf 'cancelled=%s\n' "$run_id"
+          done < "$stale_ids"
+          printf 'current_sha=%s\n' "$GITHUB_SHA"
+          printf 'current_run=%s\n' "$GITHUB_RUN_ID"

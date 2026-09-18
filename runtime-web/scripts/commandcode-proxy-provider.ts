@@ -18,7 +18,6 @@ export type {
   CommandCodeProxyRegistrationPlan,
 } from "../../src/lib/control-center/commandcode-proxy-provider.ts";
 
-
 function option(args: string[], name: string, fallback: string): string {
   const index = args.indexOf(name);
   if (index < 0) return fallback;

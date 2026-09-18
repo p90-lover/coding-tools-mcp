@@ -1,0 +1,5 @@
+Exact committed-source validation trigger for the unified CPA OAuth implementation.
+
+Production commit: a23be36ddf7257e3fd1bf89614d0182847bc6e6a
+
+The next workflow run must detect the implementation as already materialized, skip patch application, and validate the committed runtime, tests, TypeScript, renderer, bundle, and no-delete boundaries. No project file or branch is deleted.

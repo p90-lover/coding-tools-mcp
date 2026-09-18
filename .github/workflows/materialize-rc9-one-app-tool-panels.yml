@@ -1,0 +1,66 @@
+name: materialize rc.9 one-app tool panels
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.9-one-app-tool-panels-merge
+    paths:
+      - '.github/workflows/materialize-rc9-one-app-tool-panels.yml'
+      - 'aiTemp/rc9-one-app-tool-panels/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-one-app-tool-panels-materializer
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Probe the verified tool-panel merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin cursor/paseo-anneal-commandcode-a6ef:refs/remotes/origin/rc9-tool-panels-source
+
+          set +e
+          git merge --no-commit --no-ff refs/remotes/origin/rc9-tool-panels-source
+          merge_status=$?
+          set -e
+
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$conflicts" ]; then
+            echo 'RC9_TOOL_PANEL_CONFLICTS_BEGIN'
+            printf '%s\n' "$conflicts"
+            echo 'RC9_TOOL_PANEL_CONFLICTS_END'
+            exit 2
+          fi
+          if [ "$merge_status" -ne 0 ]; then
+            echo "Merge failed without conflict paths (status $merge_status)." >&2
+            exit 1
+          fi
+
+          base_before="$(git rev-parse HEAD)"
+          git add -A
+          git diff --cached --diff-filter=D --exit-code "$base_before"
+          node --test \
+            desktop-electron/tests/original-upstream-panels.test.cjs \
+            desktop-electron/tests/upstream-tools.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs
+          git commit -m 'merge(rc9): add Paseo Anneal and CommandCode panels'
+          git push origin HEAD:integration/v0.7.0-rc.9-one-app-tool-panels-merge

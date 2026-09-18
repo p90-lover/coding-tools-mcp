@@ -1,0 +1,5 @@
+release=v0.7.0-rc.6
+purpose=authoritative Windows build after Paseo, Anneal, and Provider Hub Traditional Chinese UI parity merge
+ui_merge=ad6ed83c42407c45b7cfc18c34e7cfa64e464e47
+stale_release_run=35172711486 cancelled
+supersession_run=35173441251 passed

@@ -1,0 +1,17 @@
+name: Legacy rc.6 release workflow (manual notice)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  superseded:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Explain the authoritative release workflow
+        run: |
+          echo 'This legacy rc.6 release workflow is retained only as a manual notice.'
+          echo 'Use .github/workflows/codex-router-multiprovider-release-rc6-csc.yml for exact-source rc.6 validation and publication.'
+          echo 'The original workflow source is preserved at aiTemp/Trash/workflows/codex-router-multiprovider-release-rc6-legacy.yml.'

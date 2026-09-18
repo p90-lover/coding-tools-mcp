@@ -141,7 +141,7 @@ jobs:
         run: npm run build
 
       - name: Run Node contract tests
-        run: node --test tests/*.test.mjs
+        run: node --test tests/*.test.mjs tests/upstream/*.test.mjs
 
       - name: NPM audit
         run: npm audit --audit-level=low

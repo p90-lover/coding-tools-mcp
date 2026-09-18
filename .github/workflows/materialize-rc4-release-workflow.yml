@@ -1,0 +1,82 @@
+name: Materialize rc.4 release workflow
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.4
+    paths:
+      - aiTemp/rc4-release/materialize_release_workflow.py
+      - .github/workflows/materialize-rc4-release-workflow.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-codex-router-release-rc4
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: github.ref == 'refs/heads/release/codex-router-multiprovider-0.7.0-rc.4'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          clean: false
+          persist-credentials: true
+
+      - name: Prepare retained evidence roots
+        run: mkdir -p aiTemp/rc4-release/evidence aiTemp/Trash/rc4-release
+
+      - name: Materialize the rc.4 workflow
+        run: |
+          set -euo pipefail
+          python aiTemp/rc4-release/materialize_release_workflow.py \
+            | tee aiTemp/rc4-release/evidence/materialization.txt
+          grep -F CODEX_ROUTER_RC4_RELEASE_WORKFLOW_MATERIALIZED \
+            aiTemp/rc4-release/evidence/materialization.txt
+
+      - name: Verify bounded release-workflow changes
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+          target='.github/workflows/codex-router-multiprovider-release-rc4.yml'
+          evidence='aiTemp/rc4-release/evidence/materialization.txt'
+          test -f "$target"
+          test -f "$evidence"
+          mapfile -t changed_paths < <(
+            git status --short --untracked-files=all \
+              | sed -E 's/^.. //'
+          )
+          printf 'materialized path: %s\n' "${changed_paths[@]}"
+          printf '%s\n' "${changed_paths[@]}" | grep -Fxq "$target"
+          printf '%s\n' "${changed_paths[@]}" | grep -Fxq "$evidence"
+          unexpected="$({ printf '%s\n' "${changed_paths[@]}" \
+            | grep -Fvx "$target" \
+            | grep -Fvx "$evidence"; } || true)"
+          test -z "$unexpected"
+          grep -F "release/codex-router-multiprovider-0.7.0-rc.4" "$target"
+          grep -F "RELEASE_VERSION: '0.7.0-rc.4'" "$target"
+          grep -F "provider-center-account-wiring.test.cjs" "$target"
+          grep -F "docs/releases/v0.7.0-rc.4.md" "$target"
+          if grep -F "0.7.0-rc.3" "$target"; then
+            echo "Stale rc.3 identity found in rc.4 release workflow" >&2
+            exit 1
+          fi
+
+      - name: Commit the release workflow
+        run: |
+          set -euo pipefail
+          git add .github/workflows/codex-router-multiprovider-release-rc4.yml
+          if git diff --cached --quiet; then
+            echo RC4_RELEASE_WORKFLOW_ALREADY_MATERIALIZED
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'build(rc4): materialize exact-source release pipeline'
+          git push origin HEAD:refs/heads/release/codex-router-multiprovider-0.7.0-rc.4

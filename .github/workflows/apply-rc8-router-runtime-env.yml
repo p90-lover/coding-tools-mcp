@@ -1,0 +1,124 @@
+name: Apply rc.8 router runtime environment binding
+
+on:
+  push:
+    branches:
+      - fix/rc8-router-runtime-env-and-endpoints
+    paths:
+      - 'aiTemp/rc8-router-runtime-env/apply.py'
+      - 'desktop-electron/tests/external-services-control-plane.test.cjs'
+      - '.github/workflows/apply-rc8-router-runtime-env.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc8-router-runtime-env
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc8-router-runtime-env/bun-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/rc8-router-runtime-env-and-endpoints
+          fetch-depth: 0
+          clean: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained roots
+        run: |
+          mkdir -p \
+            aiTemp/rc8-router-runtime-env/evidence \
+            aiTemp/rc8-router-runtime-env/renderer-dist \
+            aiTemp/Trash/rc8-router-runtime-env
+
+      - name: Apply guarded runtime environment patch
+        run: |
+          set -euo pipefail
+          python aiTemp/rc8-router-runtime-env/apply.py \
+            2>&1 | tee aiTemp/rc8-router-runtime-env/evidence/materializer.txt
+          grep -F RC8_ROUTER_RUNTIME_ENV_APPLIED \
+            aiTemp/rc8-router-runtime-env/evidence/materializer.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Enforce bounded source scope
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf '%s\n' \
+            desktop-electron/electron/external-services.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/runtime-supervisor.cjs | sort)"
+          printf 'changed files:\n%s\n' "$changed" \
+            | tee aiTemp/rc8-router-runtime-env/evidence/changed-files.txt
+          test "$changed" = "$expected"
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run focused contracts and syntax checks
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/runtime-supervisor.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            2>&1 | tee aiTemp/rc8-router-runtime-env/evidence/contracts.txt
+          node --check desktop-electron/electron/external-services.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/runtime-supervisor.cjs
+
+      - name: Typecheck and build renderer
+        run: |
+          set -euo pipefail
+          bun run --cwd desktop-electron typecheck
+          renderer_dir="$GITHUB_WORKSPACE/aiTemp/rc8-router-runtime-env/renderer-dist"
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_dir" --emptyOutDir false
+          )
+          CODING_TOOLS_RENDERER_DIST="$renderer_dir" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+
+      - name: Commit verified runtime binding
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/external-services.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/runtime-supervisor.cjs
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'Router runtime environment binding is already committed.'
+            exit 0
+          fi
+          git commit -m 'fix(rc8): bind router settings into packaged runtime'
+          git push origin HEAD:fix/rc8-router-runtime-env-and-endpoints
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/rc8-router-runtime-env/node_modules-$GITHUB_RUN_ID"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: apply-rc8-router-runtime-env-${{ github.sha }}
+          path: aiTemp/rc8-router-runtime-env/evidence/
+          if-no-files-found: warn
+          retention-days: 14

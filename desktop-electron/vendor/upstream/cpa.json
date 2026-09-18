@@ -1,0 +1,33 @@
+{
+  "id": "cpa",
+  "name": "CPA / CLIProxyAPI",
+  "repository": "router-for-me/CLIProxyAPI",
+  "commit": "v7.3.7",
+  "version": "7.3.7",
+  "license": "MIT",
+  "licenseFile": "LICENSE",
+  "defaultEndpoint": "http://127.0.0.1:8317/",
+  "environmentEndpoint": "CODING_TOOLS_CPA_URL",
+  "sections": [
+    "dashboard",
+    "ai-providers",
+    "auth-files",
+    "oauth",
+    "quota",
+    "config",
+    "logs",
+    "system",
+    "plugins"
+  ],
+  "sectionPaths": {
+    "dashboard": "/management.html#/dashboard",
+    "ai-providers": "/management.html#/ai-providers",
+    "auth-files": "/management.html#/auth-files",
+    "oauth": "/management.html#/oauth",
+    "quota": "/management.html#/quota",
+    "config": "/management.html#/config",
+    "logs": "/management.html#/logs",
+    "system": "/management.html#/system",
+    "plugins": "/management.html#/plugins"
+  }
+}

@@ -1,0 +1,170 @@
+name: Apply multi-provider Codex Router wiring
+
+on:
+  push:
+    branches:
+      - subagent/codex-router-multiprovider-0.7.0-20260915
+    paths:
+      - .github/workflows/codex-router-multiprovider-apply.yml
+      - aiTemp/codex-router-multiprovider/apply-server.py
+      - aiTemp/codex-router-multiprovider/apply-router-web-ingress.py
+      - aiTemp/codex-router-multiprovider/apply-cli-router-command.py
+      - aiTemp/codex-router-multiprovider/fix-fetch-types.py
+      - aiTemp/codex-router-multiprovider/fix-agent-smoke.py
+      - aiTemp/codex-router-multiprovider/fix-global-router-agent-definition.py
+      - runtime-web/package.json
+      - runtime-web/src/cli.ts
+      - runtime-web/src/routed-providers.ts
+      - runtime-web/src/routed-agent-catalog.ts
+      - runtime-web/src/router-web-ingress.ts
+      - runtime-web/scripts/commandcode-proxy-provider.ts
+      - runtime-web/scripts/codex-router-coding-tools-web-provider.ts
+      - runtime-web/scripts/codex-router-integration.ts
+      - runtime-web/scripts/smoke-codex-router-agent-types.ts
+      - runtime-web/scripts/smoke-codex-router-global-agents.ts
+      - runtime-web/tests/cli-codex-router-integration.test.ts
+      - runtime-web/tests/routed-providers.test.ts
+      - runtime-web/tests/routed-agent-catalog.test.ts
+      - runtime-web/tests/router-web-ingress.test.ts
+      - runtime-web/tests/commandcode-proxy-provider.test.ts
+      - runtime-web/tests/codex-router-coding-tools-web-provider.test.ts
+      - runtime-web/tests/codex-router-integration.test.ts
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-router-multiprovider-apply
+  cancel-in-progress: false
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Apply exact idempotent integration patches
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence aiTemp/tmp aiTemp/Trash/routed-agent-smoke
+          python aiTemp/codex-router-multiprovider/apply-server.py \
+            | tee aiTemp/evidence/routed-provider-server-patch.txt
+          python aiTemp/codex-router-multiprovider/apply-router-web-ingress.py \
+            | tee aiTemp/evidence/router-web-ingress-server-patch.txt
+          python aiTemp/codex-router-multiprovider/apply-cli-router-command.py \
+            | tee aiTemp/evidence/router-cli-command-patch.txt
+          python aiTemp/codex-router-multiprovider/fix-fetch-types.py \
+            | tee aiTemp/evidence/routed-provider-type-patch.txt
+          python aiTemp/codex-router-multiprovider/fix-agent-smoke.py \
+            | tee aiTemp/evidence/routed-agent-smoke-patch.txt
+          python aiTemp/codex-router-multiprovider/fix-global-router-agent-definition.py \
+            | tee aiTemp/evidence/global-router-agent-definition-patch.txt
+          grep -F ROUTED_PROVIDER_SERVER_PATCH_OK aiTemp/evidence/routed-provider-server-patch.txt
+          grep -F ROUTER_WEB_INGRESS_SERVER_PATCH_OK aiTemp/evidence/router-web-ingress-server-patch.txt
+          grep -F CODEX_ROUTER_CLI_COMMAND_PATCH_OK aiTemp/evidence/router-cli-command-patch.txt
+          grep -F ROUTED_PROVIDER_FETCH_TYPES_PATCH_OK aiTemp/evidence/routed-provider-type-patch.txt
+          grep -F ROUTED_AGENT_SMOKE_DIAGNOSTICS_PATCH_OK aiTemp/evidence/routed-agent-smoke-patch.txt
+          grep -F GLOBAL_ROUTER_AGENT_DEFINITION_PATCH_OK aiTemp/evidence/global-router-agent-definition-patch.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+
+      - name: Install runtime dependencies
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd runtime-web --frozen-lockfile \
+            2>&1 | tee aiTemp/evidence/install.txt
+
+      - name: Run focused provider and catalog contracts
+        run: |
+          set -euo pipefail
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun test --cwd runtime-web \
+              tests/cli-codex-router-integration.test.ts \
+              tests/routed-providers.test.ts \
+              tests/routed-agent-catalog.test.ts \
+              tests/router-web-ingress.test.ts \
+              tests/commandcode-proxy-provider.test.ts \
+              tests/codex-router-coding-tools-web-provider.test.ts \
+              tests/codex-router-integration.test.ts \
+              tests/model-catalog.test.ts \
+            2>&1 | tee aiTemp/evidence/tests.txt
+          grep -F '0 fail' aiTemp/evidence/tests.txt
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd runtime-web typecheck \
+            2>&1 | tee aiTemp/evidence/typecheck.txt
+
+      - name: Install pinned official Codex fixture
+        run: |
+          set -euo pipefail
+          python aiTemp/electron-codex-smoke/install.py \
+            > aiTemp/evidence/codex-path.txt 2> aiTemp/evidence/codex-install.txt
+          codex="$(cat aiTemp/evidence/codex-path.txt)"
+          test -x "$codex"
+          echo "CODEX_SMOKE_BIN=$codex" >> "$GITHUB_ENV"
+          "$codex" --version | tee aiTemp/evidence/codex-version.txt
+          grep -F 'codex-cli 0.154.0' aiTemp/evidence/codex-version.txt
+
+      - name: Prove one global router provider with a model-routed child
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          export CODING_TOOLS_TEMP_ROOT="$PWD/aiTemp/tmp"
+          export CODING_TOOLS_RETENTION_ROOT="$PWD/aiTemp/Trash/routed-agent-smoke"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            CODEX_SMOKE_BIN="$CODEX_SMOKE_BIN" \
+            bun run --cwd runtime-web scripts/smoke-codex-router-global-agents.ts \
+            2>&1 | tee aiTemp/evidence/routed-agent-smoke.txt
+          grep -F CODEX_ROUTER_GLOBAL_AGENT_SMOKE_OK aiTemp/evidence/routed-agent-smoke.txt
+          grep -F 'commandcode-proxy/claude-sonnet-4-6' aiTemp/evidence/routed-agent-smoke.txt
+          grep -F ROUTED_AGENT_SMOKE_RETAINED aiTemp/evidence/routed-agent-smoke.txt
+          test -z "$(grep -Ei 'api\.openai\.com|chatgpt\.com|platform\.openai\.com' aiTemp/evidence/routed-agent-smoke.txt || true)"
+
+      - name: Commit only verified integration files
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+          remote_head="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)"
+          test "$remote_head" = "$GITHUB_SHA"
+          git add \
+            runtime-web/package.json \
+            runtime-web/src/cli.ts \
+            runtime-web/src/server.ts \
+            runtime-web/src/routed-providers.ts \
+            runtime-web/src/routed-agent-catalog.ts \
+            runtime-web/src/router-web-ingress.ts \
+            runtime-web/tests/cli-codex-router-integration.test.ts \
+            runtime-web/tests/routed-providers.test.ts \
+            runtime-web/tests/routed-agent-catalog.test.ts \
+            runtime-web/tests/router-web-ingress.test.ts \
+            runtime-web/scripts/smoke-codex-router-agent-types.ts \
+            runtime-web/scripts/smoke-codex-router-global-agents.ts
+          if ! git diff --cached --quiet; then
+            git config user.name 'p90-lover'
+            git config user.email '146848721+p90-lover@users.noreply.github.com'
+            git commit -m 'feat: verify multi-provider Codex Router integration'
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: codex-router-multiprovider-${{ github.run_id }}
+          path: aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14
