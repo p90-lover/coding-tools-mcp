@@ -15,6 +15,7 @@ on:
       - 'desktop-electron/src/features/external-services.css'
       - 'desktop-electron/vendor/managed-components/**'
       - 'desktop-electron/tests/rc9-managed-five-stack.test.cjs'
+      - 'desktop-electron/tests/external-services-control-plane.test.cjs'
       - 'desktop-electron/package.json'
       - '.github/workflows/rc9-managed-five-stack.yml'
   pull_request:
@@ -29,6 +30,7 @@ on:
       - 'desktop-electron/src/features/external-services.css'
       - 'desktop-electron/vendor/managed-components/**'
       - 'desktop-electron/tests/rc9-managed-five-stack.test.cjs'
+      - 'desktop-electron/tests/external-services-control-plane.test.cjs'
       - 'desktop-electron/package.json'
       - '.github/workflows/rc9-managed-five-stack.yml'
   workflow_dispatch:
