@@ -364,6 +364,32 @@ test("Control Center Start uses the bundled renderer and Coding Tools Electron w
   assert.doesNotMatch(managed, /npm ci/);
 });
 
+test("Windows package-time npm ci uses cmd.exe so Node does not EINVAL on npm.cmd", () => {
+  const {
+    npmExecutable,
+    windowsBatchSpawn,
+  } = require("../scripts/prepare-bundled-runtimes.cjs");
+  assert.equal(npmExecutable("win32"), "npm.cmd");
+  assert.equal(npmExecutable("linux"), "npm");
+  assert.deepEqual(
+    windowsBatchSpawn("npm.cmd", ["ci", "--omit=dev"], {
+      platform: "win32",
+      env: { ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+    }),
+    {
+      executable: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/s", "/c", "npm.cmd", "ci", "--omit=dev"],
+    },
+  );
+  assert.deepEqual(
+    windowsBatchSpawn("npm", ["ci"], { platform: "linux" }),
+    { executable: "npm", args: ["ci"] },
+  );
+  const bundled = read("scripts/prepare-bundled-runtimes.cjs");
+  assert.match(bundled, /windowsBatchSpawn/);
+  assert.match(bundled, /\/d", "\/s", "\/c"/);
+});
+
 test("packaging ships bundled CPA and Codex Router outside the download path", () => {
   const pack = JSON.parse(read("package.json"));
   const resources = read("scripts/prepare-package-resources.cjs");

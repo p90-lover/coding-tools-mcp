@@ -50,11 +50,27 @@ function writeJson(filePath, value) {
   });
 }
 
+function windowsBatchSpawn(executable, args, { platform = process.platform, env = process.env } = {}) {
+  if (platform !== "win32" || !/\.(?:cmd|bat)$/i.test(String(executable))) {
+    return { executable, args };
+  }
+  return {
+    executable: env.ComSpec || process.env.ComSpec || "cmd.exe",
+    args: ["/d", "/s", "/c", executable, ...args],
+  };
+}
+
 function runChecked(executable, args, options = {}) {
-  const result = spawnSync(executable, args, {
+  const { platform, ...spawnOptions } = options;
+  const spawned = windowsBatchSpawn(executable, args, {
+    platform: platform || process.platform,
+    env: spawnOptions.env || process.env,
+  });
+  const result = spawnSync(spawned.executable, spawned.args, {
     encoding: "utf8",
     windowsHide: true,
-    ...options,
+    ...spawnOptions,
+    shell: false,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -312,5 +328,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  npmExecutable,
   prepareBundledRuntimes,
+  windowsBatchSpawn,
 };
