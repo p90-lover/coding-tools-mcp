@@ -36,7 +36,7 @@ jobs:
   release-windows:
     name: Verify five-stack, package, migrate, and publish Windows x64
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:

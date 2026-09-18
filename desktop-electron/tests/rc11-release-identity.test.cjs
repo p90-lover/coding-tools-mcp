@@ -6,7 +6,13 @@ const path = require("node:path");
 const test = require("node:test");
 
 const repo = path.resolve(__dirname, "..", "..");
-const read = (relative) => fs.readFileSync(path.join(repo, relative), "utf8");
+const read = (relative) => fs.readFileSync(path.join(repo, relative), "utf8").replace(/\r\n/g, "\n");
+
+test("rc.11 identity source reads stay LF-normalized on Windows checkouts", () => {
+  const workflow = read(".github/workflows/codex-router-multiprovider-release-rc11.yml");
+  assert.equal(workflow.includes("\r"), false);
+  assert.match(workflow, /\n {2}push:\n {4}branches:\n {6}- main/);
+});
 
 test("rc.11 product and package identities are aligned", () => {
   const manifest = JSON.parse(read("desktop-electron/package.json"));
