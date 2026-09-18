@@ -244,6 +244,50 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
   assert.match(windowsPath, /nodejs/);
 });
 
+test("Windows five-stack npm prepare merges Path and PATH when bun splits them", () => {
+  const root = temporaryDirectory("coding-tools-windows-split-path");
+  const bunShimDir = path.join(root, "bun");
+  const nodeDir = path.join(root, "nodejs");
+  fs.mkdirSync(bunShimDir, { recursive: true });
+  fs.mkdirSync(nodeDir, { recursive: true });
+  fs.writeFileSync(path.join(bunShimDir, "bun.exe"), "");
+  fs.writeFileSync(path.join(bunShimDir, "npm.cmd"), "@echo bun-npm-shim\r\n");
+  fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo real-npm\r\n");
+  fs.writeFileSync(path.join(nodeDir, "node.exe"), "");
+
+  const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
+    PATH: bunShimDir,
+    Path: `${nodeDir};C:\\Windows\\system32`,
+    ComSpec: "C:\\Windows\\System32\\cmd.exe",
+  });
+  assert.equal(windows.args[3], path.join(nodeDir, "npm.cmd"));
+  assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
+  assert.equal(windows.options.env.Path, windows.options.env.PATH);
+  assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
+});
+
+test("Windows five-stack npm prepare keeps an explicit node.exe even if bun dropped PATH", () => {
+  const root = temporaryDirectory("coding-tools-windows-explicit-node");
+  const bunShimDir = path.join(root, "bun");
+  const nodeDir = path.join(root, "nodejs");
+  const nodeExe = path.join(nodeDir, "node.exe");
+  fs.mkdirSync(bunShimDir, { recursive: true });
+  fs.mkdirSync(nodeDir, { recursive: true });
+  fs.writeFileSync(path.join(bunShimDir, "bun.exe"), "");
+  fs.writeFileSync(path.join(bunShimDir, "npm.cmd"), "@echo bun-npm-shim\r\n");
+  fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo real-npm\r\n");
+  fs.writeFileSync(nodeExe, "");
+
+  const windows = npmSpawnInvocation(["ci"], "win32", {
+    PATH: bunShimDir,
+    CODING_TOOLS_NODE_EXE: nodeExe,
+    ComSpec: "C:\\Windows\\System32\\cmd.exe",
+  });
+  assert.equal(windows.options.env.npm_node_execpath, nodeExe);
+  assert.equal(windows.args[3], path.join(nodeDir, "npm.cmd"));
+  assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
+});
+
 test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {
   const repositoryRoot = temporaryDirectory("coding-tools-five-stack-npm");
   const desktopDir = path.join(repositoryRoot, "desktop-electron");

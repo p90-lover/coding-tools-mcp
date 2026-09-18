@@ -211,6 +211,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw 'Rust headless release build failed' }
+          $node = Get-Command node -ErrorAction Stop
+          $env:CODING_TOOLS_NODE_EXE = $node.Source
+          $env:npm_node_execpath = $node.Source
+          $env:Path = "$(Split-Path -Parent $node.Source);$env:Path"
           bun run --cwd desktop-electron package:win
           if ($LASTEXITCODE -ne 0) { throw 'Windows package build failed' }
 

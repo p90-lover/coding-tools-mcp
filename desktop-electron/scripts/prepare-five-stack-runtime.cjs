@@ -152,9 +152,16 @@ function envPathDelimiter(platform = process.platform) {
 }
 
 function envPathParts(env, platform = process.platform) {
-  return String(env[envPathKey(env, platform)] || "")
-    .split(envPathDelimiter(platform))
-    .filter(Boolean);
+  const delimiter = envPathDelimiter(platform);
+  const values = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toLowerCase() === "path" && value) values.push(String(value));
+  }
+  if (values.length === 0) {
+    const fallback = env[envPathKey(env, platform)];
+    if (fallback) values.push(String(fallback));
+  }
+  return values.flatMap((chunk) => chunk.split(delimiter)).filter(Boolean);
 }
 
 function nodeExecutableName(platform = process.platform) {
@@ -171,6 +178,10 @@ function directoryHasBun(dir, platform = process.platform) {
 
 function resolveNodeExecutable(env = process.env, platform = process.platform) {
   const nodeName = nodeExecutableName(platform);
+  for (const key of ["CODING_TOOLS_NODE_EXE", "npm_node_execpath"]) {
+    const candidate = env[key];
+    if (candidate && isFile(candidate) && !isBunExecutable(candidate)) return candidate;
+  }
   const searchDirs = [...envPathParts(env, platform)];
   if (
     !isBunExecutable(process.execPath)
