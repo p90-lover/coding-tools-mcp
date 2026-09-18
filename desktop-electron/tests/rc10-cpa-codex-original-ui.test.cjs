@@ -203,6 +203,7 @@ test("managed CPA keeps the original control panel enabled on loopback", () => {
   assert.match(adapter, /allow-remote: false/);
   assert.match(adapter, /host: \\"127\.0\.0\.1\\"/);
   assert.match(adapter, /--no-browser/);
+  assert.match(adapter, /cpa-codex-long-run/);
 });
 
 test("desktop shell routes CPA and Codex Router to the original UI surface", () => {
@@ -228,8 +229,10 @@ test("desktop shell routes CPA and Codex Router to the original UI surface", () 
   assert.match(app, /toolId="codex-router"/);
   assert.match(surface, /data-original-chrome="true"/);
   assert.match(surface, /Copy management key/);
+  assert.match(surface, /reconnectGeneration/);
   assert.match(css, /\.original-ui-surface/);
   assert.match(css, /flex: 1 1 auto/);
   assert.match(integrations, /Open original UI/);
   assert.doesNotMatch(integrations, /CPA Provider Hub/);
+  assert.match(main, /cpa-codex-long-run\.json/);
 });

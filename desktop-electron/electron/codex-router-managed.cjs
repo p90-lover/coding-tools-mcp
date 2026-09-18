@@ -3,6 +3,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const {
+  applyLongRunLiteLlmTimeout,
+  routerLongRunEnvironment,
+} = require("./cpa-codex-long-run.cjs");
 
 function fail(message) {
   process.stderr.write(`${message}\n`);
@@ -35,6 +39,7 @@ function environment(home, state) {
     CODEX_HOME: codexHome,
     CODEX_ROUTER_SOURCE_ROOT: home,
     CODEX_ROUTER_NODE_BIN: process.execPath,
+    ...routerLongRunEnvironment(),
   };
 }
 
@@ -66,16 +71,23 @@ function writeWrapper(filePath, value, mode) {
   if (process.platform !== "win32") fs.chmodSync(filePath, mode);
 }
 
+function wrapperExports(env, quote) {
+  return [
+    ["MODEL_ROUTER_TARGET", "codex"],
+    ["MODEL_ROUTER_STATE_DIR", env.MODEL_ROUTER_STATE_DIR],
+    ["CODEX_ROUTER_STATE_DIR", env.CODEX_ROUTER_STATE_DIR],
+    ["CODEX_HOME", env.CODEX_HOME],
+    ...Object.entries(routerLongRunEnvironment()),
+  ].map(([name, value]) => [name, quote ? quote(value) : value]);
+}
+
 function wrappers(home, state, env) {
   const bin = path.join(state, "bin");
   if (process.platform === "win32") {
     writeWrapper(path.join(bin, "model-router.cmd"), [
       "@echo off",
       "setlocal",
-      "set MODEL_ROUTER_TARGET=codex",
-      `set MODEL_ROUTER_STATE_DIR=${env.MODEL_ROUTER_STATE_DIR}`,
-      `set CODEX_ROUTER_STATE_DIR=${env.CODEX_ROUTER_STATE_DIR}`,
-      `set CODEX_HOME=${env.CODEX_HOME}`,
+      ...wrapperExports(env).map(([name, value]) => `set ${name}=${value}`),
       `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${quoteCmd(path.join(home, "codex-router.ps1"))} %*`,
       "",
     ].join("\r\n"), 0o600);
@@ -83,17 +95,15 @@ function wrappers(home, state, env) {
       "@echo off",
       "setlocal",
       `set MODEL_ROUTER_STATE_DIR=${env.MODEL_ROUTER_STATE_DIR}`,
+      ...wrapperExports(env).map(([name, value]) => `set ${name}=${value}`),
       `${quoteCmd(process.execPath)} ${quoteCmd(path.join(home, "src", "curate-models.mjs"))} %*`,
       "",
     ].join("\r\n"), 0o600);
     return;
   }
-  const exports = [
-    "export MODEL_ROUTER_TARGET=codex",
-    `export MODEL_ROUTER_STATE_DIR=${quoteSh(env.MODEL_ROUTER_STATE_DIR)}`,
-    `export CODEX_ROUTER_STATE_DIR=${quoteSh(env.CODEX_ROUTER_STATE_DIR)}`,
-    `export CODEX_HOME=${quoteSh(env.CODEX_HOME)}`,
-  ].join("\n");
+  const exports = wrapperExports(env, quoteSh)
+    .map(([name, value]) => `export ${name}=${value}`)
+    .join("\n");
   writeWrapper(
     path.join(bin, "model-router"),
     `#!/usr/bin/env bash\nset -euo pipefail\n${exports}\nexec bash ${quoteSh(path.join(home, "bin", "model-router"))} codex "$@"\n`,
@@ -124,6 +134,7 @@ function prepare(home, state) {
     runChecked("bash", [requiredFile(home, "bin/install"), "--prepare-only"], home, env);
   }
   wrappers(home, state, env);
+  applyLongRunLiteLlmTimeout(home);
   const { ensureOriginalControlCenter } = require("./codex-router-original-ui.cjs");
   try {
     ensureOriginalControlCenter(home);
@@ -137,6 +148,7 @@ function prepare(home, state) {
 }
 
 function run(home, state) {
+  applyLongRunLiteLlmTimeout(home);
   const env = environment(home, state);
   const child = spawn(process.execPath, [requiredFile(home, "src/foreground-start.mjs")], {
     cwd: home,
@@ -157,9 +169,17 @@ function run(home, state) {
   });
 }
 
-const [action, homeValue, stateValue] = process.argv.slice(2);
-const home = absolute(homeValue, "Codex Router home");
-const state = absolute(stateValue, "Codex Router state");
-if (action === "prepare") prepare(home, state);
-else if (action === "run") run(home, state);
-else fail(`Unsupported managed Codex Router action: ${action || "missing"}`);
+if (require.main === module) {
+  const [action, homeValue, stateValue] = process.argv.slice(2);
+  const home = absolute(homeValue, "Codex Router home");
+  const state = absolute(stateValue, "Codex Router state");
+  if (action === "prepare") prepare(home, state);
+  else if (action === "run") run(home, state);
+  else fail(`Unsupported managed Codex Router action: ${action || "missing"}`);
+}
+
+module.exports = {
+  environment,
+  prepare,
+  run,
+};
