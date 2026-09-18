@@ -271,7 +271,7 @@ def patch_styles() -> None:
 }
 '''
     if ".external-services-surface.is-focused .external-services-summary" not in source:
-        path.write_text(source.rstrip() + addition + "\n", encoding="utf-8")
+        path.write_text(source.rstrip() + addition.rstrip() + "\n", encoding="utf-8")
         print(f"patched: {path}")
 
 
