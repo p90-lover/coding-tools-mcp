@@ -89,24 +89,31 @@ test("managed component controller stages under aiTemp and preserves replaced in
   assert.doesNotMatch(source, /\b(?:rmSync|unlinkSync|rmdirSync)\s*\(/);
 });
 
-test("managed installation is wired through focused IPC, preload, types and the Integrations UI", () => {
+test("managed installation is wired through the combined controller, focused IPC, preload, types and UI", () => {
   const main = read("electron/main.cjs");
+  const combined = read("electron/managed-external-services.cjs");
   const preload = read("electron/preload.cjs");
   const types = read("src/types.ts");
   const surface = read("src/features/ExternalServicesSurface.tsx");
 
-  assert.match(main, /createManagedComponentController/);
+  assert.match(main, /createManagedExternalServicesController/);
+  assert.match(main, /launcher:managed-components-snapshot/);
   assert.match(main, /launcher:managed-component-install/);
   assert.match(main, /launcher:managed-component-repair/);
+  assert.match(combined, /createManagedComponentController/);
+  assert.match(combined, /installManagedComponent/);
+  assert.match(combined, /repairManagedComponent/);
+  assert.match(preload, /managedComponentsSnapshot/);
   assert.match(preload, /installManagedComponent/);
   assert.match(preload, /repairManagedComponent/);
   assert.match(types, /ManagedComponentInstallState/);
   assert.match(types, /installManagedComponent\(serviceId: ExternalServiceId\)/);
   assert.match(surface, /Install \/ Repair|安裝／修復/);
   assert.match(surface, /managedInstall/);
+  assert.match(surface, /Advanced manual configuration|進階手動設定/);
 });
 
-test("packaging retains managed manifests and the manager module", () => {
+test("packaging retains managed manifests and manager modules", () => {
   const packageJson = readJson("package.json");
   assert.ok(packageJson.build.files.includes("vendor/managed-components/**"));
   assert.ok(packageJson.build.files.includes("electron/**"));
