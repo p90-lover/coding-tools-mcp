@@ -27,14 +27,43 @@ test("all external runtimes have pinned in-app managed component manifests", () 
   }
 });
 
-test("Codex Router is pinned to a checksum-verified Windows release binary", () => {
+test("Codex Router installs pinned source through the managed foreground adapter", () => {
   const manifest = readJson("vendor/managed-components/codex-router.json");
-  assert.equal(manifest.strategy, "release-binary");
+  assert.equal(manifest.strategy, "git-source");
   assert.equal(manifest.repository, "duolahypercho/codex-router");
   assert.equal(manifest.version, "0.6.0");
-  assert.match(manifest.platforms.win32.x64.url, /model-router-0\.6\.0-windows-x64\.exe$/);
-  assert.match(manifest.platforms.win32.x64.sha256, /^[a-f0-9]{64}$/);
-  assert.equal(manifest.configure.runtimeCommand, "router integrate");
+  assert.equal(manifest.commit, "930f547d8d8861a47e18a83216e15e73a73aa97c");
+  assert.equal(manifest.platformModes.win32, "native");
+
+  const steps = new Map(manifest.install.steps.map((step) => [step.id, step]));
+  assert.deepEqual([...steps.keys()], [
+    "prepare-codex-router",
+    "assert-router-source",
+    "assert-curation-source",
+    "activate",
+  ]);
+  assert.deepEqual(steps.get("prepare-codex-router").arguments, [
+    "{adapterRoot}/codex-router-managed.cjs",
+    "prepare",
+    "{home}",
+    "{state}",
+  ]);
+  assert.equal(steps.get("assert-router-source").path, "src/foreground-start.mjs");
+  assert.equal(steps.get("assert-curation-source").path, "src/curate-models.mjs");
+
+  assert.equal(manifest.launch.primaryProcessId, "router");
+  assert.equal(manifest.launch.processes[0].id, "router");
+  assert.equal(manifest.launch.processes[0].mode, "foreground");
+  assert.equal(manifest.launch.processes[0].executable, "{runtime}");
+  assert.deepEqual(manifest.launch.processes[0].arguments, [
+    "{adapterRoot}/codex-router-managed.cjs",
+    "run",
+    "{home}",
+    "{state}",
+  ]);
+  assert.equal(manifest.cli.win32.router, "{state}/bin/model-router.cmd");
+  assert.equal(manifest.cli.win32.curate, "{state}/bin/curate-models.cmd");
+  assert.match(manifest.health.endpoint, /_codex-router\/\{callerKey\}\/v1\/models$/);
 });
 
 test("CommandCode Proxy is a pinned managed service using the existing CLI session authority", () => {
@@ -59,7 +88,7 @@ test("Paseo installation builds and runs the pinned upstream server", () => {
   assert.equal(manifest.health.endpoint, "http://127.0.0.1:6768/");
 });
 
-test("Anneal includes PostgreSQL, API, runner and web with a Windows WSL2 boundary", () => {
+test("Anneal preserves config and guards its dedicated database migration", () => {
   const manifest = readJson("vendor/managed-components/anneal.json");
   assert.equal(manifest.strategy, "git-source");
   assert.equal(manifest.repository, "mosonlab/anneal");
@@ -71,8 +100,33 @@ test("Anneal includes PostgreSQL, API, runner and web with a Windows WSL2 bounda
     "runner",
     "web",
   ]);
-  assert.ok(manifest.install.steps.some((step) => step.id === "setup-local"));
-  assert.ok(manifest.install.steps.some((step) => step.id === "db-migrate"));
+
+  const steps = new Map(manifest.install.steps.map((step) => [step.id, step]));
+  assert.deepEqual([...steps.keys()], [
+    "install-dependencies",
+    "restore-or-create-config",
+    "build-anneal",
+    "initialize-dedicated-database",
+    "activate",
+  ]);
+
+  const configCommand = steps.get("restore-or-create-config").arguments.join(" ");
+  assert.match(configCommand, /npm run setup:local/);
+  assert.match(configCommand, /config\/\.env/);
+  assert.match(configCommand, /chmod 600/);
+  assert.equal(
+    steps.get("restore-or-create-config").environment.GITHUB_READ_TOKEN,
+    "{secret:githubReadToken}",
+  );
+
+  const databaseCommand = steps.get("initialize-dedicated-database").arguments.join(" ");
+  assert.match(databaseCommand, /db:migrate:release/);
+  assert.match(databaseCommand, /--fresh/);
+  assert.match(databaseCommand, /database-v0\.9\.0\.initialized/);
+  assert.match(databaseCommand, /database-v0\.9\.0\.initializing/);
+  assert.match(databaseCommand, /refusing a fresh reset/);
+  assert.match(databaseCommand, /exit 42/);
+
   assert.equal(manifest.health.endpoint, "http://127.0.0.1:5173/");
   assert.equal(manifest.executionEndpoint, "http://127.0.0.1:3000/");
 });
