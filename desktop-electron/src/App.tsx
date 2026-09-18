@@ -18,7 +18,7 @@ import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
-import { ManagedAppsSurface, type ManagedAppTabId } from "./features/ManagedAppsSurface";
+import { ManagedAppsSurface } from "./features/ManagedAppsSurface";
 import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
 import type {
   BrowserInteractionMode,
@@ -27,6 +27,7 @@ import type {
   Language,
   LauncherSnapshot,
   LauncherState,
+  ManagedAppTabId,
   LogRecord,
   OperationState,
   Surface,
@@ -365,7 +366,7 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
-  const [managedAppTab, setManagedAppTab] = useState<ManagedAppTabId>("cpa");
+  const [managedAppTab, setManagedAppTabState] = useState<ManagedAppTabId>(snapshot.state.managedAppTab);
   const devProfile = snapshot.profile === "development";
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(compactAtMount ? false : snapshot.state.sidebarOpen !== false);
@@ -401,6 +402,19 @@ function LauncherShell({
   const updateBusy = snapshot.update.status === "downloading" || snapshot.update.status === "installing";
   const updateVersion = "version" in snapshot.update ? snapshot.update.version : null;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
+  const selectManagedAppTab = useCallback((tab: ManagedAppTabId) => {
+    setManagedAppTabState(tab);
+    void api!.setManagedAppTab(tab)
+      .then(updateState)
+      .catch((cause) => {
+        setManagedAppTabState(snapshot.state.managedAppTab);
+        setError(messageOf(cause));
+      });
+  }, [setError, snapshot.state.managedAppTab, updateState]);
+
+  useEffect(() => {
+    setManagedAppTabState(snapshot.state.managedAppTab);
+  }, [snapshot.state.managedAppTab]);
 
   useEffect(() => {
     if (snapshot.state.browserInteractionMode === "manual") {
@@ -778,7 +792,7 @@ function LauncherShell({
             {surface === "apps" ? (
               <ManagedAppsSurface
                 language={language}
-                onSelectedTabChange={setManagedAppTab}
+                onSelectedTabChange={selectManagedAppTab}
                 selectedTab={managedAppTab}
                 setError={setError}
               />
@@ -790,15 +804,15 @@ function LauncherShell({
               <ExternalServicesSurface
                 language={language}
                 openAnneal={() => {
-                  setManagedAppTab("anneal");
+                  selectManagedAppTab("anneal");
                   navigateSurface("apps");
                 }}
                 openPaseo={() => {
-                  setManagedAppTab("paseo");
+                  selectManagedAppTab("paseo");
                   navigateSurface("apps");
                 }}
                 openProviders={() => {
-                  setManagedAppTab("cpa");
+                  selectManagedAppTab("cpa");
                   navigateSurface("apps");
                 }}
                 setError={setError}

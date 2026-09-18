@@ -1,18 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ExternalServiceId, ExternalServicesSnapshot, Language } from "../types";
+import type { ExternalServiceId, ExternalServicesSnapshot, Language, ManagedAppTabId } from "../types";
 import { AnnealTasksSurface } from "./AnnealTasksSurface";
 import { ExternalServicesSurface } from "./ExternalServicesSurface";
 import { PaseoOrchestratorSurface } from "./PaseoOrchestratorSurface";
 import { ProviderCenterSurface } from "./ProviderHubSaasSurface";
 import { UpstreamToolSurface } from "./UpstreamToolSurface";
 import "./managed-apps.css";
-
-export type ManagedAppTabId =
-  | "cpa"
-  | "codex-router"
-  | "commandcode-proxy"
-  | "paseo"
-  | "anneal";
 
 interface ManagedAppsSurfaceProps {
   language: Language;
