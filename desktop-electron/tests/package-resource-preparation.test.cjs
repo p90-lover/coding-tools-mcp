@@ -291,7 +291,7 @@ test("composes the exact Windows payload from the official seven-member client a
   );
 });
 
-test("five-stack package copy skips dangling npm workspace links and materializes real ones", () => {
+test("five-stack package copy skips dangling npm workspace links, materializes real ones, and does not follow cycles", () => {
   const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "coding-tools-five-stack-links-"));
   const source = path.join(root, "source");
   const destination = path.join(root, "destination");
@@ -302,6 +302,7 @@ test("five-stack package copy skips dangling npm workspace links and materialize
   fs.writeFileSync(path.join(realApp, "index.js"), "export {}\n");
   fs.symlinkSync(path.join("..", "missing-app"), path.join(scoped, "app"));
   fs.symlinkSync(realApp, path.join(scoped, "protocol"));
+  fs.symlinkSync(realApp, path.join(realApp, "self"));
   fs.writeFileSync(path.join(source, "MANIFEST.json"), "{}\n");
 
   copyFiveStackTree(source, destination);
@@ -311,6 +312,7 @@ test("five-stack package copy skips dangling npm workspace links and materialize
     "export {}\n",
   );
   assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "protocol")).isSymbolicLink(), false);
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "packages", "app", "self")), false);
   assert.equal(fs.readFileSync(path.join(destination, "MANIFEST.json"), "utf8"), "{}\n");
 });
 

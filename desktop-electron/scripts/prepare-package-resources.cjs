@@ -723,11 +723,34 @@ function writeComponent(stagingRoot, relativePath, bytes, mode = 0o600) {
   return target;
 }
 
-function copyFiveStackTree(sourceRoot, destinationRoot) {
+function isDanglingLink(filePath, dirent) {
+  if (dirent && typeof dirent.isSymbolicLink === "function" && dirent.isSymbolicLink()) return true;
+  try {
+    return fs.lstatSync(filePath).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function realPathOr(filePath) {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function copyFiveStackTree(sourceRoot, destinationRoot, ancestors = new Set()) {
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = fs.readdirSync(source, { withFileTypes: true });
+  } catch (error) {
+    fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${source}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  for (const entry of entries) {
     if (entry.name === ".git") continue;
     const from = path.join(source, entry.name);
     const to = path.join(destination, entry.name);
@@ -737,17 +760,22 @@ function copyFiveStackTree(sourceRoot, destinationRoot) {
     } catch (error) {
       fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${from}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    let metadata = linkStat;
-    if (linkStat.isSymbolicLink()) {
-      try {
-        metadata = fs.statSync(from);
-      } catch {
-        // npm workspaces leave dangling scoped links such as @getpaseo/app
-        continue;
-      }
+    let metadata;
+    try {
+      metadata = fs.statSync(from);
+    } catch (error) {
+      // npm workspaces leave dangling junctions (Windows) / symlinks for
+      // packages such as @getpaseo/app after `npm ci --ignore-scripts`.
+      const code = error && typeof error === "object" ? error.code : "";
+      if (linkStat.isSymbolicLink() || code === "ENOENT" || code === "ELOOP" || isDanglingLink(from, entry)) continue;
+      fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${from}: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (metadata.isDirectory()) {
-      copyFiveStackTree(from, to);
+      const realPath = realPathOr(from);
+      if (ancestors.has(realPath)) continue;
+      const next = new Set(ancestors);
+      next.add(realPath);
+      copyFiveStackTree(from, to, next);
       continue;
     }
     if (!metadata.isFile()) fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNSUPPORTED", from);
