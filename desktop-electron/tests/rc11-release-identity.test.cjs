@@ -6,7 +6,9 @@ const path = require("node:path");
 const test = require("node:test");
 
 const repo = path.resolve(__dirname, "..", "..");
-const read = (relative) => fs.readFileSync(path.join(repo, relative), "utf8");
+const normalizeNewlines = (text) => String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+const read = (relative) => normalizeNewlines(fs.readFileSync(path.join(repo, relative), "utf8"));
+const PUSH_ON_MAIN = /\n {2}push:\n {4}branches:\n {6}- main/;
 
 test("rc.11 product and package identities are aligned", () => {
   const manifest = JSON.parse(read("desktop-electron/package.json"));
@@ -20,7 +22,7 @@ test("rc.11 exact-source runner publishes a new tag without moving frozen rc.8, 
   const workflow = read(".github/workflows/codex-router-multiprovider-release-rc11.yml");
   assert.match(workflow, /RELEASE_VERSION: 0\.7\.0-rc\.11/);
   assert.match(workflow, /RELEASE_TAG: v0\.7\.0-rc\.11/);
-  assert.match(workflow, /\n {2}push:\n {4}branches:\n {6}- main/);
+  assert.match(workflow, PUSH_ON_MAIN);
   assert.doesNotMatch(workflow, /RELEASE_TAG: v0\.7\.0-rc\.10/);
   assert.doesNotMatch(workflow, /RELEASE_TAG: v0\.7\.0-rc\.8/);
   assert.doesNotMatch(workflow, /\bforce\b/);
@@ -38,4 +40,14 @@ test("rc.11 exact-source runner publishes a new tag without moving frozen rc.8, 
   assert.match(notes, /^## 繁體中文$/m);
   assert.match(notes, /v0\.7\.0-rc\.10/);
   assert.match(notes, /never force-moved|永遠唔會被 force-move/);
+});
+
+test("rc.11 identity contracts tolerate Windows CRLF checkouts", () => {
+  const crlfWorkflow = normalizeNewlines(
+    fs.readFileSync(path.join(repo, ".github/workflows/codex-router-multiprovider-release-rc11.yml"), "utf8"),
+  ).replace(/\n/g, "\r\n");
+  assert.match(crlfWorkflow, /\r\n {2}push:\r\n {4}branches:\r\n {6}- main/);
+  assert.doesNotMatch(crlfWorkflow, PUSH_ON_MAIN);
+  assert.match(normalizeNewlines(crlfWorkflow), PUSH_ON_MAIN);
+  assert.match(normalizeNewlines(crlfWorkflow), /RELEASE_TAG: v0\.7\.0-rc\.11/);
 });
