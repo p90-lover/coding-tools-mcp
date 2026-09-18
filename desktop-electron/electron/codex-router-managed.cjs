@@ -5,6 +5,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const {
   applyLongRunLiteLlmTimeout,
+  desktopCrossUseEnvironment,
   routerLongRunEnvironment,
 } = require("./cpa-codex-long-run.cjs");
 
@@ -40,6 +41,9 @@ function environment(home, state) {
     CODEX_ROUTER_SOURCE_ROOT: home,
     CODEX_ROUTER_NODE_BIN: process.execPath,
     ...routerLongRunEnvironment(),
+    ...desktopCrossUseEnvironment({
+      cpaProxyApiKey: process.env.CODING_TOOLS_CPA_PROXY_API_KEY,
+    }),
   };
 }
 
@@ -72,11 +76,19 @@ function writeWrapper(filePath, value, mode) {
 }
 
 function wrapperExports(env, quote) {
+  const extra = [
+    ["CODING_TOOLS_CPA_URL", env.CODING_TOOLS_CPA_URL],
+    ["CODING_TOOLS_CODEX_ROUTER_URL", env.CODING_TOOLS_CODEX_ROUTER_URL],
+    ...(env.CODING_TOOLS_CPA_PROXY_API_KEY
+      ? [["CODING_TOOLS_CPA_PROXY_API_KEY", env.CODING_TOOLS_CPA_PROXY_API_KEY]]
+      : []),
+  ].filter(([_name, value]) => typeof value === "string" && value);
   return [
     ["MODEL_ROUTER_TARGET", "codex"],
     ["MODEL_ROUTER_STATE_DIR", env.MODEL_ROUTER_STATE_DIR],
     ["CODEX_ROUTER_STATE_DIR", env.CODEX_ROUTER_STATE_DIR],
     ["CODEX_HOME", env.CODEX_HOME],
+    ...extra,
     ...Object.entries(routerLongRunEnvironment()),
   ].map(([name, value]) => [name, quote ? quote(value) : value]);
 }

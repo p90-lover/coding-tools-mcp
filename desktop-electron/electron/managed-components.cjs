@@ -331,6 +331,7 @@ function createManagedComponentController({
   bundleRoot = null,
   resourcesPath = typeof process.resourcesPath === "string" ? process.resourcesPath : null,
   desktopRoot = path.join(__dirname, ".."),
+  launchEnvironmentFor = null,
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   if (typeof fetchImpl !== "function") throw new Error("Managed component downloads require fetch");
@@ -595,13 +596,27 @@ function createManagedComponentController({
       });
   }
 
-  function commandSpec(entry, context) {
-    const executable = expandToken(entry.executable, context);
-    const args = (entry.arguments || []).map((value) => expandToken(value, context));
-    const environment = Object.fromEntries(Object.entries(entry.environment || {}).map(([key, value]) => [
+  function entryEnvironment(entry, context) {
+    const fromEntry = Object.fromEntries(Object.entries(entry.environment || {}).map(([key, value]) => [
       key,
       expandToken(value, context),
     ]));
+    const extra = typeof launchEnvironmentFor === "function"
+      ? (launchEnvironmentFor(context.id) || {})
+      : {};
+    const merged = { ...fromEntry };
+    for (const [key, value] of Object.entries(extra)) {
+      if (/^[A-Z][A-Z0-9_]*$/.test(key) && typeof value === "string" && value.length > 0) {
+        merged[key] = value;
+      }
+    }
+    return merged;
+  }
+
+  function commandSpec(entry, context) {
+    const executable = expandToken(entry.executable, context);
+    const args = (entry.arguments || []).map((value) => expandToken(value, context));
+    const environment = entryEnvironment(entry, context);
     const managedMode = entry.execution === "managed-mode";
     if (context.mode === "wsl2" && managedMode) {
       const linuxHome = context.wslHome || wslPath(context.home);
@@ -616,10 +631,7 @@ function createManagedComponentController({
       };
       const wslExecutable = expandToken(entry.executable, wslContext);
       const wslArgs = (entry.arguments || []).map((value) => expandToken(value, wslContext));
-      const wslEnvironment = Object.fromEntries(Object.entries(entry.environment || {}).map(([key, value]) => [
-        key,
-        expandToken(value, wslContext),
-      ]));
+      const wslEnvironment = entryEnvironment(entry, wslContext);
       const exported = Object.entries(wslEnvironment)
         .map(([key, value]) => `export ${key}=${quoteBash(value)}`)
         .join("; ");
