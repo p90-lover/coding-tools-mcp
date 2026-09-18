@@ -30,13 +30,19 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Probe the verified original UI merge
+      - name: Merge and reconcile the verified original interfaces
         shell: bash
         run: |
           set -euo pipefail
+          base_before="$(git rev-parse HEAD)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin cursor/cpa-codex-router-parity-64e0:refs/remotes/origin/rc9-original-ui-source
+
+          if git merge-base --is-ancestor b046ce232a6c913161ec988cc23da2d37119fb80 HEAD; then
+            echo 'Original UI source is already present.'
+            exit 0
+          fi
 
           set +e
           git merge --no-commit --no-ff refs/remotes/origin/rc9-original-ui-source
@@ -44,25 +50,54 @@ jobs:
           set -e
 
           conflicts="$(git diff --name-only --diff-filter=U)"
-          if [ -n "$conflicts" ]; then
-            echo 'RC9_ORIGINAL_UI_CONFLICTS_BEGIN'
-            printf '%s\n' "$conflicts"
-            echo 'RC9_ORIGINAL_UI_CONFLICTS_END'
-            exit 2
+          expected="$(cat <<'EOF'
+desktop-electron/electron/cpa-managed.cjs
+desktop-electron/electron/provider-bootstrap.cjs
+desktop-electron/package.json
+desktop-electron/src/features/ExternalServicesSurface.tsx
+desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
+EOF
+)"
+          if [ "$conflicts" != "$expected" ]; then
+            echo 'Unexpected original-UI conflict inventory.' >&2
+            echo 'Expected:' >&2
+            printf '%s\n' "$expected" >&2
+            echo 'Actual:' >&2
+            printf '%s\n' "$conflicts" >&2
+            exit 1
           fi
-          if [ "$merge_status" -ne 0 ]; then
-            echo "Merge failed without conflict paths (status $merge_status)." >&2
+          if [ "$merge_status" -eq 0 ]; then
+            echo 'Expected bounded conflicts were not reported.' >&2
             exit 1
           fi
 
-          base_before="$(git rev-parse HEAD)"
+          git checkout --theirs -- \
+            desktop-electron/electron/cpa-managed.cjs \
+            desktop-electron/electron/provider-bootstrap.cjs \
+            desktop-electron/package.json \
+            desktop-electron/src/features/ExternalServicesSurface.tsx
+          git checkout --ours -- desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
+          python3 aiTemp/rc9-one-app-original-ui/reconcile.py
           git add -A
+
+          unresolved="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$unresolved" ]; then
+            echo 'Unresolved conflicts remain:' >&2
+            printf '%s\n' "$unresolved" >&2
+            exit 1
+          fi
+
           git diff --cached --diff-filter=D --exit-code "$base_before"
+          node --check desktop-electron/electron/main.cjs
           node --check desktop-electron/electron/original-ui.cjs
           node --check desktop-electron/electron/codex-router-original-ui.cjs
+          node --check desktop-electron/electron/cpa-managed.cjs
           node --test \
             desktop-electron/tests/desktop-shell-fidelity.test.cjs \
             desktop-electron/tests/rc10-cpa-codex-original-ui.test.cjs \
-            desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
+            desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/preload-boundary.test.cjs
+
           git commit -m 'merge(rc9): add original CPA and Codex Router interfaces'
           git push origin HEAD:integration/v0.7.0-rc.9-one-app-original-ui-merge
