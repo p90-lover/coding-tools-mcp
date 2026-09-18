@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: rc7-installer-location-beta-popup
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/installer-location-beta-popup/bun-cache
@@ -40,7 +40,7 @@ jobs:
         with:
           bun-version: 1.4.0
 
-      - name: Confirm the two regressions before materialization
+      - name: Confirm the regressions before materialization
         shell: bash
         run: |
           set -euo pipefail
@@ -53,15 +53,20 @@ jobs:
           if [ "$red_status" -eq 0 ]; then
             grep -F 'function windowsInstallerArguments(job)' desktop-electron/electron/update-worker.cjs
             grep -F 'async function promptForAvailableUpdate(next, { logger, stateStore })' desktop-electron/electron/main.cjs
+            grep -F '!macro CaptureLegacyInstallLocation ROOT' desktop-electron/build/installer.nsh
             echo 'Repair was already materialized on this exact head.'
           else
-            grep -E 'running installation directory|install-or-later popup|not match' \
+            grep -E 'running installation directory|legacy install directory|install-or-later popup|not match' \
               aiTemp/installer-location-beta-popup/evidence/red.txt
             echo 'RED_REPRODUCED'
           fi
 
       - name: Materialize the bounded repair
-        run: node aiTemp/installer-location-beta-popup/materialize.mjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/installer-location-beta-popup/materialize.mjs
+          node aiTemp/installer-location-beta-popup/materialize-legacy-location.mjs
 
       - name: Verify updater and installer contracts
         shell: bash
@@ -98,6 +103,8 @@ jobs:
           test -z "$(git diff --name-only --diff-filter=D)"
           git diff --check
           git add \
+            aiTemp/rc7-release/verify-windows-migration.ps1 \
+            desktop-electron/build/installer.nsh \
             desktop-electron/electron/main.cjs \
             desktop-electron/electron/update.cjs \
             desktop-electron/electron/update-worker.cjs
@@ -106,7 +113,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if ! git diff --cached --quiet; then
-            git commit -m 'fix(rc7): preserve install location and prompt for beta updates'
+            git commit -m 'fix(rc7): reuse legacy install path and prompt for beta updates'
           fi
           git fetch origin "$GITHUB_REF_NAME"
           remote_head="$(git rev-parse "origin/$GITHUB_REF_NAME")"
@@ -133,6 +140,7 @@ jobs:
     runs-on: windows-2025
     env:
       SOURCE: ${{ needs.materialize-and-verify.outputs.source }}
+      SOURCE_SHA: ${{ needs.materialize-and-verify.outputs.source }}
       ELECTRON_CACHE: ${{ github.workspace }}\aiTemp\installer-location-beta-popup\electron-cache
       ELECTRON_BUILDER_CACHE: ${{ github.workspace }}\aiTemp\installer-location-beta-popup\electron-builder-cache
     steps:
@@ -179,27 +187,19 @@ jobs:
           (Get-FileHash $installer.FullName -Algorithm SHA256).Hash |
             Set-Content aiTemp/installer-location-beta-popup/evidence/installer-sha256.txt
 
-      - name: Verify the installer reuses a legacy custom location
+      - name: Verify real legacy migration retains the old location
         shell: pwsh
         run: |
           $installer = Get-Content aiTemp/installer-location-beta-popup/evidence/installer-path.txt
-          $legacy = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\installer-location-beta-popup\Legacy Install With Spaces'
-          New-Item -ItemType Directory -Force $legacy | Out-Null
-          Set-Content -Path (Join-Path $legacy 'Coding Tools.exe') -Value 'legacy-placeholder'
-          $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\8a1d3576-15cd-5f5d-9800-5496aec075ea'
-          New-Item -Path $uninstallKey -Force | Out-Null
-          New-ItemProperty -Path $uninstallKey -Name InstallLocation -Value $legacy -PropertyType String -Force | Out-Null
-          $process = Start-Process -FilePath $installer -ArgumentList @('/S','/UPDATE','/CLOSEAPPLICATIONS','/NORESTART') -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "Installer exited with code $($process.ExitCode)" }
-          $installed = Join-Path $legacy 'Coding Tools.exe'
-          if (-not (Test-Path $installed -PathType Leaf)) {
-            throw "Installer did not reuse legacy location: $legacy"
-          }
-          if ((Get-Item $installed).Length -lt 1024) {
-            throw 'Legacy placeholder was not replaced by the packaged application.'
-          }
-          "LEGACY_LOCATION_REUSED=$legacy" |
-            Set-Content aiTemp/installer-location-beta-popup/evidence/legacy-install-result.txt
+          $trash = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\Trash\installer-location-beta-popup'
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\installer-location-beta-popup\evidence\migration'
+          & (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc7-release\verify-windows-migration.ps1') `
+            -InstallerPath $installer `
+            -TrashRoot $trash `
+            -EvidenceRoot $evidence
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Select-String -Path (Join-Path $evidence 'installer-upgrade-migration.json') `
+            -Pattern '"legacyLocationReused": true' | Out-Null
 
       - name: Preserve Windows installer and evidence
         if: always()
