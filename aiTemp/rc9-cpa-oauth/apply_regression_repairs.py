@@ -221,6 +221,16 @@ replace_once(
         reservedAuthFileIds: reservedCpaAuthFileIds(account.id),
         requireBound: Boolean(binding.id),
       });
+      if (!binding.id && result.authFile.status !== "connected") {
+        return store.updateAccountConnection(account.id, {
+          status: result.authFile.status,
+          identity: result.authFile.identity ?? account.identity,
+          models: result.models,
+          loginAdapterId: adapterId,
+          credentialSource: "cpa",
+          error: result.authFile.error ?? result.modelError,
+        });
+      }
       return persistCpaBinding(account, adapterId, result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
