@@ -7,13 +7,14 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   copyBundledTree,
+  flattenSymlinks,
 } = require("../scripts/vendor-upstream-bundles.cjs");
 
 function temporaryDirectory(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
 }
 
-test("copyBundledTree skips dangling gitlinks and materializes real file links", () => {
+test("copyBundledTree skips dangling gitlinks and materializes real file links", (t) => {
   const root = temporaryDirectory("coding-tools-bundled-gitlinks");
   const source = path.join(root, "source");
   const destination = path.join(root, "destination");
@@ -21,10 +22,15 @@ test("copyBundledTree skips dangling gitlinks and materializes real file links",
   fs.mkdirSync(docs, { recursive: true });
   fs.writeFileSync(path.join(docs, "guide.md"), "# guide\n");
   fs.writeFileSync(path.join(source, "index.js"), "export default true;\n");
-  fs.symlinkSync(path.join("docs", "guide.md"), path.join(source, "AGENTS.md"));
-  fs.symlinkSync(path.join("docs", "missing.md"), path.join(source, "CLAUDE.md"));
-  fs.mkdirSync(path.join(source, "fastlane", "images"), { recursive: true });
-  fs.symlinkSync(path.join("..", "missing-1.png"), path.join(source, "fastlane", "images", "1.png"));
+  try {
+    fs.symlinkSync(path.join("docs", "guide.md"), path.join(source, "AGENTS.md"));
+    fs.symlinkSync(path.join("docs", "missing.md"), path.join(source, "CLAUDE.md"));
+    fs.mkdirSync(path.join(source, "fastlane", "images"), { recursive: true });
+    fs.symlinkSync(path.join("..", "missing-1.png"), path.join(source, "fastlane", "images", "1.png"));
+  } catch {
+    t.skip("filesystem does not allow file symlinks");
+    return;
+  }
 
   copyBundledTree(source, destination);
 
@@ -36,6 +42,24 @@ test("copyBundledTree skips dangling gitlinks and materializes real file links",
   assert.equal(fs.existsSync(path.join(destination, "fastlane", "images", "1.png")), false);
 });
 
+test("flattenSymlinks replaces remaining gitlinks with regular files", (t) => {
+  const root = temporaryDirectory("coding-tools-flatten-gitlinks");
+  fs.writeFileSync(path.join(root, "CLAUDE.md"), "# anneal\n");
+  try {
+    fs.symlinkSync("CLAUDE.md", path.join(root, "AGENTS.md"));
+    fs.symlinkSync("missing-target", path.join(root, "dangling.md"));
+  } catch {
+    t.skip("filesystem does not allow file symlinks");
+    return;
+  }
+
+  flattenSymlinks(root);
+
+  assert.equal(fs.lstatSync(path.join(root, "AGENTS.md")).isSymbolicLink(), false);
+  assert.equal(fs.readFileSync(path.join(root, "AGENTS.md"), "utf8"), "# anneal\n");
+  assert.equal(fs.existsSync(path.join(root, "dangling.md")), false);
+});
+
 test("fetched bundled archives are copied through copyBundledTree instead of keeping tar reparse points", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "scripts", "vendor-upstream-bundles.cjs"), "utf8");
   assert.match(source, /extractArchive\(archive, scratch\)/);
@@ -43,4 +67,5 @@ test("fetched bundled archives are copied through copyBundledTree instead of kee
   assert.doesNotMatch(source, /extractArchive\(archive, dest\)/);
   assert.match(source, /isLinkOrReparse/);
   assert.match(source, /The directory name is invalid/);
+  assert.match(source, /flattenSymlinks\(dest\)/);
 });

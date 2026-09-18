@@ -206,6 +206,7 @@ jobs:
             desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs `
             desktop-electron/tests/commandcode-provider-session.test.cjs `
             desktop-electron/tests/upstream-tool-runtime.test.cjs `
+            desktop-electron/tests/vendor-upstream-bundles.test.cjs `
             2>&1 | Tee-Object -FilePath aiTemp/rc8-external-services/windows-evidence/contracts.txt
           if ($LASTEXITCODE -ne 0) { throw 'Focused Windows contracts failed' }
           bun run --cwd desktop-electron typecheck

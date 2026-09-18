@@ -19,6 +19,67 @@ function isLinkOrReparse(filePath, dirent, linkStat) {
   }
 }
 
+function unlinkReparsePoint(pathname) {
+  try {
+    fs.unlinkSync(pathname);
+  } catch (error) {
+    if (error && (error.code === "EPERM" || error.code === "EISDIR")) {
+      fs.rmdirSync(pathname);
+      return;
+    }
+    throw error;
+  }
+}
+
+function flattenSymlinks(root, seen = new Set()) {
+  const dir = path.resolve(root);
+  let real;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    return;
+  }
+  if (seen.has(real)) return;
+  seen.add(real);
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name === ".git") continue;
+    const full = path.join(dir, entry.name);
+    let linkStat;
+    try {
+      linkStat = fs.lstatSync(full);
+    } catch {
+      continue;
+    }
+    if (isLinkOrReparse(full, entry, linkStat)) {
+      let targetStat;
+      let resolved;
+      try {
+        targetStat = fs.statSync(full);
+        resolved = fs.realpathSync(full);
+      } catch {
+        try { unlinkReparsePoint(full); } catch { /* dangling gitlink */ }
+        continue;
+      }
+      if (!targetStat.isFile()) {
+        try { unlinkReparsePoint(full); } catch { /* directory gitlink */ }
+        continue;
+      }
+      unlinkReparsePoint(full);
+      fs.mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });
+      fs.copyFileSync(resolved, full);
+      fs.chmodSync(full, targetStat.mode & 0o777 || 0o600);
+      continue;
+    }
+    if (linkStat.isDirectory()) flattenSymlinks(full, seen);
+  }
+}
+
 function copyBundledTree(sourceRoot, destinationRoot) {
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
@@ -27,7 +88,13 @@ function copyBundledTree(sourceRoot, destinationRoot) {
   }
   const visit = (from, to) => {
     fs.mkdirSync(to, { recursive: true, mode: 0o700 });
-    for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = fs.readdirSync(from, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
       if (entry.name === ".git" || entry.name === "node_modules") continue;
       const fromPath = path.join(from, entry.name);
       const toPath = path.join(to, entry.name);
@@ -110,6 +177,7 @@ function materializeBundledComponents({
     const local = path.join(desktopRoot, "vendor", "bundled", id);
     if (entrypointReady(local, entry)) {
       copyBundledTree(local, dest);
+      flattenSymlinks(dest);
       copied.push(id);
       continue;
     }
@@ -124,6 +192,7 @@ function materializeBundledComponents({
       if (!fs.existsSync(archive)) downloadArchive(archiveUrl, archive);
       extractArchive(archive, scratch);
       copyBundledTree(scratch, dest);
+      flattenSymlinks(dest);
     } catch (error) {
       throw new Error(`${id}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -139,5 +208,6 @@ function materializeBundledComponents({
 module.exports = {
   BUNDLED_IDS,
   copyBundledTree,
+  flattenSymlinks,
   materializeBundledComponents,
 };
