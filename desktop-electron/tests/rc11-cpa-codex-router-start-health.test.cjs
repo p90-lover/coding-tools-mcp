@@ -37,9 +37,13 @@ function closeServer(server) {
 test("CPA and Codex Router wait for real /v1/models health, not a live pid", () => {
   assert.equal(READY_WAIT_MS.cpa, 45_000);
   assert.equal(READY_WAIT_MS["codex-router"], 90_000);
+  assert.equal(READY_WAIT_MS["commandcode-proxy"], 30_000);
+  assert.equal(READY_WAIT_MS.paseo, 60_000);
+  assert.equal(READY_WAIT_MS.anneal, 45_000);
 
   const originalMain = read("electron/original-ui.cjs");
   const managed = read("electron/managed-external-services.cjs");
+  const fiveStack = fs.readFileSync(path.join(root, "..", "src-tauri/src/integrations/five_stack.rs"), "utf8");
   const cpaManifest = JSON.parse(read("vendor/managed-components/cpa.json"));
   const routerManifest = JSON.parse(read("vendor/managed-components/codex-router.json"));
 
@@ -47,6 +51,8 @@ test("CPA and Codex Router wait for real /v1/models health, not a live pid", () 
   assert.match(managed, /waitUntilListen/);
   assert.match(managed, /waitForHealth: !supervised/);
   assert.match(managed, /A live pid is "starting", never "ready"/);
+  assert.match(fiveStack, /Ok\(wait_until_healthy\(id\)\.await\)/);
+  assert.doesNotMatch(fiveStack, /if matches!\(id, ToolId::Cpa \| ToolId::CodexRouter\)/);
   assert.equal(cpaManifest.health.endpoint, "http://127.0.0.1:8317/v1/models");
   assert.equal(
     routerManifest.health.endpoint,

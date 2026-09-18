@@ -3,16 +3,17 @@
 /**
  * Honest loopback health for managed stacks.
  * Ready means the health HTTP probe succeeded (CPA GET /v1/models,
- * Codex Router GET /_codex-router/{callerKey}/v1/models). A live pid
- * without a successful listen is never ready.
+ * Codex Router GET /_codex-router/{callerKey}/v1/models, CommandCode
+ * GET /v1/models, Paseo/Anneal GET /). A live pid without a successful
+ * listen is never ready.
  */
 
 const READY_WAIT_MS = Object.freeze({
   cpa: 45_000,
   "codex-router": 90_000,
-  "commandcode-proxy": 20_000,
-  paseo: 20_000,
-  anneal: 20_000,
+  "commandcode-proxy": 30_000,
+  paseo: 60_000,
+  anneal: 45_000,
 });
 const DEFAULT_READY_WAIT_MS = 20_000;
 const READY_POLL_MS = 250;

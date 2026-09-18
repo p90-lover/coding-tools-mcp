@@ -104,7 +104,7 @@ function createManagedExternalServicesController({
       ? managedConfiguration(service.id)
       : null;
     // A live pid is "starting", never "ready". Ready is only HTTP health
-    // (CPA GET /v1/models, Codex Router GET /_codex-router/{callerKey}/v1/models).
+    // (CPA / Codex Router / CommandCode models probes, Paseo/Anneal GET /).
     const mergedStatus = running
       ? (service.status === "error" ? "error" : service.status === "ready" ? "ready" : "starting")
       : service.status;

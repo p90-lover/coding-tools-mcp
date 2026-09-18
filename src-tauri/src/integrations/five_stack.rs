@@ -531,7 +531,9 @@ fn ready_wait(id: ToolId) -> Duration {
     match id {
         ToolId::Cpa => Duration::from_millis(45_000),
         ToolId::CodexRouter => Duration::from_millis(90_000),
-        _ => Duration::from_millis(20_000),
+        ToolId::CommandCodeProxy => Duration::from_millis(30_000),
+        ToolId::Paseo => Duration::from_millis(60_000),
+        ToolId::Anneal => Duration::from_millis(45_000),
     }
 }
 
@@ -696,10 +698,7 @@ pub(crate) async fn start_supervised(id: ToolId) -> AppResult<ToolSnapshot> {
             ToolId::CodexRouter => start_codex_router()?,
         }
     }
-    if matches!(id, ToolId::Cpa | ToolId::CodexRouter) {
-        return Ok(wait_until_healthy(id).await);
-    }
-    Ok(decorate(inspect_live(id).await))
+    Ok(wait_until_healthy(id).await)
 }
 
 async fn wait_until_healthy(id: ToolId) -> ToolSnapshot {
@@ -1044,6 +1043,12 @@ mod tests {
             ready_wait(ToolId::CodexRouter),
             Duration::from_millis(90_000)
         );
+        assert_eq!(
+            ready_wait(ToolId::CommandCodeProxy),
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(ready_wait(ToolId::Paseo), Duration::from_millis(60_000));
+        assert_eq!(ready_wait(ToolId::Anneal), Duration::from_millis(45_000));
     }
 
     #[tokio::test]
