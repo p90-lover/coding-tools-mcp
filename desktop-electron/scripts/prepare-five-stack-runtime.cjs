@@ -355,8 +355,57 @@ function runNpm(sourceRoot, args, spawnSyncProcess, code, platform = process.pla
   }
 }
 
+function withAbsoluteNodeCommand(script, nodeExecutable) {
+  const quoted = `"${String(nodeExecutable).replace(/"/g, "\"\"")}"`;
+  return String(script).replace(/(^|[\s|&;])node(?:\.exe)?(?=\s|$)/gi, `$1${quoted}`);
+}
+
+function rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable) {
+  if (!nodeExecutable || !isFile(nodeExecutable)) return 0;
+  let rewritten = 0;
+  const visit = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(full);
+        continue;
+      }
+      if (entry.name !== "package.json") continue;
+      let pkg;
+      try {
+        pkg = JSON.parse(fs.readFileSync(full, "utf8"));
+      } catch {
+        continue;
+      }
+      if (!pkg || typeof pkg.scripts !== "object" || pkg.scripts === null) continue;
+      let changed = false;
+      for (const [name, value] of Object.entries(pkg.scripts)) {
+        if (typeof value !== "string") continue;
+        const next = withAbsoluteNodeCommand(value, nodeExecutable);
+        if (next === value) continue;
+        pkg.scripts[name] = next;
+        changed = true;
+      }
+      if (!changed) continue;
+      fs.writeFileSync(full, `${JSON.stringify(pkg, null, 2)}\n`);
+      rewritten += 1;
+    }
+  };
+  visit(sourceRoot);
+  return rewritten;
+}
+
 function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
   if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
+  const nodeExecutable = resolveNodeExecutable();
+  if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable);
   runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
   for (const script of extraScripts) {
     runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
@@ -526,4 +575,5 @@ module.exports = {
   npmSpawnInvocation,
   prepareFiveStackRuntime,
   resolveNpmCliJs,
+  rewritePackageScriptsToAbsoluteNode,
 };

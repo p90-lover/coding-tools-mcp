@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { npmSpawnInvocation, prepareFiveStackRuntime } = require("../scripts/prepare-five-stack-runtime.cjs");
+const { npmSpawnInvocation, prepareFiveStackRuntime, rewritePackageScriptsToAbsoluteNode } = require("../scripts/prepare-five-stack-runtime.cjs");
 const { prepare } = require("../electron/codex-router-managed.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
@@ -204,6 +204,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /coding-tools-node-shims/);
   assert.match(source, /npm-script-shell\.cmd/);
   assert.match(source, /npm_config_script_shell/);
+  assert.match(source, /rewritePackageScriptsToAbsoluteNode/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
     Path: "C:\\nodejs;C:\\Windows\\system32",
@@ -345,6 +346,32 @@ test("Windows five-stack npm prepare runs npm-cli.js through node.exe when prese
     fs.readFileSync(path.join(root, "coding-tools-node-shims", "node.cmd"), "utf8"),
     /node\.exe/,
   );
+});
+
+test("five-stack prepare rewrites nested node scripts to an absolute node.exe", () => {
+  const root = temporaryDirectory("coding-tools-rewrite-node-scripts");
+  const nodeExe = path.join(root, "node.exe");
+  const protocol = path.join(root, "packages", "protocol");
+  fs.mkdirSync(protocol, { recursive: true });
+  fs.writeFileSync(nodeExe, "");
+  fs.writeFileSync(path.join(root, "package.json"), `${JSON.stringify({
+    name: "paseo",
+    private: true,
+    scripts: { "build:server": "npm run build --workspace=@getpaseo/protocol && tsc" },
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(protocol, "package.json"), `${JSON.stringify({
+    name: "@getpaseo/protocol",
+    scripts: {
+      "generate:validators": "node scripts/generate-validation-aot.mjs",
+      build: "npm run generate:validators",
+    },
+  }, null, 2)}\n`);
+
+  const rewritten = rewritePackageScriptsToAbsoluteNode(root, nodeExe);
+  assert.equal(rewritten, 1);
+  const protocolPkg = JSON.parse(fs.readFileSync(path.join(protocol, "package.json"), "utf8"));
+  assert.equal(protocolPkg.scripts["generate:validators"], `"${nodeExe}" scripts/generate-validation-aot.mjs`);
+  assert.equal(protocolPkg.scripts.build, "npm run generate:validators");
 });
 
 test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {
