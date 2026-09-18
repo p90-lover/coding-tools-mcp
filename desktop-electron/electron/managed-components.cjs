@@ -16,6 +16,7 @@ const {
   resolveBundleRoot,
   resolveBundledPayload,
 } = require("./bundled-runtimes.cjs");
+const { resolveLane193Payload } = require("./paseo-anneal-commandcode-bundles.cjs");
 
 const COMPONENT_IDS = Object.freeze([
   "codex-router",
@@ -332,6 +333,7 @@ function createManagedComponentController({
   resourcesPath = typeof process.resourcesPath === "string" ? process.resourcesPath : null,
   desktopRoot = path.join(__dirname, ".."),
   launchEnvironmentFor = null,
+  peerEnvironment = null,
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   if (typeof fetchImpl !== "function") throw new Error("Managed component downloads require fetch");
@@ -514,7 +516,7 @@ function createManagedComponentController({
       processes: serviceProcesses(id),
       secretConfigured: Object.keys(secretFor(id)).length > 0,
       missingCredentials: missingCredentials(manifest),
-      bundledRuntime: Boolean(resolveBundledPayload(manifest, {
+      bundledRuntime: Boolean(resolveAnyBundledPayload(manifest, {
         bundleRoot: resolvedBundleRoot,
         platform,
         arch,
@@ -596,6 +598,31 @@ function createManagedComponentController({
       });
   }
 
+  function peerEnv(context) {
+    if (typeof peerEnvironment !== "function") return {};
+    try {
+      const value = peerEnvironment(manifestFor(context.id)) || {};
+      return Object.fromEntries(
+        Object.entries(value).filter(([key, entry]) => (
+          /^[A-Z][A-Z0-9_]*$/.test(key) && typeof entry === "string" && entry.length > 0
+        )),
+      );
+    } catch (error) {
+      logger?.warn?.("managed-component.peer-environment-failed", {
+        componentId: context.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return {};
+    }
+  }
+
+  function resolveAnyBundledPayload(manifest, options) {
+    const official = resolveBundledPayload(manifest, options);
+    if (official) return official;
+    if (manifest.strategy === "git-source") return resolveLane193Payload(manifest, options);
+    return null;
+  }
+
   function entryEnvironment(entry, context) {
     const fromEntry = Object.fromEntries(Object.entries(entry.environment || {}).map(([key, value]) => [
       key,
@@ -605,7 +632,7 @@ function createManagedComponentController({
       ? (launchEnvironmentFor(context.id) || {})
       : {};
     const merged = { ...fromEntry };
-    for (const [key, value] of Object.entries(extra)) {
+    for (const [key, value] of Object.entries({ ...extra, ...peerEnv(context) })) {
       if (/^[A-Z][A-Z0-9_]*$/.test(key) && typeof value === "string" && value.length > 0) {
         merged[key] = value;
       }
@@ -733,7 +760,7 @@ function createManagedComponentController({
   async function prepareReleaseBinary(manifest, stagingHome) {
     const asset = selectedReleaseAsset(manifest);
     const artifact = path.join(stagingHome, assertSafeRelativePath(asset.fileName, `${manifest.id} filename`));
-    const bundled = resolveBundledPayload(manifest, {
+    const bundled = resolveAnyBundledPayload(manifest, {
       bundleRoot: resolvedBundleRoot,
       platform,
       arch,
@@ -756,7 +783,7 @@ function createManagedComponentController({
   }
 
   async function prepareGitSource(manifest, stagingHome) {
-    const bundled = resolveBundledPayload(manifest, {
+    const bundled = resolveAnyBundledPayload(manifest, {
       bundleRoot: resolvedBundleRoot,
       platform,
       arch,

@@ -5,12 +5,14 @@ import type {
   ProviderExecutionPlan,
   ProviderNetworkSnapshot,
 } from "../types";
+import type { JsonObject } from "../api/contracts";
 import {
   boardRevision,
   executionBindings,
   messageOf,
   missionRevision,
   missionViews,
+  object,
   sanitizeIdentifier,
   selectBinding,
   workspaceOptions,
@@ -25,7 +27,14 @@ import {
 import "./orchestration-control.css";
 
 type Action = "create" | "start" | "hold" | "resume" | "cancel" | "close";
-type InspectorTab = "route" | "mission";
+type InspectorTab = "route" | "mission" | "plan";
+type SubagentDraft = {
+  key: string;
+  providerId: string;
+  accountId: string;
+  model: string;
+  role: string;
+};
 const ACTIONS: readonly Exclude<Action, "create">[] = ["start", "hold", "resume", "cancel", "close"];
 const WEB_GPT_PROVIDER_ID = "chatgpt-web";
 
@@ -47,6 +56,14 @@ function canRun(action: Action, mission: MissionView | undefined): boolean {
       && ["ready", "held", "review_required", "accepted", "changes_requested"].includes(mission.phase);
   }
   return action === "create" && mission.phase === "draft";
+}
+
+function stringValue(value: unknown, fallback = ""): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function listValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function phaseTone(phase: string): string {
@@ -79,6 +96,10 @@ export function PaseoOrchestratorSurface({
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("route");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [subagents, setSubagents] = useState<SubagentDraft[]>([]);
+  const [assignmentPlan, setAssignmentPlan] = useState<JsonObject | null>(null);
+  const [assignmentRun, setAssignmentRun] = useState<JsonObject | null>(null);
+  const [assignmentReview, setAssignmentReview] = useState<JsonObject | null>(null);
 
   const accounts = useMemo(() => usable(network), [network]);
   const providers = useMemo(
@@ -140,6 +161,21 @@ export function PaseoOrchestratorSurface({
   }, [account]);
 
   useEffect(() => {
+    if (!accounts.length) return;
+    setSubagents((current) => {
+      if (current.length) return current;
+      const fallback = accounts.find((item) => item.providerId !== providerId) ?? accounts[0];
+      return [{
+        key: crypto.randomUUID().slice(0, 8),
+        providerId: fallback?.providerId ?? "",
+        accountId: fallback?.id ?? "",
+        model: fallback?.models[0] ?? "",
+        role: "implementer",
+      }];
+    });
+  }, [accounts, providerId]);
+
+  useEffect(() => {
     if (workspaceId) void refresh();
   }, [workspaceId]);
 
@@ -193,6 +229,135 @@ export function PaseoOrchestratorSurface({
     } finally {
       setBusy(false);
     }
+  };
+
+  const callPlane = async (tool: string, args: JsonObject): Promise<JsonObject> => {
+    const api = window.codingTools;
+    if (!api) throw new Error(copy.executionPlanningUnavailable);
+    if (!workspaceId) throw new Error(copy.chooseWorkspace);
+    return api.tools.call({
+      workspaceId,
+      tool,
+      arguments: args,
+    }) as Promise<JsonObject>;
+  };
+
+  const planAssignments = async () => {
+    if (!taskId.trim() || !subagents.length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await callPlane("paseo_plan", {
+        brief: taskId.trim(),
+        orchestrator: {
+          providerId,
+          accountId,
+          model,
+          allowFallback,
+        },
+        subagents: subagents.map((item) => ({
+          role: item.role,
+          providerId: item.providerId,
+          accountId: item.accountId,
+          model: item.model,
+          allowFallback,
+        })),
+      });
+      setAssignmentPlan(next);
+      setAssignmentRun(null);
+      setAssignmentReview(null);
+      setInspectorTab("plan");
+      setNotice(`${copy.paseoAssignmentPreview}: ${stringValue(object(next.orchestrator)?.role, "orchestrator")}`);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runSubagents = async () => {
+    const planId = stringValue(assignmentPlan?.id);
+    if (!planId || !taskId.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await callPlane("paseo_run", {
+        planId,
+        message: taskId.trim(),
+      });
+      setAssignmentRun(next);
+      setInspectorTab("plan");
+      setNotice(copy.paseoRunningSubagents);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reviewResults = async () => {
+    const runId = stringValue(assignmentRun?.id);
+    if (!runId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await callPlane("paseo_review", { runId });
+      setAssignmentReview(next);
+      setInspectorTab("plan");
+      setNotice(copy.paseoReviewReady);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openAnnealTask = async () => {
+    const reviewId = stringValue(assignmentReview?.id);
+    if (!reviewId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await callPlane("anneal_open_from_review", { reviewId });
+      setNotice(copy.paseoAnnealTaskOpened);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recordAssignment = async (assignmentId: string, withIssue: boolean) => {
+    const runId = stringValue(assignmentRun?.id);
+    if (!runId || !assignmentId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await callPlane("paseo_submit_result", {
+        runId,
+        assignmentId,
+        ok: !withIssue,
+        summary: taskId.trim() || assignmentId,
+        issues: withIssue
+          ? [{ title: (taskId.trim() || assignmentId).slice(0, 240), detail: taskId.trim() }]
+          : [],
+      });
+      setAssignmentRun(next);
+      const reviewed = await callPlane("paseo_review", { runId });
+      setAssignmentReview(reviewed);
+      setInspectorTab("plan");
+      setNotice(copy.paseoReviewReady);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const updateSubagent = (key: string, patch: Partial<SubagentDraft>) => {
+    setSubagents((current) => current.map((item) => (
+      item.key === key ? { ...item, ...patch } : item
+    )));
   };
 
   const prepare = async () => {
@@ -312,6 +477,9 @@ export function PaseoOrchestratorSurface({
     setMissionId("");
     setTaskId("");
     setRoute(null);
+    setAssignmentPlan(null);
+    setAssignmentRun(null);
+    setAssignmentReview(null);
     setNotice("");
     setInspectorTab("route");
   };
@@ -443,7 +611,7 @@ export function PaseoOrchestratorSurface({
 
             <div className="paseo-meta-row">
               <label className="paseo-meta-chip">
-                <span>{copy.provider}</span>
+                <span>{copy.paseoOrchestrator}</span>
                 <select value={providerId} onChange={(event) => setProviderId(event.target.value)}>
                   <option value="">{copy.automatic}</option>
                   {providers.map((id) => (
@@ -482,6 +650,96 @@ export function PaseoOrchestratorSurface({
               </label>
             </div>
 
+            <section className="paseo-subagent-board">
+              <header>
+                <h3>{copy.paseoSubagents}</h3>
+                <button
+                  className="secondary-button"
+                  disabled={busy || !accounts.length || subagents.length >= 8}
+                  onClick={() => {
+                    const fallback = accounts.find((item) => (
+                      !subagents.some((agent) => agent.accountId === item.id)
+                    )) ?? accounts[0];
+                    setSubagents((current) => [
+                      ...current,
+                      {
+                        key: crypto.randomUUID().slice(0, 8),
+                        providerId: fallback?.providerId ?? "",
+                        accountId: fallback?.id ?? "",
+                        model: fallback?.models[0] ?? "",
+                        role: `subagent-${current.length + 1}`,
+                      },
+                    ]);
+                  }}
+                  type="button"
+                >
+                  {copy.paseoAddSubagent}
+                </button>
+              </header>
+              {subagents.map((item) => {
+                const agentAccounts = accounts.filter((account) => (
+                  !item.providerId || account.providerId === item.providerId
+                ));
+                const agentAccount = agentAccounts.find((account) => account.id === item.accountId)
+                  ?? agentAccounts[0];
+                return (
+                  <div className="paseo-subagent-row" key={item.key}>
+                    <label>
+                      <span>{copy.paseoSubagentRole}</span>
+                      <input
+                        value={item.role}
+                        onChange={(event) => updateSubagent(item.key, { role: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>{copy.provider}</span>
+                      <select
+                        value={item.providerId}
+                        onChange={(event) => updateSubagent(item.key, {
+                          providerId: event.target.value,
+                          accountId: "",
+                          model: "",
+                        })}
+                      >
+                        <option value="">{copy.automatic}</option>
+                        {providers.map((id) => <option key={id} value={id}>{id}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span>{copy.account}</span>
+                      <select
+                        value={item.accountId}
+                        onChange={(event) => updateSubagent(item.key, { accountId: event.target.value })}
+                      >
+                        <option value="">{copy.automatic}</option>
+                        {agentAccounts.map((account) => (
+                          <option key={account.id} value={account.id}>{account.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>{copy.model}</span>
+                      <input
+                        value={item.model}
+                        onChange={(event) => updateSubagent(item.key, { model: event.target.value })}
+                        placeholder={copy.defaultModel}
+                      />
+                    </label>
+                    <button
+                      className="secondary-button"
+                      disabled={busy || subagents.length <= 1}
+                      onClick={() => setSubagents((current) => current.filter((agent) => agent.key !== item.key))}
+                      type="button"
+                    >
+                      {copy.paseoRemoveSubagent}
+                    </button>
+                    <small>{agentAccount?.label}</small>
+                  </div>
+                );
+              })}
+              {!subagents.length ? <p className="paseo-provider-warning">{copy.paseoNoSubagents}</p> : null}
+            </section>
+
             <section className="paseo-composer">
               <textarea
                 aria-label={copy.taskId}
@@ -499,6 +757,22 @@ export function PaseoOrchestratorSurface({
                     type="button"
                   >
                     {copy.previewRoute}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    disabled={busy || !workspaceId || !taskId.trim() || !subagents.length || !accounts.length}
+                    onClick={() => void planAssignments()}
+                    type="button"
+                  >
+                    {busy ? copy.paseoPlanning : copy.paseoPlanAssignments}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    disabled={busy || !assignmentPlan}
+                    onClick={() => void runSubagents()}
+                    type="button"
+                  >
+                    {copy.paseoRunSubagents}
                   </button>
                   <button
                     className="primary-button paseo-submit-button"
@@ -540,6 +814,15 @@ export function PaseoOrchestratorSurface({
             >
               {copy.paseoMissionTab}
             </button>
+            <button
+              aria-selected={inspectorTab === "plan"}
+              className={inspectorTab === "plan" ? "is-active" : ""}
+              onClick={() => setInspectorTab("plan")}
+              role="tab"
+              type="button"
+            >
+              {copy.paseoAssignmentTab}
+            </button>
           </div>
         </header>
 
@@ -557,6 +840,85 @@ export function PaseoOrchestratorSurface({
             </div>
           ) : (
             <p className="paseo-inspector-empty">{copy.routeUnavailable}</p>
+          )
+        ) : inspectorTab === "plan" ? (
+          assignmentPlan ? (
+            <div className="paseo-inspector-content">
+              <span className="paseo-route-ready">{copy.paseoAssignmentPreview}</span>
+              <dl className="paseo-detail-list">
+                <div>
+                  <dt>{copy.paseoOrchestrator}</dt>
+                  <dd>
+                    {stringValue(object(object(assignmentPlan.orchestrator)?.route)?.providerId)}
+                    {" · "}
+                    {stringValue(object(object(assignmentPlan.orchestrator)?.route)?.model, copy.defaultModel)}
+                  </dd>
+                </div>
+              </dl>
+              <ol className="paseo-assignment-list">
+                {listValue(assignmentPlan.subagents).map((entry) => {
+                  const row = object(entry) ?? {};
+                  const routeRow = object(row.route) ?? {};
+                  return (
+                    <li key={stringValue(row.id)}>
+                      <strong>{stringValue(row.role)}</strong>
+                      <small>{stringValue(routeRow.providerId)} · {stringValue(routeRow.model, copy.defaultModel)}</small>
+                      <code>{stringValue(row.backend)}</code>
+                    </li>
+                  );
+                })}
+              </ol>
+              {assignmentRun ? (
+                <div className="paseo-run-results">
+                  <h3>{copy.paseoReviewResults}</h3>
+                  {listValue(assignmentRun.assignments).map((entry) => {
+                    const row = object(entry) ?? {};
+                    return (
+                      <article className="paseo-assignment-result" key={stringValue(row.id)}>
+                        <strong>{stringValue(row.role)}</strong>
+                        <small>{stringValue(row.status)}</small>
+                        <div className="paseo-inline-controls">
+                          <button
+                            className="secondary-button"
+                            disabled={busy}
+                            onClick={() => void recordAssignment(stringValue(row.id), false)}
+                            type="button"
+                          >
+                            {copy.paseoRecordReturn}
+                          </button>
+                          <button
+                            className="secondary-button"
+                            disabled={busy}
+                            onClick={() => void recordAssignment(stringValue(row.id), true)}
+                            type="button"
+                          >
+                            {copy.paseoRecordIssue}
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                  <button
+                    className="secondary-button"
+                    disabled={busy || !assignmentRun}
+                    onClick={() => void reviewResults()}
+                    type="button"
+                  >
+                    {copy.paseoReviewResults}
+                  </button>
+                  <button
+                    className="primary-button compact"
+                    disabled={busy || listValue(assignmentReview?.findings).length === 0}
+                    onClick={() => void openAnnealTask()}
+                    type="button"
+                  >
+                    {copy.paseoOpenAnnealTask}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="paseo-inspector-empty">{copy.paseoNoSubagents}</p>
           )
         ) : selectedMission ? (
           <div className="paseo-inspector-content">

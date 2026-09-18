@@ -10,6 +10,12 @@
   "version": "1.0.0",
   "strategy": "git-source",
   "license": "MIT",
+  "bundle": {
+    "required": true,
+    "kind": "source-tree",
+    "entrypoint": "proxy.mjs",
+    "prebuilt": true
+  },
   "credentials": {
     "accountAuthority": "CPA Provider Hub",
     "sessionSource": "~/.commandcode/auth.json",

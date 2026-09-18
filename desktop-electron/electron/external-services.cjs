@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
 const STORE_VERSION = 1;
 const SERVICE_IDS = Object.freeze([
@@ -54,7 +55,7 @@ const DEFAULTS = Object.freeze({
   paseo: Object.freeze({
     name: "Paseo",
     endpoint: "http://127.0.0.1:6768/",
-    executionEndpoint: "ws://127.0.0.1:6767/ws",
+    executionEndpoint: "ws://127.0.0.1:6768/ws",
     home: "",
     executable: process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm",
     arguments: process.platform === "win32"
@@ -76,6 +77,24 @@ const DEFAULTS = Object.freeze({
     autoStart: false,
   }),
 });
+
+function commandCodeAlternateEndpoint(endpoint) {
+  let parsed;
+  try {
+    parsed = new URL(String(endpoint || ""));
+  } catch {
+    return null;
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!LOOPBACK_HOSTS.has(hostname)) return null;
+  if (parsed.port === "9090") parsed.port = "3050";
+  else if (parsed.port === "3050") parsed.port = "9090";
+  else return null;
+  parsed.search = "";
+  parsed.hash = "";
+  if (!parsed.pathname.endsWith("/")) parsed.pathname += "/";
+  return parsed.toString();
+}
 
 function requiredServiceId(value) {
   const id = typeof value === "string" ? value.trim() : "";
@@ -332,6 +351,7 @@ function countModels(payload) {
 function createExternalServicesController({
   filePath,
   keyPath,
+  loopbackMeshPath = null,
   safeStorage = null,
   logger = null,
   env = process.env,
@@ -344,6 +364,7 @@ function createExternalServicesController({
   now = () => new Date().toISOString(),
 } = {}) {
   if (!filePath || !keyPath) throw new Error("External service state paths are required");
+  const meshFilePath = loopbackMeshPath || path.join(path.dirname(filePath), "loopback-mesh.json");
   const codec = createSecretCodec({ safeStorage, keyPath });
   let state;
   try {
@@ -454,6 +475,13 @@ function createExternalServicesController({
 
   function emit() {
     const value = snapshot();
+    try {
+      persistLoopbackMesh(meshFilePath, buildLoopbackMesh(value.services));
+    } catch (error) {
+      logger?.warn?.("external-service.loopback-mesh-persist-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     try { publish?.(value); } catch {}
     return value;
   }
@@ -570,8 +598,55 @@ function createExternalServicesController({
     } finally {
       clearTimeout(timer);
     }
+    if (id === "commandcode-proxy") {
+      const current = runtime.get(id);
+      if (current.status !== "ready") {
+        const alternate = commandCodeAlternateEndpoint(config.endpoint);
+        if (alternate) {
+          const altController = new AbortController();
+          const altTimer = setTimeout(() => altController.abort(), DEFAULT_INSPECT_TIMEOUT_MS);
+          altTimer.unref?.();
+          try {
+            const response = await fetchImpl(new URL("/v1/models", alternate).toString(), {
+              method: "GET",
+              headers: {
+                accept: "application/json,text/html;q=0.8,*/*;q=0.1",
+                ...(typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {}),
+              },
+              signal: altController.signal,
+            });
+            if (response.ok) {
+              runtime.set(id, {
+                ...runtime.get(id),
+                status: "ready",
+                checkedAt: now(),
+                statusCode: response.status,
+                error: null,
+                alternateEndpoint: alternate,
+              });
+            } else {
+              runtime.set(id, {
+                ...runtime.get(id),
+                error: "CommandCode Proxy is not reachable on 9090 or 3050",
+                alternateEndpoint: null,
+              });
+            }
+          } catch {
+            runtime.set(id, {
+              ...runtime.get(id),
+              error: "CommandCode Proxy is not reachable on 9090 or 3050",
+              alternateEndpoint: null,
+            });
+          } finally {
+            clearTimeout(altTimer);
+          }
+        }
+      }
+    }
     emit();
-    return project(id);
+    const projected = project(id);
+    const alternateEndpoint = runtime.get(id)?.alternateEndpoint || null;
+    return alternateEndpoint ? { ...projected, alternateEndpoint } : projected;
   }
 
   async function start(idValue) {
@@ -733,6 +808,8 @@ function createExternalServicesController({
     const router = state.services["codex-router"];
     const commandCode = state.services["commandcode-proxy"];
     const cpa = state.services.cpa;
+    const mesh = buildLoopbackMesh(snapshot().services);
+    try { persistLoopbackMesh(meshFilePath, mesh); } catch {}
     const callerKey = secretFor("codex-router").callerKey;
     return Object.freeze({
       CODING_TOOLS_CODEX_ROUTER_URL: router.endpoint.replace(/\/$/, ""),
@@ -741,6 +818,7 @@ function createExternalServicesController({
       CODING_TOOLS_CPA_URL: cpa.endpoint.replace(/\/$/, ""),
       CODING_TOOLS_PASEO_EXECUTION_URL: state.services.paseo.executionEndpoint,
       CODING_TOOLS_ANNEAL_EXECUTION_URL: state.services.anneal.executionEndpoint,
+      ...loopbackMeshEnvironment(mesh, { meshPath: meshFilePath }),
     });
   }
 
@@ -784,6 +862,7 @@ function createExternalServicesController({
     restart,
     syncCodexRouter,
     runtimeEnvironment,
+    loopbackMesh: () => buildLoopbackMesh(snapshot().services),
     upstreamConfiguration,
     dispose,
   });
@@ -791,7 +870,9 @@ function createExternalServicesController({
 
 module.exports = {
   SERVICE_IDS,
+  COMMANDCODE_ALTERNATE_ENDPOINT: "http://127.0.0.1:3050/",
   createExternalServicesController,
+  commandCodeAlternateEndpoint,
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
 };

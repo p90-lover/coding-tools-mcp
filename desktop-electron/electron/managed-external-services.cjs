@@ -11,6 +11,8 @@ const {
   providerBackendContract,
   startPeerIds,
 } = require("./cpa-codex-long-run.cjs");
+const { attachLane193LongRun } = require("./paseo-anneal-commandcode-long-run.cjs");
+const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: ROUTER_LOOPBACK.endpoint }),
@@ -18,7 +20,7 @@ const SERVICE_ENDPOINTS = Object.freeze({
   cpa: Object.freeze({ endpoint: CPA_LOOPBACK.endpoint }),
   paseo: Object.freeze({
     endpoint: "http://127.0.0.1:6768/",
-    executionEndpoint: "ws://127.0.0.1:6767/ws",
+    executionEndpoint: "ws://127.0.0.1:6768/ws",
   }),
   anneal: Object.freeze({
     endpoint: "http://127.0.0.1:5173/",
@@ -41,8 +43,20 @@ function createManagedExternalServicesController({
     try { publish?.(combinedSnapshot()); } catch {}
   };
 
+  if (!dataRoot || !path.isAbsolute(dataRoot)) {
+    throw new Error("Managed component data root must be absolute");
+  }
+  const meshPath = path.join(dataRoot, "loopback-mesh.json");
+
+  function persistMeshFromServices(services, targetId = null, commandCodeApiKey = "") {
+    const mesh = buildLoopbackMesh(services);
+    persistLoopbackMesh(meshPath, mesh);
+    return loopbackMeshEnvironment(mesh, { targetId, commandCodeApiKey, meshPath });
+  }
+
   baseController = createExternalServicesController({
     ...options,
+    loopbackMeshPath: meshPath,
     getHealthHeaders: (serviceId) => managedController?.healthHeaders(serviceId) || {},
     publish: publishCombined,
   });
@@ -69,6 +83,13 @@ function createManagedExternalServicesController({
       } catch {
         return desktopCrossUseEnvironment();
       }
+    },
+    peerEnvironment: (manifest) => {
+      let commandCodeApiKey = "";
+      try {
+        commandCodeApiKey = String(managedController.runtimeSecrets("commandcode-proxy").proxyApiKey || "");
+      } catch {}
+      return persistMeshFromServices(combinedSnapshot().services, manifest.id, commandCodeApiKey);
     },
   });
 
@@ -278,18 +299,23 @@ function createManagedExternalServicesController({
   }
 
   function runtimeEnvironment() {
+    const mesh = buildLoopbackMesh(combinedSnapshot().services);
+    persistLoopbackMesh(meshPath, mesh);
     const base = baseController.runtimeEnvironment();
     let cpaProxyApiKey = "";
     try {
       cpaProxyApiKey = String(cpaConnection()?.proxyApiKey || "").trim();
     } catch {}
     const callerKey = String(base.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY || "").trim();
+    const meshEnv = loopbackMeshEnvironment(mesh, { meshPath });
     return Object.freeze({
       ...base,
       ...desktopCrossUseEnvironment({
         cpaProxyApiKey: cpaProxyApiKey || undefined,
         routerCallerKey: callerKey || undefined,
       }),
+      ...meshEnv,
+      ...(callerKey ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey } : {}),
     });
   }
 
@@ -298,7 +324,7 @@ function createManagedExternalServicesController({
     baseController.dispose();
   }
 
-  return Object.freeze({
+  const controller = {
     snapshot: combinedSnapshot,
     configure,
     inspect,
@@ -314,7 +340,13 @@ function createManagedExternalServicesController({
     repairManagedComponent,
     setManagedComponentCredential,
     managedComponentsSnapshot: () => managedController.snapshot(),
+    loopbackMesh: () => buildLoopbackMesh(combinedSnapshot().services),
     dispose,
+  };
+  return attachLane193LongRun(controller, {
+    statePath: path.join(dataRoot, "paseo-anneal-commandcode-long-run.json"),
+    logger: options.logger,
+    powerSaveBlocker: options.powerSaveBlocker,
   });
 }
 

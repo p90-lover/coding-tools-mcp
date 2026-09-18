@@ -60,6 +60,24 @@ export interface OrchestrationCopy {
   paseoReadyToStart: string;
   paseoBindingsMissing: string;
   paseoAvailableBindings: string;
+  paseoOrchestrator: string;
+  paseoSubagents: string;
+  paseoAddSubagent: string;
+  paseoRemoveSubagent: string;
+  paseoSubagentRole: string;
+  paseoPlanAssignments: string;
+  paseoPlanning: string;
+  paseoRunSubagents: string;
+  paseoRunningSubagents: string;
+  paseoReviewResults: string;
+  paseoOpenAnnealTask: string;
+  paseoAssignmentTab: string;
+  paseoAssignmentPreview: string;
+  paseoNoSubagents: string;
+  paseoReviewReady: string;
+  paseoAnnealTaskOpened: string;
+  paseoRecordIssue: string;
+  paseoRecordReturn: string;
   annealTitle: string;
   annealSubtitle: string;
   annealTaskBoard: string;
@@ -81,6 +99,9 @@ export interface OrchestrationCopy {
   annealTaskDescription: string;
   annealTaskState: string;
   annealMissionSubmitted: string;
+  annealFromPaseoReview: string;
+  annealAssignmentPreview: string;
+  annealNoAssignment: string;
   executionPlanningUnavailable: string;
   connectApprovedBinding: string;
   phases: Record<string, string>;
@@ -146,6 +167,24 @@ const EN: OrchestrationCopy = {
   paseoReadyToStart: "The session is ready to start.",
   paseoBindingsMissing: "Connect an approved Paseo provider binding in Providers first.",
   paseoAvailableBindings: "Available bindings",
+  paseoOrchestrator: "Main orchestrator",
+  paseoSubagents: "Subagents",
+  paseoAddSubagent: "Add subagent",
+  paseoRemoveSubagent: "Remove",
+  paseoSubagentRole: "Role",
+  paseoPlanAssignments: "Plan assignments",
+  paseoPlanning: "Planning…",
+  paseoRunSubagents: "Run subagents",
+  paseoRunningSubagents: "Running…",
+  paseoReviewResults: "Review results",
+  paseoOpenAnnealTask: "Open Anneal task",
+  paseoAssignmentTab: "Assignment",
+  paseoAssignmentPreview: "Orchestrator → subagent assignment",
+  paseoNoSubagents: "Add at least one subagent from a connected provider.",
+  paseoReviewReady: "Orchestrator review is ready.",
+  paseoAnnealTaskOpened: "Anneal task opened from review findings.",
+  paseoRecordIssue: "Record issue",
+  paseoRecordReturn: "Record return",
   annealTitle: "Anneal Tasks",
   annealSubtitle: "Queue and dispatch work from an Anneal-style five-column board, then inspect the selected chain and route.",
   annealTaskBoard: "Task board",
@@ -167,6 +206,9 @@ const EN: OrchestrationCopy = {
   annealTaskDescription: "Description",
   annealTaskState: "Board state",
   annealMissionSubmitted: "Task dispatch was submitted. Refresh until it is Ready, then start it.",
+  annealFromPaseoReview: "Opened from Paseo review",
+  annealAssignmentPreview: "Assignment preview",
+  annealNoAssignment: "This task has no orchestrator→subagent assignment yet.",
   executionPlanningUnavailable: "Provider execution planning is unavailable.",
   connectApprovedBinding: "Connect an approved provider binding first.",
   phases: {
@@ -245,6 +287,24 @@ const ZH_TW: OrchestrationCopy = {
   paseoReadyToStart: "工作階段已準備好，可以啟動。",
   paseoBindingsMissing: "請先喺供應商中心連線已批准嘅 Paseo 供應商綁定。",
   paseoAvailableBindings: "可用綁定",
+  paseoOrchestrator: "主協調器",
+  paseoSubagents: "子代理",
+  paseoAddSubagent: "新增子代理",
+  paseoRemoveSubagent: "移除",
+  paseoSubagentRole: "角色",
+  paseoPlanAssignments: "規劃指派",
+  paseoPlanning: "規劃中…",
+  paseoRunSubagents: "執行子代理",
+  paseoRunningSubagents: "執行中…",
+  paseoReviewResults: "審查結果",
+  paseoOpenAnnealTask: "開啟 Anneal 任務",
+  paseoAssignmentTab: "指派",
+  paseoAssignmentPreview: "協調器 → 子代理指派",
+  paseoNoSubagents: "請至少從已連線供應商新增一個子代理。",
+  paseoReviewReady: "協調器審查已準備好。",
+  paseoAnnealTaskOpened: "已從審查發現開啟 Anneal 任務。",
+  paseoRecordIssue: "記錄問題",
+  paseoRecordReturn: "記錄回傳",
   annealTitle: "Anneal 任務",
   annealSubtitle: "以 Anneal 式五欄任務板整理及執行工作，再檢查所選 chain 同路由。",
   annealTaskBoard: "Anneal 任務板",
@@ -266,6 +326,9 @@ const ZH_TW: OrchestrationCopy = {
   annealTaskDescription: "描述",
   annealTaskState: "任務板狀態",
   annealMissionSubmitted: "已提交任務執行要求。請更新至「準備好」，再啟動工作階段。",
+  annealFromPaseoReview: "由 Paseo 審查開啟",
+  annealAssignmentPreview: "指派預覽",
+  annealNoAssignment: "呢個任務尚未有協調器→子代理指派結構。",
   executionPlanningUnavailable: "供應商執行路由功能目前無法使用。",
   connectApprovedBinding: "請先連線已批准嘅供應商綁定。",
   phases: {
@@ -334,6 +397,24 @@ const ZH_CN: OrchestrationCopy = {
   paseoReadyToStart: "会话已准备好，可以启动。",
   paseoBindingsMissing: "请先在供应商中心连接已批准的 Paseo 供应商绑定。",
   paseoAvailableBindings: "可用绑定",
+  paseoOrchestrator: "主协调器",
+  paseoSubagents: "子代理",
+  paseoAddSubagent: "新增子代理",
+  paseoRemoveSubagent: "移除",
+  paseoSubagentRole: "角色",
+  paseoPlanAssignments: "规划指派",
+  paseoPlanning: "规划中…",
+  paseoRunSubagents: "执行子代理",
+  paseoRunningSubagents: "执行中…",
+  paseoReviewResults: "审核结果",
+  paseoOpenAnnealTask: "打开 Anneal 任务",
+  paseoAssignmentTab: "指派",
+  paseoAssignmentPreview: "协调器 → 子代理指派",
+  paseoNoSubagents: "请至少从已连接供应商新增一个子代理。",
+  paseoReviewReady: "协调器审核已准备好。",
+  paseoAnnealTaskOpened: "已从审核发现打开 Anneal 任务。",
+  paseoRecordIssue: "记录问题",
+  paseoRecordReturn: "记录返回",
   annealSubtitle: "以 Anneal 式五栏任务板整理和执行工作，再检查所选 chain 和路由。",
   annealTaskBoard: "Anneal 任务板",
   annealBacklog: "待整理",
@@ -353,6 +434,9 @@ const ZH_CN: OrchestrationCopy = {
   annealNoRelatedMissions: "尚无相关会话。",
   annealTaskState: "任务板状态",
   annealMissionSubmitted: "已提交任务执行请求。请刷新到“准备好”，然后启动会话。",
+  annealFromPaseoReview: "由 Paseo 审核打开",
+  annealAssignmentPreview: "指派预览",
+  annealNoAssignment: "这个任务还没有协调器→子代理指派结构。",
   executionPlanningUnavailable: "供应商执行路由功能当前不可用。",
   connectApprovedBinding: "请先连接已批准的供应商绑定。",
   phases: {
@@ -400,6 +484,24 @@ const JA: OrchestrationCopy = {
   paseoComposerTitle: "エージェントに何を依頼しますか？",
   paseoComposerPlaceholder: "タスクを説明するか、既存のタスク ID を入力…",
   paseoCreateSession: "セッションを作成",
+  paseoOrchestrator: "メインオーケストレーター",
+  paseoSubagents: "サブエージェント",
+  paseoAddSubagent: "サブエージェントを追加",
+  paseoRemoveSubagent: "削除",
+  paseoSubagentRole: "役割",
+  paseoPlanAssignments: "割り当てを計画",
+  paseoPlanning: "計画中…",
+  paseoRunSubagents: "サブエージェントを実行",
+  paseoRunningSubagents: "実行中…",
+  paseoReviewResults: "結果をレビュー",
+  paseoOpenAnnealTask: "Anneal タスクを開く",
+  paseoAssignmentTab: "割り当て",
+  paseoAssignmentPreview: "オーケストレーター → サブエージェント割り当て",
+  paseoNoSubagents: "接続済みプロバイダーからサブエージェントを 1 つ以上追加してください。",
+  paseoReviewReady: "オーケストレーターのレビュー準備ができました。",
+  paseoAnnealTaskOpened: "レビューの指摘から Anneal タスクを開きました。",
+  paseoRecordIssue: "問題を記録",
+  paseoRecordReturn: "結果を記録",
   paseoActivity: "アクティビティ",
   paseoInspector: "インスペクター",
   paseoRouteTab: "ルート",
@@ -420,6 +522,9 @@ const JA: OrchestrationCopy = {
   annealDispatchTask: "タスクを実行",
   annealRelatedMissions: "関連ミッション",
   annealNoRelatedMissions: "関連ミッションはありません。",
+  annealFromPaseoReview: "Paseo レビューから開く",
+  annealAssignmentPreview: "割り当てプレビュー",
+  annealNoAssignment: "このタスクにはオーケストレーター→サブエージェント割り当てがまだありません。",
   phases: {
     draft: "下書き",
     ready: "準備完了",

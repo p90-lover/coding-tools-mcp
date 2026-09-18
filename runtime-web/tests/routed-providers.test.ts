@@ -7,8 +7,11 @@ import {
   forwardCodexRouterResponse,
   parseCodexRouterModelId,
   redactRouterError,
+  resolveAnnealExecutionLoopback,
   resolveCodexRouterConnection,
+  resolveCommandCodeLoopback,
   resolveCpaConnection,
+  resolvePaseoExecutionLoopback,
   describeProviderBackends,
 } from "../src/routed-providers";
 
@@ -263,5 +266,36 @@ describe("Codex Router provider contract", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(response.headers.get("x-router")).toBe("ok");
     expect(await response.text()).toContain("response.completed");
+  });
+});
+
+describe("in-app CommandCode/Paseo/Anneal loopbacks", () => {
+  test("resolves CommandCode 9090/v1 from Desktop mesh env", () => {
+    const profile = resolveCommandCodeLoopback({
+      CODING_TOOLS_COMMANDCODE_URL: "http://127.0.0.1:9090/",
+    });
+    expect(profile).toEqual({
+      id: "commandcode-proxy",
+      name: "CommandCode Proxy",
+      baseUrl: "http://127.0.0.1:9090/v1",
+      adapter: "openai-chat",
+      modelEndpoint: "/models",
+    });
+    expect(resolveCommandCodeLoopback({})).toBeUndefined();
+    expect(() => resolveCommandCodeLoopback({
+      CODING_TOOLS_COMMANDCODE_URL: "http://proxy.example:9090",
+    })).toThrow("loopback");
+  });
+
+  test("resolves Paseo and Anneal execution loopbacks", () => {
+    expect(resolvePaseoExecutionLoopback({
+      CODING_TOOLS_PASEO_EXECUTION_URL: "ws://127.0.0.1:6768/ws",
+    })).toBe("ws://127.0.0.1:6768/ws");
+    expect(resolveAnnealExecutionLoopback({
+      CODING_TOOLS_ANNEAL_EXECUTION_URL: "http://127.0.0.1:3000/",
+    })).toBe("http://127.0.0.1:3000");
+    expect(() => resolvePaseoExecutionLoopback({
+      CODING_TOOLS_PASEO_EXECUTION_URL: "ws://paseo.example/ws",
+    })).toThrow("loopback");
   });
 });

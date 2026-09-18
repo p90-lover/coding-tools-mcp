@@ -19,9 +19,10 @@ test("Codex Router is the pinned managed git source plus original Control Center
   assert.equal(fs.existsSync(path.join(root, "electron/codex-router-managed.cjs")), true);
 });
 
-test("Anneal requires an encrypted operator token and gates fresh migration to a new dedicated volume", () => {
+test("Anneal bundled Start does not gate on a GitHub token and still guards dedicated volume migration", () => {
   const manifest = JSON.parse(read("vendor/managed-components/anneal.json"));
-  assert.equal(manifest.credentials.githubReadToken.required, true);
+  assert.equal(manifest.credentials.githubReadToken.required, false);
+  assert.equal(manifest.bundle.required, true);
   const serialized = JSON.stringify(manifest);
   assert.match(serialized, /database-v0\.9\.0\.initialized/);
   assert.match(serialized, /docker volume ls/);

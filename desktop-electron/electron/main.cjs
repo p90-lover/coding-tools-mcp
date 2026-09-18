@@ -42,9 +42,11 @@ const {
   setProviderCpaConnection,
 } = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
+const { createFiveStackControlPlane } = require("./five-stack-control-plane.cjs");
 const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
+const { actUpstream } = require("./upstream-actions.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -489,6 +491,52 @@ function registerIpc({ logger, stateStore }) {
     headlessHost,
     updateController,
   });
+  const fiveStackControlPlane = createFiveStackControlPlane({
+    planProvider: createProviderExecutionPlan,
+    getProviderSnapshot: async () => {
+      const providerNetwork = await providerNetworkReady();
+      return providerNetwork.store.snapshot();
+    },
+    getServicesSnapshot: () => {
+      if (!externalServicesController) return { version: 1, services: [] };
+      return externalServicesController.snapshot();
+    },
+    inspectService: (stack) => {
+      if (!externalServicesController) throw new Error("External services controller is unavailable");
+      return externalServicesController.inspect(stack);
+    },
+    manageService: async (stack, action) => {
+      if (!externalServicesController) throw new Error("External services controller is unavailable");
+      if (action === "start") return externalServicesController.start(stack);
+      if (action === "stop") return externalServicesController.stop(stack);
+      if (action === "restart") return externalServicesController.restart(stack);
+      if (action === "repair") return externalServicesController.repairManagedComponent(stack);
+      throw new Error(`Unsupported manage action ${action}`);
+    },
+    handoffAnnealTask: async ({ projectId, body }) => {
+      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const result = await actUpstream({
+        toolId: "anneal",
+        op: "create",
+        projectId,
+        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+        name: body?.name,
+        description: body?.description,
+        cwd: body?.workingDirectory,
+      });
+      return result.body && typeof result.body === "object" ? result.body : { id: null };
+    },
+    fetchAnnealTask: async ({ taskId }) => {
+      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const result = await actUpstream({
+        toolId: "anneal",
+        op: "preview",
+        taskId,
+        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+      });
+      return result.body;
+    },
+  });
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
@@ -496,11 +544,36 @@ function registerIpc({ logger, stateStore }) {
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
   handle("coding-tools:native-codex:status", (event) => codingTools.nativeCodexStatus(event));
-  handle("coding-tools:integrations:snapshot", (event) => codingTools.integrationsSnapshot(event));
+  handle("coding-tools:integrations:snapshot", async (event) => {
+    const snapshot = await codingTools.integrationsSnapshot(event);
+    return {
+      ...snapshot,
+      available: true,
+      five_stack: fiveStackControlPlane.apiMap(),
+    };
+  });
   handle("coding-tools:updates:status", (event) => codingTools.updatesStatus(event));
   handle("coding-tools:diagnostics:snapshot", (event) => codingTools.diagnosticsSnapshot(event));
-  handle("coding-tools:tools:catalog", (event, input) => codingTools.toolsCatalog(event, input));
-  handle("coding-tools:tools:call", (event, input) => codingTools.toolsCall(event, input));
+  handle("coding-tools:tools:catalog", async (event, input) => {
+    assertFocusedMainWindow(event, false);
+    let headless = { tools: [], unavailable: true };
+    try {
+      headless = await codingTools.toolsCatalog(event, input);
+    } catch {
+      headless = { tools: [], unavailable: true };
+    }
+    return fiveStackControlPlane.mergeCatalog(headless);
+  });
+  handle("coding-tools:tools:call", async (event, input) => {
+    if (fiveStackControlPlane.hasTool(input.tool)) {
+      assertFocusedMainWindow(event, !fiveStackControlPlane.isReadOnly(input.tool));
+      return fiveStackControlPlane.callTool(input.tool, input.arguments ?? {}, {
+        workspaceId: input.workspaceId,
+        requestId: input.requestId,
+      });
+    }
+    return codingTools.toolsCall(event, input);
+  });
   handle("coding-tools:execution:read", async (event, input) => {
     assertFocusedMainWindow(event, false);
     if (!headlessHost) throw new Error("Local execution service is unavailable");
@@ -1285,6 +1358,7 @@ async function start() {
     publish: (value) => send("launcher:external-services-changed", value),
     resourcesPath: process.resourcesPath,
     desktopRoot: path.join(__dirname, ".."),
+    powerSaveBlocker,
     runRuntimeCommand: async (args) => {
       if (!runtimeSupervisor) throw new Error("Packaged runtime is not ready");
       const invocation = runtimeSupervisor.runtimeCommand(args);
