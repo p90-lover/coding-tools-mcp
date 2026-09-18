@@ -18,7 +18,7 @@ concurrency:
 
 env:
   SOURCE_BRANCH: cursor/rc11-five-stack-integrate-657e
-  SOURCE_HEAD: 84a86be2dcf2baece276904fecc18dc650f62cd5
+  SOURCE_HEAD: 8dfe7316aeaa172e254ded98bdbea3db7abfb5df
   BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc11-integration/bun-cache
 
 jobs:
