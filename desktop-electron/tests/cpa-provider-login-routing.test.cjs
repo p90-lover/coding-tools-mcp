@@ -66,7 +66,7 @@ function saveCpaAccount(controller, providerId, adapterId, overrides = {}) {
   return snapshot.accounts.find((account) => account.providerId === providerId);
 }
 
-test("Codex CPA login completes, stores only binding metadata, and discovers models", async () => {
+test("Codex CPA login completes, stores an encrypted binding, and discovers models", async () => {
   let listingReads = 0;
   const requests = [];
   const fetchImpl = async (url, options = {}) => {
@@ -104,10 +104,13 @@ test("Codex CPA login completes, stores only binding metadata, and discovers mod
   assert.equal(connected.identity, "codex@example.test");
   assert.equal(connected.loginAdapterId, "cpa-codex");
   assert.equal(connected.credentialSource, "cpa");
-  assert.equal(connected.authFileId, "codex-index");
-  assert.equal(connected.authFileName, "codex-user.json");
+  const storedBinding = controller.store.accountSecret(account.id);
+  assert.equal(storedBinding.cpaAuthIndex, "codex-index");
+  assert.equal(storedBinding.cpaAuthName, "codex-user.json");
   assert.deepEqual(connected.models, ["gpt-5.6-codex"]);
   assert.equal(JSON.stringify(result.snapshot).includes("management-secret"), false);
+  assert.equal(JSON.stringify(result.snapshot).includes("codex-index"), false);
+  assert.equal(JSON.stringify(result.snapshot).includes("codex-user.json"), false);
   assert.ok(requests.every(({ options }) => options.headers.Authorization === "Bearer management-secret"));
 });
 
@@ -171,7 +174,9 @@ test("Gemini CPA account imports an existing auth file without pretending an OAu
   assert.deepEqual(opened, []);
   assert.equal(paths.some((pathname) => pathname.includes("gemini-auth-url")), false);
   assert.equal(connected.status, "connected");
-  assert.equal(connected.authFileName, "gemini-user.json");
+  const storedBinding = controller.store.accountSecret(account.id);
+  assert.equal(storedBinding.cpaAuthName, "gemini-user.json");
+  assert.equal(JSON.stringify(result.snapshot).includes("gemini-user.json"), false);
 });
 
 test("Codex native browser login remains explicit and separate from CPA", async () => {
