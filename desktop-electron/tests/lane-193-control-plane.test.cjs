@@ -74,6 +74,7 @@ test("prepare-paseo-anneal-commandcode copies vendor CommandCode and skips npm",
     const source = path.join(cacheRoot, id, "source");
     fs.mkdirSync(source, { recursive: true });
     fs.writeFileSync(path.join(source, "package.json"), `${JSON.stringify({ name: id, private: true })}\n`);
+    fs.writeFileSync(path.join(source, ".env.example"), "TOKEN=example\n");
   }
   const spawned = [];
   const result = await preparePaseoAnnealCommandCode({
@@ -89,8 +90,11 @@ test("prepare-paseo-anneal-commandcode copies vendor CommandCode and skips npm",
     },
   });
   assert.equal(fs.existsSync(path.join(result.outputRoot, "commandcode-proxy", "proxy.mjs")), true);
+  assert.equal(fs.existsSync(path.join(result.outputRoot, "commandcode-proxy", ".env.example")), false);
   assert.equal(fs.existsSync(path.join(result.outputRoot, "paseo", "source", "package.json")), true);
+  assert.equal(fs.existsSync(path.join(result.outputRoot, "paseo", "source", ".env.example")), false);
   assert.equal(fs.existsSync(path.join(result.outputRoot, "anneal", "source", "package.json")), true);
+  assert.equal(fs.existsSync(path.join(result.outputRoot, "anneal", "source", ".env.example")), false);
   assert.equal(spawned.some((entry) => entry.join(" ").includes("npm")), false);
   const manifest = JSON.parse(fs.readFileSync(path.join(result.outputRoot, "MANIFEST.json"), "utf8"));
   assert.equal(manifest.owner, "pr-193");

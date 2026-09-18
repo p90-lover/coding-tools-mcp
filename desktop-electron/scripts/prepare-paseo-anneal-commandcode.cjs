@@ -3,7 +3,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { copyTreeDeref } = require("../electron/bundled-runtimes.cjs");
 const { MARKER_NAME, sourceRelative } = require("../electron/paseo-anneal-commandcode-bundles.cjs");
 const { createRetentionSession } = require("./prepare-package-resources.cjs");
 
@@ -116,13 +115,36 @@ function writeMarker(sourceRoot, manifest, extra = {}) {
   });
 }
 
+function skipPackagedEntry(name) {
+  const base = String(name || "").toLowerCase();
+  return base.startsWith(".env") || base === ".git";
+}
+
+function copyLane193Tree(sourcePath, destinationPath) {
+  const source = fs.lstatSync(sourcePath);
+  if (source.isSymbolicLink() || !source.isDirectory() && !source.isFile()) return;
+  if (source.isDirectory()) {
+    fs.mkdirSync(destinationPath, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") fs.chmodSync(destinationPath, 0o700);
+    for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+      if (skipPackagedEntry(entry.name)) continue;
+      copyLane193Tree(path.join(sourcePath, entry.name), path.join(destinationPath, entry.name));
+    }
+    return;
+  }
+  fs.copyFileSync(sourcePath, destinationPath);
+  if (process.platform !== "win32") {
+    fs.chmodSync(destinationPath, (source.mode & 0o777) || 0o600);
+  }
+}
+
 function copyCommandCode(stagingRoot) {
   const vendorRoot = path.join(desktopRoot, "vendor", "bundled", "commandcode-proxy");
   const destination = path.join(stagingRoot, ...sourceRelative("commandcode-proxy").split("/"));
   if (!isFile(path.join(vendorRoot, "proxy.mjs"))) {
     fail("LANE193_COMMANDCODE_VENDOR_MISSING", vendorRoot);
   }
-  copyTreeDeref(vendorRoot, destination);
+  copyLane193Tree(vendorRoot, destination);
   writeMarker(destination, COMMANDCODE_MANIFEST, { prebuilt: true, entrypoint: "proxy.mjs" });
   return { id: "commandcode-proxy", relative: sourceRelative("commandcode-proxy"), commit: COMMANDCODE_MANIFEST.commit };
 }
@@ -138,7 +160,7 @@ async function materializeGitSource({
   const destination = path.join(stagingRoot, ...sourceRelative(manifest.id).split("/"));
   const cached = cacheRoot ? path.join(cacheRoot, manifest.id, "source") : null;
   if (cached && isDirectory(cached)) {
-    copyTreeDeref(cached, destination);
+    copyLane193Tree(cached, destination);
     writeMarker(destination, manifest);
     return { id: manifest.id, relative: sourceRelative(manifest.id), commit: manifest.commit, source: "cache" };
   }
@@ -150,7 +172,7 @@ async function materializeGitSource({
     path.join(scratchRoot, `${manifest.id}-extract`),
     spawnSyncProcess,
   );
-  copyTreeDeref(extracted, destination);
+  copyLane193Tree(extracted, destination);
   writeMarker(destination, manifest);
   return { id: manifest.id, relative: sourceRelative(manifest.id), commit: manifest.commit, source: "archive" };
 }
