@@ -329,6 +329,42 @@ function countModels(payload) {
   return null;
 }
 
+function boundedText(value, maximum) {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, maximum) : undefined;
+}
+
+function projectCommandCodeHealth(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const endpoints = payload.endpoints && typeof payload.endpoints === "object"
+    ? Object.fromEntries(
+      Object.entries(payload.endpoints)
+        .filter(([, value]) => typeof value === "string")
+        .slice(0, 8)
+        .map(([key, value]) => [String(key).slice(0, 40), String(value).slice(0, 120)]),
+    )
+    : undefined;
+  const models = Array.isArray(payload.models)
+    ? payload.models.map((item) => String(item).slice(0, 80)).filter(Boolean).slice(0, 64)
+    : undefined;
+  const user = payload.user && typeof payload.user === "object"
+    ? {
+      id: boundedText(payload.user.id, 80),
+      email: boundedText(payload.user.email, 120),
+    }
+    : undefined;
+  return {
+    status: boundedText(payload.status, 32),
+    proxy: boundedText(payload.proxy, 64),
+    version: boundedText(payload.version, 32),
+    ...(endpoints ? { endpoints } : {}),
+    ...(user && (user.id || user.email) ? { user } : {}),
+    ...(typeof payload.credits === "number" ? { credits: payload.credits } : {}),
+    ...(models && models.length ? { models } : {}),
+  };
+}
+
 function createExternalServicesController({
   filePath,
   keyPath,
@@ -361,6 +397,7 @@ function createExternalServicesController({
     latencyMs: null,
     statusCode: null,
     modelCount: null,
+    health: null,
     error: null,
   }]));
 
@@ -437,6 +474,7 @@ function createExternalServicesController({
       statusCode: activity.statusCode,
       modelCount: activity.modelCount,
       error: activity.error,
+      ...(id === "commandcode-proxy" && activity.health ? { health: activity.health } : {}),
       secretConfigured: id === "codex-router" && Boolean(secretFor(id).callerKey),
       sourceConfigured: Boolean(config.home || config.executable),
       ...(id === "codex-router" ? {
@@ -539,11 +577,22 @@ function createExternalServicesController({
         signal: controller.signal,
       });
       let modelCount = null;
+      let health = null;
       try {
         const contentType = response.headers?.get?.("content-type") || "";
         if (contentType.includes("json")) modelCount = countModels(await response.clone().json());
       } catch {}
       const reachable = response.ok;
+      if (reachable && id === "commandcode-proxy") {
+        try {
+          const banner = await fetchImpl(new URL("/", config.endpoint).toString(), {
+            method: "GET",
+            headers: { accept: "application/json" },
+            signal: controller.signal,
+          });
+          if (banner.ok) health = projectCommandCodeHealth(await banner.json());
+        } catch {}
+      }
       runtime.set(id, {
         ...runtime.get(id),
         status: reachable ? "ready" : "error",
@@ -553,6 +602,7 @@ function createExternalServicesController({
         latencyMs: Date.now() - started,
         statusCode: response.status,
         modelCount,
+        health,
         error: reachable ? null : `HTTP ${response.status}`,
       });
     } catch (error) {
@@ -562,6 +612,7 @@ function createExternalServicesController({
         pid: processes.get(id)?.pid || null,
         owned: processes.has(id),
         checkedAt: now(),
+        health: null,
         latencyMs: Date.now() - started,
         statusCode: null,
         modelCount: null,
@@ -794,4 +845,5 @@ module.exports = {
   createExternalServicesController,
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
+  projectCommandCodeHealth,
 };

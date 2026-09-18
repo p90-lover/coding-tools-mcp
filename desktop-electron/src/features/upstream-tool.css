@@ -8,6 +8,58 @@
     var(--color-bg-primary);
 }
 
+.upstream-tool-surface.is-immersive {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.upstream-tool-surface.is-immersive .upstream-tool-heading {
+  margin: 0;
+  padding: 10px 14px 8px;
+  align-items: center;
+}
+
+.upstream-tool-surface.is-immersive .upstream-tool-heading h1 {
+  margin: 2px 0 0;
+  font-size: 18px;
+}
+
+.upstream-tool-surface.is-immersive .upstream-tool-toolbar.is-collapsed,
+.upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-section-tabs,
+.upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-native-control,
+.upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-tool-hint,
+.upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-tool-error {
+  display: none;
+}
+
+.upstream-tool-surface.is-immersive .upstream-tool-toolbar {
+  margin: 0 14px 8px;
+}
+
+.upstream-chrome-toggle {
+  min-height: 32px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 5%);
+  color: var(--color-text-primary);
+  padding: 0 10px;
+}
+
+.upstream-tool-surface.is-immersive .upstream-tool-frame-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.upstream-tool-surface.is-immersive .upstream-tool-frame-shell iframe {
+  height: 100%;
+  min-height: 0;
+}
+
 .upstream-tool-heading {
   display: flex;
   align-items: flex-start;

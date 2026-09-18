@@ -58,8 +58,20 @@ function sectionUrl(manifest, endpoint, section) {
   if (!manifest.sections.includes(section)) {
     throw new Error(`Unsupported ${manifest.id} section: ${section}`);
   }
-  const pathname = manifest.sectionPaths?.[section] || `/${section}`;
-  const target = new URL(pathname, normalizeLoopbackEndpoint(endpoint));
+  const raw = String(manifest.sectionPaths?.[section] || `/${section}`);
+  const base = normalizeLoopbackEndpoint(endpoint);
+  const target = new URL(base);
+  if (raw.startsWith("#") || raw.startsWith("/#")) {
+    target.hash = raw.replace(/^\/?#/u, "");
+  } else {
+    const resolved = new URL(raw, base);
+    if (!isLoopbackHostname(resolved.hostname)) {
+      throw new Error("Upstream section URL escaped the loopback boundary");
+    }
+    target.pathname = resolved.pathname;
+    target.search = resolved.search;
+    target.hash = resolved.hash;
+  }
   if (!isLoopbackHostname(target.hostname)) {
     throw new Error("Upstream section URL escaped the loopback boundary");
   }
