@@ -52,3 +52,13 @@ test("rc.11 exact-source runner publishes a new tag without moving frozen rc.8, 
   assert.match(notes, /v0\.7\.0-rc\.10/);
   assert.match(notes, /never force-moved|永遠唔會被 force-move/);
 });
+
+test("rc.11 migration waits for the installer process only and reaps leftover Coding Tools", () => {
+  const migration = read("aiTemp/rc11-release/verify-windows-migration.ps1");
+  assert.match(migration, /installerTimeoutMilliseconds = 45 \* 60 \* 1000/);
+  assert.match(migration, /WaitForExit\(\$TimeoutMilliseconds\)/);
+  assert.match(migration, /Stop-Process/);
+  assert.match(migration, /Coding Tools\.exe/);
+  assert.match(migration, /'\/S', '\/currentuser'/);
+  assert.doesNotMatch(migration, /Start-Process[^\n]*-Wait/);
+});
