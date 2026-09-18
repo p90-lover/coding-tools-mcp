@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
+  hostNpmPrepareAllowed,
   installWindowsCwdLifecycleFallbacks,
   installWindowsCwdNodeCommands,
   installWindowsNodeBinShims,
@@ -584,6 +585,78 @@ test("Windows five-stack npm prepare rejects bun node.exe in favor of hostedtool
     }, "win32"),
     path.join(nodeDir, "node.exe"),
   );
+});
+
+test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal", async () => {
+  assert.equal(hostNpmPrepareAllowed({ platformModes: { win32: "wsl2" } }, "win32"), false);
+  assert.equal(hostNpmPrepareAllowed({ platformModes: { win32: "native" } }, "win32"), true);
+  assert.equal(hostNpmPrepareAllowed({}, "linux"), true);
+  assert.match(read("scripts/prepare-five-stack-runtime.cjs"), /hostNpmPrepareAllowed/);
+  assert.match(read("vendor/managed-components/anneal.json"), /"win32": "wsl2"/);
+
+  const repositoryRoot = temporaryDirectory("coding-tools-five-stack-wsl2");
+  const desktopDir = path.join(repositoryRoot, "desktop-electron");
+  const manifestRoot = path.join(desktopDir, "vendor", "managed-components");
+  const cacheRoot = path.join(repositoryRoot, "cache");
+  const outputRoot = path.join(desktopDir, "build", "five-stack-runtime");
+  const payload = Buffer.from("bundled-cpa-archive", "utf8");
+  const digest = sha256(payload);
+
+  for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
+    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id, id === "anneal"
+      ? { platformModes: { win32: "wsl2", linux: "native", darwin: "native" } }
+      : {}));
+    const sourceRoot = path.join(cacheRoot, id, "source");
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    fs.writeFileSync(path.join(sourceRoot, `${id}.txt`), `${id} bundled\n`);
+    if (id === "paseo" || id === "anneal") {
+      writeJson(path.join(sourceRoot, "package.json"), { name: id, private: true });
+    }
+    if (id === "codex-router") {
+      const controlCenter = path.join(sourceRoot, "apps", "control-center");
+      fs.mkdirSync(controlCenter, { recursive: true });
+      writeJson(path.join(controlCenter, "package.json"), { name: "control-center", private: true });
+    }
+  }
+  writeJson(path.join(manifestRoot, "cpa.json"), bundledManifest("cpa", {
+    strategy: "release-binary",
+    platforms: {
+      win32: {
+        x64: {
+          fileName: "cpa.bin",
+          url: "https://example.invalid/cpa.bin",
+          sha256: digest,
+        },
+      },
+    },
+  }));
+  fs.mkdirSync(path.join(cacheRoot, "cpa"), { recursive: true });
+  fs.writeFileSync(path.join(cacheRoot, "cpa", "cpa.bin"), payload);
+
+  const calls = [];
+  await prepareFiveStackRuntime({
+    repositoryRoot,
+    desktopRoot: desktopDir,
+    manifestRoot,
+    outputRoot,
+    cacheRoot,
+    platform: "win32",
+    arch: "x64",
+    prepareDependencies: true,
+    fetchImpl: async () => {
+      throw new Error("prepare-five-stack-runtime must not fetch when a cache is present");
+    },
+    spawnSyncProcess: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: "", stderr: "", error: null };
+    },
+    now: () => "2026-09-18T12:00:00.000Z",
+    nonce: () => "fixture-wsl2",
+  });
+
+  assert.equal(calls.some((call) => String(call.options?.cwd || "").includes(`${path.sep}anneal${path.sep}`)), false);
+  assert.ok(calls.some((call) => String(call.options?.cwd || "").includes(`${path.sep}paseo${path.sep}`)));
+  assert.equal(fs.existsSync(path.join(outputRoot, "anneal", "source", "package.json")), true);
 });
 
 test("Windows installer smoke uses the 15-minute bundled-payload budget", () => {

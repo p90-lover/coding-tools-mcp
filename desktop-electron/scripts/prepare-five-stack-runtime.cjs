@@ -589,6 +589,11 @@ function removeWrittenFiles(files) {
   }
 }
 
+function hostNpmPrepareAllowed(manifest, platform) {
+  const mode = String(manifest?.platformModes?.[platform] || "native").trim().toLowerCase();
+  return mode !== "wsl2";
+}
+
 function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
   if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
   const nodeExecutable = resolveNodeExecutable();
@@ -675,7 +680,7 @@ async function materializeComponent({
       runGit(["checkout", "--detach", manifest.commit], cloneRoot, spawnSyncProcess);
       copyTree(cloneRoot, sourceDestination);
     }
-    if (prepareDependencies) {
+    if (prepareDependencies && hostNpmPrepareAllowed(manifest, platform)) {
       if (manifest.id === "paseo") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build:server"]);
       if (manifest.id === "anneal") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build"]);
       if (manifest.id === "codex-router") {
@@ -772,6 +777,7 @@ if (require.main === module) {
 
 module.exports = {
   COMPONENT_IDS,
+  hostNpmPrepareAllowed,
   installWindowsCwdLifecycleFallbacks,
   installWindowsCwdNodeCommands,
   installWindowsNodeBinShims,
