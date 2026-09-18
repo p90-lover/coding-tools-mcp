@@ -121,5 +121,5 @@ test("packaging keeps the CPA adapter executable outside app.asar and preserves 
   assert.match(workflow, /git diff --diff-filter=D/);
   assert.match(workflow, /rc9-managed-cpa-runtime\.test\.cjs/);
   assert.match(workflow, /cpa-oauth-adapter\.test\.cjs/);
-  assert.match(workflow, /managed-components\.test\.cjs/);
+  assert.match(workflow, /managed-components-runtime\.test\.cjs/);
 });
