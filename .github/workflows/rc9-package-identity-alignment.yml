@@ -1,0 +1,87 @@
+name: rc.9 package identity alignment
+
+on:
+  push:
+    branches:
+      - fix/rc9-package-identity-alignment
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/electron/product.cjs
+      - desktop-electron/scripts/prepare-package-resources.cjs
+      - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/product-identity.test.cjs
+      - desktop-electron/tests/package-contents.test.cjs
+      - desktop-electron/tests/package-resource-preparation.test.cjs
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+      - desktop-electron/tests/packaging-contract.test.cjs
+      - desktop-electron/tests/rc9-package-identity-alignment.test.cjs
+      - .github/workflows/rc9-package-identity-alignment.yml
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.9-five-stack-cpa-union
+    paths:
+      - desktop-electron/package.json
+      - desktop-electron/electron/product.cjs
+      - desktop-electron/scripts/prepare-package-resources.cjs
+      - desktop-electron/scripts/verify-package.cjs
+      - desktop-electron/tests/product-identity.test.cjs
+      - desktop-electron/tests/package-contents.test.cjs
+      - desktop-electron/tests/package-resource-preparation.test.cjs
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+      - desktop-electron/tests/packaging-contract.test.cjs
+      - desktop-electron/tests/rc9-package-identity-alignment.test.cjs
+      - .github/workflows/rc9-package-identity-alignment.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc9-package-identity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Run release-identity and packaging contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc9-package-identity/evidence
+          node --test \
+            desktop-electron/tests/rc9-package-identity-alignment.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/packaging-contract.test.cjs \
+            2>&1 | tee aiTemp/rc9-package-identity/evidence/contracts.txt
+          grep -F '# fail 0' aiTemp/rc9-package-identity/evidence/contracts.txt
+
+      - name: Validate package scripts and no-delete scope
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/product.cjs
+          node --check desktop-electron/scripts/prepare-package-resources.cjs
+          node --check desktop-electron/scripts/verify-package.cjs
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only HEAD^ HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-package-identity-${{ github.sha }}
+          path: aiTemp/rc9-package-identity/evidence/
+          if-no-files-found: warn
+          retention-days: 14
