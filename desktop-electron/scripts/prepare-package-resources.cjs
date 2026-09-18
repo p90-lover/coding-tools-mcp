@@ -765,16 +765,59 @@ function recoverWorkspacePackage(fromPath) {
   return null;
 }
 
-function copyFiveStackResolved(from, to, seen) {
-  const metadata = fs.statSync(from);
-  if (metadata.isDirectory()) {
-    copyFiveStackTree(from, to, seen);
-    return;
+function posixParts(relative) {
+  return String(relative || "").replaceAll("\\", "/").split("/").filter(Boolean);
+}
+
+function joinRelative(prefix, name) {
+  return prefix ? `${prefix}/${name}` : name;
+}
+
+const SKIP_FIVE_STACK_DIR_NAMES = new Set([".git", "fastlane", "test", "tests", "__tests__", "e2e"]);
+const SKIP_PASEO_WORKSPACES = new Set(["app", "website", "desktop"]);
+const SKIP_HEAVY_NODE_MODULES = new Set([
+  "expo",
+  "expo-router",
+  "react-native",
+  "react-native-web",
+  "metro",
+  "metro-config",
+  "metro-core",
+  "metro-runtime",
+  "metro-source-map",
+  "workerd",
+  "wrangler",
+  "miniflare",
+  "eas-cli",
+]);
+const SKIP_HEAVY_NODE_MODULE_SCOPES = new Set([
+  "@expo",
+  "@react-native",
+  "@react-native-community",
+  "@react-navigation",
+  "@cloudflare",
+]);
+
+function skipHeavyNodeModule(parts) {
+  const index = parts.lastIndexOf("node_modules");
+  if (index < 0 || index + 1 >= parts.length) return false;
+  const pkg = parts[index + 1];
+  return SKIP_HEAVY_NODE_MODULES.has(pkg) || SKIP_HEAVY_NODE_MODULE_SCOPES.has(pkg);
+}
+
+function skipFiveStackRelative(relativePosix) {
+  const parts = posixParts(relativePosix);
+  for (let index = 0; index < parts.length; index += 1) {
+    if (SKIP_FIVE_STACK_DIR_NAMES.has(parts[index])) return true;
+    if (parts[index] === "packages" && SKIP_PASEO_WORKSPACES.has(parts[index + 1])) return true;
   }
-  if (!metadata.isFile()) fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNSUPPORTED", from);
-  fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
-  fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
-  fs.chmodSync(to, metadata.mode & 0o777 || 0o600);
+  return skipHeavyNodeModule(parts);
+}
+
+function skipFiveStackResolvedPath(resolvedPath) {
+  const posix = String(resolvedPath || "").replaceAll("\\", "/");
+  if (/(?:^|\/)packages\/(?:app|website|desktop)(?:\/|$)/.test(posix)) return true;
+  return skipHeavyNodeModule(posix.split("/").filter(Boolean));
 }
 
 function isUnsafeWindowsPackagedName(name) {
@@ -788,14 +831,28 @@ function looksLikePackagedFileName(name) {
   return /\.(?:md|png|jpe?g|gif|webp|json|txt|ya?ml|js|mjs|cjs|ts|tsx|css|html|svg|lock|map|xml)$/i.test(String(name || ""));
 }
 
-function skipFiveStackPackageEntry(name, metadata) {
-  if (name === ".git" || name === ".bin" || name === "node_modules" || name === "fastlane") return true;
-  if (name === "test" || name === "tests" || name === "__tests__" || name === "e2e") return true;
+function skipFiveStackPackageEntry(name, metadata, relativePosix = "") {
+  if (SKIP_FIVE_STACK_DIR_NAMES.has(name)) return true;
   if (isUnsafeWindowsPackagedName(name)) return true;
+  if (relativePosix && skipFiveStackRelative(relativePosix)) return true;
   return Boolean(metadata && metadata.isDirectory() && looksLikePackagedFileName(name));
 }
 
-function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
+function copyFiveStackResolved(from, to, seen, relative = "") {
+  if (skipFiveStackRelative(relative) || skipFiveStackResolvedPath(from)) return;
+  const metadata = fs.statSync(from);
+  if (metadata.isDirectory()) {
+    copyFiveStackTree(from, to, seen, relative);
+    return;
+  }
+  if (!metadata.isFile()) fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNSUPPORTED", from);
+  fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
+  fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(to, metadata.mode & 0o777 || 0o600);
+}
+
+function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set(), relativePrefix = "") {
+  if (skipFiveStackRelative(relativePrefix) || skipFiveStackResolvedPath(sourceRoot)) return;
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
   let real;
@@ -814,15 +871,20 @@ function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
   } catch (error) {
     if (isMissingFsEntry(error)) {
       const recovered = recoverWorkspacePackage(source);
-      if (recovered && path.resolve(recovered) !== path.resolve(source)) {
-        copyFiveStackTree(recovered, destination, seen);
+      if (
+        recovered
+        && path.resolve(recovered) !== path.resolve(source)
+        && !skipFiveStackResolvedPath(recovered)
+      ) {
+        copyFiveStackTree(recovered, destination, seen, relativePrefix);
       }
       return;
     }
     fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${source}: ${error instanceof Error ? error.message : String(error)}`);
   }
   for (const entry of entries) {
-    if (skipFiveStackPackageEntry(entry.name)) continue;
+    const relative = joinRelative(relativePrefix, entry.name);
+    if (skipFiveStackPackageEntry(entry.name, null, relative)) continue;
     const from = path.join(source, entry.name);
     const to = path.join(destination, entry.name);
     let linkStat;
@@ -831,7 +893,7 @@ function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
     } catch (error) {
       if (isMissingFsEntry(error)) {
         const recovered = recoverWorkspacePackage(from);
-        if (recovered) copyFiveStackResolved(recovered, to, nextSeen);
+        if (recovered) copyFiveStackResolved(recovered, to, nextSeen, relative);
         continue;
       }
       fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${from}: ${error instanceof Error ? error.message : String(error)}`);
@@ -852,10 +914,10 @@ function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
         }
       }
     }
-    if (skipFiveStackPackageEntry(entry.name, metadata)) continue;
+    if (skipFiveStackPackageEntry(entry.name, metadata, relative) || skipFiveStackResolvedPath(resolvedFrom)) continue;
     if (metadata.isDirectory()) {
       if (looksLikePackagedFileName(entry.name)) continue;
-      copyFiveStackTree(resolvedFrom, to, nextSeen);
+      copyFiveStackTree(resolvedFrom, to, nextSeen, relative);
       continue;
     }
     if (!metadata.isFile()) fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNSUPPORTED", from);

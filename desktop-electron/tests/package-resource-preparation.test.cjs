@@ -292,36 +292,62 @@ test("composes the exact Windows payload from the official seven-member client a
   );
 });
 
-test("five-stack package copy omits node_modules, fastlane, and file-named directories from the NSIS payload", () => {
-  assert.equal(skipFiveStackPackageEntry("node_modules"), true);
+test("five-stack package copy keeps production node_modules and omits expo, Paseo app, fastlane, and file-named directories", () => {
+  assert.equal(skipFiveStackPackageEntry("node_modules"), false);
   assert.equal(skipFiveStackPackageEntry("fastlane"), true);
   assert.equal(skipFiveStackPackageEntry("test"), true);
   assert.equal(skipFiveStackPackageEntry(".git"), true);
   assert.equal(skipFiveStackPackageEntry("AGENTS.md", { isDirectory: () => true }), true);
   assert.equal(skipFiveStackPackageEntry("1.png", { isDirectory: () => true }), true);
   assert.equal(skipFiveStackPackageEntry("packages"), false);
+  assert.equal(
+    skipFiveStackPackageEntry("app", { isDirectory: () => true }, "paseo/source/packages/app"),
+    true,
+  );
+  assert.equal(
+    skipFiveStackPackageEntry("expo", { isDirectory: () => true }, "paseo/source/node_modules/expo"),
+    true,
+  );
+  assert.equal(
+    skipFiveStackPackageEntry("left-pad", { isDirectory: () => true }, "paseo/source/node_modules/left-pad"),
+    false,
+  );
 
   const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "coding-tools-five-stack-links-"));
   const source = path.join(root, "source");
   const destination = path.join(root, "destination");
   const scoped = path.join(source, "paseo", "source", "node_modules", "@getpaseo");
   const realApp = path.join(source, "paseo", "source", "packages", "app");
+  const realServer = path.join(source, "paseo", "source", "packages", "server");
+  const productionDep = path.join(source, "paseo", "source", "node_modules", "left-pad");
+  const expoDep = path.join(source, "paseo", "source", "node_modules", "expo");
   const screenshot = path.join(source, "paseo", "fastlane", "metadata", "android", "en-US", "images", "phoneScreenshots");
   fs.mkdirSync(scoped, { recursive: true });
   fs.mkdirSync(realApp, { recursive: true });
+  fs.mkdirSync(realServer, { recursive: true });
+  fs.mkdirSync(productionDep, { recursive: true });
+  fs.mkdirSync(expoDep, { recursive: true });
   fs.mkdirSync(screenshot, { recursive: true });
   fs.mkdirSync(path.join(source, "paseo", "AGENTS.md"), { recursive: true });
   fs.writeFileSync(path.join(realApp, "index.js"), "export const app = true\n");
+  fs.writeFileSync(path.join(realServer, "index.js"), "export const server = true\n");
+  fs.writeFileSync(path.join(productionDep, "index.js"), "module.exports = 1\n");
+  fs.writeFileSync(path.join(expoDep, "index.js"), "module.exports = 'expo'\n");
   fs.writeFileSync(path.join(screenshot, "1.png"), "png");
-  fs.writeFileSync(path.join(scoped, "ignored.js"), "should not pack\n");
+  fs.writeFileSync(path.join(scoped, "ignored.js"), "should not pack as a file in @getpaseo\n");
   fs.writeFileSync(path.join(source, "MANIFEST.json"), "{}\n");
 
   copyFiveStackTree(source, destination);
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "packages", "app")), false);
   assert.equal(
-    fs.readFileSync(path.join(destination, "paseo", "source", "packages", "app", "index.js"), "utf8"),
-    "export const app = true\n",
+    fs.readFileSync(path.join(destination, "paseo", "source", "packages", "server", "index.js"), "utf8"),
+    "export const server = true\n",
   );
-  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules")), false);
+  assert.equal(
+    fs.readFileSync(path.join(destination, "paseo", "source", "node_modules", "left-pad", "index.js"), "utf8"),
+    "module.exports = 1\n",
+  );
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules", "expo")), false);
   assert.equal(fs.existsSync(path.join(destination, "paseo", "fastlane")), false);
   assert.equal(fs.existsSync(path.join(destination, "paseo", "AGENTS.md")), false);
   assert.equal(fs.readFileSync(path.join(destination, "MANIFEST.json"), "utf8"), "{}\n");

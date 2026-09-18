@@ -352,7 +352,7 @@ function copyBundledTree(sourceRoot, destinationRoot) {
   const visit = (from, to) => {
     fs.mkdirSync(to, { recursive: true, mode: 0o700 });
     for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      if (entry.name === ".git") continue;
       const fromPath = path.join(from, entry.name);
       const toPath = path.join(to, entry.name);
       const stat = fs.lstatSync(fromPath);

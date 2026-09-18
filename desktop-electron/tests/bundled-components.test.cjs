@@ -9,6 +9,7 @@ const test = require("node:test");
 const {
   BUNDLED_COMPONENT_IDS,
   assertSafeManifest,
+  copyBundledTree,
   createManagedComponentController,
   loadManagedManifest,
 } = require("../electron/managed-components.cjs");
@@ -87,6 +88,21 @@ function writeBundleTree(bundledRoot, id, body = "export default true;\n") {
   fs.writeFileSync(path.join(home, "package.json"), `${JSON.stringify({ name: id, dependencies: {} }, null, 2)}\n`);
   return home;
 }
+
+test("Start copies bundled production node_modules so Paseo does not fetch npm packages", () => {
+  const source = temporaryDirectory("coding-tools-bundled-node-modules-src");
+  const destination = temporaryDirectory("coding-tools-bundled-node-modules-dst");
+  const dep = path.join(source, "node_modules", "left-pad");
+  fs.mkdirSync(dep, { recursive: true });
+  fs.writeFileSync(path.join(source, "package.json"), `${JSON.stringify({ name: "paseo" }, null, 2)}\n`);
+  fs.writeFileSync(path.join(dep, "index.js"), "module.exports = 1\n");
+  fs.mkdirSync(path.join(source, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(source, ".git", "HEAD"), "ref: refs/heads/main\n");
+
+  copyBundledTree(source, destination);
+  assert.equal(fs.readFileSync(path.join(destination, "node_modules", "left-pad", "index.js"), "utf8"), "module.exports = 1\n");
+  assert.equal(fs.existsSync(path.join(destination, ".git")), false);
+});
 
 test("real CommandCode, Paseo and Anneal manifests are bundled-source inside Desktop", () => {
   assert.deepEqual([...BUNDLED_COMPONENT_IDS], ["commandcode-proxy", "paseo", "anneal"]);
