@@ -70,6 +70,7 @@ function serviceName(language: Language, id: ExternalServiceId): string {
   const names: Record<ExternalServiceId, [string, string]> = {
     "codex-router": ["Codex Router", "Codex Router"],
     "commandcode-proxy": ["CommandCode Proxy", "CommandCode 代理"],
+    cpa: ["CPA / CLIProxyAPI", "CPA／CLIProxyAPI"],
     paseo: ["Paseo", "Paseo"],
     anneal: ["Anneal", "Anneal"],
   };
@@ -300,8 +301,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Install, repair and run Codex Router, CommandCode Proxy, Paseo and Anneal from Coding Tools while CPA Provider Hub remains the encrypted account and routing authority.",
-            "直接由 Coding Tools 安裝、修復同執行 Codex Router、CommandCode Proxy、Paseo 與 Anneal；CPA 供應商中心繼續作為加密帳戶同路由權限來源。",
+            "Install, repair and run CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from Coding Tools while Provider Hub remains the encrypted account and routing authority.",
+            "直接由 Coding Tools 安裝、修復同執行 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal；供應商中心繼續作為加密帳戶同路由權限來源。",
           )}</p>
         </div>
         <button disabled={busy !== null} onClick={() => void refresh()} type="button">

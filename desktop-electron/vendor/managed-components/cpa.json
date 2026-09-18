@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "id": "cpa",
+  "name": "CPA / CLIProxyAPI",
+  "managedBy": "Coding Tools",
+  "loopbackOnly": true,
+  "repository": "router-for-me/CLIProxyAPI",
+  "repositoryUrl": "https://github.com/router-for-me/CLIProxyAPI",
+  "version": "7.3.7",
+  "strategy": "release-binary",
+  "license": "MIT",
+  "licenseFile": "LICENSE",
+  "credentials": {
+    "managementKey": {
+      "required": false,
+      "generated": true,
+      "minimumLength": 32,
+      "purpose": "Local CLIProxyAPI management API"
+    },
+    "proxyApiKey": {
+      "required": false,
+      "generated": true,
+      "minimumLength": 32,
+      "purpose": "Local OpenAI-compatible proxy API"
+    }
+  },
+  "platforms": {
+    "win32": {
+      "x64": {
+        "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.7/CLIProxyAPI_7.3.7_windows_amd64.zip",
+        "sha256": "da5466b81beb7c769b99e26a5f6f41d9999a07be7c36be170167f10a2a6ecfc7",
+        "fileName": "CLIProxyAPI_7.3.7_windows_amd64.zip"
+      },
+      "arm64": {
+        "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.7/CLIProxyAPI_7.3.7_windows_aarch64.zip",
+        "sha256": "e940427e0e09afe9b92b5902dc357a96581cd03bd820aaea72566b5844b493ea",
+        "fileName": "CLIProxyAPI_7.3.7_windows_aarch64.zip"
+      }
+    },
+    "linux": {
+      "x64": {
+        "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.7/CLIProxyAPI_7.3.7_linux_amd64.tar.gz",
+        "sha256": "3391dff672abccffce5f9259b7ce1e12cee7b0a8aa3f5b2280406484f59f37ba",
+        "fileName": "CLIProxyAPI_7.3.7_linux_amd64.tar.gz"
+      },
+      "arm64": {
+        "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.7/CLIProxyAPI_7.3.7_linux_aarch64.tar.gz",
+        "sha256": "442aad130260cc22a75d2b230826e0b2185e92baf5ef8ae57b849ae694dddf2a",
+        "fileName": "CLIProxyAPI_7.3.7_linux_aarch64.tar.gz"
+      }
+    },
+    "darwin": {
+      "x64": {
+        "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.7/CLIProxyAPI_7.3.7_darwin_amd64.tar.gz",
+        "sha256": "7b20a8988afe1dff0a5f3cd3d7fd30300576d630506d747e74ce25dfc46bb2af",
+        "fileName": "CLIProxyAPI_7.3.7_darwin_amd64.tar.gz"
+      },
+      "arm64": {
+        "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.3.7/CLIProxyAPI_7.3.7_darwin_aarch64.tar.gz",
+        "sha256": "15269902173e99b834b8577a520ddf8f89fbb4a224afd2230384c1890b06875f",
+        "fileName": "CLIProxyAPI_7.3.7_darwin_aarch64.tar.gz"
+      }
+    }
+  },
+  "install": {
+    "steps": [
+      {
+        "id": "download-release",
+        "kind": "download"
+      },
+      {
+        "id": "verify-sha256",
+        "kind": "verify"
+      },
+      {
+        "id": "prepare-cpa",
+        "kind": "command",
+        "executable": "{runtime}",
+        "arguments": [
+          "{adapterRoot}/cpa-managed.cjs",
+          "prepare",
+          "{home}",
+          "{state}",
+          "{artifact}"
+        ],
+        "timeoutMs": 300000
+      },
+      {
+        "id": "assert-cpa-runtime",
+        "kind": "assert-file",
+        "path": "runtime/CPA_RUNTIME.json"
+      },
+      {
+        "id": "activate",
+        "kind": "activate"
+      }
+    ]
+  },
+  "launch": {
+    "primaryProcessId": "cpa",
+    "processes": [
+      {
+        "id": "cpa",
+        "mode": "foreground",
+        "executable": "{runtime}",
+        "arguments": [
+          "{adapterRoot}/cpa-managed.cjs",
+          "run",
+          "{home}",
+          "{state}"
+        ],
+        "environment": {
+          "CODING_TOOLS_CPA_MANAGEMENT_KEY": "{secret:managementKey}",
+          "CODING_TOOLS_CPA_PROXY_API_KEY": "{secret:proxyApiKey}"
+        }
+      }
+    ],
+    "stop": []
+  },
+  "health": {
+    "endpoint": "http://127.0.0.1:8317/v1/models",
+    "authorization": "Bearer {secret:proxyApiKey}",
+    "acceptStatus": [
+      200
+    ]
+  }
+}

@@ -10,6 +10,7 @@ const STORE_VERSION = 1;
 const SERVICE_IDS = Object.freeze([
   "codex-router",
   "commandcode-proxy",
+  "cpa",
   "paseo",
   "anneal",
 ]);
@@ -35,6 +36,15 @@ const DEFAULTS = Object.freeze({
   "commandcode-proxy": Object.freeze({
     name: "CommandCode Proxy",
     endpoint: "http://127.0.0.1:9090/",
+    home: "",
+    executable: "",
+    arguments: [],
+    enabled: true,
+    autoStart: false,
+  }),
+  cpa: Object.freeze({
+    name: "CPA / CLIProxyAPI",
+    endpoint: "http://127.0.0.1:8317/",
     home: "",
     executable: "",
     arguments: [],
@@ -235,7 +245,9 @@ function initialState(env) {
           ? env.CODING_TOOLS_ANNEAL_URL
           : id === "codex-router"
             ? env.CODING_TOOLS_CODEX_ROUTER_URL
-            : env.CODING_TOOLS_COMMANDCODE_URL;
+            : id === "commandcode-proxy"
+              ? env.CODING_TOOLS_COMMANDCODE_URL
+              : env.CODING_TOOLS_CPA_URL;
       const environmentExecutionEndpoint = id === "paseo"
         ? env.CODING_TOOLS_PASEO_EXECUTION_URL
         : id === "anneal"
@@ -383,9 +395,18 @@ function createExternalServicesController({
     const accounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts : [];
     const selected = id === "commandcode-proxy"
       ? accounts.filter((account) => account.providerId === "commandcode-proxy" && !account.archivedAt)
-      : id === "codex-router"
-        ? accounts.filter((account) => account.enabled !== false && !account.archivedAt)
-        : [];
+      : id === "cpa"
+        ? accounts.filter((account) => (
+            !account.archivedAt
+              && (
+                account.credentialSource === "cpa"
+                || String(account.loginAdapterId || "").startsWith("cpa-")
+                || account.providerId === "cliproxyapi-antigravity"
+              )
+          ))
+        : id === "codex-router"
+          ? accounts.filter((account) => account.enabled !== false && !account.archivedAt)
+          : [];
     return {
       accountCount: selected.length,
       connectedAccountCount: selected.filter((account) => account.status === "connected").length,
@@ -493,7 +514,9 @@ function createExternalServicesController({
       if (!callerKey) throw new Error("Codex Router caller key is not configured");
       return new URL(`/_codex-router/${encodeURIComponent(callerKey)}/v1/models`, config.endpoint).toString();
     }
-    if (id === "commandcode-proxy") return new URL("/v1/models", config.endpoint).toString();
+    if (id === "commandcode-proxy" || id === "cpa") {
+      return new URL("/v1/models", config.endpoint).toString();
+    }
     return config.endpoint;
   }
 
@@ -709,11 +732,13 @@ function createExternalServicesController({
   function runtimeEnvironment() {
     const router = state.services["codex-router"];
     const commandCode = state.services["commandcode-proxy"];
+    const cpa = state.services.cpa;
     const callerKey = secretFor("codex-router").callerKey;
     return Object.freeze({
       CODING_TOOLS_CODEX_ROUTER_URL: router.endpoint.replace(/\/$/, ""),
       ...(callerKey ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey } : {}),
       CODING_TOOLS_COMMANDCODE_URL: commandCode.endpoint.replace(/\/$/, ""),
+      CODING_TOOLS_CPA_URL: cpa.endpoint.replace(/\/$/, ""),
       CODING_TOOLS_PASEO_EXECUTION_URL: state.services.paseo.executionEndpoint,
       CODING_TOOLS_ANNEAL_EXECUTION_URL: state.services.anneal.executionEndpoint,
     });

@@ -37,6 +37,7 @@ const { createUpdateController } = require("./update.cjs");
 const {
   providerNetworkReady,
   setProviderBrowserHost,
+  setProviderCpaConnection,
 } = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
@@ -1251,6 +1252,7 @@ async function start() {
       return { stdout: String(result.stdout || ""), stderr: String(result.stderr || "") };
     },
   });
+  setProviderCpaConnection(() => externalServicesController?.cpaConnection());
   upstreamToolController = createUpstreamToolController({
     env: process.env,
     logger,

@@ -170,7 +170,7 @@ export interface ProviderExecutionPlan {
   };
 }
 
-export type ExternalServiceId = "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+export type ExternalServiceId = "codex-router" | "commandcode-proxy" | "cpa" | "paseo" | "anneal";
 export type ExternalServiceStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 export type ManagedComponentInstallState =
   | "not-installed"

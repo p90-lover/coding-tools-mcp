@@ -9,7 +9,7 @@ const root = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 const readJson = (relativePath) => JSON.parse(read(relativePath));
 
-const COMPONENT_IDS = ["codex-router", "commandcode-proxy", "paseo", "anneal"];
+const COMPONENT_IDS = ["codex-router", "commandcode-proxy", "cpa", "paseo", "anneal"];
 
 test("all external runtimes have pinned in-app managed component manifests", () => {
   for (const id of COMPONENT_IDS) {

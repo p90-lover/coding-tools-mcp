@@ -1,0 +1,148 @@
+name: rc.9 fully managed CPA runtime
+
+on:
+  push:
+    branches:
+      - fix/rc9-fully-managed-cpa-runtime
+    paths:
+      - .github/workflows/rc9-managed-cpa-runtime.yml
+      - aiTemp/rc9-managed-cpa-runtime/live-smoke.cjs
+      - desktop-electron/electron/cpa-managed.cjs
+      - desktop-electron/electron/external-services.cjs
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/managed-components.cjs
+      - desktop-electron/electron/managed-external-services.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/package.json
+      - desktop-electron/src/features/ExternalServicesSurface.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/vendor/managed-components/cpa.json
+      - desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
+      - desktop-electron/tests/cpa-oauth-adapter.test.cjs
+      - desktop-electron/tests/cpa-provider-login-routing.test.cjs
+      - desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs
+      - desktop-electron/tests/managed-components-runtime.test.cjs
+      - desktop-electron/tests/external-services-control-plane.test.cjs
+      - desktop-electron/tests/rc9-managed-five-stack.test.cjs
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.9-five-stack-cpa-union
+    paths:
+      - .github/workflows/rc9-managed-cpa-runtime.yml
+      - aiTemp/rc9-managed-cpa-runtime/live-smoke.cjs
+      - desktop-electron/electron/cpa-managed.cjs
+      - desktop-electron/electron/external-services.cjs
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/managed-components.cjs
+      - desktop-electron/electron/managed-external-services.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/package.json
+      - desktop-electron/src/features/ExternalServicesSurface.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/vendor/managed-components/cpa.json
+      - desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
+      - desktop-electron/tests/cpa-oauth-adapter.test.cjs
+      - desktop-electron/tests/cpa-provider-login-routing.test.cjs
+      - desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs
+      - desktop-electron/tests/managed-components-runtime.test.cjs
+      - desktop-electron/tests/external-services-control-plane.test.cjs
+      - desktop-electron/tests/rc9-managed-five-stack.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc9-managed-cpa-runtime-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Fully managed CPA contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run focused CPA and managed-runtime contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc9-managed-cpa-runtime
+          node --test \
+            desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs \
+            desktop-electron/tests/cpa-oauth-adapter.test.cjs \
+            desktop-electron/tests/cpa-provider-login-routing.test.cjs \
+            desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs \
+            desktop-electron/tests/managed-components-runtime.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/rc9-managed-five-stack.test.cjs \
+            2>&1 | tee aiTemp/rc9-managed-cpa-runtime/results.txt
+          grep -F '# fail 0' aiTemp/rc9-managed-cpa-runtime/results.txt
+
+      - name: Enforce no-delete integration diff
+        run: |
+          set -euo pipefail
+          git fetch origin integration/v0.7.0-rc.9-five-stack-cpa-union --no-tags
+          git diff --check origin/integration/v0.7.0-rc.9-five-stack-cpa-union...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.9-five-stack-cpa-union...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-managed-cpa-contracts-${{ github.sha }}
+          path: aiTemp/rc9-managed-cpa-runtime/
+          if-no-files-found: error
+          retention-days: 14
+
+  live-runtime:
+    name: Pinned CPA download, launch and authenticated health
+    needs: contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Install, start and authenticate the pinned official CPA runtime
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc9-managed-cpa-runtime/evidence
+          node aiTemp/rc9-managed-cpa-runtime/live-smoke.cjs \
+            2>&1 | tee aiTemp/rc9-managed-cpa-runtime/evidence/live-smoke.txt
+          grep -F RC9_MANAGED_CPA_LIVE_SMOKE_OK \
+            aiTemp/rc9-managed-cpa-runtime/evidence/live-smoke.txt
+          test -s aiTemp/rc9-managed-cpa-runtime/evidence/live-smoke.json
+
+      - name: Enforce exact source and no-delete policy
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch origin integration/v0.7.0-rc.9-five-stack-cpa-union --no-tags
+          git diff --check origin/integration/v0.7.0-rc.9-five-stack-cpa-union...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.9-five-stack-cpa-union...HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-managed-cpa-live-smoke-${{ github.sha }}
+          path: aiTemp/rc9-managed-cpa-runtime/evidence/
+          if-no-files-found: error
+          retention-days: 14
