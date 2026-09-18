@@ -9,7 +9,6 @@ const desktopRoot = path.resolve(__dirname, "..");
 const installerPath = path.join(desktopRoot, "build", "installer.nsh");
 const updatePath = path.join(desktopRoot, "electron", "update.cjs");
 const workerPath = path.join(desktopRoot, "electron", "update-worker.cjs");
-const promptPath = path.join(desktopRoot, "electron", "update-prompt.cjs");
 const mainPath = path.join(desktopRoot, "electron", "main.cjs");
 
 const installer = fs.readFileSync(installerPath, "utf8");
@@ -17,67 +16,87 @@ const updateSource = fs.readFileSync(updatePath, "utf8");
 const workerSource = fs.readFileSync(workerPath, "utf8");
 const mainSource = fs.readFileSync(mainPath, "utf8");
 
-test("legacy NSIS and MSI migration preserve one validated old installation directory", () => {
-  assert.match(installer, /Var LegacyInstallLocationCaptured/);
+test("legacy NSIS and MSI migration reuse the registered old installation directory", () => {
   assert.match(installer, /!macro CaptureLegacyInstallLocation ROOT/);
   assert.match(installer, /ReadRegStr[^\n]*InstallLocation/);
-  assert.match(installer, /StrCpy \$INSTDIR \$LegacyInstallLocationCaptured/);
-  assert.match(installer, /multiple legacy installations use different locations/i);
+  assert.match(installer, /StrCpy \$INSTDIR \$LegacyInstallLocation/);
+  assert.match(installer, /Reusing legacy Coding Tools install location/);
 
-  const captureCalls = installer.match(/!insertmacro CaptureLegacyInstallLocation \$\{ROOT\}/g) ?? [];
-  assert.equal(
-    captureCalls.length,
-    2,
-    "both legacy MSI and legacy NSIS paths must capture and reuse the old location",
+  const migrationStart = installer.indexOf("!macro MigrateLegacyInstall ROOT VIEW");
+  const capture = installer.indexOf("!insertmacro CaptureLegacyInstallLocation ${ROOT}", migrationStart);
+  const providerDispatch = installer.indexOf("ReadRegDWORD $LegacyWindowsInstaller", migrationStart);
+  assert.ok(
+    migrationStart >= 0 && capture > migrationStart && providerDispatch > capture,
+    "the old install directory must be captured before either MSI or NSIS removal",
   );
 });
 
-test("silent Windows auto-update pins NSIS to the directory of the running executable", () => {
+test("silent Windows auto-update pins NSIS to the running executable directory", () => {
   assert.match(
     updateSource,
     /installDirectory:\s*path\.dirname\(executablePath\)/,
-    "the update job must retain the exact current installation directory",
+    "the detached update job must retain the exact current installation directory",
   );
   assert.match(workerSource, /function windowsInstallerArguments\(job\)/);
-  assert.match(workerSource, /\/D=\$\{installDirectory\}/);
+  assert.match(workerSource, /args\.push\(`\/D=\$\{installDirectory\}`\)/);
   assert.match(workerSource, /spawnSync\(job\.source,\s*windowsInstallerArguments\(job\)/);
+  assert.match(workerSource, /if \(require\.main === module\)/);
 
-  const helperStart = workerSource.indexOf("function windowsInstallerArguments(job)");
-  const silentArgument = workerSource.indexOf('"/S"', helperStart);
-  const destinationArgument = workerSource.indexOf("/D=${installDirectory}", helperStart);
-  assert.ok(helperStart >= 0 && silentArgument > helperStart && destinationArgument > silentArgument);
-  assert.ok(
-    workerSource.indexOf("return", destinationArgument) > destinationArgument,
-    "NSIS /D must remain the final installer argument",
+  const { windowsInstallerArguments } = require(workerPath);
+  const installDirectory = String.raw`C:\Users\Alice Example\Apps\Coding Tools`;
+  const args = windowsInstallerArguments({ installDirectory });
+  assert.deepEqual(args, [
+    "/S",
+    "/UPDATE",
+    "/CLOSEAPPLICATIONS",
+    "/NORESTART",
+    `/D=${installDirectory}`,
+  ]);
+  assert.equal(args.at(-1), `/D=${installDirectory}`, "NSIS /D must be the final argument");
+  assert.throws(
+    () => windowsInstallerArguments({ installDirectory: "relative\\path" }),
+    /absolute install directory/i,
   );
 });
 
-test("stable and beta updates expose a localized native install prompt before downloading", () => {
-  assert.equal(fs.existsSync(promptPath), true, "missing native update prompt policy module");
-  const { isPrereleaseVersion, updatePromptOptions } = require(promptPath);
+test("a detected beta update opens a localized install-or-later popup before download", () => {
+  assert.match(mainSource, /async function promptForAvailableUpdate\(next, \{ logger, stateStore \}\)/);
+  assert.match(mainSource, /dialog\.showMessageBox\(mainWindow,/);
+  assert.match(mainSource, /buttons:\s*\[copy\.installNow, copy\.later\]/);
+  assert.match(mainSource, /Coding Tools beta update/);
+  assert.match(mainSource, /Coding Tools 測試版更新/);
+  assert.match(mainSource, /void promptForAvailableUpdate\(state, \{ logger, stateStore \}\)/);
+  assert.doesNotMatch(
+    mainSource,
+    /maybeInstallAutomaticUpdate/,
+    "automatic checks must prompt instead of silently replacing the running installation",
+  );
 
-  assert.equal(isPrereleaseVersion("0.7.0-rc.9"), true);
-  assert.equal(isPrereleaseVersion("0.7.0"), false);
-  assert.throws(() => updatePromptOptions({ version: "not-a-version", language: "en" }), /invalid/i);
-
-  const english = updatePromptOptions({ version: "0.7.0-rc.9", language: "en" });
-  assert.match(english.title, /beta|prerelease/i);
-  assert.match(english.message, /0\.7\.0-rc\.9/);
-  assert.deepEqual(english.buttons.length, 2);
-  assert.equal(english.defaultId, 0);
-  assert.equal(english.cancelId, 1);
-
-  const traditional = updatePromptOptions({ version: "0.7.0-rc.9", language: "zh-TW" });
-  assert.match(traditional.title, /Beta|測試|預覽/);
-  assert.match(traditional.detail, /安裝|更新/);
-
-  assert.match(mainSource, /async function promptAvailableUpdate/);
-  assert.match(mainSource, /updatePromptOptions\(\{/);
-  assert.match(mainSource, /dialog\.showMessageBox/);
-  assert.match(mainSource, /promptedUpdateVersions/);
-
-  const promptStart = mainSource.indexOf("async function promptAvailableUpdate");
+  const promptStart = mainSource.indexOf("async function promptForAvailableUpdate");
   const promptCall = mainSource.indexOf("dialog.showMessageBox", promptStart);
   const installCall = mainSource.indexOf("updateController.beginInstall()", promptStart);
   assert.ok(promptStart >= 0 && promptCall > promptStart && installCall > promptCall);
+});
+
+test("prerelease discovery keeps a newer beta eligible for the popup", () => {
+  const { compareVersions, selectCompatibleRelease } = require(updatePath);
+  assert.equal(compareVersions("0.7.0-rc.9", "0.7.0-rc.8"), 1);
+  assert.equal(compareVersions("0.7.0", "0.7.0-rc.9"), 1);
+
+  const selected = selectCompatibleRelease([{
+    tag_name: "v0.7.0-rc.9",
+    prerelease: true,
+    draft: false,
+    assets: [
+      {
+        name: "Coding.Tools_0.7.0-rc.9_windows_x64_setup.exe",
+        browser_download_url: "https://github.com/p90-lover/coding-tools-mcp/releases/download/v0.7.0-rc.9/Coding.Tools_0.7.0-rc.9_windows_x64_setup.exe",
+      },
+      {
+        name: "SHA256SUMS.txt",
+        browser_download_url: "https://github.com/p90-lover/coding-tools-mcp/releases/download/v0.7.0-rc.9/SHA256SUMS.txt",
+      },
+    ],
+  }], "win32", "x64");
+  assert.equal(selected?.version, "0.7.0-rc.9");
 });
