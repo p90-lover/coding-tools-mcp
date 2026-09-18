@@ -117,8 +117,8 @@
     </button>
     {#if toolId === 'cpa'}
       <button class="cc-button" type="button" disabled={busy !== null} onclick={() => void run('copy-key', async () => {
-        const copied = await invoke<string>('five_stack_copy_cpa_management_key');
-        await navigator.clipboard.writeText(copied);
+        const copied = await invoke<{ copied: boolean; length: number }>('five_stack_copy_cpa_management_key');
+        if (!copied.copied) throw new Error('CPA management key was not copied');
         onNotice(t($locale, `CPA management key copied (${copied.length} chars). Paste it into the original login form.`, `已複製 CPA 管理金鑰（${copied.length} 字）。請貼到原始登入表單。`));
       })}>{t($locale, 'Copy management key', '複製管理金鑰')}</button>
     {/if}

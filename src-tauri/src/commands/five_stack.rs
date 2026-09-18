@@ -4,6 +4,7 @@ use crate::integrations::five_stack::{
     self, window_label, Catalog, OpenResult, ToolId, ToolSnapshot,
 };
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 fn local_focused(window: &WebviewWindow) -> AppResult<()> {
     if window.label() != "main" {
@@ -67,10 +68,27 @@ pub async fn five_stack_bootstrap(window: WebviewWindow) -> AppResult<Catalog> {
     five_stack::bootstrap().await
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CpaClipboardResult {
+    copied: bool,
+    length: usize,
+}
+
 #[tauri::command]
-pub async fn five_stack_copy_cpa_management_key(window: WebviewWindow) -> AppResult<String> {
+pub async fn five_stack_copy_cpa_management_key(
+    window: WebviewWindow,
+) -> AppResult<CpaClipboardResult> {
     local_focused(&window)?;
-    five_stack::cpa_management_key()
+    let key = five_stack::cpa_management_key()?;
+    let length = key.len();
+    window.clipboard().write_text(key).map_err(|error| {
+        AppError::Message(format!("Could not copy CPA management key: {error}"))
+    })?;
+    Ok(CpaClipboardResult {
+        copied: true,
+        length,
+    })
 }
 
 #[tauri::command]

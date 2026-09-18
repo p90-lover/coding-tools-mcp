@@ -178,6 +178,7 @@ pub fn run() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             app.manage(AppState::new().expect("failed to load app state"));
             tools::native_sandbox::initialize(app.path().resource_dir()?);
