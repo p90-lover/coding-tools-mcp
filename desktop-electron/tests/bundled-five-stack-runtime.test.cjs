@@ -198,6 +198,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /withNpmOnPath/);
   assert.match(source, /resolveNodeExecutable/);
   assert.match(source, /isBunExecutable/);
+  assert.match(source, /npm_config_scripts_prepend_node_path/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
     Path: "C:\\nodejs;C:\\Windows\\system32",
@@ -211,12 +212,36 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.deepEqual(windows.options.stdio, ["ignore", "pipe", "pipe"]);
   const windowsPath = windows.options.env.Path || windows.options.env.PATH;
   assert.match(windowsPath, /nodejs|node/i);
+  assert.equal(windows.options.env.Path, windows.options.env.PATH);
 
   const posix = npmSpawnInvocation(["run", "build:server"], "linux");
   assert.match(path.basename(posix.command), /^npm$/);
   assert.deepEqual(posix.args, ["run", "build:server"]);
   assert.equal(posix.options.shell, false);
   assert.deepEqual(posix.options.stdio, ["ignore", "pipe", "pipe"]);
+});
+
+test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim", () => {
+  const root = temporaryDirectory("coding-tools-windows-node-path");
+  const bunShimDir = path.join(root, "bun");
+  const nodeDir = path.join(root, "nodejs");
+  fs.mkdirSync(bunShimDir, { recursive: true });
+  fs.mkdirSync(nodeDir, { recursive: true });
+  fs.writeFileSync(path.join(bunShimDir, "bun.exe"), "");
+  fs.writeFileSync(path.join(bunShimDir, "npm.cmd"), "@echo bun-npm-shim\r\n");
+  fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo real-npm\r\n");
+  fs.writeFileSync(path.join(nodeDir, "node.exe"), "");
+
+  const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
+    Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
+    ComSpec: "C:\\Windows\\System32\\cmd.exe",
+  });
+  assert.equal(windows.args[3], path.join(nodeDir, "npm.cmd"));
+  assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
+  assert.equal(windows.options.env.npm_config_scripts_prepend_node_path, "true");
+  const windowsPath = windows.options.env.Path || windows.options.env.PATH;
+  assert.equal(windowsPath.split(";")[0], nodeDir);
+  assert.match(windowsPath, /nodejs/);
 });
 
 test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {
