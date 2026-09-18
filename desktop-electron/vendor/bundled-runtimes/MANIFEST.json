@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "product": "Coding Tools Desktop",
+  "purpose": "CPA and Codex Router first Start uses these packaged runtimes. Package-time preparation writes platform payloads under build/bundled-runtimes and copies them into extraResources. Users never download a separate CPA or Codex Router app.",
+  "components": {
+    "cpa": {
+      "id": "cpa",
+      "version": "7.3.7",
+      "layout": "cpa/{platform}/{arch}/{officialReleaseArchive}",
+      "source": "router-for-me/CLIProxyAPI"
+    },
+    "codex-router": {
+      "id": "codex-router",
+      "version": "0.6.0",
+      "commit": "930f547d8d8861a47e18a83216e15e73a73aa97c",
+      "layout": "codex-router/source/",
+      "marker": "codex-router/source/CODING_TOOLS_BUNDLED.json",
+      "source": "duolahypercho/codex-router"
+    }
+  }
+}
