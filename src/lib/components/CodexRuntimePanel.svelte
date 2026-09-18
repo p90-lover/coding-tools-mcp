@@ -129,8 +129,8 @@
   </div>
   <div class="cc-notice">
     <span>{t($locale,
-      'This starts the native executable you select. Agent turns, review and compaction can spend provider quota. All authenticated clients of this MCP listener share this grant. Existing model-free tools and read-only Paseo/Anneal adapters are separate.',
-      '此功能會啟動你選擇的原生程式。Agent 回合、審查及壓縮可能消耗供應商配額；此 MCP 監聽服務的所有已驗證用戶端共用這項授權。現有免模型工具與唯讀 Paseo／Anneal 介接器是分開的。')}</span>
+      'This starts the native executable you select. Agent turns, review and compaction can spend provider quota. All authenticated clients of this MCP listener share this grant. Managed original Paseo/Anneal/CPA/CommandCode/Codex Router UIs are separate.',
+      '此功能會啟動你選擇的原生程式。Agent 回合、審查及壓縮可能消耗供應商配額；此 MCP 監聽服務的所有已驗證用戶端共用這項授權。受管原始 Paseo／Anneal／CPA／CommandCode／Codex Router 介面是分開的。')}</span>
   </div>
   <form class="cc-form" onsubmit={(event) => { event.preventDefault(); void connect(); }}>
     <label>{t($locale, 'Workspace with a running authenticated MCP listener', '已啟動認證 MCP 監聽服務的工作區')}

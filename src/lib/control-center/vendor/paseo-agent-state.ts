@@ -56,3 +56,15 @@ export function getAgentStatusPriority(input: AgentStateBucketInput): number {
   }
   return 4;
 }
+
+/** Original Paseo Expo routes hosted by the managed loopback UI. */
+export const PASEO_ORIGINAL_ROUTES = {
+  agents: "/sessions",
+  sessions: "/sessions",
+  workspaces: "/open-project",
+  providers: "/settings",
+  plugins: "/settings",
+  voice: "/settings",
+  settings: "/settings",
+} as const;
+export const PASEO_ORIGINAL_ORIGIN = "http://127.0.0.1:6768";

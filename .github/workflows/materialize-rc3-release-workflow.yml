@@ -1,0 +1,83 @@
+name: Materialize rc3 release workflow
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.3
+    paths:
+      - aiTemp/rc3-release/generate-release-workflow.py
+      - aiTemp/rc3-release/apply-release-identity.py
+      - docs/releases/v0.7.0-rc.3.md
+      - .github/workflows/materialize-rc3-release-workflow.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-codex-router-release-0.7.0-rc.3
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+
+      - name: Prepare retained release roots
+        run: mkdir -p aiTemp/evidence aiTemp/rc3-release/generated aiTemp/Trash/release-0.7.0-rc.3
+
+      - name: Generate exact rc.3 release workflow
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc3-release/generate-release-workflow.py \
+            2>&1 | tee aiTemp/evidence/rc3-release-workflow-generation.txt
+          staged='aiTemp/rc3-release/generated/codex-router-multiprovider-release-rc3.yml'
+          test -s "$staged"
+          grep -F "release/codex-router-multiprovider-0.7.0-rc.3" "$staged"
+          grep -F "RELEASE_VERSION: '0.7.0-rc.3'" "$staged"
+          grep -F "aiTemp/rc3-release/apply-release-identity.py" "$staged"
+          grep -F "docs/releases/v0.7.0-rc.3.md" "$staged"
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+
+      - name: Enforce generated-file-only scope
+        run: |
+          set -euo pipefail
+          staged='aiTemp/rc3-release/generated/codex-router-multiprovider-release-rc3.yml'
+          changed="$(git status --short --untracked-files=all \
+            | awk '{print $2}' \
+            | grep -v '^aiTemp/evidence/' \
+            | sort)"
+          printf 'generated files:\n%s\n' "$changed"
+          test "$changed" = "$staged"
+
+      - name: Commit verified staged rc.3 release workflow
+        run: |
+          set -euo pipefail
+          staged='aiTemp/rc3-release/generated/codex-router-multiprovider-release-rc3.yml'
+          if [ -z "$(git status --porcelain --untracked-files=all -- "$staged")" ]; then
+            echo 'The staged rc.3 release workflow is already current.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$staged"
+          git diff --cached --check
+          git commit -m 'release(rc3): stage exact Windows prerelease workflow'
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc3-release-workflow-${{ github.sha }}
+          path: |
+            aiTemp/evidence/
+            aiTemp/rc3-release/generated/
+          if-no-files-found: error
+          retention-days: 14

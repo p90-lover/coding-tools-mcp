@@ -1,0 +1,60 @@
+name: RC2 Foundation Contracts
+
+on:
+  push:
+    branches:
+      - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - desktop-electron/src/providers/**
+      - desktop-electron/src/network/**
+      - desktop-electron/src/orchestration/**
+      - desktop-electron/src/integrations/electron-bridge-contracts.ts
+      - desktop-electron/src/i18n/locales/zh-TW.ts
+      - desktop-electron/tests/rc2-foundations.test.ts
+      - .github/workflows/rc2-foundation-contracts.yml
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - desktop-electron/src/providers/**
+      - desktop-electron/src/network/**
+      - desktop-electron/src/orchestration/**
+      - desktop-electron/src/integrations/electron-bridge-contracts.ts
+      - desktop-electron/src/i18n/locales/zh-TW.ts
+      - desktop-electron/tests/rc2-foundations.test.ts
+      - .github/workflows/rc2-foundation-contracts.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc2-foundations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck-and-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+      - name: Typecheck the complete Electron renderer
+        run: bun run --cwd desktop-electron typecheck
+      - name: Run focused rc.2 foundation contracts
+        run: bun test desktop-electron/tests/rc2-foundations.test.ts
+      - name: Enforce no-delete changes
+        shell: bash
+        run: |
+          deleted="$(git diff --diff-filter=D --name-only HEAD^ HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi

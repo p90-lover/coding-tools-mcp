@@ -1,0 +1,94 @@
+name: rc.11 CPA frontend repair
+
+on:
+  push:
+    branches:
+      - cursor/five-stack-original-parity-rc11-2e35
+    paths:
+      - aiTemp/rc11-cpa-frontend-repair/apply_patch.py
+      - .github/workflows/rc11-cpa-frontend-repair.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc11-cpa-frontend-repair-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  repair-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Apply deterministic frontend repairs
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-cpa-frontend-repair/evidence
+          python aiTemp/rc11-cpa-frontend-repair/apply_patch.py \
+            | tee aiTemp/rc11-cpa-frontend-repair/evidence/materializer.txt
+          grep -F RC11_CPA_FRONTEND_REPAIR_APPLIED \
+            aiTemp/rc11-cpa-frontend-repair/evidence/materializer.txt
+
+      - name: Enforce bounded no-delete diff
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --name-only | tee aiTemp/rc11-cpa-frontend-repair/evidence/changed-files.txt
+          expected='^(src/lib/orchestrator-center\.ts|src/lib/provider-center\.ts|src/lib/components/AppShell\.svelte|src/lib/components/control-center/OriginalUiPanel\.svelte|src/lib/components/control-center/CommandCodeProxyPanel\.svelte)$'
+          unexpected="$(grep -Ev "$expected" aiTemp/rc11-cpa-frontend-repair/evidence/changed-files.txt || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected repaired paths:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Install exact root dependencies
+        run: npm ci
+
+      - name: Run Svelte and focused CPA contracts
+        run: |
+          set -euo pipefail
+          npm run check 2>&1 | tee aiTemp/rc11-cpa-frontend-repair/evidence/svelte-check.txt
+          node --test \
+            desktop-electron/tests/rc11-cpa-codex-router-lane.test.cjs \
+            desktop-electron/tests/rc11-five-stack-original-parity.test.cjs \
+            2>&1 | tee aiTemp/rc11-cpa-frontend-repair/evidence/focused-tests.txt
+          grep -F '# fail 0' aiTemp/rc11-cpa-frontend-repair/evidence/focused-tests.txt
+
+      - name: Commit verified production repairs
+        run: |
+          set -euo pipefail
+          git add \
+            src/lib/orchestrator-center.ts \
+            src/lib/provider-center.ts \
+            src/lib/components/AppShell.svelte \
+            src/lib/components/control-center/OriginalUiPanel.svelte \
+            src/lib/components/control-center/CommandCodeProxyPanel.svelte
+          if git diff --cached --quiet; then
+            echo RC11_CPA_FRONTEND_ALREADY_REPAIRED
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(rc11): repair CPA and five-stack frontend checks'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-cpa-frontend-repair-${{ github.sha }}
+          path: aiTemp/rc11-cpa-frontend-repair/evidence/
+          if-no-files-found: error
+          retention-days: 14

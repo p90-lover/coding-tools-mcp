@@ -30,4 +30,4 @@ const state=fs.readFileSync('src/lib/control-center/state.ts','utf8');
 assert.equal(state.match(/localStorage.setItem\([^;]+/g).length,1);assert.ok(state.includes("'control-center-locale'"));
 const { pathToFileURL } = await import('node:url');
 await import(pathToFileURL(resolve('scripts/check-commandcode-proxy.mjs')).href);
-console.log('PASS: upstream status/ordering semantics; explicit checklist states; read-only adapter and memory-only credential paths');
+console.log('PASS: upstream status/ordering semantics; explicit checklist states; observation adapters stay mutation-free; credentials stay out of localStorage');

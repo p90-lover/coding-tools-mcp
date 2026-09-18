@@ -8,7 +8,7 @@ pub use store::DataStore;
 #[cfg(test)]
 pub(crate) use migrate::shared_http_test_guard;
 #[cfg(test)]
-pub(crate) use migrate::with_test_file;
+pub(crate) use migrate::{current_test_file, with_test_file};
 
 #[cfg(test)]
 pub(crate) fn test_data_file_path() -> Option<std::path::PathBuf> {

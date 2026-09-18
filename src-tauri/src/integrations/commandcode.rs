@@ -102,6 +102,13 @@ fn count_models(body: &str) -> Option<usize> {
     None
 }
 
+fn root_url(mut u: Url) -> Url {
+    u.set_path("/");
+    u.set_query(None);
+    u.set_fragment(None);
+    u
+}
+
 pub async fn status(raw: &str) -> AppResult<CommandCodeProxyStatus> {
     let parsed = parse_loopback_http(raw)?;
     let endpoint = parsed.to_string();
@@ -154,6 +161,23 @@ pub async fn status(raw: &str) -> AppResult<CommandCodeProxyStatus> {
     })
     .await;
     result.map_err(|_| err("CommandCode Proxy probe timed out"))?
+}
+
+#[allow(dead_code)]
+pub async fn root_health(raw: &str) -> AppResult<bool> {
+    let parsed = parse_loopback_http(raw)?;
+    let target = root_url(parsed);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(6))
+        .build()
+        .map_err(|_| err("Cannot initialize CommandCode Proxy probe"))?;
+    match client.get(target).send().await {
+        Ok(response) => Ok(response.status().as_u16() < 500),
+        Err(_) => Ok(false),
+    }
 }
 
 fn safe_cli(value: &str, label: &str) -> AppResult<String> {

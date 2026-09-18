@@ -1,0 +1,4 @@
+branch reservation: subagent/rust-core-extraction-0.6.0-20260914
+base: 46317ee8940ab4ddb9702d85461eb6b32055b8b9
+scope: Task 4 reusable Rust core compatibility API, Cargo workspace, and focused cross-platform verification only
+protected: Task 18 prerelease/release policy; OAuth refresh/release branches; Electron source/runtime parity files

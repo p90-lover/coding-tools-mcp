@@ -1,0 +1,121 @@
+name: Materialize v0.7.0-rc.6 installer migration release
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.6
+    paths:
+      - aiTemp/installer-upgrade/materialize_rc6_release.py
+      - aiTemp/installer-upgrade/patch_rc6_fixture_compiler.py
+      - .github/workflows/materialize-v0.7-rc6-installer-migration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-v0.7.0-rc.6-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Materialize exact rc.6 identity and release workflow
+        run: |
+          set -euo pipefail
+          python aiTemp/installer-upgrade/materialize_rc6_release.py \
+            | tee aiTemp/installer-upgrade/rc6-materialization.txt
+          grep -F RC6_INSTALLER_MIGRATION_RELEASE_MATERIALIZED \
+            aiTemp/installer-upgrade/rc6-materialization.txt
+
+      - name: Replace unsupported PowerShell Add-Type fixture compiler
+        run: |
+          set -euo pipefail
+          python aiTemp/installer-upgrade/patch_rc6_fixture_compiler.py \
+            | tee aiTemp/installer-upgrade/rc6-fixture-compiler-patch.txt
+          grep -F RC6_FIXTURE_CSC_PATCH_OK \
+            aiTemp/installer-upgrade/rc6-fixture-compiler-patch.txt
+
+      - name: Verify generated identity and migration release contract
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            2>&1 | tee aiTemp/installer-upgrade/rc6-contract.txt
+          grep -F '# fail 0' aiTemp/installer-upgrade/rc6-contract.txt
+          test -s .github/workflows/codex-router-multiprovider-release-rc6.yml
+          test -s docs/releases/v0.7.0-rc.6.md
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Preserve generated release workflow as an unattached Git blob
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow_path='.github/workflows/codex-router-multiprovider-release-rc6.yml'
+          payload='aiTemp/installer-upgrade/rc6-release-workflow-blob-request.json'
+          reference='aiTemp/installer-upgrade/rc6-release-workflow-blob.txt'
+          python - "$workflow_path" "$payload" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          source = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2])
+          destination.write_text(
+              json.dumps({"content": source.read_text(encoding="utf-8"), "encoding": "utf-8"}),
+              encoding="utf-8",
+          )
+          PY
+          blob_sha="$(gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/blobs" \
+            --input "$payload" \
+            --jq '.sha')"
+          test "${#blob_sha}" -eq 40
+          workflow_sha256="$(sha256sum "$workflow_path" | awk '{print $1}')"
+          printf 'path=%s\nblob_sha=%s\nsha256=%s\nmaterialized_from=%s\n' \
+            "$workflow_path" "$blob_sha" "$workflow_sha256" "$GITHUB_SHA" \
+            > "$reference"
+          grep -E '^blob_sha=[0-9a-f]{40}$' "$reference"
+          grep -E '^sha256=[0-9a-f]{64}$' "$reference"
+
+      - name: Commit verified non-workflow rc.6 source and blob reference
+        run: |
+          set -euo pipefail
+          git add \
+            aiTemp/installer-upgrade/materialize_rc6_release.py \
+            aiTemp/installer-upgrade/patch_rc6_fixture_compiler.py \
+            aiTemp/installer-upgrade/rc6-release-workflow-blob.txt \
+            docs/releases/v0.7.0-rc.6.md \
+            desktop-electron/package.json \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs
+          if git diff --cached --quiet; then
+            echo 'rc.6 non-workflow source and blob reference are already materialized'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(rc6): compile legacy uninstall fixture with csc.exe'
+          git push origin "HEAD:${GITHUB_REF_NAME}"

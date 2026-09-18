@@ -1,0 +1,27 @@
+name: Pinned execution protocol audit
+on:
+  push:
+    branches: [feature/paseo-anneal-execution-0.5.0]
+    paths: [.github/workflows/execution-upstream-audit.yml]
+permissions: {contents: read}
+jobs:
+  audit:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {repository: getpaseo/paseo, ref: fa93c4290eaa87ae58452ab6e2012f85ae6e0c6b, path: aiTemp/paseo, clean: false, persist-credentials: false}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: {repository: mosonlab/anneal, ref: 2eaea1c7ab5fc4444beab703bf1fbab264ad3f58, path: aiTemp/anneal, clean: false, persist-credentials: false}
+      - name: Preserve source without executing upstream runners, install scripts or inference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          git -C aiTemp/paseo archive --format=tar HEAD > aiTemp/evidence/paseo.tar
+          git -C aiTemp/anneal archive --format=tar HEAD > aiTemp/evidence/anneal.tar
+          git -C aiTemp/paseo rev-parse HEAD > aiTemp/evidence/paseo.commit
+          git -C aiTemp/anneal rev-parse HEAD > aiTemp/evidence/anneal.commit
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: 'execution-upstream-${{ github.run_id }}', path: aiTemp/evidence/, if-no-files-found: error, retention-days: 14}

@@ -80,12 +80,40 @@ assert.equal(JSON.stringify(localPlan).includes('user_'), false);
 
 const page = fs.readFileSync('src/routes/integrations/+page.svelte', 'utf8');
 assert.equal(page.includes('CommandCodeProxyPanel'), true);
-assert.equal(page.includes("['paseo','anneal']"), true);
-assert.equal(/ssh -N -L 3000:127\.0\.0\.1:3000/.test(page), true);
+assert.equal(page.includes('OriginalUiPanel'), true);
+assert.equal(page.includes('toolId="codex-router"'), true);
+assert.equal(page.includes('toolId="cpa"'), true);
+assert.equal(page.includes('toolId="paseo"'), true);
+assert.equal(page.includes('toolId="anneal"'), true);
+assert.equal(page.includes('Install and start all'), true);
+assert.equal(/ssh -N -L 3000:127\.0\.0\.1:3000/.test(page), false);
+assert.equal(/port-forward/.test(page), false);
+
+const panel = fs.readFileSync('src/lib/components/control-center/CommandCodeProxyPanel.svelte', 'utf8');
+assert.equal(panel.includes('CommandCode AI Proxy'), true);
+assert.equal(panel.includes('ANTHROPIC_BASE_URL='), true);
+assert.equal(panel.includes('app-managed (not shown)'), true);
+assert.equal(panel.includes('five_stack_start'), true);
+assert.equal(panel.includes('five_stack_stop'), true);
+
+const originalUi = fs.readFileSync('src/lib/components/control-center/OriginalUiPanel.svelte', 'utf8');
+assert.equal(originalUi.includes('original-ui-section-tabs'), true);
+assert.equal(originalUi.includes('Copy management key'), true);
+assert.equal(originalUi.includes('Open original UI'), true);
+
+const rustFive = fs.readFileSync('src-tauri/src/integrations/five_stack.rs', 'utf8');
+assert.equal(rustFive.includes('disable-control-panel: false'), true);
+assert.equal(rustFive.includes('health_path: "/"'), true);
+assert.equal(rustFive.includes('"/sessions"'), true);
+assert.equal(rustFive.includes('"#/tasks"'), true);
+assert.equal(rustFive.includes('"Trash"'), true);
+assert.equal(/fs::remove_dir_all|fs::remove_file/.test(rustFive), false);
 
 const upstreams = JSON.parse(fs.readFileSync('src/lib/control-center/upstreams.json', 'utf8'));
-assert.equal(upstreams.paseo.mode, 'read_only');
-assert.equal(upstreams.anneal.mode, 'read_only');
+assert.equal(upstreams.paseo.mode, 'managed_original_ui');
+assert.equal(upstreams.anneal.mode, 'managed_original_ui');
+assert.equal(upstreams.paseo.observation, 'read_only');
+assert.equal(upstreams.anneal.observation, 'read_only');
 assert.equal(upstreams.agentLaunchEnabled, false);
 
 const rust = fs.readFileSync('src-tauri/src/integrations/commandcode.rs', 'utf8');
@@ -98,4 +126,4 @@ const cli = fs.readFileSync('runtime-web/scripts/commandcode-proxy-provider.ts',
 assert.equal(cli.includes('commandCodeProxyRegistrationPlan'), true);
 assert.equal(cli.includes('--apply'), true);
 
-console.log('PASS: CommandCode Proxy registration plan, secret isolation, Integrations panel, read-only Paseo/Anneal');
+console.log('PASS: CommandCode Proxy registration plan, secret isolation, original five-stack Integrations UI');

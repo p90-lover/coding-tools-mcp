@@ -1,0 +1,102 @@
+name: v0.7 rc.2 contracts
+
+on:
+  push:
+    branches:
+      - feature/v0.7.0-rc2-paseo-anneal-proxy-zhTW
+      - feature/v0.7-rc2-subagent-port
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - .github/workflows/v0.7-rc2-contracts.yml
+      - desktop-electron/src/agents/**
+      - desktop-electron/src/anneal/**
+      - desktop-electron/src/i18n/**
+      - desktop-electron/src/integrations/**
+      - desktop-electron/src/network/**
+      - desktop-electron/src/orchestration/**
+      - desktop-electron/src/orchestrator/**
+      - desktop-electron/src/paseo/**
+      - desktop-electron/src/providers/**
+      - desktop-electron/tests/proxy-provider-contract.test.cjs
+      - desktop-electron/tests/subagent-orchestrator-contract.test.cjs
+      - desktop-electron/tests/anneal-monitor-contract.test.cjs
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.2-all-project-work
+    paths:
+      - .github/workflows/v0.7-rc2-contracts.yml
+      - desktop-electron/src/agents/**
+      - desktop-electron/src/anneal/**
+      - desktop-electron/src/i18n/**
+      - desktop-electron/src/integrations/**
+      - desktop-electron/src/network/**
+      - desktop-electron/src/orchestration/**
+      - desktop-electron/src/orchestrator/**
+      - desktop-electron/src/paseo/**
+      - desktop-electron/src/providers/**
+      - desktop-electron/tests/proxy-provider-contract.test.cjs
+      - desktop-electron/tests/subagent-orchestrator-contract.test.cjs
+      - desktop-electron/tests/anneal-monitor-contract.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v0.7-rc2-contracts-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: TypeScript and focused contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Install desktop contract dependencies
+        working-directory: desktop-electron
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Run TypeScript and focused contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/v0.7-rc2-contracts
+          (
+            cd desktop-electron
+            npm run typecheck
+            tests=(tests/proxy-provider-contract.test.cjs)
+            for candidate in \
+              tests/subagent-orchestrator-contract.test.cjs \
+              tests/anneal-monitor-contract.test.cjs
+            do
+              if [[ -f "${candidate}" ]]; then
+                tests+=("${candidate}")
+              fi
+            done
+            node --test "${tests[@]}"
+          ) 2>&1 | tee aiTemp/v0.7-rc2-contracts/results.txt
+          grep -F '# fail 0' aiTemp/v0.7-rc2-contracts/results.txt
+
+      - name: Enforce no deletion in the integration diff
+        run: |
+          set -euo pipefail
+          git fetch origin integration/v0.7.0-rc.2-all-project-work --no-tags
+          git diff --check origin/integration/v0.7.0-rc.2-all-project-work...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.2-all-project-work...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: v0.7-rc2-contracts-${{ github.sha }}
+          path: aiTemp/v0.7-rc2-contracts/
+          if-no-files-found: error
+          retention-days: 14

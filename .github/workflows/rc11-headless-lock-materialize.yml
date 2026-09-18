@@ -1,0 +1,79 @@
+name: rc.11 headless lockfile materializer
+
+on:
+  push:
+    branches:
+      - cursor/five-stack-original-parity-rc11-2e35
+    paths:
+      - .github/workflows/rc11-headless-lock-materialize.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc11-headless-lock-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: '1.98.1'
+
+      - name: Regenerate only the headless service lockfile
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-headless-lock/evidence
+          cargo generate-lockfile \
+            --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+            2>&1 | tee aiTemp/rc11-headless-lock/evidence/generate.txt
+          cargo metadata --locked \
+            --manifest-path rust-core/coding-tools-headless/Cargo.toml \
+            --format-version 1 \
+            > aiTemp/rc11-headless-lock/evidence/metadata.json
+
+      - name: Enforce bounded no-delete diff
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --name-only | tee aiTemp/rc11-headless-lock/evidence/changed-files.txt
+          test "$(cat aiTemp/rc11-headless-lock/evidence/changed-files.txt)" = \
+            'rust-core/coding-tools-headless/Cargo.lock'
+          grep -F 'name = "tauri-plugin-clipboard-manager"' \
+            rust-core/coding-tools-headless/Cargo.lock
+          grep -A1 -F 'name = "tauri-plugin-clipboard-manager"' \
+            rust-core/coding-tools-headless/Cargo.lock \
+            | grep -F 'version = "2.3.3"'
+
+      - name: Commit verified generated lockfile
+        run: |
+          set -euo pipefail
+          git add rust-core/coding-tools-headless/Cargo.lock
+          if git diff --cached --quiet; then
+            echo RC11_HEADLESS_LOCK_ALREADY_CURRENT
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(rc11): sync headless lockfile with CPA clipboard runtime'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-headless-lock-${{ github.sha }}
+          path: aiTemp/rc11-headless-lock/evidence/
+          if-no-files-found: error
+          retention-days: 14

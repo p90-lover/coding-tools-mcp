@@ -1,0 +1,85 @@
+name: Apply rc.8 bounded elevation source-scope fix
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.8
+    paths:
+      - aiTemp/rc8-release/apply_source_scope_elevation.py
+      - desktop-electron/tests/rc8-source-scope-elevation.test.cjs
+      - .github/workflows/apply-rc8-source-scope-elevation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc8-source-scope-elevation
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Prepare retained evidence root
+        run: mkdir -p aiTemp/evidence aiTemp/Trash/rc8-source-scope-elevation
+
+      - name: Record the contract-first failure
+        run: |
+          set -euo pipefail
+          if node --test desktop-electron/tests/rc8-source-scope-elevation.test.cjs \
+            >aiTemp/evidence/rc8-source-scope-elevation-red.txt 2>&1; then
+            echo 'Elevation source-scope contract unexpectedly passed before the patch.' >&2
+            cat aiTemp/evidence/rc8-source-scope-elevation-red.txt
+            exit 1
+          fi
+          cat aiTemp/evidence/rc8-source-scope-elevation-red.txt
+
+      - name: Apply bounded assisted-elevation repair
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc8-release/apply_source_scope_elevation.py \
+            2>&1 | tee aiTemp/evidence/rc8-source-scope-elevation-apply.txt
+          grep -F RC8_SOURCE_SCOPE_ELEVATION_APPLIED \
+            aiTemp/evidence/rc8-source-scope-elevation-apply.txt
+
+      - name: Verify green contract and no-delete scope
+        run: |
+          set -euo pipefail
+          node --check scripts/release/verify-source-scope.mjs
+          node --test desktop-electron/tests/rc8-source-scope-elevation.test.cjs \
+            2>&1 | tee aiTemp/evidence/rc8-source-scope-elevation-green.txt
+          grep -F '# fail 0' aiTemp/evidence/rc8-source-scope-elevation-green.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          changed="$(git diff --name-only)"
+          test "$changed" = 'scripts/release/verify-source-scope.mjs'
+
+      - name: Commit verified source-scope contract
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/release/verify-source-scope.mjs
+          git diff --cached --check
+          git commit -m 'fix(rc8 release): permit bounded legacy-migration elevation'
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc8-source-scope-elevation-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14

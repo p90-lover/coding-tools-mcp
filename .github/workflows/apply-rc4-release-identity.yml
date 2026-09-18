@@ -1,0 +1,126 @@
+name: Apply rc.4 release identity
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.4
+    paths:
+      - aiTemp/rc4-release/apply-release-identity.py
+      - .github/workflows/apply-rc4-release-identity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-codex-router-release-identity-rc4
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: '1.4.0'
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache-rc4-identity
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/release/codex-router-multiprovider-0.7.0-rc.4'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          clean: false
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Prepare retained roots
+        run: mkdir -p aiTemp/tmp aiTemp/rc4-release/evidence aiTemp/Trash/rc4-release
+
+      - name: Apply exact rc.4 identity
+        run: |
+          set -euo pipefail
+          python aiTemp/rc4-release/apply-release-identity.py \
+            | tee aiTemp/rc4-release/evidence/identity-patch.txt
+          grep -F CODEX_ROUTER_RELEASE_IDENTITY_RC4_PATCH_OK \
+            aiTemp/rc4-release/evidence/identity-patch.txt
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+
+      - name: Install exact validation dependencies
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd runtime-web --frozen-lockfile
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Verify package and Provider Hub contracts
+        run: |
+          set -euo pipefail
+          preload="$PWD/runtime-web/scripts/no-delete-preload.mjs"
+          export NODE_OPTIONS="--import=$preload"
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun test --cwd runtime-web tests/runtime-bundle-version.test.ts
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd runtime-web typecheck
+          node --test \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/packaging-contract.test.cjs \
+            desktop-electron/tests/prepare-runtime.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs
+          TMPDIR="$PWD/aiTemp/tmp" TMP="$PWD/aiTemp/tmp" TEMP="$PWD/aiTemp/tmp" \
+            bun run --cwd desktop-electron typecheck
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const desktop = JSON.parse(fs.readFileSync('desktop-electron/package.json', 'utf8'));
+          if (desktop.version !== '0.7.0-rc.4') {
+            throw new Error(`DESKTOP_RELEASE_VERSION_MISMATCH:${desktop.version}`);
+          }
+          process.stdout.write(`DESKTOP_RELEASE_VERSION_OK ${desktop.version}\n`);
+          NODE
+
+      - name: Commit only verified release identity files
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --check
+          git add \
+            desktop-electron/package.json \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/runtime-preparation.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            runtime-web/scripts/build-runtime-bundle.ts \
+            runtime-web/src/runtime-bundle-version.ts \
+            runtime-web/tests/runtime-bundle-version.test.ts
+          if git diff --cached --quiet; then
+            echo RC4_RELEASE_IDENTITY_ALREADY_ALIGNED
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'build(rc4): align exact package identity'
+          git push origin HEAD:refs/heads/release/codex-router-multiprovider-0.7.0-rc.4
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          set -euo pipefail
+          for source in runtime-web/node_modules desktop-electron/node_modules; do
+            if [ -d "$source" ]; then
+              safe_name="${source//\//-}"
+              mv "$source" "aiTemp/Trash/rc4-release/${safe_name}-$GITHUB_RUN_ID"
+            fi
+          done

@@ -350,6 +350,16 @@ fn set_confirmed(args: &mut Value) {
 
 fn classify_operation(tool_name: &str, args: &Value) -> Option<ApprovalRisk> {
     match tool_name {
+        "workflow_update"
+            if args.pointer("/change/operation").and_then(Value::as_str)
+                == Some("agent_control")
+                && matches!(
+                    args.pointer("/change/action").and_then(Value::as_str),
+                    Some("create" | "start" | "resume")
+                ) =>
+        {
+            Some(ApprovalRisk::Network)
+        }
         "exec_command" => {
             let command = args.get("cmd").and_then(Value::as_str).unwrap_or("");
             Some(classify_command(command))

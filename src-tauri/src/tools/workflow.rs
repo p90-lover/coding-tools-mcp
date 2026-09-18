@@ -18,6 +18,8 @@ struct List {
     offset: usize,
     limit: usize,
     include_archived: bool,
+    mission_id: Option<String>,
+    refresh_source: bool,
 }
 impl Default for List {
     fn default() -> Self {
@@ -26,6 +28,8 @@ impl Default for List {
             offset: 0,
             limit: 50,
             include_archived: false,
+            mission_id: None,
+            refresh_source: false,
         }
     }
 }
@@ -52,7 +56,7 @@ fn scope(ctx: &ToolContext, data: &AppData) -> AppResult<String> {
     }
     Ok(id.into())
 }
-pub fn input_schema(name: &str) -> Value {
+fn base_input_schema(name: &str) -> Value {
     if name == "workflow_list" {
         return json!({"type":"object","properties":{
         "task_id":{"type":"string","maxLength":128},"offset":{"type":"integer","minimum":0,"maximum":256},
@@ -68,6 +72,15 @@ pub fn input_schema(name: &str) -> Value {
         {"type":"object","properties":{"operation":{"const":"observe"},"id":id,"note":{"type":"string","minLength":1,"maxLength":4096}},"required":["operation","id","note"],"additionalProperties":false},
         {"type":"object","properties":{"operation":{"enum":["archive","restore"]},"id":id},"required":["operation","id"],"additionalProperties":false}
         ]}},"required":["expected_revision","change"],"additionalProperties":false})
+}
+pub fn input_schema(name: &str) -> Value {
+    crate::integrations::execution::schema::extend(name, base_input_schema(name))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionWrite {
+    expected_revision: u64,
+    change: crate::integrations::execution::service::Change,
 }
 pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, WorkspaceError> {
     if !matches!(ctx.auth.auth_type.as_str(), "bearer" | "oauth" | "api_key") {
@@ -104,12 +117,45 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
                     r.include_archived,
                 )
             })
+            .and_then(|mut view| {
+                let execution = if r.refresh_source {
+                    let mission = r.mission_id.as_deref().ok_or_else(|| {
+                        AppError::Message("Source refresh requires a mission ID".into())
+                    })?;
+                    crate::integrations::execution::service::refresh(ctx, mission)?
+                } else {
+                    crate::integrations::execution::service::view(ctx, r.mission_id.as_deref())?
+                };
+                view["execution"] = execution;
+                Ok(view)
+            })
         }
         "workflow_update" => {
             let mut clean = args.clone();
             if let Some(o) = clean.as_object_mut() {
                 o.remove("approval_token");
                 o.remove("confirm");
+            }
+            if clean
+                .pointer("/change/operation")
+                .and_then(Value::as_str)
+                .is_some_and(|v| v.starts_with("agent_"))
+            {
+                let request: ExecutionWrite = serde_json::from_value(clean).map_err(|_| {
+                    WorkspaceError::invalid_argument("Invalid scoped agent operation")
+                })?;
+                return crate::integrations::execution::service::change(
+                    ctx,
+                    request.expected_revision,
+                    request.change,
+                )
+                .map(|value| tool_ok(json!({"execution":value})))
+                .map_err(|e| WorkspaceError::Tool {
+                    code: "AGENT_CONTROL_REJECTED",
+                    message: e.to_string(),
+                    category: "execution",
+                    retryable: false,
+                });
             }
             let r: Write = serde_json::from_value(clean).map_err(|_| {
                 WorkspaceError::invalid_argument(

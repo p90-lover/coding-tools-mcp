@@ -1,0 +1,164 @@
+# Exact-head verification after the implementation commit is present on the branch.
+name: Apply stable Antigravity session binding on rc.6
+
+on:
+  push:
+    branches:
+      - fix/rc6-antigravity-session-binding
+    paths:
+      - .github/workflows/apply-antigravity-session-binding-rc6.yml
+      - aiTemp/antigravity-session-binding/apply_patch.py
+      - aiTemp/antigravity-session-binding/apply_connected_binding.py
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/tests/antigravity-session-binding.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: antigravity-session-binding-rc6-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/antigravity-session-binding/bun-cache
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/rc6-antigravity-session-binding
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained work roots
+        run: |
+          mkdir -p \
+            aiTemp/antigravity-session-binding/evidence \
+            aiTemp/antigravity-session-binding/renderer-dist \
+            aiTemp/Trash/antigravity-session-binding
+
+      - name: Capture the missing binding regression before patching
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Fq 'const binding = antigravitySessionBinding(account);' \
+            desktop-electron/electron/provider-network.cjs; then
+            echo ANTIGRAVITY_SESSION_BINDING_ALREADY_PRESENT \
+              | tee aiTemp/antigravity-session-binding/evidence/red-state.txt
+            exit 0
+          fi
+          set +e
+          node --test desktop-electron/tests/antigravity-session-binding.test.cjs \
+            > aiTemp/antigravity-session-binding/evidence/red-test.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            cat aiTemp/antigravity-session-binding/evidence/red-test.log
+            echo 'Expected the new session-binding contract to fail before the patch.' >&2
+            exit 1
+          fi
+          printf 'EXPECTED_RED_STATUS=%s\n' "$status" \
+            | tee aiTemp/antigravity-session-binding/evidence/red-state.txt
+
+      - name: Apply the retained binding patches
+        run: |
+          set -euo pipefail
+          python aiTemp/antigravity-session-binding/apply_patch.py \
+            | tee aiTemp/antigravity-session-binding/evidence/materializer.txt
+          grep -E 'ANTIGRAVITY_SESSION_BINDING_PATCH_(APPLIED|ALREADY_APPLIED)' \
+            aiTemp/antigravity-session-binding/evidence/materializer.txt
+          python aiTemp/antigravity-session-binding/apply_connected_binding.py \
+            | tee aiTemp/antigravity-session-binding/evidence/connected-binding.txt
+          grep -E 'ANTIGRAVITY_CONNECTED_BINDING_(APPLIED|ALREADY_APPLIED)' \
+            aiTemp/antigravity-session-binding/evidence/connected-binding.txt
+
+      - name: Check the bounded source diff
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          git diff --name-only | tee aiTemp/antigravity-session-binding/evidence/changed-files.txt
+          if ! grep -Fxq desktop-electron/electron/provider-network.cjs \
+            aiTemp/antigravity-session-binding/evidence/changed-files.txt; then
+            if ! grep -Fq ANTIGRAVITY_SESSION_BINDING_PATCH_ALREADY_APPLIED \
+              aiTemp/antigravity-session-binding/evidence/materializer.txt; then
+              echo 'The materializer did not update provider-network.cjs.' >&2
+              exit 1
+            fi
+          fi
+          unexpected="$(grep -Ev '^desktop-electron/electron/provider-network\.cjs$' \
+            aiTemp/antigravity-session-binding/evidence/changed-files.txt || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected materialized paths:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Install exact Electron dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run Antigravity, Provider Hub, and routing regressions
+        run: >-
+          node --test
+          desktop-electron/tests/antigravity-session-binding.test.cjs
+          desktop-electron/tests/antigravity-provider-session.test.cjs
+          desktop-electron/tests/provider-console-saas.test.cjs
+          desktop-electron/tests/provider-center-account-wiring.test.cjs
+          desktop-electron/tests/provider-execution-router.test.cjs
+          desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs
+          desktop-electron/tests/proxy-provider-contract.test.cjs
+
+      - name: Validate runtime syntax, TypeScript, and retained production renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          renderer_dir="$GITHUB_WORKSPACE/aiTemp/antigravity-session-binding/renderer-dist"
+          node --check desktop-electron/electron/provider-network.cjs
+          bun run --cwd desktop-electron typecheck
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_dir" --emptyOutDir false
+          )
+          CODING_TOOLS_RENDERER_DIST="$renderer_dir" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs
+
+      - name: Enforce branch no-delete contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.6 --no-tags
+          git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.6...HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit verified implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add desktop-electron/electron/provider-network.cjs
+          if git diff --cached --quiet; then
+            echo ANTIGRAVITY_SESSION_BINDING_IMPLEMENTATION_ALREADY_COMMITTED
+            exit 0
+          fi
+          git config user.name 'p90-lover'
+          git config user.email '146848721+p90-lover@users.noreply.github.com'
+          git commit -m 'fix(rc6): keep Antigravity accounts bound to their auth session'
+          git push origin HEAD:refs/heads/fix/rc6-antigravity-session-binding
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p aiTemp/Trash/antigravity-session-binding
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules \
+              "aiTemp/Trash/antigravity-session-binding/node_modules-$GITHUB_RUN_ID"
+          fi

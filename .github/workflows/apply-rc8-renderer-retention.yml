@@ -1,0 +1,85 @@
+name: Apply rc.8 renderer-retention release fix
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.8
+    paths:
+      - aiTemp/rc8-release/apply_renderer_retention.py
+      - desktop-electron/tests/rc8-renderer-retention.test.cjs
+      - .github/workflows/apply-rc8-renderer-retention.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc8-renderer-retention
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Prepare retained evidence root
+        run: mkdir -p aiTemp/evidence aiTemp/Trash/rc8-renderer-retention
+
+      - name: Record the test-first failure
+        run: |
+          set -euo pipefail
+          if node --test desktop-electron/tests/rc8-renderer-retention.test.cjs \
+            >aiTemp/evidence/rc8-renderer-retention-red.txt 2>&1; then
+            echo 'Renderer-retention contract unexpectedly passed before the patch.' >&2
+            cat aiTemp/evidence/rc8-renderer-retention-red.txt
+            exit 1
+          fi
+          cat aiTemp/evidence/rc8-renderer-retention-red.txt
+
+      - name: Apply bounded no-delete repair
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc8-release/apply_renderer_retention.py \
+            2>&1 | tee aiTemp/evidence/rc8-renderer-retention-apply.txt
+          grep -F RC8_RENDERER_RETENTION_APPLIED \
+            aiTemp/evidence/rc8-renderer-retention-apply.txt
+
+      - name: Verify release runner and green contract
+        run: |
+          set -euo pipefail
+          node --check aiTemp/rc8-release/run-windows-release.mjs
+          node --test desktop-electron/tests/rc8-renderer-retention.test.cjs \
+            2>&1 | tee aiTemp/evidence/rc8-renderer-retention-green.txt
+          grep -F '# fail 0' aiTemp/evidence/rc8-renderer-retention-green.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          changed="$(git diff --name-only)"
+          test "$changed" = 'aiTemp/rc8-release/run-windows-release.mjs'
+
+      - name: Commit verified release hygiene
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add aiTemp/rc8-release/run-windows-release.mjs
+          git diff --cached --check
+          git commit -m 'fix(rc8 release): retain generated renderer before source-integrity gate'
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc8-renderer-retention-${{ github.sha }}
+          path: aiTemp/evidence/
+          if-no-files-found: warn
+          retention-days: 14

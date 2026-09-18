@@ -1,0 +1,81 @@
+name: Verify Coding Tools profile isolation
+on:
+  push:
+    branches: [feature/electron-full-codex-harness-0.6.0]
+    paths:
+      - .github/workflows/electron-profile-green.yml
+      - desktop-electron/electron/profile.cjs
+      - desktop-electron/electron/connector-identity.cjs
+      - desktop-electron/tests/profile.test.cjs
+      - desktop-electron/tests/dev-profile-isolation.test.cjs
+      - desktop-electron/tests/upstream-parity.test.cjs
+      - runtime-web/src/dev-chat/profile.ts
+      - runtime-web/tests/dev-profile.test.ts
+      - runtime-web/tests/coding-tools-upstream-smoke.test.ts
+  workflow_dispatch:
+permissions: {contents: read}
+concurrency:
+  group: electron-profile-green-060rc1
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    permissions: {actions: read, contents: read}
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/bun-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/source
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with: {node-version: '22'}
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with: {bun-version: '1.4.0'}
+      - name: Require retained old-profile failures
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          gh run download 34825424449 --repo "$GITHUB_REPOSITORY" --name electron-profile-red-34825424449 --dir aiTemp/red
+          cp aiTemp/red/desktop-profile-red.txt aiTemp/red/runtime-profile-red.txt aiTemp/evidence/
+          grep -F 'Codex Web GPT' aiTemp/evidence/desktop-profile-red.txt
+          grep -E 'codex-chatgpt-web-dev|Expected.*coding-tools-dev|expected.*coding-tools-dev' aiTemp/evidence/runtime-profile-red.txt
+      - name: Install exact locked dependencies
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile --cwd desktop-electron 2>&1 | tee aiTemp/evidence/desktop-install.txt
+          bun install --frozen-lockfile --cwd runtime-web 2>&1 | tee aiTemp/evidence/runtime-install.txt
+      - name: Verify profile isolation, identity, and retained entrypoints
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/profile.test.cjs \
+            desktop-electron/tests/dev-profile-isolation.test.cjs \
+            desktop-electron/tests/upstream-parity.test.cjs \
+            2>&1 | tee aiTemp/evidence/desktop-profile-green.txt
+          bun test --cwd runtime-web \
+            tests/dev-profile.test.ts \
+            tests/coding-tools-upstream-smoke.test.ts \
+            2>&1 | tee aiTemp/evidence/runtime-profile-green.txt
+          bun run --cwd desktop-electron typecheck 2>&1 | tee aiTemp/evidence/desktop-typecheck.txt
+          bun run --cwd runtime-web typecheck 2>&1 | tee aiTemp/evidence/runtime-typecheck.txt
+          grep -F '# fail 0' aiTemp/evidence/desktop-profile-green.txt
+          grep -F '0 fail' aiTemp/evidence/runtime-profile-green.txt
+      - name: Verify the exact vendor remains unchanged
+        run: node scripts/verify-vendored-upstream.mjs 2>&1 | tee aiTemp/evidence/vendor-verify.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: electron-profile-green-${{ github.run_id }}
+          path: aiTemp/source/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14

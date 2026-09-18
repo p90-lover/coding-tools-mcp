@@ -1,15 +1,28 @@
 {
   "paseo": {
     "repository": "getpaseo/paseo",
-    "commit": "da8c1b5c94e752b01d451645e5fa52aba2c1b2f0",
-    "mode": "read_only",
-    "protocol": 1
+    "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96",
+    "mode": "managed_original_ui",
+    "observation": "read_only",
+    "protocol": 1,
+    "originalOrigin": "http://127.0.0.1:6768",
+    "originalRoutes": {
+      "agents": "/sessions",
+      "workspaces": "/open-project",
+      "settings": "/settings"
+    }
   },
   "anneal": {
     "repository": "mosonlab/anneal",
-    "commit": "088f0d5971a1692134aaa3db0230cc541b014c07",
-    "mode": "read_only",
-    "boardEndpoint": "/tasks?view=board&archived=false"
+    "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e",
+    "mode": "managed_original_ui",
+    "observation": "read_only",
+    "originalOrigin": "http://127.0.0.1:5173",
+    "apiOrigin": "http://127.0.0.1:3000",
+    "originalRoutes": {
+      "tasks": "#/tasks",
+      "inbox": "#/inbox"
+    }
   },
   "agentLaunchEnabled": false
 }
