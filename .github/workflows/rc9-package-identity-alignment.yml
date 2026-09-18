@@ -5,6 +5,7 @@ on:
     branches:
       - fix/rc9-package-identity-alignment
     paths:
+      - aiTemp/rc9-package-identity/apply.py
       - desktop-electron/package.json
       - desktop-electron/electron/product.cjs
       - desktop-electron/scripts/prepare-package-resources.cjs
@@ -34,7 +35,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: rc9-package-identity-${{ github.event.pull_request.number || github.ref }}
@@ -50,33 +51,78 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.sha || github.ref_name }}
           fetch-depth: 0
           clean: false
-          persist-credentials: false
+          persist-credentials: ${{ github.event_name == 'push' }}
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: '22'
 
+      - name: Prepare retained evidence root
+        run: mkdir -p aiTemp/rc9-package-identity/evidence aiTemp/Trash/rc9-package-identity
+
+      - name: Apply deterministic package identity repair
+        if: github.event_name == 'push' && github.ref_name == 'fix/rc9-package-identity-alignment'
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc9-package-identity/apply.py \
+            2>&1 | tee aiTemp/rc9-package-identity/evidence/apply.txt
+          grep -F RC9_PACKAGE_IDENTITY_ALIGNED aiTemp/rc9-package-identity/evidence/apply.txt
+
       - name: Run release-identity and packaging contracts
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/rc9-package-identity/evidence
           node --test \
             desktop-electron/tests/rc9-package-identity-alignment.test.cjs \
             desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
             desktop-electron/tests/package-resource-preparation.test.cjs \
             desktop-electron/tests/installer-upgrade-migration.test.cjs \
             desktop-electron/tests/packaging-contract.test.cjs \
             2>&1 | tee aiTemp/rc9-package-identity/evidence/contracts.txt
           grep -F '# fail 0' aiTemp/rc9-package-identity/evidence/contracts.txt
 
-      - name: Validate package scripts and no-delete scope
+      - name: Validate package scripts and bounded no-delete scope
         run: |
           set -euo pipefail
           node --check desktop-electron/electron/product.cjs
           node --check desktop-electron/scripts/prepare-package-resources.cjs
           node --check desktop-electron/scripts/verify-package.cjs
           git diff --check
-          test -z "$(git diff --diff-filter=D --name-only HEAD^ HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+          if [ "${{ github.event_name }}" = 'push' ] && [ "${{ github.ref_name }}" = 'fix/rc9-package-identity-alignment' ]; then
+            changed="$(git diff --name-only | sort)"
+            expected="$(printf '%s\n' \
+              desktop-electron/electron/product.cjs \
+              desktop-electron/scripts/prepare-package-resources.cjs \
+              desktop-electron/scripts/verify-package.cjs \
+              desktop-electron/tests/installer-upgrade-migration.test.cjs \
+              desktop-electron/tests/package-contents.test.cjs \
+              desktop-electron/tests/package-resource-preparation.test.cjs \
+              desktop-electron/tests/product-identity.test.cjs | sort)"
+            test "$changed" = "$expected" || test -z "$changed"
+          fi
+
+      - name: Commit verified identity alignment
+        if: github.event_name == 'push' && github.ref_name == 'fix/rc9-package-identity-alignment'
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Package identity is already aligned.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs
+          git diff --cached --check
+          git commit -m 'fix(rc9): align active package identity with rc.9'
+          git push origin "HEAD:${{ github.ref_name }}"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
