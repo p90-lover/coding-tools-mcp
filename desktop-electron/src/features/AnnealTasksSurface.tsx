@@ -5,11 +5,13 @@ import type {
   ProviderExecutionPlan,
   ProviderNetworkSnapshot,
 } from "../types";
+import type { JsonObject } from "../api/contracts";
 import {
   boardRevision,
   messageOf,
   missionRevision,
   missionViews,
+  object,
   sanitizeIdentifier,
   selectBinding,
   taskOptions,
@@ -80,6 +82,15 @@ function phaseTone(phase: string): string {
   return "is-muted";
 }
 
+function asJson(value: unknown): JsonObject | null {
+  const row = object(value);
+  return row ? row as JsonObject : null;
+}
+
+function jsonList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 export function AnnealTasksSurface({
   language,
   setError,
@@ -103,6 +114,8 @@ export function AnnealTasksSurface({
   const [missionId, setMissionId] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [assignmentPreview, setAssignmentPreview] = useState<JsonObject | null>(null);
+  const [paseoReviews, setPaseoReviews] = useState<JsonObject[]>([]);
 
   const accounts = useMemo(() => usable(network), [network]);
   const providers = useMemo(
@@ -177,6 +190,26 @@ export function AnnealTasksSurface({
     if (workspaceId) void refresh();
   }, [workspaceId]);
 
+  useEffect(() => {
+    if (!workspaceId || !taskId || !window.codingTools) {
+      setAssignmentPreview(null);
+      return;
+    }
+    let cancelled = false;
+    void window.codingTools.tools.call({
+      workspaceId,
+      tool: "anneal_preview",
+      arguments: { taskId },
+    }).then((preview) => {
+      if (!cancelled) setAssignmentPreview(asJson(preview));
+    }).catch(() => {
+      if (!cancelled) setAssignmentPreview(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, workspaceId]);
+
   const refresh = async () => {
     const api = window.codingTools;
     if (!api || !workspaceId) return;
@@ -190,9 +223,32 @@ export function AnnealTasksSurface({
       const nextMissions = missionViews(view).filter((mission) => (
         mission.engine === "anneal" || mission.engine === "paseo"
       ));
-      setTasks(nextTasks);
+      let controlTasks: TaskOption[] = [];
+      let reviews: JsonObject[] = [];
+      try {
+        const status = await api.tools.call({
+          workspaceId,
+          tool: "five_stack_status",
+          arguments: {},
+        });
+        const root = object(status) ?? {};
+        controlTasks = taskOptions({ items: root.annealTasks }).filter((item) => item.state !== "archived");
+        reviews = (Array.isArray(root.reviews) ? root.reviews : []).flatMap((entry) => {
+          const row = object(entry);
+          return row ? [row as JsonObject] : [];
+        });
+      } catch {
+        controlTasks = [];
+        reviews = [];
+      }
+      const mergedTasks = [
+        ...nextTasks,
+        ...controlTasks.filter((item) => !nextTasks.some((existing) => existing.id === item.id)),
+      ];
+      setTasks(mergedTasks);
+      setPaseoReviews(reviews);
       setTaskId((current) => (
-        nextTasks.some((item) => item.id === current) ? current : ""
+        mergedTasks.some((item) => item.id === current) ? current : ""
       ));
       setMissions(nextMissions);
       setMissionId((current) => (
@@ -287,6 +343,30 @@ export function AnnealTasksSurface({
       setMissionId(id);
       setNotice(copy.annealMissionSubmitted);
       await refresh();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openFromPaseoReview = async (reviewId: string) => {
+    const api = window.codingTools;
+    if (!api || !workspaceId || !reviewId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await api.tools.call({
+        workspaceId,
+        tool: "anneal_open_from_review",
+        arguments: { reviewId },
+      });
+      const preview = asJson(created);
+      const id = typeof preview?.id === "string" ? preview.id : "";
+      setAssignmentPreview(preview);
+      setNotice(copy.annealFromPaseoReview);
+      await refresh();
+      if (id) setTaskId(id);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -435,6 +515,46 @@ export function AnnealTasksSurface({
               {task.description ? <div><dt>{copy.annealTaskDescription}</dt><dd>{task.description}</dd></div> : null}
             </dl>
 
+            <section className="anneal-assignment-preview">
+              <h3>{copy.annealAssignmentPreview}</h3>
+              {assignmentPreview ? (
+                <ol className="paseo-assignment-list">
+                  <li>
+                    <strong>{copy.paseoOrchestrator}</strong>
+                    <small>
+                      {String(object(object(object(assignmentPreview.assignment)?.orchestrator)?.route)?.providerId
+                        ?? copy.unknown)}
+                    </small>
+                  </li>
+                  {jsonList(object(assignmentPreview.assignment)?.subagents).flatMap((entry) => {
+                    const row = object(entry);
+                    if (!row) return [];
+                    const route = object(row.route) ?? {};
+                    return [(
+                      <li key={String(row.id ?? row.role)}>
+                        <strong>{String(row.role ?? copy.paseoSubagents)}</strong>
+                        <small>{String(route.providerId ?? copy.unknown)} · {String(route.model ?? copy.defaultModel)}</small>
+                        <code>{String(row.backend ?? "")}</code>
+                      </li>
+                    )];
+                  })}
+                </ol>
+              ) : (
+                <p className="empty-copy">{copy.annealNoAssignment}</p>
+              )}
+              {paseoReviews.filter((item) => Number(item.findings) > 0).map((item) => (
+                <button
+                  className="secondary-button"
+                  disabled={busy}
+                  key={String(item.id)}
+                  onClick={() => void openFromPaseoReview(String(item.id))}
+                  type="button"
+                >
+                  {copy.paseoOpenAnnealTask}
+                </button>
+              ))}
+            </section>
+
             <section className="anneal-dispatch-section">
               <h3>{copy.annealDispatch}</h3>
               <div className="anneal-engine-toggle" role="radiogroup">
@@ -570,6 +690,17 @@ export function AnnealTasksSurface({
             <span className="anneal-empty-drawer-mark" aria-hidden="true">◇</span>
             <h2>{copy.annealSelectedTask}</h2>
             <p>{copy.annealSelectTask}</p>
+            {paseoReviews.filter((item) => Number(item.findings) > 0).map((item) => (
+              <button
+                className="primary-button compact"
+                disabled={busy}
+                key={String(item.id)}
+                onClick={() => void openFromPaseoReview(String(item.id))}
+                type="button"
+              >
+                {copy.paseoOpenAnnealTask}
+              </button>
+            ))}
           </aside>
         )}
       </div>

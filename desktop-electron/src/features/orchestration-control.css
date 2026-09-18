@@ -706,6 +706,84 @@
   opacity: 0.62;
 }
 
+.paseo-subagent-board {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+  max-width: 780px;
+  width: 100%;
+}
+
+.paseo-subagent-board > header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.paseo-subagent-board h3 {
+  font-size: 13px;
+  margin: 0;
+}
+
+.paseo-subagent-row {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(90px, 0.8fr) minmax(110px, 1fr) minmax(110px, 1fr) minmax(90px, 0.9fr) auto;
+}
+
+.paseo-subagent-row label {
+  display: grid;
+  gap: 4px;
+}
+
+.paseo-subagent-row label > span,
+.paseo-subagent-row small {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.paseo-subagent-row input,
+.paseo-subagent-row select {
+  min-height: 28px;
+}
+
+.paseo-assignment-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.paseo-assignment-list li,
+.paseo-assignment-result {
+  background: color-mix(in srgb, var(--panel-bg) 88%, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  padding: 10px 12px;
+}
+
+.paseo-assignment-list small,
+.paseo-assignment-list code {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.paseo-run-results {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.anneal-assignment-preview {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 18px;
+}
+
 .paseo-provider-warning {
   color: #e0ad57;
   font-size: 11px;
@@ -1352,7 +1430,12 @@
   }
 
   .paseo-composer footer > div {
+    flex-wrap: wrap;
     justify-content: flex-end;
+  }
+
+  .paseo-subagent-row {
+    grid-template-columns: 1fr;
   }
 
   .control-surface.anneal-shell {

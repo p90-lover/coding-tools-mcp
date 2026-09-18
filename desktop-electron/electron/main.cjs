@@ -42,6 +42,7 @@ const {
   setProviderCpaConnection,
 } = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
+const { createFiveStackControlPlane } = require("./five-stack-control-plane.cjs");
 const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
@@ -491,6 +492,13 @@ function registerIpc({ logger, stateStore }) {
     headlessHost,
     updateController,
   });
+  const fiveStackControlPlane = createFiveStackControlPlane({
+    planProvider: createProviderExecutionPlan,
+    getProviderSnapshot: async () => {
+      const providerNetwork = await providerNetworkReady();
+      return providerNetwork.store.snapshot();
+    },
+  });
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
@@ -498,11 +506,36 @@ function registerIpc({ logger, stateStore }) {
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
   handle("coding-tools:native-codex:status", (event) => codingTools.nativeCodexStatus(event));
-  handle("coding-tools:integrations:snapshot", (event) => codingTools.integrationsSnapshot(event));
+  handle("coding-tools:integrations:snapshot", async (event) => {
+    const snapshot = await codingTools.integrationsSnapshot(event);
+    return {
+      ...snapshot,
+      available: true,
+      five_stack: fiveStackControlPlane.apiMap(),
+    };
+  });
   handle("coding-tools:updates:status", (event) => codingTools.updatesStatus(event));
   handle("coding-tools:diagnostics:snapshot", (event) => codingTools.diagnosticsSnapshot(event));
-  handle("coding-tools:tools:catalog", (event, input) => codingTools.toolsCatalog(event, input));
-  handle("coding-tools:tools:call", (event, input) => codingTools.toolsCall(event, input));
+  handle("coding-tools:tools:catalog", async (event, input) => {
+    assertFocusedMainWindow(event, false);
+    let headless = { tools: [], unavailable: true };
+    try {
+      headless = await codingTools.toolsCatalog(event, input);
+    } catch {
+      headless = { tools: [], unavailable: true };
+    }
+    return fiveStackControlPlane.mergeCatalog(headless);
+  });
+  handle("coding-tools:tools:call", async (event, input) => {
+    if (fiveStackControlPlane.hasTool(input.tool)) {
+      assertFocusedMainWindow(event, !fiveStackControlPlane.isReadOnly(input.tool));
+      return fiveStackControlPlane.callTool(input.tool, input.arguments ?? {}, {
+        workspaceId: input.workspaceId,
+        requestId: input.requestId,
+      });
+    }
+    return codingTools.toolsCall(event, input);
+  });
   handle("coding-tools:execution:read", async (event, input) => {
     assertFocusedMainWindow(event, false);
     if (!headlessHost) throw new Error("Local execution service is unavailable");

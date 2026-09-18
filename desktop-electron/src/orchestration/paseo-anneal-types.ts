@@ -60,3 +60,5 @@ export interface AnnealDispatchRequest {
   workflowId?: string;
   usePaseoAsSubagent: boolean;
 }
+
+/** Desktop + MCP share `five-stack-control-plane` tools (`paseo_plan` → `anneal_preview`). */
