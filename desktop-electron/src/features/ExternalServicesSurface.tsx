@@ -29,6 +29,7 @@ interface ServiceDraft {
   argumentsText: string;
   enabled: boolean;
   autoStart: boolean;
+  keepAlive: boolean;
   routerCli: string;
   curateCli: string;
   webBaseUrl: string;
@@ -64,6 +65,7 @@ function draftFrom(service: ExternalServiceSnapshot): ServiceDraft {
     argumentsText: service.arguments.join("\n"),
     enabled: service.enabled,
     autoStart: service.autoStart,
+    keepAlive: service.keepAlive === true,
     routerCli: service.routerCli ?? "model-router",
     curateCli: service.curateCli ?? "curate-models",
     webBaseUrl: service.webBaseUrl ?? "http://127.0.0.1:17841/router/v1",
@@ -134,6 +136,7 @@ export function ExternalServicesSurface({
   const [managedCredential, setManagedCredential] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
+  const [planText, setPlanText] = useState("");
   const [bootstrap, setBootstrap] = useState<ManagedBootstrapSnapshot | null>(null);
 
   const selected = services.services.find((service) => service.id === selectedId) ?? null;
@@ -212,6 +215,7 @@ export function ExternalServicesSurface({
       setCallerKey("");
       setManagedCredential("");
       setNotice("");
+      setPlanText("");
     }
   }, [selectedId]);
 
@@ -242,6 +246,7 @@ export function ExternalServicesSurface({
       arguments: splitArguments(draft.argumentsText),
       enabled: draft.enabled,
       autoStart: draft.autoStart,
+      keepAlive: draft.keepAlive,
       ...(selected.id === "codex-router" ? {
         routerCli: draft.routerCli,
         curateCli: draft.curateCli,
@@ -257,6 +262,33 @@ export function ExternalServicesSurface({
   const inspect = () => run("inspect", async () => {
     if (!api || !selected) return;
     await api.inspectExternalService(selected.id);
+  });
+
+  const copyPlan = () => run("copy-plan", async () => {
+    if (!api || !selected || selected.id !== "commandcode-proxy" || !draft) return;
+    const plan = await api.commandCodeProxyPlan({
+      baseUrl: draft.endpoint,
+      routerCli: draft.routerCli,
+      curateCli: draft.curateCli,
+    });
+    setPlanText(plan.text);
+    await navigator.clipboard.writeText(plan.text);
+    setNotice(text(language, "Registration plan copied.", "已複製註冊計劃。"));
+  });
+
+  const applyNonSecret = () => run("apply-plan", async () => {
+    if (!api || !selected || selected.id !== "commandcode-proxy" || !draft) return;
+    const result = await api.applyCommandCodeProxyPlan({
+      baseUrl: draft.endpoint,
+      routerCli: draft.routerCli,
+      curateCli: draft.curateCli,
+    });
+    setPlanText(result.planText || planText);
+    setNotice(text(
+      language,
+      "Credential set was not executed. Paste the user_* key only in Codex Router’s hidden prompt.",
+      "未執行 credential set。user_* 金鑰只能在 Codex Router 隱藏提示中輸入。",
+    ));
   });
 
   const start = () => run("start", async () => {
@@ -384,7 +416,9 @@ export function ExternalServicesSurface({
             <CommandCodeProxySurface
               busy={busy}
               language={language}
+              onApplyNonSecret={() => void applyNonSecret()}
               onCheck={() => void inspect()}
+              onCopyPlan={() => void copyPlan()}
               onOpenProviders={openProviders}
               onRestart={() => void restart()}
               onStart={() => void start()}
@@ -491,15 +525,43 @@ export function ExternalServicesSurface({
             ) : null}
             <label className="service-check"><input checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} type="checkbox" /><span>{text(language, "Enabled", "已啟用")}</span></label>
             <label className="service-check"><input checked={draft.autoStart} onChange={(event) => setDraft({ ...draft, autoStart: event.target.checked })} type="checkbox" /><span>{text(language, "Start with Coding Tools", "隨 Coding Tools 啟動")}</span></label>
+            <label className="service-check"><input checked={draft.keepAlive} onChange={(event) => setDraft({ ...draft, keepAlive: event.target.checked })} type="checkbox" /><span>{text(language, "Keep-alive inspect for multi-day runs (does not spawn engines)", "為多日任務保持探測（不會拉起引擎）")}</span></label>
             </div>
           </details>
 
           {selected.error ? <p className="external-service-error">{selected.error}</p> : null}
+          {selected.stale ? <p className="external-service-error">{text(language, "Keep-alive snapshot is stale.", "保活快照已過期。")}</p> : null}
           {notice ? <p className="external-service-notice">{notice}</p> : null}
+          {selected.id === "commandcode-proxy" ? (
+            <p className="external-service-notice">
+              {text(
+                language,
+                "Coding Tools never accepts the CommandCode user_* key. Packaged default listen is 9090; 3050 is probed when 9090 is down. Start forces HOST=127.0.0.1. Stop only kills an owned child. autoStart stays off unless you check Start with Coding Tools.",
+                "本程式永不接收 CommandCode user_* 金鑰。打包預設監聽 9090；9090 不可達時探測 3050。Start 強制 HOST=127.0.0.1。Stop 只結束 owned 子行程。未勾選「隨 Coding Tools 啟動」時 autoStart 維持關閉。",
+              )}
+            </p>
+          ) : null}
+          {planText ? <pre className="commandcode-plan">{planText}</pre> : null}
 
           <div className="external-service-actions">
             <button disabled={busy !== null} onClick={() => void save()} type="button">{busy === "save" ? "…" : text(language, "Save", "儲存")}</button>
-            <button disabled={busy !== null || !selected.enabled} onClick={() => void inspect()} type="button">{busy === "inspect" ? "…" : text(language, "Check", "檢查")}</button>
+            <button disabled={busy !== null || !selected.enabled} onClick={() => void inspect()} type="button">
+              {busy === "inspect"
+                ? "…"
+                : selected.id === "commandcode-proxy"
+                  ? text(language, "Check status", "檢查狀態")
+                  : text(language, "Check", "檢查")}
+            </button>
+            {selected.id === "commandcode-proxy" ? (
+              <>
+                <button disabled={busy !== null} onClick={() => void copyPlan()} type="button">
+                  {busy === "copy-plan" ? "…" : text(language, "Copy plan", "複製計劃")}
+                </button>
+                <button disabled={busy !== null} onClick={() => void applyNonSecret()} type="button">
+                  {busy === "apply-plan" ? "…" : text(language, "Apply non-secret", "套用非密鑰步驟")}
+                </button>
+              </>
+            ) : null}
             <button disabled={busy !== null || !selected.enabled || selected.status === "ready"} onClick={() => void start()} type="button">{busy === "start" ? "…" : text(language, "Start", "啟動")}</button>
             <button disabled={busy !== null || !selected.owned} onClick={() => void restart()} type="button">{busy === "restart" ? "…" : text(language, "Restart", "重新啟動")}</button>
             <button disabled={busy !== null || !selected.owned} onClick={() => void stop()} type="button">{busy === "stop" ? "…" : text(language, "Stop", "停止")}</button>

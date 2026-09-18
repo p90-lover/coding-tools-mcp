@@ -174,6 +174,7 @@ test("CommandCode integration is exposed through provider metadata, IPC and UI",
   assert.match(types, /"commandcode_oauth"/);
   assert.match(types, /loginMode:\s*"commandcode_oauth"/);
   assert.match(bootstrap, /launcher:provider-session-import/);
+  assert.match(bootstrap, /reviveCommandCodeSessions/);
   assert.match(preload, /importProviderSession/);
   assert.match(rendererTypes, /importProviderSession\(accountId: string\)/);
   assert.match(surface, /Login with CommandCode/);

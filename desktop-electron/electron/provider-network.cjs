@@ -43,7 +43,7 @@ const COMMANDCODE_PROVIDER_ID = "commandcode-proxy";
 const DEFAULT_COMMANDCODE_PROXY_URL = "http://127.0.0.1:9090";
 const COMMANDCODE_API_URL = "https://api.commandcode.ai";
 const COMMANDCODE_LOGIN_URL = "https://commandcode.ai/studio/auth/cli";
-const DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_OAUTH_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_OAUTH_TIMEOUT_MS = 5 * 60_000;
 
@@ -1502,6 +1502,33 @@ function createProviderNetworkController({
     }
   }
 
+  async function reviveCommandCodeSessions() {
+    const snapshot = store.snapshot();
+    const accounts = snapshot.accounts.filter((account) => (
+      account.providerId === COMMANDCODE_PROVIDER_ID && !account.archivedAt
+    ));
+    for (const account of accounts) {
+      const secret = store.accountSecret(account.id) || {};
+      if (commandCodeToken(secret)) {
+        try {
+          await inspectCommandCodeSession(accountRecord(account.id));
+        } catch (error) {
+          store.updateAccountConnection(account.id, {
+            status: providerSessionFailureStatus(error instanceof Error ? error.message : String(error)),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        continue;
+      }
+      try {
+        await importProviderSession(account.id);
+      } catch {
+        // CLI auth.json is optional after crash; encrypted store is the durable source.
+      }
+    }
+    return store.snapshot();
+  }
+
   async function probeProviderAccount(accountId) {
     const account = accountRecord(accountId);
     try {
@@ -1611,6 +1638,7 @@ function createProviderNetworkController({
     openProviderLogin,
     importProviderSession,
     probeProviderAccount,
+    reviveCommandCodeSessions,
     testProxyProfile,
     handleProxyLogin,
   };

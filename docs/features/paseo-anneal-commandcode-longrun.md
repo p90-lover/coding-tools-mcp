@@ -1,6 +1,14 @@
 # Paseo, Anneal, and CommandCode Proxy — original function + 7-day live
 
-This is a focused rc.11+ change on the 0.4.11 Svelte/Tauri Desktop (`main` after #181). It does not merge the 0.7 Electron tree, CPA, Codex Router exclusive editors, or the Desktop shell-only lane.
+This is a **focused follow-up on top of #192** (`0.7.0-rc.11` five-stack Start+health). It does **not** duplicate LOL's five-stack tree, CPA, Codex Router exclusive editors (`#190` remains Bot GG keep-alive SoT), or the Desktop shell-only lane.
+
+Unique deltas #192 lacked:
+
+- Electron Integrations **Check status / Copy plan / Apply non-secret** (never collects CommandCode `user_*`)
+- CommandCode inspect **12s**, packaged **9090** with **3050** fallback, `HOST=127.0.0.1` on owned Start, **keepAlive ≠ autoStart**
+- Paseo/Anneal **allowlisted original-function** RPCs/POSTs plus iframe auto-embed
+- CommandCode OAuth/CLI **session revive** after crash
+- Tauri lease/live/actions original-function (kept additive with #192's execution/provider/orchestrator stack)
 
 ## Inventory (current main vs originals)
 
@@ -23,6 +31,7 @@ Credentials stay in RAM unless Remember is checked (then `app_secrets["integrati
 ```bash
 node scripts/check-control-center.mjs
 cargo test --manifest-path src-tauri/Cargo.toml --lib control_center -- --test-threads=1
+node --test desktop-electron/tests/commandcode-proxy-plan.test.cjs desktop-electron/tests/upstream-actions.test.cjs desktop-electron/tests/external-services-control-plane.test.cjs desktop-electron/tests/original-upstream-panels.test.cjs desktop-electron/tests/commandcode-provider-session.test.cjs
 ```
 
 Manual (when the local services are already running):

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   Language,
+  UpstreamToolActResult,
   UpstreamToolId,
   UpstreamToolSnapshot,
   UpstreamToolsSnapshot,
@@ -63,6 +64,13 @@ export function UpstreamToolSurface({
   const [frameUrl, setFrameUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [chromeOpen, setChromeOpen] = useState(false);
+  const [agentId, setAgentId] = useState("");
+  const [taskId, setTaskId] = useState("");
+  const [messageId, setMessageId] = useState("");
+  const [createPrompt, setCreatePrompt] = useState("");
+  const [createProvider, setCreateProvider] = useState("claude");
+  const [inboxDecision, setInboxDecision] = useState("approve");
+  const [actDetail, setActDetail] = useState("");
   const tool = useMemo(() => toolFrom(snapshot, toolId), [snapshot, toolId]);
 
   const refresh = async () => {
@@ -152,6 +160,24 @@ export function UpstreamToolSurface({
     if (!api) throw new Error("Launcher IPC is unavailable");
     await api.openUpstreamToolExternal(toolId, selectedSection);
   });
+
+  const act = async (name: string, input: Record<string, string>) => {
+    if (!api) throw new Error("Launcher IPC is unavailable");
+    setBusy(name);
+    setError(null);
+    try {
+      const result: UpstreamToolActResult = await api.actUpstreamTool({
+        toolId,
+        ...input,
+      });
+      setActDetail(result.ok ? result.detail : result.detail || "request failed");
+      if (!result.ok) setError(result.detail);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   if (!tool) {
     return (
@@ -277,12 +303,84 @@ export function UpstreamToolSurface({
             <strong>{localize(language, "Full upstream interface", "完整上游介面")}</strong>
             <span>
               {ready
-                ? localize(language, "Choose a section and open the embedded interface.", "選擇頁面並開啟內嵌介面。")
+                ? localize(language, "Opening the original embedded interface.", "正在開啟原版內嵌介面。")
                 : localize(language, "Coding Tools is preparing the managed loopback service.", "Coding Tools 正在準備受管 loopback 服務。")}
             </span>
           </div>
         )}
       </div>
+
+      <section className="upstream-original-function" aria-label="Original function">
+        <h2>{localize(language, "Original function", "原版功能")}</h2>
+        {toolId === "paseo" ? (
+          <div className="upstream-original-actions">
+            <p>
+              {localize(
+                language,
+                "Allowlisted protocol v1 RPCs: send, resume, cancel, archive, permission, create. These call the running Paseo daemon; they are not decorative.",
+                "允許名單 protocol v1 RPC：send、resume、cancel、archive、permission、create。會打到已運行的 Paseo daemon，不是裝飾按鈕。",
+              )}
+            </p>
+            <label>
+              <span>agent / session id</span>
+              <input onChange={(event) => setAgentId(event.target.value)} spellCheck={false} value={agentId} />
+            </label>
+            <label>
+              <span>prompt</span>
+              <input onChange={(event) => setCreatePrompt(event.target.value)} spellCheck={false} value={createPrompt} />
+            </label>
+            <label>
+              <span>provider</span>
+              <input onChange={(event) => setCreateProvider(event.target.value)} spellCheck={false} value={createProvider} />
+            </label>
+            <button disabled={busy !== null} onClick={() => void act("send", { op: "send", agentId, text: createPrompt || "ping" })} type="button">
+              {localize(language, "Send", "傳送")}
+            </button>
+            <button disabled={busy !== null} onClick={() => void act("resume", { op: "resume", provider: createProvider, sessionId: agentId })} type="button">
+              {localize(language, "Resume", "恢復")}
+            </button>
+            <button disabled={busy !== null} onClick={() => void act("cancel", { op: "cancel", agentId })} type="button">{localize(language, "Cancel", "取消")}</button>
+            <button disabled={busy !== null} onClick={() => void act("archive", { op: "archive", agentId })} type="button">{localize(language, "Archive", "封存")}</button>
+            <button disabled={busy !== null} onClick={() => void act("permission", { op: "permission", agentId, requestId: agentId, behavior: "allow" })} type="button">
+              {localize(language, "Allow", "允許")}
+            </button>
+            <button disabled={busy !== null} onClick={() => void act("create", { op: "create", provider: createProvider, cwd: ".", text: createPrompt || "hello" })} type="button">
+              {localize(language, "Create", "建立")}
+            </button>
+          </div>
+        ) : (
+          <div className="upstream-original-actions">
+            <p>
+              {localize(
+                language,
+                "Allowlisted POSTs: start/retry/archive/unarchive, chain hold|resume, inbox decision/reply/close. Runner and scheduler stay in Anneal.",
+                "允許名單 POST：start／retry／archive／unarchive、chain hold｜resume、inbox decision／reply／close。Runner 與排程仍在 Anneal。",
+              )}
+            </p>
+            <label>
+              <span>task id</span>
+              <input onChange={(event) => setTaskId(event.target.value)} spellCheck={false} value={taskId} />
+            </label>
+            <button disabled={busy !== null} onClick={() => void act("start", { op: "start", taskId })} type="button">{localize(language, "Start", "開始")}</button>
+            <button disabled={busy !== null} onClick={() => void act("retry", { op: "retry", taskId })} type="button">{localize(language, "Retry", "重試")}</button>
+            <button disabled={busy !== null} onClick={() => void act("hold", { op: "hold", taskId })} type="button">{localize(language, "Hold", "暫停")}</button>
+            <button disabled={busy !== null} onClick={() => void act("resume", { op: "resume", taskId })} type="button">{localize(language, "Resume", "恢復")}</button>
+            <button disabled={busy !== null} onClick={() => void act("archive", { op: "archive", taskId })} type="button">{localize(language, "Archive", "封存")}</button>
+            <label>
+              <span>inbox message id</span>
+              <input onChange={(event) => setMessageId(event.target.value)} spellCheck={false} value={messageId} />
+            </label>
+            <label>
+              <span>decision</span>
+              <input onChange={(event) => setInboxDecision(event.target.value)} spellCheck={false} value={inboxDecision} />
+            </label>
+            <button disabled={busy !== null} onClick={() => void act("inbox", { op: "inbox_decision", messageId, text: inboxDecision })} type="button">
+              {localize(language, "Inbox decision", "Inbox 決策")}
+            </button>
+          </div>
+        )}
+        {actDetail ? <p className="upstream-tool-hint">{actDetail}</p> : null}
+      </section>
 
       {nativeControl ? (
         <details className="upstream-native-control" open={!ready}>

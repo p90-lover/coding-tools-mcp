@@ -2,7 +2,7 @@
 
 ## 概述
 
-在 0.4.11 Svelte/Tauri Desktop 的 Integrations 车道上，为 Paseo、Anneal、CommandCode Proxy 增加原版 UI 嵌入、允许名单原版功能，以及与隧道 Recovery 同类的 7 天 keep-alive / 重连 / 崩溃恢复。不合并 0.7 Electron，不打包上游执行引擎。
+在 #192 的 0.7.0-rc.11 五栈 Start+health 之上，补齐 #192 没有的 Check status / Copy plan / Apply non-secret、12s inspect、9090↔3050、keepAlive≠autoStart、Paseo/Anneal 允许名单原版功能，以及 CommandCode session revive。Tauri 车道仍保留 lease/live/actions，与 #192 的 execution/provider/orchestrator 加性共存。不合并 CPA / Codex Router 独占编辑器（#190），不改 Desktop 主壳。
 
 **对应需求:** FR-1, FR-2, FR-3, FR-4, FR-5, FR-6, FR-7, NFR-1, NFR-2, NFR-3
 

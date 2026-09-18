@@ -82,6 +82,13 @@ function installProviderNetwork({
     if (snapshot.routing.globalEnabled && snapshot.routing.globalProfileId) {
       await controller.applyGlobalRouting();
     }
+    try {
+      await controller.reviveCommandCodeSessions();
+    } catch (error) {
+      logger.warn("commandcode.session_revive_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return controller;
   });
   const controllerPromise = providerNetworkControllerPromise;
