@@ -1,0 +1,213 @@
+name: RC7 installer location and beta update prompt
+
+on:
+  push:
+    branches:
+      - fix/rc7-installer-location-beta-update-prompt
+    paths:
+      - .github/workflows/rc7-installer-location-beta-popup.yml
+      - aiTemp/installer-location-beta-popup/**
+      - desktop-electron/tests/installer-location-beta-popup.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc7-installer-location-beta-popup
+  cancel-in-progress: false
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/installer-location-beta-popup/bun-cache
+  npm_config_cache: ${{ github.workspace }}/aiTemp/installer-location-beta-popup/npm-cache
+
+jobs:
+  materialize-and-verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      source: ${{ steps.commit.outputs.source }}
+    steps:
+      - name: Check out exact repair branch head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Confirm the two regressions before materialization
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/installer-location-beta-popup/evidence
+          set +e
+          node --test desktop-electron/tests/installer-location-beta-popup.test.cjs \
+            > aiTemp/installer-location-beta-popup/evidence/red.txt 2>&1
+          red_status=$?
+          set -e
+          if [ "$red_status" -eq 0 ]; then
+            grep -F 'function windowsInstallerArguments(job)' desktop-electron/electron/update-worker.cjs
+            grep -F 'async function promptForAvailableUpdate(next, { logger, stateStore })' desktop-electron/electron/main.cjs
+            echo 'Repair was already materialized on this exact head.'
+          else
+            grep -E 'running installation directory|install-or-later popup|not match' \
+              aiTemp/installer-location-beta-popup/evidence/red.txt
+            echo 'RED_REPRODUCED'
+          fi
+
+      - name: Materialize the bounded repair
+        run: node aiTemp/installer-location-beta-popup/materialize.mjs
+
+      - name: Verify updater and installer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/update.cjs
+          node --check desktop-electron/electron/update-worker.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --test \
+            desktop-electron/tests/installer-location-beta-popup.test.cjs \
+            desktop-electron/tests/update.test.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            2>&1 | tee aiTemp/installer-location-beta-popup/evidence/node-tests.txt
+
+      - name: Verify renderer type and production bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/installer-location-beta-popup/evidence/bun-install.txt
+          bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/installer-location-beta-popup/evidence/typecheck.txt
+          renderer_dir="$GITHUB_WORKSPACE/aiTemp/installer-location-beta-popup/renderer-dist"
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_dir" --emptyOutDir false
+          ) 2>&1 | tee aiTemp/installer-location-beta-popup/evidence/renderer-build.txt
+
+      - name: Enforce no-delete and record exact tested source
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git diff --name-only --diff-filter=D)"
+          git diff --check
+          git add \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/update.cjs \
+            desktop-electron/electron/update-worker.cjs
+          test -z "$(git diff --cached --name-only --diff-filter=D)"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(rc7): preserve install location and prompt for beta updates'
+          fi
+          git fetch origin "$GITHUB_REF_NAME"
+          remote_head="$(git rev-parse "origin/$GITHUB_REF_NAME")"
+          if [ "$remote_head" != "$GITHUB_SHA" ]; then
+            echo "Branch advanced from $GITHUB_SHA to $remote_head; refusing a stale push." >&2
+            exit 1
+          fi
+          git push origin "HEAD:$GITHUB_REF_NAME"
+          source="$(git rev-parse HEAD)"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$source" > aiTemp/installer-location-beta-popup/evidence/exact-source-sha.txt
+
+      - name: Preserve Linux verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rc7-installer-beta-linux-${{ github.run_id }}
+          path: aiTemp/installer-location-beta-popup/evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-installer:
+    needs: materialize-and-verify
+    runs-on: windows-2025
+    env:
+      SOURCE: ${{ needs.materialize-and-verify.outputs.source }}
+      ELECTRON_CACHE: ${{ github.workspace }}\aiTemp\installer-location-beta-popup\electron-cache
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}\aiTemp\installer-location-beta-popup\electron-builder-cache
+    steps:
+      - name: Check out exact verified source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.SOURCE }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Re-run focused Windows contracts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force aiTemp/installer-location-beta-popup/evidence | Out-Null
+          bun install --cwd desktop-electron --frozen-lockfile 2>&1 |
+            Tee-Object aiTemp/installer-location-beta-popup/evidence/windows-bun-install.txt
+          node --test `
+            desktop-electron/tests/installer-location-beta-popup.test.cjs `
+            desktop-electron/tests/update.test.cjs `
+            desktop-electron/tests/installer-upgrade-migration.test.cjs 2>&1 |
+            Tee-Object aiTemp/installer-location-beta-popup/evidence/windows-tests.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun run --cwd desktop-electron typecheck 2>&1 |
+            Tee-Object aiTemp/installer-location-beta-popup/evidence/windows-typecheck.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build exact Windows NSIS installer
+        shell: pwsh
+        run: |
+          bun run --cwd desktop-electron package:win 2>&1 |
+            Tee-Object aiTemp/installer-location-beta-popup/evidence/windows-package.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installer = Get-ChildItem desktop-electron/artifacts -Filter '*.exe' -File |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $installer) { throw 'Windows packaging produced no installer executable.' }
+          $installer.FullName | Set-Content aiTemp/installer-location-beta-popup/evidence/installer-path.txt
+          (Get-FileHash $installer.FullName -Algorithm SHA256).Hash |
+            Set-Content aiTemp/installer-location-beta-popup/evidence/installer-sha256.txt
+
+      - name: Verify the installer reuses a legacy custom location
+        shell: pwsh
+        run: |
+          $installer = Get-Content aiTemp/installer-location-beta-popup/evidence/installer-path.txt
+          $legacy = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\installer-location-beta-popup\Legacy Install With Spaces'
+          New-Item -ItemType Directory -Force $legacy | Out-Null
+          Set-Content -Path (Join-Path $legacy 'Coding Tools.exe') -Value 'legacy-placeholder'
+          $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\8a1d3576-15cd-5f5d-9800-5496aec075ea'
+          New-Item -Path $uninstallKey -Force | Out-Null
+          New-ItemProperty -Path $uninstallKey -Name InstallLocation -Value $legacy -PropertyType String -Force | Out-Null
+          $process = Start-Process -FilePath $installer -ArgumentList @('/S','/UPDATE','/CLOSEAPPLICATIONS','/NORESTART') -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer exited with code $($process.ExitCode)" }
+          $installed = Join-Path $legacy 'Coding Tools.exe'
+          if (-not (Test-Path $installed -PathType Leaf)) {
+            throw "Installer did not reuse legacy location: $legacy"
+          }
+          if ((Get-Item $installed).Length -lt 1024) {
+            throw 'Legacy placeholder was not replaced by the packaged application.'
+          }
+          "LEGACY_LOCATION_REUSED=$legacy" |
+            Set-Content aiTemp/installer-location-beta-popup/evidence/legacy-install-result.txt
+
+      - name: Preserve Windows installer and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rc7-installer-beta-windows-${{ github.run_id }}
+          path: |
+            aiTemp/installer-location-beta-popup/evidence/
+            desktop-electron/artifacts/*.exe
+          if-no-files-found: error
+          retention-days: 14
