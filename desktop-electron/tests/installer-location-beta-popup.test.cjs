@@ -3,10 +3,17 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const electronRoot = path.join(__dirname, "..", "electron");
+const desktopRoot = path.join(__dirname, "..");
+const repositoryRoot = path.join(desktopRoot, "..");
+const electronRoot = path.join(desktopRoot, "electron");
 const updateSource = fs.readFileSync(path.join(electronRoot, "update.cjs"), "utf8");
 const workerSource = fs.readFileSync(path.join(electronRoot, "update-worker.cjs"), "utf8");
 const mainSource = fs.readFileSync(path.join(electronRoot, "main.cjs"), "utf8");
+const installerSource = fs.readFileSync(path.join(desktopRoot, "build", "installer.nsh"), "utf8");
+const migrationAcceptanceSource = fs.readFileSync(
+  path.join(repositoryRoot, "aiTemp", "rc7-release", "verify-windows-migration.ps1"),
+  "utf8",
+);
 
 test("Windows detached updater preserves the running installation directory", () => {
   assert.match(
@@ -37,6 +44,19 @@ test("Windows detached updater preserves the running installation directory", ()
     `/D=${installDirectory}`,
   ]);
   assert.equal(args.at(-1), `/D=${installDirectory}`, "NSIS requires /D to be the final argument");
+});
+
+test("the installer retains the matched legacy install directory before removing old files", () => {
+  assert.match(installerSource, /!macro CaptureLegacyInstallLocation ROOT/);
+  assert.match(installerSource, /ReadRegStr \$LegacyInstallLocation \$\{ROOT\} "\$LegacyRegistryKey" "InstallLocation"/);
+  assert.match(installerSource, /StrCpy \$INSTDIR \$LegacyInstallLocation/);
+  assert.match(installerSource, /DetailPrint "Reusing legacy Coding Tools install location: \$INSTDIR"/);
+  const capture = installerSource.indexOf("!insertmacro CaptureLegacyInstallLocation ${ROOT}");
+  const remove = installerSource.indexOf("!insertmacro RemoveLegacyNsis ${ROOT} ${VIEW}");
+  assert.ok(capture >= 0 && remove > capture, "the old directory must be captured before legacy removal");
+
+  assert.match(migrationAcceptanceSource, /legacyLocationReused = \$true/);
+  assert.match(migrationAcceptanceSource, /current install location changed from legacy path/i);
 });
 
 test("automatic prerelease discovery opens an install-or-later popup", () => {
