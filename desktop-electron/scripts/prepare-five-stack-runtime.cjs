@@ -511,61 +511,104 @@ function packageJsonDirectories(sourceRoot) {
   return dirs;
 }
 
+function cmdShimBody(lines) {
+  return ["@echo off", ...lines, ""].join("\r\n");
+}
+
+function writeCmdPair(fileBase, body, written) {
+  const cmd = `${fileBase}.cmd`;
+  const bat = `${fileBase}.bat`;
+  fs.writeFileSync(cmd, body);
+  fs.writeFileSync(bat, body);
+  written.push(cmd, bat);
+}
+
 function installWindowsCwdNodeCommands(sourceRoot, env = process.env, platform = process.platform) {
   if (platform !== "win32") return [];
   const nodeExecutable = resolveNodeExecutable(env, platform);
   if (!nodeExecutable || !isFile(nodeExecutable)) return [];
+  const nodeDir = path.dirname(nodeExecutable);
+  const npmCli = resolveNpmCliJs(nodeExecutable);
   const npmExecutable = resolveNpmExecutable(env, platform);
-  const nodeBody = `@echo off\r\n"${nodeExecutable}" %*\r\n`;
-  const npmBody = npmExecutable && isFile(npmExecutable)
-    ? `@echo off\r\ncall "${npmExecutable}" %*\r\n`
-    : null;
+  const rootBin = path.join(sourceRoot, "node_modules", ".bin");
+  const nodeBody = cmdShimBody([`"${nodeExecutable}" %*`]);
   const written = [];
   for (const dir of packageJsonDirectories(sourceRoot)) {
-    const cmd = path.join(dir, "node.cmd");
-    fs.writeFileSync(cmd, nodeBody);
-    fs.writeFileSync(path.join(dir, "node.bat"), nodeBody);
-    written.push(cmd);
-    if (npmBody) {
-      const npmCmd = path.join(dir, "npm.cmd");
-      fs.writeFileSync(npmCmd, npmBody);
-      fs.writeFileSync(path.join(dir, "npm.bat"), npmBody);
-      written.push(npmCmd);
+    const localBin = path.join(dir, "node_modules", ".bin");
+    const pathLine = `set "PATH=${nodeDir};${rootBin};${localBin};%PATH%"`;
+    writeCmdPair(path.join(dir, "node"), nodeBody, written);
+    let npmBody = null;
+    if (npmCli) {
+      npmBody = cmdShimBody([pathLine, `"${nodeExecutable}" "${npmCli}" %*`]);
+    } else if (path.isAbsolute(npmExecutable) && isFile(npmExecutable)) {
+      npmBody = cmdShimBody([pathLine, `call "${npmExecutable}" %*`]);
     }
+    if (npmBody) writeCmdPair(path.join(dir, "npm"), npmBody, written);
   }
   return written;
 }
 
 function installWindowsCwdLifecycleFallbacks(sourceRoot, platform = process.platform) {
   if (platform !== "win32") return [];
+  const reserved = new Set(["node.cmd", "node.bat", "npm.cmd", "npm.bat"]);
+  const tools = new Map();
+  for (const bin of npmBinDirectories(sourceRoot)) {
+    let names = [];
+    try {
+      names = fs.readdirSync(bin);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const lower = name.toLowerCase();
+      if (!/\.(cmd|bat)$/i.test(name) || reserved.has(lower) || tools.has(lower)) continue;
+      const abs = path.join(bin, name);
+      if (isFile(abs)) tools.set(lower, { name, abs });
+    }
+  }
   const written = [];
   for (const dir of packageJsonDirectories(sourceRoot)) {
-    const bin = path.join(dir, "node_modules", ".bin");
-    for (const name of ["tsc", "npx"]) {
-      const src = path.join(bin, `${name}.cmd`);
-      if (!isFile(src)) continue;
-      const dest = path.join(dir, `${name}.cmd`);
-      fs.copyFileSync(src, dest);
-      const bat = path.join(bin, `${name}.bat`);
-      if (isFile(bat)) fs.copyFileSync(bat, path.join(dir, `${name}.bat`));
+    for (const { name, abs } of tools.values()) {
+      const dest = path.join(dir, name);
+      if (path.resolve(dest) === path.resolve(abs)) continue;
+      // Copying npm .bin shims breaks %~dp0; call the original by absolute path.
+      fs.writeFileSync(dest, cmdShimBody([`call "${abs}" %*`]));
       written.push(dest);
     }
   }
   return written;
 }
 
+function removeWrittenFiles(files) {
+  for (const file of files) {
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // prepare-only Windows shims must not ship CI node.exe paths
+    }
+  }
+}
+
 function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
   if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
   const nodeExecutable = resolveNodeExecutable();
   const npmExecutable = resolveNpmExecutable();
-  installWindowsCwdNodeCommands(sourceRoot);
-  if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable, npmExecutable);
-  runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
-  installWindowsNodeBinShims(sourceRoot);
-  installWindowsCwdNodeCommands(sourceRoot);
-  installWindowsCwdLifecycleFallbacks(sourceRoot);
-  for (const script of extraScripts) {
-    runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
+  const cleanup = [];
+  const track = (files) => {
+    cleanup.push(...files);
+  };
+  try {
+    track(installWindowsCwdNodeCommands(sourceRoot));
+    if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable, npmExecutable);
+    runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
+    track(installWindowsNodeBinShims(sourceRoot));
+    track(installWindowsCwdNodeCommands(sourceRoot));
+    track(installWindowsCwdLifecycleFallbacks(sourceRoot));
+    for (const script of extraScripts) {
+      runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
+    }
+  } finally {
+    removeWrittenFiles(cleanup);
   }
   return true;
 }

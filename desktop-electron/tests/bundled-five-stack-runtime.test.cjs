@@ -455,26 +455,30 @@ test("Windows package directories get node.cmd in CWD for empty PATH cmd lookup"
     assert.equal(fs.readFileSync(cmd.replace(/\.cmd$/i, ".bat"), "utf8"), fs.readFileSync(cmd, "utf8"));
     const npmCmd = cmd.replace(/node\.cmd$/i, "npm.cmd");
     assert.ok(written.includes(npmCmd), `missing ${npmCmd}`);
-    assert.match(fs.readFileSync(npmCmd, "utf8"), /npm\.cmd/);
+    const npmBody = fs.readFileSync(npmCmd, "utf8");
+    assert.match(npmBody, /set "PATH=/);
+    assert.match(npmBody, /npm\.cmd/);
   }
   assert.equal(installWindowsCwdNodeCommands(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "linux").length, 0);
 });
 
-test("Windows package directories copy tsc.cmd into CWD after npm bins exist", () => {
+test("Windows package directories forward hoisted tsc.cmd into CWD without copying %~dp0 shims", () => {
   const root = temporaryDirectory("coding-tools-windows-cwd-tsc");
   const client = path.join(root, "packages", "client");
-  const bin = path.join(client, "node_modules", ".bin");
-  fs.mkdirSync(bin, { recursive: true });
+  const hoisted = path.join(root, "node_modules", ".bin", "tsc.cmd");
+  fs.mkdirSync(client, { recursive: true });
+  fs.mkdirSync(path.dirname(hoisted), { recursive: true });
   fs.writeFileSync(path.join(root, "package.json"), "{}\n");
   fs.writeFileSync(path.join(client, "package.json"), "{}\n");
-  fs.writeFileSync(path.join(bin, "tsc.cmd"), "@echo tsc\r\n");
-  fs.writeFileSync(path.join(bin, "tsc.bat"), "@echo tsc\r\n");
+  fs.writeFileSync(hoisted, "@echo off\r\n\"%~dp0\\node.exe\" \"%~dp0\\..\\typescript\\bin\\tsc\" %*\r\n");
 
   const written = installWindowsCwdLifecycleFallbacks(root, "win32");
   const cwdTsc = path.join(client, "tsc.cmd");
   assert.ok(written.includes(cwdTsc));
-  assert.equal(fs.readFileSync(cwdTsc, "utf8"), "@echo tsc\r\n");
-  assert.equal(fs.readFileSync(path.join(client, "tsc.bat"), "utf8"), "@echo tsc\r\n");
+  const body = fs.readFileSync(cwdTsc, "utf8");
+  assert.match(body, /call "/);
+  assert.ok(body.includes(hoisted));
+  assert.doesNotMatch(body, /%~dp0/);
   assert.equal(installWindowsCwdLifecycleFallbacks(root, "linux").length, 0);
 });
 
