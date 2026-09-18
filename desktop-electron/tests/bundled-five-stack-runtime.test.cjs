@@ -206,13 +206,17 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   });
   assert.match(String(windows.command).replaceAll("\\", "/"), /cmd\.exe$/i);
   assert.deepEqual(windows.args.slice(0, 3), ["/d", "/s", "/c"]);
-  assert.match(String(windows.args[3]).toLowerCase(), /npm\.cmd$/);
-  assert.deepEqual(windows.args.slice(4), ["ci"]);
+  assert.equal(windows.args.length, 4);
+  assert.match(String(windows.args[3]), /set "PATH=/);
+  assert.match(String(windows.args[3]), /call /);
+  assert.match(String(windows.args[3]).toLowerCase(), /npm\.cmd/);
+  assert.match(String(windows.args[3]), /\bci\b/);
   assert.equal(windows.options.shell, false);
   assert.deepEqual(windows.options.stdio, ["ignore", "pipe", "pipe"]);
   const windowsPath = windows.options.env.Path || windows.options.env.PATH;
   assert.match(windowsPath, /nodejs|node/i);
   assert.equal(windows.options.env.Path, windows.options.env.PATH);
+  assert.match(String(windows.options.env.PATHEXT), /EXE/i);
 
   const posix = npmSpawnInvocation(["run", "build:server"], "linux");
   assert.match(path.basename(posix.command), /^npm$/);
@@ -236,7 +240,8 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
     Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
-  assert.equal(windows.args[3], path.join(nodeDir, "npm.cmd"));
+  assert.match(String(windows.args[3]), /set "PATH=/);
+  assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
   assert.equal(windows.options.env.npm_config_scripts_prepend_node_path, "true");
   const windowsPath = windows.options.env.Path || windows.options.env.PATH;
@@ -260,7 +265,8 @@ test("Windows five-stack npm prepare merges Path and PATH when bun splits them",
     Path: `${nodeDir};C:\\Windows\\system32`,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
-  assert.equal(windows.args[3], path.join(nodeDir, "npm.cmd"));
+  assert.match(String(windows.args[3]), /set "PATH=/);
+  assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
   assert.equal(windows.options.env.Path, windows.options.env.PATH);
   assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
@@ -284,7 +290,8 @@ test("Windows five-stack npm prepare keeps an explicit node.exe even if bun drop
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
   assert.equal(windows.options.env.npm_node_execpath, nodeExe);
-  assert.equal(windows.args[3], path.join(nodeDir, "npm.cmd"));
+  assert.match(String(windows.args[3]), /set "PATH=/);
+  assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
 });
 
@@ -356,7 +363,8 @@ test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async 
     if (process.platform === "win32") {
       assert.equal(path.basename(call.command).toLowerCase(), "cmd.exe");
       assert.deepEqual(call.args.slice(0, 3), ["/d", "/s", "/c"]);
-      assert.match(String(call.args[3]).toLowerCase(), /npm\.cmd$/);
+      assert.match(String(call.args[3]).toLowerCase(), /npm\.cmd/);
+      assert.match(String(call.args[3]), /set "PATH=/);
     } else {
       assert.match(path.basename(call.command), /^npm$/);
       assert.ok(["ci", "run"].includes(call.args[0]));

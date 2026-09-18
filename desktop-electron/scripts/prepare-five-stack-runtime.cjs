@@ -233,14 +233,25 @@ function withNpmOnPath(env = process.env, platform = process.platform) {
   if (platform === "win32") {
     next.Path = mergedPath;
     next.PATH = mergedPath;
+    const pathext = String(next.PATHEXT || next.Pathext || "");
+    if (!pathext.toUpperCase().includes(".EXE")) {
+      next.PATHEXT = pathext ? `.COM;.EXE;.BAT;.CMD;${pathext}` : ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.MSC";
+    }
   } else {
     next.PATH = mergedPath;
   }
   if (nodeExecutable) {
     next.npm_node_execpath = nodeExecutable;
+    next.NODE = nodeExecutable;
     next.npm_config_scripts_prepend_node_path = "true";
   }
   return next;
+}
+
+function quoteCmdToken(value) {
+  const text = String(value);
+  if (!/[\s"&()<>^|!]/.test(text)) return text;
+  return `"${text.replace(/"/g, "\"\"")}"`;
 }
 
 function npmSpawnInvocation(args, platform = process.platform, env = process.env) {
@@ -255,9 +266,14 @@ function npmSpawnInvocation(args, platform = process.platform, env = process.env
   if (platform === "win32") {
     const resolved = resolveNpmExecutable(env, platform);
     const npmCmd = /\.cmd$/i.test(resolved) ? resolved : "npm.cmd";
+    const npmCommand = ["call", quoteCmdToken(npmCmd), ...args.map(quoteCmdToken)].join(" ");
+    const mergedPath = options.env.Path || options.env.PATH || "";
+    const commandLine = mergedPath
+      ? `set "PATH=${mergedPath}" && ${npmCommand}`
+      : npmCommand;
     return {
       command: env.ComSpec || process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", npmCmd, ...args],
+      args: ["/d", "/s", "/c", commandLine],
       options,
     };
   }
