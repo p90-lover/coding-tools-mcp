@@ -35,7 +35,7 @@
   );
 
   $effect(() => {
-    if (tool && !selected) selected = tool.long_run?.selected_section || tool.sections[0] ?? '';
+    if (tool && !selected) selected = (tool.long_run?.selected_section || tool.sections[0]) ?? '';
   });
 
   async function refresh() {

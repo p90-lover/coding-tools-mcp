@@ -157,7 +157,13 @@
     <button class="cc-button" type="button" disabled={busy !== null} onclick={() => void navigator.clipboard.writeText(openaiBase)}>{t($locale, 'Copy OpenAI base URL', '複製 OpenAI Base URL')}</button>
     <button class="cc-button" type="button" disabled={busy !== null} onclick={() => void navigator.clipboard.writeText(anthropicBase)}>{t($locale, 'Copy Anthropic base URL', '複製 Anthropic Base URL')}</button>
     <button class="cc-button" type="button" disabled={busy !== null} onclick={() => void checkStatus()}><RefreshCw size={15} class={busy === 'inspect' ? 'cc-spin' : ''} />{t($locale, 'Check', '檢查')}</button>
-    <button class="cc-button primary" type="button" disabled={busy !== null || service?.status === 'ready'} onclick={() => void run('start', async () => { onCatalog({ version: catalog?.version ?? 1, tools: (catalog?.tools ?? []).map((candidate) => candidate.id === 'commandcode-proxy' ? await invoke<FiveStackSnapshot>('five_stack_start', { toolId: 'commandcode-proxy' }) : candidate) }); })}>{t($locale, 'Start', '啟動')}</button>
+    <button class="cc-button primary" type="button" disabled={busy !== null || service?.status === 'ready'} onclick={() => void run('start', async () => {
+      const next = await invoke<FiveStackSnapshot>('five_stack_start', { toolId: 'commandcode-proxy' });
+      onCatalog({
+        version: catalog?.version ?? 1,
+        tools: (catalog?.tools ?? []).map((candidate) => candidate.id === 'commandcode-proxy' ? next : candidate),
+      });
+    })}>{t($locale, 'Start', '啟動')}</button>
     <button class="cc-button" type="button" disabled={busy !== null || !service?.owned} onclick={() => void run('restart', async () => { await invoke('five_stack_restart', { toolId: 'commandcode-proxy' }); await checkStatus(); })}>{t($locale, 'Restart', '重新啟動')}</button>
     <button class="cc-button ghost" type="button" disabled={busy !== null || !service?.owned} onclick={() => void run('stop', async () => { await invoke('five_stack_stop', { toolId: 'commandcode-proxy' }); })}>{t($locale, 'Stop', '停止')}</button>
   </div>

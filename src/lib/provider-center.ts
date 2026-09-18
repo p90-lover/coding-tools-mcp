@@ -56,7 +56,7 @@ export interface ProviderRegistryView {
 
 export type ProviderProfileInput = Omit<
   ProviderProfile,
-  'generation' | 'revision' | 'updated_at' | 'archived'
+  'id' | 'generation' | 'revision' | 'updated_at' | 'archived'
 > & { id: string | null };
 
 export const PROVIDER_CAPABILITIES: ProviderCapability[] = [
