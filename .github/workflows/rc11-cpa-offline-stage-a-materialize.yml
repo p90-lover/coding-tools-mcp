@@ -1,0 +1,169 @@
+name: rc.11 CPA offline Stage A materializer
+
+on:
+  push:
+    branches:
+      - integration/rc11-cpa-offline-first-start
+    paths:
+      - .github/workflows/rc11-cpa-offline-stage-a-materialize.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc11-cpa-offline-stage-a-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REVIEWED_BASE_SHA: c3fd89d0ec158bf9435fc7c1eca130d4496275fc
+  REVIEWED_HEAD_SHA: efa1fd21322b3e6d72061c604f0c7841473653c6
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Build the reviewed Stage A patch
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-cpa-offline-stage-a/evidence
+          git fetch origin cursor/cpa-router-bundled-runtime-d65c --no-tags
+          paths=(
+            desktop-electron/vendor/managed-components/cpa.json
+            desktop-electron/vendor/managed-components/codex-router.json
+            desktop-electron/electron/managed-components.cjs
+            desktop-electron/electron/cpa-managed.cjs
+            desktop-electron/electron/codex-router-managed.cjs
+            desktop-electron/electron/codex-router-original-ui.cjs
+            desktop-electron/package.json
+            desktop-electron/scripts/prepare-package-resources.cjs
+            desktop-electron/scripts/verify-package.cjs
+          )
+          git diff --binary "$REVIEWED_BASE_SHA" "$REVIEWED_HEAD_SHA" -- "${paths[@]}" \
+            > aiTemp/rc11-cpa-offline-stage-a/evidence/reviewed.patch
+          test -s aiTemp/rc11-cpa-offline-stage-a/evidence/reviewed.patch
+          git apply --3way --index aiTemp/rc11-cpa-offline-stage-a/evidence/reviewed.patch
+
+      - name: Add current-architecture projection and UI labels
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(pathname: str, old: str, new: str) -> None:
+              path = Path(pathname)
+              source = path.read_text(encoding="utf-8")
+              if new in source and old not in source:
+                  return
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one Stage A anchor in {pathname}, found {count}")
+              path.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+          replace_once(
+              "desktop-electron/electron/original-ui.cjs",
+              '      originalChrome: true,\n',
+              '      originalChrome: true,\n      bundledRuntime: current?.managedInstall?.bundledRuntime === true,\n',
+          )
+
+          original = Path("desktop-electron/src/features/OriginalUiSurface.tsx")
+          source = original.read_text(encoding="utf-8")
+          source = source.replace(
+              '''              : needsInstall\n                ? localize(language, "Install / start original runtime", "安裝／啟動原始執行環境")\n                : localize(language, "Start original UI", "啟動原始介面")}''',
+              '''              : localize(language, "Start original UI", "啟動原始介面")}''',
+          )
+          source = source.replace(
+              'Install and start the managed runtime, then the original UI opens here.',
+              'Start the bundled runtime, then the original UI opens here.',
+          ).replace(
+              '先安裝並啟動受管理執行環境，原始介面就會在此開啟。',
+              '啟動內建執行環境後，原始介面就會在此開啟。',
+          )
+          if 'Install / start original runtime' in source:
+              raise SystemExit('obsolete original-UI install label remains')
+          original.write_text(source, encoding="utf-8")
+
+          services = Path("desktop-electron/src/features/ExternalServicesSurface.tsx")
+          source = services.read_text(encoding="utf-8")
+          anchor = ''': selected.managedInstall.state === "installed"\n                  ? text(language, "Repair installation", "修復安裝")\n                  : text(language, "Install / Repair", "安裝／修復")}'''
+          replacement = ''': selected.managedInstall.bundledRuntime\n                  ? selected.managedInstall.state === "installed"\n                    ? text(language, "Repair bundled runtime", "修復內建執行環境")\n                    : text(language, "Activate bundled runtime", "啟動內建執行環境")\n                : selected.managedInstall.state === "installed"\n                  ? text(language, "Repair installation", "修復安裝")\n                  : text(language, "Install / Repair", "安裝／修復")}'''
+          if replacement not in source:
+              if source.count(anchor) != 1:
+                  raise SystemExit('ExternalServices bundled-runtime label anchor changed')
+              source = source.replace(anchor, replacement, 1)
+          services.write_text(source, encoding="utf-8")
+          PY
+
+      - name: Check bounded production diff
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/vendor/managed-components/cpa.json \
+            desktop-electron/vendor/managed-components/codex-router.json \
+            desktop-electron/electron/managed-components.cjs \
+            desktop-electron/electron/cpa-managed.cjs \
+            desktop-electron/electron/codex-router-managed.cjs \
+            desktop-electron/electron/codex-router-original-ui.cjs \
+            desktop-electron/electron/original-ui.cjs \
+            desktop-electron/package.json \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/src/features/OriginalUiSurface.tsx \
+            desktop-electron/src/features/ExternalServicesSurface.tsx
+          git diff --cached --check
+          test -z "$(git diff --cached --diff-filter=D --name-only)"
+          git diff --cached --name-only \
+            | tee aiTemp/rc11-cpa-offline-stage-a/evidence/production-files.txt
+          expected='^(desktop-electron/(vendor/managed-components/(cpa|codex-router)\.json|electron/(managed-components|cpa-managed|codex-router-managed|codex-router-original-ui|original-ui)\.cjs|package\.json|scripts/(prepare-package-resources|verify-package)\.cjs|src/features/(OriginalUiSurface|ExternalServicesSurface)\.tsx))$'
+          unexpected="$(grep -Ev "$expected" aiTemp/rc11-cpa-offline-stage-a/evidence/production-files.txt || true)"
+          if [ -n "$unexpected" ]; then
+            printf 'Unexpected Stage A paths:\n%s\n' "$unexpected" >&2
+            exit 1
+          fi
+
+      - name: Run Stage A and existing managed-runtime contracts
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/managed-components.cjs
+          node --check desktop-electron/electron/cpa-managed.cjs
+          node --check desktop-electron/electron/codex-router-managed.cjs
+          node --check desktop-electron/electron/codex-router-original-ui.cjs
+          node --test \
+            desktop-electron/tests/cpa-codex-bundled-runtime.test.cjs \
+            desktop-electron/tests/managed-components-runtime.test.cjs \
+            desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs \
+            desktop-electron/tests/rc10-cpa-codex-original-ui.test.cjs \
+            2>&1 | tee aiTemp/rc11-cpa-offline-stage-a/evidence/tests.txt
+          grep -F '# fail 0' aiTemp/rc11-cpa-offline-stage-a/evidence/tests.txt
+
+      - name: Commit verified Stage A implementation
+        run: |
+          set -euo pipefail
+          if git diff --cached --quiet; then
+            echo RC11_CPA_OFFLINE_STAGE_A_ALREADY_MATERIALIZED
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(rc11): activate bundled CPA and Router runtimes offline'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-cpa-offline-stage-a-${{ github.sha }}
+          path: aiTemp/rc11-cpa-offline-stage-a/evidence/
+          if-no-files-found: error
+          retention-days: 14
