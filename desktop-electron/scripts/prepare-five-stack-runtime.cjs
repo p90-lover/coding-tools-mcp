@@ -231,8 +231,9 @@ function withNpmOnPath(env = process.env, platform = process.platform) {
   }
   const mergedPath = merged.join(envPathDelimiter(platform));
   if (platform === "win32") {
+    // Passing both Path and PATH through spawn env can leave nested cmd.exe
+    // with an empty PATH, so lifecycle scripts fail with "node is not recognized".
     next.Path = mergedPath;
-    next.PATH = mergedPath;
     const pathext = String(next.PATHEXT || next.Pathext || "");
     if (!pathext.toUpperCase().includes(".EXE")) {
       next.PATHEXT = pathext ? `.COM;.EXE;.BAT;.CMD;${pathext}` : ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.MSC";
@@ -266,15 +267,14 @@ function npmSpawnInvocation(args, platform = process.platform, env = process.env
   if (platform === "win32") {
     const resolved = resolveNpmExecutable(env, platform);
     const npmCmd = /\.cmd$/i.test(resolved) ? resolved : "npm.cmd";
-    const npmCommand = ["call", quoteCmdToken(npmCmd), ...args.map(quoteCmdToken)].join(" ");
-    const mergedPath = options.env.Path || options.env.PATH || "";
-    const commandLine = mergedPath
-      ? `set "PATH=${mergedPath}" && ${npmCommand}`
-      : npmCommand;
+    const commandLine = ["call", quoteCmdToken(npmCmd), ...args.map(quoteCmdToken)].join(" ");
     return {
       command: env.ComSpec || process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", commandLine],
-      options,
+      args: ["/d", "/s", "/c", `"${commandLine}"`],
+      options: {
+        ...options,
+        windowsVerbatimArguments: true,
+      },
     };
   }
   return {
