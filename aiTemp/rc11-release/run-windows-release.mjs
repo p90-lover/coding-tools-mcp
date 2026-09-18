@@ -197,18 +197,27 @@ async function main() {
   const { packageRoot, installer } = findInstaller();
   run('node', ['desktop-electron/scripts/verify-package.cjs', packageRoot, '--source', sourceSha, '--json-out', path.join(evidence, 'package-verification.json')], { label: 'verify packaged resources and identity' });
   run('node', ['--test', 'desktop-electron/tests/package-contents.test.cjs'], { label: 'package contents contract' });
-  run('bun', ['run', 'smoke:package'], { cwd: path.join(root, 'desktop-electron'), label: 'packaged launcher smoke' });
 
   const releaseInstaller = path.join(assets, installerName);
   assert(!fs.existsSync(releaseInstaller), 'RELEASE_INSTALLER_ALREADY_EXISTS');
   fs.copyFileSync(installer, releaseInstaller, fs.constants.COPYFILE_EXCL);
   assert(fs.statSync(releaseInstaller).size > 0, 'RELEASE_INSTALLER_EMPTY');
 
+  // One silent NSIS install only. A second /S over smoke's install hung the
+  // installer PID for 45+ minutes on windows-latest (upgrade + legacy fixture).
   run('pwsh', ['-NoLogo', '-NoProfile', '-File', 'aiTemp/rc11-release/verify-windows-migration.ps1',
     '-InstallerPath', releaseInstaller,
     '-TrashRoot', trash,
     '-EvidenceRoot', evidence,
   ], { env: childEnv, label: 'retained NSIS and MSI migration acceptance' });
+  run('bun', ['run', 'smoke:package'], {
+    cwd: path.join(root, 'desktop-electron'),
+    env: {
+      ...childEnv,
+      CODING_TOOLS_WINDOWS_INSTALL_DONE: '1',
+    },
+    label: 'packaged launcher smoke',
+  });
 
   const rendererDist = path.join(root, 'desktop-electron', 'dist');
   const retainedRenderer = path.join(trash, 'generated-renderer', sourceSha);

@@ -37,7 +37,11 @@ function Stop-CodingToolsLeftovers {
             -not $keep.ContainsKey([int]$_.ProcessId) -and
             (
                 $_.Name -eq 'Coding Tools.exe' -or
-                $_.Name -like 'Coding.Tools_*setup.exe'
+                $_.Name -like 'Coding.Tools_*setup.exe' -or
+                ($_.CommandLine -and (
+                    $_.CommandLine -like '*Coding Tools.exe*' -or
+                    $_.CommandLine -like '*Coding.Tools_*setup*'
+                ))
             )
         } |
         ForEach-Object {
@@ -58,6 +62,11 @@ function Invoke-BoundedSilentProcess {
         [string] $Label
     )
     Stop-CodingToolsLeftovers
+    $snapshotName = ($Label -replace '[^A-Za-z0-9]+', '-').ToLowerInvariant()
+    Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
+        Select-Object ProcessId, Name, CommandLine |
+        ConvertTo-Json -Depth 3 |
+        Set-Content -LiteralPath (Join-Path $EvidenceRoot "process-snapshot-$snapshotName.json") -Encoding UTF8
     Write-Host "Starting $Label (timeout ${TimeoutMilliseconds}ms, process-only wait)"
     $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru
     if ($null -eq $process) { throw "$Label did not start" }

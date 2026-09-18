@@ -127,9 +127,13 @@ async function runSmoke() {
     args = ["-a", executable, "--launcher-smoke-test"];
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
-    const installer = artifact(artifactNameFor("win", process.arch, "exe"), "Windows installer");
-    run(installer, ["/S", "/currentuser"], { timeout: WINDOWS_INSTALLER_TIMEOUT_MS });
-    executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
+    if (process.env.CODING_TOOLS_WINDOWS_INSTALL_DONE === "1") {
+      executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
+    } else {
+      const installer = artifact(artifactNameFor("win", process.arch, "exe"), "Windows installer");
+      run(installer, ["/S", "/currentuser"], { timeout: WINDOWS_INSTALLER_TIMEOUT_MS });
+      executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
+    }
     command = executable;
     args = ["--launcher-smoke-test"];
   } else {
