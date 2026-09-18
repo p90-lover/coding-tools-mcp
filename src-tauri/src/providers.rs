@@ -306,6 +306,7 @@ impl ProviderProfile {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn template(
     id: &str,
     name: &str,

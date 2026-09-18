@@ -60,17 +60,12 @@ fn text(value: &str, max: usize, label: &str, required: bool) -> AppResult<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestratorExecutionMode {
+    #[default]
     Sequential,
     ParallelGroups,
-}
-
-impl Default for OrchestratorExecutionMode {
-    fn default() -> Self {
-        Self::Sequential
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
