@@ -69,7 +69,9 @@ jobs:
       - name: Materialize provider and orchestrator credential separation
         run: |
           set -euo pipefail
-          mkdir -p aiTemp/rc8-provider-orchestrator-boundary/tmp
+          mkdir -p \
+            aiTemp/rc8-provider-orchestrator-boundary/renderer \
+            aiTemp/rc8-provider-orchestrator-boundary/tmp
           python aiTemp/rc8-provider-orchestrator-boundary/apply_patch.py \
             | tee aiTemp/rc8-provider-orchestrator-boundary/patch.txt
           grep -F RC8_PROVIDER_ORCHESTRATOR_BOUNDARY_PATCH_OK \
@@ -85,9 +87,12 @@ jobs:
       - name: Run renderer, TypeScript, routing, and credential-boundary gates
         run: |
           set -euo pipefail
+          renderer_out="$PWD/aiTemp/rc8-provider-orchestrator-boundary/renderer"
           (
             bun run --cwd desktop-electron typecheck
-            bun run --cwd desktop-electron build:renderer
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_out" --emptyOutDir false
+            cd ..
             node --test \
               desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs \
               desktop-electron/tests/provider-execution-router.test.cjs \
@@ -103,8 +108,13 @@ jobs:
           git fetch origin release/codex-router-multiprovider-0.7.0-rc.8 --no-tags
           git diff --check origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD
           git diff --check
-          test -z "$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD)"
-          test -z "$(git diff --diff-filter=D --name-only)"
+          committed_deletions="$(git diff --diff-filter=D --name-only origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD)"
+          working_deletions="$(git diff --diff-filter=D --name-only)"
+          if [[ -n "$committed_deletions" || -n "$working_deletions" ]]; then
+            printf 'Committed deletions:\n%s\nWorking-tree deletions:\n%s\n' \
+              "$committed_deletions" "$working_deletions"
+            exit 1
+          fi
 
       - name: Commit verified provider and orchestrator boundary
         if: github.event_name == 'push' && github.ref_name == 'fix/v0.7-rc8-provider-orchestrator-credential-boundary'
