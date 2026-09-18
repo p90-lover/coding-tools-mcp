@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 SOURCE = Path("aiTemp/rc9-cpa-oauth/apply_patch.py")
+REPAIRS = Path("aiTemp/rc9-cpa-oauth/apply_regression_repairs.py")
 TARGET = Path("aiTemp/rc9-cpa-oauth/tmp/runtime_apply_patch.py")
 
 source = SOURCE.read_text(encoding="utf-8")
@@ -81,6 +82,14 @@ newline_join_count = source.count(newline_join_anchor)
 if newline_join_count < 6:
     raise SystemExit(f"expected at least six model-list join anchors, found {newline_join_count}")
 source = source.replace(newline_join_anchor, 'join("\\\\n")')
+
+repairs = REPAIRS.read_text(encoding="utf-8")
+repairs = repairs.replace("from __future__ import annotations\n\n", "", 1)
+repair_root = "ROOT = Path(__file__).resolve().parents[2]"
+if repairs.count(repair_root) != 1:
+    raise SystemExit(f"expected one repair-root anchor, found {repairs.count(repair_root)}")
+repairs = repairs.replace(repair_root, "ROOT = Path(__file__).resolve().parents[3]", 1)
+source += "\n\n# Post-materialization regression repairs.\n" + repairs
 
 TARGET.parent.mkdir(parents=True, exist_ok=True)
 TARGET.write_text(source, encoding="utf-8")
