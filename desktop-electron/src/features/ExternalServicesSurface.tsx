@@ -5,6 +5,7 @@ import type {
   ExternalServiceSnapshot,
   ExternalServicesSnapshot,
   Language,
+  ProviderBackendDescriptor,
   ProviderNetworkSnapshot,
 } from "../types";
 import "./external-services.css";
@@ -114,6 +115,20 @@ function splitArguments(value: string): string[] {
     .slice(0, 64);
 }
 
+function providerBackendFor(
+  snapshot: ExternalServicesSnapshot,
+  id: ExternalServiceId,
+): ProviderBackendDescriptor | null {
+  if (id !== "cpa" && id !== "codex-router") return null;
+  return snapshot.providerBackends?.backends[id] ?? null;
+}
+
+function backendRoleLabel(language: Language, backend: ProviderBackendDescriptor): string {
+  return backend.role === "main-provider"
+    ? text(language, "Main provider for Paseo", "Paseo 主供應商")
+    : text(language, "Free-subagent provider for Paseo", "Paseo 免費子代理供應商");
+}
+
 export function ExternalServicesSurface({
   language,
   setError,
@@ -134,6 +149,7 @@ export function ExternalServicesSurface({
   const [notice, setNotice] = useState("");
 
   const selected = services.services.find((service) => service.id === selectedId) ?? null;
+  const selectedBackend = selected ? providerBackendFor(services, selected.id) : null;
   const activeAccounts = providers.accounts.filter((account) => !account.archivedAt);
   const connectedAccounts = activeAccounts.filter((account) => account.enabled && account.status === "connected");
   const providerCount = new Set(activeAccounts.map((account) => account.providerId)).size;
@@ -311,8 +327,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Activate bundled CPA / CLIProxyAPI and Codex Router, and install CommandCode Proxy, Paseo and Anneal from Coding Tools. Open CPA and Codex Router original interfaces from their dedicated pages.",
-            "CPA／CLIProxyAPI 與 Codex Router 使用桌面版內建執行環境啟動；CommandCode Proxy、Paseo 與 Anneal 仍由 Coding Tools 安裝。CPA 與 Codex Router 原始介面由專用頁面開啟。",
+            "Activate bundled CPA / CLIProxyAPI and Codex Router, and install CommandCode Proxy, Paseo and Anneal from Coding Tools. CPA and Codex Router expose loopback provider APIs for Desktop, MCP, and Paseo. Open CPA and Codex Router original interfaces from their dedicated pages.",
+            "CPA／CLIProxyAPI 與 Codex Router 使用桌面版內建執行環境啟動，並對 Desktop、MCP 與 Paseo 提供 loopback 供應商 API；CommandCode Proxy、Paseo 與 Anneal 仍由 Coding Tools 安裝。CPA 與 Codex Router 原始介面由專用頁面開啟。",
           )}</p>
         </div>
         <button disabled={busy !== null} onClick={() => void refresh()} type="button">
@@ -409,6 +425,49 @@ export function ExternalServicesSurface({
                   : text(language, "Install / Repair", "安裝／修復")}
             </button>
           </section>
+
+          {selectedBackend ? (
+            <section className="provider-backend-panel">
+              <div>
+                <span>{text(language, "PROVIDER BACKEND APIS", "供應商後端 API")}</span>
+                <strong>{backendRoleLabel(language, selectedBackend)}</strong>
+                <small>{text(
+                  language,
+                  "Desktop, MCP, and Paseo call this bundled loopback. Paseo plan/run/review and Anneal task/preview stay with other owners.",
+                  "桌面版、MCP 與 Paseo 透過此內建 loopback 呼叫。Paseo 的 plan/run/review 與 Anneal 的 task/preview 由其他負責人實作。",
+                )}</small>
+              </div>
+              <dl>
+                <div>
+                  <dt>{text(language, "Health", "健康檢查")}</dt>
+                  <dd><code>{selectedBackend.health.method} {selectedBackend.health.url}</code></dd>
+                </div>
+                <div>
+                  <dt>{text(language, "Chat API", "對話 API")}</dt>
+                  <dd>
+                    <code>
+                      {selectedBackend.api.chatCompletions.method}
+                      {" "}
+                      {selectedBackend.origin}
+                      {selectedBackend.api.chatCompletions.path}
+                    </code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>{text(language, "Control", "控制面")}</dt>
+                  <dd><code>{selectedBackend.control.url}</code></dd>
+                </div>
+                <div>
+                  <dt>{text(language, "Live check", "即時檢查")}</dt>
+                  <dd>
+                    {selected?.statusCode ?? "—"}
+                    {selected?.latencyMs != null ? ` · ${selected.latencyMs}ms` : ""}
+                    {selected?.modelCount != null ? ` · ${selected.modelCount} models` : ""}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+          ) : null}
 
           <details className="external-service-advanced">
             <summary>{text(language, "Advanced manual configuration", "進階手動設定")}</summary>

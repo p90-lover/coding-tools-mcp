@@ -123,6 +123,15 @@ test("CPA and Codex Router publish a tiny OpenAPI/health contract as Paseo provi
   assert.match(main, /launcher:provider-backend-contract/);
   assert.match(preload, /providerBackendContract/);
   assert.match(types, /providerBackendContract\(\):\s*Promise<ProviderBackendContract>/);
+
+  const surface = read("src/features/ExternalServicesSurface.tsx");
+  assert.match(surface, /providerBackendFor/);
+  assert.match(surface, /PROVIDER BACKEND APIS/);
+  assert.match(surface, /selectedBackend\.health\.url/);
+  assert.match(surface, /selectedBackend\.api\.chatCompletions/);
+  assert.match(surface, /selectedBackend\.control\.url/);
+  assert.match(read("src/features/external-services.css"), /\.provider-backend-panel/);
+  assert.match(read("../runtime-web/src/routed-providers.ts"), /export function describeProviderBackends/);
 });
 
 test("Router launch env always pins the CPA loopback so Desktop can route without a separate app", () => {

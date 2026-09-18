@@ -16,6 +16,27 @@ export interface CpaConnection {
   baseUrl: string;
 }
 
+export interface ProviderBackendDiscovery {
+  kind: "coding-tools-provider-backends";
+  role: "provider-backend";
+  backends: {
+    cpa?: {
+      role: "main-provider";
+      origin: string;
+      openaiBaseUrl: string;
+      healthUrl: string;
+      chatCompletionsUrl: string;
+    };
+    "codex-router"?: {
+      role: "subagent-provider";
+      origin: string;
+      openaiBaseUrl: string;
+      healthUrl: string;
+      chatCompletionsUrl: string;
+    };
+  };
+}
+
 export interface CommandCodeProxyProviderProfile {
   id: "commandcode-proxy";
   name: "CommandCode Proxy";
@@ -100,6 +121,45 @@ export function resolveCpaConnection(
     origin: normalizedOrigin,
     proxyApiKey,
     baseUrl: `${normalizedOrigin}/v1`,
+  };
+}
+
+export function describeProviderBackends(
+  env: Record<string, string | undefined> = process.env,
+): ProviderBackendDiscovery {
+  const backends: ProviderBackendDiscovery["backends"] = {};
+  try {
+    const cpa = resolveCpaConnection(env);
+    if (cpa) {
+      backends.cpa = {
+        role: "main-provider",
+        origin: cpa.origin,
+        openaiBaseUrl: cpa.baseUrl,
+        healthUrl: `${cpa.baseUrl}/models`,
+        chatCompletionsUrl: `${cpa.baseUrl}/chat/completions`,
+      };
+    }
+  } catch {
+    // Invalid CPA env stays undiscoverable so MCP catalog reads do not throw.
+  }
+  try {
+    const router = resolveCodexRouterConnection(env);
+    if (router) {
+      backends["codex-router"] = {
+        role: "subagent-provider",
+        origin: router.origin,
+        openaiBaseUrl: router.baseUrl,
+        healthUrl: `${router.baseUrl}/models`,
+        chatCompletionsUrl: `${router.baseUrl}/chat/completions`,
+      };
+    }
+  } catch {
+    // Invalid Router env stays undiscoverable so MCP catalog reads do not throw.
+  }
+  return {
+    kind: "coding-tools-provider-backends",
+    role: "provider-backend",
+    backends,
   };
 }
 

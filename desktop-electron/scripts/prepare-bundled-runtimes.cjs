@@ -107,6 +107,23 @@ function npmExecutable(platform) {
   return platform === "win32" ? "npm.cmd" : "npm";
 }
 
+function relocateUnpublishedRouterFiles(sourceRoot, unpublishedRoot) {
+  fs.mkdirSync(unpublishedRoot, { recursive: true, mode: 0o700 });
+  for (const relative of ["test", ".github"]) {
+    const source = path.join(sourceRoot, relative);
+    if (!fs.existsSync(source)) continue;
+    const destination = path.join(unpublishedRoot, relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    fs.renameSync(source, destination);
+  }
+  const grokName = "verify-grok-service-tier.mjs";
+  const grokSource = path.join(sourceRoot, "scripts", grokName);
+  if (!fs.existsSync(grokSource)) return;
+  const destination = path.join(unpublishedRoot, "scripts", grokName);
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  fs.renameSync(grokSource, destination);
+}
+
 function writeRouterMarker(sourceRoot, {
   platform,
   arch,
@@ -157,6 +174,7 @@ async function materializeCpaArchive({
 
 async function materializeRouterSource({
   stagingRoot,
+  scratchRoot,
   platform,
   arch,
   fetchImpl,
@@ -165,10 +183,10 @@ async function materializeRouterSource({
 }) {
   const sourceRoot = path.join(stagingRoot, ...routerSourceRelative().split("/"));
   const archiveName = `codex-router-${ROUTER_MANIFEST.commit}.tar.gz`;
-  const archivePath = path.join(stagingRoot, "aiTemp-router-archive", archiveName);
+  const archivePath = path.join(scratchRoot, "aiTemp-router-archive", archiveName);
   const archiveUrl = `https://github.com/${ROUTER_MANIFEST.repository}/archive/${ROUTER_MANIFEST.commit}.tar.gz`;
   await downloadFile(archiveUrl, archivePath, fetchImpl);
-  const extractRoot = path.join(stagingRoot, "aiTemp-router-extract");
+  const extractRoot = path.join(scratchRoot, "aiTemp-router-extract");
   fs.mkdirSync(extractRoot, { recursive: true, mode: 0o700 });
   runChecked("tar", ["-xf", archivePath, "-C", extractRoot]);
   const extracted = fs.readdirSync(extractRoot, { withFileTypes: true })
@@ -226,6 +244,7 @@ async function materializeRouterSource({
 
   const nodeModules = fs.existsSync(path.join(sourceRoot, "node_modules"));
   if (!nodeModules) fail("BUNDLED_RUNTIME_NODE_MODULES_MISSING", sourceRoot);
+  relocateUnpublishedRouterFiles(sourceRoot, path.join(scratchRoot, "unpublished-router-files"));
   writeRouterMarker(sourceRoot, {
     platform,
     arch,
@@ -258,7 +277,9 @@ async function prepareBundledRuntimes(options = {}) {
     nonce: options.nonce,
   });
   const stagingRoot = path.join(session.workRoot, "payload");
+  const scratchRoot = path.join(session.workRoot, "scratch");
   fs.mkdirSync(stagingRoot, { recursive: false, mode: 0o700 });
+  fs.mkdirSync(scratchRoot, { recursive: false, mode: 0o700 });
   try {
     const cpa = await materializeCpaArchive({
       stagingRoot,
@@ -270,8 +291,9 @@ async function prepareBundledRuntimes(options = {}) {
     const router = options.routerSourceRoot
       ? (() => {
         const sourceRoot = path.join(stagingRoot, ...routerSourceRelative().split("/"));
-        copyTreeDeref(path.resolve(options.routerSourceRoot), sourceRoot);
-        const marker = path.join(sourceRoot, ROUTER_MARKER_NAME);
+            copyTreeDeref(path.resolve(options.routerSourceRoot), sourceRoot);
+            relocateUnpublishedRouterFiles(sourceRoot, path.join(scratchRoot, "unpublished-router-files"));
+            const marker = path.join(sourceRoot, ROUTER_MARKER_NAME);
         if (!fs.existsSync(marker)) {
           writeRouterMarker(sourceRoot, {
             platform,
@@ -285,6 +307,7 @@ async function prepareBundledRuntimes(options = {}) {
       })()
       : await materializeRouterSource({
         stagingRoot,
+        scratchRoot,
         platform,
         arch,
         fetchImpl,
@@ -330,5 +353,6 @@ if (require.main === module) {
 module.exports = {
   npmExecutable,
   prepareBundledRuntimes,
+  relocateUnpublishedRouterFiles,
   windowsBatchSpawn,
 };

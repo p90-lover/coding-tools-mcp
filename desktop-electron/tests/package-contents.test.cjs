@@ -242,6 +242,59 @@ test("rejects credential-like files and never reports their contents", () => {
   );
 });
 
+test("bundled Codex Router vendor trees do not trip the package secret scanner", () => {
+  const { bundledRouterVendorPath } = require("../scripts/verify-package.cjs");
+  assert.equal(
+    bundledRouterVendorPath("resources/bundled-runtimes/codex-router/source/.venv/Lib/site-packages/certifi/cacert.pem"),
+    true,
+  );
+  assert.equal(
+    bundledRouterVendorPath("resources/bundled-runtimes/codex-router/source/apps/control-center/node_modules/dotenv/README.md"),
+    true,
+  );
+  assert.equal(
+    bundledRouterVendorPath("resources/bundled-runtimes/codex-router/source/src/foreground-start.mjs"),
+    false,
+  );
+  const fakeKey = "-----BEGIN PRIVATE KEY-----" + "A".repeat(80) + "-----END PRIVATE KEY-----";
+  const { appRoot } = createPackageFixture("bundled-router-vendor", ({ resourcesRoot }) => {
+    writeFile(
+      path.join(resourcesRoot, "bundled-runtimes/codex-router/source/.venv/Lib/site-packages/certifi/cacert.pem"),
+      "fixture-ca\n",
+    );
+    writeFile(
+      path.join(resourcesRoot, "bundled-runtimes/codex-router/source/apps/control-center/node_modules/dotenv/README.md"),
+      `${fakeKey}\n`,
+    );
+    writeFile(
+      path.join(resourcesRoot, "bundled-runtimes/codex-router/source/node_modules/example/index.js"),
+      "const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';\n",
+    );
+  });
+  const result = inspectExtractedApplication(appRoot, packageOptions());
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.secretsFound, []);
+});
+
+test("bundled Codex Router first-party source still fails closed on secret material", () => {
+  const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+  const { appRoot } = createPackageFixture("bundled-router-source-secret", ({ resourcesRoot }) => {
+    writeFile(
+      path.join(resourcesRoot, "bundled-runtimes/codex-router/source/src/leaked.mjs"),
+      `export const token = "${secret}";\n`,
+    );
+  });
+  assert.throws(
+    () => inspectExtractedApplication(appRoot, packageOptions()),
+    (error) => {
+      assert.match(error.message, /PACKAGE_SECRET_MATERIAL_FOUND/);
+      assert.match(error.message, /bundled-runtimes\/codex-router\/source\/src\/leaked\.mjs/);
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      return true;
+    },
+  );
+});
+
 test("rejects the retained Tauri identity masquerading as the Electron candidate", () => {
   const { appRoot } = createPackageFixture("identity");
   assert.throws(

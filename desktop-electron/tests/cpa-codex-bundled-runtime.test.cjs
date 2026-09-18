@@ -388,6 +388,28 @@ test("Windows package-time npm ci uses cmd.exe so Node does not EINVAL on npm.cm
   const bundled = read("scripts/prepare-bundled-runtimes.cjs");
   assert.match(bundled, /windowsBatchSpawn/);
   assert.match(bundled, /\/d", "\/s", "\/c"/);
+  assert.match(bundled, /scratchRoot/);
+  assert.match(bundled, /relocateUnpublishedRouterFiles/);
+  assert.doesNotMatch(bundled, /stagingRoot, "aiTemp-router-extract"/);
+});
+
+test("published Router source relocates tests instead of deleting them", () => {
+  const { relocateUnpublishedRouterFiles } = require("../scripts/prepare-bundled-runtimes.cjs");
+  const sourceRoot = temporaryDirectory("coding-tools-prune-router");
+  const unpublishedRoot = temporaryDirectory("coding-tools-unpublished-router");
+  fs.mkdirSync(path.join(sourceRoot, "test"), { recursive: true });
+  fs.writeFileSync(path.join(sourceRoot, "test", "routing.test.mjs"), "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n");
+  fs.mkdirSync(path.join(sourceRoot, "scripts"), { recursive: true });
+  fs.writeFileSync(path.join(sourceRoot, "scripts", "verify-grok-service-tier.mjs"), "sk-test\n");
+  fs.writeFileSync(path.join(sourceRoot, "scripts", "keep.mjs"), "keep\n");
+  relocateUnpublishedRouterFiles(sourceRoot, unpublishedRoot);
+  assert.equal(fs.existsSync(path.join(sourceRoot, "test")), false);
+  assert.equal(fs.existsSync(path.join(sourceRoot, "scripts", "verify-grok-service-tier.mjs")), false);
+  assert.equal(fs.readFileSync(path.join(sourceRoot, "scripts", "keep.mjs"), "utf8"), "keep\n");
+  assert.equal(
+    fs.readFileSync(path.join(unpublishedRoot, "test", "routing.test.mjs"), "utf8"),
+    "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+  );
 });
 
 test("packaging ships bundled CPA and Codex Router outside the download path", () => {
@@ -408,6 +430,7 @@ test("packaging ships bundled CPA and Codex Router outside the download path", (
   assert.match(bundled, /skipNetworkPrepare: true/);
   assert.match(verifier, /bundled-cpa/);
   assert.match(verifier, /bundled-codex-router/);
+  assert.match(verifier, /bundledRouterVendorPath/);
   assert.match(manager, /copy-bundled-archive/);
   assert.match(manager, /copy-bundled-source/);
   assert.match(surface, /Start original UI/);
