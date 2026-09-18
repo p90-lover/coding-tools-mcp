@@ -7,10 +7,12 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
+  installWindowsCwdNodeCommands,
   installWindowsNodeBinShims,
   npmSpawnInvocation,
   prepareFiveStackRuntime,
   rewritePackageScriptsToAbsoluteNode,
+  withAbsoluteNodeCommand,
 } = require("../scripts/prepare-five-stack-runtime.cjs");
 const { prepare } = require("../electron/codex-router-managed.cjs");
 
@@ -207,9 +209,9 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /resolveNpmCliJs/);
   assert.match(source, /npm-cli\.js/);
   assert.match(source, /coding-tools-node-shims/);
-  assert.match(source, /npm-script-shell\.cmd/);
-  assert.match(source, /npm_config_script_shell/);
   assert.match(source, /rewritePackageScriptsToAbsoluteNode/);
+  assert.match(source, /installWindowsCwdNodeCommands/);
+  assert.match(source, /next\.PATH = mergedPath/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
     Path: "C:\\nodejs;C:\\Windows\\system32",
@@ -225,9 +227,10 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.equal(windows.options.shell, false);
   assert.equal(windows.options.windowsVerbatimArguments, true);
   assert.deepEqual(windows.options.stdio, ["ignore", "pipe", "pipe"]);
-  const windowsPath = windows.options.env.Path;
+  const windowsPath = windows.options.env.PATH;
   assert.match(windowsPath, /nodejs|node/i);
-  assert.equal(windows.options.env.PATH, undefined);
+  assert.equal(windows.options.env.Path, undefined);
+  assert.equal(windows.options.env.npm_config_script_shell, undefined);
   assert.match(String(windows.options.env.PATHEXT), /EXE/i);
 
   const posix = npmSpawnInvocation(["run", "build:server"], "linux");
@@ -257,20 +260,16 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
   assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
   assert.equal(windows.options.env.npm_config_scripts_prepend_node_path, "true");
-  const windowsPath = windows.options.env.Path;
+  const windowsPath = windows.options.env.PATH;
   assert.ok(windowsPath.split(";")[0].endsWith("coding-tools-node-shims"));
   assert.ok(windowsPath.split(";").includes(nodeDir));
   assert.match(windowsPath, /nodejs/);
+  assert.equal(windows.options.env.Path, undefined);
+  assert.equal(windows.options.env.npm_config_script_shell, undefined);
   assert.equal(
     fs.readFileSync(path.join(root, "coding-tools-node-shims", "node.cmd"), "utf8"),
     `@echo off\r\n"${path.join(nodeDir, "node.exe")}" %*\r\n`,
   );
-  const scriptShell = windows.options.env.npm_config_script_shell;
-  assert.ok(String(scriptShell).endsWith("npm-script-shell.cmd"));
-  const shellBody = fs.readFileSync(scriptShell, "utf8");
-  assert.match(shellBody, /set "PATH=/);
-  assert.ok(shellBody.includes(nodeDir));
-  assert.match(shellBody, /%PATH%/);
 });
 
 test("Windows five-stack npm prepare merges Path and PATH when bun splits them", () => {
@@ -293,8 +292,8 @@ test("Windows five-stack npm prepare merges Path and PATH when bun splits them",
   assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
   assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
-  assert.equal(windows.options.env.PATH, undefined);
-  assert.ok(windows.options.env.Path.split(";").includes(nodeDir));
+  assert.equal(windows.options.env.Path, undefined);
+  assert.ok(windows.options.env.PATH.split(";").includes(nodeDir));
 });
 
 test("Windows five-stack npm prepare keeps an explicit node.exe even if bun dropped PATH", () => {
@@ -318,7 +317,8 @@ test("Windows five-stack npm prepare keeps an explicit node.exe even if bun drop
   assert.equal(windows.options.env.npm_node_execpath, nodeExe);
   assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
   assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
-  assert.ok(windows.options.env.Path.split(";").includes(nodeDir));
+  assert.ok(windows.options.env.PATH.split(";").includes(nodeDir));
+  assert.equal(windows.options.env.Path, undefined);
 });
 
 test("Windows five-stack npm prepare runs npm-cli.js through node.exe when present", () => {
@@ -344,9 +344,9 @@ test("Windows five-stack npm prepare runs npm-cli.js through node.exe when prese
   assert.deepEqual(windows.args, [npmCli, "run", "build:server"]);
   assert.equal(windows.options.env.npm_execpath, npmCli);
   assert.equal(windows.options.env.npm_node_execpath, nodeExe);
-  assert.equal(windows.options.env.PATH, undefined);
-  assert.ok(windows.options.env.Path.split(";")[0].endsWith("coding-tools-node-shims"));
-  assert.ok(windows.options.env.Path.split(";").includes(nodeDir));
+  assert.equal(windows.options.env.Path, undefined);
+  assert.ok(windows.options.env.PATH.split(";")[0].endsWith("coding-tools-node-shims"));
+  assert.ok(windows.options.env.PATH.split(";").includes(nodeDir));
   assert.match(
     fs.readFileSync(path.join(root, "coding-tools-node-shims", "node.cmd"), "utf8"),
     /node\.exe/,
@@ -375,8 +375,12 @@ test("five-stack prepare rewrites nested node scripts to an absolute node.exe", 
   const rewritten = rewritePackageScriptsToAbsoluteNode(root, nodeExe);
   assert.equal(rewritten, 1);
   const protocolPkg = JSON.parse(fs.readFileSync(path.join(protocol, "package.json"), "utf8"));
-  assert.equal(protocolPkg.scripts["generate:validators"], `"${nodeExe}" scripts/generate-validation-aot.mjs`);
+  assert.equal(protocolPkg.scripts["generate:validators"], `${nodeExe} scripts/generate-validation-aot.mjs`);
   assert.equal(protocolPkg.scripts.build, "npm run generate:validators");
+  assert.equal(
+    withAbsoluteNodeCommand("node scripts/generate-validation-aot.mjs", "C:\\Program Files\\nodejs\\node.exe"),
+    "node scripts/generate-validation-aot.mjs",
+  );
 });
 
 test("Windows workspace npm scripts get node.cmd inside node_modules/.bin", () => {
@@ -401,6 +405,33 @@ test("Windows workspace npm scripts get node.cmd inside node_modules/.bin", () =
     assert.match(fs.readFileSync(cmd, "utf8"), /node\.exe/);
   }
   assert.equal(installWindowsNodeBinShims(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "linux").length, 0);
+});
+
+test("Windows package directories get node.cmd in CWD for empty PATH cmd lookup", () => {
+  const root = temporaryDirectory("coding-tools-windows-cwd-node");
+  const nodeDir = path.join(root, "nodejs");
+  const nodeExe = path.join(nodeDir, "node.exe");
+  const protocol = path.join(root, "packages", "protocol");
+  fs.mkdirSync(nodeDir, { recursive: true });
+  fs.mkdirSync(protocol, { recursive: true });
+  fs.writeFileSync(nodeExe, "");
+  fs.writeFileSync(path.join(root, "package.json"), "{}\n");
+  fs.writeFileSync(path.join(protocol, "package.json"), "{}\n");
+
+  const written = installWindowsCwdNodeCommands(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "win32");
+  const expected = [
+    path.join(root, "node.cmd"),
+    path.join(protocol, "node.cmd"),
+  ];
+  for (const cmd of expected) {
+    assert.ok(written.includes(cmd), `missing ${cmd}`);
+    assert.equal(
+      fs.readFileSync(cmd, "utf8"),
+      `@echo off\r\n"${nodeExe}" %*\r\n`,
+    );
+    assert.equal(fs.readFileSync(cmd.replace(/\.cmd$/i, ".bat"), "utf8"), fs.readFileSync(cmd, "utf8"));
+  }
+  assert.equal(installWindowsCwdNodeCommands(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "linux").length, 0);
 });
 
 test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {

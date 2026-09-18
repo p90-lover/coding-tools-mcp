@@ -241,54 +241,42 @@ function ensureWindowsNodeShims(nodeExecutable, npmExecutable, env = process.env
     fs.writeFileSync(path.join(shimDir, "npm.cmd"), npmBody);
     fs.writeFileSync(path.join(shimDir, "npm.bat"), npmBody);
   }
-  const comspec = env.ComSpec || process.env.ComSpec
-    || path.join(env.SystemRoot || process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
-  const scriptShell = path.join(shimDir, "npm-script-shell.cmd");
-  fs.writeFileSync(scriptShell, [
-    "@echo off",
-    `set "PATH=${path.dirname(nodeExecutable)};${shimDir};%PATH%"`,
-    `"${comspec}" %*`,
-    "",
-  ].join("\r\n"));
-  return { shimDir, scriptShell };
+  return shimDir;
 }
 
-function withNpmOnPath(env = process.env, platform = process.platform) {
+function withNpmOnPath(env = process.env, platform = process.platform, sourceRoot = null) {
   const next = { ...env };
   for (const key of Object.keys(next)) {
     if (key.toLowerCase() === "path") delete next[key];
   }
   const nodeExecutable = resolveNodeExecutable(env, platform);
   const npmExecutable = resolveNpmExecutable(env, platform);
-  const shims = ensureWindowsNodeShims(nodeExecutable, npmExecutable, env, platform);
+  const shimDir = ensureWindowsNodeShims(nodeExecutable, npmExecutable, env, platform);
   const extras = [];
-  if (shims?.shimDir) extras.push(shims.shimDir);
+  if (shimDir) extras.push(shimDir);
   if (nodeExecutable) extras.push(path.dirname(nodeExecutable));
   if (path.isAbsolute(npmExecutable)) extras.push(path.dirname(npmExecutable));
+  if (sourceRoot) extras.push(...npmBinDirectories(sourceRoot));
   const merged = [];
   for (const dir of [...extras, ...envPathParts(env, platform)]) {
     const resolved = path.resolve(dir);
     if (!merged.some((existing) => path.resolve(existing) === resolved)) merged.push(dir);
   }
   const mergedPath = merged.join(envPathDelimiter(platform));
+  // Node's Windows spawn keeps the lexicographically first PATH key (PATH < Path).
+  // An empty uppercase PATH plus a good Path drops the good value, so nested
+  // cmd.exe cannot find node. Always pass a single uppercase PATH.
+  next.PATH = mergedPath;
   if (platform === "win32") {
-    // Passing both Path and PATH through spawn env can leave nested cmd.exe
-    // with an empty PATH, so lifecycle scripts fail with "node is not recognized".
-    next.Path = mergedPath;
-    const pathext = String(next.PATHEXT || next.Pathext || "");
-    if (!pathext.toUpperCase().includes(".EXE")) {
-      next.PATHEXT = pathext ? `.COM;.EXE;.BAT;.CMD;${pathext}` : ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.MSC";
-    }
-  } else {
-    next.PATH = mergedPath;
+    const pathext = String(env.PATHEXT || env.Pathext || "");
+    next.PATHEXT = pathext.toUpperCase().includes(".CMD") && pathext.toUpperCase().includes(".EXE")
+      ? pathext
+      : `.COM;.EXE;.BAT;.CMD;${pathext}`;
   }
   if (nodeExecutable) {
     next.npm_node_execpath = nodeExecutable;
     next.NODE = nodeExecutable;
     next.npm_config_scripts_prepend_node_path = "true";
-  }
-  if (shims?.scriptShell) {
-    next.npm_config_script_shell = shims.scriptShell;
   }
   return next;
 }
@@ -299,14 +287,14 @@ function quoteCmdToken(value) {
   return `"${text.replace(/"/g, "\"\"")}"`;
 }
 
-function npmSpawnInvocation(args, platform = process.platform, env = process.env) {
+function npmSpawnInvocation(args, platform = process.platform, env = process.env, sourceRoot = null) {
   const options = {
     encoding: "utf8",
     shell: false,
     windowsHide: true,
     timeout: 30 * 60_000,
     stdio: ["ignore", "pipe", "pipe"],
-    env: withNpmOnPath(env, platform),
+    env: withNpmOnPath(env, platform, sourceRoot),
   };
   if (platform === "win32") {
     const nodeExecutable = resolveNodeExecutable(env, platform);
@@ -344,7 +332,7 @@ function npmSpawnInvocation(args, platform = process.platform, env = process.env
 }
 
 function runNpm(sourceRoot, args, spawnSyncProcess, code, platform = process.platform) {
-  const invocation = npmSpawnInvocation(args, platform);
+  const invocation = npmSpawnInvocation(args, platform, process.env, sourceRoot);
   const result = spawnSyncProcess(invocation.command, invocation.args, {
     cwd: sourceRoot,
     ...invocation.options,
@@ -356,8 +344,12 @@ function runNpm(sourceRoot, args, spawnSyncProcess, code, platform = process.pla
 }
 
 function withAbsoluteNodeCommand(script, nodeExecutable) {
-  const quoted = `"${String(nodeExecutable).replace(/"/g, "\"\"")}"`;
-  return String(script).replace(/(^|[\s|&;])node(?:\.exe)?(?=\s|$)/gi, `$1${quoted}`);
+  const exe = String(nodeExecutable);
+  // cmd.exe /s strips a leading/trailing quote pair, so quoted Program Files
+  // paths break. Leave `node` in place when quoting would be required; CWD
+  // node.cmd shims cover that case. Safe unquoted paths work with an empty PATH.
+  if (/[\s"&()<>^|!]/.test(exe)) return String(script);
+  return String(script).replace(/(^|[\s|&;])node(?:\.exe)?(?=\s|$)/gi, `$1${exe}`);
 }
 
 function rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable) {
@@ -436,12 +428,49 @@ function installWindowsNodeBinShims(sourceRoot, env = process.env, platform = pr
   return written;
 }
 
+function packageJsonDirectories(sourceRoot) {
+  const dirs = [];
+  const visit = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    if (isFile(path.join(dir, "package.json"))) dirs.push(dir);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      visit(path.join(dir, entry.name));
+    }
+  };
+  visit(sourceRoot);
+  return dirs;
+}
+
+function installWindowsCwdNodeCommands(sourceRoot, env = process.env, platform = process.platform) {
+  if (platform !== "win32") return [];
+  const nodeExecutable = resolveNodeExecutable(env, platform);
+  if (!nodeExecutable || !isFile(nodeExecutable)) return [];
+  const body = `@echo off\r\n"${nodeExecutable}" %*\r\n`;
+  const written = [];
+  for (const dir of packageJsonDirectories(sourceRoot)) {
+    const cmd = path.join(dir, "node.cmd");
+    fs.writeFileSync(cmd, body);
+    fs.writeFileSync(path.join(dir, "node.bat"), body);
+    written.push(cmd);
+  }
+  return written;
+}
+
 function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
   if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
   const nodeExecutable = resolveNodeExecutable();
+  installWindowsCwdNodeCommands(sourceRoot);
   if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable);
   runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
   installWindowsNodeBinShims(sourceRoot);
+  installWindowsCwdNodeCommands(sourceRoot);
   for (const script of extraScripts) {
     runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
   }
@@ -607,9 +636,11 @@ if (require.main === module) {
 
 module.exports = {
   COMPONENT_IDS,
+  installWindowsCwdNodeCommands,
   installWindowsNodeBinShims,
   npmSpawnInvocation,
   prepareFiveStackRuntime,
   resolveNpmCliJs,
   rewritePackageScriptsToAbsoluteNode,
+  withAbsoluteNodeCommand,
 };
