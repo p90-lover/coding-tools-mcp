@@ -214,6 +214,19 @@ function resolveNpmExecutable(env = process.env, platform = process.platform) {
   return platform === "win32" ? "npm.cmd" : "npm";
 }
 
+function resolveNpmCliJs(nodeExecutable) {
+  if (!nodeExecutable || !isFile(nodeExecutable)) return null;
+  const dir = path.dirname(nodeExecutable);
+  const candidates = [
+    path.join(dir, "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(dir, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+  ];
+  for (const candidate of candidates) {
+    if (isFile(candidate)) return path.resolve(candidate);
+  }
+  return null;
+}
+
 function withNpmOnPath(env = process.env, platform = process.platform) {
   const next = { ...env };
   for (const key of Object.keys(next)) {
@@ -265,6 +278,21 @@ function npmSpawnInvocation(args, platform = process.platform, env = process.env
     env: withNpmOnPath(env, platform),
   };
   if (platform === "win32") {
+    const nodeExecutable = resolveNodeExecutable(env, platform);
+    const npmCli = resolveNpmCliJs(nodeExecutable);
+    if (nodeExecutable && npmCli) {
+      return {
+        command: nodeExecutable,
+        args: [npmCli, ...args],
+        options: {
+          ...options,
+          env: {
+            ...options.env,
+            npm_execpath: npmCli,
+          },
+        },
+      };
+    }
     const resolved = resolveNpmExecutable(env, platform);
     const npmCmd = /\.cmd$/i.test(resolved) ? resolved : "npm.cmd";
     const commandLine = ["call", quoteCmdToken(npmCmd), ...args.map(quoteCmdToken)].join(" ");
@@ -466,4 +494,5 @@ module.exports = {
   COMPONENT_IDS,
   npmSpawnInvocation,
   prepareFiveStackRuntime,
+  resolveNpmCliJs,
 };

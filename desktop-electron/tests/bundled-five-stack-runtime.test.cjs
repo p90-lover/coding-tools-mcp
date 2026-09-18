@@ -199,6 +199,8 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /resolveNodeExecutable/);
   assert.match(source, /isBunExecutable/);
   assert.match(source, /npm_config_scripts_prepend_node_path/);
+  assert.match(source, /resolveNpmCliJs/);
+  assert.match(source, /npm-cli\.js/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
     Path: "C:\\nodejs;C:\\Windows\\system32",
@@ -296,6 +298,32 @@ test("Windows five-stack npm prepare keeps an explicit node.exe even if bun drop
   assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
 });
 
+test("Windows five-stack npm prepare runs npm-cli.js through node.exe when present", () => {
+  const root = temporaryDirectory("coding-tools-windows-npm-cli");
+  const bunShimDir = path.join(root, "bun");
+  const nodeDir = path.join(root, "nodejs");
+  const npmCli = path.join(nodeDir, "node_modules", "npm", "bin", "npm-cli.js");
+  const nodeExe = path.join(nodeDir, "node.exe");
+  fs.mkdirSync(bunShimDir, { recursive: true });
+  fs.mkdirSync(path.dirname(npmCli), { recursive: true });
+  fs.writeFileSync(path.join(bunShimDir, "bun.exe"), "");
+  fs.writeFileSync(path.join(bunShimDir, "npm.cmd"), "@echo bun-npm-shim\r\n");
+  fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo real-npm\r\n");
+  fs.writeFileSync(nodeExe, "");
+  fs.writeFileSync(npmCli, "#!/usr/bin/env node\n");
+
+  const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
+    Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
+    ComSpec: "C:\\Windows\\System32\\cmd.exe",
+  });
+  assert.equal(windows.command, nodeExe);
+  assert.deepEqual(windows.args, [npmCli, "run", "build:server"]);
+  assert.equal(windows.options.env.npm_execpath, npmCli);
+  assert.equal(windows.options.env.npm_node_execpath, nodeExe);
+  assert.equal(windows.options.env.PATH, undefined);
+  assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
+});
+
 test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {
   const repositoryRoot = temporaryDirectory("coding-tools-five-stack-npm");
   const desktopDir = path.join(repositoryRoot, "desktop-electron");
@@ -362,11 +390,17 @@ test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async 
     assert.deepEqual(call.options.stdio, ["ignore", "pipe", "pipe"]);
     assert.ok(call.options.env);
     if (process.platform === "win32") {
-      assert.equal(path.basename(call.command).toLowerCase(), "cmd.exe");
-      assert.deepEqual(call.args.slice(0, 3), ["/d", "/s", "/c"]);
-      assert.match(String(call.args[3]).toLowerCase(), /npm\.cmd/);
-      assert.doesNotMatch(String(call.args[3]), /set "PATH=/);
-      assert.equal(call.options.windowsVerbatimArguments, true);
+      const commandBase = path.basename(call.command).toLowerCase();
+      if (commandBase === "node.exe" || commandBase === "node") {
+        assert.match(String(call.args[0]), /npm-cli\.js$/i);
+        assert.ok(["ci", "run"].includes(call.args[1]));
+      } else {
+        assert.equal(commandBase, "cmd.exe");
+        assert.deepEqual(call.args.slice(0, 3), ["/d", "/s", "/c"]);
+        assert.match(String(call.args[3]).toLowerCase(), /npm\.cmd/);
+        assert.doesNotMatch(String(call.args[3]), /set "PATH=/);
+        assert.equal(call.options.windowsVerbatimArguments, true);
+      }
     } else {
       assert.match(path.basename(call.command), /^npm$/);
       assert.ok(["ci", "run"].includes(call.args[0]));
