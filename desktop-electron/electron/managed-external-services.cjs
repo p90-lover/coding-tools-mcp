@@ -5,7 +5,7 @@ const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
-const { createFiveStackLongRun, HEARTBEAT_MS } = require("./five-stack-long-run.cjs");
+const { createFiveStackLongRun, FIVE_STACK_IDS, HEARTBEAT_MS } = require("./five-stack-long-run.cjs");
 const { waitUntilHealthy } = require("./loopback-health.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
@@ -85,6 +85,18 @@ function createManagedExternalServicesController({
     };
   }
 
+  function ownsProcessKeepAlive(serviceId) {
+    return FIVE_STACK_IDS.includes(serviceId);
+  }
+
+  function setDesiredIfOwned(serviceId, desired) {
+    if (ownsProcessKeepAlive(serviceId)) longRun.setDesired(serviceId, desired);
+  }
+
+  function noteHealthyIfOwned(serviceId) {
+    if (ownsProcessKeepAlive(serviceId)) longRun.noteHealthy(serviceId);
+  }
+
   function mergeService(service) {
     const managed = managedController.project(service.id);
     const running = managed.processes.find((entry) => entry.running) || null;
@@ -114,7 +126,7 @@ function createManagedExternalServicesController({
         pid: running.pid,
         owned: true,
       } : {}),
-      longRun: longRun.summary(service.id, mergedStatus),
+      longRun: ownsProcessKeepAlive(service.id) ? longRun.summary(service.id, mergedStatus) : null,
       managedInstall: {
         state: managed.installState,
         version: managed.version,
@@ -186,7 +198,7 @@ function createManagedExternalServicesController({
       sleep,
       now: now || (() => Date.now()),
     });
-    if (snapshot.status === "ready") longRun.noteHealthy(serviceId);
+    if (snapshot.status === "ready") noteHealthyIfOwned(serviceId);
     return snapshot;
   }
 
@@ -199,7 +211,7 @@ function createManagedExternalServicesController({
       await baseController.inspect(serviceId);
       publishCombined();
       const snapshot = serviceFromSnapshot(serviceId);
-      if (snapshot.status === "ready") longRun.noteHealthy(serviceId);
+      if (snapshot.status === "ready") noteHealthyIfOwned(serviceId);
       return snapshot;
     }
     let snapshot = await waitUntilListen(serviceId);
@@ -211,32 +223,32 @@ function createManagedExternalServicesController({
   }
 
   async function installManagedComponent(serviceId) {
-    longRun.setDesired(serviceId, "running");
+    setDesiredIfOwned(serviceId, "running");
     await managedController.installComponent(serviceId);
     return startManagedProcess(serviceId, { waitForHealth: true });
   }
 
   async function repairManagedComponent(serviceId) {
-    longRun.setDesired(serviceId, "running");
+    setDesiredIfOwned(serviceId, "running");
     try { await managedController.stopComponent(serviceId); } catch {}
     await managedController.repairComponent(serviceId);
     return startManagedProcess(serviceId, { waitForHealth: true });
   }
 
   async function start(serviceId, { supervised = false } = {}) {
-    if (!supervised) longRun.setDesired(serviceId, "running");
+    if (!supervised) setDesiredIfOwned(serviceId, "running");
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       return startManagedProcess(serviceId, { waitForHealth: !supervised });
     }
     const started = mergeService(await baseController.start(serviceId));
     if (!supervised) return waitUntilListen(serviceId);
-    if (started.status === "ready") longRun.noteHealthy(serviceId);
+    if (started.status === "ready") noteHealthyIfOwned(serviceId);
     return started;
   }
 
   async function stop(serviceId) {
-    longRun.setDesired(serviceId, "stopped");
+    setDesiredIfOwned(serviceId, "stopped");
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       await managedController.stopComponent(serviceId);
@@ -248,7 +260,7 @@ function createManagedExternalServicesController({
   }
 
   async function restart(serviceId) {
-    longRun.setDesired(serviceId, "running");
+    setDesiredIfOwned(serviceId, "running");
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       applyManagedConfiguration(serviceId);

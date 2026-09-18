@@ -2,6 +2,7 @@
 
 const path = require("node:path");
 const { ORIGINAL_SECTIONS, openOriginalControlCenter } = require("./codex-router-original-ui.cjs");
+const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
 const { READY_POLL_MS, READY_WAIT_MS, waitUntilHealthy } = require("./loopback-health.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router"]);
@@ -58,7 +59,7 @@ function sectionUrl(manifest, endpoint, section) {
   return target.toString();
 }
 
-function createOriginalUiController({
+function createOriginalUiCore({
   externalServices = null,
   openExternal = null,
   spawnProcess = null,
@@ -98,7 +99,6 @@ function createOriginalUiController({
       sourceConfigured: Boolean(current?.home),
       installState: current?.managedInstall?.state || "not-installed",
       originalChrome: true,
-      longRun: current?.longRun || null,
     };
   }
 
@@ -187,8 +187,7 @@ function createOriginalUiController({
   async function openEmbedded(toolId, section) {
     const manifest = requireTool(toolId);
     let state = await inspect(toolId);
-    const selected = section || state.longRun?.selectedSection || manifest.sections[0];
-    if (externalServices?.rememberSection) externalServices.rememberSection(toolId, selected);
+    const selected = section || manifest.sections[0];
     if (state.status !== "ready") {
       await start(toolId);
       state = await waitUntilReady(toolId);
@@ -262,10 +261,25 @@ function createOriginalUiController({
   });
 }
 
+function createOriginalUiController(options = {}) {
+  const core = createOriginalUiCore(options);
+  if (options.longRun === false) return core;
+  return attachCpaCodexLongRun(core, {
+    statePath: options.longRun?.statePath || options.statePath || null,
+    now: options.now,
+    setTimeoutFn: options.setTimeoutFn,
+    clearTimeoutFn: options.clearTimeoutFn,
+    powerSaveBlocker: options.powerSaveBlocker || options.longRun?.powerSaveBlocker,
+    logger: options.logger,
+    resumeOnCreate: options.resumeOnCreate !== false,
+  });
+}
+
 module.exports = {
   TOOL_IDS,
   READY_WAIT_MS,
   createOriginalUiController,
+  createOriginalUiCore,
   loadManifest,
   normalizeLoopbackEndpoint,
   sectionUrl,

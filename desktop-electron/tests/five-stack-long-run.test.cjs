@@ -43,10 +43,8 @@ function createHarness() {
   };
 }
 
-test("five-stack long-run covers all five stacks with a seven-day target", () => {
+test("five-stack long-run covers CommandCode, Paseo, and Anneal with a seven-day target", () => {
   assert.deepEqual(FIVE_STACK_IDS, [
-    "cpa",
-    "codex-router",
     "commandcode-proxy",
     "paseo",
     "anneal",
@@ -83,19 +81,19 @@ test("seven days of healthy heartbeats never reconnects or blocks", () => {
 
 test("a child-process crash reconnects with backoff instead of spawning immediately", () => {
   const harness = createHarness();
-  harness.longRun.setDesired("cpa", "running");
-  harness.longRun.noteHealthy("cpa");
+  harness.longRun.setDesired("commandcode-proxy", "running");
+  harness.longRun.noteHealthy("commandcode-proxy");
   harness.advance(HEARTBEAT_MS);
-  harness.longRun.planTick({ cpa: { status: "ready", installState: "installed" } });
+  harness.longRun.planTick({ "commandcode-proxy": { status: "ready", installState: "installed" } });
   harness.advance(HEARTBEAT_MS);
-  const first = harness.longRun.planTick({ cpa: { status: "offline", installState: "installed" } });
-  assert.deepEqual(first, [{ id: "cpa", action: "reconnect" }]);
-  assert.equal(harness.longRun.summary("cpa", "offline").uiStatus, "reconnecting");
-  const immediate = harness.longRun.planTick({ cpa: { status: "offline", installState: "installed" } });
+  const first = harness.longRun.planTick({ "commandcode-proxy": { status: "offline", installState: "installed" } });
+  assert.deepEqual(first, [{ id: "commandcode-proxy", action: "reconnect" }]);
+  assert.equal(harness.longRun.summary("commandcode-proxy", "offline").uiStatus, "reconnecting");
+  const immediate = harness.longRun.planTick({ "commandcode-proxy": { status: "offline", installState: "installed" } });
   assert.equal(immediate.some((action) => action.action === "reconnect"), false);
   harness.advance(5_000);
-  const second = harness.longRun.planTick({ cpa: { status: "offline", installState: "installed" } });
-  assert.deepEqual(second, [{ id: "cpa", action: "reconnect" }]);
+  const second = harness.longRun.planTick({ "commandcode-proxy": { status: "offline", installState: "installed" } });
+  assert.deepEqual(second, [{ id: "commandcode-proxy", action: "reconnect" }]);
 });
 
 test("eight consecutive crashes cap reconnects and require a manual start", () => {
@@ -138,8 +136,8 @@ test("an eight-hour sleep gap is not counted as a crash", () => {
 
 test("durable state survives a simulated desktop restart and restores the selected section", () => {
   const harness = createHarness();
-  harness.longRun.setDesired("codex-router", "running");
-  harness.longRun.setSelectedSection("codex-router", "models");
+  harness.longRun.setDesired("paseo", "running");
+  harness.longRun.setSelectedSection("paseo", "inbox");
   harness.longRun.setDesired("commandcode-proxy", "stopped");
   harness.longRun.persist(true);
   const payload = harness.stored();
@@ -147,18 +145,18 @@ test("durable state survives a simulated desktop restart and restores the select
   assert.doesNotMatch(payload, /secret|token|apiKey|managementKey/i);
 
   const restored = harness.reload();
-  assert.equal(restored.desired("codex-router"), "running");
-  assert.equal(restored.summary("codex-router").selectedSection, "models");
+  assert.equal(restored.desired("paseo"), "running");
+  assert.equal(restored.summary("paseo").selectedSection, "inbox");
   assert.equal(restored.desired("commandcode-proxy"), "stopped");
   assert.equal(restored.shouldAutoStart("commandcode-proxy"), false);
 });
 
 test("explicit stop keeps the supervisor idle until the user starts again", () => {
   const harness = createHarness();
-  harness.longRun.setDesired("cpa", "running");
-  harness.longRun.setDesired("cpa", "stopped");
+  harness.longRun.setDesired("paseo", "running");
+  harness.longRun.setDesired("paseo", "stopped");
   harness.advance(HEARTBEAT_MS);
-  const actions = harness.longRun.planTick({ cpa: { status: "offline", installState: "installed" } });
+  const actions = harness.longRun.planTick({ paseo: { status: "offline", installState: "installed" } });
   assert.deepEqual(actions, []);
-  assert.equal(harness.longRun.summary("cpa", "offline").uiStatus, "stopped");
+  assert.equal(harness.longRun.summary("paseo", "offline").uiStatus, "stopped");
 });

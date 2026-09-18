@@ -17,6 +17,7 @@ test("this rc.11 lane owns Codex Router and CPA original UI plus 7-day keep-aliv
   const surface = read("src/features/OriginalUiSurface.tsx");
   const app = read("src/App.tsx");
   const longRun = read("electron/five-stack-long-run.cjs");
+  const cpaRouterLongRun = read("electron/cpa-codex-long-run.cjs");
   const fiveStack = readRepo("src-tauri/src/integrations/five_stack.rs");
   const tauriPanel = readRepo("src/lib/components/control-center/OriginalUiPanel.svelte");
   const main = read("electron/main.cjs");
@@ -32,9 +33,13 @@ test("this rc.11 lane owns Codex Router and CPA original UI plus 7-day keep-aliv
   assert.match(cpaManaged, /port: 8317/);
   assert.match(fiveStack, /disable-control-panel: false/);
   assert.match(tauriPanel, /Copy management key/);
-  assert.match(longRun, /"cpa"/);
-  assert.match(longRun, /"codex-router"/);
+  assert.match(cpaRouterLongRun, /attachCpaCodexLongRun/);
+  assert.match(cpaRouterLongRun, /const TOOL_IDS = Object\.freeze\(\["cpa", "codex-router"\]\)/);
+  assert.match(originalMain, /attachCpaCodexLongRun/);
+  assert.match(main, /cpa-codex-long-run\.json/);
+  assert.match(longRun, /"commandcode-proxy"/);
   assert.match(longRun, /TARGET_UPTIME_MS = 7 \* 24 \* 60 \* 60 \* 1000/);
+  assert.doesNotMatch(longRun, /const FIVE_STACK_IDS = Object\.freeze\(\[[^\]]*"cpa"/);
   assert.match(main, /powerMonitor\.on\("resume"/);
   assert.match(originalMain, /return waitUntilReady\(toolId\)/);
   assert.match(read("electron/loopback-health.cjs"), /READY_WAIT_MS/);

@@ -98,7 +98,7 @@ test("all five stacks keep original visual UI and managed lifecycle wiring", () 
   assert.match(longRun, /TARGET_UPTIME_MS = 7 \* 24 \* 60 \* 60 \* 1000/);
   assert.match(longRun, /createFiveStackLongRun/);
   assert.match(longRunRust, /ensure_five_stack_health_loop/);
-  assert.match(combined, /longRun: longRun\.summary/);
+  assert.match(combined, /longRun\.summary/);
   assert.match(combined, /supervised = false/);
   assert.match(main, /powerMonitor\.on\("suspend"/);
   assert.match(lib, /ensure_five_stack_health_loop/);

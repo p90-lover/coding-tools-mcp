@@ -16,6 +16,38 @@ function messageOf(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
 
+function withReconnect(url: string, generation: number): string {
+  if (!url || generation < 1) return url;
+  const parsed = new URL(url);
+  parsed.searchParams.set("lr", String(generation));
+  return parsed.toString();
+}
+
+function selectedFrom(tool: OriginalUiSnapshot | null): string {
+  const longRun = tool?.longRun;
+  if (longRun && "selectedSection" in longRun && typeof longRun.selectedSection === "string" && longRun.selectedSection) {
+    return longRun.selectedSection;
+  }
+  return tool?.sections[0] || "";
+}
+
+function reconnectGenerationOf(tool: OriginalUiSnapshot | null): number {
+  const longRun = tool?.longRun;
+  if (longRun && "reconnectGeneration" in longRun && typeof longRun.reconnectGeneration === "number") {
+    return longRun.reconnectGeneration;
+  }
+  return 0;
+}
+
+function displayStatusOf(tool: OriginalUiSnapshot): string {
+  const longRun = tool.longRun;
+  if (longRun && "uiStatus" in longRun && typeof longRun.uiStatus === "string") return longRun.uiStatus;
+  if (longRun && "lastEvent" in longRun && (longRun.lastEvent === "crash-recover" || longRun.lastEvent === "restart-failed")) {
+    return "reconnecting";
+  }
+  return tool.status;
+}
+
 function toolFrom(snapshot: OriginalUiCatalog | null, toolId: OriginalUiId): OriginalUiSnapshot | null {
   return snapshot?.tools.find((candidate) => candidate.id === toolId) ?? null;
 }
@@ -29,6 +61,8 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const autoOpened = useRef(false);
+  const lastStatus = useRef("");
+  const lastGeneration = useRef(0);
   const tool = useMemo(() => toolFrom(snapshot, toolId), [snapshot, toolId]);
 
   const refresh = async () => {
@@ -36,12 +70,14 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     const next = await api.originalUiSnapshot();
     setSnapshot(next);
     const current = toolFrom(next, toolId);
-    if (current) setSelectedSection((value) => value || current.longRun?.selectedSection || current.sections[0] || "");
+    if (current) setSelectedSection((value) => value || selectedFrom(current));
     return current;
   };
 
   useEffect(() => {
     autoOpened.current = false;
+    lastStatus.current = "";
+    lastGeneration.current = 0;
     setFrameUrl("");
     setOriginalWindow(false);
     setNotice("");
@@ -55,7 +91,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       if (cancelled) return;
       setSnapshot(next);
       const current = toolFrom(next, toolId);
-      if (current) setSelectedSection((value) => value || current.longRun?.selectedSection || current.sections[0] || "");
+      if (current) setSelectedSection((value) => value || selectedFrom(current));
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribe = api.onExternalServicesChanged?.(() => {
       void api.originalUiSnapshot().then((next) => {
@@ -105,11 +141,22 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   };
 
   useEffect(() => {
-    if (!tool || autoOpened.current || busy || !api) return;
-    if (tool.status !== "ready" || toolId === "codex-router") return;
-    autoOpened.current = true;
-    void openSection(selectedSection || tool.longRun?.selectedSection || tool.sections[0]).catch((cause) => setError(messageOf(cause)));
-  }, [api, busy, setError, tool, toolId]);
+    if (!tool || busy || !api) return;
+    const generation = reconnectGenerationOf(tool);
+    const recovered = lastStatus.current !== "" && lastStatus.current !== "ready" && tool.status === "ready";
+    const generationBumped = generation > lastGeneration.current;
+    lastStatus.current = tool.status;
+    lastGeneration.current = generation;
+    if (toolId !== "cpa" || tool.status !== "ready") return;
+    if (!autoOpened.current) {
+      autoOpened.current = true;
+      void openSection(selectedSection || selectedFrom(tool)).catch((cause) => setError(messageOf(cause)));
+      return;
+    }
+    if (recovered || generationBumped) {
+      void openSection(selectedSection || selectedFrom(tool)).catch((cause) => setError(messageOf(cause)));
+    }
+  }, [api, busy, selectedSection, setError, tool, toolId]);
 
   if (!tool) {
     return (
@@ -122,7 +169,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   }
 
   const ready = tool.status === "ready";
-  const displayStatus = tool.longRun?.uiStatus || tool.status;
+  const displayStatus = displayStatusOf(tool);
   const needsInstall = tool.installState === "not-installed"
     || tool.installState === "repair-required"
     || tool.installState === "error";
@@ -220,7 +267,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
             allow="clipboard-read; clipboard-write"
             referrerPolicy="no-referrer"
             sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-            src={frameUrl}
+            src={withReconnect(frameUrl, reconnectGenerationOf(tool))}
             title={`${tool.name} original ${selectedSection}`}
           />
         ) : (

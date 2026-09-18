@@ -1,12 +1,9 @@
 "use strict";
 
 /**
- * Multi-day keep-alive for the five managed stacks (Codex Router, CPA,
- * CommandCode Proxy, Anneal, Paseo). Policy mirrors tunnel Recovery
- * (bounded backoff + healthy reset) and turn-suspension (sleep/wake is not a crash).
- *
- * Persist file holds desired running/stopped, selected section, and reconnect
- * budget. It never stores secrets or credentials.
+ * Multi-day keep-alive for CommandCode Proxy, Paseo, and Anneal.
+ * CPA and Codex Router 7-day durability comes from #190
+ * (`cpa-codex-long-run.cjs`) and is not re-implemented here.
  */
 
 const fs = require("node:fs");
@@ -15,16 +12,12 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { sweepGapIndicatesSuspension } = require("./turn-suspension.cjs");
 
 const FIVE_STACK_IDS = Object.freeze([
-  "cpa",
-  "codex-router",
   "commandcode-proxy",
   "paseo",
   "anneal",
 ]);
 
 const DEFAULT_SECTIONS = Object.freeze({
-  cpa: "dashboard",
-  "codex-router": "dashboard",
   "commandcode-proxy": "banner",
   paseo: "agents",
   anneal: "tasks",
