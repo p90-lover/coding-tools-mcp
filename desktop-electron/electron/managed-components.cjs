@@ -28,6 +28,18 @@ const INSTALL_STATE_SET = new Set(INSTALL_STATES);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 const ALLOWED_STEP_KINDS = new Set(["download", "verify", "git-checkout", "assert-file", "command", "activate"]);
 const SAFE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const FORBIDDEN_COMMANDS = new Set([
+  "del",
+  "erase",
+  "rd",
+  "remove-item",
+  "rmdir",
+  "rm",
+  "shred",
+  "unlink",
+]);
+const SHELL_COMMANDS = new Set(["bash", "cmd", "powershell", "pwsh", "sh"]);
+const DESTRUCTIVE_SHELL_PATTERN = /(?:^|[;&|\s])(?:del|erase|rd|remove-item|rmdir|rm|shred|unlink)(?:$|[;&|\s])/iu;
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMMIT_SHA = /^[a-f0-9]{40}$/;
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
@@ -72,6 +84,22 @@ function assertSafeRelativePath(value, label) {
   return normalized;
 }
 
+function assertNonDestructiveCommand(executable, argumentsValue, label) {
+  const rawBase = path.basename(String(executable || "")).toLowerCase();
+  const base = rawBase.replace(/\.(?:bat|cmd|exe|ps1)$/iu, "");
+  const args = Array.isArray(argumentsValue) ? argumentsValue.map(String) : [];
+  if (FORBIDDEN_COMMANDS.has(base)) throw new Error(`${label} contains a destructive executable`);
+  if (base === "git" && args[0]?.toLowerCase() === "clean") {
+    throw new Error(`${label} must not run git clean`);
+  }
+  if (base === "docker" && args.some((value) => value.toLowerCase() === "down")) {
+    throw new Error(`${label} must not destroy the managed Docker topology`);
+  }
+  if (SHELL_COMMANDS.has(base) && DESTRUCTIVE_SHELL_PATTERN.test(args.join(" "))) {
+    throw new Error(`${label} contains a destructive shell command`);
+  }
+}
+
 function assertSafeCommand(step, label) {
   if (!step || typeof step !== "object") throw new Error(`${label} is invalid`);
   if (!SAFE_ID.test(String(step.id || ""))) throw new Error(`${label} has an invalid id`);
@@ -87,6 +115,7 @@ function assertSafeCommand(step, label) {
         throw new Error(`${label} contains an invalid argument`);
       }
     }
+    assertNonDestructiveCommand(step.executable, step.arguments, label);
   }
   if (step.kind === "assert-file") assertSafeRelativePath(step.path, `${label} path`);
 }
