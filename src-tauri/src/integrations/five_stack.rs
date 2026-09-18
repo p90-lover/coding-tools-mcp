@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -404,6 +403,7 @@ fn store_secrets(value: &serde_json::Value) -> AppResult<()> {
     fs::create_dir_all(data_root())?;
     #[cfg(unix)]
     {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         let mut file = fs::File::create(secret_path())?;
         file.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;

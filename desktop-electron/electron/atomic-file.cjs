@@ -16,8 +16,12 @@ function renameAtomicFile(
     platform = process.platform,
     rename = fs.renameSync,
     wait = waitSync,
+    delays = WINDOWS_RENAME_RETRY_DELAYS_MS,
   } = {},
 ) {
+  const retryDelays = Array.isArray(delays) && delays.length > 0
+    ? delays
+    : WINDOWS_RENAME_RETRY_DELAYS_MS;
   for (let attempt = 0; ; attempt += 1) {
     try {
       rename(source, destination);
@@ -25,7 +29,7 @@ function renameAtomicFile(
     } catch (error) {
       const transientWindowsError = platform === "win32"
         && ["EBUSY", "EPERM", "EACCES"].includes(error?.code);
-      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+      const delay = retryDelays[attempt];
       if (!transientWindowsError || delay === undefined) throw error;
       wait(delay);
     }

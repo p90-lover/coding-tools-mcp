@@ -47,6 +47,29 @@ test("atomic replacement fails closed after its bounded Windows retry budget", (
   assert.deepEqual(waits, WINDOWS_RENAME_RETRY_DELAYS_MS);
 });
 
+test("atomic replacement honors a caller-supplied Windows retry budget", () => {
+  const waits = [];
+  let attempts = 0;
+  const delays = [10, 20];
+  renameAtomicFile("source", "destination", {
+    platform: "win32",
+    delays,
+    rename() {
+      attempts += 1;
+      if (attempts < 3) {
+        const error = new Error("temporarily locked");
+        error.code = "EPERM";
+        throw error;
+      }
+    },
+    wait(milliseconds) {
+      waits.push(milliseconds);
+    },
+  });
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, delays);
+});
+
 test("atomic replacement never retries a structural filesystem failure", () => {
   let attempts = 0;
   assert.throws(() => renameAtomicFile("source", "destination", {

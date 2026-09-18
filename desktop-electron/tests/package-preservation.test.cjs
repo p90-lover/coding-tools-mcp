@@ -139,3 +139,41 @@ test("failed directory replacement restores the prior artifacts and fails closed
   assert.equal(fs.readFileSync(path.join(target, "old.exe"), "utf8"), "old artifact\n");
   assert.equal(fs.existsSync(prepared), true, "prepared evidence must remain for diagnosis");
 });
+
+test("preservePath retries bounded Windows file locks without deleting the source", () => {
+  const { PRESERVE_RENAME_RETRY_DELAYS_MS, createPreservationSession } = loadHelper();
+  const fixtureRepository = uniqueFixtureRoot("eperm");
+  fs.mkdirSync(fixtureRepository, { recursive: true });
+
+  const realFs = fs;
+  const lockedFs = Object.create(realFs);
+  let attempts = 0;
+  const waits = [];
+  lockedFs.renameSync = (source, destination) => {
+    attempts += 1;
+    if (attempts < 3) {
+      const error = new Error("temporarily locked");
+      error.code = attempts === 1 ? "EPERM" : "EBUSY";
+      throw error;
+    }
+    return realFs.renameSync(source, destination);
+  };
+
+  const session = createPreservationSession({
+    repositoryRoot: fixtureRepository,
+    label: "package-win",
+    now: () => new Date("2026-09-14T15:33:00.000Z"),
+    nonce: () => "fixture",
+    fsImpl: lockedFs,
+    platform: "win32",
+    wait: (milliseconds) => waits.push(milliseconds),
+  });
+  const work = session.createWorkDirectory("smoke");
+  fs.writeFileSync(path.join(work, "ready.json"), "{\"ok\":true}\n");
+  const preserved = session.preservePath(work, "smoke-evidence");
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, PRESERVE_RENAME_RETRY_DELAYS_MS.slice(0, 2));
+  assert.equal(fs.existsSync(work), false);
+  assert.equal(fs.readFileSync(path.join(preserved, "ready.json"), "utf8"), "{\"ok\":true}\n");
+});

@@ -1,6 +1,17 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { renameAtomicFile } = require("../electron/atomic-file.cjs");
+
+const PRESERVE_RENAME_RETRY_DELAYS_MS = Object.freeze([
+  50,
+  100,
+  250,
+  500,
+  1000,
+  2000,
+  4000,
+]);
 
 function safeSegment(value, fallback = "item") {
   const normalized = String(value ?? "")
@@ -32,6 +43,8 @@ function createPreservationSession({
   now = () => new Date(),
   nonce = () => crypto.randomBytes(6).toString("hex"),
   fsImpl = fs,
+  platform = process.platform,
+  wait,
 } = {}) {
   if (typeof repositoryRoot !== "string" || repositoryRoot.trim() === "") {
     throw new Error("Preservation session requires repositoryRoot");
@@ -49,6 +62,15 @@ function createPreservationSession({
     const directory = fsImpl.mkdtempSync(path.join(workRoot, `${safeKind}-`));
     assertInside(aiTempRoot, directory, "working directory");
     return directory;
+  }
+
+  function renamePreserved(source, destination) {
+    renameAtomicFile(source, destination, {
+      platform,
+      rename: (from, to) => fsImpl.renameSync(from, to),
+      delays: PRESERVE_RENAME_RETRY_DELAYS_MS,
+      ...(typeof wait === "function" ? { wait } : {}),
+    });
   }
 
   function uniqueDestination(category, baseName) {
@@ -69,7 +91,7 @@ function createPreservationSession({
     assertInside(resolvedRepositoryRoot, source, "preserved path");
     if (!fsImpl.existsSync(source)) return null;
     const destination = uniqueDestination(category, path.basename(source));
-    fsImpl.renameSync(source, destination);
+    renamePreserved(source, destination);
     return destination;
   }
 
@@ -86,12 +108,12 @@ function createPreservationSession({
     if (fsImpl.existsSync(target)) preservedPath = preservePath(target, category);
     try {
       fsImpl.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-      fsImpl.renameSync(prepared, target);
+      renamePreserved(prepared, target);
     } catch (publicationError) {
       let restorationError = null;
       if (preservedPath && !fsImpl.existsSync(target)) {
         try {
-          fsImpl.renameSync(preservedPath, target);
+          renamePreserved(preservedPath, target);
           preservedPath = null;
         } catch (error) {
           restorationError = error;
@@ -121,5 +143,6 @@ function createPreservationSession({
 }
 
 module.exports = {
+  PRESERVE_RENAME_RETRY_DELAYS_MS,
   createPreservationSession,
 };
