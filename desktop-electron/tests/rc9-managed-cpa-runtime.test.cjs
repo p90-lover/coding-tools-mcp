@@ -113,6 +113,14 @@ test("CPA management credentials stay central and are not required on every prov
   assert.match(main, /setProviderCpaConnection\(\(\) => externalServicesController\?\.cpaConnection\(\)\)/);
 });
 
+test("a healthy managed CPA probe remains ready instead of being overwritten as starting", () => {
+  const source = read("desktop-electron/electron/managed-external-services.cjs");
+  assert.match(
+    source,
+    /status:\s*service\.status === "error"[\s\S]*?service\.status === "ready"[\s\S]*?"ready"[\s\S]*?:\s*"starting"/,
+  );
+});
+
 test("packaging keeps the CPA adapter executable outside app.asar and preserves the no-delete contract", () => {
   const manifest = JSON.parse(read("desktop-electron/package.json"));
   assert.ok(manifest.build.asarUnpack.includes("electron/cpa-managed.cjs"));
