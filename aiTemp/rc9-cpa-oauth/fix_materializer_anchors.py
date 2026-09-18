@@ -76,6 +76,12 @@ if new not in source:
         raise SystemExit(f"expected one ambiguous Codex materializer block, found {count}")
     source = source.replace(old, new, 1)
 
+newline_join_anchor = 'join("\\n")'
+newline_join_count = source.count(newline_join_anchor)
+if newline_join_count < 6:
+    raise SystemExit(f"expected at least six model-list join anchors, found {newline_join_count}")
+source = source.replace(newline_join_anchor, 'join("\\\\n")')
+
 TARGET.parent.mkdir(parents=True, exist_ok=True)
 TARGET.write_text(source, encoding="utf-8")
 print("RC9_MATERIALIZER_ANCHORS_FIXED")
