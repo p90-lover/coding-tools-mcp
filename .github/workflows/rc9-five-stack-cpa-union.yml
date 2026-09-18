@@ -8,6 +8,7 @@ on:
       - aiTemp/rc9-five-stack-cpa-union/**
       - aiTemp/rc9-managed-five-stack/**
       - desktop-electron/**
+      - docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
       - .github/workflows/rc9-five-stack-cpa-union.yml
       - .github/workflows/rc9-managed-five-stack.yml
   pull_request:
@@ -17,6 +18,7 @@ on:
       - aiTemp/rc9-five-stack-cpa-union/**
       - aiTemp/rc9-managed-five-stack/**
       - desktop-electron/**
+      - docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
       - .github/workflows/rc9-five-stack-cpa-union.yml
       - .github/workflows/rc9-managed-five-stack.yml
   workflow_dispatch:
@@ -66,6 +68,9 @@ jobs:
       - name: Run exact combined contracts
         run: |
           set -euo pipefail
+          test -s docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
+          grep -F 'Combined validation branch: `integration/v0.7.0-rc.9-five-stack-cpa-union`' \
+            docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
           (
             node --check desktop-electron/electron/codex-router-managed.cjs
             node --check desktop-electron/electron/external-services.cjs
