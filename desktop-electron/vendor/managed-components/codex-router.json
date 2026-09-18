@@ -38,6 +38,11 @@
         "path": "src/curate-models.mjs"
       },
       {
+        "id": "assert-control-center",
+        "kind": "assert-file",
+        "path": "apps/control-center/electron/main.mjs"
+      },
+      {
         "id": "activate",
         "kind": "activate"
       }

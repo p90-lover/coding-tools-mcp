@@ -12,6 +12,7 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const COMPONENT_IDS = Object.freeze([
   "codex-router",
   "commandcode-proxy",
+  "cpa",
   "paseo",
   "anneal",
 ]);
@@ -418,12 +419,17 @@ function createManagedComponentController({
   }
 
   function ensureComponentSecrets(id) {
-    const current = secretFor(id);
-    if (id === "commandcode-proxy" && !current.proxyApiKey) {
-      const next = { ...current, proxyApiKey: crypto.randomBytes(36).toString("base64url") };
-      writeSecret(id, next);
-      return next;
+    let current = secretFor(id);
+    let changed = false;
+    if ((id === "commandcode-proxy" || id === "cpa") && !current.proxyApiKey) {
+      current = { ...current, proxyApiKey: crypto.randomBytes(36).toString("base64url") };
+      changed = true;
     }
+    if (id === "cpa" && !current.managementKey) {
+      current = { ...current, managementKey: crypto.randomBytes(36).toString("base64url") };
+      changed = true;
+    }
+    if (changed) writeSecret(id, current);
     return current;
   }
 
@@ -1008,6 +1014,7 @@ function createManagedComponentController({
       : "";
     return {
       home: context.home,
+      state: context.state,
       executable: spec.executable,
       arguments: [...spec.args],
       endpoint: manifest.health.endpoint.replace("{callerKey}", ""),
@@ -1020,11 +1027,24 @@ function createManagedComponentController({
     };
   }
 
+  function runtimeSecrets(idValue) {
+    const id = requiredComponentId(idValue);
+    return { ...ensureComponentSecrets(id) };
+  }
+
   function healthHeaders(idValue) {
     const id = requiredComponentId(idValue);
-    if (id !== "commandcode-proxy") return {};
-    const proxyApiKey = ensureComponentSecrets(id).proxyApiKey;
-    return proxyApiKey ? { Authorization: `Bearer ${proxyApiKey}` } : {};
+    const template = manifestFor(id).health?.authorization;
+    if (!template) return {};
+    const current = ensureComponentSecrets(id);
+    const authorization = String(template).replace(
+      /\{secret:([A-Za-z0-9_-]+)\}/g,
+      (_match, key) => String(current[key] || ""),
+    );
+    if (!authorization || authorization.includes("{secret:")) {
+      throw new Error(`${manifestFor(id).name} health credential is unavailable`);
+    }
+    return { Authorization: authorization };
   }
 
   function dispose() {
@@ -1048,6 +1068,7 @@ function createManagedComponentController({
     stopComponent,
     restartComponent,
     runtimeConfiguration,
+    runtimeSecrets,
     healthHeaders,
     dispose,
   });

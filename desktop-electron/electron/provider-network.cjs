@@ -870,6 +870,7 @@ function createProviderNetworkController({
   app,
   browserPartition,
   getBrowserHost,
+  getCpaConnection = null,
   logger,
   safeStorage,
   session,
@@ -944,13 +945,25 @@ function createProviderNetworkController({
   }
 
   function cpaConnection(account) {
+    const managed = getCpaConnection?.();
+    const managedKey = String(managed?.managementKey || "").trim();
+    if (managedKey) {
+      return {
+        baseUrl: normalizeProviderBaseUrl(managed.baseUrl || DEFAULT_CPA_BASE_URL),
+        managementKey: managedKey,
+        proxyApiKey: String(managed.proxyApiKey || "").trim(),
+      };
+    }
+
     const secret = store.accountSecret(account.id) || {};
     const managementKey = String(secret.managementKey ?? secret.credential ?? "").trim();
-    if (!managementKey) throw new Error("Enter the CPA / CLIProxyAPI management key before login or testing");
+    if (!managementKey) {
+      throw new Error("Install managed CPA or enter an external CPA / CLIProxyAPI management key before login or testing");
+    }
     const baseUrl = normalizeProviderBaseUrl(
       account.endpoint || secret.baseUrl || DEFAULT_CPA_BASE_URL,
     );
-    return { baseUrl, managementKey };
+    return { baseUrl, managementKey, proxyApiKey: String(secret.apiKey || "").trim() };
   }
 
   function antigravitySessionBinding(account) {
@@ -1009,8 +1022,11 @@ function createProviderNetworkController({
   function defaultLoginAdapter(account) {
     if (account.loginAdapterId) return account.loginAdapterId;
     if (account.providerId === "codex-oauth") {
+      const managed = getCpaConnection?.();
       const secret = store.accountSecret(account.id) || {};
-      return secret.managementKey || secret.credential ? "cpa-codex" : "native-browser";
+      return managed?.managementKey || secret.managementKey || secret.credential
+        ? "cpa-codex"
+        : "native-browser";
     }
     return PROVIDER_LOGIN_ADAPTERS[account.providerId]?.[0] ?? null;
   }

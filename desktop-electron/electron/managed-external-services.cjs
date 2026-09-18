@@ -8,6 +8,7 @@ const { createManagedComponentController } = require("./managed-components.cjs")
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
   "commandcode-proxy": Object.freeze({ endpoint: "http://127.0.0.1:9090/" }),
+  cpa: Object.freeze({ endpoint: "http://127.0.0.1:8317/" }),
   paseo: Object.freeze({
     endpoint: "http://127.0.0.1:6768/",
     executionEndpoint: "ws://127.0.0.1:6767/ws",
@@ -54,6 +55,7 @@ function createManagedExternalServicesController({
     const endpoints = SERVICE_ENDPOINTS[serviceId];
     return {
       home: installed.home,
+      stateDir: installed.state,
       executable: installed.executable,
       arguments: installed.arguments,
       endpoint: endpoints.endpoint,
@@ -78,6 +80,7 @@ function createManagedExternalServicesController({
       ...service,
       ...(configuration ? {
         home: configuration.home,
+        stateDir: configuration.stateDir,
         executable: configuration.executable,
         arguments: [...configuration.arguments],
         endpoint: configuration.endpoint,
@@ -212,6 +215,22 @@ function createManagedExternalServicesController({
     return configuration || baseController.upstreamConfiguration(serviceId);
   }
 
+  function cpaConnection() {
+    const managed = managedController.project("cpa");
+    if (managed.installState !== "installed") return null;
+    const secrets = managedController.runtimeSecrets("cpa");
+    const managementKey = String(secrets.managementKey || "").trim();
+    const proxyApiKey = String(secrets.proxyApiKey || "").trim();
+    if (!managementKey || !proxyApiKey) {
+      throw new Error("Managed CPA credentials are unavailable");
+    }
+    return {
+      baseUrl: SERVICE_ENDPOINTS.cpa.endpoint.replace(/\/$/, ""),
+      managementKey,
+      proxyApiKey,
+    };
+  }
+
   function dispose() {
     managedController.dispose();
     baseController.dispose();
@@ -227,6 +246,7 @@ function createManagedExternalServicesController({
     syncCodexRouter,
     runtimeEnvironment: () => baseController.runtimeEnvironment(),
     upstreamConfiguration,
+    cpaConnection,
     installManagedComponent,
     repairManagedComponent,
     setManagedComponentCredential,

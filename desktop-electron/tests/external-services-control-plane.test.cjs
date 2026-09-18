@@ -74,12 +74,13 @@ function controllerFixture(overrides = {}) {
   return { controller, calls, child, directory };
 }
 
-test("external service controller owns the four architecture-B services and rejects remote endpoints", () => {
+test("external service controller owns the five app-managed services and rejects remote endpoints", () => {
   const { controller } = controllerFixture();
   const snapshot = controller.snapshot();
   assert.deepEqual(snapshot.services.map((service) => service.id), [
     "codex-router",
     "commandcode-proxy",
+    "cpa",
     "paseo",
     "anneal",
   ]);
@@ -194,13 +195,13 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.match(types, /installManagedComponent\(serviceId: ExternalServiceId\)/);
   assert.match(app, /surface === "integrations"/);
   assert.match(app, /<ExternalServicesSurface/);
-  assert.match(surface, /CPA Provider Hub/);
+  assert.match(surface, /CPA \/ CLIProxyAPI/);
   assert.match(surface, /Codex Router/);
   assert.match(surface, /CommandCode Proxy/);
   assert.match(surface, /Paseo/);
   assert.match(surface, /Anneal/);
   assert.match(surface, /Install \/ Repair|安裝／修復/);
-  assert.match(surface, /供應商中心/);
+  assert.match(surface, /開啟原始介面/);
   assert.match(surface, /外部服務/);
   assert.match(packageScript, /--publish["',\s]+never/);
 });

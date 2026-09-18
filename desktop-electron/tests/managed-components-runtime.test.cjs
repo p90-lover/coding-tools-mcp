@@ -12,7 +12,7 @@ const {
   createManagedComponentController,
 } = require("../electron/managed-components.cjs");
 
-const COMPONENT_IDS = ["codex-router", "commandcode-proxy", "paseo", "anneal"];
+const COMPONENT_IDS = ["codex-router", "commandcode-proxy", "cpa", "paseo", "anneal"];
 
 function temporaryDirectory(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
@@ -61,7 +61,7 @@ function releaseManifest(id, payload) {
       ],
     },
     health: {
-      endpoint: `http://127.0.0.1:${id === "codex-router" ? 4202 : id === "commandcode-proxy" ? 9090 : id === "paseo" ? 6768 : 5173}/`,
+      endpoint: `http://127.0.0.1:${id === "codex-router" ? 4202 : id === "commandcode-proxy" ? 9090 : id === "cpa" ? 8317 : id === "paseo" ? 6768 : 5173}/`,
       acceptStatus: [200],
     },
   };
