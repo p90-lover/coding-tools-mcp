@@ -192,19 +192,26 @@ test("Codex Router prepare unpacks from CODING_TOOLS_BUNDLED.json without instal
   assert.equal(fs.existsSync(wrapper), true);
 });
 
-test("Windows five-stack npm prepare uses cmd.exe instead of spawning npm.cmd", () => {
+test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () => {
   const source = read("scripts/prepare-five-stack-runtime.cjs");
-  assert.doesNotMatch(source, /["']npm\.cmd["']/);
+  assert.match(source, /npm\.cmd/);
+  assert.match(source, /withNpmOnPath/);
 
-  const windows = npmSpawnInvocation(["ci"], "win32");
-  assert.equal(path.basename(windows.command).toLowerCase(), "cmd.exe");
-  assert.deepEqual(windows.args.slice(0, 4), ["/d", "/s", "/c", "npm"]);
+  const windows = npmSpawnInvocation(["ci"], "win32", {
+    Path: "C:\\nodejs;C:\\Windows\\system32",
+    ComSpec: "C:\\Windows\\System32\\cmd.exe",
+  });
+  assert.match(String(windows.command).replaceAll("\\", "/"), /cmd\.exe$/i);
+  assert.deepEqual(windows.args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.match(String(windows.args[3]).toLowerCase(), /npm\.cmd$/);
   assert.deepEqual(windows.args.slice(4), ["ci"]);
   assert.equal(windows.options.shell, false);
   assert.deepEqual(windows.options.stdio, ["ignore", "pipe", "pipe"]);
+  const windowsPath = windows.options.env.Path || windows.options.env.PATH;
+  assert.match(windowsPath, /nodejs|node/i);
 
   const posix = npmSpawnInvocation(["run", "build:server"], "linux");
-  assert.equal(posix.command, "npm");
+  assert.match(path.basename(posix.command), /^npm$/);
   assert.deepEqual(posix.args, ["run", "build:server"]);
   assert.equal(posix.options.shell, false);
   assert.deepEqual(posix.options.stdio, ["ignore", "pipe", "pipe"]);
@@ -274,11 +281,13 @@ test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async 
   for (const call of calls) {
     assert.equal(call.options.shell, false);
     assert.deepEqual(call.options.stdio, ["ignore", "pipe", "pipe"]);
+    assert.ok(call.options.env);
     if (process.platform === "win32") {
       assert.equal(path.basename(call.command).toLowerCase(), "cmd.exe");
-      assert.deepEqual(call.args.slice(0, 4), ["/d", "/s", "/c", "npm"]);
+      assert.deepEqual(call.args.slice(0, 3), ["/d", "/s", "/c"]);
+      assert.match(String(call.args[3]).toLowerCase(), /npm\.cmd$/);
     } else {
-      assert.equal(call.command, "npm");
+      assert.match(path.basename(call.command), /^npm$/);
       assert.ok(["ci", "run"].includes(call.args[0]));
     }
   }
