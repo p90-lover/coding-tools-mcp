@@ -241,7 +241,16 @@ function ensureWindowsNodeShims(nodeExecutable, npmExecutable, env = process.env
     fs.writeFileSync(path.join(shimDir, "npm.cmd"), npmBody);
     fs.writeFileSync(path.join(shimDir, "npm.bat"), npmBody);
   }
-  return shimDir;
+  const comspec = env.ComSpec || process.env.ComSpec
+    || path.join(env.SystemRoot || process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
+  const scriptShell = path.join(shimDir, "npm-script-shell.cmd");
+  fs.writeFileSync(scriptShell, [
+    "@echo off",
+    `set "PATH=${path.dirname(nodeExecutable)};${shimDir};%PATH%"`,
+    `"${comspec}" %*`,
+    "",
+  ].join("\r\n"));
+  return { shimDir, scriptShell };
 }
 
 function withNpmOnPath(env = process.env, platform = process.platform) {
@@ -251,9 +260,9 @@ function withNpmOnPath(env = process.env, platform = process.platform) {
   }
   const nodeExecutable = resolveNodeExecutable(env, platform);
   const npmExecutable = resolveNpmExecutable(env, platform);
-  const shimDir = ensureWindowsNodeShims(nodeExecutable, npmExecutable, env, platform);
+  const shims = ensureWindowsNodeShims(nodeExecutable, npmExecutable, env, platform);
   const extras = [];
-  if (shimDir) extras.push(shimDir);
+  if (shims?.shimDir) extras.push(shims.shimDir);
   if (nodeExecutable) extras.push(path.dirname(nodeExecutable));
   if (path.isAbsolute(npmExecutable)) extras.push(path.dirname(npmExecutable));
   const merged = [];
@@ -277,6 +286,9 @@ function withNpmOnPath(env = process.env, platform = process.platform) {
     next.npm_node_execpath = nodeExecutable;
     next.NODE = nodeExecutable;
     next.npm_config_scripts_prepend_node_path = "true";
+  }
+  if (shims?.scriptShell) {
+    next.npm_config_script_shell = shims.scriptShell;
   }
   return next;
 }

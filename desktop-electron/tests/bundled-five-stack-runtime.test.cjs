@@ -202,6 +202,8 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /resolveNpmCliJs/);
   assert.match(source, /npm-cli\.js/);
   assert.match(source, /coding-tools-node-shims/);
+  assert.match(source, /npm-script-shell\.cmd/);
+  assert.match(source, /npm_config_script_shell/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
     Path: "C:\\nodejs;C:\\Windows\\system32",
@@ -257,6 +259,12 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
     fs.readFileSync(path.join(root, "coding-tools-node-shims", "node.cmd"), "utf8"),
     `@echo off\r\n"${path.join(nodeDir, "node.exe")}" %*\r\n`,
   );
+  const scriptShell = windows.options.env.npm_config_script_shell;
+  assert.ok(String(scriptShell).endsWith("npm-script-shell.cmd"));
+  const shellBody = fs.readFileSync(scriptShell, "utf8");
+  assert.match(shellBody, /set "PATH=/);
+  assert.ok(shellBody.includes(nodeDir));
+  assert.match(shellBody, /%PATH%/);
 });
 
 test("Windows five-stack npm prepare merges Path and PATH when bun splits them", () => {
