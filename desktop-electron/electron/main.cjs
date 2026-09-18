@@ -16,6 +16,7 @@ const {
   safeStorage,
   shell,
   Tray,
+  powerMonitor,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
@@ -1306,6 +1307,15 @@ async function start() {
     .catch((error) => logger.warn("managed-bootstrap.startup-failed", {
       message: error instanceof Error ? error.message : String(error),
     }));
+  if (powerMonitor && typeof powerMonitor.on === "function") {
+    powerMonitor.on("suspend", () => {
+      externalServicesController?.markSuspended?.();
+    });
+    powerMonitor.on("resume", () => {
+      externalServicesController?.markSuspended?.();
+      void externalServicesController?.tick?.();
+    });
+  }
   upstreamToolController = createUpstreamToolController({
     env: process.env,
     logger,

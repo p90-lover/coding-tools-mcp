@@ -4,6 +4,7 @@ pub mod board_sync;
 pub mod commandcode;
 pub mod execution;
 pub mod five_stack;
+pub mod long_run;
 use crate::error::{AppError, AppResult};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};

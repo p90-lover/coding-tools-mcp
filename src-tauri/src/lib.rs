@@ -184,6 +184,7 @@ pub fn run() {
             // Recover FRP clients that stay alive while the public proxy dies
             // (common after install/restart network blips).
             tunnel::ensure_frp_health_loop();
+            integrations::long_run::ensure_five_stack_health_loop();
             setup_tray(app)?;
             commands::computer_restore::start(app.handle().clone());
             #[cfg(target_os = "windows")]

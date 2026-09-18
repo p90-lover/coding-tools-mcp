@@ -35,7 +35,7 @@
   );
 
   $effect(() => {
-    if (tool && !selected) selected = tool.sections[0] ?? '';
+    if (tool && !selected) selected = tool.long_run?.selected_section || tool.sections[0] ?? '';
   });
 
   async function refresh() {
@@ -79,6 +79,7 @@
   }
 
   const ready = $derived(tool?.status === 'ready');
+  const displayStatus = $derived(tool?.long_run?.ui_status || tool?.long_run?.uiStatus || tool?.status || '');
   const mark = $derived(toolId === 'cpa' ? 'M' : toolId === 'paseo' ? 'P' : toolId === 'anneal' ? 'A' : 'R');
 </script>
 
@@ -102,7 +103,7 @@
     </div>
   </div>
   <div class="cc-integration-features">
-    <span class="cc-status {ready ? 'green' : tool.status === 'starting' ? 'blue' : 'red'}"><span></span>{tool.status}</span>
+    <span class="cc-status {displayStatus === 'ready' ? 'green' : displayStatus === 'blocked' ? 'red' : displayStatus === 'reconnecting' || displayStatus === 'starting' ? 'blue' : 'red'}"><span></span>{displayStatus === 'reconnecting' ? t($locale, 'reconnecting', '正在重連') : displayStatus === 'blocked' ? t($locale, 'reconnect paused', '重連已暫停') : tool.status}</span>
     <span>{tool.endpoint}</span>
     <span>{t($locale, 'Original chrome', '原始介面')}</span>
   </div>

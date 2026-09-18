@@ -98,6 +98,7 @@ function createOriginalUiController({
       sourceConfigured: Boolean(current?.home),
       installState: current?.managedInstall?.state || "not-installed",
       originalChrome: true,
+      longRun: current?.longRun || null,
     };
   }
 
@@ -184,8 +185,9 @@ function createOriginalUiController({
 
   async function openEmbedded(toolId, section) {
     const manifest = requireTool(toolId);
-    const selected = section || manifest.sections[0];
     let state = await inspect(toolId);
+    const selected = section || state.longRun?.selectedSection || manifest.sections[0];
+    if (externalServices?.rememberSection) externalServices.rememberSection(toolId, selected);
     if (state.status !== "ready") {
       await start(toolId);
       state = await waitUntilReady(toolId);

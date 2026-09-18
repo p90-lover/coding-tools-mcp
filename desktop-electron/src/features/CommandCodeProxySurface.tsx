@@ -88,7 +88,11 @@ export function CommandCodeProxySurface({
       <dl className="commandcode-health">
         <div>
           <dt>{text(language, "Health", "健康狀態")}</dt>
-          <dd>{health?.status ?? service.status}</dd>
+          <dd>{service.longRun?.uiStatus === "reconnecting"
+            ? text(language, "Reconnecting", "正在重連")
+            : service.longRun?.uiStatus === "blocked"
+              ? text(language, "Reconnect paused", "重連已暫停")
+              : health?.status ?? service.status}</dd>
         </div>
         <div>
           <dt>{text(language, "Models", "模型")}</dt>

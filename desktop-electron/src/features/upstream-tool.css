@@ -105,12 +105,14 @@
   color: #62e4a4;
 }
 
-.upstream-tool-status.status-starting {
+.upstream-tool-status.status-starting,
+.upstream-tool-status.status-reconnecting {
   border-color: rgb(89 146 255 / 35%);
   background: rgb(89 146 255 / 12%);
   color: #8bb6ff;
 }
 
+.upstream-tool-status.status-blocked,
 .upstream-tool-status.status-error {
   border-color: rgb(255 98 112 / 35%);
   background: rgb(255 98 112 / 12%);

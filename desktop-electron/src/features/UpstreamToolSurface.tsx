@@ -72,7 +72,7 @@ export function UpstreamToolSurface({
     const current = toolFrom(next, toolId);
     if (current) {
       setEndpoint(current.endpoint);
-      setSelectedSection((value) => value || current.sections[0] || "");
+      setSelectedSection((value) => value || current.longRun?.selectedSection || current.sections[0] || "");
     }
     return current;
   };
@@ -89,7 +89,7 @@ export function UpstreamToolSurface({
         const current = toolFrom(next, toolId);
         if (!current) return;
         setEndpoint(current.endpoint);
-        const section = current.sections[0] || "";
+        const section = current.longRun?.selectedSection || current.sections[0] || "";
         setSelectedSection(section);
         if (current.status === "ready" && section) {
           const result = await api.openEmbeddedTool(toolId, section);
@@ -164,13 +164,18 @@ export function UpstreamToolSurface({
   }
 
   const ready = tool.status === "ready";
-  const statusText = ready
+  const displayStatus = tool.longRun?.uiStatus || tool.status;
+  const statusText = displayStatus === "ready"
     ? localize(language, "Connected", "已連線")
-    : tool.status === "starting"
-      ? localize(language, "Starting", "正在啟動")
-      : tool.status === "error"
-        ? localize(language, "Error", "錯誤")
-        : localize(language, "Offline", "離線");
+    : displayStatus === "reconnecting"
+      ? localize(language, "Reconnecting", "正在重連")
+      : displayStatus === "blocked"
+        ? localize(language, "Reconnect paused", "重連已暫停")
+        : displayStatus === "starting"
+          ? localize(language, "Starting", "正在啟動")
+          : tool.status === "error"
+            ? localize(language, "Error", "錯誤")
+            : localize(language, "Offline", "離線");
 
   const immersive = Boolean(frameUrl);
   const annealManagedHint = toolId === "anneal"
@@ -199,7 +204,7 @@ export function UpstreamToolSurface({
             </p>
           )}
         </div>
-        <span className={`upstream-tool-status status-${tool.status}`}>{statusText}</span>
+        <span className={`upstream-tool-status status-${displayStatus}`}>{statusText}</span>
         {immersive ? (
           <button className="upstream-chrome-toggle" onClick={() => setChromeOpen((value) => !value)} type="button">
             {chromeOpen

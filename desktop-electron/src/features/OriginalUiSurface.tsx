@@ -36,7 +36,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     const next = await api.originalUiSnapshot();
     setSnapshot(next);
     const current = toolFrom(next, toolId);
-    if (current) setSelectedSection((value) => value || current.sections[0] || "");
+    if (current) setSelectedSection((value) => value || current.longRun?.selectedSection || current.sections[0] || "");
     return current;
   };
 
@@ -55,7 +55,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       if (cancelled) return;
       setSnapshot(next);
       const current = toolFrom(next, toolId);
-      if (current) setSelectedSection(current.sections[0] || "");
+      if (current) setSelectedSection((value) => value || current.longRun?.selectedSection || current.sections[0] || "");
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribe = api.onExternalServicesChanged?.(() => {
       void api.originalUiSnapshot().then((next) => {
@@ -108,7 +108,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     if (!tool || autoOpened.current || busy || !api) return;
     if (tool.status !== "ready" || toolId === "codex-router") return;
     autoOpened.current = true;
-    void openSection(tool.sections[0]).catch((cause) => setError(messageOf(cause)));
+    void openSection(selectedSection || tool.longRun?.selectedSection || tool.sections[0]).catch((cause) => setError(messageOf(cause)));
   }, [api, busy, setError, tool, toolId]);
 
   if (!tool) {
@@ -122,22 +122,27 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   }
 
   const ready = tool.status === "ready";
+  const displayStatus = tool.longRun?.uiStatus || tool.status;
   const needsInstall = tool.installState === "not-installed"
     || tool.installState === "repair-required"
     || tool.installState === "error";
-  const statusText = ready
+  const statusText = displayStatus === "ready"
     ? localize(language, "Connected", "已連線")
-    : tool.status === "starting"
-      ? localize(language, "Starting", "正在啟動")
-      : tool.status === "error"
-        ? localize(language, "Error", "錯誤")
-        : localize(language, "Offline", "離線");
+    : displayStatus === "reconnecting"
+      ? localize(language, "Reconnecting", "正在重連")
+      : displayStatus === "blocked"
+        ? localize(language, "Reconnect paused", "重連已暫停")
+        : displayStatus === "starting"
+          ? localize(language, "Starting", "正在啟動")
+          : tool.status === "error"
+            ? localize(language, "Error", "錯誤")
+            : localize(language, "Offline", "離線");
 
   return (
     <section className="original-ui-surface" data-tool={toolId} data-original-chrome="true">
       <header className="original-ui-hostbar">
         <strong>{tool.name}</strong>
-        <span className={`original-ui-status status-${tool.status}`}>{statusText}</span>
+        <span className={`original-ui-status status-${displayStatus}`}>{statusText}</span>
         <div className="original-ui-hostbar-actions">
           <button className="primary" disabled={busy !== null} onClick={() => void run(ready ? "open" : "start", async () => {
             if (!api) throw new Error("Launcher IPC is unavailable");

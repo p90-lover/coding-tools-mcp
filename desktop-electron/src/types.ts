@@ -172,6 +172,20 @@ export interface ProviderExecutionPlan {
 
 export type ExternalServiceId = "codex-router" | "commandcode-proxy" | "cpa" | "paseo" | "anneal";
 export type ExternalServiceStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
+export type FiveStackLongRunUiStatus = "ready" | "starting" | "reconnecting" | "blocked" | "stopped" | "offline";
+
+export interface FiveStackLongRunSnapshot {
+  desired: "running" | "stopped";
+  selectedSection: string;
+  uiStatus: FiveStackLongRunUiStatus;
+  reconnectAttempts: number;
+  maxAttempts: number;
+  retryAfterSeconds: number;
+  lastHealthyAt: number | null;
+  blockedReason: string | null;
+  targetUptimeMs: number;
+  heartbeatMs: number;
+}
 export type ManagedComponentInstallState =
   | "not-installed"
   | "installing"
@@ -288,6 +302,7 @@ export interface ExternalServiceSnapshot {
   providerModelCount?: number;
   health?: CommandCodeProxyHealth;
   managedInstall: ManagedComponentInstallSnapshot;
+  longRun?: FiveStackLongRunSnapshot | null;
 }
 
 export interface ExternalServicesSnapshot {
@@ -338,6 +353,7 @@ export interface UpstreamToolSnapshot {
   error: string | null;
   sourceConfigured: boolean;
   sourceAvailable: boolean;
+  longRun?: FiveStackLongRunSnapshot | null;
 }
 
 export interface UpstreamToolsSnapshot {
@@ -367,6 +383,7 @@ export interface OriginalUiSnapshot {
   sourceConfigured: boolean;
   installState: ManagedComponentInstallState;
   originalChrome: boolean;
+  longRun?: FiveStackLongRunSnapshot | null;
 }
 
 export interface OriginalUiCatalog {

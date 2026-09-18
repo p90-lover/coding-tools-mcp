@@ -87,6 +87,26 @@ test("all five stacks keep original visual UI and managed lifecycle wiring", () 
   assert.match(commandCodePanel, /onStart|five_stack_start/);
   assert.match(fiveStack, /disable-control-panel: false/);
   assert.doesNotMatch(fiveStack.split("#[cfg(test)]")[0], /disable-control-panel: true/);
+
+  const longRun = read("electron/five-stack-long-run.cjs");
+  const longRunRust = readRepo("src-tauri/src/integrations/long_run.rs");
+  const originalUiSurface = read("src/features/OriginalUiSurface.tsx");
+  const commandCodeSurface = read("src/features/CommandCodeProxySurface.tsx");
+  const upstreamSurface = read("src/features/UpstreamToolSurface.tsx");
+  const main = read("electron/main.cjs");
+  const lib = readRepo("src-tauri/src/lib.rs");
+  assert.match(longRun, /TARGET_UPTIME_MS = 7 \* 24 \* 60 \* 60 \* 1000/);
+  assert.match(longRun, /createFiveStackLongRun/);
+  assert.match(longRunRust, /ensure_five_stack_health_loop/);
+  assert.match(combined, /longRun: longRun\.summary/);
+  assert.match(combined, /supervised = false/);
+  assert.match(main, /powerMonitor\.on\("suspend"/);
+  assert.match(lib, /ensure_five_stack_health_loop/);
+  assert.match(originalUiSurface, /Reconnecting/);
+  assert.match(commandCodeSurface, /Reconnecting/);
+  assert.match(upstreamSurface, /Reconnecting/);
+  assert.match(tauriOriginalUi, /reconnecting/);
+  assert.match(commandCodePanel, /reconnecting/);
 });
 
 test("managed security boundaries stay loopback, focused-window, secret-redacted, and no-delete", () => {

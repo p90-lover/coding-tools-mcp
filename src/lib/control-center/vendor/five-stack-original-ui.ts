@@ -68,6 +68,16 @@ export type FiveStackSnapshot = {
   install_state: string;
   error: string | null;
   health: Record<string, unknown> | null;
+  long_run?: {
+    desired?: string;
+    selected_section?: string;
+    ui_status?: string;
+    uiStatus?: string;
+    reconnect_attempts?: number;
+    max_attempts?: number;
+    retry_after_seconds?: number;
+    blocked_reason?: string | null;
+  } | null;
 };
 
 export type FiveStackCatalog = {

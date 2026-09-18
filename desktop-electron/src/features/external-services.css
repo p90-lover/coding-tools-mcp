@@ -256,6 +256,13 @@ button.external-service-card:hover,
   color: #69e6aa;
 }
 
+.external-service-status.status-starting,
+.external-service-status.status-reconnecting {
+  background: rgb(89 146 255 / 13%);
+  color: #8bb6ff;
+}
+
+.external-service-status.status-blocked,
 .external-service-status.status-error,
 .external-service-status.status-offline {
   background: rgb(230 111 120 / 13%);

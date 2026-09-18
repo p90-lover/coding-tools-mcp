@@ -186,6 +186,7 @@ function createUpstreamToolController({
       error: managed?.error ?? state.error,
       sourceConfigured: managed ? managed.sourceConfigured : Boolean(sourceHome),
       sourceAvailable: Boolean(sourceHome && fs.existsSync(sourceHome)),
+      longRun: managed?.longRun || null,
     };
   }
 
@@ -246,8 +247,9 @@ function createUpstreamToolController({
 
   async function openEmbeddedTool(toolId, section) {
     const manifest = requireTool(toolId);
-    const selectedSection = section || manifest.sections[0];
     const state = await inspect(toolId);
+    const selectedSection = section || state.longRun?.selectedSection || manifest.sections[0];
+    if (externalServices?.rememberSection) externalServices.rememberSection(toolId, selectedSection);
     return {
       tool: state,
       section: selectedSection,

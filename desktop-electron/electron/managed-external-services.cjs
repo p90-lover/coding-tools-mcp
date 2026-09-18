@@ -5,6 +5,7 @@ const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
+const { createFiveStackLongRun, HEARTBEAT_MS } = require("./five-stack-long-run.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
@@ -25,11 +26,21 @@ function createManagedExternalServicesController({
   manifestRoot = path.join(__dirname, "..", "vendor", "managed-components"),
   resolveRuntimeExecutable,
   publish = null,
+  longRun: injectedLongRun = null,
+  now = null,
+  enableHeartbeat = true,
   ...options
 } = {}) {
   let baseController = null;
   let managedController = null;
   let bootstrap = null;
+  let ticking = false;
+  let heartbeatTimer = null;
+  const longRun = injectedLongRun || createFiveStackLongRun({
+    persistPath: dataRoot ? path.join(dataRoot, "long-run.json") : null,
+    logger: options.logger,
+    now: now || (() => Date.now()),
+  });
 
   const publishCombined = () => {
     if (!baseController || !managedController) return;
@@ -78,6 +89,9 @@ function createManagedExternalServicesController({
     const configuration = managed.installState === "installed"
       ? managedConfiguration(service.id)
       : null;
+    const mergedStatus = running
+      ? (service.status === "error" ? "error" : service.status === "ready" ? "ready" : "starting")
+      : service.status;
     return {
       ...service,
       ...(configuration ? {
@@ -92,14 +106,11 @@ function createManagedExternalServicesController({
         sourceConfigured: true,
       } : {}),
       ...(running ? {
-        status: service.status === "error"
-          ? "error"
-          : service.status === "ready"
-            ? "ready"
-            : "starting",
+        status: mergedStatus,
         pid: running.pid,
         owned: true,
       } : {}),
+      longRun: longRun.summary(service.id, mergedStatus),
       managedInstall: {
         state: managed.installState,
         version: managed.version,
@@ -159,6 +170,7 @@ function createManagedExternalServicesController({
   }
 
   async function installManagedComponent(serviceId) {
+    longRun.setDesired(serviceId, "running");
     await managedController.installComponent(serviceId);
     applyManagedConfiguration(serviceId);
     await managedController.startComponent(serviceId);
@@ -168,6 +180,7 @@ function createManagedExternalServicesController({
   }
 
   async function repairManagedComponent(serviceId) {
+    longRun.setDesired(serviceId, "running");
     try { await managedController.stopComponent(serviceId); } catch {}
     await managedController.repairComponent(serviceId);
     applyManagedConfiguration(serviceId);
@@ -177,19 +190,25 @@ function createManagedExternalServicesController({
     return serviceFromSnapshot(serviceId);
   }
 
-  async function start(serviceId) {
+  async function start(serviceId, { supervised = false } = {}) {
+    if (!supervised) longRun.setDesired(serviceId, "running");
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       applyManagedConfiguration(serviceId);
       await managedController.startComponent(serviceId);
       await baseController.inspect(serviceId);
       publishCombined();
-      return serviceFromSnapshot(serviceId);
+      const snapshot = serviceFromSnapshot(serviceId);
+      if (snapshot.status === "ready") longRun.noteHealthy(serviceId);
+      return snapshot;
     }
-    return mergeService(await baseController.start(serviceId));
+    const started = mergeService(await baseController.start(serviceId));
+    if (started.status === "ready") longRun.noteHealthy(serviceId);
+    return started;
   }
 
   async function stop(serviceId) {
+    longRun.setDesired(serviceId, "stopped");
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       await managedController.stopComponent(serviceId);
@@ -201,13 +220,16 @@ function createManagedExternalServicesController({
   }
 
   async function restart(serviceId) {
+    longRun.setDesired(serviceId, "running");
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       applyManagedConfiguration(serviceId);
       await managedController.restartComponent(serviceId);
       await baseController.inspect(serviceId);
       publishCombined();
-      return serviceFromSnapshot(serviceId);
+      const snapshot = serviceFromSnapshot(serviceId);
+      if (snapshot.status === "ready") longRun.noteHealthy(serviceId);
+      return snapshot;
     }
     return mergeService(await baseController.restart(serviceId));
   }
@@ -258,7 +280,53 @@ function createManagedExternalServicesController({
     return bootstrap.getSnapshot();
   }
 
+  function rememberSection(serviceId, section) {
+    return longRun.setSelectedSection(serviceId, section);
+  }
+
+  function liveMap() {
+    const live = {};
+    for (const service of combinedSnapshot().services) {
+      live[service.id] = {
+        status: service.status,
+        installState: service.managedInstall?.state,
+      };
+    }
+    return live;
+  }
+
+  async function tick() {
+    if (ticking) return [];
+    ticking = true;
+    try {
+      const actions = longRun.planTick(liveMap());
+      for (const action of actions) {
+        if (action.action !== "reconnect") continue;
+        try {
+          await start(action.id, { supervised: true });
+        } catch (error) {
+          options.logger?.warn?.("five-stack-long-run.reconnect-failed", {
+            componentId: action.id,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      publishCombined();
+      return actions;
+    } finally {
+      ticking = false;
+    }
+  }
+
+  function markSuspended() {
+    longRun.markSuspended();
+  }
+
   function dispose() {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
     bootstrap?.dispose();
     managedController.dispose();
     baseController.dispose();
@@ -273,6 +341,13 @@ function createManagedExternalServicesController({
     publish: publishCombined,
     logger: options.logger,
   });
+
+  if (enableHeartbeat) {
+    heartbeatTimer = setInterval(() => {
+      void tick();
+    }, HEARTBEAT_MS);
+    heartbeatTimer.unref?.();
+  }
 
   return Object.freeze({
     snapshot: combinedSnapshot,
@@ -291,6 +366,10 @@ function createManagedExternalServicesController({
     reconcileManagedComponents,
     managedBootstrapSnapshot,
     managedComponentsSnapshot: () => managedController.snapshot(),
+    rememberSection,
+    markSuspended,
+    tick,
+    longRun,
     dispose,
   });
 }

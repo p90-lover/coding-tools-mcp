@@ -94,15 +94,19 @@ function serviceName(language: Language, id: ExternalServiceId): string {
 }
 
 function statusLabel(language: Language, service: ExternalServiceSnapshot): string {
-  const labels: Record<ExternalServiceSnapshot["status"], [string, string]> = {
+  const status = service.longRun?.uiStatus || service.status;
+  const labels: Record<string, [string, string]> = {
     unknown: ["Not checked", "尚未檢查"],
     disabled: ["Disabled", "已停用"],
     offline: ["Offline", "離線"],
     starting: ["Starting", "正在啟動"],
+    reconnecting: ["Reconnecting", "正在重連"],
+    blocked: ["Reconnect paused", "重連已暫停"],
+    stopped: ["Stopped", "已停止"],
     ready: [service.owned ? "Running · app managed" : "Running · external", service.owned ? "運行中 · App 管理" : "運行中 · 外部管理"],
     error: ["Error", "錯誤"],
   };
-  const value = labels[service.status];
+  const value = labels[status] || labels[service.status];
   return text(language, value[0], value[1]);
 }
 
@@ -407,7 +411,7 @@ export function ExternalServicesSurface({
               <h2>{serviceName(language, selected.id)}</h2>
               <p>{selected.endpoint}</p>
             </div>
-            <span className={`external-service-status status-${selected.status}`}>{statusLabel(language, selected)}</span>
+            <span className={`external-service-status status-${selected.longRun?.uiStatus || selected.status}`}>{statusLabel(language, selected)}</span>
           </header>
 
           {selected.id === "commandcode-proxy" ? (

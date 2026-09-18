@@ -55,6 +55,7 @@
   const anthropicBase = $derived(`${origin}/v1`);
   const health = $derived(service?.health ?? null);
   const version = $derived(typeof health?.version === 'string' ? health.version : '1.0.0');
+  const displayStatus = $derived(service?.long_run?.ui_status || service?.long_run?.uiStatus || service?.status || 'offline');
 
   function buildPlan() {
     return commandCodeProxyRegistrationPlan({ baseUrl, routerCli, curateCli });
@@ -132,6 +133,10 @@
       <h2 id="commandcode-proxy-title">CommandCode Proxy</h2>
       <p>{t($locale, 'Original CLI banner plus managed Check/Start/Stop/Restart on 127.0.0.1:9090.', '原版 CLI banner，並在 127.0.0.1:9090 提供受管 Check／Start／Stop／Restart。')}</p>
     </div>
+  </div>
+  <div class="cc-integration-features">
+    <span class="cc-status {displayStatus === 'ready' ? 'green' : displayStatus === 'blocked' ? 'red' : displayStatus === 'reconnecting' || displayStatus === 'starting' ? 'blue' : 'red'}"><span></span>{displayStatus === 'reconnecting' ? t($locale, 'reconnecting', '正在重連') : displayStatus === 'blocked' ? t($locale, 'reconnect paused', '重連已暫停') : displayStatus}</span>
+    <span>{origin}</span>
   </div>
   <pre class="commandcode-banner">
 {` CommandCode AI Proxy v${version}

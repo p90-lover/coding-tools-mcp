@@ -227,6 +227,8 @@ pub struct ToolSnapshot {
     pub install_state: String,
     pub error: Option<String>,
     pub health: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long_run: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -480,7 +482,7 @@ fn record_child(id: ToolId, child: Child) {
     }
 }
 
-pub async fn inspect(id: ToolId) -> ToolSnapshot {
+pub(crate) async fn inspect_live(id: ToolId) -> ToolSnapshot {
     let tool = spec(id);
     let endpoint = tool.default_endpoint.to_string();
     let pid = owned_pid(id);
@@ -516,7 +518,31 @@ pub async fn inspect(id: ToolId) -> ToolSnapshot {
         install_state: install_state.into(),
         error,
         health: health_value,
+        long_run: None,
     }
+}
+
+fn decorate(mut snapshot: ToolSnapshot) -> ToolSnapshot {
+    let live = snapshot.status.clone();
+    if live == "ready" {
+        super::long_run::note_healthy(snapshot.id);
+    }
+    snapshot.long_run = Some(super::long_run::summary(snapshot.id, &live));
+    if let Some(ui) = snapshot
+        .long_run
+        .as_ref()
+        .and_then(|value| value.get("ui_status").or_else(|| value.get("uiStatus")))
+        .and_then(|value| value.as_str())
+    {
+        if ui == "reconnecting" || ui == "blocked" {
+            snapshot.status = ui.into();
+        }
+    }
+    snapshot
+}
+
+pub async fn inspect(id: ToolId) -> ToolSnapshot {
+    decorate(inspect_live(id).await)
 }
 
 pub async fn snapshot() -> Catalog {
@@ -592,9 +618,17 @@ fn spawn_managed(
 }
 
 pub async fn start(id: ToolId) -> AppResult<ToolSnapshot> {
-    let current = inspect(id).await;
+    super::long_run::set_desired(id, super::long_run::Desired::Running);
+    start_supervised(id).await
+}
+
+pub(crate) async fn start_supervised(id: ToolId) -> AppResult<ToolSnapshot> {
+    let current = inspect_live(id).await;
     if current.status == "ready" {
-        return Ok(current);
+        return Ok(decorate(current));
+    }
+    if current.pid.is_some() {
+        return Ok(decorate(current));
     }
     match id {
         ToolId::Cpa => start_cpa().await?,
@@ -603,7 +637,7 @@ pub async fn start(id: ToolId) -> AppResult<ToolSnapshot> {
         ToolId::Anneal => start_npm(id, &["run", "dev:web"])?,
         ToolId::CodexRouter => start_codex_router()?,
     }
-    Ok(inspect(id).await)
+    Ok(decorate(inspect_live(id).await))
 }
 
 fn npm_executable() -> PathBuf {
@@ -774,7 +808,7 @@ fn visit_files(root: &Path, matches: &mut Vec<PathBuf>) -> AppResult<()> {
     Ok(())
 }
 
-pub fn stop(id: ToolId) -> AppResult<ToolSnapshot> {
+fn stop_process(id: ToolId) {
     if let Ok(mut guard) = processes().lock() {
         if let Some(mut children) = guard.remove(id.as_str()) {
             for child in children.iter_mut().rev() {
@@ -783,12 +817,17 @@ pub fn stop(id: ToolId) -> AppResult<ToolSnapshot> {
             }
         }
     }
-    Ok(ToolSnapshot {
+}
+
+pub fn stop(id: ToolId) -> AppResult<ToolSnapshot> {
+    super::long_run::set_desired(id, super::long_run::Desired::Stopped);
+    stop_process(id);
+    Ok(decorate(ToolSnapshot {
         pid: None,
         owned: false,
         status: "offline".into(),
         ..poll_sync(id)
-    })
+    }))
 }
 
 fn poll_sync(id: ToolId) -> ToolSnapshot {
@@ -813,12 +852,14 @@ fn poll_sync(id: ToolId) -> ToolSnapshot {
         },
         error: None,
         health: None,
+        long_run: None,
     }
 }
 
 pub async fn restart(id: ToolId) -> AppResult<ToolSnapshot> {
-    let _ = stop(id);
-    start(id).await
+    super::long_run::set_desired(id, super::long_run::Desired::Running);
+    stop_process(id);
+    start_supervised(id).await
 }
 
 pub async fn bootstrap() -> AppResult<Catalog> {
@@ -832,7 +873,18 @@ pub fn open_target(id: ToolId, section: Option<&str>) -> AppResult<OpenResult> {
     let tool = spec(id);
     let selected = section
         .filter(|value| !value.is_empty())
-        .unwrap_or(tool.sections[0]);
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| super::long_run::selected_section(id));
+    let selected = if selected.is_empty() {
+        tool.sections[0]
+    } else {
+        tool.sections
+            .iter()
+            .copied()
+            .find(|name| *name == selected)
+            .unwrap_or(tool.sections[0])
+    };
+    super::long_run::set_selected_section(id, selected);
     Ok(OpenResult {
         tool: poll_sync(id),
         section: selected.into(),
@@ -912,5 +964,19 @@ mod tests {
             .iter()
             .any(|tool| tool.id == ToolId::CodexRouter && tool.original_window));
         assert_eq!(spec(ToolId::CommandCodeProxy).health_path, "/");
+    }
+
+    #[test]
+    fn long_run_policy_matches_electron_contract() {
+        assert_eq!(super::super::long_run::MAX_ATTEMPTS, 8);
+        assert_eq!(super::super::long_run::HEARTBEAT_MS, 30_000);
+        assert_eq!(
+            super::super::long_run::TARGET_UPTIME_MS,
+            7 * 24 * 60 * 60 * 1000
+        );
+        assert_eq!(
+            super::super::long_run::BACKOFF_SECONDS,
+            [5, 15, 30, 60, 120, 300]
+        );
     }
 }
