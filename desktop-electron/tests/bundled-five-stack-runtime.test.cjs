@@ -13,6 +13,7 @@ const {
   prepareFiveStackRuntime,
   rewritePackageScriptsToAbsoluteNode,
   withAbsoluteNodeCommand,
+  withAbsoluteNpmCommand,
 } = require("../scripts/prepare-five-stack-runtime.cjs");
 const { prepare } = require("../electron/codex-router-managed.cjs");
 
@@ -359,6 +360,7 @@ test("five-stack prepare rewrites nested node scripts to an absolute node.exe", 
   const protocol = path.join(root, "packages", "protocol");
   fs.mkdirSync(protocol, { recursive: true });
   fs.writeFileSync(nodeExe, "");
+  fs.writeFileSync(nodeExe.replace(/node\.exe$/i, "npm.cmd"), "");
   fs.writeFileSync(path.join(root, "package.json"), `${JSON.stringify({
     name: "paseo",
     private: true,
@@ -372,14 +374,21 @@ test("five-stack prepare rewrites nested node scripts to an absolute node.exe", 
     },
   }, null, 2)}\n`);
 
-  const rewritten = rewritePackageScriptsToAbsoluteNode(root, nodeExe);
-  assert.equal(rewritten, 1);
+  const npmCmd = nodeExe.replace(/node\.exe$/i, "npm.cmd");
+  const rewritten = rewritePackageScriptsToAbsoluteNode(root, nodeExe, npmCmd);
+  assert.equal(rewritten, 2);
   const protocolPkg = JSON.parse(fs.readFileSync(path.join(protocol, "package.json"), "utf8"));
+  const rootPkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(protocolPkg.scripts["generate:validators"], `${nodeExe} scripts/generate-validation-aot.mjs`);
-  assert.equal(protocolPkg.scripts.build, "npm run generate:validators");
+  assert.equal(protocolPkg.scripts.build, `${npmCmd} run generate:validators`);
+  assert.match(rootPkg.scripts["build:server"], /npm\.cmd run build/);
   assert.equal(
     withAbsoluteNodeCommand("node scripts/generate-validation-aot.mjs", "C:\\Program Files\\nodejs\\node.exe"),
     "node scripts/generate-validation-aot.mjs",
+  );
+  assert.equal(
+    withAbsoluteNpmCommand("npm run generate:validators", "C:\\nodejs\\npm.cmd"),
+    "C:\\nodejs\\npm.cmd run generate:validators",
   );
 });
 
@@ -415,10 +424,14 @@ test("Windows package directories get node.cmd in CWD for empty PATH cmd lookup"
   fs.mkdirSync(nodeDir, { recursive: true });
   fs.mkdirSync(protocol, { recursive: true });
   fs.writeFileSync(nodeExe, "");
+  fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo real-npm\r\n");
   fs.writeFileSync(path.join(root, "package.json"), "{}\n");
   fs.writeFileSync(path.join(protocol, "package.json"), "{}\n");
 
-  const written = installWindowsCwdNodeCommands(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "win32");
+  const written = installWindowsCwdNodeCommands(root, {
+    CODING_TOOLS_NODE_EXE: nodeExe,
+    TEMP: root,
+  }, "win32");
   const expected = [
     path.join(root, "node.cmd"),
     path.join(protocol, "node.cmd"),
@@ -430,6 +443,9 @@ test("Windows package directories get node.cmd in CWD for empty PATH cmd lookup"
       `@echo off\r\n"${nodeExe}" %*\r\n`,
     );
     assert.equal(fs.readFileSync(cmd.replace(/\.cmd$/i, ".bat"), "utf8"), fs.readFileSync(cmd, "utf8"));
+    const npmCmd = cmd.replace(/node\.cmd$/i, "npm.cmd");
+    assert.ok(written.includes(npmCmd), `missing ${npmCmd}`);
+    assert.match(fs.readFileSync(npmCmd, "utf8"), /npm\.cmd/);
   }
   assert.equal(installWindowsCwdNodeCommands(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "linux").length, 0);
 });

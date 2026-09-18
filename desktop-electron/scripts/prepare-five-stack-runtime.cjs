@@ -352,7 +352,13 @@ function withAbsoluteNodeCommand(script, nodeExecutable) {
   return String(script).replace(/(^|[\s|&;])node(?:\.exe)?(?=\s|$)/gi, `$1${exe}`);
 }
 
-function rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable) {
+function withAbsoluteNpmCommand(script, npmExecutable) {
+  const exe = String(npmExecutable);
+  if (/[\s"&()<>^|!]/.test(exe)) return String(script);
+  return String(script).replace(/(^|[\s|&;])npm(?:\.cmd)?(?=\s|$)/gi, `$1${exe}`);
+}
+
+function rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable, npmExecutable) {
   if (!nodeExecutable || !isFile(nodeExecutable)) return 0;
   let rewritten = 0;
   const visit = (dir) => {
@@ -380,7 +386,10 @@ function rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable) {
       let changed = false;
       for (const [name, value] of Object.entries(pkg.scripts)) {
         if (typeof value !== "string") continue;
-        const next = withAbsoluteNodeCommand(value, nodeExecutable);
+        let next = withAbsoluteNodeCommand(value, nodeExecutable);
+        if (npmExecutable && isFile(npmExecutable)) {
+          next = withAbsoluteNpmCommand(next, npmExecutable);
+        }
         if (next === value) continue;
         pkg.scripts[name] = next;
         changed = true;
@@ -416,14 +425,24 @@ function installWindowsNodeBinShims(sourceRoot, env = process.env, platform = pr
   if (platform !== "win32") return [];
   const nodeExecutable = resolveNodeExecutable(env, platform);
   if (!nodeExecutable || !isFile(nodeExecutable)) return [];
-  const body = `@echo off\r\n"${nodeExecutable}" %*\r\n`;
+  const npmExecutable = resolveNpmExecutable(env, platform);
+  const nodeBody = `@echo off\r\n"${nodeExecutable}" %*\r\n`;
+  const npmBody = npmExecutable && isFile(npmExecutable)
+    ? `@echo off\r\ncall "${npmExecutable}" %*\r\n`
+    : null;
   const written = [];
   for (const bin of npmBinDirectories(sourceRoot)) {
     fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
     const cmd = path.join(bin, "node.cmd");
-    fs.writeFileSync(cmd, body);
-    fs.writeFileSync(path.join(bin, "node.bat"), body);
+    fs.writeFileSync(cmd, nodeBody);
+    fs.writeFileSync(path.join(bin, "node.bat"), nodeBody);
     written.push(cmd);
+    if (npmBody) {
+      const npmCmd = path.join(bin, "npm.cmd");
+      fs.writeFileSync(npmCmd, npmBody);
+      fs.writeFileSync(path.join(bin, "npm.bat"), npmBody);
+      written.push(npmCmd);
+    }
   }
   return written;
 }
@@ -452,13 +471,23 @@ function installWindowsCwdNodeCommands(sourceRoot, env = process.env, platform =
   if (platform !== "win32") return [];
   const nodeExecutable = resolveNodeExecutable(env, platform);
   if (!nodeExecutable || !isFile(nodeExecutable)) return [];
-  const body = `@echo off\r\n"${nodeExecutable}" %*\r\n`;
+  const npmExecutable = resolveNpmExecutable(env, platform);
+  const nodeBody = `@echo off\r\n"${nodeExecutable}" %*\r\n`;
+  const npmBody = npmExecutable && isFile(npmExecutable)
+    ? `@echo off\r\ncall "${npmExecutable}" %*\r\n`
+    : null;
   const written = [];
   for (const dir of packageJsonDirectories(sourceRoot)) {
     const cmd = path.join(dir, "node.cmd");
-    fs.writeFileSync(cmd, body);
-    fs.writeFileSync(path.join(dir, "node.bat"), body);
+    fs.writeFileSync(cmd, nodeBody);
+    fs.writeFileSync(path.join(dir, "node.bat"), nodeBody);
     written.push(cmd);
+    if (npmBody) {
+      const npmCmd = path.join(dir, "npm.cmd");
+      fs.writeFileSync(npmCmd, npmBody);
+      fs.writeFileSync(path.join(dir, "npm.bat"), npmBody);
+      written.push(npmCmd);
+    }
   }
   return written;
 }
@@ -466,8 +495,9 @@ function installWindowsCwdNodeCommands(sourceRoot, env = process.env, platform =
 function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
   if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
   const nodeExecutable = resolveNodeExecutable();
+  const npmExecutable = resolveNpmExecutable();
   installWindowsCwdNodeCommands(sourceRoot);
-  if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable);
+  if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable, npmExecutable);
   runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
   installWindowsNodeBinShims(sourceRoot);
   installWindowsCwdNodeCommands(sourceRoot);
@@ -643,4 +673,5 @@ module.exports = {
   resolveNpmCliJs,
   rewritePackageScriptsToAbsoluteNode,
   withAbsoluteNodeCommand,
+  withAbsoluteNpmCommand,
 };
