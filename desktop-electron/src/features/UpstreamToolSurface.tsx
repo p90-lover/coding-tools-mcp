@@ -283,8 +283,8 @@ export function UpstreamToolSurface({
         <p className="upstream-tool-hint">
           {localize(
             language,
-            "Use the connection controls below to install, start, stop, or repair the managed service.",
-            "請使用下方連線控制安裝、啟動、停止或修復受管服務。",
+            "Use the connection controls below to start or inspect the bundled in-app service. Coding Tools does not download Paseo or Anneal at runtime.",
+            "請使用下方連線控制啟動或檢查已內建服務。Coding Tools 不會在執行時下載 Paseo 或 Anneal。",
           )}
         </p>
       ) : null}

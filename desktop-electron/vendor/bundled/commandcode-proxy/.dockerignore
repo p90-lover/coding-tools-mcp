@@ -1,0 +1,14 @@
+node_modules
+.env
+.env.local
+.env.*.local
+*.log
+.git
+.gitignore
+test
+coverage
+.nyc_output
+LICENSE
+*.md
+docker-compose.yml
+.dockerignore

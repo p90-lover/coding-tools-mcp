@@ -97,7 +97,19 @@ function statusLabel(language: Language, service: ExternalServiceSnapshot): stri
   return text(language, value[0], value[1]);
 }
 
+function isBundledComponent(service: ExternalServiceSnapshot): boolean {
+  return service.managedInstall.strategy === "bundled-source"
+    || service.id === "commandcode-proxy"
+    || service.id === "paseo"
+    || service.id === "anneal";
+}
+
 function installStateLabel(language: Language, service: ExternalServiceSnapshot): string {
+  if (isBundledComponent(service) && (service.managedInstall.state === "not-installed" || service.managedInstall.state === "installed")) {
+    return service.managedInstall.state === "installed"
+      ? text(language, "Bundled in app · ready", "已內建於 App · 就緒")
+      : text(language, "Bundled in app", "已內建於 App");
+  }
   const labels: Record<ExternalServiceSnapshot["managedInstall"]["state"], [string, string]> = {
     "not-installed": ["Bundled · ready to start", "已內建 · 可啟動"],
     installing: ["Unpacking bundled runtime", "正在解包內建執行環境"],
@@ -362,8 +374,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime. They share in-app loopbacks (CPA :8317, Router :4202, CommandCode :9090, Paseo :6768, Anneal :5173/:3000) so cross-use does not need a separate install. Open CPA and Codex Router original interfaces from their dedicated pages.",
-            "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。五棧共用 App 內 loopback（CPA :8317、Router :4202、CommandCode :9090、Paseo :6768、Anneal :5173/:3000），交叉使用唔使另外安裝。CPA 與 Codex Router 原始介面由專用頁面開啟。",
+            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime. CommandCode Proxy, Paseo and Anneal are bundled inside this app — Start them without a separate download. They share in-app loopbacks (CPA :8317, Router :4202, CommandCode :9090, Paseo :6768, Anneal :5173/:3000) so cross-use does not need a separate install. Open CPA and Codex Router original interfaces from their dedicated pages.",
+            "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CommandCode Proxy、Paseo 與 Anneal 已內建於本 App，Start 不必另外下載。五棧共用 App 內 loopback（CPA :8317、Router :4202、CommandCode :9090、Paseo :6768、Anneal :5173/:3000），交叉使用唔使另外安裝。CPA 與 Codex Router 原始介面由專用頁面開啟。",
           )}</p>
         </div>
         <div className="external-services-heading-actions">
@@ -443,8 +455,8 @@ export function ExternalServicesSurface({
               <label className="managed-secret-field">
                 <span>{text(
                   language,
-                  "GitHub read token (optional, for extra GitHub features)",
-                  "GitHub 唯讀 Token（選填，用於額外 GitHub 功能）",
+                  "GitHub read token (optional, for extra GitHub features / Anneal setup:local)",
+                  "GitHub 唯讀 Token（選填，用於額外 GitHub 功能／Anneal setup:local）",
                 )}</span>
                 <input
                   autoComplete="off"
@@ -457,6 +469,15 @@ export function ExternalServicesSurface({
                 </button>
               </label>
             ) : null}
+            {isBundledComponent(selected) ? (
+              <p className="managed-bundled-hint">
+                {text(
+                  language,
+                  "Bundled inside Coding Tools. Start copies the in-app payload. No separate download or GitHub clone.",
+                  "已內建於 Coding Tools。Start 會複製 App 內建 payload，不必另外下載或 git clone。",
+                )}
+              </p>
+            ) : (
             <button
               className="primary"
               disabled={busy !== null
@@ -469,6 +490,7 @@ export function ExternalServicesSurface({
                 ? "…"
                 : text(language, "Repair runtime", "修復執行環境")}
             </button>
+            )}
           </section>
 
           <details className="external-service-advanced">

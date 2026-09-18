@@ -65,6 +65,7 @@
       "electron/**",
       "vendor/upstream/**",
       "vendor/managed-components/**",
+      "vendor/bundled/**",
       "assets/icon.png",
       "assets/linux-appimage-runner.sh",
       "package.json"

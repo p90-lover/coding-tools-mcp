@@ -1,0 +1,47 @@
+{
+  "name": "commandcode-proxy",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible and Anthropic-compatible API proxy for CommandCode AI models",
+  "type": "module",
+  "main": "proxy.mjs",
+  "bin": {
+    "commandcode-proxy": "./proxy.mjs"
+  },
+  "files": [
+    "proxy.mjs",
+    "LICENSE",
+    "README.md",
+    ".env.example"
+  ],
+  "scripts": {
+    "start": "node proxy.mjs",
+    "dev": "node --watch proxy.mjs",
+    "test": "node --test test/unit.test.mjs test/proxy.test.mjs",
+    "test:unit": "node --test test/unit.test.mjs",
+    "test:integration": "node --test test/proxy.test.mjs",
+    "test:docker": "node test/docker-e2e.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "commandcode",
+    "proxy",
+    "openai",
+    "anthropic",
+    "api",
+    "claude",
+    "cursor",
+    "llm"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zahidhussaina2l/commandcode-proxy.git"
+  },
+  "homepage": "https://github.com/zahidhussaina2l/commandcode-proxy#readme",
+  "bugs": {
+    "url": "https://github.com/zahidhussaina2l/commandcode-proxy/issues"
+  },
+  "dependencies": {}
+}
