@@ -38,4 +38,3 @@ tmp-run
 !/desktop-electron/vendor/bundled/paseo/BUNDLE.json
 /desktop-electron/vendor/bundled/anneal/**
 !/desktop-electron/vendor/bundled/anneal/BUNDLE.json
-
