@@ -1,0 +1,163 @@
+# Exact-source publisher for the unified app-tabs rc.11 release.
+name: Coding Tools v0.7.0-rc.11 exact-source Windows release
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.11
+    paths:
+      - .github/workflows/codex-router-multiprovider-release-rc11.yml
+      - aiTemp/rc8-release/run-windows-release.mjs
+      - aiTemp/rc8-release/verify-windows-migration.ps1
+      - desktop-electron/**
+      - runtime-web/**
+      - rust-core/**
+      - scripts/release/**
+      - docs/releases/v0.7.0-rc.11.md
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: coding-tools-v0.7.0-rc.11-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_VERSION: 0.7.0-rc.11
+  RELEASE_TAG: v0.7.0-rc.11
+  NODE_VERSION: '22'
+  BUN_VERSION: 1.4.0
+  RUST_TOOLCHAIN: 1.98.1
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  release-windows:
+    name: Verify app tabs, five-stack, package, migrate, and publish Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Generate and validate the rc.11 release runners
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $targetRoot = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc11-release'
+          New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+
+          $runnerSource = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc8-release\run-windows-release.mjs'
+          $runnerTarget = Join-Path $targetRoot 'run-windows-release.mjs'
+          $runner = [System.IO.File]::ReadAllText($runnerSource).Replace("`r`n", "`n")
+          $replacements = @(
+            @('release/codex-router-multiprovider-0.7.0-rc.8', 'release/codex-router-multiprovider-0.7.0-rc.11'),
+            @('codex-router-multiprovider-release-rc8.yml', 'codex-router-multiprovider-release-rc11.yml'),
+            @('aiTemp/rc8-release', 'aiTemp/rc11-release'),
+            @('docs/releases/v0.7.0-rc.8.md', 'docs/releases/v0.7.0-rc.11.md'),
+            @('v0.7.0-rc.8', 'v0.7.0-rc.11'),
+            @('0.7.0-rc.8', '0.7.0-rc.11'),
+            @('rc.8 exact-source', 'rc.11 exact-source'),
+            @('rc.8 release', 'rc.11 release'),
+            @('rc.8 prerelease', 'rc.11 prerelease'),
+            @('rc.8 migration', 'rc.11 migration'),
+            @('rc8-release', 'rc11-release')
+          )
+          foreach ($pair in $replacements) { $runner = $runner.Replace($pair[0], $pair[1]) }
+
+          $testAnchor = "    'desktop-electron/tests/external-services-control-plane.test.cjs',`n"
+          $extraTests = @(
+            "    'desktop-electron/tests/cpa-oauth-adapter.test.cjs',"
+            "    'desktop-electron/tests/cpa-provider-login-routing.test.cjs',"
+            "    'desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs',"
+            "    'desktop-electron/tests/managed-components-runtime.test.cjs',"
+            "    'desktop-electron/tests/rc9-five-stack-completion.test.cjs',"
+            "    'desktop-electron/tests/rc9-managed-five-stack.test.cjs',"
+            "    'desktop-electron/tests/rc9-package-identity-alignment.test.cjs',"
+            "    'desktop-electron/tests/integrated-app-tabs.test.cjs',"
+            "    'desktop-electron/tests/provider-console-saas.test.cjs',"
+            "    'desktop-electron/tests/rc11-release-identity.test.cjs',"
+          ) -join "`n"
+          $extraTests += "`n"
+          if (-not $runner.Contains('managed-components-runtime.test.cjs')) {
+            if (-not $runner.Contains($testAnchor)) { throw 'RC11_TEST_INSERTION_ANCHOR_MISSING' }
+            $runner = $runner.Replace($testAnchor, $testAnchor + $extraTests)
+          }
+
+          $syntaxAnchor = "    'desktop-electron/electron/external-services.cjs',`n"
+          $extraSyntax = @(
+            "    'desktop-electron/electron/managed-components.cjs',"
+            "    'desktop-electron/electron/managed-external-services.cjs',"
+            "    'desktop-electron/electron/cpa-oauth-adapter.cjs',"
+            "    'desktop-electron/electron/codex-router-managed.cjs',"
+          ) -join "`n"
+          $extraSyntax += "`n"
+          if (-not $runner.Contains('managed-external-services.cjs')) {
+            if (-not $runner.Contains($syntaxAnchor)) { throw 'RC11_SYNTAX_INSERTION_ANCHOR_MISSING' }
+            $runner = $runner.Replace($syntaxAnchor, $syntaxAnchor + $extraSyntax)
+          }
+          [System.IO.File]::WriteAllText($runnerTarget, $runner, [System.Text.UTF8Encoding]::new($false))
+
+          $migrationSource = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc8-release\verify-windows-migration.ps1'
+          $migrationTarget = Join-Path $targetRoot 'verify-windows-migration.ps1'
+          $migration = [System.IO.File]::ReadAllText($migrationSource)
+          foreach ($pair in $replacements) { $migration = $migration.Replace($pair[0], $pair[1]) }
+          [System.IO.File]::WriteAllText($migrationTarget, $migration, [System.Text.UTF8Encoding]::new($false))
+
+          node --check $runnerTarget
+          if ($LASTEXITCODE -ne 0) { throw 'Node rc.11 release runner syntax validation failed' }
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            $migrationTarget,
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.ToString() }
+            throw 'PowerShell rc.11 migration runner syntax validation failed'
+          }
+          Select-String -Path $runnerTarget -SimpleMatch "releaseVersion === '0.7.0-rc.11'" | Out-Null
+          Select-String -Path $runnerTarget -SimpleMatch 'managed-components-runtime.test.cjs' | Out-Null
+          Select-String -Path $runnerTarget -SimpleMatch 'cpa-unified-oauth-catalog.test.cjs' | Out-Null
+          Select-String -Path $runnerTarget -SimpleMatch 'rc9-package-identity-alignment.test.cjs' | Out-Null
+          Select-String -Path $runnerTarget -SimpleMatch 'integrated-app-tabs.test.cjs' | Out-Null
+          Select-String -Path $runnerTarget -SimpleMatch 'provider-console-saas.test.cjs' | Out-Null
+          Select-String -Path $runnerTarget -SimpleMatch 'rc11-release-identity.test.cjs' | Out-Null
+
+      - name: Run exact-source app-managed five-stack release pipeline
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node aiTemp/rc11-release/run-windows-release.mjs
+          if ($LASTEXITCODE -ne 0) { throw "rc.11 release runner failed with exit code $LASTEXITCODE" }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: coding-tools-v0.7.0-rc.11-evidence-${{ github.sha }}
+          path: |
+            aiTemp/evidence/
+            aiTemp/release-assets/
+            aiTemp/rc11-release/
+          if-no-files-found: warn
+          retention-days: 14
