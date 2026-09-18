@@ -249,6 +249,85 @@ function nativeCopyFor(language) {
   return NATIVE_COPY[language] || NATIVE_COPY.en;
 }
 
+const UPDATE_PROMPT_COPY = Object.freeze({
+  en: Object.freeze({
+    title: "Coding Tools beta update",
+    message: "A newer Coding Tools beta is ready.",
+    detail: "Install it into the current application folder and restart Coding Tools now?",
+    installNow: "Install and restart",
+    later: "Later",
+  }),
+  "zh-CN": Object.freeze({
+    title: "Coding Tools 测试版更新",
+    message: "检测到较新的 Coding Tools 测试版。",
+    detail: "是否安装到当前应用目录并立即重新启动 Coding Tools？",
+    installNow: "安装并重新启动",
+    later: "稍后",
+  }),
+  "zh-TW": Object.freeze({
+    title: "Coding Tools 測試版更新",
+    message: "偵測到較新嘅 Coding Tools 測試版。",
+    detail: "要唔要安裝到目前應用程式目錄，並立即重新啟動 Coding Tools？",
+    installNow: "安裝並重新啟動",
+    later: "稍後",
+  }),
+  ja: Object.freeze({
+    title: "Coding Tools ベータ更新",
+    message: "新しい Coding Tools ベータ版を検出しました。",
+    detail: "現在のアプリケーションフォルダーにインストールして再起動しますか？",
+    installNow: "インストールして再起動",
+    later: "後で",
+  }),
+});
+
+function updatePromptCopyFor(language) {
+  return UPDATE_PROMPT_COPY[language] || UPDATE_PROMPT_COPY.en;
+}
+
+let updatePromptVersion = null;
+let updatePromptInFlight = false;
+
+async function promptForAvailableUpdate(next, { logger, stateStore }) {
+  if (next?.status !== "available" || typeof next.version !== "string") return;
+  if (stateStore.read().automaticUpdates !== true) return;
+  if (updatePromptInFlight || updatePromptVersion === next.version) return;
+
+  updatePromptInFlight = true;
+  updatePromptVersion = next.version;
+  const copy = updatePromptCopyFor(stateStore.read().language);
+  try {
+    showMainWindow();
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: copy.title,
+      message: `${copy.message} v${next.version}`,
+      detail: copy.detail,
+      buttons: [copy.installNow, copy.later],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (result.response !== 0) {
+      logger.info("launcher.update_prompt_deferred", { version: next.version });
+      return;
+    }
+    const launch = await updateController.beginInstall();
+    const quitResult = await requestQuit();
+    if (!quitResult.ok) {
+      updateController.cancelInstall(launch);
+      throw new Error(quitResult.message);
+    }
+  } catch (error) {
+    updatePromptVersion = null;
+    logger.warn("launcher.update_prompt_failed", {
+      version: next.version,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    updatePromptInFlight = false;
+  }
+}
+
 function updateTrayMenu(language) {
   if (!tray) return;
   const copy = nativeCopyFor(language);
@@ -1220,7 +1299,12 @@ async function start() {
       ? runtimeBundlePaths(updaterRuntimeRoot, process.platform).executable
       : null,
     logsDirectory: app.getPath("logs"),
-    publish: (state) => send("launcher:update-state", state),
+    publish: (state) => {
+      send("launcher:update-state", state);
+      if (state.status === "available") {
+        void promptForAvailableUpdate(state, { logger, stateStore });
+      }
+    },
     logger,
   });
   registerIpc({ logger, stateStore });
@@ -1237,31 +1321,12 @@ async function start() {
   }
   await loadRenderer(mainWindow);
   if (!launcherSmokeTest) {
-    const maybeInstallAutomaticUpdate = async (next) => {
-      if (next?.status !== "available" || stateStore.read().automaticUpdates !== true) return;
-      if (runtimeHost?.currentOperation() || browserHost?.currentOperation() || browserHost?.activeTraceId) {
-        logger.info("launcher.automatic_update_deferred", { version: next.version });
-        return;
-      }
-      try {
-        const launch = await updateController.beginInstall();
-        const result = await requestQuit();
-        if (!result.ok) {
-          updateController.cancelInstall(launch);
-          logger.warn("launcher.automatic_update_deferred", {
-            version: next.version,
-            message: result.message,
-          });
-        }
-      } catch (error) {
-        logger.warn("launcher.automatic_update_failed", {
-          version: next.version,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
-    };
-    void updateController.checkNow({ force: true }).then(maybeInstallAutomaticUpdate);
-    updateController.startPeriodicChecks({ onAvailable: maybeInstallAutomaticUpdate });
+    void updateController.checkNow({ force: true }).catch((error) => {
+      logger.warn("launcher.update_check_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    updateController.startPeriodicChecks();
   }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
