@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   commandCodeProxyRegistrationPlan,
   renderCommandCodeProxyPlan,
-} from "../../src/lib/control-center/commandcode-proxy-provider.ts";
+} from "../../src/lib/control-center/commandcode-proxy-provider";
 
 export {
   COMMANDCODE_PROXY_ALTERNATE_LISTEN,
@@ -11,12 +11,12 @@ export {
   commandCodeProxyRegistrationPlan,
   isLoopbackUrl,
   renderCommandCodeProxyPlan,
-} from "../../src/lib/control-center/commandcode-proxy-provider.ts";
+} from "../../src/lib/control-center/commandcode-proxy-provider";
 export type {
   CommandCodeProxyProviderProfile,
   CommandCodeProxyRegistrationOptions,
   CommandCodeProxyRegistrationPlan,
-} from "../../src/lib/control-center/commandcode-proxy-provider.ts";
+} from "../../src/lib/control-center/commandcode-proxy-provider";
 
 function option(args: string[], name: string, fallback: string): string {
   const index = args.indexOf(name);
