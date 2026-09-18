@@ -90,7 +90,7 @@ pub fn endpoint(source: Source, value: &str) -> AppResult<url::Url> {
         Source::Anneal if u.scheme() == "http" && matches!(u.path(), "" | "/") => u.set_path("/"),
         _ => {
             return Err(err(
-                "Paseo uses ws://127.0.0.1:6767/ws; Anneal uses http://127.0.0.1:3000/",
+                "Paseo uses ws://127.0.0.1:6768/ws; Anneal uses http://127.0.0.1:3000/",
             ))
         }
     }

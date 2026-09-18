@@ -77,6 +77,8 @@ test("CommandCode Proxy is a pinned managed service using the existing CLI sessi
   assert.equal(manifest.credentials.sessionSource, "~/.commandcode/auth.json");
   assert.equal(manifest.launch.processes[0].environment.PROXY_HOST, "127.0.0.1");
   assert.equal(manifest.launch.processes[0].environment.PROXY_PORT, "9090");
+  assert.match(read("src/features/ProviderOrchestratorSurfaces.tsx"), /http:\/\/127\.0\.0\.1:9090\/v1\//);
+  assert.doesNotMatch(read("src/features/ProviderOrchestratorSurfaces.tsx"), /127\.0\.0\.1:3050/);
 });
 
 test("Paseo installation builds and runs the pinned upstream server", () => {
@@ -88,6 +90,7 @@ test("Paseo installation builds and runs the pinned upstream server", () => {
   assert.ok(manifest.install.steps.some((step) => step.arguments?.includes("build:server")));
   assert.equal(manifest.launch.processes[0].environment.PASEO_LISTEN, "127.0.0.1:6768");
   assert.equal(manifest.health.endpoint, "http://127.0.0.1:6768/");
+  assert.equal(manifest.executionEndpoint, "ws://127.0.0.1:6768/ws");
 });
 
 test("Anneal preserves config and guards its dedicated database migration", () => {
@@ -164,7 +167,15 @@ test("managed installation is wired through the combined controller, focused IPC
   assert.match(preload, /repairManagedComponent/);
   assert.match(types, /ManagedComponentInstallState/);
   assert.match(types, /installManagedComponent\(serviceId: ExternalServiceId\)/);
+  assert.match(main, /createManagedBootstrap/);
+  assert.match(main, /launcher:managed-bootstrap-snapshot/);
+  assert.match(main, /launcher:managed-bootstrap-reconcile/);
+  assert.match(preload, /managedBootstrapSnapshot/);
+  assert.match(preload, /reconcileManagedBootstrap/);
+  assert.match(types, /ManagedBootstrapSnapshot/);
+  assert.match(types, /reconcileManagedBootstrap\(/);
   assert.match(surface, /Install \/ Repair|安裝／修復/);
+  assert.match(surface, /Install and start all|全部安裝並啟動/);
   assert.match(surface, /managedInstall/);
   assert.match(surface, /Advanced manual configuration|進階手動設定/);
 });

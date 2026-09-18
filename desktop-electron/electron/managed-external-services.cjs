@@ -11,7 +11,7 @@ const SERVICE_ENDPOINTS = Object.freeze({
   cpa: Object.freeze({ endpoint: "http://127.0.0.1:8317/" }),
   paseo: Object.freeze({
     endpoint: "http://127.0.0.1:6768/",
-    executionEndpoint: "ws://127.0.0.1:6767/ws",
+    executionEndpoint: "ws://127.0.0.1:6768/ws",
   }),
   anneal: Object.freeze({
     endpoint: "http://127.0.0.1:5173/",

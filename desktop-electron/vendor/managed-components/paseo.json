@@ -35,5 +35,5 @@
     "endpoint": "http://127.0.0.1:6768/",
     "acceptStatus": [200, 302, 401, 403, 404]
   },
-  "executionEndpoint": "ws://127.0.0.1:6767/ws"
+  "executionEndpoint": "ws://127.0.0.1:6768/ws"
 }

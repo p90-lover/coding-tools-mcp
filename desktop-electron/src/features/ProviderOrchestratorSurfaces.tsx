@@ -58,7 +58,7 @@ function text(language: Language, english: string, traditionalChinese: string): 
 function presetBaseUrl(providerId: string): string {
   switch (providerId) {
     case "commandcode-proxy":
-      return "http://127.0.0.1:3050/v1/";
+      return "http://127.0.0.1:9090/v1/";
     case "ai-studio-reverse-proxy":
       return "http://127.0.0.1:7860/v1beta/";
     case "gemini-reverse-proxy":
@@ -488,7 +488,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   updateSelected({
                     engine,
                     engineEndpoint: engine === "paseo"
-                      ? "ws://127.0.0.1:6767/ws"
+                      ? "ws://127.0.0.1:6768/ws"
                       : "http://127.0.0.1:3000/",
                   });
                 }}>

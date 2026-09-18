@@ -36,6 +36,13 @@
   line-height: 1.55;
 }
 
+.external-services-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .external-services-heading button,
 .external-service-card button,
 .external-service-actions button {

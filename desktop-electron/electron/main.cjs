@@ -42,6 +42,7 @@ const {
 } = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
+const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
 const {
@@ -108,6 +109,7 @@ let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let updateController = null;
 let externalServicesController = null;
+let managedBootstrapController = null;
 let upstreamToolController = null;
 let originalUiController = null;
 
@@ -682,6 +684,19 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.syncCodexRouter();
+  });
+  handle("launcher:managed-bootstrap-snapshot", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!managedBootstrapController) throw new Error("Managed bootstrap controller is unavailable");
+    return managedBootstrapController.getSnapshot();
+  });
+  handle("launcher:managed-bootstrap-reconcile", (event, input = {}) => {
+    assertFocusedMainWindow(event, true);
+    if (!managedBootstrapController) throw new Error("Managed bootstrap controller is unavailable");
+    return managedBootstrapController.reconcile({
+      reason: typeof input?.reason === "string" ? input.reason : "manual",
+      componentIds: Array.isArray(input?.componentIds) ? input.componentIds : null,
+    });
   });
 
   handle("launcher:upstream-tools-snapshot", (event) => {
@@ -1296,6 +1311,15 @@ async function start() {
     },
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
+  managedBootstrapController = createManagedBootstrap({
+    snapshot: () => externalServicesController.snapshot(),
+    install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
+    repair: (serviceId) => externalServicesController.repairManagedComponent(serviceId),
+    start: (serviceId) => externalServicesController.start(serviceId),
+    inspect: (serviceId) => externalServicesController.inspect(serviceId),
+    logger,
+    publish: (value) => send("launcher:managed-bootstrap-changed", value),
+  });
   upstreamToolController = createUpstreamToolController({
     env: process.env,
     logger,
@@ -1308,6 +1332,7 @@ async function start() {
     electronExecutable: process.execPath,
   });
   app.once("before-quit", () => {
+    managedBootstrapController?.dispose();
     originalUiController?.dispose();
     externalServicesController?.dispose();
     upstreamToolController?.dispose();

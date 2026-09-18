@@ -5,6 +5,7 @@ import type {
   ExternalServiceSnapshot,
   ExternalServicesSnapshot,
   Language,
+  ManagedBootstrapSnapshot,
   ProviderNetworkSnapshot,
 } from "../types";
 import { CommandCodeProxySurface } from "./CommandCodeProxySurface";
@@ -133,6 +134,7 @@ export function ExternalServicesSurface({
   const [managedCredential, setManagedCredential] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
+  const [bootstrap, setBootstrap] = useState<ManagedBootstrapSnapshot | null>(null);
 
   const selected = services.services.find((service) => service.id === selectedId) ?? null;
   const activeAccounts = providers.accounts.filter((account) => !account.archivedAt);
@@ -154,12 +156,14 @@ export function ExternalServicesSurface({
 
   const refresh = async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
-    const [serviceSnapshot, providerSnapshot] = await Promise.all([
+    const [serviceSnapshot, providerSnapshot, bootstrapSnapshot] = await Promise.all([
       api.externalServicesSnapshot(),
       api.providerSnapshot(),
+      api.managedBootstrapSnapshot(),
     ]);
     setServices(serviceSnapshot);
     setProviders(providerSnapshot);
+    setBootstrap(bootstrapSnapshot);
     const current = serviceSnapshot.services.find((service) => service.id === selectedId)
       ?? serviceSnapshot.services[0];
     if (current) {
@@ -171,10 +175,15 @@ export function ExternalServicesSurface({
   useEffect(() => {
     if (!api) return;
     let cancelled = false;
-    void Promise.all([api.externalServicesSnapshot(), api.providerSnapshot()]).then(([nextServices, nextProviders]) => {
+    void Promise.all([
+      api.externalServicesSnapshot(),
+      api.providerSnapshot(),
+      api.managedBootstrapSnapshot(),
+    ]).then(([nextServices, nextProviders, nextBootstrap]) => {
       if (cancelled) return;
       setServices(nextServices);
       setProviders(nextProviders);
+      setBootstrap(nextBootstrap);
       const current = nextServices.services.find((service) => service.id === selectedId)
         ?? nextServices.services[0];
       if (current) {
@@ -187,10 +196,12 @@ export function ExternalServicesSurface({
       const current = next.services.find((service) => service.id === selectedId);
       if (current) setDraft(draftFrom(current));
     });
+    const unsubscribeBootstrap = api.onManagedBootstrapChanged(setBootstrap);
     const unsubscribeProviders = api.onProviderNetworkChanged(setProviders);
     return () => {
       cancelled = true;
       unsubscribeServices();
+      unsubscribeBootstrap();
       unsubscribeProviders();
     };
   }, [api, selectedId, setError]);
@@ -272,6 +283,17 @@ export function ExternalServicesSurface({
     setNotice(text(language, "Anneal credential saved securely.", "Anneal 憑證已安全儲存。"));
   });
 
+  const installAll = () => run("managed-bootstrap", async () => {
+    if (!api) return;
+    const result = await api.reconcileManagedBootstrap({ reason: "manual" });
+    setBootstrap(result);
+    setNotice(text(
+      language,
+      "Coding Tools installed and started the five managed stacks. Check each card for health.",
+      "Coding Tools 已安裝並啟動五條受管理棧。請逐張卡片檢查健康狀態。",
+    ));
+  });
+
   const installOrRepair = () => run("managed-install", async () => {
     if (!api || !selected) return;
     const repair = selected.managedInstall.state === "repair-required"
@@ -312,9 +334,14 @@ export function ExternalServicesSurface({
             "直接由 Coding Tools 安裝、修復同執行 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CPA 與 Codex Router 原始介面由專用頁面開啟。",
           )}</p>
         </div>
-        <button disabled={busy !== null} onClick={() => void refresh()} type="button">
-          {text(language, "Refresh all", "全部刷新")}
-        </button>
+        <div className="external-services-heading-actions">
+          <button disabled={busy !== null} onClick={() => void refresh()} type="button">
+            {text(language, "Refresh all", "全部刷新")}
+          </button>
+          <button disabled={busy !== null} onClick={() => void installAll()} type="button">
+            {text(language, "Install and start all", "全部安裝並啟動")}
+          </button>
+        </div>
       </header>
 
       <div className="external-services-summary">
@@ -329,7 +356,7 @@ export function ExternalServicesSurface({
               <span className="external-service-glyph">{service.name.split(/\s+/u).map((word) => word[0]).slice(0, 2).join("")}</span>
               <div>
                 <strong>{serviceName(language, service.id)}</strong>
-                <small>{statusLabel(language, service)} · {installStateLabel(language, service)}</small>
+                <small>{statusLabel(language, service)} · {installStateLabel(language, service)}{bootstrap?.components.find((entry) => entry.id === service.id)?.status ? ` · ${bootstrap.components.find((entry) => entry.id === service.id)?.status}` : ""}</small>
               </div>
               <i className={`service-state ${service.status}`} />
             </div>

@@ -208,7 +208,7 @@ function bindingId(account: ProviderAccountRecord, workload: ProviderExecutionWo
 
 function defaultEngineEndpoint(workload: ProviderExecutionWorkload): string {
   return workload === "paseo"
-    ? "ws://127.0.0.1:6767/ws"
+    ? "ws://127.0.0.1:6768/ws"
     : "http://127.0.0.1:3000/";
 }
 

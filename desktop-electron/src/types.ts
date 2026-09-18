@@ -219,6 +219,32 @@ export interface ManagedComponentsSnapshot {
   }>;
 }
 
+export type ManagedBootstrapStatus = "idle" | "running" | "ready" | "blocked" | "error";
+export type ManagedBootstrapComponentStatus =
+  | "pending"
+  | "installing"
+  | "repairing"
+  | "starting"
+  | "ready"
+  | "blocked"
+  | "error";
+
+export interface ManagedBootstrapComponentSnapshot {
+  id: ExternalServiceId;
+  status: ManagedBootstrapComponentStatus;
+  action: string | null;
+  missingCredentials: string[];
+  message: string | null;
+}
+
+export interface ManagedBootstrapSnapshot {
+  status: ManagedBootstrapStatus;
+  reason: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  components: ManagedBootstrapComponentSnapshot[];
+}
+
 export interface CommandCodeProxyHealth {
   status?: string;
   proxy?: string;
@@ -537,6 +563,11 @@ export interface LauncherApi {
   stopExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   restartExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   syncCodexRouter(): Promise<CodexRouterSyncResult>;
+  managedBootstrapSnapshot(): Promise<ManagedBootstrapSnapshot>;
+  reconcileManagedBootstrap(input?: {
+    reason?: string;
+    componentIds?: ExternalServiceId[] | null;
+  }): Promise<ManagedBootstrapSnapshot>;
   upstreamToolsSnapshot(): Promise<UpstreamToolsSnapshot>;
   inspectUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
   setUpstreamToolEndpoint(toolId: UpstreamToolId, endpoint: string): Promise<UpstreamToolSnapshot>;
@@ -604,6 +635,7 @@ export interface LauncherApi {
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
   onExternalServicesChanged(listener: (state: ExternalServicesSnapshot) => void): () => void;
+  onManagedBootstrapChanged(listener: (state: ManagedBootstrapSnapshot) => void): () => void;
   onProviderNetworkChanged(listener: (state: ProviderNetworkSnapshot) => void): () => void;
 }
 

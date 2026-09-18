@@ -54,7 +54,7 @@ const DEFAULTS = Object.freeze({
   paseo: Object.freeze({
     name: "Paseo",
     endpoint: "http://127.0.0.1:6768/",
-    executionEndpoint: "ws://127.0.0.1:6767/ws",
+    executionEndpoint: "ws://127.0.0.1:6768/ws",
     home: "",
     executable: process.platform === "win32" ? (process.env.ComSpec || "cmd.exe") : "npm",
     arguments: process.platform === "win32"

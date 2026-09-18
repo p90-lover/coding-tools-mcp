@@ -12,7 +12,7 @@ export const snapshots = writable<Partial<Record<Source, Snapshot>>>({});
 export const integrationErrors = writable<Partial<Record<Source, string>>>({});
 export const integrationBusy = writable<Partial<Record<Source, boolean>>>({});
 // Only non-secret preferences persist in the browser. Tokens and snapshots stay in RAM.
-export const endpoints = writable<Record<Source, string>>({paseo:'ws://127.0.0.1:6767/ws',anneal:'http://127.0.0.1:3000/'});
+export const endpoints = writable<Record<Source, string>>({paseo:'ws://127.0.0.1:6768/ws',anneal:'http://127.0.0.1:3000/'});
 export function initializePreferences() {
  try { const v=localStorage.getItem('control-center-locale');if(v==='en'||v==='zh-Hant')locale.set(v); } catch { /* Storage is optional. */ }
 }

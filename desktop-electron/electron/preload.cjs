@@ -65,6 +65,8 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   stopExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-stop", serviceId),
   restartExternalService: (serviceId) => ipcRenderer.invoke("launcher:external-service-restart", serviceId),
   syncCodexRouter: () => ipcRenderer.invoke("launcher:codex-router-sync"),
+  managedBootstrapSnapshot: () => ipcRenderer.invoke("launcher:managed-bootstrap-snapshot"),
+  reconcileManagedBootstrap: (input) => ipcRenderer.invoke("launcher:managed-bootstrap-reconcile", input),
   upstreamToolsSnapshot: () => ipcRenderer.invoke("launcher:upstream-tools-snapshot"),
   inspectUpstreamTool: (toolId) => ipcRenderer.invoke("launcher:upstream-tool-inspect", toolId),
   setUpstreamToolEndpoint: (toolId, endpoint) => ipcRenderer.invoke(
@@ -137,6 +139,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onLog: (listener) => subscription("launcher:log", listener),
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
   onExternalServicesChanged: (listener) => subscription("launcher:external-services-changed", listener),
+  onManagedBootstrapChanged: (listener) => subscription("launcher:managed-bootstrap-changed", listener),
   onProviderNetworkChanged: (listener) => subscription("launcher:provider-network-changed", listener),
 });
 

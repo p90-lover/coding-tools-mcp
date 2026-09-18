@@ -414,7 +414,7 @@ function defaultEngineEndpoint(
   const configured = services.services.find((service) => service.id === workload)?.executionEndpoint;
   if (configured) return configured;
   return workload === "paseo"
-    ? "ws://127.0.0.1:6767/ws"
+    ? "ws://127.0.0.1:6768/ws"
     : "http://127.0.0.1:3000/";
 }
 
