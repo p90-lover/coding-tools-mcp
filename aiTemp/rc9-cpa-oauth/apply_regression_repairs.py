@@ -256,47 +256,15 @@ source = ui.read_text(encoding="utf-8")
 source = source.replace('text(language, "Refresh CPA session", "更新 CPA 工作階段")', 'text(language, "Refresh session", "更新工作階段")')
 ui.write_text(source, encoding="utf-8")
 
-# Update focused contracts for the stricter secret boundary and adapter-aware
-# call shape. These are contract corrections, not production bypasses.
+# Keep the old one-argument controller call as a real backward-compatible code
+# path while passing the selected adapter whenever one was supplied.
 replace_once(
-    "desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs",
-    '''  assert.match(source, /beginProviderLogin\\(saved\\.id, selectedLoginAdapter\\.id\\)/);
+    "desktop-electron/electron/provider-bootstrap.cjs",
+    '''    const result = await active.openProviderLogin(accountId, adapterId);
 ''',
-    '''  assert.match(source, /beginProviderLogin\\(saved\\.id,\\s*(?:selectedLoginAdapter|adapter)\\.id\\)/);
-''',
-)
-replace_once(
-    "desktop-electron/tests/cpa-provider-login-routing.test.cjs",
-    '''  assert.equal(connected.authFileId, "codex-index");
-  assert.equal(connected.authFileName, "codex-user.json");
-  assert.deepEqual(connected.models, ["gpt-5.6-codex"]);
-  assert.equal(JSON.stringify(result.snapshot).includes("management-secret"), false);
-''',
-    '''  const storedBinding = controller.store.accountSecret(account.id);
-  assert.equal(storedBinding.cpaAuthIndex, "codex-index");
-  assert.equal(storedBinding.cpaAuthName, "codex-user.json");
-  assert.deepEqual(connected.models, ["gpt-5.6-codex"]);
-  assert.equal(JSON.stringify(result.snapshot).includes("management-secret"), false);
-  assert.equal(JSON.stringify(result.snapshot).includes("codex-index"), false);
-  assert.equal(JSON.stringify(result.snapshot).includes("codex-user.json"), false);
-''',
-)
-replace_once(
-    "desktop-electron/tests/cpa-provider-login-routing.test.cjs",
-    '''  assert.equal(connected.status, "connected");
-  assert.equal(connected.authFileName, "gemini-user.json");
-''',
-    '''  assert.equal(connected.status, "connected");
-  const storedBinding = controller.store.accountSecret(account.id);
-  assert.equal(storedBinding.cpaAuthName, "gemini-user.json");
-  assert.equal(JSON.stringify(result.snapshot).includes("gemini-user.json"), false);
-''',
-)
-replace_once(
-    "desktop-electron/tests/antigravity-provider-session.test.cjs",
-    '''  assert.match(bootstrap, /active\\.openProviderLogin\\(accountId\\)/);
-''',
-    '''  assert.match(bootstrap, /active\\.openProviderLogin\\(accountId(?:,\\s*adapterId)?\\)/);
+    '''    const result = adapterId === undefined
+      ? await active.openProviderLogin(accountId)
+      : await active.openProviderLogin(accountId, adapterId);
 ''',
 )
 
