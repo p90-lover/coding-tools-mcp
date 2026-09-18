@@ -21,6 +21,19 @@
  function search(){searchOpen=true;query='';setTimeout(()=>searchInput?.focus(),0);}
  function navigate(path:string){searchOpen=false;menu=false;void goto(path);}
  function keydown(e:KeyboardEvent){if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();search();}if(e.key==='Escape'){searchOpen=false;menu=false;}}
+ async function openRepo(){
+  try { await openUrl(REPO_URL); }
+  catch { repoError = 'Open the repository from your browser. / 請在瀏覽器開啟儲存庫。'; }
+ }
+ function trapPaletteTab(e:KeyboardEvent){
+  if(e.key!=='Tab') return;
+  const dialog=e.currentTarget;
+  if(!(dialog instanceof HTMLElement)) return;
+  const targets=Array.from(dialog.querySelectorAll<HTMLElement>('input,button,a[href]'));
+  const first=targets[0], last=targets.at(-1);
+  if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}
+  else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}
+ }
  onMount(initializePreferences);
  $effect(()=>{if(typeof document!=="undefined")document.documentElement.lang=$locale;});
 </script>
@@ -34,7 +47,7 @@
   <div class="cc-workspace-nav">{#if $workspaces.length}{@render sidebar()}{:else}<p class="cc-nav-empty">{translated($locale,'Add your first workspace to get started.','新增第一個工作區以開始使用。')}</p>{/if}</div>
   <div class="cc-nav-bottom">{#if settingsNav}<details><summary><Settings2 size={17}/>{translated($locale,'Settings','設定')}<ChevronRight size={15}/></summary><div class="cc-settings-items">{@render settingsNav()}</div></details>{/if}
    <div class="cc-safe-mode"><ShieldCheck size={17}/><div>{translated($locale,'Local permission boundaries','本機權限邊界')}<small>{translated($locale,'Provider execution needs consent','供應商執行須明確批准')}</small></div></div>
-   <div class="cc-version"><span>v{APP_VERSION}</span><button aria-label="Open GitHub repository" onclick={async()=>{try{await openUrl(REPO_URL);}catch{repoError='Open the repository from your browser. / 請在瀏覽器開啟儲存庫。';}}><Github size={16}/></button></div>{#if repoError}<small>{repoError}</small>{/if}
+   <div class="cc-version"><span>v{APP_VERSION}</span><button aria-label="Open GitHub repository" onclick={openRepo}><Github size={16}/></button></div>{#if repoError}<small>{repoError}</small>{/if}
   </div>
  </aside>
  <div class="cc-main">
@@ -43,6 +56,6 @@
  </div>
 </div>
 {#if searchOpen}
- <div class="cc-palette-backdrop"><dialog open class="cc-palette" aria-modal="true" aria-label="Jump to page" tabindex="-1" onkeydown={(e)=>{if(e.key==='Tab'){const targets=Array.from(e.currentTarget.querySelectorAll<HTMLElement>('input,button,a[href]'));const first=targets[0],last=targets.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}}}><div class="cc-palette-search"><Search size={20}/><input bind:this={searchInput} bind:value={query} placeholder={translated($locale,'Search pages and workspaces…','搜尋頁面及工作區…')} onkeydown={(e)=>{if(e.key==='Enter'&&results[0])navigate(results[0].path);}}/><button class="cc-icon-btn" onclick={()=>searchOpen=false} aria-label="Close search"><X size={18}/></button></div><div class="cc-palette-results">{#each results as result}<button onclick={()=>navigate(result.path)}><span>{result.label}</span><ChevronRight size={16}/></button>{/each}{#if !results.length}<p>{translated($locale,'No matching pages.','沒有相符頁面。')}</p>{/if}</div><footer>{translated($locale,'Enter opens the first result · Esc closes','Enter 開啟第一項 · Esc 關閉')}</footer></dialog></div>
+ <div class="cc-palette-backdrop"><dialog open class="cc-palette" aria-modal="true" aria-label="Jump to page" tabindex="-1" onkeydown={trapPaletteTab}><div class="cc-palette-search"><Search size={20}/><input bind:this={searchInput} bind:value={query} placeholder={translated($locale,'Search pages and workspaces…','搜尋頁面及工作區…')} onkeydown={(e)=>{if(e.key==='Enter'&&results[0])navigate(results[0].path);}}/><button class="cc-icon-btn" onclick={()=>searchOpen=false} aria-label="Close search"><X size={18}/></button></div><div class="cc-palette-results">{#each results as result}<button onclick={()=>navigate(result.path)}><span>{result.label}</span><ChevronRight size={16}/></button>{/each}{#if !results.length}<p>{translated($locale,'No matching pages.','沒有相符頁面。')}</p>{/if}</div><footer>{translated($locale,'Enter opens the first result · Esc closes','Enter 開啟第一項 · Esc 關閉')}</footer></dialog></div>
 {/if}
 <svelte:head><title>Coding Tools · {title}</title></svelte:head>

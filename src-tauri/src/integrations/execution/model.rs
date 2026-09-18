@@ -52,7 +52,9 @@ pub fn identifier(s: &str) -> Result<(), String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
     {
-        return Err("Identifier must contain 1..128 letters, digits, hyphens or underscores".into());
+        return Err(
+            "Identifier must contain 1..128 letters, digits, hyphens or underscores".into(),
+        );
     }
     Ok(())
 }

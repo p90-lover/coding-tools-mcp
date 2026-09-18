@@ -42,11 +42,9 @@ pub async fn orchestrator_profile_save(
     if !confirm {
         return Err(fail("Confirm orchestrator profile changes locally"));
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        orchestrators::save(expected_revision, profile)
-    })
-    .await
-    .map_err(|_| fail("Orchestrator save worker unavailable"))?
+    tauri::async_runtime::spawn_blocking(move || orchestrators::save(expected_revision, profile))
+        .await
+        .map_err(|_| fail("Orchestrator save worker unavailable"))?
 }
 
 #[tauri::command]

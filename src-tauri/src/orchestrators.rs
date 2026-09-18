@@ -37,9 +37,9 @@ fn default_concurrency() -> u8 {
 fn identifier(value: &str, label: &str) -> AppResult<()> {
     if value.is_empty()
         || value.len() > 128
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
     {
         return Err(fail(format!(
             "{label} must contain 1..128 letters, digits, hyphens, underscores, dots or colons"
@@ -201,7 +201,8 @@ impl OrchestratorStage {
                 provider.name
             )));
         }
-        if !provider.models.is_empty() && !provider.models.iter().any(|model| model == &self.model) {
+        if !provider.models.is_empty() && !provider.models.iter().any(|model| model == &self.model)
+        {
             return Err(fail(format!(
                 "Model {} is not in the discovered catalogue for {}",
                 self.model, provider.name
@@ -272,7 +273,10 @@ impl OrchestratorProfile {
             stage.validate(data)?;
         }
         if self.execution_mode == OrchestratorExecutionMode::Sequential
-            && self.stages.iter().any(|stage| stage.parallel_group.is_some())
+            && self
+                .stages
+                .iter()
+                .any(|stage| stage.parallel_group.is_some())
         {
             return Err(fail(
                 "Sequential orchestrators cannot assign parallel groups",
@@ -282,10 +286,9 @@ impl OrchestratorProfile {
     }
 
     pub fn runnable_snapshot(&self) -> AppResult<OrchestratorSnapshot> {
-        let template_id = self
-            .template_id
-            .clone()
-            .ok_or_else(|| fail("Select an Anneal task template before running this orchestrator"))?;
+        let template_id = self.template_id.clone().ok_or_else(|| {
+            fail("Select an Anneal task template before running this orchestrator")
+        })?;
         let mut step_overrides = BTreeMap::new();
         for (index, stage) in self.stages.iter().enumerate() {
             let agent_id = stage.anneal_agent_id.clone().ok_or_else(|| {
@@ -364,9 +367,7 @@ pub fn save(expected_revision: u64, input: OrchestratorProfileInput) -> AppResul
         if data.orchestrator_registry_revision != expected_revision {
             return Err(fail("Orchestrator registry changed; refresh before saving"));
         }
-        let id = input
-            .id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let previous = data
             .orchestrator_profiles
             .iter()
@@ -377,7 +378,9 @@ pub fn save(expected_revision: u64, input: OrchestratorProfileInput) -> AppResul
             name: input.name.trim().to_string(),
             project_id: input.project_id.trim().to_string(),
             repo_id: input.repo_id.trim().to_string(),
-            environment_id: input.environment_id.filter(|value| !value.trim().is_empty()),
+            environment_id: input
+                .environment_id
+                .filter(|value| !value.trim().is_empty()),
             template_id: input.template_id.filter(|value| !value.trim().is_empty()),
             staffing_profile_id: input
                 .staffing_profile_id
@@ -522,7 +525,10 @@ mod tests {
         };
         profile.validate(&data).unwrap();
         let snapshot = profile.runnable_snapshot().unwrap();
-        assert_eq!(snapshot.step_overrides.get("1").map(String::as_str), Some("agent"));
+        assert_eq!(
+            snapshot.step_overrides.get("1").map(String::as_str),
+            Some("agent")
+        );
         assert_eq!(snapshot.profile_revision, 3);
     }
 }

@@ -186,9 +186,9 @@ fn bounded(value: &str, max: usize, label: &str, required: bool) -> AppResult<()
 fn identifier(value: &str, label: &str) -> AppResult<()> {
     if value.is_empty()
         || value.len() > 128
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
     {
         return Err(fail(format!(
             "{label} must contain 1..128 letters, digits, hyphens, underscores, dots or colons"
@@ -513,8 +513,10 @@ fn health_for(profile: &ProviderProfile) -> ProviderHealth {
         .is_some_and(|connection| connection.generation == profile.generation);
     let status = if connected {
         ProviderHealthStatus::Unknown
-    } else if matches!(profile.auth, ProviderAuth::OAuth | ProviderAuth::BrowserSession)
-        && profile.base_url.is_none()
+    } else if matches!(
+        profile.auth,
+        ProviderAuth::OAuth | ProviderAuth::BrowserSession
+    ) && profile.base_url.is_none()
     {
         ProviderHealthStatus::ManagedExternally
     } else {
@@ -564,9 +566,7 @@ pub fn save(
         if data.provider_registry_revision != expected_revision {
             return Err(fail("Provider registry changed; refresh before saving"));
         }
-        let id = input
-            .id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         identifier(&id, "Provider profile ID")?;
         let current = data
             .provider_profiles
@@ -764,9 +764,24 @@ fn model_ids(value: &Value) -> Vec<String> {
             let id = candidate
                 .as_str()
                 .map(str::to_owned)
-                .or_else(|| candidate.get("id").and_then(Value::as_str).map(str::to_owned))
-                .or_else(|| candidate.get("name").and_then(Value::as_str).map(str::to_owned))
-                .or_else(|| candidate.get("model").and_then(Value::as_str).map(str::to_owned));
+                .or_else(|| {
+                    candidate
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    candidate
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    candidate
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
             if let Some(id) = id {
                 let id = id.trim().trim_start_matches("models/");
                 if !id.is_empty() && id.len() <= 256 {
@@ -884,7 +899,10 @@ pub async fn probe(id: &str, discover_models: bool) -> AppResult<Value> {
             },
             checked_at: Some(checked_at),
             latency_ms: Some(latency_ms),
-            error: Some(format!("Provider returned HTTP {}", response.status().as_u16())),
+            error: Some(format!(
+                "Provider returned HTTP {}",
+                response.status().as_u16()
+            )),
             models: profile.models.clone(),
         },
         Err(error) => ProviderHealth {

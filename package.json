@@ -11,7 +11,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "precheck": "npm run check:version",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --config ./svelte.config.js",
     "check:version": "node scripts/check-version-alignment.mjs",
     "tauri": "tauri"
   },
