@@ -1,9 +1,19 @@
-# Frozen after v0.7.0-rc.8 publication. Auto-publish is disabled so later
-# commits on this branch cannot rewrite the existing v0.7.0-rc.8 tag.
-# Current Windows publish is codex-router-multiprovider-release-rc10.yml.
-name: Coding Tools v0.7.0-rc.8 exact-source Windows release
+# Exact-source Windows publish for the next version after frozen v0.7.0-rc.8 and v0.7.0-rc.9.
+name: Coding Tools v0.7.0-rc.10 exact-source Windows release
 
 on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.8
+    paths:
+      - .github/workflows/codex-router-multiprovider-release-rc10.yml
+      - aiTemp/rc10-release/run-windows-release.mjs
+      - aiTemp/rc10-release/verify-windows-migration.ps1
+      - desktop-electron/**
+      - runtime-web/**
+      - rust-core/**
+      - scripts/release/**
+      - docs/releases/v0.7.0-rc.10.md
   workflow_dispatch:
 
 permissions:
@@ -11,12 +21,12 @@ permissions:
   contents: write
 
 concurrency:
-  group: coding-tools-v0.7.0-rc.8-${{ github.ref }}
+  group: coding-tools-v0.7.0-rc.10-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: 0.7.0-rc.8
-  RELEASE_TAG: v0.7.0-rc.8
+  RELEASE_VERSION: 0.7.0-rc.10
+  RELEASE_TAG: v0.7.0-rc.10
   NODE_VERSION: '22'
   BUN_VERSION: 1.4.0
   RUST_TOOLCHAIN: 1.98.1
@@ -51,18 +61,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          node --check aiTemp/rc8-release/run-windows-release.mjs
-          if ($LASTEXITCODE -ne 0) { throw 'Node rc.8 release runner syntax validation failed' }
+          node --check aiTemp/rc10-release/run-windows-release.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Node rc.10 release runner syntax validation failed' }
           $tokens = $null
           $errors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc8-release\verify-windows-migration.ps1'),
+            (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc10-release\verify-windows-migration.ps1'),
             [ref]$tokens,
             [ref]$errors
           )
           if ($errors.Count -gt 0) {
             $errors | ForEach-Object { Write-Error $_.ToString() }
-            throw 'PowerShell rc.8 migration runner syntax validation failed'
+            throw 'PowerShell rc.10 migration runner syntax validation failed'
           }
 
       - name: Run exact-source five-stack release pipeline
@@ -71,13 +81,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          node aiTemp/rc8-release/run-windows-release.mjs
-          if ($LASTEXITCODE -ne 0) { throw "rc.8 release runner failed with exit code $LASTEXITCODE" }
+          node aiTemp/rc10-release/run-windows-release.mjs
+          if ($LASTEXITCODE -ne 0) { throw "rc.10 release runner failed with exit code $LASTEXITCODE" }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: coding-tools-v0.7.0-rc.8-evidence-${{ github.sha }}
+          name: coding-tools-v0.7.0-rc.10-evidence-${{ github.sha }}
           path: |
             aiTemp/evidence/
             aiTemp/release-assets/
