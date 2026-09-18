@@ -74,12 +74,13 @@ function controllerFixture(overrides = {}) {
   return { controller, calls, child, directory };
 }
 
-test("external service controller owns the four architecture-B services and rejects remote endpoints", () => {
+test("external service controller owns the five app-managed services and rejects remote endpoints", () => {
   const { controller } = controllerFixture();
   const snapshot = controller.snapshot();
   assert.deepEqual(snapshot.services.map((service) => service.id), [
     "codex-router",
     "commandcode-proxy",
+    "cpa",
     "paseo",
     "anneal",
   ]);

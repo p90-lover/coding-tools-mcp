@@ -7,12 +7,20 @@ const { resolveLauncherProfile } = require("./profile.cjs");
 
 let providerNetworkControllerPromise = null;
 let providerBrowserHostGetter = () => null;
+let providerCpaConnectionGetter = () => null;
 
 function setProviderBrowserHost(getter) {
   if (typeof getter !== "function") {
     throw new Error("Provider BrowserHost getter must be a function");
   }
   providerBrowserHostGetter = getter;
+}
+
+function setProviderCpaConnection(getter) {
+  if (typeof getter !== "function") {
+    throw new Error("Provider CPA connection getter must be a function");
+  }
+  providerCpaConnectionGetter = getter;
 }
 
 function providerNetworkReady() {
@@ -56,6 +64,7 @@ function installProviderNetwork({
       app,
       browserPartition: launcherProfile.browserPartition,
       getBrowserHost: () => providerBrowserHostGetter?.() ?? null,
+      getCpaConnection: () => providerCpaConnectionGetter?.() ?? null,
       logger,
       safeStorage,
       session,
@@ -163,4 +172,5 @@ module.exports = {
   installProviderNetwork,
   providerNetworkReady,
   setProviderBrowserHost,
+  setProviderCpaConnection,
 };
