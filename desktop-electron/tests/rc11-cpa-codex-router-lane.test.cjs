@@ -46,3 +46,18 @@ test("CommandCode Check/Copy/Apply and Paseo/Anneal original-function engines st
   assert.doesNotMatch(commandCode, /Copy plan|Apply non-secret|Check status/);
   assert.doesNotMatch(upstream, /protocol v1|inbox decision|chain hold/);
 });
+
+test("the CPA lane keeps the shared frontend type and parser boundaries buildable", () => {
+  const orchestrator = readRepo("src/lib/orchestrator-center.ts");
+  const providers = readRepo("src/lib/provider-center.ts");
+  const appShell = readRepo("src/lib/components/AppShell.svelte");
+  const originalPanel = readRepo("src/lib/components/control-center/OriginalUiPanel.svelte");
+  const commandCodePanel = readRepo("src/lib/components/control-center/CommandCodeProxyPanel.svelte");
+
+  assert.match(orchestrator, /'id' \| 'archived' \| 'revision' \| 'updated_at'/);
+  assert.match(providers, /'id' \| 'generation' \| 'revision' \| 'updated_at' \| 'archived'/);
+  assert.match(appShell, /onclick=\{async\(\)=>\{try\{await openUrl\(REPO_URL\);\}catch\{repoError=.*;\}\}\}>/);
+  assert.match(originalPanel, /\(tool\.long_run\?\.selected_section \|\| tool\.sections\[0\]\) \?\? ''/);
+  assert.match(commandCodePanel, /const next = await invoke<FiveStackSnapshot>\('five_stack_start'/);
+  assert.doesNotMatch(commandCodePanel, /map\(\(candidate\)[^\n]*\? await invoke/);
+});
