@@ -167,6 +167,51 @@ export interface ProviderExecutionPlan {
 
 export type ExternalServiceId = "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
 export type ExternalServiceStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
+export type ManagedComponentInstallState =
+  | "not-installed"
+  | "installing"
+  | "installed"
+  | "repair-required"
+  | "external"
+  | "error";
+
+export interface ManagedComponentProcessSnapshot {
+  id: string;
+  pid: number | null;
+  running: boolean;
+}
+
+export interface ManagedComponentInstallSnapshot {
+  state: ManagedComponentInstallState;
+  version: string;
+  commit: string | null;
+  strategy: "release-binary" | "git-source";
+  home: string;
+  installedAt: string | null;
+  currentStep: string | null;
+  error: string | null;
+  platformMode: "native" | "wsl2" | string;
+  processes: ManagedComponentProcessSnapshot[];
+}
+
+export interface ManagedComponentsSnapshot {
+  version: 1;
+  components: Array<{
+    id: ExternalServiceId;
+    name: string;
+    version: string;
+    commit: string | null;
+    strategy: "release-binary" | "git-source";
+    installState: ManagedComponentInstallState;
+    managedHome: string;
+    installedAt: string | null;
+    currentStep: string | null;
+    error: string | null;
+    platformMode: "native" | "wsl2" | string;
+    processes: ManagedComponentProcessSnapshot[];
+    secretConfigured: boolean;
+  }>;
+}
 
 export interface ExternalServiceSnapshot {
   id: ExternalServiceId;
@@ -195,6 +240,7 @@ export interface ExternalServiceSnapshot {
   accountCount?: number;
   connectedAccountCount?: number;
   providerModelCount?: number;
+  managedInstall: ManagedComponentInstallSnapshot;
 }
 
 export interface ExternalServicesSnapshot {
@@ -424,6 +470,9 @@ export interface LauncherApi {
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
   externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
+  managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;
+  installManagedComponent(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  repairManagedComponent(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   configureExternalService(serviceId: ExternalServiceId, input: ExternalServiceConfigurationInput): Promise<ExternalServiceSnapshot>;
   inspectExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   startExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;

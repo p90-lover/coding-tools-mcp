@@ -46,6 +46,9 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
   externalServicesSnapshot: () => ipcRenderer.invoke("launcher:external-services-snapshot"),
+  managedComponentsSnapshot: () => ipcRenderer.invoke("launcher:managed-components-snapshot"),
+  installManagedComponent: (serviceId) => ipcRenderer.invoke("launcher:managed-component-install", serviceId),
+  repairManagedComponent: (serviceId) => ipcRenderer.invoke("launcher:managed-component-repair", serviceId),
   configureExternalService: (serviceId, input) => ipcRenderer.invoke(
     "launcher:external-service-configure",
     serviceId,

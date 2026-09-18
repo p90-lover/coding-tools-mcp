@@ -529,6 +529,19 @@ function createManagedComponentController({
         },
       };
     }
+    if (platform === "win32" && context.mode === "native" && /\.(?:cmd|bat)$/i.test(executable)) {
+      return {
+        executable: env.ComSpec || process.env.ComSpec || "cmd.exe",
+        args: ["/d", "/s", "/c", executable, ...args],
+        options: {
+          cwd: context.home,
+          env: { ...env, ...environment },
+          shell: false,
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      };
+    }
     return {
       executable,
       args,

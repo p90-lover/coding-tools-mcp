@@ -38,7 +38,7 @@ const {
   setProviderBrowserHost,
 } = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
-const { createExternalServicesController } = require("./external-services.cjs");
+const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const {
   createStateStore,
@@ -606,6 +606,21 @@ function registerIpc({ logger, stateStore }) {
     return true;
   });
 
+  handle("launcher:managed-components-snapshot", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!externalServicesController) throw new Error("Managed components controller is unavailable");
+    return externalServicesController.managedComponentsSnapshot();
+  });
+  handle("launcher:managed-component-install", (event, serviceId) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("Managed components controller is unavailable");
+    return externalServicesController.installManagedComponent(serviceId);
+  });
+  handle("launcher:managed-component-repair", (event, serviceId) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("Managed components controller is unavailable");
+    return externalServicesController.repairManagedComponent(serviceId);
+  });
   handle("launcher:external-services-snapshot", (event) => {
     assertFocusedMainWindow(event, false);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
@@ -1182,7 +1197,13 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
-  externalServicesController = createExternalServicesController({
+  externalServicesController = createManagedExternalServicesController({
+    dataRoot: path.join(app.getPath("userData"), "integrations"),
+    resolveRuntimeExecutable: () => {
+      const runtimeRoot = runtimeRootProvider();
+      if (!runtimeRoot) throw new Error("Packaged runtime is unavailable for managed components");
+      return runtimeBundlePaths(runtimeRoot, process.platform).executable;
+    },
     filePath: path.join(app.getPath("userData"), "external-services.json"),
     keyPath: path.join(app.getPath("userData"), "external-services.key"),
     safeStorage,

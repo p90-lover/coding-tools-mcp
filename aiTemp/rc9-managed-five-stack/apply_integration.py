@@ -8,13 +8,27 @@ ROOT = Path(__file__).resolve().parents[2]
 def replace_once(relative: str, old: str, new: str) -> None:
     path = ROOT / relative
     text = path.read_text(encoding="utf-8")
-    if new in text and old not in text:
+    if new in text:
         print(f"already patched: {relative}")
         return
     count = text.count(old)
     if count != 1:
         raise SystemExit(f"expected exactly one match in {relative}, found {count}: {old[:120]!r}")
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print(f"patched: {relative}")
+
+
+
+def insert_before_once(relative: str, anchor: str, block: str, sentinel: str) -> None:
+    path = ROOT / relative
+    current = path.read_text(encoding="utf-8")
+    if sentinel in current:
+        print(f"already patched: {relative}")
+        return
+    count = current.count(anchor)
+    if count != 1:
+        raise SystemExit(f"expected exactly one insertion anchor in {relative}, found {count}: {anchor[:120]!r}")
+    path.write_text(current.replace(anchor, block + anchor, 1), encoding="utf-8")
     print(f"patched: {relative}")
 
 
@@ -83,9 +97,9 @@ replace_once(
 ''',
 )
 
-replace_once(
+insert_before_once(
     "desktop-electron/electron/main.cjs",
-    '''  handle("launcher:external-service-configure", (event, serviceId, input) => {
+    '''  handle("launcher:external-services-snapshot", (event) => {
 ''',
     '''  handle("launcher:managed-components-snapshot", (event) => {
     assertFocusedMainWindow(event, false);
@@ -102,8 +116,8 @@ replace_once(
     if (!externalServicesController) throw new Error("Managed components controller is unavailable");
     return externalServicesController.repairManagedComponent(serviceId);
   });
-  handle("launcher:external-service-configure", (event, serviceId, input) => {
 ''',
+    "launcher:managed-components-snapshot",
 )
 
 replace_once(
