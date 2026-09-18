@@ -82,8 +82,8 @@ internal static class LegacyUninstallFixture
         {
             FileName = powershell,
             Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " + encodedScript,
-            CreateNoWindow = true,
-            UseShellExecute = false,
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
         });
         if (child == null) return 42;
         return 0;

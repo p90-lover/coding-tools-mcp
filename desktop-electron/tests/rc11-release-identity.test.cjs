@@ -62,3 +62,15 @@ test("rc.11 migration waits for the installer process only and reaps leftover Co
   assert.match(migration, /'\/S', '\/currentuser'/);
   assert.doesNotMatch(migration, /Start-Process[^\n]*-Wait/);
 });
+
+test("rc.11 smokes the migrated install instead of a second silent NSIS upgrade", () => {
+  const runner = read("aiTemp/rc11-release/run-windows-release.mjs");
+  const smoke = runner.indexOf("packaged launcher smoke");
+  const migration = runner.indexOf("retained NSIS and MSI migration acceptance");
+  assert.ok(migration >= 0, "missing migration gate");
+  assert.ok(smoke > migration, "smoke must run after the single migration install");
+  assert.match(runner, /CODING_TOOLS_WINDOWS_INSTALL_DONE: '1'/);
+  const smokeScript = read("desktop-electron/scripts/smoke-package.cjs");
+  assert.match(smokeScript, /CODING_TOOLS_WINDOWS_INSTALL_DONE/);
+  assert.match(smokeScript, /run\(installer, \["\/S", "\/currentuser"\]/);
+});
