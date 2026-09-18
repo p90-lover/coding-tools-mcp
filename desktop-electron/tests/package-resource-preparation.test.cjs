@@ -295,6 +295,7 @@ test("composes the exact Windows payload from the official seven-member client a
 test("five-stack package copy omits node_modules, fastlane, and file-named directories from the NSIS payload", () => {
   assert.equal(skipFiveStackPackageEntry("node_modules"), true);
   assert.equal(skipFiveStackPackageEntry("fastlane"), true);
+  assert.equal(skipFiveStackPackageEntry("test"), true);
   assert.equal(skipFiveStackPackageEntry(".git"), true);
   assert.equal(skipFiveStackPackageEntry("AGENTS.md", { isDirectory: () => true }), true);
   assert.equal(skipFiveStackPackageEntry("1.png", { isDirectory: () => true }), true);

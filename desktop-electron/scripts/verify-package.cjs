@@ -433,6 +433,15 @@ function bundledRuntimeVendorPath(relative) {
 function bundledRouterVendorPath(relative) {
   return bundledRuntimeVendorPath(relative);
 }
+function bundledUpstreamSourcePath(relative) {
+  const normalized = String(relative).replaceAll("\\", "/");
+  return [
+    "five-stack-runtime/",
+    "bundled-components/",
+    "vendor/bundled/",
+    "bundled-runtimes/",
+  ].some((marker) => normalized.includes(marker));
+}
 function secretIn(bytes) {
   if (bytes.length > MAX_TEXT_BYTES || bytes.includes(0)) return null;
   const text = bytes.toString("utf8");
@@ -445,6 +454,7 @@ function scanEntries(entries, read) {
     if (bundledRuntimeVendorPath(relative)) continue;
     const nameRule = forbiddenName(relative);
     if (nameRule) findings.push({ path: relative, rule: nameRule });
+    if (bundledUpstreamSourcePath(relative)) continue;
     const base = path.posix.basename(relative).toLowerCase();
     if (!base.startsWith(".env") && !TEXT_EXTENSIONS.has(path.posix.extname(base))) continue;
     let bytes;
@@ -667,6 +677,7 @@ module.exports = {
   REQUIRED_TUNNEL_MEMBERS,
   bundledRouterVendorPath,
   bundledRuntimeVendorPath,
+  bundledUpstreamSourcePath,
   findWindowsInstaller,
   forbiddenName,
   inspectExtractedApplication,

@@ -6,7 +6,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const BUNDLED_IDS = Object.freeze(["commandcode-proxy", "paseo", "anneal"]);
-const SKIP_BUNDLED_DIRS = new Set([".git", "node_modules", ".bin", "fastlane", ".github"]);
+const SKIP_BUNDLED_DIRS = new Set([".git", "node_modules", ".bin", "fastlane", ".github", "test", "tests", "__tests__", "e2e"]);
 
 function isUnsafeWindowsPackagedName(name) {
   const base = String(name || "");

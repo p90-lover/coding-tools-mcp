@@ -15,6 +15,7 @@ const {
   forbiddenName,
   bundledRouterVendorPath,
   bundledRuntimeVendorPath,
+  bundledUpstreamSourcePath,
 } = require("../scripts/verify-package.cjs");
 
 const PRODUCT_VERSION = "0.7.0-rc.11";
@@ -344,6 +345,14 @@ test("bundled five-stack and Codex Router vendor trees do not trip the package s
     bundledRuntimeVendorPath("resources/five-stack-runtime/codex-router/source/src/foreground-start.mjs"),
     false,
   );
+  assert.equal(
+    bundledUpstreamSourcePath("resources/five-stack-runtime/codex-router/source/test/routing.test.mjs"),
+    true,
+  );
+  assert.equal(
+    bundledUpstreamSourcePath("vendor/bundled/commandcode-proxy/.env.example"),
+    true,
+  );
   const fakeKey = "-----BEGIN PRIVATE KEY-----" + "A".repeat(80) + "-----END PRIVATE KEY-----";
   const { appRoot } = createPackageFixture("bundled-runtime-vendor", ({ resourcesRoot }) => {
     writeFile(
@@ -358,8 +367,26 @@ test("bundled five-stack and Codex Router vendor trees do not trip the package s
       path.join(resourcesRoot, "five-stack-runtime/paseo/source/node_modules/example/index.js"),
       "const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';\n",
     );
+    writeFile(
+      path.join(resourcesRoot, "five-stack-runtime/codex-router/source/test/routing.test.mjs"),
+      "const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';\n",
+    );
+    writeFile(
+      path.join(resourcesRoot, "five-stack-runtime/codex-router/source/scripts/verify-grok-service-tier.mjs"),
+      "const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';\n",
+    );
   });
   const result = inspectExtractedApplication(appRoot, packageOptions());
   assert.equal(result.ok, true);
   assert.deepEqual(result.secretsFound, []);
+});
+
+test("live .env files still fail the package secret scanner after example templates are allowed", () => {
+  const { appRoot } = createPackageFixture("live-env", ({ resourcesRoot }) => {
+    writeFile(path.join(resourcesRoot, "bundled-components/anneal/.env"), "GITHUB_READ_TOKEN=secret\n");
+  });
+  assert.throws(
+    () => inspectExtractedApplication(appRoot, packageOptions()),
+    /PACKAGE_SECRET_MATERIAL_FOUND/,
+  );
 });

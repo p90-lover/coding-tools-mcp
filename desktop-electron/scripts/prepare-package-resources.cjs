@@ -790,6 +790,7 @@ function looksLikePackagedFileName(name) {
 
 function skipFiveStackPackageEntry(name, metadata) {
   if (name === ".git" || name === ".bin" || name === "node_modules" || name === "fastlane") return true;
+  if (name === "test" || name === "tests" || name === "__tests__" || name === "e2e") return true;
   if (isUnsafeWindowsPackagedName(name)) return true;
   return Boolean(metadata && metadata.isDirectory() && looksLikePackagedFileName(name));
 }
