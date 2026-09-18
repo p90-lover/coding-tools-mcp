@@ -19,6 +19,10 @@ const metadata = fs.readFileSync(
   "utf8",
 );
 const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
+const integratedApps = fs.readFileSync(
+  path.join(root, "src/features/IntegratedAppsSurface.tsx"),
+  "utf8",
+);
 
 test("Provider Hub exposes every requested OAuth and reverse-proxy provider", () => {
   for (const providerId of [
@@ -69,11 +73,17 @@ test("Provider Hub localizes the new management controls in Traditional Chinese"
   }
 });
 
-test("The application exposes one active Provider destination and imports the SaaS surface", () => {
-  const providerDestinations = app.match(/active=\{surface === "providers"\}/g) ?? [];
-  const providerSurfaceMounts = app.match(/<ProviderCenterSurface\b/g) ?? [];
-  assert.equal(providerDestinations.length, 1);
-  assert.equal(providerSurfaceMounts.length, 1);
-  assert.match(app, /ProviderHubSaasSurface/);
+test("The application exposes one Apps destination and mounts Provider Hub in its CPA tab", () => {
+  const appDestinations = app.match(/active=\{surface === "apps"\}/g) ?? [];
+  const directProviderDestinations = app.match(/active=\{surface === "providers"\}/g) ?? [];
+  const appsWorkspaceMounts = app.match(/<IntegratedAppsSurface\b/g) ?? [];
+  const cpaTabMounts = integratedApps.match(/<ProviderCenterSurface\b/g) ?? [];
+
+  assert.equal(appDestinations.length, 1);
+  assert.equal(directProviderDestinations.length, 0);
+  assert.equal(appsWorkspaceMounts.length, 1);
+  assert.equal(cpaTabMounts.length, 1);
+  assert.match(integratedApps, /ProviderHubSaasSurface/);
   assert.doesNotMatch(app, /from "\.\/features\/ProviderHubSurface"/);
+  assert.doesNotMatch(integratedApps, /from "\.\/ProviderHubSurface"/);
 });
