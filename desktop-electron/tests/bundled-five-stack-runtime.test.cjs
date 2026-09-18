@@ -6,7 +6,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { npmSpawnInvocation, prepareFiveStackRuntime, rewritePackageScriptsToAbsoluteNode } = require("../scripts/prepare-five-stack-runtime.cjs");
+const {
+  installWindowsNodeBinShims,
+  npmSpawnInvocation,
+  prepareFiveStackRuntime,
+  rewritePackageScriptsToAbsoluteNode,
+} = require("../scripts/prepare-five-stack-runtime.cjs");
 const { prepare } = require("../electron/codex-router-managed.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
@@ -372,6 +377,30 @@ test("five-stack prepare rewrites nested node scripts to an absolute node.exe", 
   const protocolPkg = JSON.parse(fs.readFileSync(path.join(protocol, "package.json"), "utf8"));
   assert.equal(protocolPkg.scripts["generate:validators"], `"${nodeExe}" scripts/generate-validation-aot.mjs`);
   assert.equal(protocolPkg.scripts.build, "npm run generate:validators");
+});
+
+test("Windows workspace npm scripts get node.cmd inside node_modules/.bin", () => {
+  const root = temporaryDirectory("coding-tools-windows-npm-bin-shims");
+  const nodeDir = path.join(root, "nodejs");
+  const nodeExe = path.join(nodeDir, "node.exe");
+  const protocol = path.join(root, "packages", "protocol");
+  const controlCenter = path.join(root, "apps", "control-center");
+  fs.mkdirSync(nodeDir, { recursive: true });
+  fs.mkdirSync(protocol, { recursive: true });
+  fs.mkdirSync(controlCenter, { recursive: true });
+  fs.writeFileSync(nodeExe, "");
+
+  const written = installWindowsNodeBinShims(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "win32");
+  const expected = [
+    path.join(root, "node_modules", ".bin", "node.cmd"),
+    path.join(protocol, "node_modules", ".bin", "node.cmd"),
+    path.join(controlCenter, "node_modules", ".bin", "node.cmd"),
+  ];
+  for (const cmd of expected) {
+    assert.ok(written.includes(cmd), `missing ${cmd}`);
+    assert.match(fs.readFileSync(cmd, "utf8"), /node\.exe/);
+  }
+  assert.equal(installWindowsNodeBinShims(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "linux").length, 0);
 });
 
 test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {

@@ -402,11 +402,46 @@ function rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable) {
   return rewritten;
 }
 
+function npmBinDirectories(sourceRoot) {
+  const bins = [path.join(sourceRoot, "node_modules", ".bin")];
+  for (const folder of ["packages", "apps"]) {
+    const parent = path.join(sourceRoot, folder);
+    if (!fs.existsSync(parent)) continue;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(parent, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) bins.push(path.join(parent, entry.name, "node_modules", ".bin"));
+    }
+  }
+  return bins;
+}
+
+function installWindowsNodeBinShims(sourceRoot, env = process.env, platform = process.platform) {
+  if (platform !== "win32") return [];
+  const nodeExecutable = resolveNodeExecutable(env, platform);
+  if (!nodeExecutable || !isFile(nodeExecutable)) return [];
+  const body = `@echo off\r\n"${nodeExecutable}" %*\r\n`;
+  const written = [];
+  for (const bin of npmBinDirectories(sourceRoot)) {
+    fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+    const cmd = path.join(bin, "node.cmd");
+    fs.writeFileSync(cmd, body);
+    fs.writeFileSync(path.join(bin, "node.bat"), body);
+    written.push(cmd);
+  }
+  return written;
+}
+
 function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
   if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
   const nodeExecutable = resolveNodeExecutable();
   if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable);
   runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
+  installWindowsNodeBinShims(sourceRoot);
   for (const script of extraScripts) {
     runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
   }
@@ -572,6 +607,7 @@ if (require.main === module) {
 
 module.exports = {
   COMPONENT_IDS,
+  installWindowsNodeBinShims,
   npmSpawnInvocation,
   prepareFiveStackRuntime,
   resolveNpmCliJs,
