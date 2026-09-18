@@ -20,7 +20,6 @@ VERSION_PATHS = [
     "desktop-electron/tests/installer-upgrade-migration.test.cjs",
     "desktop-electron/tests/package-contents.test.cjs",
     "desktop-electron/tests/package-resource-preparation.test.cjs",
-    "desktop-electron/src/App.tsx",
 ]
 
 

@@ -20,8 +20,8 @@ function readInstallerInclude() {
   return fs.readFileSync(includePath, "utf8");
 }
 
-test("rc.7 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
-  assert.equal(manifest.version, "0.7.0-rc.7");
+test("rc.8 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
+  assert.equal(manifest.version, "0.7.0-rc.8");
   assert.equal(manifest.build.appId, "dev.codingtools.fullharness");
   assert.equal(manifest.build.productName, "Coding Tools");
   assert.equal(manifest.build.nsis.guid, "3cb2ea96-3319-55b8-95a5-7f180a5f3ed4");
@@ -93,7 +93,7 @@ test("the authoritative release workflow delegates to the exact-source Windows m
     repositoryRoot,
     ".github",
     "workflows",
-    "codex-router-multiprovider-release-rc7.yml",
+    "codex-router-multiprovider-release-rc8.yml",
   );
   const releaseRunnerPath = path.join(
     repositoryRoot,
