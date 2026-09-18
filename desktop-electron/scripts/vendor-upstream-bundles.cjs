@@ -7,6 +7,18 @@ const { spawnSync } = require("node:child_process");
 
 const BUNDLED_IDS = Object.freeze(["commandcode-proxy", "paseo", "anneal"]);
 
+function isLinkOrReparse(filePath, dirent, linkStat) {
+  if ((dirent && typeof dirent.isSymbolicLink === "function" && dirent.isSymbolicLink()) || linkStat.isSymbolicLink()) {
+    return true;
+  }
+  try {
+    fs.readlinkSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function copyBundledTree(sourceRoot, destinationRoot) {
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
@@ -19,15 +31,34 @@ function copyBundledTree(sourceRoot, destinationRoot) {
       if (entry.name === ".git" || entry.name === "node_modules") continue;
       const fromPath = path.join(from, entry.name);
       const toPath = path.join(to, entry.name);
-      const stat = fs.lstatSync(fromPath);
-      if (stat.isSymbolicLink()) continue;
-      if (stat.isDirectory()) {
+      let linkStat;
+      try {
+        linkStat = fs.lstatSync(fromPath);
+      } catch {
+        continue;
+      }
+      if (isLinkOrReparse(fromPath, entry, linkStat)) {
+        // GitHub tarballs keep docs/screenshot gitlinks. Windows tar turns
+        // dangling ones into reparse points that 7zip then rejects as
+        // "The directory name is invalid." during NSIS compression.
+        let followed;
+        try {
+          followed = fs.statSync(fromPath);
+        } catch {
+          continue;
+        }
+        if (!followed.isFile()) continue;
+        fs.copyFileSync(fromPath, toPath);
+        fs.chmodSync(toPath, followed.mode & 0o777);
+        continue;
+      }
+      if (linkStat.isDirectory()) {
         visit(fromPath, toPath);
         continue;
       }
-      if (!stat.isFile()) continue;
+      if (!linkStat.isFile()) continue;
       fs.copyFileSync(fromPath, toPath);
-      fs.chmodSync(toPath, stat.mode & 0o777);
+      fs.chmodSync(toPath, linkStat.mode & 0o777);
     }
   };
   visit(source, destination);
@@ -88,9 +119,11 @@ function materializeBundledComponents({
     }
     const archiveUrl = `https://github.com/${manifest.repository}/archive/${manifest.commit}.tar.gz`;
     const archive = path.join(os.tmpdir(), `coding-tools-bundle-${id}-${manifest.commit}.tar.gz`);
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), `coding-tools-bundle-${id}-`));
     try {
       if (!fs.existsSync(archive)) downloadArchive(archiveUrl, archive);
-      extractArchive(archive, dest);
+      extractArchive(archive, scratch);
+      copyBundledTree(scratch, dest);
     } catch (error) {
       throw new Error(`${id}: ${error instanceof Error ? error.message : String(error)}`);
     }
