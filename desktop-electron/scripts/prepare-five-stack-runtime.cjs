@@ -604,8 +604,11 @@ function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = [
   };
   try {
     track(installWindowsCwdNodeCommands(sourceRoot));
-    if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable, npmExecutable);
-    runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
+  if (nodeExecutable) rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable, npmExecutable);
+  // Native addons such as anneal's fs-ext need node-gyp/VS. windows-2025 ships
+  // Visual Studio 18, which node-gyp 11 cannot use. Skip install scripts and run
+  // the explicit JS build afterwards.
+  runNpm(sourceRoot, ["ci", "--ignore-scripts"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
     track(installWindowsNodeBinShims(sourceRoot));
     track(installWindowsCwdNodeCommands(sourceRoot));
     track(installWindowsCwdLifecycleFallbacks(sourceRoot));

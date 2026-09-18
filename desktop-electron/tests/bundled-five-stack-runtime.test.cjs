@@ -217,6 +217,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /installWindowsCwdNodeCommands/);
   assert.match(source, /installWindowsCwdLifecycleFallbacks/);
   assert.match(source, /windowsCmdWithInjectedPath/);
+  assert.match(source, /--ignore-scripts/);
   assert.match(source, /next\.PATH = mergedPath/);
   assert.match(source, /RUNNER_TOOL_CACHE/);
   assert.match(source, /isUsableNodeExecutable/);
@@ -556,9 +557,13 @@ test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async 
       assert.equal(call.options.windowsVerbatimArguments, true);
       const line = String(call.args[3]).toLowerCase();
       assert.ok(line.includes("npm-cli.js") || line.includes("npm.cmd"));
+      if (line.includes(" ci") || line.endsWith(" ci") || /\bci\b/.test(line)) {
+        assert.match(line, /ignore-scripts/);
+      }
     } else {
       assert.match(path.basename(call.command), /^npm$/);
       assert.ok(["ci", "run"].includes(call.args[0]));
+      if (call.args[0] === "ci") assert.deepEqual(call.args.slice(0, 2), ["ci", "--ignore-scripts"]);
     }
   }
 });
