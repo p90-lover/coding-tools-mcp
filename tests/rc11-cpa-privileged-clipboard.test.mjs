@@ -10,12 +10,14 @@ const read = (relativePath) => fs.readFileSync(path.join(repo, relativePath), 'u
 test('CPA management key is copied by privileged Rust code and never returned to renderer JavaScript', () => {
   const cargo = read('src-tauri/Cargo.toml');
   const lock = read('src-tauri/Cargo.lock');
+  const headlessLock = read('rust-core/coding-tools-headless/Cargo.lock');
   const app = read('src-tauri/src/lib.rs');
   const command = read('src-tauri/src/commands/five_stack.rs');
   const panel = read('src/lib/components/control-center/OriginalUiPanel.svelte');
 
   assert.match(cargo, /tauri-plugin-clipboard-manager\s*=\s*"=2\.3\.3"/);
   assert.match(lock, /name = "tauri-plugin-clipboard-manager"\nversion = "2\.3\.3"/);
+  assert.match(headlessLock, /name = "tauri-plugin-clipboard-manager"\nversion = "2\.3\.3"/);
   assert.match(app, /\.plugin\(tauri_plugin_clipboard_manager::init\(\)\)/);
   assert.match(command, /use tauri_plugin_clipboard_manager::ClipboardExt;/);
   assert.match(command, /pub struct CpaClipboardResult/);
