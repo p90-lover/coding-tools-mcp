@@ -27,6 +27,7 @@ const {
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { HeadlessHost } = require("./headless-host.cjs");
+const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
@@ -478,6 +479,23 @@ function executionSettingsPayload(settings) {
 
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  const codingTools = createCodingToolsShellBridge({
+    assertFocusedMainWindow,
+    headlessHost,
+    updateController,
+  });
+  handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
+  handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
+  handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
+  handle("coding-tools:computer:status", (event) => codingTools.computerStatus(event));
+  handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
+  handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
+  handle("coding-tools:native-codex:status", (event) => codingTools.nativeCodexStatus(event));
+  handle("coding-tools:integrations:snapshot", (event) => codingTools.integrationsSnapshot(event));
+  handle("coding-tools:updates:status", (event) => codingTools.updatesStatus(event));
+  handle("coding-tools:diagnostics:snapshot", (event) => codingTools.diagnosticsSnapshot(event));
+  handle("coding-tools:tools:catalog", (event, input) => codingTools.toolsCatalog(event, input));
+  handle("coding-tools:tools:call", (event, input) => codingTools.toolsCall(event, input));
   handle("coding-tools:execution:read", async (event, input) => {
     assertFocusedMainWindow(event, false);
     if (!headlessHost) throw new Error("Local execution service is unavailable");

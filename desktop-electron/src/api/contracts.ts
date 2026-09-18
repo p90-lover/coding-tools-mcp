@@ -84,6 +84,15 @@ export interface CodingToolsApi {
   readonly diagnostics: {
     snapshot(): Promise<JsonObject>;
   };
+  readonly tools: {
+    catalog(input: { readonly workspaceId: string }): Promise<JsonObject>;
+    call(input: {
+      readonly workspaceId: string;
+      readonly tool: string;
+      readonly requestId?: string;
+      readonly arguments?: JsonObject;
+    }): Promise<JsonObject>;
+  };
 }
 
 declare global {

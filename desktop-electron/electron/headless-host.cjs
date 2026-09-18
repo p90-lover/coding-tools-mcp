@@ -253,13 +253,15 @@ class HeadlessHost {
     return token;
   }
 
-  async request(pathname, body) {
+  async request(pathname, body = null, options = {}) {
     const control = await this.ensureStarted();
+    const method = options.method || (body == null ? "GET" : "POST");
     try {
       return await requestJson({
         endpoint: control.endpoint,
         token: control.token,
         pathname,
+        method,
         body,
       });
     } catch (error) {
