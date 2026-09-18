@@ -32,6 +32,7 @@ printf '%s\n' "$merge_status" > "$evidence/merge-exit-code.txt"
 
 git diff --name-only --diff-filter=U | sort > "$evidence/actual-conflicts.txt"
 cat > "$evidence/expected-conflicts.txt" <<'EOF'
+.github/workflows/rc8-external-services-control-plane.yml
 desktop-electron/electron/codex-router-managed.cjs
 desktop-electron/electron/codex-router-original-ui.cjs
 desktop-electron/electron/cpa-codex-long-run.cjs
@@ -97,6 +98,7 @@ git add -- "${ours_paths[@]}" "${theirs_paths[@]}"
 # Keep this integration branch's workflow inventory. New application behavior is
 # validated by this dedicated candidate workflow before any merge commit exists.
 git checkout HEAD -- .github/workflows
+git add -- .github/workflows
 
 # Merge the package contracts instead of choosing one side: rc.11 identity and
 # the shared five-stack builder are combined with the CPA/Router bundled runtime.
