@@ -1,0 +1,106 @@
+name: Apply rc.9 exact-source release lane
+
+on:
+  push:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.9
+    paths:
+      - 'aiTemp/rc9-release/materialize_rc9_release.py'
+      - '.github/workflows/apply-rc9-release-lane.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-rc9-exact-source-release-lane
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    name: Materialize and verify rc.9 release files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: release/codex-router-multiprovider-0.7.0-rc.9
+          fetch-depth: 0
+
+      - name: Prepare retained temporary directories
+        run: mkdir -p aiTemp/rc9-release/evidence aiTemp/Trash/rc9-release
+
+      - name: Materialize rc.9 exact-source release lane
+        run: python aiTemp/rc9-release/materialize_rc9_release.py
+
+      - name: Validate generated runner syntax and identity
+        shell: bash
+        run: |
+          node --check aiTemp/rc9-release/run-windows-release.mjs
+          grep -F 'name: Coding Tools v0.7.0-rc.9 exact-source Windows release' .github/workflows/codex-router-multiprovider-release-rc9.yml
+          grep -F 'release/codex-router-multiprovider-0.7.0-rc.9' .github/workflows/codex-router-multiprovider-release-rc9.yml
+          grep -F "RELEASE_VERSION: 0.7.0-rc.9" .github/workflows/codex-router-multiprovider-release-rc9.yml
+          grep -F "releaseVersion === '0.7.0-rc.9'" aiTemp/rc9-release/run-windows-release.mjs
+          grep -F 'managed-components-runtime.test.cjs' aiTemp/rc9-release/run-windows-release.mjs
+          grep -F 'cpa-unified-oauth-catalog.test.cjs' aiTemp/rc9-release/run-windows-release.mjs
+          grep -F 'rc9-package-identity-alignment.test.cjs' aiTemp/rc9-release/run-windows-release.mjs
+
+      - name: Validate PowerShell migration runner syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $env:GITHUB_WORKSPACE 'aiTemp/rc9-release/verify-windows-migration.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.ToString() }
+            throw 'PowerShell rc.9 migration runner syntax validation failed'
+          }
+
+      - name: Enforce bounded no-delete change
+        shell: bash
+        run: |
+          git diff --check
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+          git diff --name-only | sort > aiTemp/rc9-release/evidence/changed-paths.txt
+          cat > aiTemp/rc9-release/evidence/allowed-paths.txt <<'EOF'
+          .github/workflows/codex-router-multiprovider-release-rc9.yml
+          aiTemp/rc9-release/run-windows-release.mjs
+          aiTemp/rc9-release/verify-windows-migration.ps1
+          docs/releases/v0.7.0-rc.9.md
+          EOF
+          sort -o aiTemp/rc9-release/evidence/allowed-paths.txt aiTemp/rc9-release/evidence/allowed-paths.txt
+          diff -u aiTemp/rc9-release/evidence/allowed-paths.txt aiTemp/rc9-release/evidence/changed-paths.txt
+
+      - name: Commit verified rc.9 release lane
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            .github/workflows/codex-router-multiprovider-release-rc9.yml \
+            aiTemp/rc9-release/run-windows-release.mjs \
+            aiTemp/rc9-release/verify-windows-migration.ps1 \
+            docs/releases/v0.7.0-rc.9.md
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'rc.9 release lane already materialized.'
+            exit 0
+          fi
+          git commit -m 'release(rc9): materialize exact-source Windows publication lane'
+          git push origin HEAD:release/codex-router-multiprovider-0.7.0-rc.9
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-release-lane-evidence-${{ github.sha }}
+          path: aiTemp/rc9-release/evidence/
+          if-no-files-found: warn
+          retention-days: 14
