@@ -18,6 +18,7 @@ import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
+import { ManagedAppsSurface, type ManagedAppTabId } from "./features/ManagedAppsSurface";
 import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
 import type {
   BrowserInteractionMode,
@@ -364,11 +365,13 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
+  const [managedAppTab, setManagedAppTab] = useState<ManagedAppTabId>("cpa");
   const devProfile = snapshot.profile === "development";
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(compactAtMount ? false : snapshot.state.sidebarOpen !== false);
   const [sidebarWidth, setSidebarWidth] = useState(snapshot.state.sidebarWidth || 252);
-  const extraSurfaceActive = surface === "providers"
+  const extraSurfaceActive = surface === "apps"
+    || surface === "providers"
     || surface === "integrations"
     || surface === "paseo"
     || surface === "anneal"
@@ -672,28 +675,10 @@ function LauncherShell({
               <details className="sidebar-more" open={extraSurfaceActive}>
                 <summary>{copy.moreTools}</summary>
                 <SidebarItem
-                  active={surface === "providers"}
+                  active={surface === "apps"}
                   icon="providers"
-                  label={copy.providers}
-                  onClick={() => navigateSurface("providers")}
-                />
-                <SidebarItem
-                  active={surface === "integrations"}
-                  icon="globe"
-                  label={copy.integrations}
-                  onClick={() => navigateSurface("integrations")}
-                />
-                <SidebarItem
-                  active={surface === "paseo"}
-                  icon="orchestrator"
-                  label={language === "zh-TW" ? "Paseo 協調器" : copy.paseoOrchestrator}
-                  onClick={() => navigateSurface("paseo")}
-                />
-                <SidebarItem
-                  active={surface === "anneal"}
-                  icon="activity"
-                  label={language === "zh-TW" ? "Anneal 任務" : copy.annealTasks}
-                  onClick={() => navigateSurface("anneal")}
+                  label={language === "zh-TW" ? "應用程式" : "Managed Apps"}
+                  onClick={() => navigateSurface("apps")}
                 />
                 <SidebarItem
                   active={surface === "network"}
@@ -790,15 +775,32 @@ function LauncherShell({
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
             ) : null}
+            {surface === "apps" ? (
+              <ManagedAppsSurface
+                language={language}
+                onSelectedTabChange={setManagedAppTab}
+                selectedTab={managedAppTab}
+                setError={setError}
+              />
+            ) : null}
             {surface === "providers" ? (
               <ProviderCenterSurface language={language} setError={setError} />
             ) : null}
             {surface === "integrations" ? (
               <ExternalServicesSurface
                 language={language}
-                openAnneal={() => navigateSurface("anneal")}
-                openPaseo={() => navigateSurface("paseo")}
-                openProviders={() => navigateSurface("providers")}
+                openAnneal={() => {
+                  setManagedAppTab("anneal");
+                  navigateSurface("apps");
+                }}
+                openPaseo={() => {
+                  setManagedAppTab("paseo");
+                  navigateSurface("apps");
+                }}
+                openProviders={() => {
+                  setManagedAppTab("cpa");
+                  navigateSurface("apps");
+                }}
                 setError={setError}
               />
             ) : null}
