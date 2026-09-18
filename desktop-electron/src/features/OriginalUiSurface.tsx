@@ -16,6 +16,13 @@ function messageOf(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
 
+function withReconnect(url: string, generation: number): string {
+  if (!url || generation < 1) return url;
+  const parsed = new URL(url);
+  parsed.searchParams.set("lr", String(generation));
+  return parsed.toString();
+}
+
 function toolFrom(snapshot: OriginalUiCatalog | null, toolId: OriginalUiId): OriginalUiSnapshot | null {
   return snapshot?.tools.find((candidate) => candidate.id === toolId) ?? null;
 }
@@ -29,6 +36,8 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const autoOpened = useRef(false);
+  const lastStatus = useRef("");
+  const lastGeneration = useRef(0);
   const tool = useMemo(() => toolFrom(snapshot, toolId), [snapshot, toolId]);
 
   const refresh = async () => {
@@ -42,6 +51,8 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
 
   useEffect(() => {
     autoOpened.current = false;
+    lastStatus.current = "";
+    lastGeneration.current = 0;
     setFrameUrl("");
     setOriginalWindow(false);
     setNotice("");
@@ -105,11 +116,22 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   };
 
   useEffect(() => {
-    if (!tool || autoOpened.current || busy || !api) return;
-    if (tool.status !== "ready" || toolId === "codex-router") return;
-    autoOpened.current = true;
-    void openSection(tool.sections[0]).catch((cause) => setError(messageOf(cause)));
-  }, [api, busy, setError, tool, toolId]);
+    if (!tool || busy || !api) return;
+    const generation = tool.longRun?.reconnectGeneration ?? 0;
+    const recovered = lastStatus.current !== "" && lastStatus.current !== "ready" && tool.status === "ready";
+    const generationBumped = generation > lastGeneration.current;
+    lastStatus.current = tool.status;
+    lastGeneration.current = generation;
+    if (toolId !== "cpa" || tool.status !== "ready") return;
+    if (!autoOpened.current) {
+      autoOpened.current = true;
+      void openSection(tool.sections[0]).catch((cause) => setError(messageOf(cause)));
+      return;
+    }
+    if (recovered || generationBumped) {
+      void openSection(selectedSection || tool.sections[0]).catch((cause) => setError(messageOf(cause)));
+    }
+  }, [api, busy, selectedSection, setError, tool, toolId]);
 
   if (!tool) {
     return (
@@ -192,7 +214,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
             allow="clipboard-read; clipboard-write"
             referrerPolicy="no-referrer"
             sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-            src={frameUrl}
+            src={withReconnect(frameUrl, tool.longRun?.reconnectGeneration ?? 0)}
             title={`${tool.name} original ${selectedSection}`}
           />
         ) : (

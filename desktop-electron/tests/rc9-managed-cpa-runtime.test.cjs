@@ -89,6 +89,9 @@ test("the managed CPA adapter extracts safely and generates a private loopback-o
   assert.match(source, /remote-management:/);
   assert.match(source, /allow-remote: false/);
   assert.match(source, /disable-control-panel: false/);
+  assert.match(source, /disable-auto-update-panel: true/);
+  assert.match(source, /cpaLongRunYamlLines/);
+  assert.match(read("desktop-electron/electron/cpa-codex-long-run.cjs"), /keepalive-seconds: 15/);
   assert.match(source, /CODING_TOOLS_CPA_MANAGEMENT_KEY/);
   assert.match(source, /CODING_TOOLS_CPA_PROXY_API_KEY/);
   assert.match(source, /--config/);
@@ -124,6 +127,9 @@ test("a healthy managed CPA probe remains ready instead of being overwritten as 
 test("packaging keeps the CPA adapter executable outside app.asar and preserves the no-delete contract", () => {
   const manifest = JSON.parse(read("desktop-electron/package.json"));
   assert.ok(manifest.build.asarUnpack.includes("electron/cpa-managed.cjs"));
+  assert.ok(manifest.build.asarUnpack.includes("electron/codex-router-original-ui.cjs"));
+  assert.ok(manifest.build.asarUnpack.includes("electron/cpa-codex-long-run.cjs"));
+  assert.ok(manifest.build.asarUnpack.includes("electron/atomic-file.cjs"));
 
   const workflow = read(".github/workflows/rc9-managed-cpa-runtime.yml");
   assert.match(workflow, /git diff --diff-filter=D/);

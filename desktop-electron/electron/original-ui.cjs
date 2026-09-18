@@ -2,10 +2,14 @@
 
 const path = require("node:path");
 const { ORIGINAL_SECTIONS, openOriginalControlCenter } = require("./codex-router-original-ui.cjs");
+const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
-const READY_WAIT_MS = 20_000;
+const READY_WAIT_MS = {
+  cpa: 45_000,
+  "codex-router": 5 * 60_000,
+};
 const READY_POLL_MS = 250;
 
 function manifestPath(toolId) {
@@ -59,7 +63,7 @@ function sectionUrl(manifest, endpoint, section) {
   return target.toString();
 }
 
-function createOriginalUiController({
+function createOriginalUiCore({
   externalServices = null,
   openExternal = null,
   spawnProcess = null,
@@ -140,7 +144,7 @@ function createOriginalUiController({
       if (state.status === "error") {
         throw new Error(state.error || `${requireTool(toolId).name} failed to start`);
       }
-      if (Date.now() - started >= READY_WAIT_MS) {
+      if (Date.now() - started >= (READY_WAIT_MS[toolId] || 45_000)) {
         throw new Error(`${requireTool(toolId).name} is not ready`);
       }
       await sleep(READY_POLL_MS);
@@ -259,9 +263,25 @@ function createOriginalUiController({
   });
 }
 
+function createOriginalUiController(options = {}) {
+  const core = createOriginalUiCore(options);
+  if (options.longRun === false) return core;
+  return attachCpaCodexLongRun(core, {
+    statePath: options.longRun?.statePath || options.statePath || null,
+    now: options.now,
+    setTimeoutFn: options.setTimeoutFn,
+    clearTimeoutFn: options.clearTimeoutFn,
+    powerSaveBlocker: options.powerSaveBlocker || options.longRun?.powerSaveBlocker,
+    logger: options.logger,
+    resumeOnCreate: options.resumeOnCreate !== false,
+  });
+}
+
 module.exports = {
   TOOL_IDS,
+  READY_WAIT_MS,
   createOriginalUiController,
+  createOriginalUiCore,
   loadManifest,
   normalizeLoopbackEndpoint,
   sectionUrl,

@@ -351,6 +351,15 @@ export interface UpstreamToolOpenResult {
   embedded: boolean;
 }
 
+export interface OriginalUiLongRun {
+  desiredRunning: boolean;
+  reconnectGeneration: number;
+  lastEvent: string | null;
+  lastError: string | null;
+  backoffMs: number;
+  keptAliveAt: string | null;
+}
+
 export interface OriginalUiSnapshot {
   id: OriginalUiId;
   name: string;
@@ -366,6 +375,7 @@ export interface OriginalUiSnapshot {
   sourceConfigured: boolean;
   installState: ManagedComponentInstallState;
   originalChrome: boolean;
+  longRun?: OriginalUiLongRun;
 }
 
 export interface OriginalUiCatalog {

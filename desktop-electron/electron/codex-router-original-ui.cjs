@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const { routerLongRunEnvironment } = require("./cpa-codex-long-run.cjs");
 
 const CONTROL_CENTER_RELATIVE = path.join("apps", "control-center");
 const ORIGINAL_SECTIONS = Object.freeze([
@@ -77,6 +78,7 @@ function routerEnvironment(home, state) {
     CODEX_HOME: codexHome,
     CODEX_ROUTER_SOURCE_ROOT: home,
     CODEX_ROUTER_NODE_BIN: process.execPath,
+    ...routerLongRunEnvironment(),
   };
 }
 

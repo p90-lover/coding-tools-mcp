@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { cpaLongRunYamlLines } = require("./cpa-codex-long-run.cjs");
 
 const RUNTIME_MARKER = "CPA_RUNTIME.json";
 const MAX_ARCHIVE_LIST_BYTES = 16 * 1024 * 1024;
@@ -147,11 +148,12 @@ function runtimeConfiguration(state, managementKey, proxyApiKey) {
     "  allow-remote: false",
     `  secret-key: ${yamlString(managementKey)}`,
     "  disable-control-panel: false",
+    "  disable-auto-update-panel: true",
     "debug: false",
     "request-log: false",
     "logging-to-file: true",
-    "logs-max-total-size-mb: 100",
     "usage-statistics-enabled: true",
+    ...cpaLongRunYamlLines(),
     "",
   ].join("\n");
 }
@@ -201,11 +203,19 @@ function run(homeValue, stateValue) {
   });
 }
 
-const command = process.argv[2];
-if (command === "prepare") {
-  prepare(process.argv[3], process.argv[4], process.argv[5]);
-} else if (command === "run") {
-  run(process.argv[3], process.argv[4]);
-} else {
-  throw new Error("CPA managed adapter command must be prepare or run");
+if (require.main === module) {
+  const command = process.argv[2];
+  if (command === "prepare") {
+    prepare(process.argv[3], process.argv[4], process.argv[5]);
+  } else if (command === "run") {
+    run(process.argv[3], process.argv[4]);
+  } else {
+    throw new Error("CPA managed adapter command must be prepare or run");
+  }
 }
+
+module.exports = {
+  prepare,
+  run,
+  runtimeConfiguration,
+};

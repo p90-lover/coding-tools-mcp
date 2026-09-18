@@ -16,6 +16,7 @@ const {
   safeStorage,
   shell,
   Tray,
+  powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
@@ -1330,6 +1331,12 @@ async function start() {
     externalServices: externalServicesController,
     openExternal: openWebUrl,
     electronExecutable: process.execPath,
+    logger,
+    powerSaveBlocker,
+    longRun: {
+      statePath: path.join(app.getPath("userData"), "cpa-codex-long-run.json"),
+      powerSaveBlocker,
+    },
   });
   app.once("before-quit", () => {
     managedBootstrapController?.dispose();
