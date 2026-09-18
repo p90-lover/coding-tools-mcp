@@ -5,6 +5,11 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const {
+  CPA_LOGIN_ADAPTERS,
+  inspectCpaAccount,
+  startCpaAccountLogin,
+} = require("./cpa-oauth-adapter.cjs");
 
 const STORE_VERSION = 1;
 const ACCOUNT_AUTH = new Set(["oauth", "api_key", "browser_session", "local_proxy"]);
@@ -33,6 +38,7 @@ const PROVIDER_LOGIN_URLS = Object.freeze({
 });
 const ANTIGRAVITY_PROVIDER_ID = "cliproxyapi-antigravity";
 const DEFAULT_ANTIGRAVITY_BASE_URL = "http://127.0.0.1:8317";
+const DEFAULT_CPA_BASE_URL = DEFAULT_ANTIGRAVITY_BASE_URL;
 const COMMANDCODE_PROVIDER_ID = "commandcode-proxy";
 const DEFAULT_COMMANDCODE_PROXY_URL = "http://127.0.0.1:9090";
 const COMMANDCODE_API_URL = "https://api.commandcode.ai";
@@ -136,6 +142,8 @@ function normalizeAccount(account) {
       enabled: account.enabled !== false,
       isDefault: account.isDefault === true,
       models: normalizeModels(account.models),
+      loginAdapterId: optionalText(account.loginAdapterId, 160),
+      credentialSource: optionalText(account.credentialSource, 64),
       proxyProfileId: optionalText(account.proxyProfileId, 160),
       createdAt: timestamp(account.createdAt),
       updatedAt: timestamp(account.updatedAt),
@@ -420,6 +428,8 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       enabled: input.enabled ?? previous?.enabled ?? true,
       isDefault: input.isDefault ?? previous?.isDefault ?? false,
       models: input.models ?? previous?.models ?? [],
+      loginAdapterId: input.loginAdapterId ?? previous?.loginAdapterId,
+      credentialSource: input.credentialSource ?? previous?.credentialSource,
       proxyProfileId: input.proxyProfileId ?? previous?.proxyProfileId,
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
@@ -497,6 +507,8 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     if (Object.hasOwn(input, "identity")) account.identity = optionalText(input.identity, 320);
     if (Object.hasOwn(input, "endpoint")) account.endpoint = optionalText(input.endpoint, 2_048);
     if (Array.isArray(input.models)) account.models = normalizeModels(input.models).sort();
+    if (Object.hasOwn(input, "loginAdapterId")) account.loginAdapterId = optionalText(input.loginAdapterId, 160);
+    if (Object.hasOwn(input, "credentialSource")) account.credentialSource = optionalText(input.credentialSource, 64);
     account.error = optionalText(input.error, 500);
     account.updatedAt = now;
     if (account.status === "connected") {
@@ -657,7 +669,14 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     const account = findAccount(accountId);
     if (!account || account.archivedAt) throw new Error("Provider account was not found");
     const current = accountSecret(accountId) || {};
-    for (const key of ["antigravityAuthName", "antigravityAuthIndex"]) {
+    for (const key of [
+      "antigravityAuthName",
+      "antigravityAuthIndex",
+      "cpaAuthName",
+      "cpaAuthIndex",
+      "cpaProvider",
+      "cpaAdapterId",
+    ]) {
       if (!Object.hasOwn(patch, key)) continue;
       const value = optionalText(patch[key], 512);
       if (value) current[key] = value;
@@ -924,12 +943,12 @@ function createProviderNetworkController({
     return account;
   }
 
-  function antigravityConnection(account) {
+  function cpaConnection(account) {
     const secret = store.accountSecret(account.id) || {};
     const managementKey = String(secret.managementKey ?? secret.credential ?? "").trim();
-    if (!managementKey) throw new Error("Enter the CLIProxyAPI management key before login or testing");
+    if (!managementKey) throw new Error("Enter the CPA / CLIProxyAPI management key before login or testing");
     const baseUrl = normalizeProviderBaseUrl(
-      account.endpoint || secret.baseUrl || DEFAULT_ANTIGRAVITY_BASE_URL,
+      account.endpoint || secret.baseUrl || DEFAULT_CPA_BASE_URL,
     );
     return { baseUrl, managementKey };
   }
@@ -942,15 +961,15 @@ function createProviderNetworkController({
     };
   }
 
-  async function managementJson(account, pathname) {
-    const { baseUrl, managementKey } = antigravityConnection(account);
+  async function managementJson(account, pathname, { method = "GET" } = {}) {
+    const { baseUrl, managementKey } = cpaConnection(account);
     const url = new URL(pathname, `${baseUrl}/`);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, requestTimeoutMs));
     timeout.unref?.();
     try {
       const response = await fetchImpl(url.toString(), {
-        method: "GET",
+        method,
         headers: {
           Accept: "application/json",
           Authorization: `Bearer ${managementKey}`,
@@ -974,6 +993,171 @@ function createProviderNetworkController({
       throw error;
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+
+  const PROVIDER_LOGIN_ADAPTERS = Object.freeze({
+    "codex-oauth": Object.freeze(["cpa-codex", "native-browser"]),
+    "claude-oauth": Object.freeze(["cpa-claude"]),
+    "chatgpt-web": Object.freeze(["native-browser"]),
+    "gemini-oauth": Object.freeze(["cpa-gemini"]),
+    [ANTIGRAVITY_PROVIDER_ID]: Object.freeze(["cpa-antigravity"]),
+    [COMMANDCODE_PROVIDER_ID]: Object.freeze(["commandcode-oauth"]),
+  });
+
+  function defaultLoginAdapter(account) {
+    if (account.loginAdapterId) return account.loginAdapterId;
+    if (account.providerId === "codex-oauth") {
+      const secret = store.accountSecret(account.id) || {};
+      return secret.managementKey || secret.credential ? "cpa-codex" : "native-browser";
+    }
+    return PROVIDER_LOGIN_ADAPTERS[account.providerId]?.[0] ?? null;
+  }
+
+  function requiredLoginAdapter(account, adapterId) {
+    const selected = String(adapterId || defaultLoginAdapter(account) || "").trim();
+    const allowed = PROVIDER_LOGIN_ADAPTERS[account.providerId] ?? [];
+    if (!selected || !allowed.includes(selected)) {
+      throw new Error(`Provider login adapter is not configured for ${account.providerId}`);
+    }
+    return selected;
+  }
+
+  function cpaSessionBinding(account) {
+    const secret = store.accountSecret(account.id) || {};
+    const authIndex = String(secret.cpaAuthIndex ?? secret.antigravityAuthIndex ?? "").trim() || null;
+    const name = String(secret.cpaAuthName ?? secret.antigravityAuthName ?? "").trim() || null;
+    return {
+      id: authIndex || name,
+      name,
+      authIndex,
+    };
+  }
+
+  function reservedCpaAuthFileIds(accountId) {
+    return store.snapshot().accounts
+      .filter((candidate) => candidate.id !== accountId && !candidate.archivedAt)
+      .flatMap((candidate) => {
+        const secret = store.accountSecret(candidate.id) || {};
+        return [
+          String(secret.cpaAuthIndex ?? secret.antigravityAuthIndex ?? "").trim(),
+          String(secret.cpaAuthName ?? secret.antigravityAuthName ?? "").trim(),
+        ].filter(Boolean);
+      });
+  }
+
+  function persistCpaBinding(account, adapterId, result) {
+    const authFile = result.authFile;
+    store.mergeAccountSecret(account.id, {
+      cpaAuthName: authFile.name,
+      cpaAuthIndex: authFile.authIndex,
+      cpaProvider: authFile.provider,
+      cpaAdapterId: adapterId,
+      ...(adapterId === "cpa-antigravity" ? {
+        antigravityAuthName: authFile.name,
+        antigravityAuthIndex: authFile.authIndex,
+      } : {}),
+    });
+    return store.updateAccountConnection(account.id, {
+      status: authFile.status,
+      identity: authFile.identity ?? account.identity,
+      endpoint: cpaConnection(account).baseUrl,
+      models: result.models.length > 0 ? result.models : account.models,
+      loginAdapterId: adapterId,
+      credentialSource: "cpa",
+      error: authFile.status === "connected" ? result.modelError : authFile.error,
+    });
+  }
+
+  async function startCpaProviderLogin(account, adapterId) {
+    store.updateAccountConnection(account.id, {
+      status: "pending",
+      loginAdapterId: adapterId,
+      credentialSource: "cpa",
+      error: undefined,
+    });
+    try {
+      const binding = cpaSessionBinding(account);
+      const result = await startCpaAccountLogin({
+        adapterId,
+        requestJson: (pathname, options) => managementJson(account, pathname, options),
+        openExternal: (url) => shell.openExternal(safeProviderLoginUrl(url)),
+        sleep: sleepImpl,
+        timeoutMs: oauthTimeoutMs,
+        pollIntervalMs: oauthPollIntervalMs,
+        identity: account.identity,
+        boundAuthFileId: binding.id,
+        boundAuthFileName: binding.name,
+        boundAuthFileIndex: binding.authIndex,
+        reservedAuthFileIds: reservedCpaAuthFileIds(account.id),
+      });
+      return {
+        opened: result.opened,
+        mode: result.mode,
+        state: result.state,
+        adapterId,
+        snapshot: persistCpaBinding(account, adapterId, result),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const snapshot = store.updateAccountConnection(account.id, {
+        status: providerSessionFailureStatus(message),
+        loginAdapterId: adapterId,
+        credentialSource: "cpa",
+        error: message,
+      });
+      error.snapshot = snapshot;
+      throw error;
+    }
+  }
+
+  async function inspectCpaProviderAccount(account, adapterId) {
+    const binding = cpaSessionBinding(account);
+    try {
+      const result = await inspectCpaAccount({
+        adapterId,
+        requestJson: (pathname, options) => managementJson(account, pathname, options),
+        identity: account.identity,
+        boundAuthFileId: binding.id,
+        boundAuthFileName: binding.name,
+        boundAuthFileIndex: binding.authIndex,
+        reservedAuthFileIds: reservedCpaAuthFileIds(account.id),
+        requireBound: Boolean(binding.id),
+      });
+      if (!binding.id && result.authFile.status !== "connected") {
+        return store.updateAccountConnection(account.id, {
+          status: result.authFile.status,
+          identity: result.authFile.identity ?? account.identity,
+          models: result.models,
+          loginAdapterId: adapterId,
+          credentialSource: "cpa",
+          error: result.authFile.error ?? result.modelError,
+        });
+      }
+      return persistCpaBinding(account, adapterId, result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!binding.id && /No available .* account exists in CPA/i.test(message)) {
+        return store.updateAccountConnection(account.id, {
+          status: "pending",
+          loginAdapterId: adapterId,
+          credentialSource: "cpa",
+          models: [],
+          error: "No CPA auth file is available for this account",
+        });
+      }
+      if (binding.id && /bound CPA account is unavailable/i.test(message)) {
+        return store.updateAccountConnection(account.id, {
+          status: "pending",
+          loginAdapterId: adapterId,
+          credentialSource: "cpa",
+          identity: account.identity,
+          models: [],
+          error: "The bound Antigravity session is unavailable; log in again",
+        });
+      }
+      throw error;
     }
   }
 
@@ -1305,11 +1489,22 @@ function createProviderNetworkController({
   async function probeProviderAccount(accountId) {
     const account = accountRecord(accountId);
     try {
-      if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
-        return await inspectAntigravitySession(account);
+      const adapterId = defaultLoginAdapter(account);
+      if (adapterId && CPA_LOGIN_ADAPTERS[adapterId]) {
+        return await inspectCpaProviderAccount(account, adapterId);
       }
       if (account.providerId === COMMANDCODE_PROVIDER_ID) {
         return await inspectCommandCodeSession(account);
+      }
+      if (adapterId === "native-browser") {
+        const browserHost = typeof getBrowserHost === "function" ? getBrowserHost() : null;
+        const browser = await browserHost?.probeAuthentication?.();
+        return store.updateAccountConnection(account.id, {
+          status: browser?.authenticated === true ? "connected" : "pending",
+          loginAdapterId: "native-browser",
+          credentialSource: "native_browser",
+          error: browser?.authenticated === true ? undefined : "Browser session is not authenticated",
+        });
       }
       throw new Error("Provider account health probing is not configured for this provider");
     } catch (error) {
@@ -1321,7 +1516,7 @@ function createProviderNetworkController({
     }
   }
 
-  async function syncBrowserProviderAccount(account) {
+  async function syncBrowserProviderAccount(account, adapterId = "native-browser") {
     const browserHost = typeof getBrowserHost === "function" ? getBrowserHost() : null;
     if (!browserHost || typeof browserHost.openLogin !== "function") {
       throw new Error("Browser provider login is unavailable");
@@ -1341,85 +1536,32 @@ function createProviderNetworkController({
       status: "connected",
       error: undefined,
       models: account.models,
+      loginAdapterId: adapterId,
+      credentialSource: "native_browser",
+      authFileId: undefined,
+      authFileName: undefined,
     });
     return { opened: true, mode: "embedded", browser, snapshot };
   }
 
-  async function openProviderLogin(accountId) {
+  async function openProviderLogin(accountId, requestedAdapterId) {
     const account = accountRecord(accountId);
-    if (account.providerId === "chatgpt-web" || account.providerId === "codex-oauth") {
-      return syncBrowserProviderAccount(account);
+    const adapterId = requiredLoginAdapter(account, requestedAdapterId);
+    if (CPA_LOGIN_ADAPTERS[adapterId]) {
+      return startCpaProviderLogin(account, adapterId);
     }
-    if (account.providerId === COMMANDCODE_PROVIDER_ID) {
-      return startCommandCodeLogin(account);
+    if (adapterId === "native-browser") {
+      return syncBrowserProviderAccount(account, adapterId);
     }
-    if (account.providerId === ANTIGRAVITY_PROVIDER_ID) {
-      let baselineAuthNames = new Set();
-      let baselineAuthIndexes = new Set();
-      try {
-        const baseline = await managementJson(account, "/v0/management/auth-files");
-        const baselineFiles = antigravityAuthFiles(baseline);
-        baselineAuthNames = new Set(
-          baselineFiles.map(antigravityAuthFileName).filter(Boolean),
-        );
-        baselineAuthIndexes = new Set(
-          baselineFiles.map(antigravityAuthIndex).filter(Boolean),
-        );
-      } catch (error) {
-        logger.warn("provider.antigravity_baseline_failed", {
-          accountId: account.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-      store.updateAccountConnection(account.id, { status: "pending", error: undefined });
-      const login = await managementJson(
-        account,
-        "/v0/management/antigravity-auth-url?is_webui=true",
-      );
-      const state = String(login?.state ?? "").trim();
-      if (!state || login?.status !== "ok") throw new Error("CLIProxyAPI did not start Antigravity authentication");
-      const loginUrl = safeProviderLoginUrl(login?.url);
-      await shell.openExternal(loginUrl);
-
-      const deadline = Date.now() + Math.max(1, oauthTimeoutMs);
-      while (Date.now() <= deadline) {
-        const status = await managementJson(
-          account,
-          `/v0/management/get-auth-status?state=${encodeURIComponent(state)}`,
-        );
-        if (status?.status === "ok") {
-          return {
-            opened: true,
-            mode: "external",
-            state,
-            snapshot: await inspectAntigravitySession(accountRecord(account.id), {
-              baselineAuthNames,
-              baselineAuthIndexes,
-            }),
-          };
-        }
-        if (status?.status === "error") {
-          const message = String(status.error || "Antigravity authentication failed");
-          const snapshot = store.updateAccountConnection(account.id, {
-            status: providerSessionFailureStatus(message),
-            error: message,
-          });
-          const error = new Error(message);
-          error.snapshot = snapshot;
-          throw error;
-        }
-        await sleepImpl(Math.max(0, oauthPollIntervalMs));
-      }
-      const message = "Antigravity authentication timed out";
-      const snapshot = store.updateAccountConnection(account.id, { status: "error", error: message });
-      const error = new Error(message);
-      error.snapshot = snapshot;
-      throw error;
+    if (adapterId === "commandcode-oauth") {
+      const result = await startCommandCodeLogin(account);
+      const snapshot = store.updateAccountConnection(account.id, {
+        loginAdapterId: adapterId,
+        credentialSource: "commandcode",
+      });
+      return { ...result, adapterId, snapshot };
     }
-    const url = PROVIDER_LOGIN_URLS[account.providerId];
-    if (!url) throw new Error("This provider uses API key or custom endpoint authentication");
-    await shell.openExternal(safeProviderLoginUrl(url));
-    return { opened: true, mode: "external" };
+    throw new Error(`Provider login adapter is not configured: ${adapterId}`);
   }
 
   async function testProxyProfile(profileId) {

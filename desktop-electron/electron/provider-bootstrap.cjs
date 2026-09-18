@@ -108,8 +108,10 @@ function installProviderNetwork({
     active,
     () => active.store.archiveAccount(accountId),
   ));
-  handle("launcher:provider-login", async (active, _event, accountId) => {
-    const result = await active.openProviderLogin(accountId);
+  handle("launcher:provider-login", async (active, _event, accountId, adapterId) => {
+    const result = adapterId === undefined
+      ? await active.openProviderLogin(accountId)
+      : await active.openProviderLogin(accountId, adapterId);
     if (result?.snapshot) publish(result.snapshot);
     return result;
   });

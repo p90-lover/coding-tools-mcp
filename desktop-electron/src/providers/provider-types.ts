@@ -27,6 +27,20 @@ export type ProviderCapability =
 
 export type ProxyMode = "inherit" | "direct" | "custom";
 export type ProviderLoginMode = "browser" | "antigravity_management" | "commandcode_oauth";
+export type ProviderLoginAdapterKind =
+  | "native_browser"
+  | "cpa_oauth"
+  | "cpa_auth_file"
+  | "commandcode_oauth";
+
+export interface ProviderLoginAdapterDefinition {
+  id: string;
+  kind: ProviderLoginAdapterKind;
+  label: string;
+  labelTraditionalChinese: string;
+  route?: string;
+  cpaProvider?: string;
+}
 
 export interface ProviderDefinition {
   id: string;
@@ -40,6 +54,7 @@ export interface ProviderDefinition {
   baseUrl?: string;
   modelsEndpoint?: string;
   loginMode?: ProviderLoginMode;
+  loginAdapters?: ProviderLoginAdapterDefinition[];
   subagentEnabled: boolean;
   paseoEnabled: boolean;
   annealEnabled: boolean;
@@ -62,6 +77,11 @@ export const DEFAULT_PROVIDERS = [
     capabilities: ["text", "reasoning", "tools"],
     models: [],
     proxyMode: "inherit",
+    baseUrl: "http://127.0.0.1:8317",
+    loginAdapters: [
+      { id: "cpa-codex", kind: "cpa_oauth", label: "CPA / CLIProxyAPI OAuth", labelTraditionalChinese: "CPA／CLIProxyAPI OAuth", route: "codex-auth-url", cpaProvider: "codex" },
+      { id: "native-browser", kind: "native_browser", label: "Native BrowserHost", labelTraditionalChinese: "原生 BrowserHost" },
+    ],
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
@@ -76,10 +96,32 @@ export const DEFAULT_PROVIDERS = [
     capabilities: ["text", "reasoning", "tools", "vision"],
     models: [],
     proxyMode: "inherit",
+    baseUrl: "http://127.0.0.1:8317",
+    loginAdapters: [
+      { id: "cpa-claude", kind: "cpa_oauth", label: "CPA / CLIProxyAPI OAuth", labelTraditionalChinese: "CPA／CLIProxyAPI OAuth", route: "anthropic-auth-url", cpaProvider: "anthropic" },
+    ],
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
     priority: 90,
+  },
+  {
+    id: "gemini-oauth",
+    name: "Gemini OAuth (CPA)",
+    category: "oauth",
+    auth: "oauth",
+    protocol: "gemini_native",
+    capabilities: ["text", "reasoning", "tools", "vision", "image_generation"],
+    models: [],
+    proxyMode: "inherit",
+    baseUrl: "http://127.0.0.1:8317",
+    loginAdapters: [
+      { id: "cpa-gemini", kind: "cpa_auth_file", label: "Import CPA Gemini account", labelTraditionalChinese: "匯入 CPA Gemini 帳戶", cpaProvider: "gemini" },
+    ],
+    subagentEnabled: true,
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 78,
   },
   {
     id: "chatgpt-web",
@@ -90,6 +132,9 @@ export const DEFAULT_PROVIDERS = [
     capabilities: ["text", "reasoning", "tools", "vision", "image_generation"],
     models: ["web-gpt"],
     proxyMode: "inherit",
+    loginAdapters: [
+      { id: "native-browser", kind: "native_browser", label: "Native BrowserHost", labelTraditionalChinese: "原生 BrowserHost" },
+    ],
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
@@ -149,6 +194,9 @@ export const DEFAULT_PROVIDERS = [
     baseUrl: "http://127.0.0.1:8317",
     modelsEndpoint: "/v0/management/auth-files/models",
     loginMode: "antigravity_management",
+    loginAdapters: [
+      { id: "cpa-antigravity", kind: "cpa_oauth", label: "CPA / Antigravity OAuth", labelTraditionalChinese: "CPA／Antigravity OAuth", route: "antigravity-auth-url", cpaProvider: "antigravity" },
+    ],
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
@@ -166,6 +214,9 @@ export const DEFAULT_PROVIDERS = [
     baseUrl: "http://127.0.0.1:9090",
     modelsEndpoint: "/v1/models",
     loginMode: "commandcode_oauth",
+    loginAdapters: [
+      { id: "commandcode-oauth", kind: "commandcode_oauth", label: "CommandCode OAuth", labelTraditionalChinese: "CommandCode OAuth" },
+    ],
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
