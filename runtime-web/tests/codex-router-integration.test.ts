@@ -35,6 +35,7 @@ describe("Codex Router integration plan", () => {
 
     expect(rendered.some(command => command.includes("providers generic add coding-tools-web"))).toBe(true);
     expect(rendered.some(command => command.includes("providers generic add commandcode-proxy"))).toBe(true);
+    expect(rendered.some(command => command.includes("providers generic add cpa"))).toBe(false);
     expect(rendered.some(command => command.includes("providers generic remove"))).toBe(false);
     expect(rendered.some(command => command.includes("providers generic edit"))).toBe(false);
     expect(plan.ensureCommandCodeCredential).toBe(true);
@@ -79,5 +80,23 @@ describe("Codex Router integration plan", () => {
     expect(output).toContain("hidden local prompt");
     expect(output).not.toContain("user_");
     expect(output).not.toContain("CODING_TOOLS_CODEX_ROUTER_CALLER_KEY");
+  });
+
+  test("registers in-app CPA without a credential prompt", () => {
+    const plan = codexRouterIntegrationPlan({
+      existingProviders: [],
+      withCpa: true,
+      cpaBaseUrl: "http://127.0.0.1:8317/v1",
+      routerCli: "model-router",
+      curateCli: "curate-models",
+    });
+    const rendered = plan.commands.map(command => command.join(" "));
+    expect(rendered.some(command => command.includes("providers generic add cpa"))).toBe(true);
+    expect(rendered.some(command => command.includes("--base-url http://127.0.0.1:8317/v1"))).toBe(true);
+    expect(rendered.some(command => command.includes("credential") && command.includes("cpa"))).toBe(false);
+    const output = renderCodexRouterIntegrationPlan(plan);
+    expect(output).toContain("127.0.0.1:8317");
+    expect(output).toContain("does not prompt");
+    expect(output).not.toContain("user_");
   });
 });

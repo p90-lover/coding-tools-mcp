@@ -8,6 +8,7 @@ const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writeInAppProvidersFile } = require("./five-stack-cross-use.cjs");
 
 const COMPONENT_IDS = Object.freeze([
   "codex-router",
@@ -344,6 +345,7 @@ function createManagedComponentController({
   spawnProcess = spawn,
   spawnSyncProcess = spawnSync,
   resolveRuntimeExecutable = () => process.execPath,
+  resolveCrossUseEnvironment = null,
   publish = null,
   now = () => new Date().toISOString(),
 } = {}) {
@@ -711,6 +713,10 @@ function createManagedComponentController({
       key,
       expandToken(value, context),
     ]));
+    const peerEnvironment = typeof resolveCrossUseEnvironment === "function"
+      ? (resolveCrossUseEnvironment(context.id, context) || {})
+      : {};
+    const mergedEnvironment = { ...peerEnvironment, ...environment };
     const managedMode = entry.execution === "managed-mode";
     if (context.mode === "wsl2" && managedMode) {
       const linuxHome = context.wslHome || wslPath(context.home);
@@ -729,7 +735,7 @@ function createManagedComponentController({
         key,
         expandToken(value, wslContext),
       ]));
-      const exported = Object.entries(wslEnvironment)
+      const exported = Object.entries({ ...peerEnvironment, ...wslEnvironment })
         .map(([key, value]) => `export ${key}=${quoteBash(value)}`)
         .join("; ");
       const command = [wslExecutable, ...wslArgs].map(quoteBash).join(" ");
@@ -751,7 +757,7 @@ function createManagedComponentController({
         args: ["/d", "/s", "/c", executable, ...args],
         options: {
           cwd: context.home,
-          env: { ...env, ...environment },
+          env: { ...env, ...mergedEnvironment },
           shell: false,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
@@ -763,7 +769,7 @@ function createManagedComponentController({
       args,
       options: {
         cwd: context.home,
-        env: { ...env, ...environment },
+        env: { ...env, ...mergedEnvironment },
         shell: false,
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -1187,6 +1193,9 @@ function createManagedComponentController({
       await installComponent(id, { repair: source.state === "repair-required" || source.state === "error" });
     }
     const context = launchContext(manifest);
+    if (id === "codex-router") {
+      writeInAppProvidersFile(path.join(context.state, "router"));
+    }
     const existing = processes.get(id);
     if (existing && [...existing.values()].some((child) => child && child.exitCode === null && child.signalCode === null)) {
       return project(id);

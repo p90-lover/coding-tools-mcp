@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
+const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
@@ -47,8 +48,40 @@ function createManagedExternalServicesController({
     env: options.env,
     logger: options.logger,
     resolveRuntimeExecutable,
+    resolveCrossUseEnvironment: (componentId, context) => {
+      const extra = peerEnvironmentFor(componentId, crossUseSecrets());
+      if (componentId === "codex-router" && context?.state) {
+        extra.CODING_TOOLS_INAPP_PROVIDERS_FILE = path.join(context.state, "router", "in-app-providers.json");
+      }
+      return extra;
+    },
     publish: publishCombined,
   });
+
+  function crossUseSecrets() {
+    let cpa = {};
+    let commandCode = {};
+    let callerKey = "";
+    try { cpa = managedController.runtimeSecrets("cpa") || {}; } catch {}
+    try { commandCode = managedController.runtimeSecrets("commandcode-proxy") || {}; } catch {}
+    try {
+      callerKey = String(managedController.runtimeConfiguration("codex-router")?.callerKey || "").trim();
+    } catch {}
+    return {
+      cpaProxyApiKey: cpa.proxyApiKey,
+      commandCodeProxyApiKey: commandCode.proxyApiKey,
+      routerCallerKey: callerKey,
+      urls: {
+        cpaOrigin: SERVICE_ENDPOINTS.cpa.endpoint,
+        routerOrigin: SERVICE_ENDPOINTS["codex-router"].endpoint,
+        commandCodeOrigin: SERVICE_ENDPOINTS["commandcode-proxy"].endpoint,
+        paseoOrigin: SERVICE_ENDPOINTS.paseo.endpoint,
+        paseoExecution: SERVICE_ENDPOINTS.paseo.executionEndpoint,
+        annealWeb: SERVICE_ENDPOINTS.anneal.endpoint,
+        annealApi: SERVICE_ENDPOINTS.anneal.executionEndpoint,
+      },
+    };
+  }
 
   function managedConfiguration(serviceId) {
     const installed = managedController.runtimeConfiguration(serviceId);
@@ -256,7 +289,10 @@ function createManagedExternalServicesController({
     stop,
     restart,
     syncCodexRouter,
-    runtimeEnvironment: () => baseController.runtimeEnvironment(),
+    runtimeEnvironment: () => Object.freeze({
+      ...baseController.runtimeEnvironment(),
+      ...peerEnvironmentFor("runtime-supervisor", crossUseSecrets()),
+    }),
     upstreamConfiguration,
     cpaConnection,
     installManagedComponent,

@@ -79,6 +79,7 @@ jobs:
             node --check desktop-electron/electron/main.cjs
             node --check desktop-electron/electron/managed-components.cjs
             node --check desktop-electron/electron/managed-external-services.cjs
+            node --check desktop-electron/electron/five-stack-cross-use.cjs
             node --check desktop-electron/electron/preload.cjs
             node --check desktop-electron/scripts/prepare-five-stack-runtime.cjs
             node --test \
@@ -95,6 +96,7 @@ jobs:
               desktop-electron/tests/managed-bootstrap.test.cjs \
               desktop-electron/tests/managed-components-runtime.test.cjs \
               desktop-electron/tests/bundled-five-stack-runtime.test.cjs \
+              desktop-electron/tests/five-stack-cross-use.test.cjs \
               desktop-electron/tests/rc9-five-stack-completion.test.cjs \
               desktop-electron/tests/rc9-managed-five-stack.test.cjs
             bun run --cwd desktop-electron typecheck

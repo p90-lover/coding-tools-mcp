@@ -202,6 +202,10 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.match(surface, /Anneal/);
   assert.match(surface, /Repair runtime|修復執行環境/);
   assert.match(surface, /Start all|全部啟動/);
+  assert.match(surface, /share in-app loopbacks/);
+  assert.match(managedServices, /peerEnvironmentFor/);
+  assert.match(read("electron/external-services.cjs"), /--with-cpa/);
+  assert.match(read("electron/five-stack-cross-use.cjs"), /CODING_TOOLS_CPA_OPENAI_BASE_URL/);
   assert.doesNotMatch(surface, /Prepare bundled runtime/);
   assert.match(surface, /開啟原始介面/);
   assert.match(surface, /外部服務/);

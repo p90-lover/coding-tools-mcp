@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { publicUrlMap } = require("./five-stack-cross-use.cjs");
 
 const STORE_VERSION = 1;
 const SERVICE_IDS = Object.freeze([
@@ -757,13 +758,16 @@ function createExternalServicesController({
     }
     const router = state.services["codex-router"];
     const commandCode = state.services["commandcode-proxy"];
+    const cpa = state.services.cpa;
     const commandCodeBaseUrl = new URL("/v1", commandCode.endpoint).toString().replace(/\/$/, "");
+    const cpaBaseUrl = new URL("/v1", cpa.endpoint).toString().replace(/\/$/, "");
     const args = [
-      "router", "integrate", "--apply", "--with-commandcode-proxy",
+      "router", "integrate", "--apply", "--with-commandcode-proxy", "--with-cpa",
       "--router-cli", router.routerCli,
       "--curate-cli", router.curateCli,
       "--web-base-url", router.webBaseUrl,
       "--commandcode-base-url", commandCodeBaseUrl,
+      "--cpa-base-url", cpaBaseUrl,
     ];
     const result = await runRuntimeCommand(args);
     const callerKey = secretFor("codex-router").callerKey;
@@ -786,12 +790,16 @@ function createExternalServicesController({
     const cpa = state.services.cpa;
     const callerKey = secretFor("codex-router").callerKey;
     return Object.freeze({
-      CODING_TOOLS_CODEX_ROUTER_URL: router.endpoint.replace(/\/$/, ""),
+      ...publicUrlMap({
+        cpaOrigin: cpa.endpoint,
+        routerOrigin: router.endpoint,
+        commandCodeOrigin: commandCode.endpoint,
+        paseoOrigin: state.services.paseo.endpoint,
+        paseoExecution: state.services.paseo.executionEndpoint,
+        annealWeb: state.services.anneal.endpoint,
+        annealApi: state.services.anneal.executionEndpoint,
+      }),
       ...(callerKey ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey } : {}),
-      CODING_TOOLS_COMMANDCODE_URL: commandCode.endpoint.replace(/\/$/, ""),
-      CODING_TOOLS_CPA_URL: cpa.endpoint.replace(/\/$/, ""),
-      CODING_TOOLS_PASEO_EXECUTION_URL: state.services.paseo.executionEndpoint,
-      CODING_TOOLS_ANNEAL_EXECUTION_URL: state.services.anneal.executionEndpoint,
     });
   }
 

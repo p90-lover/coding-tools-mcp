@@ -43,7 +43,7 @@ Usage:
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web subagents <status|compatibility-v1|native>
-  codex-chatgpt-web router integrate [--apply] [--with-commandcode-proxy] [options]
+  codex-chatgpt-web router integrate [--apply] [--with-commandcode-proxy] [--with-cpa] [options]
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
   codex-chatgpt-web dev status [--json]

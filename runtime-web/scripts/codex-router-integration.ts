@@ -21,8 +21,10 @@ export interface CodexRouterIntegrationPlan {
 export interface CodexRouterIntegrationOptions {
   existingProviders?: GenericProviderSnapshot[];
   withCommandCodeProxy?: boolean;
+  withCpa?: boolean;
   webBaseUrl?: string;
   commandCodeBaseUrl?: string;
+  cpaBaseUrl?: string;
   routerCli?: string;
   curateCli?: string;
 }
@@ -116,8 +118,10 @@ function addProviderCommand(
 export function codexRouterIntegrationPlan({
   existingProviders = [],
   withCommandCodeProxy = false,
+  withCpa = false,
   webBaseUrl = "http://127.0.0.1:17841/router/v1",
   commandCodeBaseUrl = "http://127.0.0.1:3050/v1",
+  cpaBaseUrl = "http://127.0.0.1:8317/v1",
   routerCli = "model-router",
   curateCli = "curate-models",
 }: CodexRouterIntegrationOptions = {}): CodexRouterIntegrationPlan {
@@ -139,6 +143,24 @@ export function codexRouterIntegrationPlan({
     const profile = commandCodeProxyProviderProfile(commandCodeBaseUrl);
     commandCode = expectedSnapshot(profile.id, profile.name, profile.baseUrl, profile.adapter);
     desired.push(commandCode);
+  }
+  if (withCpa) {
+    let origin;
+    try {
+      origin = new URL(cpaBaseUrl);
+    } catch {
+      throw new Error("CPA URL must be a valid URL");
+    }
+    if (!LOOPBACK_HOSTS.has(origin.hostname)) {
+      throw new Error("CPA URL must use a loopback host");
+    }
+    origin.pathname = origin.pathname.replace(/\/+$/, "") || "/v1";
+    desired.push(expectedSnapshot(
+      "cpa",
+      "CPA / CLIProxyAPI",
+      origin.toString().replace(/\/$/, ""),
+      "openai-chat",
+    ));
   }
 
   // Validate every owned id before producing any mutation command. A conflict in the optional
@@ -189,6 +211,12 @@ export function renderCodexRouterIntegrationPlan(plan: CodexRouterIntegrationPla
     lines.push(
       "",
       "CommandCode credential status is checked first. If unconfigured, Codex Router opens its hidden local prompt; Coding Tools never receives or prints the provider API key.",
+    );
+  }
+  if (plan.managedProviderIds.includes("cpa")) {
+    lines.push(
+      "",
+      "CPA / CLIProxyAPI is the in-app loopback at 127.0.0.1:8317. Coding Tools supplies CODING_TOOLS_CPA_PROXY_API_KEY on the Router process and does not prompt for that key.",
     );
   }
   return lines.join("\n");
@@ -266,12 +294,15 @@ function option(args: string[], name: string, fallback: string): string {
 export function codexRouterIntegrationMain(args = process.argv.slice(2)): void {
   const apply = args.includes("--apply");
   const withCommandCodeProxy = args.includes("--with-commandcode-proxy");
+  const withCpa = args.includes("--with-cpa");
   const routerCli = option(args, "--router-cli", "model-router");
   const curateCli = option(args, "--curate-cli", "curate-models");
   const shared = {
     withCommandCodeProxy,
+    withCpa,
     webBaseUrl: option(args, "--web-base-url", "http://127.0.0.1:17841/router/v1"),
     commandCodeBaseUrl: option(args, "--commandcode-base-url", "http://127.0.0.1:3050/v1"),
+    cpaBaseUrl: option(args, "--cpa-base-url", "http://127.0.0.1:8317/v1"),
     routerCli,
     curateCli,
   };
