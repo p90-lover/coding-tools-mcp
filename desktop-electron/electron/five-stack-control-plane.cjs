@@ -13,9 +13,20 @@ const MAX_SUBAGENTS = 8;
 const MAX_FINDINGS = 32;
 const MAX_RECORDS = 50;
 
+const STACK_IDS = Object.freeze([
+  "cpa",
+  "codex-router",
+  "commandcode-proxy",
+  "paseo",
+  "anneal",
+]);
+const MANAGE_ACTIONS = Object.freeze(["start", "stop", "restart", "repair"]);
+
 const TOOL_NAMES = Object.freeze([
   "five_stack_api_map",
   "five_stack_status",
+  "five_stack_inspect",
+  "five_stack_manage",
   "paseo_plan",
   "paseo_run",
   "paseo_submit_result",
@@ -27,8 +38,11 @@ const TOOL_NAMES = Object.freeze([
 const READ_ONLY_TOOLS = new Set([
   "five_stack_api_map",
   "five_stack_status",
+  "five_stack_inspect",
   "anneal_preview",
 ]);
+
+const SENSITIVE_KEY = /(?:^|_)(?:access_token|refresh_token|api_key|private_key|client_secret|password|secret|token|credential|bearer|authorization|caller_key|proxy_api_key|management_key)(?:_|$)/i;
 
 function text(value, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
@@ -54,6 +68,39 @@ function asRecord(value) {
 
 function asList(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function normalizedKey(key) {
+  return String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[-.\s]+/g, "_");
+}
+
+function sanitizePublic(value) {
+  if (Array.isArray(value)) return value.map((entry) => sanitizePublic(entry));
+  if (!value || typeof value !== "object") return value;
+  const snapshot = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const normalized = normalizedKey(key);
+    if (SENSITIVE_KEY.test(normalized) && typeof entry !== "boolean") continue;
+    snapshot[key] = sanitizePublic(entry);
+  }
+  return snapshot;
+}
+
+function requiredStackId(value) {
+  const id = text(value);
+  if (!STACK_IDS.includes(id)) throw new Error("Stack must be cpa, codex-router, commandcode-proxy, paseo or anneal");
+  return id;
+}
+
+function requiredManageAction(value) {
+  const action = text(value);
+  if (!MANAGE_ACTIONS.includes(action)) {
+    throw new Error("Manage action must be start, stop, restart or repair");
+  }
+  return action;
 }
 
 function nowIso(clock) {
@@ -108,39 +155,45 @@ function apiMap(endpoints) {
     stacks: Object.freeze({
       cpa: Object.freeze({
         id: "cpa",
-        manage: Object.freeze(["launcher.managedComponentsSnapshot", "launcher.startExternalService"]),
-        monitor: Object.freeze(["launcher.inspectExternalService", "five_stack_status"]),
+        manage: Object.freeze(["five_stack_manage", "launcher.startExternalService"]),
+        monitor: Object.freeze(["five_stack_status", "five_stack_inspect", "launcher.inspectExternalService"]),
         openai: backends.cpa,
         origin: endpoints.cpa.origin,
+        bundleOwner: "pr-194",
       }),
       "codex-router": Object.freeze({
         id: "codex-router",
-        manage: Object.freeze(["launcher.syncCodexRouter", "launcher.startExternalService"]),
-        monitor: Object.freeze(["launcher.inspectExternalService", "five_stack_status"]),
+        manage: Object.freeze(["five_stack_manage", "launcher.syncCodexRouter", "launcher.startExternalService"]),
+        monitor: Object.freeze(["five_stack_status", "five_stack_inspect", "launcher.inspectExternalService"]),
         openai: backends.router,
         origin: endpoints["codex-router"].origin,
+        bundleOwner: "pr-194",
       }),
       "commandcode-proxy": Object.freeze({
         id: "commandcode-proxy",
-        manage: Object.freeze(["launcher.startExternalService"]),
-        monitor: Object.freeze(["launcher.inspectExternalService", "five_stack_status"]),
+        manage: Object.freeze(["five_stack_manage", "launcher.startExternalService"]),
+        monitor: Object.freeze(["five_stack_status", "five_stack_inspect", "launcher.inspectExternalService"]),
         openai: backends.commandcode,
         origin: endpoints["commandcode-proxy"].origin,
       }),
       paseo: Object.freeze({
         id: "paseo",
-        manage: Object.freeze(["paseo_plan", "paseo_run", "execution.update"]),
-        monitor: Object.freeze(["paseo_review", "execution.read", "five_stack_status"]),
+        manage: Object.freeze(["five_stack_manage", "paseo_plan", "paseo_run", "execution.update"]),
+        monitor: Object.freeze(["five_stack_status", "five_stack_inspect", "paseo_review", "execution.read"]),
         origin: endpoints.paseo.origin,
         execution: endpoints.paseo.ws,
       }),
       anneal: Object.freeze({
         id: "anneal",
-        manage: Object.freeze(["anneal_open_from_review", "execution.update"]),
-        monitor: Object.freeze(["anneal_preview", "tasks.list", "five_stack_status"]),
+        manage: Object.freeze(["five_stack_manage", "anneal_open_from_review", "execution.update"]),
+        monitor: Object.freeze(["five_stack_status", "five_stack_inspect", "anneal_preview", "tasks.list"]),
         web: endpoints.anneal.web,
         api: endpoints.anneal.api,
       }),
+    }),
+    compose: Object.freeze({
+      cpaRouterBundle: "pr-194",
+      commandcodeLongrun: "pr-193",
     }),
     mcp: Object.freeze({
       tools: TOOL_NAMES.slice(),
@@ -169,8 +222,18 @@ function mcpTools() {
     }),
     Object.freeze({
       name: "five_stack_status",
-      description: "Monitor in-app five-stack endpoints and Paseo/Anneal orchestrator records.",
+      description: "Monitor in-app five-stack endpoints, managed runtimes, and Paseo/Anneal records.",
       readOnly: true,
+    }),
+    Object.freeze({
+      name: "five_stack_inspect",
+      description: "Inspect one five-stack runtime using the same launcher inspect API as the Desktop panel.",
+      readOnly: true,
+    }),
+    Object.freeze({
+      name: "five_stack_manage",
+      description: "Start, stop, restart, or repair one five-stack runtime. Same controller as the Desktop panel; does not download.",
+      readOnly: false,
     }),
     Object.freeze({
       name: "paseo_plan",
@@ -190,7 +253,7 @@ function mcpTools() {
     Object.freeze({
       name: "paseo_review",
       description: "Read the orchestrator review of subagent results.",
-      readOnly: true,
+      readOnly: false,
     }),
     Object.freeze({
       name: "anneal_open_from_review",
@@ -241,6 +304,9 @@ function createFiveStackControlPlane({
   idFactory,
   planProvider = createProviderExecutionPlan,
   getProviderSnapshot,
+  getServicesSnapshot,
+  inspectService,
+  manageService,
   endpoints = FIVE_STACK_ENDPOINTS,
 } = {}) {
   const plans = new Map();
@@ -479,11 +545,11 @@ function createFiveStackControlPlane({
     return selected;
   }
 
-  function status(workspaceId = "") {
+  async function status(workspaceId = "") {
     const matchWorkspace = (record) => (
       !workspaceId || !record.workspaceId || record.workspaceId === workspaceId
     );
-    return {
+    const payload = {
       endpoints: backends,
       plans: [...plans.values()].filter(matchWorkspace).map((item) => ({
         id: item.id,
@@ -506,6 +572,30 @@ function createFiveStackControlPlane({
       })),
       annealTasks: [...tasks.values()].filter(matchWorkspace),
     };
+    if (typeof getServicesSnapshot !== "function") return payload;
+    try {
+      payload.services = sanitizePublic(await getServicesSnapshot());
+    } catch {
+      payload.servicesUnavailable = true;
+    }
+    return payload;
+  }
+
+  async function inspectStack(input = {}) {
+    if (typeof inspectService !== "function") {
+      throw new Error("Five-stack inspect controller is unavailable");
+    }
+    const stack = requiredStackId(input.stack);
+    return sanitizePublic(await inspectService(stack));
+  }
+
+  async function manageStack(input = {}) {
+    if (typeof manageService !== "function") {
+      throw new Error("Five-stack manage controller is unavailable");
+    }
+    const stack = requiredStackId(input.stack);
+    const action = requiredManageAction(input.action);
+    return sanitizePublic(await manageService(stack, action));
   }
 
   function readResource(uri) {
@@ -521,12 +611,15 @@ function createFiveStackControlPlane({
     const workspaceId = text(context.workspaceId);
     if (tool === "five_stack_api_map") return apiMap(endpoints);
     if (tool === "five_stack_status") return status(workspaceId);
+    if (tool === "five_stack_inspect") return inspectStack(input);
+    if (tool === "five_stack_manage") return manageStack(input);
     if (tool === "paseo_plan") return plan(input, workspaceId);
     if (tool === "paseo_run") return run(input, workspaceId);
     if (tool === "paseo_submit_result") return submitResult(input);
     if (tool === "paseo_review") return review(input);
     if (tool === "anneal_open_from_review") return openAnnealFromReview(input, workspaceId);
-    return previewAnneal(input, workspaceId);
+    if (tool === "anneal_preview") return previewAnneal(input, workspaceId);
+    throw new Error(`Unknown five-stack tool ${name}`);
   }
 
   return {
@@ -543,9 +636,11 @@ function createFiveStackControlPlane({
 
 module.exports = {
   FIVE_STACK_CONTROL_PLANE_TOOLS: TOOL_NAMES,
+  FIVE_STACK_IDS: STACK_IDS,
   apiMap,
   createFiveStackControlPlane,
   mergeCatalog,
   mcpResources,
   mcpTools,
+  sanitizePublic,
 };

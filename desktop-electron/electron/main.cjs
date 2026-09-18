@@ -498,6 +498,22 @@ function registerIpc({ logger, stateStore }) {
       const providerNetwork = await providerNetworkReady();
       return providerNetwork.store.snapshot();
     },
+    getServicesSnapshot: () => {
+      if (!externalServicesController) return { version: 1, services: [] };
+      return externalServicesController.snapshot();
+    },
+    inspectService: (stack) => {
+      if (!externalServicesController) throw new Error("External services controller is unavailable");
+      return externalServicesController.inspect(stack);
+    },
+    manageService: async (stack, action) => {
+      if (!externalServicesController) throw new Error("External services controller is unavailable");
+      if (action === "start") return externalServicesController.start(stack);
+      if (action === "stop") return externalServicesController.stop(stack);
+      if (action === "restart") return externalServicesController.restart(stack);
+      if (action === "repair") return externalServicesController.repairManagedComponent(stack);
+      throw new Error(`Unsupported manage action ${action}`);
+    },
   });
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));

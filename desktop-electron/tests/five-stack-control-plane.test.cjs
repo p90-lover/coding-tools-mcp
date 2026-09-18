@@ -61,12 +61,17 @@ test("API map covers all five stacks and the Paseo→Anneal loop", () => {
   assert.equal(map.control_plane, "coding-tools-five-stack");
   assert.match(map.loop, /paseo_plan/);
   assert.match(map.loop, /anneal_open_from_review/);
+  assert.equal(map.compose.cpaRouterBundle, "pr-194");
+  assert.equal(map.compose.commandcodeLongrun, "pr-193");
   for (const id of ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]) {
     assert.ok(map.stacks[id], `missing stack ${id}`);
-    assert.ok(map.stacks[id].manage.length > 0);
-    assert.ok(map.stacks[id].monitor.length > 0);
+    assert.ok(map.stacks[id].manage.includes("five_stack_manage"));
+    assert.ok(map.stacks[id].monitor.includes("five_stack_status"));
+    assert.ok(map.stacks[id].monitor.includes("five_stack_inspect"));
   }
   assert.equal(map.stacks.cpa.openai, "http://127.0.0.1:8317/v1");
+  assert.equal(map.stacks.cpa.bundleOwner, "pr-194");
+  assert.equal(map.stacks["codex-router"].bundleOwner, "pr-194");
   assert.equal(map.stacks.paseo.execution, "ws://127.0.0.1:6768/ws");
   assert.equal(map.stacks.anneal.api, "http://127.0.0.1:3000");
   assert.deepEqual(map.mcp.tools, [...FIVE_STACK_CONTROL_PLANE_TOOLS]);
@@ -139,9 +144,10 @@ test("MCP catalog overlay keeps headless tools and exposes five-stack resources"
     resources: [{ uri: "coding-tools://workspace/one" }],
   });
   assert.equal(catalog.control_plane, "coding-tools-five-stack");
-  assert.deepEqual(catalog.tools.map((tool) => tool.name || tool).slice(0, 8), [
-    ...FIVE_STACK_CONTROL_PLANE_TOOLS,
-  ]);
+  assert.deepEqual(
+    catalog.tools.map((tool) => tool.name || tool).slice(0, FIVE_STACK_CONTROL_PLANE_TOOLS.length),
+    [...FIVE_STACK_CONTROL_PLANE_TOOLS],
+  );
   assert.ok(catalog.tools.some((tool) => tool.name === "read_file"));
   assert.equal(catalog.tools.filter((tool) => (tool.name || tool) === "five_stack_status").length, 1);
   assert.ok(catalog.resources.some((resource) => resource.uri === "coding-tools://five-stack/api-map"));
@@ -155,10 +161,66 @@ test("Desktop and MCP share the control-plane tools.call path", () => {
   assert.match(main, /createFiveStackControlPlane/);
   assert.match(main, /fiveStackControlPlane\.hasTool/);
   assert.match(main, /mergeCatalog/);
+  assert.match(main, /manageService/);
+  assert.match(main, /inspectService/);
+  assert.match(main, /repairManagedComponent/);
+  assert.doesNotMatch(main, /five_stack_manage[\s\S]{0,200}installManagedComponent/);
   assert.match(paseo, /tools\.call/);
   assert.match(paseo, /paseo_plan/);
   assert.match(paseo, /paseo_run/);
   assert.match(paseo, /paseo_review/);
   assert.match(anneal, /anneal_preview|anneal_open_from_review|five_stack_status/);
   assert.doesNotMatch(read("electron/five-stack-control-plane.cjs"), /bundled-runtimes/);
+});
+
+test("MCP manage/inspect uses the panel controller and strips secrets", async () => {
+  const actions = [];
+  let seq = 0;
+  const control = createFiveStackControlPlane({
+    clock: () => "2026-09-18T00:00:00.000Z",
+    idFactory: () => `id${String(++seq).padStart(4, "0")}`,
+    planProvider: createProviderExecutionPlan,
+    getProviderSnapshot: async () => snapshot(),
+    getServicesSnapshot: async () => ({
+      version: 1,
+      services: [{
+        id: "commandcode-proxy",
+        running: true,
+        endpoint: "http://127.0.0.1:9090/",
+        callerKey: "must-never-leak",
+        proxyApiKey: "must-never-leak",
+        secretConfigured: true,
+      }],
+    }),
+    inspectService: async (stack) => ({
+      id: stack,
+      reachable: true,
+      managementKey: "must-never-leak",
+    }),
+    manageService: async (stack, action) => {
+      actions.push({ stack, action });
+      return { id: stack, action, running: action !== "stop" };
+    },
+  });
+
+  const status = await control.callTool("five_stack_status", {});
+  assert.equal(status.services.services[0].id, "commandcode-proxy");
+  assert.equal(status.services.services[0].secretConfigured, true);
+  assert.equal(JSON.stringify(status).includes("must-never-leak"), false);
+
+  const inspected = await control.callTool("five_stack_inspect", { stack: "commandcode-proxy" });
+  assert.equal(inspected.id, "commandcode-proxy");
+  assert.equal(inspected.managementKey, undefined);
+
+  const started = await control.callTool("five_stack_manage", {
+    stack: "commandcode-proxy",
+    action: "start",
+  });
+  assert.equal(started.id, "commandcode-proxy");
+  assert.deepEqual(actions, [{ stack: "commandcode-proxy", action: "start" }]);
+
+  await assert.rejects(
+    () => control.callTool("five_stack_manage", { stack: "commandcode-proxy", action: "install" }),
+    /start, stop, restart or repair/,
+  );
 });
