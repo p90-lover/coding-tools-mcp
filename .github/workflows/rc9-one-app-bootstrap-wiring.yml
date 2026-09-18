@@ -6,17 +6,25 @@ on:
       - integration/v0.7.0-rc.9-one-app-bootstrap-wiring
     paths:
       - '.github/workflows/rc9-one-app-bootstrap-wiring.yml'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/electron/managed-bootstrap.cjs'
       - 'desktop-electron/electron/managed-external-services.cjs'
+      - 'desktop-electron/src/types.ts'
       - 'desktop-electron/tests/managed-bootstrap.test.cjs'
       - 'desktop-electron/tests/managed-external-bootstrap.test.cjs'
+      - 'desktop-electron/tests/managed-bootstrap-ipc-contract.test.cjs'
   pull_request:
     paths:
       - '.github/workflows/rc9-one-app-bootstrap-wiring.yml'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/electron/managed-bootstrap.cjs'
       - 'desktop-electron/electron/managed-external-services.cjs'
+      - 'desktop-electron/src/types.ts'
       - 'desktop-electron/tests/managed-bootstrap.test.cjs'
       - 'desktop-electron/tests/managed-external-bootstrap.test.cjs'
+      - 'desktop-electron/tests/managed-bootstrap-ipc-contract.test.cjs'
   workflow_dispatch:
 
 permissions:
@@ -45,12 +53,15 @@ jobs:
           set -euo pipefail
           node --test \
             desktop-electron/tests/managed-bootstrap.test.cjs \
-            desktop-electron/tests/managed-external-bootstrap.test.cjs
+            desktop-electron/tests/managed-external-bootstrap.test.cjs \
+            desktop-electron/tests/managed-bootstrap-ipc-contract.test.cjs
 
       - name: Validate runtime syntax
         shell: bash
         run: |
           set -euo pipefail
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/preload.cjs
           node --check desktop-electron/electron/managed-bootstrap.cjs
           node --check desktop-electron/electron/managed-external-services.cjs
 
