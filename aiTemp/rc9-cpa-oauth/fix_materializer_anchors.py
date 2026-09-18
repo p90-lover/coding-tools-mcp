@@ -89,6 +89,56 @@ repair_root = "ROOT = Path(__file__).resolve().parents[2]"
 if repairs.count(repair_root) != 1:
     raise SystemExit(f"expected one repair-root anchor, found {repairs.count(repair_root)}")
 repairs = repairs.replace(repair_root, "ROOT = Path(__file__).resolve().parents[3]", 1)
+
+sequence_old = '''path = ROOT / "desktop-electron/electron/cpa-oauth-adapter.cjs"
+source = path.read_text(encoding="utf-8")
+old_sequence = \'\'\'      boundAuthFileId,
+      identity,
+      requireBound,
+\'\'\'
+new_sequence = \'\'\'      boundAuthFileId,
+      boundAuthFileName,
+      boundAuthFileIndex,
+      identity,
+      requireBound,
+\'\'\'
+count = source.count(old_sequence)
+if count != 2:
+    raise SystemExit(f"expected two CPA login resolution anchors, found {count}")
+source = source.replace(old_sequence, new_sequence)
+'''
+sequence_new = '''path = ROOT / "desktop-electron/electron/cpa-oauth-adapter.cjs"
+source = path.read_text(encoding="utf-8")
+import_old = \'\'\'      boundAuthFileId,
+      identity,
+      requireBound,
+\'\'\'
+import_new = \'\'\'      boundAuthFileId,
+      boundAuthFileName,
+      boundAuthFileIndex,
+      identity,
+      requireBound,
+\'\'\'
+if source.count(import_old) != 1:
+    raise SystemExit(f"expected one CPA import resolution anchor, found {source.count(import_old)}")
+source = source.replace(import_old, import_new, 1)
+oauth_old = \'\'\'        boundAuthFileId,
+        identity,
+        requireBound,
+\'\'\'
+oauth_new = \'\'\'        boundAuthFileId,
+        boundAuthFileName,
+        boundAuthFileIndex,
+        identity,
+        requireBound,
+\'\'\'
+if source.count(oauth_old) != 1:
+    raise SystemExit(f"expected one CPA OAuth resolution anchor, found {source.count(oauth_old)}")
+source = source.replace(oauth_old, oauth_new, 1)
+'''
+if repairs.count(sequence_old) != 1:
+    raise SystemExit(f"expected one CPA resolution repair block, found {repairs.count(sequence_old)}")
+repairs = repairs.replace(sequence_old, sequence_new, 1)
 source += "\n\n# Post-materialization regression repairs.\n" + repairs
 
 TARGET.parent.mkdir(parents=True, exist_ok=True)
