@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
+  installWindowsCwdLifecycleFallbacks,
   installWindowsCwdNodeCommands,
   installWindowsNodeBinShims,
   npmSpawnInvocation,
@@ -212,6 +213,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /coding-tools-node-shims/);
   assert.match(source, /rewritePackageScriptsToAbsoluteNode/);
   assert.match(source, /installWindowsCwdNodeCommands/);
+  assert.match(source, /installWindowsCwdLifecycleFallbacks/);
   assert.match(source, /next\.PATH = mergedPath/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
@@ -448,6 +450,24 @@ test("Windows package directories get node.cmd in CWD for empty PATH cmd lookup"
     assert.match(fs.readFileSync(npmCmd, "utf8"), /npm\.cmd/);
   }
   assert.equal(installWindowsCwdNodeCommands(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "linux").length, 0);
+});
+
+test("Windows package directories copy tsc.cmd into CWD after npm bins exist", () => {
+  const root = temporaryDirectory("coding-tools-windows-cwd-tsc");
+  const client = path.join(root, "packages", "client");
+  const bin = path.join(client, "node_modules", ".bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(root, "package.json"), "{}\n");
+  fs.writeFileSync(path.join(client, "package.json"), "{}\n");
+  fs.writeFileSync(path.join(bin, "tsc.cmd"), "@echo tsc\r\n");
+  fs.writeFileSync(path.join(bin, "tsc.bat"), "@echo tsc\r\n");
+
+  const written = installWindowsCwdLifecycleFallbacks(root, "win32");
+  const cwdTsc = path.join(client, "tsc.cmd");
+  assert.ok(written.includes(cwdTsc));
+  assert.equal(fs.readFileSync(cwdTsc, "utf8"), "@echo tsc\r\n");
+  assert.equal(fs.readFileSync(path.join(client, "tsc.bat"), "utf8"), "@echo tsc\r\n");
+  assert.equal(installWindowsCwdLifecycleFallbacks(root, "linux").length, 0);
 });
 
 test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {

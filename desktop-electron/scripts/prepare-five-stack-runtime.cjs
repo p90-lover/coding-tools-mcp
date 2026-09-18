@@ -492,6 +492,24 @@ function installWindowsCwdNodeCommands(sourceRoot, env = process.env, platform =
   return written;
 }
 
+function installWindowsCwdLifecycleFallbacks(sourceRoot, platform = process.platform) {
+  if (platform !== "win32") return [];
+  const written = [];
+  for (const dir of packageJsonDirectories(sourceRoot)) {
+    const bin = path.join(dir, "node_modules", ".bin");
+    for (const name of ["tsc", "npx"]) {
+      const src = path.join(bin, `${name}.cmd`);
+      if (!isFile(src)) continue;
+      const dest = path.join(dir, `${name}.cmd`);
+      fs.copyFileSync(src, dest);
+      const bat = path.join(bin, `${name}.bat`);
+      if (isFile(bat)) fs.copyFileSync(bat, path.join(dir, `${name}.bat`));
+      written.push(dest);
+    }
+  }
+  return written;
+}
+
 function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
   if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
   const nodeExecutable = resolveNodeExecutable();
@@ -501,6 +519,7 @@ function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = [
   runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
   installWindowsNodeBinShims(sourceRoot);
   installWindowsCwdNodeCommands(sourceRoot);
+  installWindowsCwdLifecycleFallbacks(sourceRoot);
   for (const script of extraScripts) {
     runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
   }
@@ -666,6 +685,7 @@ if (require.main === module) {
 
 module.exports = {
   COMPONENT_IDS,
+  installWindowsCwdLifecycleFallbacks,
   installWindowsCwdNodeCommands,
   installWindowsNodeBinShims,
   npmSpawnInvocation,
