@@ -48,6 +48,12 @@ const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
 const {
+  applyCommandCodeProxyPlan,
+  commandCodeProxyRegistrationPlan,
+  renderCommandCodeProxyPlan,
+} = require("./commandcode-proxy-plan.cjs");
+const { actUpstream } = require("./upstream-actions.cjs");
+const {
   createStateStore,
   nextSessionRefreshReminderAt,
   validateSidebarState,
@@ -514,6 +520,29 @@ function registerIpc({ logger, stateStore }) {
       if (action === "repair") return externalServicesController.repairManagedComponent(stack);
       throw new Error(`Unsupported manage action ${action}`);
     },
+    handoffAnnealTask: async ({ projectId, body }) => {
+      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const result = await actUpstream({
+        toolId: "anneal",
+        op: "create",
+        projectId,
+        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+        name: body?.name,
+        description: body?.description,
+        cwd: body?.workingDirectory,
+      });
+      return result.body && typeof result.body === "object" ? result.body : { id: null };
+    },
+    fetchAnnealTask: async ({ taskId }) => {
+      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const result = await actUpstream({
+        toolId: "anneal",
+        op: "preview",
+        taskId,
+        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+      });
+      return result.body;
+    },
   });
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
@@ -735,6 +764,36 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.syncCodexRouter();
   });
+  handle("launcher:commandcode-proxy-plan", (event, input = {}) => {
+    assertFocusedMainWindow(event, false);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    const snapshot = externalServicesController.snapshot();
+    const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");
+    const router = snapshot.services.find((service) => service.id === "codex-router");
+    const baseUrl = input.baseUrl || commandCode?.endpoint || "http://127.0.0.1:9090/";
+    const plan = commandCodeProxyRegistrationPlan({
+      baseUrl,
+      routerCli: input.routerCli || router?.routerCli || "model-router",
+      curateCli: input.curateCli || router?.curateCli || "curate-models",
+    });
+    return {
+      text: renderCommandCodeProxyPlan(plan),
+      credentialPromptRequired: true,
+      provider: plan.provider,
+    };
+  });
+  handle("launcher:commandcode-proxy-apply", (event, input = {}) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    const snapshot = externalServicesController.snapshot();
+    const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");
+    const router = snapshot.services.find((service) => service.id === "codex-router");
+    return applyCommandCodeProxyPlan({
+      baseUrl: input.baseUrl || commandCode?.endpoint || "http://127.0.0.1:9090/",
+      routerCli: input.routerCli || router?.routerCli || "model-router",
+      curateCli: input.curateCli || router?.curateCli || "curate-models",
+    });
+  });
   handle("launcher:managed-bootstrap-snapshot", (event) => {
     assertFocusedMainWindow(event, false);
     if (!managedBootstrapController) throw new Error("Managed bootstrap controller is unavailable");
@@ -788,6 +847,17 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.openExternalTool(toolId, section);
+  });
+  handle("launcher:upstream-tool-act", (event, input = {}) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("External services controller is unavailable");
+    const toolId = String(input.toolId || "").trim();
+    const config = externalServicesController.upstreamConfiguration(toolId);
+    return actUpstream({
+      ...input,
+      toolId,
+      endpoint: input.endpoint || config.executionEndpoint,
+    });
   });
   handle("launcher:original-ui-snapshot", (event) => {
     assertFocusedMainWindow(event, false);

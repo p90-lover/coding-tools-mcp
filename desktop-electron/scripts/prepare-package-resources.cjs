@@ -853,6 +853,15 @@ function preparePackageResources(options = {}) {
         sha256: sha256(bytes),
       };
     });
+    const { materializeBundledComponents } = require("./vendor-upstream-bundles.cjs");
+    if (fs.existsSync(path.join(desktopRoot, "vendor", "managed-components"))) {
+      materializeBundledComponents({
+        desktopRoot,
+        destinationRoot: path.join(stagingRoot, "bundled-components"),
+        fetchMissing: options.fetchBundles === true,
+      });
+    }
+
     writeJson(path.join(stagingRoot, "coding-tools", "package-manifest.json"), {
       schema: 1,
       product: {
@@ -923,7 +932,10 @@ function preparePackageResources(options = {}) {
 
 if (require.main === module) {
   try {
-    const result = preparePackageResources({ requireMain: true });
+    const result = preparePackageResources({
+      requireMain: true,
+      fetchBundles: process.env.CODING_TOOLS_SKIP_BUNDLE_FETCH !== "1",
+    });
     process.stdout.write(`PACKAGE_RESOURCES_PREPARED ${JSON.stringify(result)}\n`);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

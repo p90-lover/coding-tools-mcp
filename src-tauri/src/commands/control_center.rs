@@ -1,11 +1,15 @@
-//! Main-window-only control center. External project integrations expose reads only.
+//! Main-window-only control center. Live connections plus allowlisted original functions.
 use crate::{
     data::DataStore,
     error::{AppError, AppResult},
     integrations::{
         self,
+        actions::{ActRequest, ActResult},
         board::{Board, Change},
-        commandcode::{CommandCodeProxyApplyResult, CommandCodeProxyStatus},
+        commandcode::{
+            CommandCodeProcessResult, CommandCodeProxyApplyResult, CommandCodeProxyStatus,
+        },
+        live::LiveStatus,
         Snapshot, Source,
     },
 };
@@ -40,6 +44,58 @@ pub async fn integration_read(
     integrations::read(source, &endpoint, credential.as_deref().unwrap_or("")).await
 }
 #[tauri::command]
+pub async fn integration_live_connect(
+    window: WebviewWindow,
+    source: String,
+    endpoint: String,
+    web_ui: Option<String>,
+    credential: Option<String>,
+    keep_alive: bool,
+    remember: bool,
+) -> AppResult<LiveStatus> {
+    local(&window)?;
+    integrations::live::connect(
+        &source,
+        &endpoint,
+        web_ui.as_deref().unwrap_or(""),
+        credential.as_deref().unwrap_or(""),
+        keep_alive,
+        remember,
+    )
+    .await
+}
+#[tauri::command]
+pub async fn integration_live_disconnect(
+    window: WebviewWindow,
+    source: String,
+) -> AppResult<LiveStatus> {
+    local(&window)?;
+    integrations::live::disconnect(&source).await
+}
+#[tauri::command]
+pub async fn integration_live_status(window: WebviewWindow) -> AppResult<Vec<LiveStatus>> {
+    local(&window)?;
+    Ok(integrations::live::all_status().await)
+}
+#[tauri::command]
+pub async fn integration_act(
+    window: WebviewWindow,
+    source: String,
+    endpoint: String,
+    credential: Option<String>,
+    request: ActRequest,
+) -> AppResult<ActResult> {
+    local(&window)?;
+    let mut req = request;
+    req.source = source.clone();
+    let secret = if let Some(value) = credential.filter(|v| !v.is_empty()) {
+        value
+    } else {
+        integrations::live::credential(&source).await
+    };
+    integrations::actions::act(&endpoint, &secret, req).await
+}
+#[tauri::command]
 pub async fn commandcode_proxy_status(
     window: WebviewWindow,
     endpoint: String,
@@ -60,6 +116,20 @@ pub async fn commandcode_proxy_apply(
     })
     .await
     .map_err(|_| AppError::Message("CommandCode Proxy apply was interrupted".into()))?
+}
+#[tauri::command]
+pub async fn commandcode_proxy_control(
+    window: WebviewWindow,
+    action: String,
+    endpoint: String,
+    bin: String,
+) -> AppResult<CommandCodeProcessResult> {
+    local(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        integrations::commandcode::control(&action, &endpoint, &bin)
+    })
+    .await
+    .map_err(|_| AppError::Message("CommandCode Proxy control was interrupted".into()))?
 }
 #[tauri::command]
 pub fn control_board_read(window: WebviewWindow) -> AppResult<Board> {

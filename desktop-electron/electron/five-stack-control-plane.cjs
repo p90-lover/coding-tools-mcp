@@ -129,6 +129,20 @@ function routeSummary(plan) {
   });
 }
 
+const CPA_BACKEND_PROVIDERS = Object.freeze([
+  "cliproxyapi-antigravity",
+  "gemini-oauth",
+  "gemini-api",
+  "gemini-reverse-proxy",
+  "ai-studio-reverse-proxy",
+  "aistudio-to-api",
+]);
+const ROUTER_BACKEND_PROVIDERS = Object.freeze([
+  "codex-oauth",
+  "openai-api",
+  "chatgpt-web",
+]);
+
 function inAppBackends(endpoints) {
   return Object.freeze({
     cpa: endpoints.cpa.v1,
@@ -139,12 +153,83 @@ function inAppBackends(endpoints) {
   });
 }
 
-function preferredBackend(providerId, backends) {
-  if (providerId === "commandcode-proxy") return backends.commandcode;
-  if (providerId === "cliproxyapi-antigravity" || providerId === "gemini-oauth") {
-    return backends.cpa;
+function serviceRows(snapshot) {
+  if (Array.isArray(snapshot?.services)) return snapshot.services;
+  if (Array.isArray(snapshot)) return snapshot;
+  return [];
+}
+
+function flagUp(row) {
+  if (!row || typeof row !== "object") return null;
+  if (row.status === "ready" || row.running === true) return true;
+  if (row.status === "error" || row.status === "stopped" || row.running === false) return false;
+  return null;
+}
+
+function stackAvailability(snapshot) {
+  const rows = serviceRows(snapshot);
+  const byId = new Map(rows.map((row) => [text(row?.id), row]));
+  return Object.freeze({
+    cpa: flagUp(byId.get("cpa")),
+    router: flagUp(byId.get("codex-router")),
+    commandcode: flagUp(byId.get("commandcode-proxy")),
+    anneal: flagUp(byId.get("anneal")),
+    paseo: flagUp(byId.get("paseo")),
+  });
+}
+
+function preferredKind(providerId) {
+  if (providerId === "commandcode-proxy") return "commandcode";
+  if (CPA_BACKEND_PROVIDERS.includes(providerId)) return "cpa";
+  if (ROUTER_BACKEND_PROVIDERS.includes(providerId)) return "router";
+  return "cpa";
+}
+
+function selectInAppBackend(providerId, backends, availability = {}) {
+  const preferred = preferredKind(providerId);
+  const order = preferred === "commandcode"
+    ? ["commandcode"]
+    : preferred === "router"
+      ? ["router", "cpa", "commandcode"]
+      : ["cpa", "router", "commandcode"];
+  for (const kind of order) {
+    if (availability[kind] === false) continue;
+    return Object.freeze({
+      url: backends[kind],
+      kind,
+      fallback: kind !== preferred,
+      available: availability[kind] !== false,
+    });
   }
-  return backends.cpa;
+  return Object.freeze({
+    url: backends.commandcode,
+    kind: "commandcode",
+    fallback: preferred !== "commandcode",
+    available: false,
+  });
+}
+
+function preferredBackend(providerId, backends, availability = {}) {
+  return selectInAppBackend(providerId, backends, availability).url;
+}
+
+function safeProjectId(value, fallback) {
+  const raw = text(value) || text(fallback) || "coding-tools";
+  return raw.replace(/[^A-Za-z0-9_.:-]+/g, "-").slice(0, 80) || "coding-tools";
+}
+
+function annealHandoffBody({ title, description, cwd = "." } = {}) {
+  return Object.freeze({
+    name: boundedText(title, MAX_FINDING_TITLE, "task name"),
+    description: optionalText(description, MAX_SUMMARY, "task description") || boundedText(title, MAX_FINDING_TITLE, "task name"),
+    status: "BACKLOG",
+    workingDirectory: text(cwd) || ".",
+    assigneeType: "AGENT",
+    approvalGate: true,
+    opensPullRequest: false,
+    scheduleKind: "NOW",
+    chainIndex: 0,
+  });
 }
 
 function apiMap(endpoints) {
@@ -307,6 +392,8 @@ function createFiveStackControlPlane({
   getServicesSnapshot,
   inspectService,
   manageService,
+  handoffAnnealTask = null,
+  fetchAnnealTask = null,
   endpoints = FIVE_STACK_ENDPOINTS,
 } = {}) {
   const plans = new Map();
@@ -327,6 +414,27 @@ function createFiveStackControlPlane({
     return getProviderSnapshot();
   }
 
+  async function readAvailability() {
+    if (typeof getServicesSnapshot !== "function") {
+      return { cpa: null, router: null, commandcode: null, anneal: null, paseo: null };
+    }
+    try {
+      return stackAvailability(await getServicesSnapshot());
+    } catch {
+      return { cpa: null, router: null, commandcode: null, anneal: null, paseo: null };
+    }
+  }
+
+  function attachBackend(providerId, availability) {
+    const selected = selectInAppBackend(providerId, backends, availability);
+    return Object.freeze({
+      backend: selected.url,
+      backendKind: selected.kind,
+      backendFallback: selected.fallback === true,
+      backendAvailable: selected.available === true,
+    });
+  }
+
   function resolveRole(input, index, fallback) {
     return optionalText(asRecord(input).role, MAX_ROLE, `subagent ${index + 1} role`) || fallback;
   }
@@ -335,6 +443,7 @@ function createFiveStackControlPlane({
     const brief = boundedText(input.brief, MAX_BRIEF, "brief");
     const orchestratorInput = asRecord(input.orchestrator);
     const snapshot = await snapshotForPlan();
+    const availability = await readAvailability();
     const orchestratorPlan = planProvider(snapshot, {
       workload: "paseo",
       providerId: text(orchestratorInput.providerId) || undefined,
@@ -356,11 +465,12 @@ function createFiveStackControlPlane({
         allowFallback: row.allowFallback !== false,
       });
       const summarized = routeSummary(route);
+      const selected = attachBackend(summarized.providerId, availability);
       return Object.freeze({
         id: nextId("sub"),
         role: resolveRole(row, index, `subagent-${index + 1}`),
         route: summarized,
-        backend: preferredBackend(summarized.providerId, backends),
+        ...selected,
       });
     });
     const record = Object.freeze({
@@ -371,7 +481,7 @@ function createFiveStackControlPlane({
       orchestrator: Object.freeze({
         role: "orchestrator",
         route: routeSummary(orchestratorPlan),
-        backend: preferredBackend(orchestratorPlan.provider.id, backends),
+        ...attachBackend(orchestratorPlan.provider.id, availability),
       }),
       subagents,
       backends,
@@ -496,7 +606,7 @@ function createFiveStackControlPlane({
     return record;
   }
 
-  function openAnnealFromReview(input = {}, workspaceId = "") {
+  async function openAnnealFromReview(input = {}, workspaceId = "") {
     const selected = requireReview(input.reviewId);
     if (!selected.findings.length) {
       throw new Error("Anneal tasks open from review findings; this review has none");
@@ -509,12 +619,49 @@ function createFiveStackControlPlane({
     const planRecord = plans.get(selected.planId);
     const title = optionalText(input.title, MAX_FINDING_TITLE, "title")
       || findings[0].title;
-    const record = Object.freeze({
-      id: nextId("anneal"),
-      workspaceId: selected.workspaceId || text(workspaceId),
+    const description = findings.map((item) => item.detail || item.title).join("\n").slice(0, MAX_SUMMARY);
+    const localId = nextId("anneal");
+    const projectId = safeProjectId(input.projectId, selected.workspaceId || workspaceId);
+    const body = annealHandoffBody({
       title,
-      description: findings.map((item) => item.detail || item.title).join("\n"),
-      state: "review",
+      description,
+      cwd: text(input.cwd) || ".",
+    });
+    let posted = false;
+    let remoteId = null;
+    let handoffError = null;
+    const availability = await readAvailability();
+    if (availability.anneal !== false && typeof handoffAnnealTask === "function") {
+      try {
+        const remote = await handoffAnnealTask({
+          projectId,
+          path: `/projects/${projectId}/tasks`,
+          body,
+        });
+        posted = true;
+        remoteId = text(asRecord(remote).id) || text(asRecord(remote).taskId) || null;
+      } catch (error) {
+        handoffError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const record = Object.freeze({
+      id: remoteId || localId,
+      localId,
+      workspaceId: selected.workspaceId || text(workspaceId),
+      projectId,
+      title,
+      description,
+      state: "BACKLOG",
+      approvalGate: true,
+      opensPullRequest: false,
+      previewPath: `/tasks/${remoteId || localId}`,
+      boardPath: "/tasks",
+      handoff: Object.freeze({
+        attempted: availability.anneal !== false && typeof handoffAnnealTask === "function",
+        posted,
+        remoteId,
+        error: handoffError,
+      }),
       source: Object.freeze({
         kind: "paseo_review",
         reviewId: selected.id,
@@ -528,6 +675,7 @@ function createFiveStackControlPlane({
           role: item.role,
           route: item.route,
           backend: item.backend,
+          backendKind: item.backendKind || null,
         })),
       }),
       findings,
@@ -537,10 +685,24 @@ function createFiveStackControlPlane({
     return record;
   }
 
-  function previewAnneal(input = {}, workspaceId = "") {
+  async function previewAnneal(input = {}, workspaceId = "") {
     const selected = requireTask(input.taskId);
     if (workspaceId && selected.workspaceId && selected.workspaceId !== workspaceId) {
       throw new Error("Anneal task does not belong to this workspace");
+    }
+    if (selected.handoff?.posted === true && typeof fetchAnnealTask === "function") {
+      try {
+        const remote = await fetchAnnealTask({
+          taskId: selected.id,
+          path: selected.previewPath,
+        });
+        return Object.freeze({
+          ...selected,
+          remote: sanitizePublic(remote),
+        });
+      } catch {
+        return selected;
+      }
     }
     return selected;
   }
@@ -635,12 +797,18 @@ function createFiveStackControlPlane({
 }
 
 module.exports = {
+  CPA_BACKEND_PROVIDERS,
   FIVE_STACK_CONTROL_PLANE_TOOLS: TOOL_NAMES,
   FIVE_STACK_IDS: STACK_IDS,
+  ROUTER_BACKEND_PROVIDERS,
+  annealHandoffBody,
   apiMap,
   createFiveStackControlPlane,
   mergeCatalog,
   mcpResources,
   mcpTools,
+  preferredBackend,
   sanitizePublic,
+  selectInAppBackend,
+  stackAvailability,
 };

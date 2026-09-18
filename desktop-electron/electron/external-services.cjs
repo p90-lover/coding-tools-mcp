@@ -6,6 +6,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { publicUrlMap } = require("./five-stack-cross-use.cjs");
+const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
 const STORE_VERSION = 1;
 const SERVICE_IDS = Object.freeze([
@@ -18,8 +19,16 @@ const SERVICE_IDS = Object.freeze([
 const SERVICE_ID_SET = new Set(SERVICE_IDS);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 const CALLER_KEY = /^[A-Za-z0-9_-]{32,}$/;
-const DEFAULT_INSPECT_TIMEOUT_MS = 4_000;
+const DEFAULT_INSPECT_TIMEOUT_MS = 12_000;
 const STOP_TIMEOUT_MS = 5_000;
+const KEEP_ALIVE_POLL_MS = 20_000;
+const KEEP_ALIVE_LEASE_WRITE_MS = 5 * 60_000;
+const KEEP_ALIVE_BACKOFF_CAP_MS = 60_000;
+const KEEP_ALIVE_STABLE_RESET_MS = 120_000;
+const PASEO_STALE_MS = 90_000;
+const HTTP_STALE_MS = 120_000;
+const COMMANDCODE_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/";
+const COMMANDCODE_ALTERNATE_ENDPOINT = "http://127.0.0.1:3050/";
 
 const DEFAULTS = Object.freeze({
   "codex-router": Object.freeze({
@@ -33,15 +42,17 @@ const DEFAULTS = Object.freeze({
     webBaseUrl: "http://127.0.0.1:17841/router/v1",
     enabled: true,
     autoStart: false,
+    keepAlive: false,
   }),
   "commandcode-proxy": Object.freeze({
     name: "CommandCode Proxy",
-    endpoint: "http://127.0.0.1:9090/",
+    endpoint: COMMANDCODE_DEFAULT_ENDPOINT,
     home: "",
     executable: "",
     arguments: [],
     enabled: true,
     autoStart: false,
+    keepAlive: false,
   }),
   cpa: Object.freeze({
     name: "CPA / CLIProxyAPI",
@@ -51,6 +62,7 @@ const DEFAULTS = Object.freeze({
     arguments: [],
     enabled: true,
     autoStart: false,
+    keepAlive: false,
   }),
   paseo: Object.freeze({
     name: "Paseo",
@@ -63,6 +75,7 @@ const DEFAULTS = Object.freeze({
       : ["run", "dev:server"],
     enabled: true,
     autoStart: false,
+    keepAlive: false,
   }),
   anneal: Object.freeze({
     name: "Anneal",
@@ -75,6 +88,7 @@ const DEFAULTS = Object.freeze({
       : ["run", "dev:web"],
     enabled: true,
     autoStart: false,
+    keepAlive: false,
   }),
 });
 
@@ -301,6 +315,7 @@ function normalizeState(value, env) {
         : [...defaults.arguments],
       enabled: input.enabled !== false,
       autoStart: input.autoStart === true,
+      keepAlive: input.keepAlive === true,
       ...(id === "codex-router" ? {
         routerCli: typeof input.routerCli === "string" && input.routerCli.trim()
           ? input.routerCli.trim()
@@ -366,9 +381,51 @@ function projectCommandCodeHealth(payload) {
   };
 }
 
+function nextKeepAliveDelayMs(attempts, random = Math.random) {
+  const exponent = Math.min(Math.max(Number(attempts) || 0, 0), 6);
+  const base = Math.min(KEEP_ALIVE_BACKOFF_CAP_MS, 1_000 * (2 ** exponent));
+  const jitter = Math.floor(random() * 250);
+  return Math.max(1_000, base + jitter);
+}
+
+function commandCodeAlternateEndpoint(endpoint) {
+  let parsed;
+  try {
+    parsed = new URL(String(endpoint || ""));
+  } catch {
+    return null;
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!LOOPBACK_HOSTS.has(hostname)) return null;
+  if (parsed.port === "9090") parsed.port = "3050";
+  else if (parsed.port === "3050") parsed.port = "9090";
+  else return null;
+  parsed.search = "";
+  parsed.hash = "";
+  if (!parsed.pathname.endsWith("/")) parsed.pathname += "/";
+  return parsed.toString();
+}
+
+function commandCodeOriginUrls(endpoint) {
+  const parsed = new URL(endpoint);
+  const origin = `${parsed.protocol}//${parsed.host}`;
+  const path = parsed.pathname.replace(/\/+$/u, "");
+  const cursor = !path || path === "/" || path === "/v1"
+    ? `${origin}/v1`
+    : path.endsWith("/v1")
+      ? `${origin}${path}`
+      : `${origin}${path}/v1`;
+  return { listen: parsed.toString(), cursorBaseUrl: cursor, anthropicBaseUrl: origin };
+}
+
+function staleWindowMs(id) {
+  return id === "paseo" ? PASEO_STALE_MS : HTTP_STALE_MS;
+}
+
 function createExternalServicesController({
   filePath,
   keyPath,
+  loopbackMeshPath = null,
   safeStorage = null,
   logger = null,
   env = process.env,
@@ -381,6 +438,7 @@ function createExternalServicesController({
   now = () => new Date().toISOString(),
 } = {}) {
   if (!filePath || !keyPath) throw new Error("External service state paths are required");
+  const meshFilePath = loopbackMeshPath || path.join(path.dirname(filePath), "loopback-mesh.json");
   const codec = createSecretCodec({ safeStorage, keyPath });
   let state;
   try {
@@ -399,6 +457,12 @@ function createExternalServicesController({
     statusCode: null,
     modelCount: null,
     health: null,
+    banner: null,
+    alternateEndpoint: null,
+    lastOkAt: null,
+    lastLeaseWriteAt: 0,
+    reconnectAttempts: 0,
+    stableSince: null,
     error: null,
   }]));
 
@@ -466,6 +530,7 @@ function createExternalServicesController({
       arguments: [...config.arguments],
       enabled: config.enabled,
       autoStart: config.autoStart,
+      keepAlive: config.keepAlive === true,
       status: config.enabled ? activity.status : "disabled",
       pid: activity.pid,
       owned: activity.owned,
@@ -476,6 +541,14 @@ function createExternalServicesController({
       modelCount: activity.modelCount,
       error: activity.error,
       ...(id === "commandcode-proxy" && activity.health ? { health: activity.health } : {}),
+      banner: activity.banner || null,
+      alternateEndpoint: activity.alternateEndpoint || null,
+      stale: Boolean(
+        config.keepAlive
+        && activity.lastOkAt
+        && (Date.now() - Date.parse(activity.lastOkAt || 0) > staleWindowMs(id) || activity.status === "offline" || activity.status === "error"),
+      ) && activity.status !== "ready",
+      reconnectAttempts: activity.reconnectAttempts || 0,
       secretConfigured: id === "codex-router" && Boolean(secretFor(id).callerKey),
       sourceConfigured: Boolean(config.home || config.executable),
       ...(id === "codex-router" ? {
@@ -493,6 +566,13 @@ function createExternalServicesController({
 
   function emit() {
     const value = snapshot();
+    try {
+      persistLoopbackMesh(meshFilePath, buildLoopbackMesh(value.services));
+    } catch (error) {
+      logger?.warn?.("external-service.loopback-mesh-persist-failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     try { publish?.(value); } catch {}
     return value;
   }
@@ -514,6 +594,7 @@ function createExternalServicesController({
       ...(input.arguments !== undefined ? { arguments: normalizeArguments(input.arguments) } : {}),
       ...(input.enabled !== undefined ? { enabled: input.enabled === true } : {}),
       ...(input.autoStart !== undefined ? { autoStart: input.autoStart === true } : {}),
+      ...(input.keepAlive !== undefined ? { keepAlive: input.keepAlive === true } : {}),
     };
     if (id === "codex-router") {
       next.routerCli = input.routerCli !== undefined
@@ -543,20 +624,151 @@ function createExternalServicesController({
     });
     write();
     emit();
+    if (next.keepAlive && next.enabled) scheduleKeepAlive(id, 0);
+    else clearKeepAlive(id);
     return project(id);
   }
 
-  function healthUrl(id) {
-    const config = state.services[id];
+  function healthUrl(id, endpoint = state.services[id].endpoint) {
+    const configEndpoint = endpoint || state.services[id].endpoint;
     if (id === "codex-router") {
       const callerKey = secretFor(id).callerKey;
       if (!callerKey) throw new Error("Codex Router caller key is not configured");
-      return new URL(`/_codex-router/${encodeURIComponent(callerKey)}/v1/models`, config.endpoint).toString();
+      return new URL(`/_codex-router/${encodeURIComponent(callerKey)}/v1/models`, configEndpoint).toString();
     }
     if (id === "commandcode-proxy" || id === "cpa") {
-      return new URL("/v1/models", config.endpoint).toString();
+      return new URL("/v1/models", configEndpoint).toString();
     }
-    return config.endpoint;
+    return configEndpoint;
+  }
+
+  function commandCodeHealthUrl(endpoint) {
+    return new URL("/health", endpoint).toString();
+  }
+
+  async function fetchProbe(url, id, signal) {
+    const response = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        accept: "application/json,text/html;q=0.8,*/*;q=0.1",
+        ...(typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {}),
+      },
+      signal,
+    });
+    let modelCount = null;
+    let health = null;
+    try {
+      const contentType = response.headers?.get?.("content-type") || "";
+      if (contentType.includes("json") && typeof response.clone === "function") {
+        modelCount = countModels(await response.clone().json());
+      }
+    } catch {}
+    try {
+      if (typeof response.text === "function") {
+        const body = await (typeof response.clone === "function" && typeof response.clone().text === "function"
+          ? response.clone().text()
+          : response.text());
+        health = String(body || "").replace(/[\u0000-\u001f]/gu, "").slice(0, 32) || null;
+      }
+    } catch {}
+    return { response, modelCount, health };
+  }
+
+  async function inspectCommandCode(id, config, signal) {
+    const primary = config.endpoint;
+    async function probe(endpoint) {
+      let healthStatus = null;
+      try {
+        const healthResult = await fetchProbe(commandCodeHealthUrl(endpoint), id, signal);
+        healthStatus = healthResult.response.status;
+      } catch {}
+      const modelsResult = await fetchProbe(new URL("/v1/models", endpoint).toString(), id, signal);
+      const statusCode = modelsResult.response.status;
+      const ready = modelsResult.response.ok || (healthStatus != null && healthStatus >= 200 && healthStatus < 300);
+      let health = null;
+      if (ready) {
+        try {
+          const banner = await fetchImpl(new URL("/", endpoint).toString(), {
+            method: "GET",
+            headers: {
+              accept: "application/json",
+              ...(typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {}),
+            },
+            signal,
+          });
+          if (banner.ok && typeof banner.json === "function") {
+            health = projectCommandCodeHealth(await banner.json());
+          }
+        } catch {}
+      }
+      const origins = commandCodeOriginUrls(endpoint);
+      return {
+        ready,
+        statusCode,
+        modelCount: modelsResult.response.ok ? modelsResult.modelCount : null,
+        health,
+        banner: {
+          version: health?.version || null,
+          listen: origins.listen,
+          cursor_base_url: origins.cursorBaseUrl,
+          anthropic_base_url: origins.anthropicBaseUrl,
+        },
+        endpoint,
+        error: ready ? null : `HTTP ${statusCode}`,
+      };
+    }
+
+    try {
+      const primaryResult = await probe(primary);
+      if (primaryResult.ready || primaryResult.statusCode != null) {
+        return { ...primaryResult, alternateEndpoint: null };
+      }
+    } catch (error) {
+      const alternate = commandCodeAlternateEndpoint(primary);
+      if (!alternate) throw error;
+      const alternateResult = await probe(alternate);
+      return { ...alternateResult, alternateEndpoint: alternateResult.ready ? alternate : null };
+    }
+    const alternate = commandCodeAlternateEndpoint(primary);
+    if (!alternate) {
+      const origins = commandCodeOriginUrls(primary);
+      return {
+        ready: false,
+        statusCode: null,
+        modelCount: null,
+        health: null,
+        banner: {
+          version: null,
+          listen: origins.listen,
+          cursor_base_url: origins.cursorBaseUrl,
+          anthropic_base_url: origins.anthropicBaseUrl,
+        },
+        endpoint: primary,
+        alternateEndpoint: null,
+        error: "CommandCode Proxy is not reachable",
+      };
+    }
+    try {
+      const alternateResult = await probe(alternate);
+      return { ...alternateResult, alternateEndpoint: alternateResult.ready ? alternate : null };
+    } catch {
+      const origins = commandCodeOriginUrls(primary);
+      return {
+        ready: false,
+        statusCode: null,
+        modelCount: null,
+        health: null,
+        banner: {
+          version: null,
+          listen: origins.listen,
+          cursor_base_url: origins.cursorBaseUrl,
+          anthropic_base_url: origins.anthropicBaseUrl,
+        },
+        endpoint: primary,
+        alternateEndpoint: null,
+        error: "CommandCode Proxy is not reachable on 9090 or 3050",
+      };
+    }
   }
 
   async function inspect(idValue) {
@@ -568,47 +780,65 @@ function createExternalServicesController({
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DEFAULT_INSPECT_TIMEOUT_MS);
     timer.unref?.();
+    const previous = runtime.get(id);
     try {
-      const response = await fetchImpl(healthUrl(id), {
-        method: "GET",
-        headers: {
-          accept: "application/json,text/html;q=0.8,*/*;q=0.1",
-          ...(typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {}),
-        },
-        signal: controller.signal,
-      });
-      let modelCount = null;
-      let health = null;
-      try {
-        const contentType = response.headers?.get?.("content-type") || "";
-        if (contentType.includes("json")) modelCount = countModels(await response.clone().json());
-      } catch {}
-      const reachable = response.ok;
-      if (reachable && id === "commandcode-proxy") {
+      if (id === "commandcode-proxy") {
+        const result = await inspectCommandCode(id, config, controller.signal);
+        const ready = result.ready;
+        runtime.set(id, {
+          ...previous,
+          status: ready ? "ready" : (result.statusCode != null ? "error" : processes.has(id) ? "starting" : "offline"),
+          pid: processes.get(id)?.pid || null,
+          owned: processes.has(id),
+          checkedAt: now(),
+          latencyMs: Date.now() - started,
+          statusCode: result.statusCode,
+          modelCount: result.modelCount,
+          health: result.health,
+          banner: result.banner,
+          alternateEndpoint: result.alternateEndpoint,
+          lastOkAt: ready ? now() : previous.lastOkAt,
+          reconnectAttempts: ready ? 0 : (previous.reconnectAttempts || 0),
+          stableSince: ready
+            ? (previous.status === "ready" ? previous.stableSince || now() : now())
+            : null,
+          error: ready ? null : result.error,
+        });
+      } else {
+        const response = await fetchImpl(healthUrl(id), {
+          method: "GET",
+          headers: {
+            accept: "application/json,text/html;q=0.8,*/*;q=0.1",
+            ...(typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {}),
+          },
+          signal: controller.signal,
+        });
+        let modelCount = null;
         try {
-          const banner = await fetchImpl(new URL("/", config.endpoint).toString(), {
-            method: "GET",
-            headers: { accept: "application/json" },
-            signal: controller.signal,
-          });
-          if (banner.ok) health = projectCommandCodeHealth(await banner.json());
+          const contentType = response.headers?.get?.("content-type") || "";
+          if (contentType.includes("json")) modelCount = countModels(await response.clone().json());
         } catch {}
+        const reachable = response.ok;
+        runtime.set(id, {
+          ...previous,
+          status: reachable ? "ready" : "error",
+          pid: processes.get(id)?.pid || null,
+          owned: processes.has(id),
+          checkedAt: now(),
+          latencyMs: Date.now() - started,
+          statusCode: response.status,
+          modelCount,
+          lastOkAt: reachable ? now() : previous.lastOkAt,
+          reconnectAttempts: reachable ? 0 : (previous.reconnectAttempts || 0),
+          stableSince: reachable
+            ? (previous.status === "ready" ? previous.stableSince || now() : now())
+            : null,
+          error: reachable ? null : `HTTP ${response.status}`,
+        });
       }
-      runtime.set(id, {
-        ...runtime.get(id),
-        status: reachable ? "ready" : "error",
-        pid: processes.get(id)?.pid || null,
-        owned: processes.has(id),
-        checkedAt: now(),
-        latencyMs: Date.now() - started,
-        statusCode: response.status,
-        modelCount,
-        health,
-        error: reachable ? null : `HTTP ${response.status}`,
-      });
     } catch (error) {
       runtime.set(id, {
-        ...runtime.get(id),
+        ...previous,
         status: processes.has(id) ? "starting" : "offline",
         pid: processes.get(id)?.pid || null,
         owned: processes.has(id),
@@ -618,10 +848,13 @@ function createExternalServicesController({
         statusCode: null,
         modelCount: null,
         error: redactServiceSecrets(error instanceof Error ? error.message : String(error)),
+        reconnectAttempts: (previous.reconnectAttempts || 0) + (config.keepAlive ? 1 : 0),
+        stableSince: null,
       });
     } finally {
       clearTimeout(timer);
     }
+    maybeWriteKeepAliveLease(id);
     emit();
     return project(id);
   }
@@ -639,7 +872,10 @@ function createExternalServicesController({
     }
     const child = spawnProcess(config.executable, [...config.arguments], {
       cwd: config.home || undefined,
-      env: { ...env },
+      env: {
+        ...env,
+        ...(id === "commandcode-proxy" ? { HOST: "127.0.0.1" } : {}),
+      },
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -788,6 +1024,8 @@ function createExternalServicesController({
     const router = state.services["codex-router"];
     const commandCode = state.services["commandcode-proxy"];
     const cpa = state.services.cpa;
+    const mesh = buildLoopbackMesh(snapshot().services);
+    try { persistLoopbackMesh(meshFilePath, mesh); } catch {}
     const callerKey = secretFor("codex-router").callerKey;
     return Object.freeze({
       ...publicUrlMap({
@@ -799,6 +1037,7 @@ function createExternalServicesController({
         annealWeb: state.services.anneal.endpoint,
         annealApi: state.services.anneal.executionEndpoint,
       }),
+      ...loopbackMeshEnvironment(mesh, { meshPath: meshFilePath }),
       ...(callerKey ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey } : {}),
     });
   }
@@ -818,7 +1057,81 @@ function createExternalServicesController({
     };
   }
 
+  function maybeWriteKeepAliveLease(id) {
+    const config = state.services[id];
+    const activity = runtime.get(id);
+    if (!config?.keepAlive || activity.status !== "ready") return;
+    const lastWrite = activity.lastLeaseWriteAt || 0;
+    if (Date.now() - lastWrite < KEEP_ALIVE_LEASE_WRITE_MS) return;
+    runtime.set(id, { ...activity, lastLeaseWriteAt: Date.now() });
+    write();
+  }
+
+  const keepAliveTimers = new Map();
+
+  function clearKeepAlive(id) {
+    const timer = keepAliveTimers.get(id);
+    if (timer) clearTimeout(timer);
+    keepAliveTimers.delete(id);
+  }
+
+  function scheduleKeepAlive(id, delayMs) {
+    const config = state.services[id];
+    if (!config?.keepAlive || !config.enabled) {
+      clearKeepAlive(id);
+      return;
+    }
+    clearKeepAlive(id);
+    const timer = setTimeout(() => {
+      void runKeepAlive(id);
+    }, Math.max(0, delayMs));
+    timer.unref?.();
+    keepAliveTimers.set(id, timer);
+  }
+
+  async function runKeepAlive(id) {
+    const config = state.services[id];
+    if (!config?.keepAlive || !config.enabled) {
+      clearKeepAlive(id);
+      return;
+    }
+    const before = runtime.get(id);
+    await inspect(id);
+    const after = runtime.get(id);
+    if (before.status !== after.status) {
+      logger?.info?.("external-service.keep-alive", {
+        serviceId: id,
+        status: after.status,
+        attempts: after.reconnectAttempts,
+      });
+    }
+    if (after.status === "ready") {
+      const stableMs = after.stableSince ? Date.now() - Date.parse(after.stableSince) : 0;
+      if (stableMs >= KEEP_ALIVE_STABLE_RESET_MS) {
+        runtime.set(id, { ...after, reconnectAttempts: 0 });
+      }
+      scheduleKeepAlive(id, KEEP_ALIVE_POLL_MS);
+      return;
+    }
+    scheduleKeepAlive(id, nextKeepAliveDelayMs(after.reconnectAttempts || 1));
+  }
+
+  function startKeepAlive(idValue) {
+    const id = requiredServiceId(idValue);
+    const config = state.services[id];
+    if (!config.keepAlive || !config.enabled) return project(id);
+    scheduleKeepAlive(id, 0);
+    return project(id);
+  }
+
+  function startKeepAliveSupervisors() {
+    for (const id of SERVICE_IDS) {
+      if (state.services[id].keepAlive && state.services[id].enabled) scheduleKeepAlive(id, 0);
+    }
+  }
+
   function dispose() {
+    for (const id of SERVICE_IDS) clearKeepAlive(id);
     for (const [id, child] of processes) {
       try {
         if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
@@ -834,6 +1147,8 @@ function createExternalServicesController({
     processes.clear();
   }
 
+  startKeepAliveSupervisors();
+
   return Object.freeze({
     snapshot,
     configure,
@@ -843,14 +1158,23 @@ function createExternalServicesController({
     restart,
     syncCodexRouter,
     runtimeEnvironment,
+    loopbackMesh: () => buildLoopbackMesh(snapshot().services),
     upstreamConfiguration,
+    startKeepAlive,
+    startKeepAliveSupervisors,
     dispose,
   });
 }
 
 module.exports = {
+  COMMANDCODE_ALTERNATE_ENDPOINT,
+  COMMANDCODE_DEFAULT_ENDPOINT,
+  DEFAULT_INSPECT_TIMEOUT_MS,
+  KEEP_ALIVE_POLL_MS,
   SERVICE_IDS,
+  commandCodeAlternateEndpoint,
   createExternalServicesController,
+  nextKeepAliveDelayMs,
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
   projectCommandCodeHealth,

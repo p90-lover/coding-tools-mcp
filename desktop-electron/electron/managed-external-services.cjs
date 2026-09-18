@@ -5,6 +5,7 @@ const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
+const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
@@ -35,8 +36,21 @@ function createManagedExternalServicesController({
     try { publish?.(combinedSnapshot()); } catch {}
   };
 
+  if (!dataRoot || !path.isAbsolute(dataRoot)) {
+    throw new Error("Managed component data root must be absolute");
+  }
+
+  const meshPath = path.join(dataRoot, "loopback-mesh.json");
+
+  function persistMeshFromServices(services, targetId = null, commandCodeApiKey = "") {
+    const mesh = buildLoopbackMesh(services);
+    persistLoopbackMesh(meshPath, mesh);
+    return loopbackMeshEnvironment(mesh, { targetId, commandCodeApiKey, meshPath });
+  }
+
   baseController = createExternalServicesController({
     ...options,
+    loopbackMeshPath: meshPath,
     getHealthHeaders: (serviceId) => managedController?.healthHeaders(serviceId) || {},
     publish: publishCombined,
   });
@@ -56,6 +70,13 @@ function createManagedExternalServicesController({
       return extra;
     },
     publish: publishCombined,
+    peerEnvironment: (manifest) => {
+      let commandCodeApiKey = "";
+      try {
+        commandCodeApiKey = String(managedController.runtimeSecrets("commandcode-proxy").proxyApiKey || "");
+      } catch {}
+      return persistMeshFromServices(combinedSnapshot().services, manifest.id, commandCodeApiKey);
+    },
   });
 
   function crossUseSecrets() {
@@ -289,10 +310,27 @@ function createManagedExternalServicesController({
     stop,
     restart,
     syncCodexRouter,
-    runtimeEnvironment: () => Object.freeze({
-      ...baseController.runtimeEnvironment(),
-      ...peerEnvironmentFor("runtime-supervisor", crossUseSecrets()),
-    }),
+    runtimeEnvironment: () => {
+      const mesh = buildLoopbackMesh(combinedSnapshot().services);
+      persistLoopbackMesh(meshPath, mesh);
+      const base = baseController.runtimeEnvironment();
+      const peers = peerEnvironmentFor("runtime-supervisor", crossUseSecrets());
+      const {
+        OPENAI_BASE_URL: _openaiBaseUrl,
+        OPENAI_API_BASE: _openaiApiBase,
+        OPENAI_API_KEY: _openaiApiKey,
+        ...peerUrls
+      } = peers;
+      return Object.freeze({
+        ...base,
+        ...peerUrls,
+        ...loopbackMeshEnvironment(mesh, { meshPath }),
+        ...(base.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY
+          ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: base.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY }
+          : {}),
+      });
+    },
+    loopbackMesh: () => buildLoopbackMesh(combinedSnapshot().services),
     upstreamConfiguration,
     cpaConnection,
     installManagedComponent,

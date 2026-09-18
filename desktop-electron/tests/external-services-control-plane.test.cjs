@@ -7,7 +7,12 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const {
+  COMMANDCODE_ALTERNATE_ENDPOINT,
+  COMMANDCODE_DEFAULT_ENDPOINT,
+  DEFAULT_INSPECT_TIMEOUT_MS,
   createExternalServicesController,
+  commandCodeAlternateEndpoint,
+  nextKeepAliveDelayMs,
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
 } = require("../electron/external-services.cjs");
@@ -189,6 +194,15 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.match(preload, /repairManagedComponent/);
   assert.match(preload, /configureExternalService/);
   assert.match(preload, /syncCodexRouter/);
+  assert.match(preload, /commandCodeProxyPlan/);
+  assert.match(preload, /applyCommandCodeProxyPlan/);
+  assert.match(preload, /actUpstreamTool/);
+  assert.match(main, /launcher:commandcode-proxy-plan/);
+  assert.match(main, /launcher:commandcode-proxy-apply/);
+  assert.match(main, /launcher:upstream-tool-act/);
+  assert.match(read("src/features/UpstreamToolSurface.tsx"), /actUpstreamTool/);
+  assert.match(read("src/features/UpstreamToolSurface.tsx"), /Opening the original embedded interface/);
+  assert.match(read("src/features/UpstreamToolSurface.tsx"), /Original function/);
   assert.match(types, /export interface ExternalServiceSnapshot/);
   assert.match(types, /export type ManagedComponentInstallState/);
   assert.match(types, /externalServicesSnapshot\(\)/);
@@ -209,5 +223,80 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.doesNotMatch(surface, /Prepare bundled runtime/);
   assert.match(surface, /開啟原始介面/);
   assert.match(surface, /外部服務/);
+  assert.match(surface, /Copy plan/);
+  assert.match(surface, /Apply non-secret/);
   assert.match(packageScript, /--publish["',\s]+never/);
+});
+
+test("CommandCode inspect uses a 12s timeout, packaged 9090, and probes 3050 without spawning", async () => {
+  assert.equal(DEFAULT_INSPECT_TIMEOUT_MS, 12_000);
+  assert.equal(COMMANDCODE_DEFAULT_ENDPOINT, "http://127.0.0.1:9090/");
+  assert.equal(COMMANDCODE_ALTERNATE_ENDPOINT, "http://127.0.0.1:3050/");
+  assert.equal(commandCodeAlternateEndpoint("http://127.0.0.1:9090/"), "http://127.0.0.1:3050/");
+  assert.ok(nextKeepAliveDelayMs(0, () => 0) >= 1_000);
+  assert.ok(nextKeepAliveDelayMs(8, () => 0) >= 60_000);
+
+  const seen = [];
+  const { controller, calls } = controllerFixture({
+    fetchImpl: async (url) => {
+      seen.push(String(url));
+      const parsed = new URL(url);
+      if (parsed.port === "9090") throw new Error("9090 down");
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        clone: () => ({
+          json: async () => ({ data: [{ id: "alt-model" }] }),
+          text: async () => "ok",
+        }),
+        json: async () => ({ status: "ok", models: ["alt-model"] }),
+        text: async () => "ok",
+      };
+    },
+  });
+  const commandCode = controller.snapshot().services.find((service) => service.id === "commandcode-proxy");
+  assert.equal(commandCode.endpoint, "http://127.0.0.1:9090/");
+  assert.equal(commandCode.autoStart, false);
+  assert.equal(commandCode.keepAlive, false);
+  const inspected = await controller.inspect("commandcode-proxy");
+  assert.equal(inspected.status, "ready");
+  assert.equal(inspected.alternateEndpoint, "http://127.0.0.1:3050/");
+  assert.ok(seen.some((url) => url.includes(":9090/")));
+  assert.ok(seen.some((url) => url.includes("/health")));
+  assert.ok(seen.some((url) => url.includes("/v1/models")));
+  controller.configure("commandcode-proxy", { keepAlive: true });
+  assert.equal(controller.snapshot().services.find((service) => service.id === "commandcode-proxy").autoStart, false);
+  assert.equal(calls.length, 0);
+  controller.dispose();
+});
+
+test("runtimeEnvironment exposes the shared in-app loopback mesh without OPENAI_BASE_URL", () => {
+  const { controller, directory } = controllerFixture();
+  const env = controller.runtimeEnvironment();
+  assert.equal(env.CODING_TOOLS_PASEO_URL, "http://127.0.0.1:6768");
+  assert.equal(env.CODING_TOOLS_ANNEAL_URL, "http://127.0.0.1:5173");
+  assert.equal(env.CODING_TOOLS_COMMANDCODE_OPENAI_BASE_URL, "http://127.0.0.1:9090/v1");
+  assert.equal(env.OPENAI_BASE_URL, undefined);
+  assert.equal(JSON.stringify(env).includes("proxyApiKey"), false);
+  assert.equal(fs.existsSync(path.join(directory, "loopback-mesh.json")), true);
+  controller.dispose();
+});
+
+test("owned CommandCode start forces HOST=127.0.0.1 and keep-alive does not spawn", async () => {
+  const { controller, calls } = controllerFixture({
+    fetchImpl: async () => {
+      throw new Error("offline");
+    },
+  });
+  controller.configure("commandcode-proxy", {
+    executable: "proxy.mjs",
+    arguments: ["--listen", "9090"],
+    autoStart: false,
+    keepAlive: true,
+  });
+  await controller.start("commandcode-proxy");
+  assert.equal(calls[0].options.env.HOST, "127.0.0.1");
+  assert.equal(controller.snapshot().services.find((service) => service.id === "commandcode-proxy").autoStart, false);
+  controller.dispose();
 });

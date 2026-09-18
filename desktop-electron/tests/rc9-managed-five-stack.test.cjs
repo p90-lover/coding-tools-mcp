@@ -69,24 +69,28 @@ test("Codex Router installs pinned source through the managed foreground adapter
   assert.match(manifest.health.endpoint, /_codex-router\/\{callerKey\}\/v1\/models$/);
 });
 
-test("CommandCode Proxy is a pinned managed service using the existing CLI session authority", () => {
+test("CommandCode Proxy is bundled in-app using the existing CLI session authority", () => {
   const manifest = readJson("vendor/managed-components/commandcode-proxy.json");
   assert.equal(manifest.strategy, "bundled-source");
+  assert.equal(manifest.bundle.entrypoint, "proxy.mjs");
   assert.equal(manifest.repository, "zahidhussaina2l/commandcode-proxy");
   assert.equal(manifest.commit, "c123a3ebe017415ef45e619600a1110198dea7f8");
   assert.equal(manifest.credentials.accountAuthority, "CPA Provider Hub");
   assert.equal(manifest.credentials.sessionSource, "~/.commandcode/auth.json");
   assert.equal(manifest.launch.processes[0].environment.PROXY_HOST, "127.0.0.1");
   assert.equal(manifest.launch.processes[0].environment.PROXY_PORT, "9090");
+  assert.equal(fs.existsSync(path.join(root, "vendor/bundled/commandcode-proxy/proxy.mjs")), true);
   assert.match(read("src/features/ProviderOrchestratorSurfaces.tsx"), /http:\/\/127\.0\.0\.1:9090\/v1\//);
   assert.doesNotMatch(read("src/features/ProviderOrchestratorSurfaces.tsx"), /127\.0\.0\.1:3050/);
 });
 
-test("Paseo installation builds and runs the pinned upstream server", () => {
+test("Paseo is bundled in-app and still builds the pinned upstream server when node_modules is absent", () => {
   const manifest = readJson("vendor/managed-components/paseo.json");
   assert.equal(manifest.strategy, "bundled-source");
+  assert.equal(manifest.bundle.entrypoint, "package.json");
   assert.equal(manifest.repository, "getpaseo/paseo");
   assert.equal(manifest.commit, "1e4ba65c6d75a6b061a1d54141f2f105b5908a96");
+  assert.ok(manifest.install.steps.some((step) => step.kind === "unpack-bundle" || step.kind === "bundled-copy"));
   assert.ok(manifest.install.steps.some((step) => step.arguments?.includes("ci")));
   assert.ok(manifest.install.steps.some((step) => step.arguments?.includes("build:server")));
   assert.equal(manifest.launch.processes[0].environment.PASEO_LISTEN, "127.0.0.1:6768");
@@ -94,12 +98,13 @@ test("Paseo installation builds and runs the pinned upstream server", () => {
   assert.equal(manifest.executionEndpoint, "ws://127.0.0.1:6768/ws");
 });
 
-test("Anneal preserves config and guards its dedicated database migration", () => {
+test("Anneal is bundled in-app, keeps dedicated database guards, and does not require a GitHub token to Start", () => {
   const manifest = readJson("vendor/managed-components/anneal.json");
   assert.equal(manifest.strategy, "bundled-source");
   assert.equal(manifest.repository, "mosonlab/anneal");
   assert.equal(manifest.commit, "e43b72b10ad389f090a0be18eea5d2bcef468f5e");
   assert.equal(manifest.platformModes.win32, "wsl2");
+  assert.equal(manifest.credentials.githubReadToken.required, false);
   assert.deepEqual(manifest.launch.processes.map((entry) => entry.id), [
     "postgres",
     "api",
@@ -178,6 +183,7 @@ test("managed installation is wired through the combined controller, focused IPC
   assert.match(types, /reconcileManagedBootstrap\(/);
   assert.match(surface, /Repair runtime|修復執行環境/);
   assert.match(surface, /Start all|全部啟動/);
+  assert.match(surface, /Bundled inside Coding Tools/);
   assert.doesNotMatch(surface, /Prepare bundled runtime/);
   assert.match(surface, /managedInstall/);
   assert.match(surface, /Advanced manual configuration|進階手動設定/);
@@ -186,5 +192,6 @@ test("managed installation is wired through the combined controller, focused IPC
 test("packaging retains managed manifests and manager modules", () => {
   const packageJson = readJson("package.json");
   assert.ok(packageJson.build.files.includes("vendor/managed-components/**"));
+  assert.ok(packageJson.build.files.includes("vendor/bundled/**"));
   assert.ok(packageJson.build.files.includes("electron/**"));
 });

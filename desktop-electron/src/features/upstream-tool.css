@@ -248,6 +248,46 @@
 .upstream-tool-frame-empty strong,
 .upstream-tool-empty strong {
   color: var(--color-text-primary);
+}
+
+.upstream-original-function {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 14px;
+  background: rgb(255 255 255 / 3%);
+}
+
+.upstream-original-function h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.upstream-original-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
+.upstream-original-actions p {
+  flex: 1 1 100%;
+  margin: 0 0 4px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.upstream-original-actions label {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.upstream-original-actions input {
+  min-width: 140px;
+}
+  color: var(--color-text-primary);
   font-size: 17px;
 }
 

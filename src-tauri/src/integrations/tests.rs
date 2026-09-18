@@ -210,6 +210,154 @@ async fn commandcode_proxy_status_gets_models_without_authorization() {
     let addr = listener.local_addr().unwrap();
     let url = format!("http://127.0.0.1:{}/v1", addr.port());
     let server = tokio::spawn(async move {
+        for expected in ["get /health http/1.1\r\n", "get /v1/models http/1.1\r\n"] {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut data = vec![];
+            loop {
+                let mut b = [0; 1024];
+                let n = sock.read(&mut b).await.unwrap();
+                assert!(n > 0 && data.len() + n < 8192);
+                data.extend_from_slice(&b[..n]);
+                if data.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let raw = String::from_utf8(data).unwrap().to_lowercase();
+            assert!(raw.starts_with(expected), "{raw}");
+            assert!(!raw.contains("authorization:"));
+            let body = if expected.contains("/health") {
+                "OK".into()
+            } else {
+                json!({"data":[{"id":"demo-model"}]}).to_string()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let result = commandcode::status(&url).await.unwrap();
+    assert!(result.reachable);
+    assert!(result.read_only);
+    assert_eq!(result.http_status, Some(200));
+    assert_eq!(result.model_count, Some(1));
+    assert_eq!(result.health.as_deref(), Some("OK"));
+    assert!(result.banner.unwrap().cursor_base_url.contains("/v1"));
+    server.await.unwrap();
+}
+
+#[test]
+fn commandcode_stop_without_owned_process_does_not_kill_foreign_pid() {
+    let stopped = commandcode::control("stop", "http://127.0.0.1:3050/v1", "proxy.mjs").unwrap();
+    assert!(!stopped.ok);
+    assert!(stopped.detail.contains("owned"));
+}
+
+#[test]
+fn original_function_allowlists_are_explicit() {
+    assert!(actions::allowed_paseo_ops().contains(&"send_agent_message_request"));
+    assert!(actions::allowed_paseo_ops().contains(&"agent_permission_response"));
+    assert!(actions::allowed_paseo_ops().contains(&"create_agent_request"));
+    assert!(!actions::allowed_paseo_ops()
+        .iter()
+        .any(|op| op.contains("shutdown")));
+    assert!(actions::allowed_anneal_posts().contains(&"/tasks/{id}/start"));
+    assert!(actions::allowed_anneal_posts().contains(&"/inbox/messages/{id}/decision"));
+    assert!(!actions::allowed_anneal_posts()
+        .iter()
+        .any(|p| p.contains("merge-tail")));
+}
+
+#[test]
+fn paseo_directory_payload_maps_persistence_and_permission() {
+    let snap = snapshot_from_paseo_payload(
+        "ws://127.0.0.1:6767/ws".into(),
+        Some("test".into()),
+        &json!({
+            "entries": [{
+                "agent": {
+                    "id": "a1",
+                    "title": "Existing session",
+                    "status": "idle",
+                    "provider": "codex",
+                    "persistence": { "provider": "codex", "sessionId": "sess-1" },
+                    "pendingPermissions": [{ "id": "perm-1" }]
+                }
+            }],
+            "pageInfo": { "hasMore": false }
+        }),
+    )
+    .unwrap();
+    assert_eq!(snap.items[0].persistence_session.as_deref(), Some("sess-1"));
+    assert_eq!(
+        snap.items[0].pending_permission_id.as_deref(),
+        Some("perm-1")
+    );
+    assert!(snap.read_only);
+}
+
+#[test]
+fn integration_leases_are_additive_on_old_profiles() {
+    let migrated: crate::data::AppData = serde_json::from_value(json!({"profiles":[]})).unwrap();
+    assert!(!migrated.integration_leases.paseo.keep_alive);
+    assert_eq!(
+        migrated.integration_leases.commandcode.status,
+        "disconnected"
+    );
+}
+
+#[tokio::test]
+async fn control_center_paseo_allowlisted_send_uses_correlated_rpc() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let hello: Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(hello["type"], "hello");
+        assert!(hello["clientId"]
+            .as_str()
+            .unwrap()
+            .starts_with("coding-tools-actor-"));
+        ws.send(Message::Text(json!({"type":"session","message":{"type":"status","payload":{"status":"server_info","serverId":"fixture","version":"test"}}}).to_string().into())).await.unwrap();
+        let request: Value =
+            serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(request["message"]["type"], "send_agent_message_request");
+        assert_eq!(request["message"]["agentId"], "a1");
+        assert_eq!(request["message"]["text"], "hello from coding tools");
+        let rid = request["message"]["requestId"].clone();
+        ws.send(Message::Text(json!({"type":"session","message":{"type":"send_agent_message_response","payload":{"requestId":rid}}}).to_string().into())).await.unwrap();
+    });
+    let result = actions::act(
+        &url,
+        "",
+        actions::ActRequest {
+            source: "paseo".into(),
+            op: "send".into(),
+            agent_id: "a1".into(),
+            task_id: String::new(),
+            message_id: String::new(),
+            text: "hello from coding tools".into(),
+            provider: String::new(),
+            session_id: String::new(),
+            request_id: String::new(),
+            cwd: String::new(),
+            behavior: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.ok);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn control_center_anneal_allowlisted_start_posts_fixed_path() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
         let mut data = vec![];
         loop {
@@ -217,24 +365,45 @@ async fn commandcode_proxy_status_gets_models_without_authorization() {
             let n = sock.read(&mut b).await.unwrap();
             assert!(n > 0 && data.len() + n < 8192);
             data.extend_from_slice(&b[..n]);
-            if data.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
+            let raw = String::from_utf8_lossy(&data);
+            if let Some(header_end) = raw.find("\r\n\r\n") {
+                let headers = &raw[..header_end].to_ascii_lowercase();
+                let body_len = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if data.len() >= header_end + 4 + body_len {
+                    break;
+                }
             }
         }
-        let raw = String::from_utf8(data).unwrap().to_lowercase();
-        assert!(raw.starts_with("get /v1/models http/1.1\r\n"));
-        assert!(!raw.contains("authorization:"));
-        let body = json!({"data":[{"id":"demo-model"}]}).to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
+        let raw = String::from_utf8_lossy(&data).to_lowercase();
+        assert!(raw.starts_with("post /tasks/t1/start http/1.1\r\n"));
+        assert!(raw.contains("authorization: bearer fixture-token"));
+        let body = json!({"runId":"r1"}).to_string();
+        let response = format!("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         sock.write_all(response.as_bytes()).await.unwrap();
     });
-    let result = commandcode::status(&url).await.unwrap();
-    assert!(result.reachable);
-    assert!(result.read_only);
-    assert_eq!(result.http_status, Some(200));
-    assert_eq!(result.model_count, Some(1));
+    let result = actions::act(
+        &url,
+        "fixture-token",
+        actions::ActRequest {
+            source: "anneal".into(),
+            op: "start".into(),
+            agent_id: String::new(),
+            task_id: "t1".into(),
+            message_id: String::new(),
+            text: String::new(),
+            provider: String::new(),
+            session_id: String::new(),
+            request_id: String::new(),
+            cwd: String::new(),
+            behavior: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.ok);
     server.await.unwrap();
 }

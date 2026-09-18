@@ -1,8 +1,11 @@
-//! Narrow, observation-only adapters. No provider CLI, mutation RPC or inference client.
+//! Observation snapshots stay here. Original-function RPCs live in `actions`.
+pub mod actions;
 pub mod board;
 pub mod board_sync;
 pub mod commandcode;
 pub mod execution;
+pub mod lease;
+pub mod live;
 use crate::error::{AppError, AppResult};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -15,10 +18,10 @@ use tokio_tungstenite::{
         protocol::{Message, WebSocketConfig},
     },
 };
-const MAX_BYTES: usize = 2 * 1024 * 1024;
-const MAX_ROWS: usize = 200;
+pub(crate) const MAX_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_ROWS: usize = 200;
 static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
-fn err(s: &str) -> AppError {
+pub(crate) fn err(s: &str) -> AppError {
     AppError::Message(s.into())
 }
 pub fn now() -> u64 {
@@ -48,8 +51,14 @@ pub struct Item {
     pub chain_layer: Option<u64>,
     pub chain_name: Option<String>,
     pub attention_reason: Option<String>,
+    #[serde(default)]
+    pub persistence_provider: Option<String>,
+    #[serde(default)]
+    pub persistence_session: Option<String>,
+    #[serde(default)]
+    pub pending_permission_id: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Debug)]
 pub struct Snapshot {
     pub source: Source,
     pub endpoint: String,
@@ -165,6 +174,15 @@ fn item(v: &Value, source: Source) -> AppResult<Item> {
         chain_layer: v["chainLayer"].as_u64(),
         chain_name: optional(v, "chainName"),
         attention_reason: optional(v, "attentionReason"),
+        persistence_provider: optional(&v["persistence"], "provider")
+            .or_else(|| optional(v, "provider")),
+        persistence_session: optional(&v["persistence"], "sessionId"),
+        pending_permission_id: v["pendingPermissions"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|p| p.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|id| id.chars().take(200).collect()),
     })
 }
 fn unique_ids(items: &[Item]) -> AppResult<()> {
@@ -255,6 +273,32 @@ async fn anneal(mut u: url::Url, credential: &str) -> AppResult<Snapshot> {
         server_version: None,
     })
 }
+pub(crate) fn snapshot_from_paseo_payload(
+    origin: String,
+    version: Option<String>,
+    payload: &Value,
+) -> AppResult<Snapshot> {
+    let rows = payload["entries"]
+        .as_array()
+        .ok_or_else(|| err("Unsupported Paseo directory schema"))?;
+    let items = rows
+        .iter()
+        .take(MAX_ROWS)
+        .map(|r| item(&r["agent"], Source::Paseo))
+        .collect::<AppResult<Vec<_>>>()?;
+    unique_ids(&items)?;
+    let has_more =
+        rows.len() > MAX_ROWS || payload["pageInfo"]["hasMore"].as_bool().unwrap_or(false);
+    Ok(Snapshot {
+        source: Source::Paseo,
+        endpoint: origin,
+        checked_at: now(),
+        read_only: true,
+        items,
+        has_more,
+        server_version: version,
+    })
+}
 async fn paseo(u: url::Url, credential: &str) -> AppResult<Snapshot> {
     let origin = u.to_string();
     let mut request = origin
@@ -323,29 +367,8 @@ async fn paseo(u: url::Url, credential: &str) -> AppResult<Snapshot> {
                     && m["type"] == "fetch_agents_response"
                     && m["payload"]["requestId"] == request_id
                 {
-                    let rows = m["payload"]["entries"]
-                        .as_array()
-                        .ok_or_else(|| err("Unsupported Paseo directory schema"))?;
-                    let items = rows
-                        .iter()
-                        .take(MAX_ROWS)
-                        .map(|r| item(&r["agent"], Source::Paseo))
-                        .collect::<AppResult<Vec<_>>>()?;
-                    unique_ids(&items)?;
-                    let has_more = rows.len() > MAX_ROWS
-                        || m["payload"]["pageInfo"]["hasMore"]
-                            .as_bool()
-                            .unwrap_or(false);
                     // Dropping the socket does not archive or stop any external agent.
-                    return Ok(Snapshot {
-                        source: Source::Paseo,
-                        endpoint: origin,
-                        checked_at: now(),
-                        read_only: true,
-                        items,
-                        has_more,
-                        server_version: version,
-                    });
+                    return snapshot_from_paseo_payload(origin, version, &m["payload"]);
                 }
             }
             Message::Ping(p) => {

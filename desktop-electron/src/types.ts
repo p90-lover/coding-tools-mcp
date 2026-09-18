@@ -270,6 +270,7 @@ export interface ExternalServiceSnapshot {
   arguments: string[];
   enabled: boolean;
   autoStart: boolean;
+  keepAlive?: boolean;
   status: ExternalServiceStatus;
   pid: number | null;
   owned: boolean;
@@ -288,6 +289,15 @@ export interface ExternalServiceSnapshot {
   connectedAccountCount?: number;
   providerModelCount?: number;
   health?: CommandCodeProxyHealth;
+  banner?: {
+    version: string | null;
+    listen: string;
+    cursor_base_url: string;
+    anthropic_base_url: string;
+  } | null;
+  alternateEndpoint?: string | null;
+  stale?: boolean;
+  reconnectAttempts?: number;
   managedInstall: ManagedComponentInstallSnapshot;
 }
 
@@ -304,6 +314,7 @@ export interface ExternalServiceConfigurationInput {
   arguments?: string[];
   enabled?: boolean;
   autoStart?: boolean;
+  keepAlive?: boolean;
   callerKey?: string;
   routerCli?: string;
   curateCli?: string;
@@ -315,6 +326,47 @@ export interface CodexRouterSyncResult {
   args: string[];
   stdout: string;
   stderr: string;
+}
+
+export interface CommandCodeProxyPlanResult {
+  text: string;
+  credentialPromptRequired: true;
+  provider: {
+    id: "commandcode-proxy";
+    name: string;
+    baseUrl: string;
+    adapter: string;
+    modelEndpoint: string;
+  };
+}
+
+export interface CommandCodeProxyApplyResult {
+  endpoint: string;
+  credentialPromptRequired: true;
+  steps: Array<{ name: string; ok: boolean; detail: string }>;
+  planText?: string;
+}
+
+export interface UpstreamToolActInput {
+  toolId: UpstreamToolId;
+  op: string;
+  endpoint?: string;
+  credential?: string;
+  agentId?: string;
+  taskId?: string;
+  messageId?: string;
+  text?: string;
+  provider?: string;
+  sessionId?: string;
+  cwd?: string;
+  requestId?: string;
+  behavior?: "allow" | "deny";
+}
+
+export interface UpstreamToolActResult {
+  ok: boolean;
+  op: string;
+  detail: string;
 }
 
 export type UpstreamToolId = "anneal" | "paseo";
@@ -574,6 +626,16 @@ export interface LauncherApi {
   stopExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   restartExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   syncCodexRouter(): Promise<CodexRouterSyncResult>;
+  commandCodeProxyPlan(input?: {
+    baseUrl?: string;
+    routerCli?: string;
+    curateCli?: string;
+  }): Promise<CommandCodeProxyPlanResult>;
+  applyCommandCodeProxyPlan(input?: {
+    baseUrl?: string;
+    routerCli?: string;
+    curateCli?: string;
+  }): Promise<CommandCodeProxyApplyResult>;
   managedBootstrapSnapshot(): Promise<ManagedBootstrapSnapshot>;
   reconcileManagedBootstrap(input?: {
     reason?: string;
@@ -587,6 +649,7 @@ export interface LauncherApi {
   restartUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
   openEmbeddedTool(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
   openUpstreamToolExternal(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
+  actUpstreamTool(input: UpstreamToolActInput): Promise<UpstreamToolActResult>;
   originalUiSnapshot(): Promise<OriginalUiCatalog>;
   inspectOriginalUi(toolId: OriginalUiId): Promise<OriginalUiSnapshot>;
   startOriginalUi(toolId: OriginalUiId): Promise<OriginalUiSnapshot>;

@@ -2,14 +2,22 @@
   "paseo": {
     "repository": "getpaseo/paseo",
     "commit": "da8c1b5c94e752b01d451645e5fa52aba2c1b2f0",
-    "mode": "read_only",
-    "protocol": 1
+    "mode": "live_allowlist",
+    "protocol": 1,
+    "webUi": "http://127.0.0.1:6768/sessions"
   },
   "anneal": {
     "repository": "mosonlab/anneal",
     "commit": "088f0d5971a1692134aaa3db0230cc541b014c07",
-    "mode": "read_only",
+    "mode": "live_allowlist",
+    "webUi": "http://127.0.0.1:3000/#/tasks",
     "boardEndpoint": "/tasks?view=board&archived=false"
+  },
+  "commandcode": {
+    "repository": "MAXeaglet/commandcode-proxy",
+    "mode": "live_allowlist",
+    "health": "/health",
+    "models": "/v1/models"
   },
   "agentLaunchEnabled": false
 }

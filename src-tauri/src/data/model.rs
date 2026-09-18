@@ -31,6 +31,8 @@ pub struct AppData {
     #[serde(default)]
     pub orchestrator_profiles: Vec<crate::orchestrators::OrchestratorProfile>,
     #[serde(default)]
+    pub integration_leases: crate::integrations::lease::IntegrationLeases,
+    #[serde(default)]
     pub sandbox_permissions: Vec<crate::tools::native_sandbox::SandboxGrant>,
     #[serde(default)]
     pub computer_permissions: Vec<crate::tools::computer::permissions::SavedPermission>,

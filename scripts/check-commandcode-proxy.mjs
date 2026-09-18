@@ -80,12 +80,19 @@ assert.equal(JSON.stringify(localPlan).includes('user_'), false);
 
 const page = fs.readFileSync('src/routes/integrations/+page.svelte', 'utf8');
 assert.equal(page.includes('CommandCodeProxyPanel'), true);
-assert.equal(page.includes("['paseo','anneal']"), true);
-assert.equal(/ssh -N -L 3000:127\.0\.0\.1:3000/.test(page), true);
+assert.equal(page.includes('PaseoPanel'), true);
+assert.equal(page.includes('AnnealPanel'), true);
+assert.equal(
+  /ssh -N -L 3000:127\.0\.0\.1:3000/.test(
+    fs.readFileSync('src/lib/components/control-center/AnnealPanel.svelte', 'utf8'),
+  ),
+  true,
+);
 
 const upstreams = JSON.parse(fs.readFileSync('src/lib/control-center/upstreams.json', 'utf8'));
-assert.equal(upstreams.paseo.mode, 'read_only');
-assert.equal(upstreams.anneal.mode, 'read_only');
+assert.equal(upstreams.paseo.mode, 'live_allowlist');
+assert.equal(upstreams.anneal.mode, 'live_allowlist');
+assert.equal(upstreams.commandcode.mode, 'live_allowlist');
 assert.equal(upstreams.agentLaunchEnabled, false);
 
 const rust = fs.readFileSync('src-tauri/src/integrations/commandcode.rs', 'utf8');
@@ -98,4 +105,4 @@ const cli = fs.readFileSync('runtime-web/scripts/commandcode-proxy-provider.ts',
 assert.equal(cli.includes('commandCodeProxyRegistrationPlan'), true);
 assert.equal(cli.includes('--apply'), true);
 
-console.log('PASS: CommandCode Proxy registration plan, secret isolation, Integrations panel, read-only Paseo/Anneal');
+console.log('PASS: CommandCode Proxy registration plan, secret isolation, Integrations panel, live-allowlist Paseo/Anneal');

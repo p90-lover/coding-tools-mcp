@@ -303,6 +303,18 @@ button.external-service-card:hover,
   color: #8eb9ff;
 }
 
+.commandcode-plan {
+  margin: 12px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgb(0 0 0 / 28%);
+  color: #d7e4ff;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 760px) {
   .external-services-surface {
     padding: 26px 16px 60px;

@@ -9,7 +9,12 @@
   "version": "0.9.0",
   "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e",
   "strategy": "bundled-source",
-  "bundle": { "required": true },
+  "license": "MIT",
+  "bundle": {
+    "required": true,
+    "entrypoint": "package.json",
+    "prebuilt": false
+  },
   "platformModes": {
     "win32": "wsl2",
     "linux": "native",
@@ -36,6 +41,7 @@
           "ci"
         ],
         "skipIfFile": "node_modules",
+        "skipIfExists": "node_modules",
         "execution": "managed-mode"
       },
       {
@@ -44,7 +50,7 @@
         "executable": "bash",
         "arguments": [
           "-lc",
-          "set -euo pipefail; state=\"$ANNEAL_STATE_DIR\"; mkdir -p \"$state/config\"; if [ -f \"$state/config/.env\" ]; then ln -s \"$state/config/.env\" .env; else npm run setup:local; mv .env \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -s \"$state/config/.env\" .env; fi"
+          "set -euo pipefail; state=\"$ANNEAL_STATE_DIR\"; mkdir -p \"$state/config\"; if [ -f \"$state/config/.env\" ]; then ln -sfn \"$state/config/.env\" .env; elif [ -f .env.example ]; then cp .env.example \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; elif [ -n \"${GITHUB_READ_TOKEN:-}\" ]; then npm run setup:local; mv .env \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; else npm run setup:local; mv .env \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; fi"
         ],
         "environment": {
           "ANNEAL_STATE_DIR": "{state}",

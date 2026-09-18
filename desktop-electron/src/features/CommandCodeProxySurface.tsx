@@ -6,6 +6,8 @@ interface CommandCodeProxySurfaceProps {
   service: ExternalServiceSnapshot;
   busy: string | null;
   onCheck: () => void;
+  onCopyPlan: () => void;
+  onApplyNonSecret: () => void;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -37,6 +39,8 @@ export function CommandCodeProxySurface({
   service,
   busy,
   onCheck,
+  onCopyPlan,
+  onApplyNonSecret,
   onStart,
   onStop,
   onRestart,
@@ -132,7 +136,13 @@ export function CommandCodeProxySurface({
           {text(language, "Copy Anthropic base URL", "複製 Anthropic Base URL")}
         </button>
         <button disabled={busy !== null} onClick={onCheck} type="button">
-          {busy === "inspect" ? "…" : text(language, "Check", "檢查")}
+          {busy === "inspect" ? "…" : text(language, "Check status", "檢查狀態")}
+        </button>
+        <button disabled={busy !== null} onClick={onCopyPlan} type="button">
+          {busy === "copy-plan" ? "…" : text(language, "Copy plan", "複製計劃")}
+        </button>
+        <button disabled={busy !== null} onClick={onApplyNonSecret} type="button">
+          {busy === "apply-plan" ? "…" : text(language, "Apply non-secret", "套用非密鑰步驟")}
         </button>
         <button disabled={busy !== null || !service.enabled || service.status === "ready"} onClick={onStart} type="button">
           {busy === "start" ? "…" : text(language, "Start", "啟動")}

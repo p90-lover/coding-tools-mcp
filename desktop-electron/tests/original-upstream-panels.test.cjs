@@ -43,7 +43,7 @@ test("UpstreamToolSurface auto-embeds managed services without manual port-forwa
   assert.match(surface, /openEmbeddedTool\(toolId, section\)/);
   assert.match(surface, /is-immersive/);
   assert.match(surface, /Coding Tools manages Anneal through WSL2 and Docker on Windows/);
-  assert.match(surface, /Use the connection controls below to install, start, stop, or repair the managed service/);
+  assert.match(surface, /start or inspect the bundled in-app service/);
   assert.doesNotMatch(surface, /user-managed secure local port forward/);
   assert.doesNotMatch(surface, /port-forward/);
   assert.doesNotMatch(surface, /Start pinned source/);

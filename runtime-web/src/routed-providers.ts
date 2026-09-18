@@ -105,6 +105,41 @@ export function commandCodeProxyProviderProfile(baseUrl: string): CommandCodePro
   };
 }
 
+export function resolveCommandCodeLoopback(
+  env: Record<string, string | undefined> = process.env,
+): CommandCodeProxyProviderProfile | undefined {
+  const configured = env.CODING_TOOLS_COMMANDCODE_OPENAI_BASE_URL?.trim()
+    || env.CODING_TOOLS_COMMANDCODE_URL?.trim();
+  if (!configured) return undefined;
+  const trimmed = configured.replace(/\/$/, "");
+  const baseUrl = trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+  const origin = normalizeOrigin(baseUrl, "CommandCode loopback URL", false);
+  return commandCodeProxyProviderProfile(origin);
+}
+
+export function resolvePaseoExecutionLoopback(
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const configured = env.CODING_TOOLS_PASEO_EXECUTION_URL?.trim();
+  if (!configured) return undefined;
+  const parsed = new URL(configured);
+  if (!LOOPBACK_HOSTS.has(parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase())) {
+    throw new Error("Paseo execution URL must use a loopback host");
+  }
+  if (!new Set(["ws:", "wss:", "http:", "https:"]).has(parsed.protocol)) {
+    throw new Error("Paseo execution URL must use WebSocket or HTTP");
+  }
+  return parsed.toString();
+}
+
+export function resolveAnnealExecutionLoopback(
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const configured = env.CODING_TOOLS_ANNEAL_EXECUTION_URL?.trim();
+  if (!configured) return undefined;
+  return normalizeOrigin(configured, "Anneal execution URL", false);
+}
+
 function object(value: unknown): JsonObject | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as JsonObject

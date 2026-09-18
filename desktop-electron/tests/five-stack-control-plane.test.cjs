@@ -89,13 +89,17 @@ test("Paseo plans an orchestrator and assigned subagents on in-app backends", as
   }, { workspaceId: "ws-1" });
 
   assert.equal(planned.orchestrator.route.providerId, "chatgpt-web");
+  assert.equal(planned.orchestrator.backend, "http://127.0.0.1:4202/v1");
+  assert.equal(planned.orchestrator.backendKind, "router");
   assert.equal(planned.orchestrator.route.workload, "paseo");
   assert.equal(planned.subagents.length, 2);
   assert.equal(planned.subagents[0].role, "implementer");
   assert.equal(planned.subagents[0].route.workload, "subagent");
   assert.equal(planned.subagents[0].route.providerId, "gemini-api");
   assert.equal(planned.subagents[1].backend, "http://127.0.0.1:8317/v1");
+  assert.equal(planned.subagents[1].backendKind, "cpa");
   assert.equal(planned.backends.cpa, "http://127.0.0.1:8317/v1");
+  assert.equal(planned.backends.router, "http://127.0.0.1:4202/v1");
   assert.equal(planned.backends.commandcode, "http://127.0.0.1:9090/v1");
   assert.equal(JSON.stringify(planned).includes("must-never-leak"), false);
 });
@@ -128,7 +132,10 @@ test("run → submit issues → review → Anneal task preview keeps assignment 
   const task = await control.callTool("anneal_open_from_review", { reviewId: reviewed.id }, {
     workspaceId: "ws-1",
   });
-  assert.equal(task.state, "review");
+  assert.equal(task.state, "BACKLOG");
+  assert.equal(task.approvalGate, true);
+  assert.equal(task.opensPullRequest, false);
+  assert.equal(task.handoff.posted, false);
   assert.equal(task.source.kind, "paseo_review");
   assert.equal(task.assignment.orchestrator.route.providerId, "chatgpt-web");
   assert.equal(task.assignment.subagents[0].role, "debugger");
@@ -136,6 +143,93 @@ test("run → submit issues → review → Anneal task preview keeps assignment 
   assert.equal(preview.id, task.id);
   const status = await control.callTool("five_stack_status", {}, { workspaceId: "ws-1" });
   assert.equal(status.annealTasks.length, 1);
+});
+
+test("Paseo uses CPA 8317 and Router 4202 only when those services are available", async () => {
+  const {
+    createFiveStackControlPlane,
+    selectInAppBackend,
+    stackAvailability,
+  } = require("../electron/five-stack-control-plane.cjs");
+  const { FIVE_STACK_ENDPOINTS } = require("../electron/five-stack-cross-use.cjs");
+  const backends = {
+    cpa: FIVE_STACK_ENDPOINTS.cpa.v1,
+    router: FIVE_STACK_ENDPOINTS["codex-router"].v1,
+    commandcode: FIVE_STACK_ENDPOINTS["commandcode-proxy"].v1,
+  };
+  assert.equal(backends.cpa, "http://127.0.0.1:8317/v1");
+  assert.equal(backends.router, "http://127.0.0.1:4202/v1");
+  assert.equal(backends.commandcode, "http://127.0.0.1:9090/v1");
+
+  const down = stackAvailability({
+    services: [
+      { id: "cpa", status: "error", running: false },
+      { id: "codex-router", status: "ready", running: true },
+      { id: "commandcode-proxy", status: "ready", running: true },
+    ],
+  });
+  assert.equal(down.cpa, false);
+  assert.equal(down.router, true);
+  const cpaFallback = selectInAppBackend("cliproxyapi-antigravity", backends, down);
+  assert.equal(cpaFallback.url, "http://127.0.0.1:4202/v1");
+  assert.equal(cpaFallback.kind, "router");
+  assert.equal(cpaFallback.fallback, true);
+
+  const commandcode = selectInAppBackend("commandcode-proxy", backends, {
+    cpa: true,
+    router: true,
+    commandcode: true,
+  });
+  assert.equal(commandcode.url, "http://127.0.0.1:9090/v1");
+  assert.equal(commandcode.kind, "commandcode");
+  assert.equal(commandcode.fallback, false);
+
+  let seq = 0;
+  const posted = [];
+  const control = createFiveStackControlPlane({
+    clock: () => "2026-09-18T00:00:00.000Z",
+    idFactory: () => `id${String(++seq).padStart(4, "0")}`,
+    planProvider: createProviderExecutionPlan,
+    getProviderSnapshot: async () => snapshot(),
+    getServicesSnapshot: async () => ({
+      services: [
+        { id: "cpa", status: "ready" },
+        { id: "codex-router", status: "ready" },
+        { id: "anneal", status: "ready" },
+        { id: "commandcode-proxy", status: "ready" },
+      ],
+    }),
+    handoffAnnealTask: async ({ projectId, path, body }) => {
+      posted.push({ projectId, path, body });
+      return { id: "remote-task-1" };
+    },
+  });
+  const planned = await control.callTool("paseo_plan", {
+    brief: "Handoff after review",
+    orchestrator: { providerId: "chatgpt-web" },
+    subagents: [{ role: "cpa-worker", providerId: "cliproxyapi-antigravity" }],
+  }, { workspaceId: "ws-1" });
+  assert.equal(planned.orchestrator.backendKind, "router");
+  assert.equal(planned.subagents[0].backendKind, "cpa");
+  const ran = await control.callTool("paseo_run", { planId: planned.id, message: "Go" }, { workspaceId: "ws-1" });
+  await control.callTool("paseo_submit_result", {
+    runId: ran.id,
+    assignmentId: ran.assignments[0].id,
+    ok: false,
+    issues: [{ title: "Need a task", detail: "Open Anneal" }],
+  });
+  const reviewed = await control.callTool("paseo_review", { runId: ran.id });
+  const task = await control.callTool("anneal_open_from_review", {
+    reviewId: reviewed.id,
+    projectId: "proj-1",
+  }, { workspaceId: "ws-1" });
+  assert.equal(task.state, "BACKLOG");
+  assert.equal(task.handoff.posted, true);
+  assert.equal(task.id, "remote-task-1");
+  assert.equal(posted[0].path, "/projects/proj-1/tasks");
+  assert.equal(posted[0].body.status, "BACKLOG");
+  assert.equal(posted[0].body.approvalGate, true);
+  assert.equal(posted[0].body.opensPullRequest, false);
 });
 
 test("MCP catalog overlay keeps headless tools and exposes five-stack resources", () => {

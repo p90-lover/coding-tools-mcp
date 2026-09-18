@@ -9,8 +9,12 @@
   "commit": "c123a3ebe017415ef45e619600a1110198dea7f8",
   "version": "1.0.0",
   "strategy": "bundled-source",
-  "bundle": { "required": true },
   "license": "MIT",
+  "bundle": {
+    "required": true,
+    "entrypoint": "proxy.mjs",
+    "prebuilt": true
+  },
   "credentials": {
     "accountAuthority": "CPA Provider Hub",
     "sessionSource": "~/.commandcode/auth.json",
@@ -19,6 +23,7 @@
   "install": {
     "steps": [
       { "id": "unpack-bundled-source", "kind": "unpack-bundle" },
+      { "id": "copy-bundled-source", "kind": "bundled-copy" },
       { "id": "verify-entrypoint", "kind": "assert-file", "path": "proxy.mjs" },
       { "id": "activate", "kind": "activate" }
     ]
