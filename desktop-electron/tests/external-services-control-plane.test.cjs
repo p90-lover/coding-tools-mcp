@@ -178,6 +178,7 @@ test("default Paseo and Anneal launch configuration is explicit on every platfor
 test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired together", () => {
   const providerBootstrap = read("electron/provider-bootstrap.cjs");
   const main = read("electron/main.cjs");
+  const managedServices = read("electron/managed-external-services.cjs");
   const preload = read("electron/preload.cjs");
   const types = read("src/types.ts");
   const app = read("src/App.tsx");
@@ -187,19 +188,29 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
 
   assert.match(providerBootstrap, /setProviderBrowserHost/);
   assert.match(main, /setProviderBrowserHost\(\(\) => browserHost\)/);
-  assert.match(main, /createExternalServicesController/);
+  assert.match(main, /createManagedExternalServicesController/);
+  assert.match(managedServices, /createExternalServicesController/);
+  assert.match(managedServices, /createManagedComponentController/);
   assert.match(main, /getRuntimeEnvironment:\s*\(\)\s*=>\s*externalServicesController\.runtimeEnvironment\(\)/);
   assert.match(main, /launcher:external-services-snapshot/);
+  assert.match(main, /launcher:managed-components-snapshot/);
+  assert.match(main, /launcher:managed-component-install/);
+  assert.match(main, /launcher:managed-component-repair/);
   assert.match(main, /launcher:external-service-configure/);
   assert.match(main, /launcher:codex-router-sync/);
   assert.match(runtimeSupervisor, /getRuntimeEnvironment/);
   assert.match(runtimeSupervisor, /const suppliedRuntimeEnvironment = this\.getRuntimeEnvironment\(\)/);
   assert.match(runtimeSupervisor, /\.\.\.runtimeEnvironment/);
   assert.match(preload, /externalServicesSnapshot/);
+  assert.match(preload, /managedComponentsSnapshot/);
+  assert.match(preload, /installManagedComponent/);
+  assert.match(preload, /repairManagedComponent/);
   assert.match(preload, /configureExternalService/);
   assert.match(preload, /syncCodexRouter/);
   assert.match(types, /export interface ExternalServiceSnapshot/);
+  assert.match(types, /export interface ManagedComponentInstallState/);
   assert.match(types, /externalServicesSnapshot\(\)/);
+  assert.match(types, /installManagedComponent\(serviceId: ExternalServiceId\)/);
   assert.match(app, /surface === "integrations"/);
   assert.match(app, /<ExternalServicesSurface/);
   assert.match(surface, /CPA Provider Hub/);
@@ -207,6 +218,7 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.match(surface, /CommandCode Proxy/);
   assert.match(surface, /Paseo/);
   assert.match(surface, /Anneal/);
+  assert.match(surface, /Install \/ Repair|安裝／修復/);
   assert.match(surface, /供應商中心/);
   assert.match(surface, /外部服務/);
   assert.match(packageScript, /--publish["',\s]+never/);
