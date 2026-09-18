@@ -15,6 +15,7 @@ interface ExternalServicesSurfaceProps {
   openProviders: () => void;
   openPaseo: () => void;
   openAnneal: () => void;
+  focusServiceId?: ExternalServiceId;
 }
 
 interface ServiceDraft {
@@ -117,11 +118,12 @@ export function ExternalServicesSurface({
   openProviders,
   openPaseo,
   openAnneal,
+  focusServiceId,
 }: ExternalServicesSurfaceProps) {
   const api = window.codexWebLauncher;
   const [services, setServices] = useState<ExternalServicesSnapshot>(EMPTY_SERVICES);
   const [providers, setProviders] = useState<ProviderNetworkSnapshot>(EMPTY_PROVIDERS);
-  const [selectedId, setSelectedId] = useState<ExternalServiceId>("codex-router");
+  const [selectedId, setSelectedId] = useState<ExternalServiceId>(focusServiceId ?? "codex-router");
   const [draft, setDraft] = useState<ServiceDraft | null>(null);
   const [callerKey, setCallerKey] = useState("");
   const [managedCredential, setManagedCredential] = useState("");
@@ -135,16 +137,18 @@ export function ExternalServicesSurface({
   const commandCodeAccounts = activeAccounts.filter((account) => account.providerId === "commandcode-proxy");
   const commandCodeModels = new Set(commandCodeAccounts.flatMap((account) => account.models)).size;
 
-  const serviceRows = useMemo(() => services.services.map((service) => (
-    service.id === "commandcode-proxy"
-      ? {
-          ...service,
-          accountCount: commandCodeAccounts.length,
-          connectedAccountCount: commandCodeAccounts.filter((account) => account.status === "connected").length,
-          providerModelCount: commandCodeModels,
-        }
-      : service
-  )), [services, commandCodeAccounts, commandCodeModels]);
+  const serviceRows = useMemo(() => services.services
+    .filter((service) => !focusServiceId || service.id === focusServiceId)
+    .map((service) => (
+      service.id === "commandcode-proxy"
+        ? {
+            ...service,
+            accountCount: commandCodeAccounts.length,
+            connectedAccountCount: commandCodeAccounts.filter((account) => account.status === "connected").length,
+            providerModelCount: commandCodeModels,
+          }
+        : service
+    )), [services, commandCodeAccounts, commandCodeModels, focusServiceId]);
 
   const refresh = async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
@@ -154,7 +158,7 @@ export function ExternalServicesSurface({
     ]);
     setServices(serviceSnapshot);
     setProviders(providerSnapshot);
-    const current = serviceSnapshot.services.find((service) => service.id === selectedId)
+    const current = serviceSnapshot.services.find((service) => service.id === (focusServiceId ?? selectedId))
       ?? serviceSnapshot.services[0];
     if (current) {
       setSelectedId(current.id);
@@ -169,7 +173,7 @@ export function ExternalServicesSurface({
       if (cancelled) return;
       setServices(nextServices);
       setProviders(nextProviders);
-      const current = nextServices.services.find((service) => service.id === selectedId)
+      const current = nextServices.services.find((service) => service.id === (focusServiceId ?? selectedId))
         ?? nextServices.services[0];
       if (current) {
         setSelectedId(current.id);
@@ -178,7 +182,7 @@ export function ExternalServicesSurface({
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribeServices = api.onExternalServicesChanged((next) => {
       setServices(next);
-      const current = next.services.find((service) => service.id === selectedId);
+      const current = next.services.find((service) => service.id === (focusServiceId ?? selectedId));
       if (current) setDraft(draftFrom(current));
     });
     const unsubscribeProviders = api.onProviderNetworkChanged(setProviders);
@@ -187,7 +191,12 @@ export function ExternalServicesSurface({
       unsubscribeServices();
       unsubscribeProviders();
     };
-  }, [api, selectedId, setError]);
+  }, [api, focusServiceId, selectedId, setError]);
+
+
+  useEffect(() => {
+    if (focusServiceId) setSelectedId(focusServiceId);
+  }, [focusServiceId]);
 
   useEffect(() => {
     if (selected) {
@@ -293,7 +302,7 @@ export function ExternalServicesSurface({
   };
 
   return (
-    <section className="external-services-surface">
+    <section className={`external-services-surface${focusServiceId ? " is-focused" : ""}`}>
       <header className="external-services-heading">
         <div>
           <span>{text(language, "EXTERNAL SERVICES", "外部服務")}</span>

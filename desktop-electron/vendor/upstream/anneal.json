@@ -23,21 +23,24 @@
     "settings"
   ],
   "sectionPaths": {
-    "tasks": "/tasks",
-    "projects": "/projects",
-    "agents": "/agents",
-    "sessions": "/sessions",
-    "inbox": "/inbox",
-    "automations": "/automations",
-    "triggers": "/triggers",
-    "costs": "/costs",
-    "goals": "/goals",
-    "connections": "/connections",
-    "settings": "/settings"
+    "tasks": "#/tasks",
+    "projects": "#/projects",
+    "agents": "#/agents",
+    "sessions": "#/sessions",
+    "inbox": "#/inbox",
+    "automations": "#/automations",
+    "triggers": "#/triggers",
+    "costs": "#/costs",
+    "goals": "#/goals",
+    "connections": "#/connections",
+    "settings": "#/settings"
   },
   "launch": {
     "executable": "npm",
-    "arguments": ["run", "dev:web"],
+    "arguments": [
+      "run",
+      "dev:web"
+    ],
     "workingDirectoryEnvironment": "CODING_TOOLS_ANNEAL_HOME"
   }
 }
