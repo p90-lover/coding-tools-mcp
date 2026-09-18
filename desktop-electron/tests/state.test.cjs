@@ -22,6 +22,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      automaticUpdates: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -31,6 +32,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       browserSmokeVersion: null,
       sidebarOpen: true,
       sidebarWidth: 252,
+      managedAppTab: "cpa",
       mcpGuideStep: 0,
       sessionRefreshReminderAt: null,
     });
@@ -48,6 +50,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      automaticUpdates: true,
       keepRunningOnClose: false,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -57,6 +60,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       browserSmokeVersion: "0.2.0",
       sidebarOpen: true,
       sidebarWidth: 252,
+      managedAppTab: "cpa",
       mcpGuideStep: 0,
       sessionRefreshReminderAt: null,
     });
@@ -113,6 +117,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      automaticUpdates: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -122,6 +127,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       browserSmokeVersion: null,
       sidebarOpen: true,
       sidebarWidth: 252,
+      managedAppTab: "cpa",
       mcpGuideStep: 0,
       sessionRefreshReminderAt: null,
     });

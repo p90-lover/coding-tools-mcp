@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   setBrowserInteractionMode: (mode) => ipcRenderer.invoke("launcher:browser-interaction-mode", mode),
   setPreference: (key, value) => ipcRenderer.invoke("launcher:set-preference", key, value),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
+  setManagedAppTab: (tab) => ipcRenderer.invoke("launcher:managed-app-tab", tab),
   externalServicesSnapshot: () => ipcRenderer.invoke("launcher:external-services-snapshot"),
   managedComponentsSnapshot: () => ipcRenderer.invoke("launcher:managed-components-snapshot"),
   installManagedComponent: (serviceId) => ipcRenderer.invoke("launcher:managed-component-install", serviceId),
@@ -165,6 +166,10 @@ const codingToolsApi = Object.freeze({
   }),
   diagnostics: Object.freeze({
     snapshot: () => invokeContract(ipcRenderer, "diagnostics.snapshot"),
+  }),
+  tools: Object.freeze({
+    catalog: (input) => invokeContract(ipcRenderer, "tools.catalog", input),
+    call: (input) => invokeContract(ipcRenderer, "tools.call", input),
   }),
 });
 

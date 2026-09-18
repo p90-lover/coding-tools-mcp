@@ -299,6 +299,18 @@ const workspaceRequest = Object.freeze({
   additionalProperties: false,
 });
 
+const toolsCallRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "tool"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    tool: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    requestId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    arguments: genericObject,
+  }),
+  additionalProperties: false,
+});
+
 const taskListRequest = Object.freeze({
   type: "object",
   properties: Object.freeze({
@@ -477,6 +489,16 @@ const CONTRACTS = Object.freeze({
   "diagnostics.snapshot": Object.freeze({
     channel: "coding-tools:diagnostics:snapshot",
     request: emptyObject,
+    response: genericObject,
+  }),
+  "tools.catalog": Object.freeze({
+    channel: "coding-tools:tools:catalog",
+    request: workspaceRequest,
+    response: genericObject,
+  }),
+  "tools.call": Object.freeze({
+    channel: "coding-tools:tools:call",
+    request: toolsCallRequest,
     response: genericObject,
   }),
 });

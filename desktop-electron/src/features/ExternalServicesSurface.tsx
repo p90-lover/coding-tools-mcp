@@ -15,6 +15,7 @@ interface ExternalServicesSurfaceProps {
   openProviders: () => void;
   openPaseo: () => void;
   openAnneal: () => void;
+  preferredServiceId?: ExternalServiceId;
 }
 
 interface ServiceDraft {
@@ -117,11 +118,12 @@ export function ExternalServicesSurface({
   openProviders,
   openPaseo,
   openAnneal,
+  preferredServiceId,
 }: ExternalServicesSurfaceProps) {
   const api = window.codexWebLauncher;
   const [services, setServices] = useState<ExternalServicesSnapshot>(EMPTY_SERVICES);
   const [providers, setProviders] = useState<ProviderNetworkSnapshot>(EMPTY_PROVIDERS);
-  const [selectedId, setSelectedId] = useState<ExternalServiceId>("codex-router");
+  const [selectedId, setSelectedId] = useState<ExternalServiceId>(preferredServiceId ?? "codex-router");
   const [draft, setDraft] = useState<ServiceDraft | null>(null);
   const [callerKey, setCallerKey] = useState("");
   const [managedCredential, setManagedCredential] = useState("");
@@ -146,6 +148,10 @@ export function ExternalServicesSurface({
       : service
   )), [services, commandCodeAccounts, commandCodeModels]);
 
+  useEffect(() => {
+    if (preferredServiceId) setSelectedId(preferredServiceId);
+  }, [preferredServiceId]);
+
   const refresh = async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
     const [serviceSnapshot, providerSnapshot] = await Promise.all([
@@ -154,7 +160,7 @@ export function ExternalServicesSurface({
     ]);
     setServices(serviceSnapshot);
     setProviders(providerSnapshot);
-    const current = serviceSnapshot.services.find((service) => service.id === selectedId)
+    const current = serviceSnapshot.services.find((service) => service.id === (preferredServiceId ?? selectedId))
       ?? serviceSnapshot.services[0];
     if (current) {
       setSelectedId(current.id);
@@ -169,7 +175,7 @@ export function ExternalServicesSurface({
       if (cancelled) return;
       setServices(nextServices);
       setProviders(nextProviders);
-      const current = nextServices.services.find((service) => service.id === selectedId)
+      const current = nextServices.services.find((service) => service.id === (preferredServiceId ?? selectedId))
         ?? nextServices.services[0];
       if (current) {
         setSelectedId(current.id);
@@ -187,7 +193,7 @@ export function ExternalServicesSurface({
       unsubscribeServices();
       unsubscribeProviders();
     };
-  }, [api, selectedId, setError]);
+  }, [api, preferredServiceId, selectedId, setError]);
 
   useEffect(() => {
     if (selected) {
