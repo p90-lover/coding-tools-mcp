@@ -111,6 +111,8 @@ function prepare(home, state) {
   if (pkg.name !== "codex-model-router" || pkg.version !== "0.6.0") fail(`Unexpected Codex Router package ${pkg.name}@${pkg.version}`);
   requiredFile(home, "src/foreground-start.mjs");
   requiredFile(home, "src/curate-models.mjs");
+  requiredFile(home, "apps/control-center/electron/main.mjs");
+  requiredFile(home, "apps/control-center/package.json");
   const env = environment(home, state);
   if (process.platform === "win32") {
     runChecked("powershell.exe", [
@@ -122,6 +124,12 @@ function prepare(home, state) {
     runChecked("bash", [requiredFile(home, "bin/install"), "--prepare-only"], home, env);
   }
   wrappers(home, state, env);
+  const { ensureOriginalControlCenter } = require("./codex-router-original-ui.cjs");
+  try {
+    ensureOriginalControlCenter(home);
+  } catch (error) {
+    fail(`Codex Router Control Center prepare failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const callerSecret = path.join(state, "router", "caller-secret");
   if (!fs.existsSync(callerSecret) || !fs.readFileSync(callerSecret, "utf8").trim()) {
     fail("Codex Router did not create its caller secret");
