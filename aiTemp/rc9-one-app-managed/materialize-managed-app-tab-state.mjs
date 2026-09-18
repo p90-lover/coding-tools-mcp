@@ -26,6 +26,19 @@ function replaceOnce(relative, oldValue, newValue, sentinel = newValue) {
   write(relative, current.replace(oldValue, newValue));
 }
 
+function removeOnce(relative, value) {
+  const current = read(relative);
+  const count = current.split(value).length - 1;
+  if (count === 0) {
+    process.stdout.write(`already removed from ${relative}\n`);
+    return;
+  }
+  if (count !== 1) {
+    throw new Error(`Expected one removable block in ${relative}, found ${count}: ${value.slice(0, 140)}`);
+  }
+  write(relative, current.replace(value, ""));
+}
+
 function replaceAllExact(relative, oldValue, newValue, expected) {
   const current = read(relative);
   if (current.includes(newValue) && !current.includes(oldValue)) {
@@ -165,7 +178,7 @@ replaceOnce(
   'Language, ManagedAppTabId',
 );
 
-replaceOnce(
+removeOnce(
   "desktop-electron/src/features/ManagedAppsSurface.tsx",
   `export type ManagedAppTabId =
   | "cpa"
@@ -175,8 +188,6 @@ replaceOnce(
   | "anneal";
 
 `,
-  '',
-  'interface ManagedAppsSurfaceProps {',
 );
 
 replaceOnce(
