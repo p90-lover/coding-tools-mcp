@@ -93,7 +93,7 @@ function mockChild(pid = 8100) {
   return child;
 }
 
-function controllerFixture() {
+function controllerFixture({ fetchImpl } = {}) {
   const payload = Buffer.from("managed-component-fixture-v1", "utf8");
   const manifestRoot = manifestFixture(payload);
   const dataRoot = temporaryDirectory("coding-tools-managed-data");
@@ -102,10 +102,10 @@ function controllerFixture() {
     manifestRoot,
     dataRoot,
     safeStorage: { isEncryptionAvailable: () => false },
-    fetchImpl: async () => new Response(payload, {
+    fetchImpl: fetchImpl ?? (async () => new Response(payload, {
       status: 200,
       headers: { "content-length": String(payload.length) },
-    }),
+    })),
     spawnProcess: () => {
       const child = mockChild(8100 + children.length);
       children.push(child);
@@ -184,6 +184,26 @@ test("release installation verifies bytes, activates atomically and reports the 
   assert.equal(marker.id, "codex-router");
   assert.equal(marker.version, "1.0.0");
   assert.equal(marker.artifact, "codex-router.bin");
+  controller.dispose();
+});
+
+test("release download retries a transient upstream HTTP failure before activating", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  let attempts = 0;
+  const { controller } = controllerFixture({
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) return new Response("temporary upstream failure", { status: 500 });
+      return new Response(payload, {
+        status: 200,
+        headers: { "content-length": String(payload.length) },
+      });
+    },
+  });
+
+  const installed = await controller.installComponent("cpa");
+  assert.equal(installed.installState, "installed");
+  assert.equal(attempts, 2);
   controller.dispose();
 });
 
