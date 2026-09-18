@@ -1,0 +1,66 @@
+name: rc.9 one-app bootstrap wiring
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.9-one-app-bootstrap-wiring
+    paths:
+      - '.github/workflows/rc9-one-app-bootstrap-wiring.yml'
+      - 'desktop-electron/electron/managed-bootstrap.cjs'
+      - 'desktop-electron/electron/managed-external-services.cjs'
+      - 'desktop-electron/tests/managed-bootstrap.test.cjs'
+      - 'desktop-electron/tests/managed-external-bootstrap.test.cjs'
+  pull_request:
+    paths:
+      - '.github/workflows/rc9-one-app-bootstrap-wiring.yml'
+      - 'desktop-electron/electron/managed-bootstrap.cjs'
+      - 'desktop-electron/electron/managed-external-services.cjs'
+      - 'desktop-electron/tests/managed-bootstrap.test.cjs'
+      - 'desktop-electron/tests/managed-external-bootstrap.test.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc9-one-app-bootstrap-wiring-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - name: Run focused bootstrap tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/managed-bootstrap.test.cjs \
+            desktop-electron/tests/managed-external-bootstrap.test.cjs
+
+      - name: Validate runtime syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check desktop-electron/electron/managed-bootstrap.cjs
+          node --check desktop-electron/electron/managed-external-services.cjs
+
+      - name: Enforce no tracked deletions
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="$(git rev-parse HEAD^)"
+          fi
+          git diff --diff-filter=D --exit-code "$base" HEAD
