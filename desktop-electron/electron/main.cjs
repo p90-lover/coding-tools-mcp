@@ -476,19 +476,6 @@ function executionSettingsPayload(settings) {
   };
 }
 
-function storedProviderCredential(secret) {
-  if (!secret || typeof secret !== "object") return "";
-  for (const key of ["apiKey", "token", "credential", "password"]) {
-    const value = secret[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-function accountNeedsStoredCredential(auth) {
-  return auth === "api_key" || auth === "local_proxy";
-}
-
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
   handle("coding-tools:execution:read", async (event, input) => {
@@ -505,7 +492,9 @@ function registerIpc({ logger, stateStore }) {
     if (!headlessHost) throw new Error("Local execution service is unavailable");
 
     let settings = input.settings;
-    let credential = "";
+    const controlCredential = typeof input.controlCredential === "string"
+      ? input.controlCredential.trim()
+      : "";
     const plannedWorkload = input.operation === "configure"
       && settings
       && (settings.engine === "paseo" || settings.engine === "anneal");
@@ -518,11 +507,6 @@ function registerIpc({ logger, stateStore }) {
         model: settings.model,
         allowFallback: input.allowProviderFallback !== false,
       });
-      const secret = providerNetwork.store.accountSecret(plan.account.id);
-      credential = storedProviderCredential(secret);
-      if (accountNeedsStoredCredential(plan.account.auth) && !credential) {
-        throw new Error(`Provider account ${plan.account.id} has no usable stored credential`);
-      }
       settings = {
         ...settings,
         provider: plan.provider.id,
@@ -546,7 +530,7 @@ function registerIpc({ logger, stateStore }) {
       expected_revision: input.expectedRevision ?? null,
       binding_id: input.bindingId ?? null,
       settings: executionSettingsPayload(settings),
-      credential,
+      credential: controlCredential,
       confirm: input.confirm === true,
     });
   });

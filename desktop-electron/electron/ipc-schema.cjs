@@ -395,6 +395,7 @@ const executionProviderRequest = Object.freeze({
     settings: Object.freeze({ ...executionSettings, nullable: true }),
     providerAccountId: Object.freeze({ type: "string", minLength: 1, maxLength: 160, nullable: true }),
     allowProviderFallback: Object.freeze({ type: "boolean" }),
+    controlCredential: Object.freeze({ type: "string", maxLength: 8192 }),
     confirm: Object.freeze({ type: "boolean" }),
   }),
   additionalProperties: false,
