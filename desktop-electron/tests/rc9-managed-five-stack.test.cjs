@@ -107,10 +107,34 @@ test("managed installation is wired through the combined controller, focused IPC
   assert.match(preload, /installManagedComponent/);
   assert.match(preload, /repairManagedComponent/);
   assert.match(types, /ManagedComponentInstallState/);
-  assert.match(types, /installManagedComponent\(serviceId: ExternalServiceId\)/);
+  assert.match(types, /installManagedComponent\(serviceId: ExternalServiceId/);
   assert.match(surface, /Install \/ Repair|安裝／修復/);
   assert.match(surface, /managedInstall/);
   assert.match(surface, /Advanced manual configuration|進階手動設定/);
+});
+
+test("Anneal setup token is request-only, bounded, redacted, and cleared by the UI", () => {
+  const manager = read("electron/managed-components.cjs");
+  const combined = read("electron/managed-external-services.cjs");
+  const main = read("electron/main.cjs");
+  const preload = read("electron/preload.cjs");
+  const types = read("src/types.ts");
+  const surface = read("src/features/ExternalServicesSurface.tsx");
+
+  assert.match(manager, /normalizeSetupSecrets/);
+  assert.match(manager, /GITHUB_READ_TOKEN/);
+  assert.match(manager, /requiredEnvironment/);
+  assert.match(manager, /transientEnvironment/);
+  assert.match(manager, /redactSensitiveText/);
+  assert.doesNotMatch(manager, /writeSecret\([^\n]*githubReadToken/);
+  assert.match(combined, /installManagedComponent\(serviceId, input/);
+  assert.match(main, /managedComponentInstallInput/);
+  assert.match(preload, /installManagedComponent:\s*\(serviceId, input = \{\}\)/);
+  assert.match(types, /export interface ManagedComponentInstallInput/);
+  assert.match(surface, /const \[githubReadToken, setGithubReadToken\] = useState\(""\)/);
+  assert.match(surface, /One-time GitHub read token|一次性 GitHub 唯讀 Token/);
+  assert.match(surface, /type="password"/);
+  assert.match(surface, /setGithubReadToken\(""\)/);
 });
 
 test("packaging retains managed manifests and manager modules", () => {
