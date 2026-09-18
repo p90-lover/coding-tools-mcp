@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "id": "anneal",
+  "name": "Anneal",
+  "managedBy": "Coding Tools",
+  "loopbackOnly": true,
+  "repository": "mosonlab/anneal",
+  "repositoryUrl": "https://github.com/mosonlab/anneal.git",
+  "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e",
+  "version": "0.9.0",
+  "strategy": "git-source",
+  "license": "MIT",
+  "platformModes": {
+    "win32": "wsl2",
+    "linux": "native",
+    "darwin": "native"
+  },
+  "prerequisites": [
+    { "id": "git", "executable": "git", "arguments": ["--version"] },
+    { "id": "node", "executable": "node", "arguments": ["--version"], "execution": "managed-mode" },
+    { "id": "npm", "executable": "npm", "arguments": ["--version"], "execution": "managed-mode" },
+    { "id": "docker", "executable": "docker", "arguments": ["--version"], "execution": "managed-mode" },
+    { "id": "docker-compose", "executable": "docker", "arguments": ["compose", "version"], "execution": "managed-mode" },
+    { "id": "codex", "executable": "codex", "arguments": ["--version"], "execution": "managed-mode" }
+  ],
+  "install": {
+    "steps": [
+      { "id": "clone-pinned-source", "kind": "git-checkout" },
+      { "id": "npm-ci", "kind": "command", "executable": "{npm}", "arguments": ["ci"], "execution": "managed-mode" },
+      { "id": "setup-local", "kind": "command", "executable": "{npm}", "arguments": ["run", "setup:local"], "execution": "managed-mode" },
+      { "id": "build", "kind": "command", "executable": "{npm}", "arguments": ["run", "build"], "execution": "managed-mode" },
+      { "id": "postgres-ready", "kind": "command", "executable": "docker", "arguments": ["compose", "up", "-d", "--wait", "--wait-timeout", "60", "postgres"], "execution": "managed-mode" },
+      { "id": "db-migrate", "kind": "command", "executable": "{npm}", "arguments": ["run", "db:migrate:release", "--", "--fresh"], "execution": "managed-mode" },
+      { "id": "activate", "kind": "activate" }
+    ]
+  },
+  "launch": {
+    "processes": [
+      {
+        "id": "postgres",
+        "mode": "command",
+        "executable": "docker",
+        "arguments": ["compose", "up", "-d", "--wait", "--wait-timeout", "60", "postgres"],
+        "execution": "managed-mode",
+        "detached": true
+      },
+      {
+        "id": "api",
+        "mode": "foreground",
+        "executable": "{npm}",
+        "arguments": ["run", "dev:api"],
+        "execution": "managed-mode"
+      },
+      {
+        "id": "runner",
+        "mode": "foreground",
+        "executable": "{npm}",
+        "arguments": ["run", "dev:runner"],
+        "execution": "managed-mode"
+      },
+      {
+        "id": "web",
+        "mode": "foreground",
+        "executable": "{npm}",
+        "arguments": ["run", "dev:web"],
+        "execution": "managed-mode"
+      }
+    ],
+    "stop": [
+      {
+        "id": "postgres-stop",
+        "executable": "docker",
+        "arguments": ["compose", "stop", "postgres"],
+        "execution": "managed-mode"
+      }
+    ]
+  },
+  "health": {
+    "endpoint": "http://127.0.0.1:5173/",
+    "acceptStatus": [200, 302, 401, 403, 404]
+  },
+  "executionEndpoint": "http://127.0.0.1:3000/"
+}
