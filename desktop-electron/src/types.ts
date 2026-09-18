@@ -192,6 +192,7 @@ export interface ManagedComponentInstallSnapshot {
   error: string | null;
   platformMode: "native" | "wsl2" | string;
   processes: ManagedComponentProcessSnapshot[];
+  missingCredentials: string[];
 }
 
 export interface ManagedComponentsSnapshot {
@@ -473,6 +474,11 @@ export interface LauncherApi {
   managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;
   installManagedComponent(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   repairManagedComponent(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
+  setManagedComponentCredential(
+    serviceId: ExternalServiceId,
+    key: string,
+    value: string,
+  ): Promise<ExternalServiceSnapshot>;
   configureExternalService(serviceId: ExternalServiceId, input: ExternalServiceConfigurationInput): Promise<ExternalServiceSnapshot>;
   inspectExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   startExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;

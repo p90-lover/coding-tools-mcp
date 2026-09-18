@@ -373,3 +373,19 @@ button.external-service-card:hover,
 .external-service-advanced[open] > summary {
   margin-bottom: 14px;
 }
+
+
+.managed-secret-field {
+  display: grid;
+  min-width: min(360px, 100%);
+  gap: 6px;
+}
+
+.managed-secret-field > span {
+  color: rgba(231, 235, 246, 0.7);
+  font-size: 10px;
+}
+
+.managed-secret-field > input {
+  min-width: 0;
+}

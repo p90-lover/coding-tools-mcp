@@ -621,6 +621,11 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("Managed components controller is unavailable");
     return externalServicesController.repairManagedComponent(serviceId);
   });
+  handle("launcher:managed-component-credential", (event, serviceId, key, value) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("Managed components controller is unavailable");
+    return externalServicesController.setManagedComponentCredential(serviceId, key, value);
+  });
   handle("launcher:external-services-snapshot", (event) => {
     assertFocusedMainWindow(event, false);
     if (!externalServicesController) throw new Error("External services controller is unavailable");

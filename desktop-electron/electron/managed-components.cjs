@@ -325,6 +325,7 @@ function createManagedComponentController({
 
   const manifests = new Map(COMPONENT_IDS.map((id) => [id, loadManagedManifest(id, manifestRoot)]));
   const componentsRoot = path.join(dataRoot, "components");
+  const stateRoot = path.join(dataRoot, "state");
   const aiTempRoot = path.join(dataRoot, "aiTemp", "managed-components");
   const trashRoot = path.join(dataRoot, "Trash", "managed-components");
   const secretPath = path.join(dataRoot, "managed-components.secrets.json");
@@ -334,7 +335,7 @@ function createManagedComponentController({
   const processes = new Map();
   let secrets = readJson(secretPath) || { version: SECRET_VERSION, components: {} };
 
-  for (const directory of [componentsRoot, aiTempRoot, trashRoot]) {
+  for (const directory of [componentsRoot, stateRoot, aiTempRoot, trashRoot]) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (platform !== "win32") fs.chmodSync(directory, 0o700);
   }
@@ -346,6 +347,17 @@ function createManagedComponentController({
 
   function componentHome(manifest) {
     return path.join(componentsRoot, manifest.id, safeSegment(manifest.version));
+  }
+
+  function componentState(manifest) {
+    return path.join(stateRoot, manifest.id);
+  }
+
+  function managedAdapterRoot() {
+    const packedMarker = `${path.sep}app.asar${path.sep}`;
+    return __dirname.includes(packedMarker)
+      ? __dirname.replace(packedMarker, `${path.sep}app.asar.unpacked${path.sep}`)
+      : __dirname;
   }
 
   function markerPath(home) {
@@ -415,6 +427,31 @@ function createManagedComponentController({
     return current;
   }
 
+  function missingCredentials(manifest) {
+    const current = secretFor(manifest.id);
+    return Object.entries(manifest.credentials || {})
+      .filter(([_key, descriptor]) => descriptor?.required === true)
+      .map(([key]) => key)
+      .filter((key) => typeof current[key] !== "string" || !current[key]);
+  }
+
+  function setComponentCredential(idValue, keyValue, value) {
+    const id = requiredComponentId(idValue);
+    const manifest = manifestFor(id);
+    const key = String(keyValue || "").trim();
+    const descriptor = manifest.credentials?.[key];
+    if (!descriptor) throw new Error(`${manifest.name} does not accept credential ${key || "missing"}`);
+    if (typeof value !== "string") throw new Error(`${manifest.name} credential ${key} must be text`);
+    const normalized = value.trim();
+    const minimumLength = Number.isInteger(descriptor.minimumLength) ? descriptor.minimumLength : 1;
+    if (normalized.length < minimumLength || normalized.length > 8_192 || normalized.includes("\0")) {
+      throw new Error(`${manifest.name} credential ${key} is invalid`);
+    }
+    writeSecret(id, { ...secretFor(id), [key]: normalized });
+    emit();
+    return project(id);
+  }
+
   function platformMode(manifest) {
     return manifest.platformModes?.[platform] || "native";
   }
@@ -457,6 +494,7 @@ function createManagedComponentController({
       platformMode: platformMode(manifest),
       processes: serviceProcesses(id),
       secretConfigured: Object.keys(secretFor(id)).length > 0,
+      missingCredentials: missingCredentials(manifest),
     };
   }
 
@@ -507,7 +545,7 @@ function createManagedComponentController({
     return platform === "win32" ? "npm.cmd" : "npm";
   }
 
-  function wslHome(home) {
+  function wslPath(home) {
     const result = spawnSyncProcess("wsl.exe", ["--exec", "wslpath", "-a", "-u", home], {
       encoding: "utf8",
       windowsHide: true,
@@ -522,6 +560,8 @@ function createManagedComponentController({
   function expandToken(value, context) {
     return String(value)
       .replaceAll("{home}", context.home)
+      .replaceAll("{state}", context.state)
+      .replaceAll("{adapterRoot}", context.adapterRoot)
       .replaceAll("{artifact}", context.artifact || "")
       .replaceAll("{runtime}", context.runtime)
       .replaceAll("{npm}", context.npm)
@@ -541,11 +581,26 @@ function createManagedComponentController({
     ]));
     const managedMode = entry.execution === "managed-mode";
     if (context.mode === "wsl2" && managedMode) {
-      const linuxHome = context.wslHome || wslHome(context.home);
-      const exported = Object.entries(environment)
+      const linuxHome = context.wslHome || wslPath(context.home);
+      const linuxState = context.wslState || wslPath(context.state);
+      const linuxAdapterRoot = context.wslAdapterRoot || wslPath(context.adapterRoot);
+      const wslContext = {
+        ...context,
+        home: linuxHome,
+        state: linuxState,
+        adapterRoot: linuxAdapterRoot,
+        npm: "npm",
+      };
+      const wslExecutable = expandToken(entry.executable, wslContext);
+      const wslArgs = (entry.arguments || []).map((value) => expandToken(value, wslContext));
+      const wslEnvironment = Object.fromEntries(Object.entries(entry.environment || {}).map(([key, value]) => [
+        key,
+        expandToken(value, wslContext),
+      ]));
+      const exported = Object.entries(wslEnvironment)
         .map(([key, value]) => `export ${key}=${quoteBash(value)}`)
         .join("; ");
-      const command = [executable, ...args].map(quoteBash).join(" ");
+      const command = [wslExecutable, ...wslArgs].map(quoteBash).join(" ");
       const script = exported ? `${exported}; exec ${command}` : `exec ${command}`;
       return {
         executable: "wsl.exe",
@@ -662,6 +717,8 @@ function createManagedComponentController({
     }, {
       id: manifest.id,
       home: parent,
+      state: componentState(manifest),
+      adapterRoot: managedAdapterRoot(),
       artifact: "",
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
@@ -675,6 +732,8 @@ function createManagedComponentController({
     }, {
       id: manifest.id,
       home: parent,
+      state: componentState(manifest),
+      adapterRoot: managedAdapterRoot(),
       artifact: "",
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
@@ -688,6 +747,8 @@ function createManagedComponentController({
     }, {
       id: manifest.id,
       home: parent,
+      state: componentState(manifest),
+      adapterRoot: managedAdapterRoot(),
       artifact: "",
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
@@ -701,6 +762,8 @@ function createManagedComponentController({
     const context = {
       id: manifest.id,
       home: stagingHome,
+      state: componentState(manifest),
+      adapterRoot: managedAdapterRoot(),
       artifact,
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
@@ -733,6 +796,10 @@ function createManagedComponentController({
     const source = sourceState(manifest);
     if (source.state === "installed" && !repair) return project(id);
     if (operationState(id)?.state === "installing") throw new Error(`${manifest.name} installation is already running`);
+    const missing = missingCredentials(manifest);
+    if (missing.length > 0) throw new Error(`${manifest.name} requires configured credentials: ${missing.join(", ")}`);
+    fs.mkdirSync(componentState(manifest), { recursive: true, mode: 0o700 });
+    if (platform !== "win32") fs.chmodSync(componentState(manifest), 0o700);
 
     setOperation(id, { state: "installing", step: "prepare", error: null });
     const stagingRoot = path.join(
@@ -806,6 +873,8 @@ function createManagedComponentController({
     return {
       id: manifest.id,
       home,
+      state: componentState(manifest),
+      adapterRoot: managedAdapterRoot(),
       artifact,
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
@@ -928,8 +997,15 @@ function createManagedComponentController({
     const source = sourceState(manifest);
     if (source.state !== "installed") return null;
     const context = launchContext(manifest);
-    const first = manifest.launch.processes[0];
-    const spec = commandSpec(first, context);
+    const primary = manifest.launch.processes.find((entry) => entry.id === manifest.launch.primaryProcessId)
+      || manifest.launch.processes.find((entry) => entry.mode !== "command" && entry.detached !== true)
+      || manifest.launch.processes[0];
+    const spec = commandSpec(primary, context);
+    const cli = manifest.cli?.[platform] || manifest.cli?.default || null;
+    const callerSecretPath = path.join(context.state, "router", "caller-secret");
+    const callerKey = id === "codex-router" && fs.existsSync(callerSecretPath)
+      ? fs.readFileSync(callerSecretPath, "utf8").trim()
+      : "";
     return {
       home: context.home,
       executable: spec.executable,
@@ -937,10 +1013,18 @@ function createManagedComponentController({
       endpoint: manifest.health.endpoint.replace("{callerKey}", ""),
       executionEndpoint: manifest.executionEndpoint || undefined,
       ...(id === "codex-router" ? {
-        routerCli: context.artifact,
-        curateCli: context.artifact,
+        routerCli: cli ? expandToken(cli.router, context) : context.artifact,
+        curateCli: cli ? expandToken(cli.curate, context) : context.artifact,
+        callerKey,
       } : {}),
     };
+  }
+
+  function healthHeaders(idValue) {
+    const id = requiredComponentId(idValue);
+    if (id !== "commandcode-proxy") return {};
+    const proxyApiKey = ensureComponentSecrets(id).proxyApiKey;
+    return proxyApiKey ? { Authorization: `Bearer ${proxyApiKey}` } : {};
   }
 
   function dispose() {
@@ -959,10 +1043,12 @@ function createManagedComponentController({
     project,
     installComponent,
     repairComponent,
+    setComponentCredential,
     startComponent,
     stopComponent,
     restartComponent,
     runtimeConfiguration,
+    healthHeaders,
     dispose,
   });
 }

@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.7.0-rc.8",
+  "version": "0.7.0-rc.9",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -48,7 +48,8 @@
     "artifactName": "Coding.Tools_${version}_${os}_${arch}.${ext}",
     "asar": true,
     "asarUnpack": [
-      "assets/linux-appimage-runner.sh"
+      "assets/linux-appimage-runner.sh",
+      "electron/codex-router-managed.cjs"
     ],
     "directories": {
       "output": "release"

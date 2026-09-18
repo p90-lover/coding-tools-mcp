@@ -5,48 +5,78 @@
   "managedBy": "Coding Tools",
   "loopbackOnly": true,
   "repository": "duolahypercho/codex-router",
+  "repositoryUrl": "https://github.com/duolahypercho/codex-router.git",
   "version": "0.6.0",
-  "strategy": "release-binary",
-  "license": "MIT",
-  "platforms": {
-    "win32": {
-      "x64": {
-        "url": "https://github.com/duolahypercho/codex-router/releases/download/v0.6.0/model-router-0.6.0-windows-x64.exe",
-        "sha256": "24c0f1b1893acdd340119628bc161f23aa70f32cd294a3446d8e16dbca22c17c",
-        "fileName": "model-router.exe"
-      }
-    },
-    "linux": {
-      "x64": {
-        "url": "https://github.com/duolahypercho/codex-router/releases/download/v0.6.0/model-router-0.6.0-linux-x64.tar.gz",
-        "sha256": "f17f4b912faf3d14267b6136b055d008a195121ab59ca97faa94187e09d984ef",
-        "fileName": "model-router-0.6.0-linux-x64.tar.gz"
-      }
-    }
+  "commit": "930f547d8d8861a47e18a83216e15e73a73aa97c",
+  "strategy": "git-source",
+  "platformModes": {
+    "win32": "native",
+    "linux": "native",
+    "darwin": "native"
   },
   "install": {
     "steps": [
-      { "id": "download-release", "kind": "download" },
-      { "id": "verify-sha256", "kind": "verify" },
-      { "id": "activate", "kind": "activate" }
-    ]
-  },
-  "launch": {
-    "processes": [
       {
-        "id": "router-service",
-        "mode": "command",
-        "executable": "{artifact}",
-        "arguments": ["codex", "enable"],
-        "detached": true
+        "id": "prepare-codex-router",
+        "kind": "command",
+        "executable": "{runtime}",
+        "arguments": [
+          "{adapterRoot}/codex-router-managed.cjs",
+          "prepare",
+          "{home}",
+          "{state}"
+        ]
+      },
+      {
+        "id": "assert-router-source",
+        "kind": "assert-file",
+        "path": "src/foreground-start.mjs"
+      },
+      {
+        "id": "assert-curation-source",
+        "kind": "assert-file",
+        "path": "src/curate-models.mjs"
+      },
+      {
+        "id": "activate",
+        "kind": "activate"
       }
     ]
   },
-  "configure": {
-    "runtimeCommand": "router integrate"
+  "launch": {
+    "primaryProcessId": "router",
+    "processes": [
+      {
+        "id": "router",
+        "mode": "foreground",
+        "executable": "{runtime}",
+        "arguments": [
+          "{adapterRoot}/codex-router-managed.cjs",
+          "run",
+          "{home}",
+          "{state}"
+        ]
+      }
+    ]
+  },
+  "cli": {
+    "win32": {
+      "router": "{state}/bin/model-router.cmd",
+      "curate": "{state}/bin/curate-models.cmd"
+    },
+    "linux": {
+      "router": "{state}/bin/model-router",
+      "curate": "{state}/bin/curate-models"
+    },
+    "darwin": {
+      "router": "{state}/bin/model-router",
+      "curate": "{state}/bin/curate-models"
+    }
   },
   "health": {
     "endpoint": "http://127.0.0.1:4202/_codex-router/{callerKey}/v1/models",
-    "acceptStatus": [200]
+    "acceptStatus": [
+      200
+    ]
   }
 }

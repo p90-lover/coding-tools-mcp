@@ -124,6 +124,7 @@ export function ExternalServicesSurface({
   const [selectedId, setSelectedId] = useState<ExternalServiceId>("codex-router");
   const [draft, setDraft] = useState<ServiceDraft | null>(null);
   const [callerKey, setCallerKey] = useState("");
+  const [managedCredential, setManagedCredential] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
 
@@ -192,6 +193,7 @@ export function ExternalServicesSurface({
     if (selected) {
       setDraft(draftFrom(selected));
       setCallerKey("");
+      setManagedCredential("");
       setNotice("");
     }
   }, [selectedId]);
@@ -253,6 +255,15 @@ export function ExternalServicesSurface({
   const restart = () => run("restart", async () => {
     if (!api || !selected) return;
     await api.restartExternalService(selected.id);
+  });
+
+  const saveManagedCredential = () => run("managed-credential", async () => {
+    if (!api || !selected || selected.id !== "anneal") return;
+    const value = managedCredential.trim();
+    if (!value) throw new Error(text(language, "Enter a GitHub read token first.", "請先輸入 GitHub 唯讀 Token。"));
+    await api.setManagedComponentCredential("anneal", "githubReadToken", value);
+    setManagedCredential("");
+    setNotice(text(language, "Anneal credential saved securely.", "Anneal 憑證已安全儲存。"));
   });
 
   const installOrRepair = () => run("managed-install", async () => {
@@ -363,9 +374,33 @@ export function ExternalServicesSurface({
               {selected.managedInstall.currentStep ? <small>{text(language, "Current step", "目前步驟")}: {selected.managedInstall.currentStep}</small> : null}
               {selected.managedInstall.error ? <small className="managed-install-error">{selected.managedInstall.error}</small> : null}
             </div>
+            {selected.id === "anneal" ? (
+              <label className="managed-secret-field">
+                <span>{text(
+                  language,
+                  selected.managedInstall.missingCredentials.includes("githubReadToken")
+                    ? "GitHub read token required"
+                    : "Replace GitHub read token",
+                  selected.managedInstall.missingCredentials.includes("githubReadToken")
+                    ? "需要 GitHub 唯讀 Token"
+                    : "取代 GitHub 唯讀 Token",
+                )}</span>
+                <input
+                  autoComplete="off"
+                  type="password"
+                  value={managedCredential}
+                  onChange={(event) => setManagedCredential(event.target.value)}
+                />
+                <button disabled={busy !== null || !managedCredential.trim()} onClick={() => void saveManagedCredential()} type="button">
+                  {busy === "managed-credential" ? "…" : text(language, "Save credential", "儲存憑證")}
+                </button>
+              </label>
+            ) : null}
             <button
               className="primary"
-              disabled={busy !== null || selected.managedInstall.state === "installing"}
+              disabled={busy !== null
+                || selected.managedInstall.state === "installing"
+                || selected.managedInstall.missingCredentials.length > 0}
               onClick={() => void installOrRepair()}
               type="button"
             >

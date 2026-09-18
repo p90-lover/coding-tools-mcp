@@ -35,6 +35,7 @@ function createManagedExternalServicesController({
 
   baseController = createExternalServicesController({
     ...options,
+    getHealthHeaders: (serviceId) => managedController?.healthHeaders(serviceId) || {},
     publish: publishCombined,
   });
   managedController = createManagedComponentController({
@@ -62,6 +63,7 @@ function createManagedExternalServicesController({
       ...(serviceId === "codex-router" ? {
         routerCli: installed.routerCli,
         curateCli: installed.curateCli,
+        callerKey: installed.callerKey,
       } : {}),
     };
   }
@@ -100,6 +102,7 @@ function createManagedExternalServicesController({
         error: managed.error,
         platformMode: managed.platformMode,
         processes: managed.processes,
+        missingCredentials: managed.missingCredentials,
       },
     };
   }
@@ -121,13 +124,18 @@ function createManagedExternalServicesController({
   function applyManagedConfiguration(serviceId) {
     const configuration = managedConfiguration(serviceId);
     if (!configuration) throw new Error(`${serviceId} is not installed`);
-    const current = baseController.snapshot().services.find((service) => service.id === serviceId);
     const patch = { ...configuration };
-    if (serviceId === "codex-router" && !current?.secretConfigured) {
-      patch.callerKey = crypto.randomBytes(32).toString("base64url");
+    if (serviceId === "codex-router" && !configuration.callerKey) {
+      throw new Error("Managed Codex Router caller key is unavailable");
     }
     baseController.configure(serviceId, patch);
     return configuration;
+  }
+
+  function setManagedComponentCredential(serviceId, key, value) {
+    managedController.setComponentCredential(serviceId, key, value);
+    publishCombined();
+    return serviceFromSnapshot(serviceId);
   }
 
   async function installManagedComponent(serviceId) {
@@ -221,6 +229,7 @@ function createManagedExternalServicesController({
     upstreamConfiguration,
     installManagedComponent,
     repairManagedComponent,
+    setManagedComponentCredential,
     managedComponentsSnapshot: () => managedController.snapshot(),
     dispose,
   });

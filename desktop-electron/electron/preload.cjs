@@ -49,6 +49,12 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   managedComponentsSnapshot: () => ipcRenderer.invoke("launcher:managed-components-snapshot"),
   installManagedComponent: (serviceId) => ipcRenderer.invoke("launcher:managed-component-install", serviceId),
   repairManagedComponent: (serviceId) => ipcRenderer.invoke("launcher:managed-component-repair", serviceId),
+  setManagedComponentCredential: (serviceId, key, value) => ipcRenderer.invoke(
+    "launcher:managed-component-credential",
+    serviceId,
+    key,
+    value,
+  ),
   configureExternalService: (serviceId, input) => ipcRenderer.invoke(
     "launcher:external-service-configure",
     serviceId,
