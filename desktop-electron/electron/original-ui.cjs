@@ -192,7 +192,7 @@ function createOriginalUiController({
     }
     if (toolId === "codex-router") {
       const current = service(toolId);
-      if (!current?.home) throw new Error("Install the pinned Codex Router source before opening its original Control Center");
+      if (!current?.home) throw new Error("Start the bundled Codex Router runtime before opening its original Control Center");
       const stateDir = current.stateDir
         || path.join(path.dirname(path.dirname(path.dirname(current.home))), "state", "codex-router");
       const opened = openOriginalControlCenter({
@@ -231,7 +231,7 @@ function createOriginalUiController({
   function cpaManagementKey() {
     const connection = externalServices?.cpaConnection?.();
     const key = String(connection?.managementKey || "").trim();
-    if (!key) throw new Error("Install and start managed CPA before copying its management key");
+    if (!key) throw new Error("Start managed CPA before copying its management key");
     return { configured: true, length: key.length, value: key };
   }
 

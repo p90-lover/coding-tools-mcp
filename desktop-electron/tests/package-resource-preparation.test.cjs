@@ -178,6 +178,13 @@ function componentBytes(outputRoot, component) {
 test("composes the exact Windows payload from the official seven-member client archive and preserves prior resources", () => {
   const options = createFixture("complete");
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "retain this prior output\n");
+  const fiveStackRuntimeRoot = path.join(options.repositoryRoot, "aiTemp", "input", "five-stack-runtime");
+  writeFile(path.join(fiveStackRuntimeRoot, "MANIFEST.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    productVersion: PRODUCT_VERSION,
+  }, null, 2)}\n`);
+  writeFile(path.join(fiveStackRuntimeRoot, "commandcode-proxy", "source", "proxy.mjs"), "export {}\n");
+  options.fiveStackRuntimeRoot = fiveStackRuntimeRoot;
 
   const result = preparePackageResources(options);
   const manifestPath = path.join(options.outputRoot, "coding-tools", "package-manifest.json");
@@ -277,6 +284,10 @@ test("composes the exact Windows payload from the official seven-member client a
   }
   assert.equal(fs.readFileSync(path.join(options.outputRoot, "coding-tools", "coding-tools-headless.exe")).subarray(0, 2).toString("ascii"), "MZ");
   assert.equal(fs.readFileSync(path.join(options.outputRoot, "native", "tunnel-client.exe")).subarray(0, 2).toString("ascii"), "MZ");
+  assert.equal(
+    fs.readFileSync(path.join(options.outputRoot, "five-stack-runtime", "commandcode-proxy", "source", "proxy.mjs"), "utf8"),
+    "export {}\n",
+  );
 });
 
 test("rejects a tunnel archive digest mismatch before replacing prior output", () => {
@@ -388,12 +399,14 @@ test("rejects an invalid source identity before staging or preserving output", (
 
 test("package and runtime preparation use repository aiTemp retention without destructive cleanup", () => {
   const composer = fs.readFileSync(path.join(repositoryRoot, "desktop-electron", "scripts", "prepare-package-resources.cjs"), "utf8");
+  const fiveStackPreparation = fs.readFileSync(path.join(repositoryRoot, "desktop-electron", "scripts", "prepare-five-stack-runtime.cjs"), "utf8");
   const runtimePreparation = fs.readFileSync(path.join(repositoryRoot, "desktop-electron", "scripts", "prepare-runtime.cjs"), "utf8");
   const runtimeBuilder = fs.readFileSync(path.join(repositoryRoot, "runtime-web", "scripts", "build-runtime-bundle.ts"), "utf8");
   const manifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "desktop-electron", "package.json"), "utf8"));
 
   for (const [label, source] of [
     ["package composer", composer],
+    ["five-stack runtime preparation", fiveStackPreparation],
     ["runtime preparation", runtimePreparation],
     ["runtime builder", runtimeBuilder],
   ]) {
@@ -409,8 +422,10 @@ test("package and runtime preparation use repository aiTemp retention without de
   assert.match(runtimePreparation, /aiTemp/);
   assert.match(runtimePreparation, /Trash/);
   assert.equal(manifest.scripts["build:package-resources"], "node scripts/prepare-package-resources.cjs");
+  assert.equal(manifest.scripts["build:five-stack-runtime"], "node scripts/prepare-five-stack-runtime.cjs");
   for (const script of ["package", "package:mac", "package:win", "package:linux"]) {
     assert.match(manifest.scripts[script], /build:runtime/);
+    assert.match(manifest.scripts[script], /build:five-stack-runtime/);
     assert.match(manifest.scripts[script], /build:package-resources/);
   }
   assert.deepEqual(manifest.build.extraResources, [

@@ -29,7 +29,7 @@ test("all external runtimes have pinned in-app managed component manifests", () 
 
 test("Codex Router installs pinned source through the managed foreground adapter", () => {
   const manifest = readJson("vendor/managed-components/codex-router.json");
-  assert.equal(manifest.strategy, "git-source");
+  assert.equal(manifest.strategy, "bundled-source");
   assert.equal(manifest.repository, "duolahypercho/codex-router");
   assert.equal(manifest.version, "0.6.0");
   assert.equal(manifest.commit, "930f547d8d8861a47e18a83216e15e73a73aa97c");
@@ -70,7 +70,7 @@ test("Codex Router installs pinned source through the managed foreground adapter
 
 test("CommandCode Proxy is a pinned managed service using the existing CLI session authority", () => {
   const manifest = readJson("vendor/managed-components/commandcode-proxy.json");
-  assert.equal(manifest.strategy, "git-source");
+  assert.equal(manifest.strategy, "bundled-source");
   assert.equal(manifest.repository, "zahidhussaina2l/commandcode-proxy");
   assert.equal(manifest.commit, "c123a3ebe017415ef45e619600a1110198dea7f8");
   assert.equal(manifest.credentials.accountAuthority, "CPA Provider Hub");
@@ -83,7 +83,7 @@ test("CommandCode Proxy is a pinned managed service using the existing CLI sessi
 
 test("Paseo installation builds and runs the pinned upstream server", () => {
   const manifest = readJson("vendor/managed-components/paseo.json");
-  assert.equal(manifest.strategy, "git-source");
+  assert.equal(manifest.strategy, "bundled-source");
   assert.equal(manifest.repository, "getpaseo/paseo");
   assert.equal(manifest.commit, "1e4ba65c6d75a6b061a1d54141f2f105b5908a96");
   assert.ok(manifest.install.steps.some((step) => step.arguments?.includes("ci")));
@@ -95,7 +95,7 @@ test("Paseo installation builds and runs the pinned upstream server", () => {
 
 test("Anneal preserves config and guards its dedicated database migration", () => {
   const manifest = readJson("vendor/managed-components/anneal.json");
-  assert.equal(manifest.strategy, "git-source");
+  assert.equal(manifest.strategy, "bundled-source");
   assert.equal(manifest.repository, "mosonlab/anneal");
   assert.equal(manifest.commit, "e43b72b10ad389f090a0be18eea5d2bcef468f5e");
   assert.equal(manifest.platformModes.win32, "wsl2");
@@ -108,6 +108,7 @@ test("Anneal preserves config and guards its dedicated database migration", () =
 
   const steps = new Map(manifest.install.steps.map((step) => [step.id, step]));
   assert.deepEqual([...steps.keys()], [
+    "unpack-bundled-source",
     "install-dependencies",
     "restore-or-create-config",
     "build-anneal",
@@ -174,8 +175,8 @@ test("managed installation is wired through the combined controller, focused IPC
   assert.match(preload, /reconcileManagedBootstrap/);
   assert.match(types, /ManagedBootstrapSnapshot/);
   assert.match(types, /reconcileManagedBootstrap\(/);
-  assert.match(surface, /Install \/ Repair|安裝／修復/);
-  assert.match(surface, /Install and start all|全部安裝並啟動/);
+  assert.match(surface, /Prepare bundled runtime|準備內建執行環境/);
+  assert.match(surface, /Start all|全部啟動/);
   assert.match(surface, /managedInstall/);
   assert.match(surface, /Advanced manual configuration|進階手動設定/);
 });

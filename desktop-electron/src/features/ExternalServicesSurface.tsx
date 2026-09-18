@@ -97,12 +97,12 @@ function statusLabel(language: Language, service: ExternalServiceSnapshot): stri
 
 function installStateLabel(language: Language, service: ExternalServiceSnapshot): string {
   const labels: Record<ExternalServiceSnapshot["managedInstall"]["state"], [string, string]> = {
-    "not-installed": ["Not installed", "尚未安裝"],
-    installing: ["Installing", "正在安裝"],
-    installed: ["Managed install ready", "受管理安裝已就緒"],
+    "not-installed": ["Bundled · ready to start", "已內建 · 可啟動"],
+    installing: ["Preparing bundled runtime", "正在準備內建執行環境"],
+    installed: ["Bundled runtime ready", "內建執行環境已就緒"],
     "repair-required": ["Repair required", "需要修復"],
     external: ["External install", "外部安裝"],
-    error: ["Install error", "安裝錯誤"],
+    error: ["Runtime error", "執行環境錯誤"],
   };
   const value = labels[service.managedInstall.state];
   return text(language, value[0], value[1]);
@@ -289,8 +289,8 @@ export function ExternalServicesSurface({
     setBootstrap(result);
     setNotice(text(
       language,
-      "Coding Tools installed and started the five managed stacks. Check each card for health.",
-      "Coding Tools 已安裝並啟動五條受管理棧。請逐張卡片檢查健康狀態。",
+      "Coding Tools started the bundled five-stack runtimes. Check each card for health.",
+      "Coding Tools 已啟動內建五棧執行環境。請逐張卡片檢查健康狀態。",
     ));
   });
 
@@ -302,8 +302,8 @@ export function ExternalServicesSurface({
     else await api.installManagedComponent(selected.id);
     setNotice(text(
       language,
-      `${serviceName(language, selected.id)} is installed and started by Coding Tools.`,
-      `${serviceName(language, selected.id)} 已由 Coding Tools 安裝並啟動。`,
+      `${serviceName(language, selected.id)} bundled runtime is ready.`,
+      `${serviceName(language, selected.id)} 內建執行環境已就緒。`,
     ));
   });
 
@@ -330,8 +330,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Install, repair and run CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from Coding Tools. Open CPA and Codex Router original interfaces from their dedicated pages.",
-            "直接由 Coding Tools 安裝、修復同執行 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CPA 與 Codex Router 原始介面由專用頁面開啟。",
+            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime. Open CPA and Codex Router original interfaces from their dedicated pages.",
+            "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CPA 與 Codex Router 原始介面由專用頁面開啟。",
           )}</p>
         </div>
         <div className="external-services-heading-actions">
@@ -339,7 +339,7 @@ export function ExternalServicesSurface({
             {text(language, "Refresh all", "全部刷新")}
           </button>
           <button disabled={busy !== null} onClick={() => void installAll()} type="button">
-            {text(language, "Install and start all", "全部安裝並啟動")}
+            {text(language, "Start all", "全部啟動")}
           </button>
         </div>
       </header>
@@ -409,12 +409,8 @@ export function ExternalServicesSurface({
               <label className="managed-secret-field">
                 <span>{text(
                   language,
-                  selected.managedInstall.missingCredentials.includes("githubReadToken")
-                    ? "GitHub read token required"
-                    : "Replace GitHub read token",
-                  selected.managedInstall.missingCredentials.includes("githubReadToken")
-                    ? "需要 GitHub 唯讀 Token"
-                    : "取代 GitHub 唯讀 Token",
+                  "GitHub read token (optional, for extra GitHub features)",
+                  "GitHub 唯讀 Token（選填，用於額外 GitHub 功能）",
                 )}</span>
                 <input
                   autoComplete="off"
@@ -430,16 +426,15 @@ export function ExternalServicesSurface({
             <button
               className="primary"
               disabled={busy !== null
-                || selected.managedInstall.state === "installing"
-                || selected.managedInstall.missingCredentials.length > 0}
+                || selected.managedInstall.state === "installing"}
               onClick={() => void installOrRepair()}
               type="button"
             >
               {busy === "managed-install" || selected.managedInstall.state === "installing"
                 ? "…"
                 : selected.managedInstall.state === "installed"
-                  ? text(language, "Repair installation", "修復安裝")
-                  : text(language, "Install / Repair", "安裝／修復")}
+                  ? text(language, "Repair runtime", "修復執行環境")
+                  : text(language, "Prepare bundled runtime", "準備內建執行環境")}
             </button>
           </section>
 

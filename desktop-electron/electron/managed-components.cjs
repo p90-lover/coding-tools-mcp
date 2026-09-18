@@ -27,7 +27,16 @@ const INSTALL_STATES = Object.freeze([
 ]);
 const INSTALL_STATE_SET = new Set(INSTALL_STATES);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
-const ALLOWED_STEP_KINDS = new Set(["download", "verify", "git-checkout", "assert-file", "command", "activate"]);
+const ALLOWED_STEP_KINDS = new Set([
+  "download",
+  "verify",
+  "git-checkout",
+  "unpack-bundle",
+  "assert-file",
+  "command",
+  "activate",
+]);
+const PINNED_SOURCE_STRATEGIES = new Set(["git-source", "bundled-source"]);
 const SAFE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const FORBIDDEN_COMMANDS = new Set([
   "del",
@@ -132,6 +141,7 @@ function assertSafeCommand(step, label) {
     }
     assertNonDestructiveCommand(step.executable, step.arguments, label);
   }
+  if (step.skipIfFile) assertSafeRelativePath(step.skipIfFile, `${label} skipIfFile`);
   if (step.kind === "assert-file") assertSafeRelativePath(step.path, `${label} path`);
 }
 
@@ -145,7 +155,7 @@ function assertSafeManifest(manifest, expectedId) {
   }
   if (manifest.managedBy !== "Coding Tools") throw new Error(`${expectedId} is not owned by Coding Tools management`);
   if (manifest.loopbackOnly !== true) throw new Error(`${expectedId} must be loopback-only`);
-  if (manifest.strategy !== "release-binary" && manifest.strategy !== "git-source") {
+  if (manifest.strategy !== "release-binary" && manifest.strategy !== "git-source" && manifest.strategy !== "bundled-source") {
     throw new Error(`${expectedId} has an unsupported installation strategy`);
   }
   if (typeof manifest.name !== "string" || !manifest.name.trim()) throw new Error(`${expectedId} name is required`);
@@ -171,7 +181,7 @@ function assertSafeManifest(manifest, expectedId) {
   for (const stopEntry of manifest.launch.stop || []) {
     assertSafeCommand({ ...stopEntry, kind: "command" }, `${expectedId} stop process`);
   }
-  if (manifest.strategy === "git-source") {
+  if (PINNED_SOURCE_STRATEGIES.has(manifest.strategy)) {
     if (typeof manifest.repositoryUrl !== "string" || !manifest.repositoryUrl.startsWith("https://github.com/")) {
       throw new Error(`${expectedId} repository URL must be an HTTPS GitHub URL`);
     }
@@ -323,6 +333,7 @@ function quoteBash(value) {
 function createManagedComponentController({
   manifestRoot = path.join(__dirname, "..", "vendor", "managed-components"),
   dataRoot,
+  bundleRoot = null,
   platform = process.platform,
   arch = process.arch,
   env = process.env,
@@ -336,7 +347,7 @@ function createManagedComponentController({
   now = () => new Date().toISOString(),
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
-  if (typeof fetchImpl !== "function") throw new Error("Managed component downloads require fetch");
+  const downloadFetch = typeof fetchImpl === "function" ? fetchImpl : null;
 
   const manifests = new Map(COMPONENT_IDS.map((id) => [id, loadManagedManifest(id, manifestRoot)]));
   const componentsRoot = path.join(dataRoot, "components");
@@ -577,6 +588,63 @@ function createManagedComponentController({
     return String(result.stdout).trim();
   }
 
+  function resolveBundleRoot() {
+    const candidates = [
+      bundleRoot,
+      env.CODING_TOOLS_FIVE_STACK_RUNTIME,
+      process.env.CODING_TOOLS_FIVE_STACK_RUNTIME,
+      process.resourcesPath ? path.join(process.resourcesPath, "five-stack-runtime") : "",
+      path.join(__dirname, "..", "vendor", "five-stack-runtime"),
+      path.join(__dirname, "..", "build", "five-stack-runtime"),
+      path.join(__dirname, "..", "build", "package-resources", "five-stack-runtime"),
+    ].filter((value) => typeof value === "string" && value.trim());
+    for (const candidate of candidates) {
+      try {
+        const resolved = path.resolve(candidate);
+        if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) return resolved;
+      } catch {}
+    }
+    return null;
+  }
+
+  function bundledSourceRoot(manifest) {
+    const root = resolveBundleRoot();
+    if (!root) return null;
+    const nested = path.join(root, manifest.id, "source");
+    if (fs.existsSync(nested) && fs.statSync(nested).isDirectory()) return nested;
+    return null;
+  }
+
+  function bundledReleaseAssetPath(manifest, asset) {
+    const root = resolveBundleRoot();
+    if (!root || !asset?.fileName) return null;
+    const candidate = path.join(root, manifest.id, assertSafeRelativePath(asset.fileName, `${manifest.id} bundled filename`));
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+    return null;
+  }
+
+  function copyBundleTree(sourceRoot, destinationRoot) {
+    const source = path.resolve(sourceRoot);
+    const destination = path.resolve(destinationRoot);
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+      if (entry.name === ".git" || entry.name === "CODING_TOOLS_TRASH_RECORD.json") continue;
+      const from = path.join(source, entry.name);
+      const to = path.join(destination, entry.name);
+      assertWithin(destinationRoot, to, "Bundled runtime member");
+      let metadata;
+      try { metadata = fs.statSync(from); }
+      catch (error) { throw new Error(`Bundled runtime entry is unreadable: ${entry.name}`); }
+      if (metadata.isDirectory()) {
+        copyBundleTree(from, to);
+        continue;
+      }
+      if (!metadata.isFile()) throw new Error(`Bundled runtime contains an unsupported entry: ${entry.name}`);
+      fs.copyFileSync(from, to);
+      if (platform !== "win32") fs.chmodSync(to, metadata.mode & 0o777 || 0o600);
+    }
+  }
+
   function expandToken(value, context) {
     return String(value)
       .replaceAll("{home}", context.home)
@@ -587,8 +655,10 @@ function createManagedComponentController({
       .replaceAll("{npm}", context.npm)
       .replace(/\{secret:([A-Za-z0-9_-]+)\}/g, (_match, key) => {
         const secret = context.secrets[key];
-        if (typeof secret !== "string" || !secret) throw new Error(`Missing managed secret: ${key}`);
-        return secret;
+        if (typeof secret === "string" && secret) return secret;
+        const descriptor = context.credentials?.[key];
+        if (descriptor && descriptor.required !== true) return "";
+        throw new Error(`Missing managed secret: ${key}`);
       });
   }
 
@@ -768,7 +838,10 @@ function createManagedComponentController({
       const partialPath = `${destination}.attempt-${attempt}-${crypto.randomUUID()}.partial`;
       let response = null;
       try {
-        response = await fetchImpl(url, { redirect: "follow" });
+        if (typeof downloadFetch !== "function") {
+          throw new Error(`${manifest.name} bundled archive is missing from this Coding Tools build`);
+        }
+        response = await downloadFetch(url, { redirect: "follow" });
         if (!response.ok || !response.body) {
           const error = new Error(`Download failed: HTTP ${response.status}`);
           error.status = response.status;
@@ -824,12 +897,28 @@ function createManagedComponentController({
   async function prepareReleaseBinary(manifest, stagingHome) {
     const asset = selectedReleaseAsset(manifest);
     const artifact = path.join(stagingHome, assertSafeRelativePath(asset.fileName, `${manifest.id} filename`));
-    setOperation(manifest.id, { state: "installing", step: "download-release", error: null });
-    await downloadAsset(asset.url, artifact, manifest);
+    const bundledAsset = bundledReleaseAssetPath(manifest, asset);
+    if (bundledAsset) {
+      setOperation(manifest.id, { state: "installing", step: "copy-bundled-release", error: null });
+      fs.copyFileSync(bundledAsset, artifact);
+    } else {
+      setOperation(manifest.id, { state: "installing", step: "download-release", error: null });
+      await downloadAsset(asset.url, artifact, manifest);
+    }
     setOperation(manifest.id, { state: "installing", step: "verify-sha256", error: null });
     verifySha256(artifact, asset.sha256);
     if (platform !== "win32") fs.chmodSync(artifact, 0o700);
     return { artifact };
+  }
+
+  async function prepareBundledSource(manifest, stagingHome) {
+    const source = bundledSourceRoot(manifest);
+    if (!source) {
+      throw new Error(`${manifest.name} bundled runtime is missing from this Coding Tools build`);
+    }
+    setOperation(manifest.id, { state: "installing", step: "unpack-bundled-source", error: null });
+    copyBundleTree(source, stagingHome);
+    return { artifact: "" };
   }
 
   async function prepareGitSource(manifest, stagingHome) {
@@ -849,6 +938,7 @@ function createManagedComponentController({
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
       secrets: ensureComponentSecrets(manifest.id),
+      credentials: manifest.credentials || {},
       mode: "native",
     });
     await runCommand({
@@ -864,6 +954,7 @@ function createManagedComponentController({
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
       secrets: ensureComponentSecrets(manifest.id),
+      credentials: manifest.credentials || {},
       mode: "native",
     });
     await runCommand({
@@ -879,6 +970,7 @@ function createManagedComponentController({
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
       secrets: ensureComponentSecrets(manifest.id),
+      credentials: manifest.credentials || {},
       mode: "native",
     });
     return { artifact: "" };
@@ -894,11 +986,17 @@ function createManagedComponentController({
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
       secrets: ensureComponentSecrets(manifest.id),
+      credentials: manifest.credentials || {},
       mode: platformMode(manifest),
     };
     for (const step of manifest.install.steps) {
-      if (["download", "verify", "git-checkout", "activate"].includes(step.kind)) continue;
+      if (["download", "verify", "git-checkout", "unpack-bundle", "activate"].includes(step.kind)) continue;
       setOperation(manifest.id, { state: "installing", step: step.id, error: null });
+      if (step.skipIfFile) {
+        const skipPath = path.join(stagingHome, assertSafeRelativePath(step.skipIfFile, `${step.id} skipIfFile`));
+        assertWithin(stagingHome, skipPath, "Managed component skip path");
+        if (fs.existsSync(skipPath)) continue;
+      }
       if (step.kind === "assert-file") {
         const expected = path.join(stagingHome, assertSafeRelativePath(step.path, `${step.id} path`));
         assertWithin(stagingHome, expected, "Managed component assertion");
@@ -949,6 +1047,9 @@ function createManagedComponentController({
       if (manifest.strategy === "release-binary") {
         fs.mkdirSync(stagingHome, { recursive: true, mode: 0o700 });
         prepared = await prepareReleaseBinary(manifest, stagingHome);
+      } else if (manifest.strategy === "bundled-source") {
+        fs.mkdirSync(stagingHome, { recursive: true, mode: 0o700 });
+        prepared = await prepareBundledSource(manifest, stagingHome);
       } else {
         prepared = await prepareGitSource(manifest, stagingHome);
       }
@@ -1005,6 +1106,7 @@ function createManagedComponentController({
       runtime: resolveRuntimeExecutable(),
       npm: npmExecutable(),
       secrets: ensureComponentSecrets(manifest.id),
+      credentials: manifest.credentials || {},
       mode: platformMode(manifest),
     };
   }
@@ -1021,6 +1123,10 @@ function createManagedComponentController({
   async function startComponent(idValue) {
     const id = requiredComponentId(idValue);
     const manifest = manifestFor(id);
+    const source = sourceState(manifest);
+    if (source.state !== "installed") {
+      await installComponent(id, { repair: source.state === "repair-required" || source.state === "error" });
+    }
     const context = launchContext(manifest);
     const existing = processes.get(id);
     if (existing && [...existing.values()].some((child) => child && child.exitCode === null && child.signalCode === null)) {

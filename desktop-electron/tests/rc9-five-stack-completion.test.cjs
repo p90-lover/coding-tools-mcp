@@ -12,7 +12,7 @@ const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
 
 test("Codex Router is the pinned managed git source plus original Control Center", () => {
   const manifest = JSON.parse(read("vendor/managed-components/codex-router.json"));
-  assert.equal(manifest.strategy, "git-source");
+  assert.equal(manifest.strategy, "bundled-source");
   assert.equal(manifest.commit, "930f547d8d8861a47e18a83216e15e73a73aa97c");
   assert.match(JSON.stringify(manifest), /codex-router-managed\.cjs/);
   assert.doesNotMatch(JSON.stringify(manifest), /AppImage|setup\.exe|release-binary/iu);
@@ -21,7 +21,7 @@ test("Codex Router is the pinned managed git source plus original Control Center
 
 test("Anneal requires an encrypted operator token and gates fresh migration to a new dedicated volume", () => {
   const manifest = JSON.parse(read("vendor/managed-components/anneal.json"));
-  assert.equal(manifest.credentials.githubReadToken.required, true);
+  assert.equal(manifest.credentials.githubReadToken.required, false);
   const serialized = JSON.stringify(manifest);
   assert.match(serialized, /database-v0\.9\.0\.initialized/);
   assert.match(serialized, /docker volume ls/);

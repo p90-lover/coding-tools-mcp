@@ -250,3 +250,120 @@ test("managed foreground lifecycle reports running process and stops it with bou
   assert.equal(stopped.processes.length, 0);
   controller.dispose();
 });
+
+test("Start materializes a missing managed component before launching it", async () => {
+  const { controller, children } = controllerFixture();
+  const started = await controller.startComponent("commandcode-proxy");
+  assert.equal(started.installState, "installed");
+  assert.equal(started.processes.length, 1);
+  assert.equal(started.processes[0].running, true);
+  assert.equal(children.length, 1);
+  controller.dispose();
+});
+
+function bundledSourceManifest(id) {
+  return {
+    schemaVersion: 1,
+    id,
+    name: id,
+    managedBy: "Coding Tools",
+    loopbackOnly: true,
+    repository: `fixture/${id}`,
+    repositoryUrl: `https://github.com/fixture/${id}.git`,
+    commit: "a".repeat(40),
+    version: "1.0.0",
+    strategy: "bundled-source",
+    install: {
+      steps: [
+        { id: "unpack-bundled-source", kind: "unpack-bundle" },
+        { id: "verify-entrypoint", kind: "assert-file", path: "proxy.mjs" },
+        { id: "activate", kind: "activate" },
+      ],
+    },
+    launch: {
+      processes: [
+        {
+          id: "service",
+          mode: "foreground",
+          executable: "{runtime}",
+          arguments: ["{home}/proxy.mjs"],
+        },
+      ],
+    },
+    health: {
+      endpoint: "http://127.0.0.1:9090/",
+      acceptStatus: [200],
+    },
+  };
+}
+
+test("bundled-source unpacks from app resources without git clone or network fetch", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const manifestRoot = temporaryDirectory("coding-tools-bundled-manifests");
+  const bundleRoot = temporaryDirectory("coding-tools-bundled-runtime");
+  const dataRoot = temporaryDirectory("coding-tools-bundled-data");
+  for (const id of COMPONENT_IDS) {
+    writeJson(path.join(manifestRoot, `${id}.json`), id === "commandcode-proxy"
+      ? bundledSourceManifest(id)
+      : releaseManifest(id, payload));
+  }
+  const sourceRoot = path.join(bundleRoot, "commandcode-proxy", "source");
+  fs.mkdirSync(sourceRoot, { recursive: true });
+  fs.writeFileSync(path.join(sourceRoot, "proxy.mjs"), "export const bundled = true;\n");
+  writeJson(path.join(bundleRoot, "MANIFEST.json"), { schemaVersion: 1 });
+
+  let fetched = 0;
+  const children = [];
+  const controller = createManagedComponentController({
+    manifestRoot,
+    dataRoot,
+    bundleRoot,
+    safeStorage: { isEncryptionAvailable: () => false },
+    fetchImpl: async () => {
+      fetched += 1;
+      throw new Error("network fetch must not run for bundled-source");
+    },
+    spawnProcess: () => {
+      const child = mockChild(9100 + children.length);
+      children.push(child);
+      return child;
+    },
+  });
+
+  const started = await controller.startComponent("commandcode-proxy");
+  assert.equal(started.installState, "installed");
+  assert.equal(fetched, 0);
+  assert.equal(
+    fs.readFileSync(path.join(started.managedHome, "proxy.mjs"), "utf8"),
+    "export const bundled = true;\n",
+  );
+  controller.dispose();
+});
+
+test("release-binary copies a bundled archive instead of downloading it", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const manifestRoot = manifestFixture(payload);
+  const bundleRoot = temporaryDirectory("coding-tools-cpa-bundle");
+  const dataRoot = temporaryDirectory("coding-tools-cpa-data");
+  fs.mkdirSync(path.join(bundleRoot, "cpa"), { recursive: true });
+  fs.writeFileSync(path.join(bundleRoot, "cpa", "cpa.bin"), payload);
+  writeJson(path.join(bundleRoot, "MANIFEST.json"), { schemaVersion: 1 });
+  let fetched = 0;
+  const controller = createManagedComponentController({
+    manifestRoot,
+    dataRoot,
+    bundleRoot,
+    safeStorage: { isEncryptionAvailable: () => false },
+    fetchImpl: async () => {
+      fetched += 1;
+      throw new Error("network fetch must not run when the CPA archive is bundled");
+    },
+    spawnProcess: () => mockChild(9200),
+  });
+
+  const installed = await controller.installComponent("cpa");
+  assert.equal(installed.installState, "installed");
+  assert.equal(fetched, 0);
+  assert.deepEqual(fs.readFileSync(path.join(installed.managedHome, "cpa.bin")), payload);
+  controller.dispose();
+});

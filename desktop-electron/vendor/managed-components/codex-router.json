@@ -8,7 +8,7 @@
   "repositoryUrl": "https://github.com/duolahypercho/codex-router.git",
   "version": "0.6.0",
   "commit": "930f547d8d8861a47e18a83216e15e73a73aa97c",
-  "strategy": "git-source",
+  "strategy": "bundled-source",
   "platformModes": {
     "win32": "native",
     "linux": "native",

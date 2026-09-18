@@ -8,13 +8,13 @@
   "repositoryUrl": "https://github.com/getpaseo/paseo.git",
   "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96",
   "version": "0.8.0",
-  "strategy": "git-source",
+  "strategy": "bundled-source",
   "license": "Apache-2.0",
   "install": {
     "steps": [
-      { "id": "clone-pinned-source", "kind": "git-checkout" },
-      { "id": "npm-ci", "kind": "command", "executable": "{npm}", "arguments": ["ci"] },
-      { "id": "build-server", "kind": "command", "executable": "{npm}", "arguments": ["run", "build:server"] },
+      { "id": "unpack-bundled-source", "kind": "unpack-bundle" },
+      { "id": "npm-ci", "kind": "command", "executable": "{npm}", "arguments": ["ci"], "skipIfFile": "node_modules" },
+      { "id": "build-server", "kind": "command", "executable": "{npm}", "arguments": ["run", "build:server"], "skipIfFile": "dist" },
       { "id": "activate", "kind": "activate" }
     ]
   },

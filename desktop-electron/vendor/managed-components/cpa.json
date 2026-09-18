@@ -65,7 +65,7 @@
   "install": {
     "steps": [
       {
-        "id": "download-release",
+        "id": "copy-bundled-release",
         "kind": "download"
       },
       {

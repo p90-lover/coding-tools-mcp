@@ -138,9 +138,9 @@ test("bootstrap installs missing, repairs damaged, starts installed, and inspect
   );
 });
 
-test("bootstrap blocks only the component with missing credentials", async () => {
+test("bootstrap blocks only the component with missing required credentials", async () => {
   const { bootstrap, calls } = bootstrapFixture([
-    managedService("anneal", "not-installed", { missingCredentials: ["githubReadToken"] }),
+    managedService("commandcode-proxy", "not-installed", { missingCredentials: ["proxyApiKey"] }),
     managedService("paseo", "installed"),
   ]);
 
@@ -149,15 +149,29 @@ test("bootstrap blocks only the component with missing credentials", async () =>
   assert.deepEqual(calls, ["start:paseo", "inspect:paseo"]);
   assert.equal(result.status, "blocked");
   assert.deepEqual(
-    result.components.find((component) => component.id === "anneal"),
+    result.components.find((component) => component.id === "commandcode-proxy"),
     {
-      id: "anneal",
+      id: "commandcode-proxy",
       status: "blocked",
       action: null,
-      missingCredentials: ["githubReadToken"],
-      message: "Missing required credentials: githubReadToken",
+      missingCredentials: ["proxyApiKey"],
+      message: "Missing required credentials: proxyApiKey",
     },
   );
+  assert.equal(result.components.find((component) => component.id === "paseo").status, "ready");
+});
+
+test("bootstrap does not block optional Anneal GitHub credentials", async () => {
+  const { bootstrap, calls } = bootstrapFixture([
+    managedService("anneal", "not-installed", { missingCredentials: [] }),
+    managedService("paseo", "installed"),
+  ]);
+
+  const result = await bootstrap.reconcile({ reason: "startup" });
+
+  assert.deepEqual(calls, ["install:anneal", "start:paseo", "inspect:paseo"]);
+  assert.equal(result.status, "ready");
+  assert.equal(result.components.find((component) => component.id === "anneal").status, "ready");
   assert.equal(result.components.find((component) => component.id === "paseo").status, "ready");
 });
 

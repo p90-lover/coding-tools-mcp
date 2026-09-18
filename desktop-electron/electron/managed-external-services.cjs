@@ -42,6 +42,7 @@ function createManagedExternalServicesController({
   managedController = createManagedComponentController({
     manifestRoot,
     dataRoot,
+    bundleRoot: options.bundleRoot,
     safeStorage: options.safeStorage,
     env: options.env,
     logger: options.logger,
@@ -166,6 +167,12 @@ function createManagedExternalServicesController({
 
   async function start(serviceId) {
     const managed = managedController.project(serviceId);
+    if (managed.installState === "repair-required" || (managed.installState === "error" && managed.installedAt)) {
+      return repairManagedComponent(serviceId);
+    }
+    if (managed.installState !== "installed" && managed.installState !== "external") {
+      return installManagedComponent(serviceId);
+    }
     if (managed.installState === "installed") {
       applyManagedConfiguration(serviceId);
       await managedController.startComponent(serviceId);

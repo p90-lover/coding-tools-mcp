@@ -723,6 +723,53 @@ function writeComponent(stagingRoot, relativePath, bytes, mode = 0o600) {
   return target;
 }
 
+function copyFiveStackTree(sourceRoot, destinationRoot) {
+  const source = path.resolve(sourceRoot);
+  const destination = path.resolve(destinationRoot);
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    if (entry.name === ".git") continue;
+    const from = path.join(source, entry.name);
+    const to = path.join(destination, entry.name);
+    let metadata;
+    try { metadata = fs.statSync(from); }
+    catch (error) {
+      fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${from}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (metadata.isDirectory()) {
+      copyFiveStackTree(from, to);
+      continue;
+    }
+    if (!metadata.isFile()) fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNSUPPORTED", from);
+    fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(to, metadata.mode & 0o777 || 0o600);
+  }
+}
+
+function resolveFiveStackRuntimeRoot({ desktopRoot, explicit, required }) {
+  const candidates = [
+    explicit,
+    process.env.CODING_TOOLS_FIVE_STACK_RUNTIME,
+    path.join(desktopRoot, "build", "five-stack-runtime"),
+    path.join(desktopRoot, "vendor", "five-stack-runtime"),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    const manifest = path.join(resolved, "MANIFEST.json");
+    if (fs.existsSync(manifest) && fs.statSync(manifest).isFile() && fs.statSync(resolved).isDirectory()) {
+      return resolved;
+    }
+  }
+  if (required) {
+    fail(
+      "PACKAGE_RESOURCE_FIVE_STACK_RUNTIME_MISSING",
+      candidates.map((entry) => path.resolve(entry)).join(", ") || "no candidates",
+    );
+  }
+  return null;
+}
+
 function preparePackageResources(options = {}) {
   const repositoryRoot = path.resolve(options.repositoryRoot || path.join(__dirname, "..", ".."));
   const desktopRoot = path.resolve(options.desktopRoot || path.join(repositoryRoot, "desktop-electron"));
@@ -751,6 +798,12 @@ function preparePackageResources(options = {}) {
       || path.join(repositoryRoot, "third_party", "THIRD_PARTY_NOTICES.md"),
   );
   const notices = combinedNotices(noticesPath, runtime.root, tunnel);
+  const fiveStackRuntimeRoot = resolveFiveStackRuntimeRoot({
+    desktopRoot,
+    explicit: options.fiveStackRuntimeRoot,
+    required: options.requireFiveStackRuntime === true
+      || (options.requireFiveStackRuntime !== false && Boolean(options.requireMain)),
+  });
   const paths = componentPaths(platform);
   const versions = componentVersions();
   const session = createRetentionSession({
@@ -785,6 +838,9 @@ function preparePackageResources(options = {}) {
     });
     writeJson(path.join(stagingRoot, ...paths["rollback-manifest"].split("/")), STABLE_ROLLBACK);
     writeComponent(stagingRoot, paths["third-party-notices"], notices);
+    if (fiveStackRuntimeRoot) {
+      copyFiveStackTree(fiveStackRuntimeRoot, path.join(stagingRoot, "five-stack-runtime"));
+    }
 
     const components = Object.keys(paths).sort(compareText).map((id) => {
       const componentPath = path.join(stagingRoot, ...paths[id].split("/"));
@@ -867,7 +923,7 @@ function preparePackageResources(options = {}) {
 
 if (require.main === module) {
   try {
-    const result = preparePackageResources();
+    const result = preparePackageResources({ requireMain: true });
     process.stdout.write(`PACKAGE_RESOURCES_PREPARED ${JSON.stringify(result)}\n`);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

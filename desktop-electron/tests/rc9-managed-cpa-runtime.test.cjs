@@ -34,7 +34,7 @@ test("CPA is the fifth app-managed component and external service", () => {
   assert.match(combined, /(?:["']cpa["']|\bcpa):\s*Object\.freeze\(\{\s*endpoint:\s*["']http:\/\/127\.0\.0\.1:8317\/["']/);
   assert.match(types, /ExternalServiceId\s*=\s*[\s\S]*["']cpa["']/);
   assert.match(surface, /cpa:\s*\[["']CPA \/ CLIProxyAPI["']/);
-  assert.match(surface, /Install, repair and run CPA \/ CLIProxyAPI/);
+  assert.match(surface, /Start CPA \/ CLIProxyAPI/);
 });
 
 test("CPA uses checksum-pinned official v7.3.7 binaries on every supported desktop platform", () => {

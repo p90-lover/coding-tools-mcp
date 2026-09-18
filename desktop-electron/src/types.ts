@@ -190,7 +190,7 @@ export interface ManagedComponentInstallSnapshot {
   state: ManagedComponentInstallState;
   version: string;
   commit: string | null;
-  strategy: "release-binary" | "git-source";
+  strategy: "release-binary" | "git-source" | "bundled-source";
   home: string;
   installedAt: string | null;
   currentStep: string | null;
@@ -207,7 +207,7 @@ export interface ManagedComponentsSnapshot {
     name: string;
     version: string;
     commit: string | null;
-    strategy: "release-binary" | "git-source";
+    strategy: "release-binary" | "git-source" | "bundled-source";
     installState: ManagedComponentInstallState;
     managedHome: string;
     installedAt: string | null;

@@ -122,9 +122,6 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   }
 
   const ready = tool.status === "ready";
-  const needsInstall = tool.installState === "not-installed"
-    || tool.installState === "repair-required"
-    || tool.installState === "error";
   const statusText = ready
     ? localize(language, "Connected", "已連線")
     : tool.status === "starting"
@@ -146,9 +143,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
           })} type="button">
             {busy === "start" || busy === "open" ? "…" : ready
               ? localize(language, "Open original UI", "開啟原始介面")
-              : needsInstall
-                ? localize(language, "Install / start original runtime", "安裝／啟動原始執行環境")
-                : localize(language, "Start original UI", "啟動原始介面")}
+              : localize(language, "Start original UI", "啟動原始介面")}
           </button>
           {toolId === "cpa" ? (
             <button disabled={busy !== null} onClick={() => void run("copy-key", async () => {
@@ -218,7 +213,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
                     ? "原始 CLIProxyAPI 管理面板會填滿此頁。登入、供應商、授權檔、OAuth、配額、設定、日誌、系統與外掛會保持原本版面。"
                     : "開啟原始 Codex Router Control Center 視窗。儀表板、用量、模型、本機、工作臺、上下文與設定會保持原本外觀。",
                 )
-                : localize(language, "Install and start the managed runtime, then the original UI opens here.", "先安裝並啟動受管理執行環境，原始介面就會在此開啟。")}
+                : localize(language, "Start the bundled runtime, then the original UI opens here.", "啟動內建執行環境後，原始介面就會在此開啟。")}
             </span>
           </div>
         )}

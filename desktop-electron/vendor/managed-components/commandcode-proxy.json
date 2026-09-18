@@ -8,7 +8,7 @@
   "repositoryUrl": "https://github.com/zahidhussaina2l/commandcode-proxy.git",
   "commit": "c123a3ebe017415ef45e619600a1110198dea7f8",
   "version": "1.0.0",
-  "strategy": "git-source",
+  "strategy": "bundled-source",
   "license": "MIT",
   "credentials": {
     "accountAuthority": "CPA Provider Hub",
@@ -17,7 +17,7 @@
   },
   "install": {
     "steps": [
-      { "id": "clone-pinned-source", "kind": "git-checkout" },
+      { "id": "unpack-bundled-source", "kind": "unpack-bundle" },
       { "id": "verify-entrypoint", "kind": "assert-file", "path": "proxy.mjs" },
       { "id": "activate", "kind": "activate" }
     ]
