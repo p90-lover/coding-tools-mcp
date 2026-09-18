@@ -69,7 +69,14 @@ jobs:
             printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
             exit 1
           fi
-          git diff --name-only | sort > aiTemp/rc9-release/evidence/changed-paths.txt
+          {
+            git diff --name-only
+            git ls-files --others --exclude-standard
+          } \
+            | grep -v '^aiTemp/rc9-release/evidence/' \
+            | grep -v '^aiTemp/Trash/' \
+            | sort -u \
+            > aiTemp/rc9-release/evidence/changed-paths.txt
           cat > aiTemp/rc9-release/evidence/allowed-paths.txt <<'EOF'
           .github/workflows/codex-router-multiprovider-release-rc9.yml
           aiTemp/rc9-release/run-windows-release.mjs
