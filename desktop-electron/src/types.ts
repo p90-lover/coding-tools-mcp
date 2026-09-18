@@ -1,7 +1,7 @@
 export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations" | "cpa" | "codex-router" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -225,6 +225,7 @@ export interface ExternalServiceSnapshot {
   endpoint: string;
   executionEndpoint?: string;
   home: string;
+  stateDir?: string;
   executable: string;
   arguments: string[];
   enabled: boolean;
@@ -276,6 +277,7 @@ export interface CodexRouterSyncResult {
 }
 
 export type UpstreamToolId = "anneal" | "paseo";
+export type OriginalUiId = "cpa" | "codex-router";
 export type UpstreamToolStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 
 export interface UpstreamToolSnapshot {
@@ -307,6 +309,37 @@ export interface UpstreamToolOpenResult {
   section: string;
   url: string;
   embedded: boolean;
+}
+
+export interface OriginalUiSnapshot {
+  id: OriginalUiId;
+  name: string;
+  repository: string;
+  commit: string;
+  version: string | null;
+  license: string;
+  sections: string[];
+  endpoint: string;
+  status: UpstreamToolStatus;
+  pid: number | null;
+  error: string | null;
+  sourceConfigured: boolean;
+  installState: ManagedComponentInstallState;
+  originalChrome: boolean;
+}
+
+export interface OriginalUiCatalog {
+  version: 1;
+  tools: OriginalUiSnapshot[];
+}
+
+export interface OriginalUiOpenResult {
+  tool: OriginalUiSnapshot;
+  section: string;
+  url: string;
+  embedded: boolean;
+  originalWindow: boolean;
+  pid?: number | null;
 }
 
 export interface LauncherState {
@@ -498,6 +531,14 @@ export interface LauncherApi {
   restartUpstreamTool(toolId: UpstreamToolId): Promise<UpstreamToolSnapshot>;
   openEmbeddedTool(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
   openUpstreamToolExternal(toolId: UpstreamToolId, section: string): Promise<UpstreamToolOpenResult>;
+  originalUiSnapshot(): Promise<OriginalUiCatalog>;
+  inspectOriginalUi(toolId: OriginalUiId): Promise<OriginalUiSnapshot>;
+  startOriginalUi(toolId: OriginalUiId): Promise<OriginalUiSnapshot>;
+  stopOriginalUi(toolId: OriginalUiId): Promise<OriginalUiSnapshot>;
+  restartOriginalUi(toolId: OriginalUiId): Promise<OriginalUiSnapshot>;
+  openOriginalUi(toolId: OriginalUiId, section: string): Promise<OriginalUiOpenResult>;
+  openOriginalUiExternal(toolId: OriginalUiId, section: string): Promise<OriginalUiOpenResult>;
+  copyCpaManagementKey(): Promise<{ copied: boolean; length: number }>;
   providerSnapshot(): Promise<ProviderNetworkSnapshot>;
   providerExecutionPlan(input: ProviderExecutionPlanInput): Promise<ProviderExecutionPlan>;
   saveProviderAccount(input: ProviderAccountInput): Promise<ProviderNetworkSnapshot>;

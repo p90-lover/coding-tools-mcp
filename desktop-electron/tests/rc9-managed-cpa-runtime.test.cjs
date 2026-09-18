@@ -88,7 +88,7 @@ test("the managed CPA adapter extracts safely and generates a private loopback-o
   assert.match(source, /127\.0\.0\.1/);
   assert.match(source, /remote-management:/);
   assert.match(source, /allow-remote: false/);
-  assert.match(source, /disable-control-panel: true/);
+  assert.match(source, /disable-control-panel: false/);
   assert.match(source, /CODING_TOOLS_CPA_MANAGEMENT_KEY/);
   assert.match(source, /CODING_TOOLS_CPA_PROXY_API_KEY/);
   assert.match(source, /--config/);

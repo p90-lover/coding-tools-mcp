@@ -40,6 +40,7 @@ test("Codex Router installs pinned source through the managed foreground adapter
     "prepare-codex-router",
     "assert-router-source",
     "assert-curation-source",
+    "assert-control-center",
     "activate",
   ]);
   assert.deepEqual(steps.get("prepare-codex-router").arguments, [
@@ -50,6 +51,7 @@ test("Codex Router installs pinned source through the managed foreground adapter
   ]);
   assert.equal(steps.get("assert-router-source").path, "src/foreground-start.mjs");
   assert.equal(steps.get("assert-curation-source").path, "src/curate-models.mjs");
+  assert.equal(steps.get("assert-control-center").path, "apps/control-center/electron/main.mjs");
 
   assert.equal(manifest.launch.primaryProcessId, "router");
   assert.equal(manifest.launch.processes[0].id, "router");

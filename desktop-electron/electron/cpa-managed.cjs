@@ -146,7 +146,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey) {
     "remote-management:",
     "  allow-remote: false",
     `  secret-key: ${yamlString(managementKey)}`,
-    "  disable-control-panel: true",
+    "  disable-control-panel: false",
     "debug: false",
     "request-log: false",
     "logging-to-file: true",

@@ -13,6 +13,8 @@ interface ExternalServicesSurfaceProps {
   language: Language;
   setError: (error: string | null) => void;
   openProviders: () => void;
+  openCpa: () => void;
+  openCodexRouter: () => void;
   openPaseo: () => void;
   openAnneal: () => void;
 }
@@ -116,6 +118,8 @@ export function ExternalServicesSurface({
   language,
   setError,
   openProviders,
+  openCpa,
+  openCodexRouter,
   openPaseo,
   openAnneal,
 }: ExternalServicesSurfaceProps) {
@@ -288,7 +292,9 @@ export function ExternalServicesSurface({
 
   const openSelected = () => {
     if (!selected) return;
-    if (selected.id === "paseo") openPaseo();
+    if (selected.id === "cpa") openCpa();
+    else if (selected.id === "codex-router") openCodexRouter();
+    else if (selected.id === "paseo") openPaseo();
     else if (selected.id === "anneal") openAnneal();
     else openProviders();
   };
@@ -301,8 +307,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Install, repair and run CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from Coding Tools while Provider Hub remains the encrypted account and routing authority.",
-            "直接由 Coding Tools 安裝、修復同執行 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal；供應商中心繼續作為加密帳戶同路由權限來源。",
+            "Install, repair and run CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from Coding Tools. Open CPA and Codex Router original interfaces from their dedicated pages.",
+            "直接由 Coding Tools 安裝、修復同執行 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CPA 與 Codex Router 原始介面由專用頁面開啟。",
           )}</p>
         </div>
         <button disabled={busy !== null} onClick={() => void refresh()} type="button">
@@ -311,23 +317,6 @@ export function ExternalServicesSurface({
       </header>
 
       <div className="external-services-summary">
-        <article className="external-service-card native-card">
-          <div className="external-service-card-title">
-            <span className="external-service-glyph">CPA</span>
-            <div>
-              <strong>CPA Provider Hub</strong>
-              <small>{text(language, "Native encrypted account authority", "原生加密帳戶權限中心")}</small>
-            </div>
-            <i className="service-state ready" />
-          </div>
-          <dl>
-            <div><dt>{text(language, "Accounts", "帳戶")}</dt><dd>{activeAccounts.length}</dd></div>
-            <div><dt>{text(language, "Connected", "已連線")}</dt><dd>{connectedAccounts.length}</dd></div>
-            <div><dt>{text(language, "Providers", "供應商")}</dt><dd>{providerCount}</dd></div>
-          </dl>
-          <button onClick={openProviders} type="button">{text(language, "Open Provider Center", "開啟供應商中心")}</button>
-        </article>
-
         {serviceRows.map((service) => (
           <button
             className={`external-service-card${selectedId === service.id ? " is-selected" : ""}`}
@@ -484,7 +473,11 @@ export function ExternalServicesSurface({
                 {busy === "sync" ? "…" : text(language, "Sync Coding Tools + CommandCode", "同步 Coding Tools + CommandCode")}
               </button>
             ) : null}
-            <button onClick={openSelected} type="button">{text(language, "Open related controls", "開啟相關控制")}</button>
+            <button onClick={openSelected} type="button">
+              {selected.id === "cpa" || selected.id === "codex-router"
+                ? text(language, "Open original UI", "開啟原始介面")
+                : text(language, "Open related controls", "開啟相關控制")}
+            </button>
           </div>
         </div>
       ) : null}

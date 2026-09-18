@@ -10,7 +10,7 @@ const { createExternalServicesController } = require("../electron/external-servi
 const root = path.resolve(__dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
 
-test("Codex Router is the pinned managed CLI/server source, not a desktop frontend", () => {
+test("Codex Router is the pinned managed git source plus original Control Center", () => {
   const manifest = JSON.parse(read("vendor/managed-components/codex-router.json"));
   assert.equal(manifest.strategy, "git-source");
   assert.equal(manifest.commit, "930f547d8d8861a47e18a83216e15e73a73aa97c");
@@ -62,12 +62,15 @@ test("CommandCode health sends the managed bearer token and rejects 401", async 
   controller.dispose();
 });
 
-test("CPA remains native while all four runtimes expose app-managed install and credential wiring", () => {
+test("CPA is a managed original UI while runtimes expose app-managed install and credential wiring", () => {
   const surface = read("src/features/ExternalServicesSurface.tsx");
+  const app = read("src/App.tsx");
   const main = read("electron/main.cjs");
   const preload = read("electron/preload.cjs");
   const provider = read("electron/provider-network.cjs");
-  assert.match(surface, /CPA Provider Hub/);
+  assert.match(surface, /CPA \/ CLIProxyAPI/);
+  assert.match(surface, /Open original UI/);
+  assert.match(app, /<OriginalUiSurface language=\{language\} setError=\{setError\} toolId="cpa" \/>/);
   assert.match(surface, /Save credential/);
   assert.match(main, /launcher:managed-component-credential/);
   assert.match(preload, /setManagedComponentCredential/);

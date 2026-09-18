@@ -55,6 +55,7 @@ function createManagedExternalServicesController({
     const endpoints = SERVICE_ENDPOINTS[serviceId];
     return {
       home: installed.home,
+      stateDir: installed.state,
       executable: installed.executable,
       arguments: installed.arguments,
       endpoint: endpoints.endpoint,
@@ -79,6 +80,7 @@ function createManagedExternalServicesController({
       ...service,
       ...(configuration ? {
         home: configuration.home,
+        stateDir: configuration.stateDir,
         executable: configuration.executable,
         arguments: [...configuration.arguments],
         endpoint: configuration.endpoint,

@@ -1134,6 +1134,7 @@ function createManagedComponentController({
       : "";
     return {
       home: context.home,
+      state: context.state,
       executable: spec.executable,
       arguments: [...spec.args],
       endpoint: manifest.health.endpoint.replace("{callerKey}", ""),

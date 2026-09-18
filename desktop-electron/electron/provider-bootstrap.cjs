@@ -64,7 +64,13 @@ function installProviderNetwork({
       app,
       browserPartition: launcherProfile.browserPartition,
       getBrowserHost: () => providerBrowserHostGetter?.() ?? null,
-      getCpaConnection: () => providerCpaConnectionGetter?.() ?? null,
+      getCpaConnection: () => {
+        try {
+          return providerCpaConnectionGetter?.() ?? null;
+        } catch {
+          return null;
+        }
+      },
       logger,
       safeStorage,
       session,

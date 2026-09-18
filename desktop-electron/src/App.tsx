@@ -18,6 +18,7 @@ import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
+import { OriginalUiSurface } from "./features/OriginalUiSurface";
 import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
 import type {
   BrowserInteractionMode,
@@ -370,6 +371,8 @@ function LauncherShell({
   const [sidebarWidth, setSidebarWidth] = useState(snapshot.state.sidebarWidth || 252);
   const extraSurfaceActive = surface === "providers"
     || surface === "integrations"
+    || surface === "cpa"
+    || surface === "codex-router"
     || surface === "paseo"
     || surface === "anneal"
     || surface === "network";
@@ -684,6 +687,18 @@ function LauncherShell({
                   onClick={() => navigateSurface("integrations")}
                 />
                 <SidebarItem
+                  active={surface === "cpa"}
+                  icon="providers"
+                  label="CPA"
+                  onClick={() => navigateSurface("cpa")}
+                />
+                <SidebarItem
+                  active={surface === "codex-router"}
+                  icon="orchestrator"
+                  label="Codex Router"
+                  onClick={() => navigateSurface("codex-router")}
+                />
+                <SidebarItem
                   active={surface === "paseo"}
                   icon="orchestrator"
                   label={language === "zh-TW" ? "Paseo 協調器" : copy.paseoOrchestrator}
@@ -797,10 +812,18 @@ function LauncherShell({
               <ExternalServicesSurface
                 language={language}
                 openAnneal={() => navigateSurface("anneal")}
+                openCpa={() => navigateSurface("cpa")}
+                openCodexRouter={() => navigateSurface("codex-router")}
                 openPaseo={() => navigateSurface("paseo")}
                 openProviders={() => navigateSurface("providers")}
                 setError={setError}
               />
+            ) : null}
+            {surface === "cpa" ? (
+              <OriginalUiSurface language={language} setError={setError} toolId="cpa" />
+            ) : null}
+            {surface === "codex-router" ? (
+              <OriginalUiSurface language={language} setError={setError} toolId="codex-router" />
             ) : null}
             {surface === "paseo" ? (
               <UpstreamToolSurface

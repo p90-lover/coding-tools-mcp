@@ -6,6 +6,7 @@ const { pathToFileURL } = require("node:url");
 const {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -42,6 +43,7 @@ const {
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
+const { createOriginalUiController } = require("./original-ui.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -107,6 +109,7 @@ let catalogVerificationInFlight = false;
 let updateController = null;
 let externalServicesController = null;
 let upstreamToolController = null;
+let originalUiController = null;
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -721,6 +724,46 @@ function registerIpc({ logger, stateStore }) {
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.openExternalTool(toolId, section);
   });
+  handle("launcher:original-ui-snapshot", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!originalUiController) throw new Error("Original UI controller is unavailable");
+    return originalUiController.snapshot();
+  });
+  handle("launcher:original-ui-inspect", (event, toolId) => {
+    assertFocusedMainWindow(event, false);
+    if (!originalUiController) throw new Error("Original UI controller is unavailable");
+    return originalUiController.inspect(toolId);
+  });
+  handle("launcher:original-ui-start", (event, toolId) => {
+    assertFocusedMainWindow(event, true);
+    if (!originalUiController) throw new Error("Original UI controller is unavailable");
+    return originalUiController.start(toolId);
+  });
+  handle("launcher:original-ui-stop", (event, toolId) => {
+    assertFocusedMainWindow(event, true);
+    if (!originalUiController) throw new Error("Original UI controller is unavailable");
+    return originalUiController.stop(toolId);
+  });
+  handle("launcher:original-ui-restart", (event, toolId) => {
+    assertFocusedMainWindow(event, true);
+    if (!originalUiController) throw new Error("Original UI controller is unavailable");
+    return originalUiController.restart(toolId);
+  });
+  handle("launcher:original-ui-open", (event, toolId, section) => {
+    assertFocusedMainWindow(event, true);
+    if (!originalUiController) throw new Error("Original UI controller is unavailable");
+    return originalUiController.openEmbedded(toolId, section);
+  });
+  handle("launcher:original-ui-open-external", (event, toolId, section) => {
+    assertFocusedMainWindow(event, true);
+    if (!originalUiController) throw new Error("Original UI controller is unavailable");
+    return originalUiController.openExternalTool(toolId, section);
+  });
+  handle("launcher:original-ui-copy-cpa-key", (event) => {
+    assertFocusedMainWindow(event, true);
+    if (!originalUiController) throw new Error("Original UI controller is unavailable");
+    return originalUiController.copyCpaManagementKey(clipboard);
+  });
 
   handle("launcher:browser-bounds", (event, bounds) => {
     browserHost?.setBounds(validateBounds(bounds), event.sender.getZoomFactor());
@@ -1259,7 +1302,13 @@ async function start() {
     openExternal: openWebUrl,
     externalServices: externalServicesController,
   });
+  originalUiController = createOriginalUiController({
+    externalServices: externalServicesController,
+    openExternal: openWebUrl,
+    electronExecutable: process.execPath,
+  });
   app.once("before-quit", () => {
+    originalUiController?.dispose();
     externalServicesController?.dispose();
     upstreamToolController?.dispose();
   });
