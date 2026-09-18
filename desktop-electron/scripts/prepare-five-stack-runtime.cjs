@@ -319,6 +319,24 @@ function quoteCmdToken(value) {
   return `"${text.replace(/"/g, "\"\"")}"`;
 }
 
+function windowsCmdWithInjectedPath(commandLine, options, env) {
+  // bun/libuv on Windows can spawn cmd.exe with an empty PATH even when
+  // options.env.PATH is set. `set PATH=` runs inside cmd after spawn, so
+  // nested npm/tsc/node lookups see the managed path instead of CWD shims.
+  const pathValue = String(options.env?.PATH || "");
+  const injected = pathValue
+    ? `set "PATH=${pathValue}" && ${commandLine}`
+    : commandLine;
+  return {
+    command: env.ComSpec || process.env.ComSpec || "cmd.exe",
+    args: ["/d", "/s", "/c", `"${injected}"`],
+    options: {
+      ...options,
+      windowsVerbatimArguments: true,
+    },
+  };
+}
+
 function npmSpawnInvocation(args, platform = process.platform, env = process.env, sourceRoot = null) {
   const options = {
     encoding: "utf8",
@@ -332,29 +350,23 @@ function npmSpawnInvocation(args, platform = process.platform, env = process.env
     const nodeExecutable = resolveNodeExecutable(env, platform);
     const npmCli = resolveNpmCliJs(nodeExecutable);
     if (nodeExecutable && npmCli) {
-      return {
-        command: nodeExecutable,
-        args: [npmCli, ...args],
-        options: {
-          ...options,
-          env: {
-            ...options.env,
-            npm_execpath: npmCli,
-          },
+      const commandLine = [
+        quoteCmdToken(nodeExecutable),
+        quoteCmdToken(npmCli),
+        ...args.map(quoteCmdToken),
+      ].join(" ");
+      return windowsCmdWithInjectedPath(commandLine, {
+        ...options,
+        env: {
+          ...options.env,
+          npm_execpath: npmCli,
         },
-      };
+      }, env);
     }
     const resolved = resolveNpmExecutable(env, platform);
     const npmCmd = /\.cmd$/i.test(resolved) ? resolved : "npm.cmd";
     const commandLine = ["call", quoteCmdToken(npmCmd), ...args.map(quoteCmdToken)].join(" ");
-    return {
-      command: env.ComSpec || process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", `"${commandLine}"`],
-      options: {
-        ...options,
-        windowsVerbatimArguments: true,
-      },
-    };
+    return windowsCmdWithInjectedPath(commandLine, options, env);
   }
   return {
     command: resolveNpmExecutable(env, platform),

@@ -215,6 +215,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /rewritePackageScriptsToAbsoluteNode/);
   assert.match(source, /installWindowsCwdNodeCommands/);
   assert.match(source, /installWindowsCwdLifecycleFallbacks/);
+  assert.match(source, /windowsCmdWithInjectedPath/);
   assert.match(source, /next\.PATH = mergedPath/);
   assert.match(source, /RUNNER_TOOL_CACHE/);
   assert.match(source, /isUsableNodeExecutable/);
@@ -226,7 +227,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(String(windows.command).replaceAll("\\", "/"), /cmd\.exe$/i);
   assert.deepEqual(windows.args.slice(0, 3), ["/d", "/s", "/c"]);
   assert.equal(windows.args.length, 4);
-  assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
+  assert.match(String(windows.args[3]), /set "PATH=/);
   assert.match(String(windows.args[3]), /call /);
   assert.match(String(windows.args[3]).toLowerCase(), /npm\.cmd/);
   assert.match(String(windows.args[3]), /\bci\b/);
@@ -262,7 +263,7 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
-  assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
+  assert.match(String(windows.args[3]), /set "PATH=/);
   assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
   assert.equal(windows.options.env.npm_config_scripts_prepend_node_path, "true");
@@ -295,7 +296,7 @@ test("Windows five-stack npm prepare merges Path and PATH when bun splits them",
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
-  assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
+  assert.match(String(windows.args[3]), /set "PATH=/);
   assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
   assert.equal(windows.options.env.Path, undefined);
@@ -321,7 +322,7 @@ test("Windows five-stack npm prepare keeps an explicit node.exe even if bun drop
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
   assert.equal(windows.options.env.npm_node_execpath, nodeExe);
-  assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
+  assert.match(String(windows.args[3]), /set "PATH=/);
   assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.ok(windows.options.env.PATH.split(";").includes(nodeDir));
   assert.equal(windows.options.env.Path, undefined);
@@ -346,8 +347,12 @@ test("Windows five-stack npm prepare runs npm-cli.js through node.exe when prese
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
-  assert.equal(windows.command, nodeExe);
-  assert.deepEqual(windows.args, [npmCli, "run", "build:server"]);
+  assert.match(String(windows.command).replaceAll("\\", "/"), /cmd\.exe$/i);
+  assert.deepEqual(windows.args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.match(String(windows.args[3]), /set "PATH=/);
+  assert.ok(String(windows.args[3]).includes(nodeExe));
+  assert.ok(String(windows.args[3]).includes(npmCli));
+  assert.match(String(windows.args[3]), /build:server/);
   assert.equal(windows.options.env.npm_execpath, npmCli);
   assert.equal(windows.options.env.npm_node_execpath, nodeExe);
   assert.equal(windows.options.env.Path, undefined);
@@ -540,16 +545,12 @@ test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async 
     assert.ok(call.options.env);
     if (process.platform === "win32") {
       const commandBase = path.basename(call.command).toLowerCase();
-      if (commandBase === "node.exe" || commandBase === "node") {
-        assert.match(String(call.args[0]), /npm-cli\.js$/i);
-        assert.ok(["ci", "run"].includes(call.args[1]));
-      } else {
-        assert.equal(commandBase, "cmd.exe");
-        assert.deepEqual(call.args.slice(0, 3), ["/d", "/s", "/c"]);
-        assert.match(String(call.args[3]).toLowerCase(), /npm\.cmd/);
-        assert.doesNotMatch(String(call.args[3]), /set "PATH=/);
-        assert.equal(call.options.windowsVerbatimArguments, true);
-      }
+      assert.equal(commandBase, "cmd.exe");
+      assert.deepEqual(call.args.slice(0, 3), ["/d", "/s", "/c"]);
+      assert.match(String(call.args[3]), /set "PATH=/);
+      assert.equal(call.options.windowsVerbatimArguments, true);
+      const line = String(call.args[3]).toLowerCase();
+      assert.ok(line.includes("npm-cli.js") || line.includes("npm.cmd"));
     } else {
       assert.match(path.basename(call.command), /^npm$/);
       assert.ok(["ci", "run"].includes(call.args[0]));
