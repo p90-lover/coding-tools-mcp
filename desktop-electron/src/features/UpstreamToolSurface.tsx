@@ -64,7 +64,6 @@ export function UpstreamToolSurface({
   const [busy, setBusy] = useState<string | null>(null);
   const [chromeOpen, setChromeOpen] = useState(false);
   const tool = useMemo(() => toolFrom(snapshot, toolId), [snapshot, toolId]);
-  const windowsHost = /windows/iu.test(navigator.userAgent);
 
   const refresh = async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
@@ -149,24 +148,6 @@ export function UpstreamToolSurface({
     await openEmbeddedTool();
   });
 
-  const start = () => run("start", async () => {
-    if (!api) throw new Error("Launcher IPC is unavailable");
-    await api.startUpstreamTool(toolId);
-    await openEmbeddedTool();
-  });
-
-  const restart = () => run("restart", async () => {
-    if (!api) throw new Error("Launcher IPC is unavailable");
-    await api.restartUpstreamTool(toolId);
-    await openEmbeddedTool();
-  });
-
-  const stop = () => run("stop", async () => {
-    if (!api) throw new Error("Launcher IPC is unavailable");
-    await api.stopUpstreamTool(toolId);
-    setFrameUrl("");
-  });
-
   const openExternal = () => run("external", async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
     await api.openUpstreamToolExternal(toolId, selectedSection);
@@ -192,11 +173,11 @@ export function UpstreamToolSurface({
         : localize(language, "Offline", "離線");
 
   const immersive = Boolean(frameUrl);
-  const annealWindowsHint = toolId === "anneal"
+  const annealManagedHint = toolId === "anneal"
     ? localize(
       language,
-      `${windowsHost ? "This host looks like Windows. " : ""}Anneal's upstream supports macOS/Linux, not native Windows. If the API runs elsewhere, use a user-managed secure local port forward to 127.0.0.1:3000. The board works as soon as that loopback service is reachable.`,
-      `${windowsHost ? "目前主機看起來是 Windows。" : ""}Anneal 上游支援 macOS／Linux，不是原生 Windows。若 API 在其他機器，請自行建立安全的本機 port-forward 到 127.0.0.1:3000。服務可達後，原版看板即可使用。`,
+      "Coding Tools manages Anneal through WSL2 and Docker on Windows. Its original board is embedded from the managed loopback web service at 127.0.0.1:5173.",
+      "Coding Tools 會喺 Windows 透過 WSL2 同 Docker 管理 Anneal，並由 127.0.0.1:5173 嘅受管 loopback 網頁服務內嵌原版看板。",
     )
     : null;
 
@@ -230,7 +211,7 @@ export function UpstreamToolSurface({
 
       <div className={`upstream-tool-toolbar${immersive && !chromeOpen ? " is-collapsed" : ""}`}>
         <label className="upstream-endpoint-field">
-          <span>{localize(language, "Local endpoint", "本機端點")}</span>
+          <span>{localize(language, "Managed loopback endpoint", "受管 loopback 端點")}</span>
           <input
             aria-label={`${tool.name} endpoint`}
             onChange={(event) => setEndpoint(event.target.value)}
@@ -244,19 +225,13 @@ export function UpstreamToolSurface({
         <button disabled={busy !== null} onClick={() => void probe()} type="button">
           {busy === "probe" ? "…" : localize(language, "Check", "檢查")}
         </button>
-        <button className="primary" disabled={busy !== null} onClick={() => void (ready ? openEmbedded() : start())} type="button">
-          {busy === "start" || busy === "open" ? "…" : ready
+        <button className="primary" disabled={busy !== null || !ready} onClick={() => void openEmbedded()} type="button">
+          {busy === "open" ? "…" : ready
             ? localize(language, "Open full UI", "開啟完整介面")
-            : localize(language, "Start pinned source", "啟動固定版本")}
+            : localize(language, "Waiting for managed service", "等待受管服務")}
         </button>
         <button disabled={busy !== null || !ready} onClick={() => void openExternal()} type="button">
           {busy === "external" ? "…" : localize(language, "Open externally", "外部開啟")}
-        </button>
-        <button disabled={busy !== null || tool.pid === null} onClick={() => void restart()} type="button">
-          {busy === "restart" ? "…" : localize(language, "Restart", "重新啟動")}
-        </button>
-        <button disabled={busy !== null || (!ready && tool.pid === null)} onClick={() => void stop()} type="button">
-          {busy === "stop" ? "…" : localize(language, "Stop", "停止")}
         </button>
       </div>
 
@@ -277,13 +252,13 @@ export function UpstreamToolSurface({
       </nav>
 
       {tool.error ? <p className="upstream-tool-error">{tool.error}</p> : null}
-      {annealWindowsHint ? <p className="upstream-tool-hint">{annealWindowsHint}</p> : null}
-      {!tool.sourceConfigured && !ready ? (
+      {annealManagedHint ? <p className="upstream-tool-hint">{annealManagedHint}</p> : null}
+      {!ready ? (
         <p className="upstream-tool-hint">
           {localize(
             language,
-            `Run ${tool.name} at ${tool.endpoint}, or configure its pinned source directory before using Start.`,
-            `請先喺 ${tool.endpoint} 執行 ${tool.name}，或者設定固定版本嘅原始碼目錄後再使用「啟動」。`,
+            "Use the connection controls below to install, start, stop, or repair the managed service.",
+            "請使用下方連線控制安裝、啟動、停止或修復受管服務。",
           )}
         </p>
       ) : null}
@@ -303,15 +278,15 @@ export function UpstreamToolSurface({
             <span>
               {ready
                 ? localize(language, "Choose a section and open the embedded interface.", "選擇頁面並開啟內嵌介面。")
-                : localize(language, "Connect to the local loopback service to continue.", "連接本機 loopback 服務後繼續。")}
+                : localize(language, "Coding Tools is preparing the managed loopback service.", "Coding Tools 正在準備受管 loopback 服務。")}
             </span>
           </div>
         )}
       </div>
 
       {nativeControl ? (
-        <details className="upstream-native-control">
-          <summary>{localize(language, "Coding Tools native controls", "Coding Tools 原生控制")}</summary>
+        <details className="upstream-native-control" open={!ready}>
+          <summary>{localize(language, "Coding Tools managed connection controls", "Coding Tools 受管連線控制")}</summary>
           <div>{nativeControl}</div>
         </details>
       ) : null}
