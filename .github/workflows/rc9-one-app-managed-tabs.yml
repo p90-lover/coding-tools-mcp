@@ -65,7 +65,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node aiTemp/rc9-one-app-managed/materialize-managed-app-tabs.mjs
+          if grep -Fq 'surface === "apps"' desktop-electron/src/App.tsx \
+            && grep -Fq 'preferredServiceId?: ExternalServiceId' desktop-electron/src/features/ExternalServicesSurface.tsx \
+            && grep -Fq 'ManagedAppsSurface' desktop-electron/src/App.tsx; then
+            echo 'Managed app tab shell is already materialized; preserving the newer source layout.'
+          else
+            node aiTemp/rc9-one-app-managed/materialize-managed-app-tabs.mjs
+          fi
           node aiTemp/rc9-one-app-managed/materialize-managed-app-tab-state.mjs
 
       - name: Install exact Electron dependencies
