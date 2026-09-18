@@ -88,7 +88,11 @@ function createManagedExternalServicesController({
         sourceConfigured: true,
       } : {}),
       ...(running ? {
-        status: service.status === "error" ? "error" : "starting",
+        status: service.status === "error"
+          ? "error"
+          : service.status === "ready"
+            ? "ready"
+            : "starting",
         pid: running.pid,
         owned: true,
       } : {}),
