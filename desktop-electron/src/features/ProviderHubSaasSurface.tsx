@@ -423,6 +423,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [draft, setDraft] = useState<AccountDraft>(() => emptyDraft());
   const [secret, setSecret] = useState("");
+  const [controlCredential, setControlCredential] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
@@ -640,6 +641,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     setSelectedProviderId(providerId);
     setEditorOpen(false);
     setNotice("");
+    setControlCredential("");
     const accounts = activeAccounts.filter((account) => account.providerId === providerId);
     const account = accounts.find((candidate) => candidate.isDefault) ?? accounts[0];
     if (account) {
@@ -655,6 +657,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   };
 
   const selectAccount = (account: ProviderAccountRecord) => {
+    setControlCredential("");
     setSelectedProviderId(account.providerId);
     setSelectedAccountId(account.id);
     setDraft(accountDraft(account));
@@ -665,6 +668,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   };
 
   const startNewAccount = (providerId = selectedProviderId) => {
+    setControlCredential("");
     const provider = providerDefinition(providerId);
     setSelectedProviderId(provider.id);
     setSelectedAccountId("");
@@ -897,6 +901,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         bindingId: null,
         providerAccountId: selectedAccount.id,
         allowProviderFallback,
+        controlCredential: controlCredential.trim(),
         settings: {
           id: bindingId(selectedAccount, workload),
           engine: workload,
@@ -914,6 +919,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         confirm: true,
       });
       await refreshBindings();
+      setControlCredential("");
       setNotice(text(
         language,
         `${selectedAccount.label} is routed to ${workload} through ${plan.provider.name} / ${plan.account.label}.`,
@@ -1331,6 +1337,26 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                     <label>
                       <span>{text(language, "Engine endpoint", "引擎端點")}</span>
                       <input value={engineEndpoint} onChange={(event) => setEngineEndpoint(event.target.value)} />
+                    </label>
+                    <label className="provider-full-row">
+                      <span>{text(language, "Paseo / Anneal control credential", "Paseo／Anneal 控制憑證")}</span>
+                      <input
+                        autoComplete="off"
+                        maxLength={8192}
+                        onChange={(event) => setControlCredential(event.target.value)}
+                        placeholder={text(
+                          language,
+                          "Optional local orchestrator token — never the provider API/OAuth secret",
+                          "選填本機協調器 Token——絕不可使用供應商 API／OAuth 憑證",
+                        )}
+                        type="password"
+                        value={controlCredential}
+                      />
+                      <small>{text(
+                        language,
+                        "Used only to authenticate the Paseo or Anneal control plane for this connection.",
+                        "只用於今次連線的 Paseo 或 Anneal 控制平面驗證。",
+                      )}</small>
                     </label>
                     <label>
                       <span>{text(language, "Mode", "模式")}</span>
