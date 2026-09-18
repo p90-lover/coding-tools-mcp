@@ -177,24 +177,56 @@ function directoryHasBun(dir, platform = process.platform) {
   return isFile(path.join(dir, platform === "win32" ? "bun.exe" : "bun"));
 }
 
+function isUsableNodeExecutable(filePath, platform = process.platform) {
+  if (!filePath || !isFile(filePath) || isBunExecutable(filePath)) return false;
+  if (directoryHasBun(path.dirname(filePath), platform)) return false;
+  return /^node(\.exe)?$/i.test(path.basename(filePath));
+}
+
+function extraNodeSearchDirs(env = process.env, platform = process.platform) {
+  if (platform !== "win32") return [];
+  const dirs = [];
+  const programFiles = env.ProgramFiles || env.PROGRAMFILES || "C:\\Program Files";
+  dirs.push(path.join(programFiles, "nodejs"));
+  const toolcache = env.RUNNER_TOOL_CACHE;
+  if (!toolcache) return dirs;
+  const nodeRoot = path.join(toolcache, "node");
+  let versions = [];
+  try {
+    versions = fs.readdirSync(nodeRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+  } catch {
+    return dirs;
+  }
+  for (const version of versions) {
+    const versionDir = path.join(nodeRoot, version);
+    let arches = [];
+    try {
+      arches = fs.readdirSync(versionDir, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+    } catch {
+      continue;
+    }
+    for (const arch of arches) dirs.push(path.join(versionDir, arch.name));
+  }
+  return dirs;
+}
+
 function resolveNodeExecutable(env = process.env, platform = process.platform) {
   const nodeName = nodeExecutableName(platform);
   for (const key of ["CODING_TOOLS_NODE_EXE", "npm_node_execpath"]) {
-    const candidate = env[key];
-    if (candidate && isFile(candidate) && !isBunExecutable(candidate)) return candidate;
+    if (isUsableNodeExecutable(env[key], platform)) return env[key];
   }
   const searchDirs = [...envPathParts(env, platform)];
-  if (
-    !isBunExecutable(process.execPath)
-    && !directoryHasBun(path.dirname(process.execPath), platform)
-    && new RegExp(`^${nodeName}$`, "i").test(path.basename(process.execPath))
-  ) {
+  if (isUsableNodeExecutable(process.execPath, platform)) {
     searchDirs.unshift(path.dirname(process.execPath));
   }
+  searchDirs.push(...extraNodeSearchDirs(env, platform));
   for (const dir of searchDirs) {
     if (directoryHasBun(dir, platform)) continue;
     const candidate = path.join(dir, nodeName);
-    if (isFile(candidate) && !isBunExecutable(candidate)) return candidate;
+    if (isUsableNodeExecutable(candidate, platform)) return candidate;
   }
   return null;
 }
@@ -691,6 +723,7 @@ module.exports = {
   npmSpawnInvocation,
   prepareFiveStackRuntime,
   resolveNpmCliJs,
+  resolveNodeExecutable,
   rewritePackageScriptsToAbsoluteNode,
   withAbsoluteNodeCommand,
   withAbsoluteNpmCommand,

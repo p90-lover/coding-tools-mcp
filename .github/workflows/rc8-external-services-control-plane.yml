@@ -223,10 +223,23 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cargo build --release --locked --manifest-path rust-core/coding-tools-headless/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw 'Rust headless release build failed' }
-          $node = Get-Command node -ErrorAction Stop
-          $env:CODING_TOOLS_NODE_EXE = $node.Source
-          $env:npm_node_execpath = $node.Source
-          $env:Path = "$(Split-Path -Parent $node.Source);$env:Path"
+          $nodeExe = $null
+          if ($env:RUNNER_TOOL_CACHE) {
+            $toolcacheNode = Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TOOL_CACHE 'node') -Recurse -Filter node.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.DirectoryName -notmatch '\\.bun\\' -and -not (Test-Path -LiteralPath (Join-Path $_.DirectoryName 'bun.exe')) } |
+              Select-Object -First 1
+            if ($toolcacheNode) { $nodeExe = $toolcacheNode.FullName }
+          }
+          if (-not $nodeExe) {
+            $nodeCmd = Get-Command node.exe -All -ErrorAction SilentlyContinue |
+              Where-Object { $_.Source -notmatch '\\bun(\.exe)?$' -and $_.Source -notmatch '\\.bun\\' } |
+              Select-Object -First 1
+            if ($nodeCmd) { $nodeExe = $nodeCmd.Source }
+          }
+          if (-not $nodeExe) { throw 'Real node.exe not found (bun shims skipped)' }
+          $env:CODING_TOOLS_NODE_EXE = $nodeExe
+          $env:npm_node_execpath = $nodeExe
+          $env:Path = "$(Split-Path -Parent $nodeExe);$env:Path"
           bun run --cwd desktop-electron package:win
           if ($LASTEXITCODE -ne 0) { throw 'Windows package build failed' }
 

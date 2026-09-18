@@ -13,6 +13,7 @@ const {
   npmSpawnInvocation,
   prepareFiveStackRuntime,
   rewritePackageScriptsToAbsoluteNode,
+  resolveNodeExecutable,
   withAbsoluteNodeCommand,
   withAbsoluteNpmCommand,
 } = require("../scripts/prepare-five-stack-runtime.cjs");
@@ -215,6 +216,8 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /installWindowsCwdNodeCommands/);
   assert.match(source, /installWindowsCwdLifecycleFallbacks/);
   assert.match(source, /next\.PATH = mergedPath/);
+  assert.match(source, /RUNNER_TOOL_CACHE/);
+  assert.match(source, /isUsableNodeExecutable/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
     Path: "C:\\nodejs;C:\\Windows\\system32",
@@ -552,6 +555,30 @@ test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async 
       assert.ok(["ci", "run"].includes(call.args[0]));
     }
   }
+});
+
+test("Windows five-stack npm prepare rejects bun node.exe in favor of hostedtoolcache", () => {
+  const root = temporaryDirectory("coding-tools-windows-toolcache-node");
+  const bunShimDir = path.join(root, "bun");
+  const toolcache = path.join(root, "hostedtoolcache");
+  const nodeDir = path.join(toolcache, "node", "22.16.0", "x64");
+  const bunNode = path.join(bunShimDir, "node.exe");
+  fs.mkdirSync(bunShimDir, { recursive: true });
+  fs.mkdirSync(nodeDir, { recursive: true });
+  fs.writeFileSync(path.join(bunShimDir, "bun.exe"), "");
+  fs.writeFileSync(bunNode, "");
+  fs.writeFileSync(path.join(nodeDir, "node.exe"), "");
+  fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo real-npm\r\n");
+
+  assert.equal(
+    resolveNodeExecutable({
+      PATH: bunShimDir,
+      CODING_TOOLS_NODE_EXE: bunNode,
+      npm_node_execpath: bunNode,
+      RUNNER_TOOL_CACHE: toolcache,
+    }, "win32"),
+    path.join(nodeDir, "node.exe"),
+  );
 });
 
 test("Windows installer smoke uses the 15-minute bundled-payload budget", () => {
