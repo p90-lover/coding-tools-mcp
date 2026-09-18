@@ -50,14 +50,7 @@ jobs:
           set -e
 
           conflicts="$(git diff --name-only --diff-filter=U)"
-          expected="$(cat <<'EOF'
-desktop-electron/electron/cpa-managed.cjs
-desktop-electron/electron/provider-bootstrap.cjs
-desktop-electron/package.json
-desktop-electron/src/features/ExternalServicesSurface.tsx
-desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
-EOF
-)"
+          expected=$'desktop-electron/electron/cpa-managed.cjs\ndesktop-electron/electron/provider-bootstrap.cjs\ndesktop-electron/package.json\ndesktop-electron/src/features/ExternalServicesSurface.tsx\ndesktop-electron/tests/rc9-managed-cpa-runtime.test.cjs'
           if [ "$conflicts" != "$expected" ]; then
             echo 'Unexpected original-UI conflict inventory.' >&2
             echo 'Expected:' >&2
