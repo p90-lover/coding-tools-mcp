@@ -14,6 +14,17 @@ def replace_once(path: Path, old: str, new: str, marker: str) -> bool:
     return True
 
 
+def replace_block(path: Path, old: str, new: str) -> bool:
+    text = path.read_text(encoding="utf-8")
+    if new in text:
+        return False
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"expected one block in {path}, found {count}: {old!r}")
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    return True
+
+
 preload = Path("desktop-electron/electron/preload.cjs")
 preload_anchor = '  externalServicesSnapshot: () => ipcRenderer.invoke("launcher:external-services-snapshot"),\n'
 preload_methods = preload_anchor + '''  managedComponentsSnapshot: () => ipcRenderer.invoke("launcher:managed-components-snapshot"),
@@ -42,20 +53,30 @@ replace_once(
     'export type ProviderCredentialSource = "native_browser" | "cpa" | "commandcode" | "api_key" | "local_proxy";\n',
     "export type ProviderCredentialSource",
 )
-replace_once(
-    types,
-    '  hasCredential: boolean;\n  models: string[];\n  proxyProfileId?: string;\n',
-    '  hasCredential: boolean;\n  models: string[];\n  loginAdapterId?: string;\n'
-    '  credentialSource?: ProviderCredentialSource;\n  proxyProfileId?: string;\n',
-    "  loginAdapterId?: string;",
-)
-replace_once(
-    types,
-    '  isDefault?: boolean;\n  models?: string[];\n  proxyProfileId?: string;\n',
-    '  isDefault?: boolean;\n  models?: string[];\n  loginAdapterId?: string;\n'
-    '  credentialSource?: ProviderCredentialSource;\n  proxyProfileId?: string;\n',
-    "  credentialSource?: ProviderCredentialSource;",
-)
+
+provider_record_old = '''  hasCredential: boolean;
+  models: string[];
+  proxyProfileId?: string;
+'''
+provider_record_new = '''  hasCredential: boolean;
+  models: string[];
+  loginAdapterId?: string;
+  credentialSource?: ProviderCredentialSource;
+  proxyProfileId?: string;
+'''
+replace_block(types, provider_record_old, provider_record_new)
+
+provider_input_old = '''  isDefault?: boolean;
+  models?: string[];
+  proxyProfileId?: string;
+'''
+provider_input_new = '''  isDefault?: boolean;
+  models?: string[];
+  loginAdapterId?: string;
+  credentialSource?: ProviderCredentialSource;
+  proxyProfileId?: string;
+'''
+replace_block(types, provider_input_old, provider_input_new)
 
 managed_types = '''export type ManagedComponentInstallState =
   | "not-installed"
@@ -159,6 +180,8 @@ for required in (
         raise SystemExit(f"missing preload union contract: {required}")
 for required in (
     "ProviderCredentialSource",
+    provider_record_new,
+    provider_input_new,
     "ManagedComponentInstallSnapshot",
     "managedComponentsSnapshot():",
     "beginProviderLogin(accountId: string, adapterId?: string)",
