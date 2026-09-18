@@ -1,0 +1,179 @@
+name: rc.9 CPA OAuth parity
+
+on:
+  push:
+    branches:
+      - fix/rc9-cpa-oauth-parity
+    paths:
+      - aiTemp/rc9-cpa-oauth-parity/apply_patch.py
+      - desktop-electron/tests/cpa-oauth-parity.test.cjs
+      - .github/workflows/rc9-cpa-oauth-parity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-cpa-oauth-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Prepare retained temporary roots
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            aiTemp/rc9-cpa-oauth-parity/evidence \
+            aiTemp/rc9-cpa-oauth-parity/renderer \
+            aiTemp/rc9-cpa-oauth-parity/tmp \
+            aiTemp/Trash/rc9-cpa-oauth-parity
+
+      - name: Record the contract-first failure
+        run: |
+          set -euo pipefail
+          if node --test desktop-electron/tests/cpa-oauth-parity.test.cjs \
+            >aiTemp/rc9-cpa-oauth-parity/evidence/red.txt 2>&1; then
+            echo 'CPA OAuth parity contract unexpectedly passed before implementation.' >&2
+            cat aiTemp/rc9-cpa-oauth-parity/evidence/red.txt
+            exit 1
+          fi
+          cat aiTemp/rc9-cpa-oauth-parity/evidence/red.txt
+
+      - name: Apply deterministic CPA OAuth parity patch
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc9-cpa-oauth-parity/apply_patch.py \
+            2>&1 | tee aiTemp/rc9-cpa-oauth-parity/evidence/apply.txt
+          grep -F RC9_CPA_OAUTH_PARITY_PATCH_OK \
+            aiTemp/rc9-cpa-oauth-parity/evidence/apply.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Install exact desktop dependencies
+        run: |
+          set -euo pipefail
+          absolute_tmp="$PWD/aiTemp/rc9-cpa-oauth-parity/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/rc9-cpa-oauth-parity/evidence/install.txt
+
+      - name: Run CPA, provider, routing, and credential contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/cpa-oauth-parity.test.cjs \
+            desktop-electron/tests/antigravity-provider-session.test.cjs \
+            desktop-electron/tests/antigravity-session-binding.test.cjs \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/execution-bridge-contract.test.cjs \
+            desktop-electron/tests/five-stack-routing-completion.test.cjs \
+            desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs \
+            2>&1 | tee aiTemp/rc9-cpa-oauth-parity/evidence/contracts.txt
+          grep -F '# fail 0' aiTemp/rc9-cpa-oauth-parity/evidence/contracts.txt
+
+      - name: Validate runtime syntax and TypeScript
+        run: |
+          set -euo pipefail
+          for file in \
+            desktop-electron/electron/cpa-oauth.cjs \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/electron/external-services.cjs \
+            desktop-electron/electron/provider-bootstrap.cjs \
+            desktop-electron/electron/provider-execution-router.cjs \
+            desktop-electron/electron/main.cjs; do
+            node --check "$file"
+          done
+          bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/rc9-cpa-oauth-parity/evidence/typecheck.txt
+
+      - name: Build isolated production renderer
+        run: |
+          set -euo pipefail
+          renderer_out="$PWD/aiTemp/rc9-cpa-oauth-parity/renderer"
+          (
+            cd desktop-electron
+            bunx vite build --outDir "$renderer_out" --emptyOutDir false
+          ) 2>&1 | tee aiTemp/rc9-cpa-oauth-parity/evidence/renderer.txt
+
+      - name: Enforce bounded no-delete source scope
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf '%s\n' \
+            desktop-electron/electron/cpa-oauth.cjs \
+            desktop-electron/electron/external-services.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/provider-bootstrap.cjs \
+            desktop-electron/electron/provider-execution-router.cjs \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/src/features/ExternalServicesSurface.tsx \
+            desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+            desktop-electron/src/providers/provider-types.ts \
+            desktop-electron/src/types.ts \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/vendor/upstream/cliproxyapi.json | sort)"
+          printf 'Changed production paths:\n%s\n' "$changed"
+          test "$changed" = "$expected"
+
+      - name: Commit verified CPA OAuth parity
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/cpa-oauth.cjs \
+            desktop-electron/electron/external-services.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/provider-bootstrap.cjs \
+            desktop-electron/electron/provider-execution-router.cjs \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/src/features/ExternalServicesSurface.tsx \
+            desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+            desktop-electron/src/providers/provider-types.ts \
+            desktop-electron/src/types.ts \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/vendor/upstream/cliproxyapi.json
+          git diff --cached --check
+          git commit -m 'feat(rc9): add CPA OAuth multi-account parity'
+          git push origin "HEAD:${{ github.ref_name }}"
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        run: |
+          set -euo pipefail
+          source='desktop-electron/node_modules'
+          if [ -d "$source" ]; then
+            target="aiTemp/Trash/rc9-cpa-oauth-parity/node_modules-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            test ! -e "$target"
+            mv "$source" "$target"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-cpa-oauth-parity-${{ github.sha }}
+          path: aiTemp/rc9-cpa-oauth-parity/evidence/
+          if-no-files-found: warn
+          retention-days: 14
