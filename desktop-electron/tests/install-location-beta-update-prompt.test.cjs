@@ -55,7 +55,7 @@ test("silent Windows auto-update pins NSIS to the running executable directory",
   assert.equal(args.at(-1), `/D=${installDirectory}`, "NSIS /D must be the final argument");
   assert.throws(
     () => windowsInstallerArguments({ installDirectory: "relative\\path" }),
-    /absolute install directory/i,
+    /must be absolute/i,
   );
 });
 
