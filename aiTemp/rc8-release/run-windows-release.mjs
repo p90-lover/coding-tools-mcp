@@ -37,6 +37,7 @@ const childEnv = {
   SOURCE_SHA: sourceSha,
   RELEASE_VERSION: releaseVersion,
   RELEASE_TAG: releaseTag,
+  VALIDATION_WORKFLOW: '.github/workflows/codex-router-multiprovider-release-rc8.yml',
   WINDOWS_INSTALLER: installerName,
   CODING_TOOLS_RETENTION_ROOT: trash,
   ELECTRON_BUILDER_CACHE: path.join(aiTemp, 'cache', 'electron-builder'),
