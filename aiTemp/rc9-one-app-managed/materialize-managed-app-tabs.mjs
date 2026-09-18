@@ -207,7 +207,14 @@ replaceAllExact(
   "desktop-electron/src/features/ExternalServicesSurface.tsx",
   'serviceSnapshot.services.find((service) => service.id === selectedId)',
   'serviceSnapshot.services.find((service) => service.id === (preferredServiceId ?? selectedId))',
-  2,
+  1,
+);
+
+replaceAllExact(
+  "desktop-electron/src/features/ExternalServicesSurface.tsx",
+  'nextServices.services.find((service) => service.id === selectedId)',
+  'nextServices.services.find((service) => service.id === (preferredServiceId ?? selectedId))',
+  1,
 );
 
 replaceOnce(
