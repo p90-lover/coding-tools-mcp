@@ -1,0 +1,73 @@
+name: rc.11 CPA offline first start
+
+on:
+  push:
+    branches:
+      - integration/rc11-cpa-offline-first-start
+    paths:
+      - desktop-electron/electron/bundled-runtimes.cjs
+      - desktop-electron/scripts/prepare-bundled-runtimes.cjs
+      - desktop-electron/tests/cpa-codex-bundled-runtime.test.cjs
+      - desktop-electron/tests/cpa-codex-cross-use.test.cjs
+      - desktop-electron/vendor/bundled-runtimes/**
+      - desktop-electron/vendor/managed-components/cpa-codex-provider-backends.openapi.json
+      - .github/workflows/rc11-cpa-offline-first-start.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc11-cpa-offline-first-start-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RC11_CPA_BASE_SHA: 5210ba3c214877baef75cc7f442cec55354dc1cb
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Validate additive runtime syntax
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-cpa-offline-first-start/evidence
+          node --check desktop-electron/electron/bundled-runtimes.cjs
+          node --check desktop-electron/scripts/prepare-bundled-runtimes.cjs
+
+      - name: Run CPA offline-first-start and cross-use contracts
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/cpa-codex-bundled-runtime.test.cjs \
+            desktop-electron/tests/cpa-codex-cross-use.test.cjs \
+            2>&1 | tee aiTemp/rc11-cpa-offline-first-start/evidence/contracts.txt
+          grep -F '# fail 0' aiTemp/rc11-cpa-offline-first-start/evidence/contracts.txt
+
+      - name: Enforce additive no-delete scope
+        if: always()
+        run: |
+          set -euo pipefail
+          git diff --check "$RC11_CPA_BASE_SHA"...HEAD
+          test -z "$(git diff --diff-filter=D --name-only "$RC11_CPA_BASE_SHA"...HEAD)"
+          git diff --name-only "$RC11_CPA_BASE_SHA"...HEAD \
+            | tee aiTemp/rc11-cpa-offline-first-start/evidence/changed-files.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-cpa-offline-first-start-${{ github.sha }}
+          path: aiTemp/rc11-cpa-offline-first-start/evidence/
+          if-no-files-found: error
+          retention-days: 14
