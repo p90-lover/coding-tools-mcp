@@ -1,0 +1,66 @@
+name: RC9 Install Location and Beta Update
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.9-install-location-beta-update-prompt
+    paths:
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/update.cjs
+      - desktop-electron/electron/update-prompt.cjs
+      - desktop-electron/electron/update-worker.cjs
+      - desktop-electron/tests/install-location-beta-update-prompt.test.cjs
+      - .github/workflows/rc9-install-location-beta-update.yml
+  pull_request:
+    paths:
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/update.cjs
+      - desktop-electron/electron/update-prompt.cjs
+      - desktop-electron/electron/update-worker.cjs
+      - desktop-electron/tests/install-location-beta-update-prompt.test.cjs
+      - .github/workflows/rc9-install-location-beta-update.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc9-install-location-beta-update-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - name: Reproduce or verify both upgrade contracts
+        run: node --test desktop-electron/tests/install-location-beta-update-prompt.test.cjs
+
+      - name: Require syntax-valid updater runtime
+        run: |
+          node --check desktop-electron/electron/update.cjs
+          node --check desktop-electron/electron/update-worker.cjs
+          if [ -f desktop-electron/electron/update-prompt.cjs ]; then
+            node --check desktop-electron/electron/update-prompt.cjs
+          fi
+          node --check desktop-electron/electron/main.cjs
+
+      - name: Enforce no tracked-file deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin release/codex-router-multiprovider-0.7.0-rc.8 --no-tags
+          deleted="$(git diff --name-only --diff-filter=D origin/release/codex-router-multiprovider-0.7.0-rc.8...HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Tracked files must be retained or moved to Trash/:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
