@@ -14,6 +14,7 @@ const ALLOWED_PASEO = Object.freeze([
   "create_agent_request",
 ]);
 const ALLOWED_ANNEAL_POST = Object.freeze([
+  "/projects/{id}/tasks",
   "/tasks/{id}/start",
   "/tasks/{id}/retry",
   "/tasks/{id}/archive",
@@ -23,6 +24,11 @@ const ALLOWED_ANNEAL_POST = Object.freeze([
   "/inbox/messages/{id}/decision",
   "/inbox/messages/{id}/reply",
   "/inbox/messages/{id}/close",
+]);
+const ALLOWED_ANNEAL_GET = Object.freeze([
+  "/tasks",
+  "/tasks/{id}",
+  "/tasks/{id}/activity",
 ]);
 
 function token(value, label) {
@@ -155,47 +161,104 @@ function expectedPaseoResponse(op) {
   }[op] || "rpc_error";
 }
 
-function annealPathForOp(op, id) {
-  const safeId = token(id, "id");
+function annealPathForOp(op, id, req = {}) {
   switch (String(op || "").trim()) {
-    case "start":
-      return { pattern: "/tasks/{id}/start", path: `/tasks/${safeId}/start`, body: {} };
-    case "retry":
-      return { pattern: "/tasks/{id}/retry", path: `/tasks/${safeId}/retry`, body: {} };
-    case "archive":
-      return { pattern: "/tasks/{id}/archive", path: `/tasks/${safeId}/archive`, body: {} };
-    case "unarchive":
-      return { pattern: "/tasks/{id}/unarchive", path: `/tasks/${safeId}/unarchive`, body: {} };
-    case "hold":
+    case "create": {
+      const projectId = token(id || req.projectId || req.project_id, "project id");
+      const name = boundedText(req.name || req.title || req.text || "Coding Tools handoff", 512, "task name");
+      const description = boundedText(
+        req.description || req.text || name,
+        8000,
+        "task description",
+      );
       return {
+        method: "POST",
+        pattern: "/projects/{id}/tasks",
+        path: `/projects/${projectId}/tasks`,
+        body: {
+          name,
+          description,
+          status: "BACKLOG",
+          workingDirectory: typeof req.cwd === "string" && req.cwd.trim() ? req.cwd.trim() : ".",
+          assigneeType: "AGENT",
+          approvalGate: true,
+          opensPullRequest: false,
+          scheduleKind: "NOW",
+          chainIndex: 0,
+        },
+      };
+    }
+    case "preview": {
+      const safeId = token(id, "task id");
+      return { method: "GET", pattern: "/tasks/{id}", path: `/tasks/${safeId}`, body: null };
+    }
+    case "board":
+      return { method: "GET", pattern: "/tasks", path: "/tasks", body: null };
+    case "activity": {
+      const safeId = token(id, "task id");
+      return { method: "GET", pattern: "/tasks/{id}/activity", path: `/tasks/${safeId}/activity`, body: null };
+    }
+    case "start": {
+      const safeId = token(id, "id");
+      return { method: "POST", pattern: "/tasks/{id}/start", path: `/tasks/${safeId}/start`, body: {} };
+    }
+    case "retry": {
+      const safeId = token(id, "id");
+      return { method: "POST", pattern: "/tasks/{id}/retry", path: `/tasks/${safeId}/retry`, body: {} };
+    }
+    case "archive": {
+      const safeId = token(id, "id");
+      return { method: "POST", pattern: "/tasks/{id}/archive", path: `/tasks/${safeId}/archive`, body: {} };
+    }
+    case "unarchive": {
+      const safeId = token(id, "id");
+      return { method: "POST", pattern: "/tasks/{id}/unarchive", path: `/tasks/${safeId}/unarchive`, body: {} };
+    }
+    case "hold": {
+      const safeId = token(id, "id");
+      return {
+        method: "POST",
         pattern: "/tasks/{id}/chain/hold",
         path: `/tasks/${safeId}/chain/hold`,
         body: { requestId: crypto.randomUUID() },
       };
-    case "resume":
+    }
+    case "resume": {
+      const safeId = token(id, "id");
       return {
+        method: "POST",
         pattern: "/tasks/{id}/chain/resume",
         path: `/tasks/${safeId}/chain/resume`,
         body: { requestId: crypto.randomUUID() },
       };
-    case "inbox_decision":
+    }
+    case "inbox_decision": {
+      const safeId = token(id, "id");
       return {
+        method: "POST",
         pattern: "/inbox/messages/{id}/decision",
         path: `/inbox/messages/${safeId}/decision`,
         body: { decision: "approve", requestId: crypto.randomUUID() },
       };
-    case "inbox_reply":
+    }
+    case "inbox_reply": {
+      const safeId = token(id, "id");
       return {
+        method: "POST",
         pattern: "/inbox/messages/{id}/reply",
         path: `/inbox/messages/${safeId}/reply`,
         body: { body: "", requestId: crypto.randomUUID() },
       };
-    case "inbox_close":
+    }
+    case "inbox_close": {
+      const safeId = token(id, "id");
       return {
+        method: "POST",
         pattern: "/inbox/messages/{id}/close",
         path: `/inbox/messages/${safeId}/close`,
         body: { requestId: crypto.randomUUID() },
       };
+    }
     default:
       throw new Error("Anneal operation is not in the original-function allowlist");
   }
@@ -321,7 +384,10 @@ async function paseoRpc(endpoint, credential, message, rid, expected, {
   });
 }
 
-async function annealPost(endpoint, credential, path, body, {
+async function annealRequest(endpoint, credential, {
+  method = "GET",
+  path,
+  body = null,
   timeoutMs = ACTION_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
 } = {}) {
@@ -335,13 +401,13 @@ async function annealPost(endpoint, credential, path, body, {
   timer.unref?.();
   try {
     const response = await fetchImpl(parsed.toString(), {
-      method: "POST",
+      method,
       headers: {
         accept: "application/json",
-        "content-type": "application/json",
+        ...(body ? { "content-type": "application/json" } : {}),
         ...(credential ? { authorization: `Bearer ${credential}` } : {}),
       },
-      body: JSON.stringify(body),
+      body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
       redirect: "manual",
     });
@@ -351,13 +417,20 @@ async function annealPost(endpoint, credential, path, body, {
       const snippet = String(text).replace(/[\u0000-\u001f]/gu, "").slice(0, 180);
       throw new Error(`Anneal returned HTTP ${response.status}. ${snippet}`.trim());
     }
-    return `HTTP ${response.status} at ${path}`;
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch { json = null; }
+    return { ok: true, status: response.status, path, text, json };
   } catch (error) {
     if (error?.name === "AbortError") throw new Error("Anneal action timed out");
     throw error instanceof Error ? error : new Error("Anneal is not reachable; no runner was started.");
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function annealPost(endpoint, credential, path, body, options = {}) {
+  const result = await annealRequest(endpoint, credential, { ...options, method: "POST", path, body });
+  return `HTTP ${result.status} at ${path}`;
 }
 
 async function actUpstream(input = {}, options = {}) {
@@ -376,25 +449,37 @@ async function actUpstream(input = {}, options = {}) {
   if (toolId === "anneal") {
     const id = String(input.op || "").startsWith("inbox_")
       ? (input.messageId || input.message_id)
-      : (input.taskId || input.task_id);
-    const spec = annealPathForOp(input.op, id);
-    if (!ALLOWED_ANNEAL_POST.includes(spec.pattern)) {
+      : (input.op === "create"
+        ? (input.projectId || input.project_id)
+        : (input.taskId || input.task_id));
+    const spec = annealPathForOp(input.op, id, input);
+    const method = spec.method || "POST";
+    const allowed = method === "GET" ? ALLOWED_ANNEAL_GET : ALLOWED_ANNEAL_POST;
+    if (!allowed.includes(spec.pattern)) {
       throw new Error("Anneal operation is not in the original-function allowlist");
     }
-    const body = { ...spec.body };
+    const body = spec.body && typeof spec.body === "object" ? { ...spec.body } : spec.body;
     if (input.op === "inbox_decision") body.decision = boundedText(input.text, 8000, "decision");
     if (input.op === "inbox_reply") body.body = boundedText(input.text, 8000, "reply");
-    const detail = await annealPost(input.endpoint, input.credential, spec.path, body, options);
-    return { ok: true, op: input.op, detail };
+    const result = await annealRequest(input.endpoint, input.credential, {
+      ...options,
+      method,
+      path: spec.path,
+      body: method === "GET" ? null : body,
+    });
+    return { ok: true, op: input.op, detail: `HTTP ${result.status} at ${spec.path}`, body: result.json };
   }
   throw new Error("Unknown integration source");
 }
 
 module.exports = {
   ACTION_TIMEOUT_MS,
+  ALLOWED_ANNEAL_GET,
   ALLOWED_ANNEAL_POST,
   ALLOWED_PASEO,
   actUpstream,
   annealPathForOp,
+  annealPost,
+  annealRequest,
   buildPaseoMessage,
 };

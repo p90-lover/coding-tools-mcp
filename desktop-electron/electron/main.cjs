@@ -520,6 +520,29 @@ function registerIpc({ logger, stateStore }) {
       if (action === "repair") return externalServicesController.repairManagedComponent(stack);
       throw new Error(`Unsupported manage action ${action}`);
     },
+    handoffAnnealTask: async ({ projectId, body }) => {
+      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const result = await actUpstream({
+        toolId: "anneal",
+        op: "create",
+        projectId,
+        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+        name: body?.name,
+        description: body?.description,
+        cwd: body?.workingDirectory,
+      });
+      return result.body && typeof result.body === "object" ? result.body : { id: null };
+    },
+    fetchAnnealTask: async ({ taskId }) => {
+      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const result = await actUpstream({
+        toolId: "anneal",
+        op: "preview",
+        taskId,
+        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+      });
+      return result.body;
+    },
   });
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
