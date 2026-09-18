@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - integration/v0.7.0-rc.9-managed-five-stack
+      - fix/rc9-anneal-one-time-setup-secret
     paths:
       - 'aiTemp/rc9-managed-five-stack/**'
       - 'desktop-electron/electron/managed-components.cjs'
@@ -146,7 +147,7 @@ jobs:
             exit 0
           fi
           git commit -m 'feat(rc9): wire managed installs into the five-stack control plane'
-          git push origin HEAD:integration/v0.7.0-rc.9-managed-five-stack
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Preserve transient dependencies in Trash
         if: always()
