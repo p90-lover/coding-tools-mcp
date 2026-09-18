@@ -10,6 +10,33 @@ export interface CodexRouterConnection {
   baseUrl: string;
 }
 
+export interface CpaConnection {
+  origin: string;
+  proxyApiKey: string;
+  baseUrl: string;
+}
+
+export interface ProviderBackendDiscovery {
+  kind: "coding-tools-provider-backends";
+  role: "provider-backend";
+  backends: {
+    cpa?: {
+      role: "main-provider";
+      origin: string;
+      openaiBaseUrl: string;
+      healthUrl: string;
+      chatCompletionsUrl: string;
+    };
+    "codex-router"?: {
+      role: "subagent-provider";
+      origin: string;
+      openaiBaseUrl: string;
+      healthUrl: string;
+      chatCompletionsUrl: string;
+    };
+  };
+}
+
 export interface CommandCodeProxyProviderProfile {
   id: "commandcode-proxy";
   name: "CommandCode Proxy";
@@ -68,6 +95,71 @@ export function resolveCodexRouterConnection(
     origin: normalizedOrigin,
     callerKey,
     baseUrl: `${normalizedOrigin}/_codex-router/${callerKey}/v1`,
+  };
+}
+
+export function resolveCpaConnection(
+  env: Record<string, string | undefined> = process.env,
+): CpaConnection | undefined {
+  const configuredOrigin = env.CODING_TOOLS_CPA_URL?.trim() || env.CODING_TOOLS_CPA_OPENAI_BASE_URL?.trim();
+  const proxyApiKey = env.CODING_TOOLS_CPA_PROXY_API_KEY?.trim();
+  if (!configuredOrigin && !proxyApiKey) return undefined;
+  if (!proxyApiKey || proxyApiKey.length < 32 || proxyApiKey.includes("\0")) {
+    throw new Error("CPA proxy API key must be at least 32 characters");
+  }
+  const origin = normalizeOrigin(
+    configuredOrigin || "http://127.0.0.1:8317",
+    "CPA URL",
+    false,
+  );
+  const parsed = new URL(origin);
+  if (parsed.pathname !== "/" && parsed.pathname !== "/v1") {
+    throw new Error("CPA URL must be an origin or /v1 OpenAI base");
+  }
+  const normalizedOrigin = origin.replace(/\/v1$/, "").replace(/\/$/, "");
+  return {
+    origin: normalizedOrigin,
+    proxyApiKey,
+    baseUrl: `${normalizedOrigin}/v1`,
+  };
+}
+
+export function describeProviderBackends(
+  env: Record<string, string | undefined> = process.env,
+): ProviderBackendDiscovery {
+  const backends: ProviderBackendDiscovery["backends"] = {};
+  try {
+    const cpa = resolveCpaConnection(env);
+    if (cpa) {
+      backends.cpa = {
+        role: "main-provider",
+        origin: cpa.origin,
+        openaiBaseUrl: cpa.baseUrl,
+        healthUrl: `${cpa.baseUrl}/models`,
+        chatCompletionsUrl: `${cpa.baseUrl}/chat/completions`,
+      };
+    }
+  } catch {
+    // Invalid CPA env stays undiscoverable so MCP catalog reads do not throw.
+  }
+  try {
+    const router = resolveCodexRouterConnection(env);
+    if (router) {
+      backends["codex-router"] = {
+        role: "subagent-provider",
+        origin: router.origin,
+        openaiBaseUrl: router.baseUrl,
+        healthUrl: `${router.baseUrl}/models`,
+        chatCompletionsUrl: `${router.baseUrl}/chat/completions`,
+      };
+    }
+  } catch {
+    // Invalid Router env stays undiscoverable so MCP catalog reads do not throw.
+  }
+  return {
+    kind: "coding-tools-provider-backends",
+    role: "provider-backend",
+    backends,
   };
 }
 

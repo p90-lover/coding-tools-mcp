@@ -371,3 +371,11 @@ test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async 
     }
   }
 });
+
+test("Windows installer smoke uses the 15-minute bundled-payload budget", () => {
+  const smoke = read("scripts/smoke-package.cjs");
+  assert.match(smoke, /WINDOWS_INSTALLER_TIMEOUT_MS = 15 \* 60_000/);
+  assert.match(smoke, /timeout: WINDOWS_INSTALLER_TIMEOUT_MS/);
+  assert.match(read("vendor/managed-components/cpa-codex-provider-backends.openapi.json"), /127\.0\.0\.1:8317/);
+  assert.match(read("vendor/managed-components/cpa-codex-provider-backends.openapi.json"), /127\.0\.0\.1:4202/);
+});

@@ -12,6 +12,7 @@ const launcherManifest = JSON.parse(
   fs.readFileSync(path.join(launcherRoot, "package.json"), "utf8"),
 );
 const expectedVersion = launcherManifest.version;
+const WINDOWS_INSTALLER_TIMEOUT_MS = 15 * 60_000;
 const preservation = createPreservationSession({
   repositoryRoot,
   label: `electron-package-smoke-${process.platform}`,
@@ -125,7 +126,7 @@ async function runSmoke() {
     env.APPIMAGE_EXTRACT_AND_RUN = "1";
   } else if (process.platform === "win32") {
     const installer = artifact(artifactNameFor("win", process.arch, "exe"), "Windows installer");
-    run(installer, ["/S", "/currentuser"], { timeout: 120_000 });
+    run(installer, ["/S", "/currentuser"], { timeout: WINDOWS_INSTALLER_TIMEOUT_MS });
     executable = path.join(windowsInstallLocation(), `${launcherManifest.build.productName}.exe`);
     command = executable;
     args = ["--launcher-smoke-test"];

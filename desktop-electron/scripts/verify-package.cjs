@@ -410,6 +410,23 @@ function forbiddenName(relative) {
   if ([".key", ".pem", ".p12", ".pfx", ".jks", ".kdbx"].includes(extension)) return "credential-file-extension";
   return null;
 }
+function bundledRuntimeVendorPath(relative) {
+  const normalized = String(relative).replaceAll("\\", "/");
+  const markers = [
+    "bundled-runtimes/codex-router/source/",
+    "five-stack-runtime/",
+  ];
+  for (const marker of markers) {
+    const index = normalized.indexOf(marker);
+    if (index < 0) continue;
+    const parts = normalized.slice(index + marker.length).split("/");
+    if (parts.includes("node_modules") || parts.includes(".venv")) return true;
+  }
+  return false;
+}
+function bundledRouterVendorPath(relative) {
+  return bundledRuntimeVendorPath(relative);
+}
 function secretIn(bytes) {
   if (bytes.length > MAX_TEXT_BYTES || bytes.includes(0)) return null;
   const text = bytes.toString("utf8");
@@ -419,6 +436,7 @@ function secretIn(bytes) {
 function scanEntries(entries, read) {
   const findings = [];
   for (const relative of entries) {
+    if (bundledRuntimeVendorPath(relative)) continue;
     const nameRule = forbiddenName(relative);
     if (nameRule) findings.push({ path: relative, rule: nameRule });
     const base = path.posix.basename(relative).toLowerCase();
@@ -641,6 +659,8 @@ module.exports = {
   REQUIRED_ASAR_FILES,
   REQUIRED_COMPONENTS,
   REQUIRED_TUNNEL_MEMBERS,
+  bundledRouterVendorPath,
+  bundledRuntimeVendorPath,
   findWindowsInstaller,
   inspectExtractedApplication,
   validatePackageManifest,

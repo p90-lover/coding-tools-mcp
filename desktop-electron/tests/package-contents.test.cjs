@@ -12,6 +12,8 @@ const {
   REQUIRED_COMPONENTS,
   inspectExtractedApplication,
   findWindowsInstaller,
+  bundledRouterVendorPath,
+  bundledRuntimeVendorPath,
 } = require("../scripts/verify-package.cjs");
 
 const PRODUCT_VERSION = "0.7.0-rc.11";
@@ -309,4 +311,37 @@ test("requires exactly one versioned Windows x64 installer", () => {
   assert.equal(path.basename(findWindowsInstaller(root)), builderInstaller);
   writeFile(path.join(root, releaseInstaller), Buffer.from("MZtwo"));
   assert.throws(() => findWindowsInstaller(root), /PACKAGE_INSTALLER_COUNT_MISMATCH/);
+});
+
+test("bundled five-stack and Codex Router vendor trees do not trip the package secret scanner", () => {
+  assert.equal(
+    bundledRouterVendorPath("resources/bundled-runtimes/codex-router/source/.venv/Lib/site-packages/certifi/cacert.pem"),
+    true,
+  );
+  assert.equal(
+    bundledRuntimeVendorPath("resources/five-stack-runtime/codex-router/source/apps/control-center/node_modules/dotenv/README.md"),
+    true,
+  );
+  assert.equal(
+    bundledRuntimeVendorPath("resources/five-stack-runtime/codex-router/source/src/foreground-start.mjs"),
+    false,
+  );
+  const fakeKey = "-----BEGIN PRIVATE KEY-----" + "A".repeat(80) + "-----END PRIVATE KEY-----";
+  const { appRoot } = createPackageFixture("bundled-runtime-vendor", ({ resourcesRoot }) => {
+    writeFile(
+      path.join(resourcesRoot, "bundled-runtimes/codex-router/source/.venv/Lib/site-packages/certifi/cacert.pem"),
+      "fixture-ca\n",
+    );
+    writeFile(
+      path.join(resourcesRoot, "five-stack-runtime/codex-router/source/apps/control-center/node_modules/dotenv/README.md"),
+      `${fakeKey}\n`,
+    );
+    writeFile(
+      path.join(resourcesRoot, "five-stack-runtime/paseo/source/node_modules/example/index.js"),
+      "const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';\n",
+    );
+  });
+  const result = inspectExtractedApplication(appRoot, packageOptions());
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.secretsFound, []);
 });
