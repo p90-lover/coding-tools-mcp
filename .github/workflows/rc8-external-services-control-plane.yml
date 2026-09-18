@@ -12,6 +12,9 @@ on:
       - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
       - 'desktop-electron/vendor/upstream/**'
       - 'desktop-electron/scripts/package.cjs'
+      - 'desktop-electron/scripts/prepare-five-stack-runtime.cjs'
+      - 'desktop-electron/scripts/prepare-runtime.cjs'
+      - 'desktop-electron/tests/bundled-five-stack-runtime.test.cjs'
       - 'docs/superpowers/specs/2026-09-18-external-services-control-plane-design.md'
       - 'docs/superpowers/plans/2026-09-18-external-services-control-plane.md'
   pull_request:
@@ -23,6 +26,9 @@ on:
       - 'desktop-electron/tests/rc7-full-integration-contract.test.cjs'
       - 'desktop-electron/vendor/upstream/**'
       - 'desktop-electron/scripts/package.cjs'
+      - 'desktop-electron/scripts/prepare-five-stack-runtime.cjs'
+      - 'desktop-electron/scripts/prepare-runtime.cjs'
+      - 'desktop-electron/tests/bundled-five-stack-runtime.test.cjs'
   workflow_dispatch:
 
 permissions:
