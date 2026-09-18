@@ -8,6 +8,8 @@ def replace_once(pathname: str, old: str, new: str) -> None:
     text = path.read_text(encoding="utf-8")
     if new and new in text:
         return
+    if not new and old not in text:
+        return
     count = text.count(old)
     if count != 1:
         raise SystemExit(f"expected one anchor in {pathname}, found {count}: {old[:100]!r}")
