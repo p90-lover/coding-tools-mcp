@@ -19,6 +19,7 @@ interface ExternalServicesSurfaceProps {
 
 interface ServiceDraft {
   endpoint: string;
+  executionEndpoint: string;
   home: string;
   executable: string;
   argumentsText: string;
@@ -53,6 +54,7 @@ function messageOf(value: unknown): string {
 function draftFrom(service: ExternalServiceSnapshot): ServiceDraft {
   return {
     endpoint: service.endpoint,
+    executionEndpoint: service.executionEndpoint ?? "",
     home: service.home,
     executable: service.executable,
     argumentsText: service.arguments.join("\n"),
@@ -200,6 +202,9 @@ export function ExternalServicesSurface({
     if (!api || !draft || !selected) return;
     const input: ExternalServiceConfigurationInput = {
       endpoint: draft.endpoint,
+      ...((selected.id === "paseo" || selected.id === "anneal")
+        ? { executionEndpoint: draft.executionEndpoint }
+        : {}),
       home: draft.home,
       executable: draft.executable,
       arguments: splitArguments(draft.argumentsText),
@@ -325,6 +330,15 @@ export function ExternalServicesSurface({
               <span>{text(language, "Loopback endpoint", "Loopback 端點")}</span>
               <input value={draft.endpoint} onChange={(event) => setDraft({ ...draft, endpoint: event.target.value })} />
             </label>
+            {selected.id === "paseo" || selected.id === "anneal" ? (
+              <label className="wide-field">
+                <span>{text(language, "Execution endpoint", "執行端點")}</span>
+                <input
+                  value={draft.executionEndpoint}
+                  onChange={(event) => setDraft({ ...draft, executionEndpoint: event.target.value })}
+                />
+              </label>
+            ) : null}
             <label>
               <span>{text(language, "Source / working directory", "原始碼／工作目錄")}</span>
               <input value={draft.home} onChange={(event) => setDraft({ ...draft, home: event.target.value })} />
