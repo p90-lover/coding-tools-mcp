@@ -400,10 +400,16 @@ function validateMigrationRollback(resourcesRoot) {
   }
 }
 
+function envTemplateName(base) {
+  return /^\.env(?:\.[a-z0-9._-]+)*\.(?:example|sample|template)$/i.test(base);
+}
+
 function forbiddenName(relative) {
   const base = path.posix.basename(relative).toLowerCase();
   const extension = path.posix.extname(base);
-  if (base.startsWith(".env")) return "environment-file";
+  // Bundled Paseo/Anneal/CommandCode ship .env.example for first-run setup.
+  // Those templates are not secrets; live .env / .env.production still fail closed.
+  if (base.startsWith(".env") && !envTemplateName(base)) return "environment-file";
   if (["id_rsa", "id_ecdsa", "id_ed25519", "credentials.json", "secrets.json", "token.json", "service-account.json"].includes(base)) {
     return "credential-file-name";
   }
@@ -662,6 +668,7 @@ module.exports = {
   bundledRouterVendorPath,
   bundledRuntimeVendorPath,
   findWindowsInstaller,
+  forbiddenName,
   inspectExtractedApplication,
   validatePackageManifest,
   validateRuntimeBundle,

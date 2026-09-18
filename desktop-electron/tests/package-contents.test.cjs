@@ -12,6 +12,7 @@ const {
   REQUIRED_COMPONENTS,
   inspectExtractedApplication,
   findWindowsInstaller,
+  forbiddenName,
   bundledRouterVendorPath,
   bundledRuntimeVendorPath,
 } = require("../scripts/verify-package.cjs");
@@ -231,6 +232,23 @@ test("rejects credential-like files and never reports their contents", () => {
       return true;
     },
   );
+});
+
+test("allows bundled five-stack .env.example templates used for first-run setup", () => {
+  assert.equal(forbiddenName("resources/bundled-components/anneal/.env.example"), null);
+  assert.equal(forbiddenName("resources/five-stack-runtime/anneal/source/.env.example"), null);
+  assert.equal(forbiddenName("resources/bundled-components/paseo/packages/server/.env.example"), null);
+  assert.equal(forbiddenName("resources/coding-tools/.env"), "environment-file");
+  assert.equal(forbiddenName("resources/coding-tools/.env.production"), "environment-file");
+  const { appRoot } = createPackageFixture("env-example", ({ resourcesRoot }) => {
+    writeFile(path.join(resourcesRoot, "bundled-components", "anneal", ".env.example"), "GITHUB_TOKEN=\n");
+    writeFile(path.join(resourcesRoot, "bundled-components", "commandcode-proxy", ".env.example"), "PORT=9090\n");
+    writeFile(path.join(resourcesRoot, "bundled-components", "paseo", "packages", "server", ".env.example"), "PASEO_LISTEN=127.0.0.1:6768\n");
+    writeFile(path.join(resourcesRoot, "five-stack-runtime", "anneal", "source", ".env.example"), "GITHUB_TOKEN=\n");
+  });
+  const result = inspectExtractedApplication(appRoot, packageOptions());
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.secretsFound, []);
 });
 
 test("rejects the retained Tauri identity masquerading as the Electron candidate", () => {
