@@ -122,6 +122,7 @@ function copyBundledTree(sourceRoot, destinationRoot) {
       } catch {
         continue;
       }
+      if (linkStat.isDirectory() && /\.(md|png|jpe?g|gif|webp)$/i.test(entry.name)) continue;
       if (isLinkOrReparse(fromPath, entry, linkStat)) {
         // GitHub tarballs keep docs/screenshot gitlinks. Windows tar turns
         // dangling ones into reparse points that 7zip then rejects as

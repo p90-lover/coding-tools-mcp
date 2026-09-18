@@ -10,6 +10,7 @@ const repositoryRoot = path.resolve(__dirname, "..", "..");
 const {
   copyFiveStackTree,
   preparePackageResources,
+  skipFiveStackPackageEntry,
 } = require("../scripts/prepare-package-resources.cjs");
 
 const PRODUCT_VERSION = "0.7.0-rc.11";
@@ -291,46 +292,37 @@ test("composes the exact Windows payload from the official seven-member client a
   );
 });
 
-test("five-stack package copy materializes dangling npm workspace links from packages/", () => {
+test("five-stack package copy omits node_modules, fastlane, and file-named directories from the NSIS payload", () => {
+  assert.equal(skipFiveStackPackageEntry("node_modules"), true);
+  assert.equal(skipFiveStackPackageEntry("fastlane"), true);
+  assert.equal(skipFiveStackPackageEntry(".git"), true);
+  assert.equal(skipFiveStackPackageEntry("AGENTS.md", { isDirectory: () => true }), true);
+  assert.equal(skipFiveStackPackageEntry("1.png", { isDirectory: () => true }), true);
+  assert.equal(skipFiveStackPackageEntry("packages"), false);
+
   const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "coding-tools-five-stack-links-"));
   const source = path.join(root, "source");
   const destination = path.join(root, "destination");
   const scoped = path.join(source, "paseo", "source", "node_modules", "@getpaseo");
   const realApp = path.join(source, "paseo", "source", "packages", "app");
-  const realProtocol = path.join(source, "paseo", "source", "packages", "protocol");
+  const screenshot = path.join(source, "paseo", "fastlane", "metadata", "android", "en-US", "images", "phoneScreenshots");
   fs.mkdirSync(scoped, { recursive: true });
   fs.mkdirSync(realApp, { recursive: true });
-  fs.mkdirSync(realProtocol, { recursive: true });
+  fs.mkdirSync(screenshot, { recursive: true });
+  fs.mkdirSync(path.join(source, "paseo", "AGENTS.md"), { recursive: true });
   fs.writeFileSync(path.join(realApp, "index.js"), "export const app = true\n");
-  fs.mkdirSync(path.join(realApp, "node_modules", "left-pad"), { recursive: true });
-  fs.writeFileSync(path.join(realApp, "node_modules", "left-pad", "index.js"), "module.exports = 1\n");
-  fs.writeFileSync(path.join(realProtocol, "index.js"), "export {}\n");
-  fs.symlinkSync(path.join("..", "missing-app"), path.join(scoped, "app"));
-  fs.symlinkSync("/old/staging/paseo/source/packages/protocol", path.join(scoped, "protocol"));
-  fs.symlinkSync(realApp, path.join(scoped, "client"));
-  fs.symlinkSync(path.join("..", "missing-orphan"), path.join(scoped, "orphan"));
-  fs.symlinkSync(realApp, path.join(realApp, "self"));
+  fs.writeFileSync(path.join(screenshot, "1.png"), "png");
+  fs.writeFileSync(path.join(scoped, "ignored.js"), "should not pack\n");
   fs.writeFileSync(path.join(source, "MANIFEST.json"), "{}\n");
 
   copyFiveStackTree(source, destination);
   assert.equal(
-    fs.readFileSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app", "index.js"), "utf8"),
+    fs.readFileSync(path.join(destination, "paseo", "source", "packages", "app", "index.js"), "utf8"),
     "export const app = true\n",
   );
-  assert.equal(
-    fs.readFileSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "protocol", "index.js"), "utf8"),
-    "export {}\n",
-  );
-  assert.equal(
-    fs.readFileSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "client", "index.js"), "utf8"),
-    "export const app = true\n",
-  );
-  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "orphan")), false);
-  assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app")).isSymbolicLink(), false);
-  assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "protocol")).isSymbolicLink(), false);
-  assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "client")).isSymbolicLink(), false);
-  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app", "node_modules")), false);
-  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "packages", "app", "self")), false);
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules")), false);
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "fastlane")), false);
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "AGENTS.md")), false);
   assert.equal(fs.readFileSync(path.join(destination, "MANIFEST.json"), "utf8"), "{}\n");
 });
 

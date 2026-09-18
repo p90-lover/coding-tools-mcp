@@ -777,10 +777,6 @@ function copyFiveStackResolved(from, to, seen) {
   fs.chmodSync(to, metadata.mode & 0o777 || 0o600);
 }
 
-function pathHasNodeModules(pathname) {
-  return String(pathname).split(/[\\/]/).some((part) => part.toLowerCase() === "node_modules");
-}
-
 function isUnsafeWindowsPackagedName(name) {
   const base = String(name || "");
   if (!base || /[. ]$/.test(base)) return true;
@@ -790,6 +786,12 @@ function isUnsafeWindowsPackagedName(name) {
 
 function looksLikePackagedFileName(name) {
   return /\.(?:md|png|jpe?g|gif|webp|json|txt|ya?ml|js|mjs|cjs|ts|tsx|css|html|svg|lock|map|xml)$/i.test(String(name || ""));
+}
+
+function skipFiveStackPackageEntry(name, metadata) {
+  if (name === ".git" || name === ".bin" || name === "node_modules" || name === "fastlane") return true;
+  if (isUnsafeWindowsPackagedName(name)) return true;
+  return Boolean(metadata && metadata.isDirectory() && looksLikePackagedFileName(name));
 }
 
 function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
@@ -819,9 +821,7 @@ function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
     fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${source}: ${error instanceof Error ? error.message : String(error)}`);
   }
   for (const entry of entries) {
-    if (entry.name === ".git" || entry.name === ".bin") continue;
-    if (isUnsafeWindowsPackagedName(entry.name)) continue;
-    if (entry.name === "node_modules" && (pathHasNodeModules(source) || pathHasNodeModules(destination))) continue;
+    if (skipFiveStackPackageEntry(entry.name)) continue;
     const from = path.join(source, entry.name);
     const to = path.join(destination, entry.name);
     let linkStat;
@@ -851,6 +851,7 @@ function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
         }
       }
     }
+    if (skipFiveStackPackageEntry(entry.name, metadata)) continue;
     if (metadata.isDirectory()) {
       if (looksLikePackagedFileName(entry.name)) continue;
       copyFiveStackTree(resolvedFrom, to, nextSeen);
@@ -1066,6 +1067,7 @@ module.exports = {
   TUNNEL_VERSION,
   componentPaths,
   copyFiveStackTree,
+  skipFiveStackPackageEntry,
   createRetentionSession,
   preparePackageResources,
   readTunnelZip,

@@ -648,9 +648,8 @@ function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = [
     for (const script of extraScripts) {
       runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
     }
-    // Windows npm workspace junctions keep absolute targets. publishDirectory
-    // renames the staging tree afterward, which would leave @scope/name dangling.
-    materializeNpmWorkspaceLinks(sourceRoot);
+    // Do not materialize workspace links into node_modules. NSIS 7-Zip failed on
+    // a 4GB Paseo tree (react-native, expo, workerd) after that copy.
   } finally {
     removeWrittenFiles(cleanup);
   }
