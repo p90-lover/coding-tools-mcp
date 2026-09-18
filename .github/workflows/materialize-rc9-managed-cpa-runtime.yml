@@ -6,6 +6,7 @@ on:
       - fix/rc9-fully-managed-cpa-runtime
     paths:
       - aiTemp/rc9-managed-cpa-runtime/materialize.py
+      - desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
       - .github/workflows/materialize-rc9-managed-cpa-runtime.yml
   workflow_dispatch:
 
