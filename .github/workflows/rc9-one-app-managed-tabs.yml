@@ -12,6 +12,17 @@ on:
       - 'desktop-electron/tests/managed-app-tabs.test.cjs'
       - 'docs/superpowers/specs/2026-09-18-one-app-tabbed-ui-amendment.md'
       - 'docs/superpowers/plans/2026-09-18-one-app-tabbed-workspace.md'
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.9
+    paths:
+      - '.github/workflows/rc9-one-app-managed-tabs.yml'
+      - 'aiTemp/rc9-one-app-managed/materialize-managed-app-tabs.mjs'
+      - 'desktop-electron/src/features/ManagedAppsSurface.tsx'
+      - 'desktop-electron/src/features/managed-apps.css'
+      - 'desktop-electron/tests/managed-app-tabs.test.cjs'
+      - 'docs/superpowers/specs/2026-09-18-one-app-tabbed-ui-amendment.md'
+      - 'docs/superpowers/plans/2026-09-18-one-app-tabbed-workspace.md'
   workflow_dispatch:
 
 permissions:
@@ -33,6 +44,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with:
@@ -93,4 +105,4 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'feat(rc9): wire one-window managed app tabs'
-          git push origin HEAD:integration/v0.7.0-rc.9-one-app-managed
+          git push origin "HEAD:${{ github.head_ref || github.ref_name }}"
