@@ -12,6 +12,7 @@ on:
       - 'desktop-electron/src/features/managed-apps.css'
       - 'desktop-electron/tests/managed-app-tabs.test.cjs'
       - 'desktop-electron/tests/managed-app-tab-state.test.cjs'
+      - 'desktop-electron/tests/managed-cpa-tab.test.cjs'
       - 'docs/superpowers/specs/2026-09-18-one-app-tabbed-ui-amendment.md'
       - 'docs/superpowers/plans/2026-09-18-one-app-tabbed-workspace.md'
   pull_request:
@@ -25,6 +26,7 @@ on:
       - 'desktop-electron/src/features/managed-apps.css'
       - 'desktop-electron/tests/managed-app-tabs.test.cjs'
       - 'desktop-electron/tests/managed-app-tab-state.test.cjs'
+      - 'desktop-electron/tests/managed-cpa-tab.test.cjs'
       - 'docs/superpowers/specs/2026-09-18-one-app-tabbed-ui-amendment.md'
       - 'docs/superpowers/plans/2026-09-18-one-app-tabbed-workspace.md'
   workflow_dispatch:
@@ -80,7 +82,7 @@ jobs:
           set -euo pipefail
           bun install --cwd desktop-electron --frozen-lockfile
 
-      - name: Run tab, state, and renderer contracts
+      - name: Run tab, state, CPA, and renderer contracts
         shell: bash
         run: |
           set -euo pipefail
@@ -90,6 +92,7 @@ jobs:
           node --test \
             desktop-electron/tests/managed-app-tabs.test.cjs \
             desktop-electron/tests/managed-app-tab-state.test.cjs \
+            desktop-electron/tests/managed-cpa-tab.test.cjs \
             desktop-electron/tests/state.test.cjs \
             desktop-electron/tests/external-services-control-plane.test.cjs \
             desktop-electron/tests/renderer-wiring.test.cjs
