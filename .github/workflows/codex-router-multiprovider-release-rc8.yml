@@ -1,3 +1,4 @@
+# Exact-source trigger after the verified renderer-retention and bounded-elevation repairs.
 name: Coding Tools v0.7.0-rc.8 exact-source Windows release
 
 on:

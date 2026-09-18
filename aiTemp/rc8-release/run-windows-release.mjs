@@ -37,6 +37,7 @@ const childEnv = {
   SOURCE_SHA: sourceSha,
   RELEASE_VERSION: releaseVersion,
   RELEASE_TAG: releaseTag,
+  VALIDATION_WORKFLOW: '.github/workflows/codex-router-multiprovider-release-rc8.yml',
   WINDOWS_INSTALLER: installerName,
   CODING_TOOLS_RETENTION_ROOT: trash,
   ELECTRON_BUILDER_CACHE: path.join(aiTemp, 'cache', 'electron-builder'),
@@ -200,6 +201,18 @@ async function main() {
     '-TrashRoot', trash,
     '-EvidenceRoot', evidence,
   ], { env: childEnv, label: 'retained NSIS and MSI migration acceptance' });
+
+  const rendererDist = path.join(root, 'desktop-electron', 'dist');
+  const retainedRenderer = path.join(trash, 'generated-renderer', sourceSha);
+  if (fs.existsSync(rendererDist)) {
+    assert(!fs.existsSync(retainedRenderer), 'RETAINED_RENDERER_ALREADY_EXISTS');
+    fs.mkdirSync(path.dirname(retainedRenderer), { recursive: true });
+    fs.renameSync(rendererDist, retainedRenderer);
+    run('git', ['restore', '--source=HEAD', '--worktree', '--', 'desktop-electron/dist'], {
+      env: process.env,
+      label: 'restore tracked renderer after retaining package output',
+    });
+  }
 
   requireCleanTrackedSource();
   const remoteHead = runCapture('git', ['ls-remote', 'origin', `refs/heads/${branch}`]).split(/\s+/)[0];
