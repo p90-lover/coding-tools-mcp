@@ -867,6 +867,11 @@ function preparePackageResources(options = {}) {
     writeJson(path.join(stagingRoot, ...paths["rollback-manifest"].split("/")), STABLE_ROLLBACK);
     writeComponent(stagingRoot, paths["third-party-notices"], notices);
     copyTreeDeref(bundledRuntimes.root, path.join(stagingRoot, "bundled-runtimes"));
+    const lane193Root = options.lane193Root
+      || path.join(desktopRoot, "build", "paseo-anneal-commandcode");
+    if (fs.existsSync(lane193Root) && fs.statSync(lane193Root).isDirectory()) {
+      copyTreeDeref(lane193Root, path.join(stagingRoot, "paseo-anneal-commandcode"));
+    }
 
     const components = Object.keys(paths).sort(compareText).map((id) => {
       const componentPath = path.join(stagingRoot, ...paths[id].split("/"));

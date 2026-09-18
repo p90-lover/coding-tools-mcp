@@ -10,11 +10,17 @@
   "version": "0.8.0",
   "strategy": "git-source",
   "license": "Apache-2.0",
+  "bundle": {
+    "required": true,
+    "kind": "source-tree",
+    "entrypoint": "package.json",
+    "prebuilt": false
+  },
   "install": {
     "steps": [
       { "id": "clone-pinned-source", "kind": "git-checkout" },
-      { "id": "npm-ci", "kind": "command", "executable": "{npm}", "arguments": ["ci"] },
-      { "id": "build-server", "kind": "command", "executable": "{npm}", "arguments": ["run", "build:server"] },
+      { "id": "npm-ci", "kind": "command", "executable": "{npm}", "arguments": ["ci"], "skipIfFile": "node_modules" },
+      { "id": "build-server", "kind": "command", "executable": "{npm}", "arguments": ["run", "build:server"], "skipIfFile": "dist" },
       { "id": "activate", "kind": "activate" }
     ]
   },

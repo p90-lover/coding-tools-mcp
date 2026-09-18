@@ -13,6 +13,9 @@ on:
       - 'desktop-electron/vendor/upstream/**'
       - 'desktop-electron/scripts/package.cjs'
       - 'desktop-electron/scripts/prepare-bundled-runtimes.cjs'
+      - 'desktop-electron/scripts/prepare-paseo-anneal-commandcode.cjs'
+      - 'desktop-electron/scripts/prepare-package-resources.cjs'
+      - 'desktop-electron/package.json'
       - 'desktop-electron/scripts/verify-package.cjs'
       - 'desktop-electron/scripts/smoke-package.cjs'
       - 'desktop-electron/tests/package-contents.test.cjs'
@@ -28,6 +31,9 @@ on:
       - 'desktop-electron/vendor/upstream/**'
       - 'desktop-electron/scripts/package.cjs'
       - 'desktop-electron/scripts/prepare-bundled-runtimes.cjs'
+      - 'desktop-electron/scripts/prepare-paseo-anneal-commandcode.cjs'
+      - 'desktop-electron/scripts/prepare-package-resources.cjs'
+      - 'desktop-electron/package.json'
       - 'desktop-electron/scripts/verify-package.cjs'
       - 'desktop-electron/scripts/smoke-package.cjs'
       - 'desktop-electron/tests/package-contents.test.cjs'
@@ -210,6 +216,7 @@ jobs:
         shell: pwsh
         env:
           SOURCE_SHA: ${{ github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
           CODING_TOOLS_TUNNEL_CLIENT_ARCHIVE: ${{ github.workspace }}\aiTemp\input\tunnel-client\v0.0.12\windows-amd64\tunnel-client-v0.0.12-windows-amd64.zip
           ELECTRON_BUILDER_CACHE: ${{ github.workspace }}\aiTemp\cache\electron-builder
           CODING_TOOLS_RETENTION_ROOT: ${{ github.workspace }}\aiTemp\Trash\rc8-external-services\windows

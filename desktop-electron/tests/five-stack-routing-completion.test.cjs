@@ -90,7 +90,7 @@ test("external service state owns persisted execution endpoints for Paseo and An
 
   const initialPaseo = controller.snapshot().services.find((service) => service.id === "paseo");
   const initialAnneal = controller.snapshot().services.find((service) => service.id === "anneal");
-  assert.equal(initialPaseo.executionEndpoint, "ws://127.0.0.1:6767/ws");
+  assert.equal(initialPaseo.executionEndpoint, "ws://127.0.0.1:6768/ws");
   assert.equal(initialAnneal.executionEndpoint, "http://127.0.0.1:3000/");
 
   controller.configure("paseo", { executionEndpoint: "ws://localhost:7777/control" });

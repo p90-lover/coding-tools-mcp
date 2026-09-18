@@ -415,6 +415,7 @@ test("package and runtime preparation use repository aiTemp retention without de
   for (const [label, source] of [
     ["package composer", composer],
     ["bundled runtime composer", fs.readFileSync(path.join(repositoryRoot, "desktop-electron", "scripts", "prepare-bundled-runtimes.cjs"), "utf8")],
+    ["paseo anneal commandcode composer", fs.readFileSync(path.join(repositoryRoot, "desktop-electron", "scripts", "prepare-paseo-anneal-commandcode.cjs"), "utf8")],
     ["runtime preparation", runtimePreparation],
     ["runtime builder", runtimeBuilder],
   ]) {
@@ -432,7 +433,7 @@ test("package and runtime preparation use repository aiTemp retention without de
   assert.equal(manifest.scripts["build:bundled-runtimes"], "node scripts/prepare-bundled-runtimes.cjs");
   assert.equal(
     manifest.scripts["build:package-resources"],
-    "node scripts/prepare-bundled-runtimes.cjs && node scripts/prepare-package-resources.cjs",
+    "node scripts/prepare-bundled-runtimes.cjs && node scripts/prepare-paseo-anneal-commandcode.cjs && node scripts/prepare-package-resources.cjs",
   );
   for (const script of ["package", "package:mac", "package:win", "package:linux"]) {
     assert.match(manifest.scripts[script], /build:runtime/);

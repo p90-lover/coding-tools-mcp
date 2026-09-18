@@ -14,7 +14,7 @@
     "build": "bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
     "build:bundled-runtimes": "node scripts/prepare-bundled-runtimes.cjs",
-    "build:package-resources": "node scripts/prepare-bundled-runtimes.cjs && node scripts/prepare-package-resources.cjs",
+    "build:package-resources": "node scripts/prepare-bundled-runtimes.cjs && node scripts/prepare-paseo-anneal-commandcode.cjs && node scripts/prepare-package-resources.cjs",
     "package": "bun run build && bun run build:runtime && bun run build:package-resources && bun run scripts/package.cjs",
     "package:mac": "bun run build && bun run build:runtime && bun run build:package-resources && bun run scripts/package.cjs --mac",
     "package:win": "bun run build && bun run build:runtime && bun run build:package-resources && bun run scripts/package.cjs --win",
