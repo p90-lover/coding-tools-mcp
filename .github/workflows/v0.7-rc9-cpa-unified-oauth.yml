@@ -1,0 +1,245 @@
+name: v0.7 rc.9 unified CPA OAuth accounts
+
+on:
+  push:
+    branches:
+      - fix/v0.7-rc9-unified-cpa-oauth-accounts
+    paths:
+      - aiTemp/rc9-cpa-oauth/**
+      - desktop-electron/electron/cpa-oauth-adapter.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/electron/provider-execution-router.cjs
+      - desktop-electron/src/providers/provider-types.ts
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs
+      - desktop-electron/tests/cpa-oauth-adapter.test.cjs
+      - desktop-electron/tests/cpa-provider-login-routing.test.cjs
+      - .github/workflows/v0.7-rc9-cpa-unified-oauth.yml
+  pull_request:
+    branches:
+      - release/codex-router-multiprovider-0.7.0-rc.8
+    paths:
+      - desktop-electron/electron/cpa-oauth-adapter.cjs
+      - desktop-electron/electron/provider-network.cjs
+      - desktop-electron/electron/provider-bootstrap.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/electron/provider-execution-router.cjs
+      - desktop-electron/src/providers/provider-types.ts
+      - desktop-electron/src/features/ProviderHubSaasSurface.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs
+      - desktop-electron/tests/cpa-oauth-adapter.test.cjs
+      - desktop-electron/tests/cpa-provider-login-routing.test.cjs
+      - .github/workflows/v0.7-rc9-cpa-unified-oauth.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-unified-cpa-oauth-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc9-cpa-oauth/bun-cache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref_name || github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: ${{ github.event_name == 'push' && github.ref_name == 'fix/v0.7-rc9-unified-cpa-oauth-accounts' }}
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: '1.4.0'
+
+      - name: Prepare retained temporary roots
+        run: |
+          mkdir -p \
+            aiTemp/rc9-cpa-oauth/evidence \
+            aiTemp/rc9-cpa-oauth/renderer \
+            aiTemp/rc9-cpa-oauth/tmp \
+            aiTemp/Trash/rc9-cpa-oauth
+
+      - name: Detect whether production patch is materialized
+        id: patch_state
+        shell: bash
+        run: |
+          if [[ -f desktop-electron/electron/cpa-oauth-adapter.cjs ]] \
+            && grep -Fq 'cpa-codex' desktop-electron/src/providers/provider-types.ts; then
+            echo 'applied=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'applied=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record the test-first failure
+        if: steps.patch_state.outputs.applied == 'false'
+        shell: bash
+        run: |
+          set -uo pipefail
+          set +e
+          node --test \
+            desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs \
+            desktop-electron/tests/cpa-oauth-adapter.test.cjs \
+            desktop-electron/tests/cpa-provider-login-routing.test.cjs \
+            > aiTemp/rc9-cpa-oauth/evidence/red.txt 2>&1
+          status=$?
+          set -e
+          cat aiTemp/rc9-cpa-oauth/evidence/red.txt
+          if [[ $status -eq 0 ]]; then
+            echo 'Unified CPA OAuth contracts unexpectedly passed before implementation.' >&2
+            exit 1
+          fi
+          grep -Eq 'cpa-oauth-adapter|loginAdapters|gemini-oauth|AssertionError|ERR_ASSERTION' \
+            aiTemp/rc9-cpa-oauth/evidence/red.txt
+
+      - name: Apply bounded unified CPA OAuth implementation
+        if: steps.patch_state.outputs.applied == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 aiTemp/rc9-cpa-oauth/apply_patch.py \
+            2>&1 | tee aiTemp/rc9-cpa-oauth/evidence/materializer.txt
+          grep -F RC9_CPA_UNIFIED_OAUTH_PATCH_OK \
+            aiTemp/rc9-cpa-oauth/evidence/materializer.txt
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Install exact Electron dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          absolute_tmp="$PWD/aiTemp/rc9-cpa-oauth/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun install --cwd desktop-electron --frozen-lockfile \
+            2>&1 | tee aiTemp/rc9-cpa-oauth/evidence/install.txt
+
+      - name: Run unified CPA OAuth and existing provider contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs \
+            desktop-electron/tests/cpa-oauth-adapter.test.cjs \
+            desktop-electron/tests/cpa-provider-login-routing.test.cjs \
+            desktop-electron/tests/antigravity-provider-session.test.cjs \
+            desktop-electron/tests/antigravity-session-binding.test.cjs \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/provider-multiaccount-global-proxy.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/provider-orchestrator-credential-boundary.test.cjs \
+            2>&1 | tee aiTemp/rc9-cpa-oauth/evidence/contracts.txt
+          grep -F '# fail 0' aiTemp/rc9-cpa-oauth/evidence/contracts.txt
+
+      - name: Validate runtime syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in \
+            desktop-electron/electron/cpa-oauth-adapter.cjs \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/electron/provider-bootstrap.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/electron/provider-execution-router.cjs; do
+            node --check "$file"
+          done
+
+      - name: Typecheck and build isolated renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          absolute_tmp="$PWD/aiTemp/rc9-cpa-oauth/tmp"
+          TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+            bun run --cwd desktop-electron typecheck \
+            2>&1 | tee aiTemp/rc9-cpa-oauth/evidence/typecheck.txt
+          renderer_out="$PWD/aiTemp/rc9-cpa-oauth/renderer"
+          (
+            cd desktop-electron
+            TMPDIR="$absolute_tmp" TMP="$absolute_tmp" TEMP="$absolute_tmp" \
+              bunx vite build --outDir "$renderer_out" --emptyOutDir false
+          ) 2>&1 | tee aiTemp/rc9-cpa-oauth/evidence/renderer.txt
+          CODING_TOOLS_RENDERER_DIST="$renderer_out" \
+            node --test desktop-electron/tests/renderer-provider-bundle.test.cjs \
+            2>&1 | tee aiTemp/rc9-cpa-oauth/evidence/bundle.txt
+          grep -F '# fail 0' aiTemp/rc9-cpa-oauth/evidence/bundle.txt
+
+      - name: Enforce bounded no-delete implementation scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+          if [[ '${{ steps.patch_state.outputs.applied }}' == 'false' ]]; then
+            changed="$(git status --short --untracked-files=all \
+              | awk '{print $2}' \
+              | grep -v '^aiTemp/rc9-cpa-oauth/evidence/' \
+              | grep -v '^aiTemp/rc9-cpa-oauth/renderer/' \
+              | grep -v '^aiTemp/rc9-cpa-oauth/tmp/' \
+              | grep -v '^desktop-electron/node_modules/' \
+              | sort)"
+            expected="$(printf '%s\n' \
+              desktop-electron/electron/cpa-oauth-adapter.cjs \
+              desktop-electron/electron/provider-bootstrap.cjs \
+              desktop-electron/electron/provider-execution-router.cjs \
+              desktop-electron/electron/provider-network.cjs \
+              desktop-electron/electron/preload.cjs \
+              desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+              desktop-electron/src/providers/provider-types.ts \
+              desktop-electron/src/types.ts | sort)"
+            printf 'Production changes:\n%s\n' "$changed"
+            test "$changed" = "$expected"
+          else
+            test -z "$(git diff --name-only)"
+          fi
+
+      - name: Commit verified unified CPA OAuth implementation
+        if: github.event_name == 'push' && github.ref_name == 'fix/v0.7-rc9-unified-cpa-oauth-accounts' && steps.patch_state.outputs.applied == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/cpa-oauth-adapter.cjs \
+            desktop-electron/electron/provider-bootstrap.cjs \
+            desktop-electron/electron/provider-execution-router.cjs \
+            desktop-electron/electron/provider-network.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/src/features/ProviderHubSaasSurface.tsx \
+            desktop-electron/src/providers/provider-types.ts \
+            desktop-electron/src/types.ts
+          git diff --cached --check
+          git commit -m 'feat(rc9): unify CPA OAuth account login adapters'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Preserve transient dependencies under Trash
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          if [[ -d desktop-electron/node_modules ]]; then
+            destination="aiTemp/Trash/rc9-cpa-oauth/node_modules-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            if [[ ! -e "$destination" ]]; then
+              mv desktop-electron/node_modules "$destination"
+            fi
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc9-unified-cpa-oauth-${{ github.sha }}
+          path: aiTemp/rc9-cpa-oauth/evidence/
+          if-no-files-found: warn
+          retention-days: 14
