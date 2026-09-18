@@ -110,7 +110,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 aiTemp/rc9-cpa-oauth/apply_patch.py \
+          python3 aiTemp/rc9-cpa-oauth/fix_materializer_anchors.py \
+            2>&1 | tee aiTemp/rc9-cpa-oauth/evidence/materializer-anchors.txt
+          grep -F RC9_MATERIALIZER_ANCHORS_FIXED \
+            aiTemp/rc9-cpa-oauth/evidence/materializer-anchors.txt
+          python3 aiTemp/rc9-cpa-oauth/tmp/runtime_apply_patch.py \
             2>&1 | tee aiTemp/rc9-cpa-oauth/evidence/materializer.txt
           grep -F RC9_CPA_UNIFIED_OAUTH_PATCH_OK \
             aiTemp/rc9-cpa-oauth/evidence/materializer.txt
