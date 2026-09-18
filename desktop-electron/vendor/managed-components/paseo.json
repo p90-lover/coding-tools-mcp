@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "paseo",
+  "name": "Paseo",
+  "managedBy": "Coding Tools",
+  "loopbackOnly": true,
+  "repository": "getpaseo/paseo",
+  "repositoryUrl": "https://github.com/getpaseo/paseo.git",
+  "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96",
+  "version": "0.8.0",
+  "strategy": "git-source",
+  "license": "Apache-2.0",
+  "install": {
+    "steps": [
+      { "id": "clone-pinned-source", "kind": "git-checkout" },
+      { "id": "npm-ci", "kind": "command", "executable": "{npm}", "arguments": ["ci"] },
+      { "id": "build-server", "kind": "command", "executable": "{npm}", "arguments": ["run", "build:server"] },
+      { "id": "activate", "kind": "activate" }
+    ]
+  },
+  "launch": {
+    "processes": [
+      {
+        "id": "daemon",
+        "mode": "foreground",
+        "executable": "{npm}",
+        "arguments": ["start"],
+        "environment": {
+          "PASEO_LISTEN": "127.0.0.1:6768"
+        }
+      }
+    ]
+  },
+  "health": {
+    "endpoint": "http://127.0.0.1:6768/",
+    "acceptStatus": [200, 302, 401, 403, 404]
+  },
+  "executionEndpoint": "ws://127.0.0.1:6767/ws"
+}

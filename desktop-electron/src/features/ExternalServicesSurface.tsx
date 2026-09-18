@@ -90,6 +90,19 @@ function statusLabel(language: Language, service: ExternalServiceSnapshot): stri
   return text(language, value[0], value[1]);
 }
 
+function installStateLabel(language: Language, service: ExternalServiceSnapshot): string {
+  const labels: Record<ExternalServiceSnapshot["managedInstall"]["state"], [string, string]> = {
+    "not-installed": ["Not installed", "尚未安裝"],
+    installing: ["Installing", "正在安裝"],
+    installed: ["Managed install ready", "受管理安裝已就緒"],
+    "repair-required": ["Repair required", "需要修復"],
+    external: ["External install", "外部安裝"],
+    error: ["Install error", "安裝錯誤"],
+  };
+  const value = labels[service.managedInstall.state];
+  return text(language, value[0], value[1]);
+}
+
 function splitArguments(value: string): string[] {
   return value
     .split(/\r?\n/u)
@@ -111,6 +124,7 @@ export function ExternalServicesSurface({
   const [selectedId, setSelectedId] = useState<ExternalServiceId>("codex-router");
   const [draft, setDraft] = useState<ServiceDraft | null>(null);
   const [callerKey, setCallerKey] = useState("");
+  const [managedCredential, setManagedCredential] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
 
@@ -179,6 +193,7 @@ export function ExternalServicesSurface({
     if (selected) {
       setDraft(draftFrom(selected));
       setCallerKey("");
+      setManagedCredential("");
       setNotice("");
     }
   }, [selectedId]);
@@ -242,6 +257,28 @@ export function ExternalServicesSurface({
     await api.restartExternalService(selected.id);
   });
 
+  const saveManagedCredential = () => run("managed-credential", async () => {
+    if (!api || !selected || selected.id !== "anneal") return;
+    const value = managedCredential.trim();
+    if (!value) throw new Error(text(language, "Enter a GitHub read token first.", "請先輸入 GitHub 唯讀 Token。"));
+    await api.setManagedComponentCredential("anneal", "githubReadToken", value);
+    setManagedCredential("");
+    setNotice(text(language, "Anneal credential saved securely.", "Anneal 憑證已安全儲存。"));
+  });
+
+  const installOrRepair = () => run("managed-install", async () => {
+    if (!api || !selected) return;
+    const repair = selected.managedInstall.state === "repair-required"
+      || selected.managedInstall.state === "error";
+    if (repair) await api.repairManagedComponent(selected.id);
+    else await api.installManagedComponent(selected.id);
+    setNotice(text(
+      language,
+      `${serviceName(language, selected.id)} is installed and started by Coding Tools.`,
+      `${serviceName(language, selected.id)} 已由 Coding Tools 安裝並啟動。`,
+    ));
+  });
+
   const syncRouter = () => run("sync", async () => {
     if (!api) return;
     const result = await api.syncCodexRouter();
@@ -263,8 +300,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Manage separately installed Codex Router, CommandCode Proxy, Paseo and Anneal while CPA Provider Hub remains the encrypted account and routing authority.",
-            "統一管理另外安裝的 Codex Router、CommandCode Proxy、Paseo 與 Anneal；CPA 供應商中心繼續作為加密帳戶與路由權限來源。",
+            "Install, repair and run Codex Router, CommandCode Proxy, Paseo and Anneal from Coding Tools while CPA Provider Hub remains the encrypted account and routing authority.",
+            "直接由 Coding Tools 安裝、修復同執行 Codex Router、CommandCode Proxy、Paseo 與 Anneal；CPA 供應商中心繼續作為加密帳戶同路由權限來源。",
           )}</p>
         </div>
         <button disabled={busy !== null} onClick={() => void refresh()} type="button">
@@ -301,7 +338,7 @@ export function ExternalServicesSurface({
               <span className="external-service-glyph">{service.name.split(/\s+/u).map((word) => word[0]).slice(0, 2).join("")}</span>
               <div>
                 <strong>{serviceName(language, service.id)}</strong>
-                <small>{statusLabel(language, service)}</small>
+                <small>{statusLabel(language, service)} · {installStateLabel(language, service)}</small>
               </div>
               <i className={`service-state ${service.status}`} />
             </div>
@@ -325,7 +362,59 @@ export function ExternalServicesSurface({
             <span className={`external-service-status status-${selected.status}`}>{statusLabel(language, selected)}</span>
           </header>
 
-          <div className="external-service-form">
+          <section className={`managed-install-panel state-${selected.managedInstall.state}`}>
+            <div>
+              <span>{text(language, "APP-MANAGED COMPONENT", "APP 受管理元件")}</span>
+              <strong>{installStateLabel(language, selected)}</strong>
+              <small>
+                {text(language, "Pinned version", "固定版本")} {selected.managedInstall.version}
+                {selected.managedInstall.commit ? ` · ${selected.managedInstall.commit.slice(0, 12)}` : ""}
+                {selected.managedInstall.platformMode === "wsl2" ? " · WSL2" : ""}
+              </small>
+              {selected.managedInstall.currentStep ? <small>{text(language, "Current step", "目前步驟")}: {selected.managedInstall.currentStep}</small> : null}
+              {selected.managedInstall.error ? <small className="managed-install-error">{selected.managedInstall.error}</small> : null}
+            </div>
+            {selected.id === "anneal" ? (
+              <label className="managed-secret-field">
+                <span>{text(
+                  language,
+                  selected.managedInstall.missingCredentials.includes("githubReadToken")
+                    ? "GitHub read token required"
+                    : "Replace GitHub read token",
+                  selected.managedInstall.missingCredentials.includes("githubReadToken")
+                    ? "需要 GitHub 唯讀 Token"
+                    : "取代 GitHub 唯讀 Token",
+                )}</span>
+                <input
+                  autoComplete="off"
+                  type="password"
+                  value={managedCredential}
+                  onChange={(event) => setManagedCredential(event.target.value)}
+                />
+                <button disabled={busy !== null || !managedCredential.trim()} onClick={() => void saveManagedCredential()} type="button">
+                  {busy === "managed-credential" ? "…" : text(language, "Save credential", "儲存憑證")}
+                </button>
+              </label>
+            ) : null}
+            <button
+              className="primary"
+              disabled={busy !== null
+                || selected.managedInstall.state === "installing"
+                || selected.managedInstall.missingCredentials.length > 0}
+              onClick={() => void installOrRepair()}
+              type="button"
+            >
+              {busy === "managed-install" || selected.managedInstall.state === "installing"
+                ? "…"
+                : selected.managedInstall.state === "installed"
+                  ? text(language, "Repair installation", "修復安裝")
+                  : text(language, "Install / Repair", "安裝／修復")}
+            </button>
+          </section>
+
+          <details className="external-service-advanced">
+            <summary>{text(language, "Advanced manual configuration", "進階手動設定")}</summary>
+            <div className="external-service-form">
             <label className="wide-field">
               <span>{text(language, "Loopback endpoint", "Loopback 端點")}</span>
               <input value={draft.endpoint} onChange={(event) => setDraft({ ...draft, endpoint: event.target.value })} />
@@ -377,7 +466,8 @@ export function ExternalServicesSurface({
             ) : null}
             <label className="service-check"><input checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} type="checkbox" /><span>{text(language, "Enabled", "已啟用")}</span></label>
             <label className="service-check"><input checked={draft.autoStart} onChange={(event) => setDraft({ ...draft, autoStart: event.target.checked })} type="checkbox" /><span>{text(language, "Start with Coding Tools", "隨 Coding Tools 啟動")}</span></label>
-          </div>
+            </div>
+          </details>
 
           {selected.error ? <p className="external-service-error">{selected.error}</p> : null}
           {notice ? <p className="external-service-notice">{notice}</p> : null}

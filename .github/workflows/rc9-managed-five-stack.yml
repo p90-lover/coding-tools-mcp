@@ -1,0 +1,59 @@
+name: rc.9 managed five-stack
+
+on:
+  push:
+    branches: [integration/v0.7.0-rc.9-managed-five-stack]
+    paths:
+      - 'aiTemp/rc9-managed-five-stack/**'
+      - 'desktop-electron/**'
+      - '.github/workflows/rc9-managed-five-stack.yml'
+  pull_request:
+    paths:
+      - 'aiTemp/rc9-managed-five-stack/**'
+      - 'desktop-electron/**'
+      - '.github/workflows/rc9-managed-five-stack.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-managed-five-stack-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc9-managed-five-stack/bun-cache
+
+jobs:
+  verify:
+    name: Managed installs, runtime, renderer, and no-delete gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Verify and run retained rc.9 integration driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.sh.gz.part-* \
+            > aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.sh.gz
+          printf '%s  %s\n' \
+            'b441ad85c9d35313311d6b55ee82bd4c7cde5fba7cad05259eee8d317b0fd40f' \
+            'aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.sh.gz' \
+            | sha256sum -c -
+          gzip -dc aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.sh.gz \
+            > aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.generated.sh
+          printf '%s  %s\n' \
+            '0a8eecb158b9d5cf2ce997eeab591f094bb71fb8c885dfe3f5217475e56fe82c' \
+            'aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.generated.sh' \
+            | sha256sum -c -
+          bash -n aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.generated.sh
+          bash aiTemp/rc9-managed-five-stack/run-rc9-managed-five-stack.generated.sh
