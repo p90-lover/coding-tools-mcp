@@ -15,6 +15,7 @@ on:
       - 'desktop-electron/src/features/external-services.css'
       - 'desktop-electron/vendor/managed-components/**'
       - 'desktop-electron/tests/rc9-managed-five-stack.test.cjs'
+      - 'desktop-electron/tests/managed-components-runtime.test.cjs'
       - 'desktop-electron/tests/external-services-control-plane.test.cjs'
       - 'desktop-electron/package.json'
       - '.github/workflows/rc9-managed-five-stack.yml'
@@ -30,6 +31,7 @@ on:
       - 'desktop-electron/src/features/external-services.css'
       - 'desktop-electron/vendor/managed-components/**'
       - 'desktop-electron/tests/rc9-managed-five-stack.test.cjs'
+      - 'desktop-electron/tests/managed-components-runtime.test.cjs'
       - 'desktop-electron/tests/external-services-control-plane.test.cjs'
       - 'desktop-electron/package.json'
       - '.github/workflows/rc9-managed-five-stack.yml'
@@ -72,6 +74,9 @@ jobs:
       - name: Apply exact guarded production patch
         run: python aiTemp/rc9-managed-five-stack/apply_integration.py
 
+      - name: Harden managed command boundary
+        run: python aiTemp/rc9-managed-five-stack/harden_managed_components.py
+
       - name: Validate runtime syntax
         run: |
           node --check desktop-electron/electron/managed-components.cjs
@@ -86,6 +91,7 @@ jobs:
         run: |
           node --test \
             desktop-electron/tests/rc9-managed-five-stack.test.cjs \
+            desktop-electron/tests/managed-components-runtime.test.cjs \
             desktop-electron/tests/external-services-control-plane.test.cjs \
             desktop-electron/tests/rc7-full-integration-contract.test.cjs \
             desktop-electron/tests/commandcode-provider-session.test.cjs \
@@ -145,7 +151,7 @@ jobs:
             echo 'Verified source is already materialized.'
             exit 0
           fi
-          git commit -m 'feat(rc9): wire managed installs into the five-stack control plane'
+          git commit -m 'fix(rc9): harden the managed five-stack lifecycle'
           git push origin HEAD:integration/v0.7.0-rc.9-managed-five-stack
 
       - name: Preserve transient dependencies in Trash
