@@ -263,6 +263,8 @@ test("Start materializes a missing managed component before launching it", async
 });
 
 function bundledSourceManifest(id) {
+  const entry = id === "commandcode-proxy" ? "proxy.mjs" : "package.json";
+  const port = id === "commandcode-proxy" ? 9090 : id === "paseo" ? 6768 : 5173;
   return {
     schemaVersion: 1,
     id,
@@ -274,10 +276,11 @@ function bundledSourceManifest(id) {
     commit: "a".repeat(40),
     version: "1.0.0",
     strategy: "bundled-source",
+    bundle: { required: true, entrypoint: entry },
     install: {
       steps: [
         { id: "unpack-bundled-source", kind: "unpack-bundle" },
-        { id: "verify-entrypoint", kind: "assert-file", path: "proxy.mjs" },
+        { id: "verify-entrypoint", kind: "assert-file", path: entry },
         { id: "activate", kind: "activate" },
       ],
     },
@@ -287,12 +290,12 @@ function bundledSourceManifest(id) {
           id: "service",
           mode: "foreground",
           executable: "{runtime}",
-          arguments: ["{home}/proxy.mjs"],
+          arguments: [`{home}/${entry}`],
         },
       ],
     },
     health: {
-      endpoint: "http://127.0.0.1:9090/",
+      endpoint: `http://127.0.0.1:${port}/`,
       acceptStatus: [200],
     },
   };
@@ -383,8 +386,8 @@ test("bundled-source Start fails closed when app resources are missing", async (
   const manifestRoot = temporaryDirectory("coding-tools-missing-bundle-manifests");
   const dataRoot = temporaryDirectory("coding-tools-missing-bundle-data");
   for (const id of COMPONENT_IDS) {
-    writeJson(path.join(manifestRoot, `${id}.json`), id === "commandcode-proxy"
-      ? { ...bundledSourceManifest(id), bundle: { required: true } }
+    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
+      ? bundledSourceManifest(id)
       : releaseManifest(id, payload));
   }
   const controller = createManagedComponentController({
@@ -398,7 +401,7 @@ test("bundled-source Start fails closed when app resources are missing", async (
     spawnProcess: () => mockChild(9300),
   });
   await assert.rejects(
-    () => controller.startComponent("commandcode-proxy"),
+    () => controller.startComponent("paseo"),
     /bundled runtime is missing|bundled inside Coding Tools Desktop/i,
   );
   controller.dispose();

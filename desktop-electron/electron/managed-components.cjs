@@ -390,10 +390,10 @@ function optionalSecretKeys(manifest) {
   );
 }
 
-function bundledSourceHome(manifest, bundledRoot, env = process.env) {
+function bundledSourceHome(manifest, bundledRoot, env = process.env, { includeDefaults = true } = {}) {
   const roots = [
     ...(bundledRoot ? [bundledRoot] : []),
-    ...defaultBundledRoots(env),
+    ...(includeDefaults ? defaultBundledRoots(env) : []),
   ];
   const entry = manifest.bundle?.entrypoint;
   for (const root of roots) {
@@ -1060,8 +1060,10 @@ function createManagedComponentController({
   }
 
   async function prepareBundledSource(manifest, stagingHome) {
-    const inApp = bundledSourceHome(manifest, bundledRoot, env);
-    const source = inApp || bundledSourceRoot(manifest);
+    const explicitHome = bundledSourceHome(manifest, bundledRoot, env, { includeDefaults: false });
+    const extraResources = explicitHome ? null : bundledSourceRoot(manifest);
+    const inApp = explicitHome || (extraResources ? null : bundledSourceHome(manifest, null, env));
+    const source = explicitHome || extraResources || inApp;
     if (!source) {
       throw new Error(`${manifest.name} bundled runtime is missing from this Coding Tools build`);
     }
