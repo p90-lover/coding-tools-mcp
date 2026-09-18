@@ -69,3 +69,22 @@ test("fetched bundled archives are copied through copyBundledTree instead of kee
   assert.match(source, /The directory name is invalid/);
   assert.match(source, /flattenSymlinks\(dest\)/);
 });
+
+test("copyBundledTree and flatten drop Windows file-named directories that 7za cannot archive", () => {
+  const source = temporaryDirectory("coding-tools-bundled-file-dirs-src");
+  const destination = temporaryDirectory("coding-tools-bundled-file-dirs-dst");
+  fs.writeFileSync(path.join(source, "package.json"), `${JSON.stringify({ name: "anneal" })}\n`);
+  fs.mkdirSync(path.join(source, "CLAUDE.md"));
+  fs.mkdirSync(path.join(source, "screenshots", "1.png"), { recursive: true });
+  fs.mkdirSync(path.join(source, "packages", "server", "AGENTS.md"), { recursive: true });
+  fs.writeFileSync(path.join(source, "packages", "server", "index.js"), "export {}\n");
+
+  copyBundledTree(source, destination);
+  flattenSymlinks(destination);
+
+  assert.equal(fs.readFileSync(path.join(destination, "package.json"), "utf8"), `${JSON.stringify({ name: "anneal" })}\n`);
+  assert.equal(fs.readFileSync(path.join(destination, "packages", "server", "index.js"), "utf8"), "export {}\n");
+  assert.equal(fs.existsSync(path.join(destination, "CLAUDE.md")), false);
+  assert.equal(fs.existsSync(path.join(destination, "screenshots", "1.png")), false);
+  assert.equal(fs.existsSync(path.join(destination, "packages", "server", "AGENTS.md")), false);
+});

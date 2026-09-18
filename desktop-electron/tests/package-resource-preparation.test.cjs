@@ -302,6 +302,8 @@ test("five-stack package copy materializes dangling npm workspace links from pac
   fs.mkdirSync(realApp, { recursive: true });
   fs.mkdirSync(realProtocol, { recursive: true });
   fs.writeFileSync(path.join(realApp, "index.js"), "export const app = true\n");
+  fs.mkdirSync(path.join(realApp, "node_modules", "left-pad"), { recursive: true });
+  fs.writeFileSync(path.join(realApp, "node_modules", "left-pad", "index.js"), "module.exports = 1\n");
   fs.writeFileSync(path.join(realProtocol, "index.js"), "export {}\n");
   fs.symlinkSync(path.join("..", "missing-app"), path.join(scoped, "app"));
   fs.symlinkSync("/old/staging/paseo/source/packages/protocol", path.join(scoped, "protocol"));
@@ -327,8 +329,28 @@ test("five-stack package copy materializes dangling npm workspace links from pac
   assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app")).isSymbolicLink(), false);
   assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "protocol")).isSymbolicLink(), false);
   assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "client")).isSymbolicLink(), false);
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app", "node_modules")), false);
   assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "packages", "app", "self")), false);
   assert.equal(fs.readFileSync(path.join(destination, "MANIFEST.json"), "utf8"), "{}\n");
+});
+
+test("five-stack package copy skips Windows file-named directories that 7za cannot archive", () => {
+  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "coding-tools-five-stack-file-dirs-"));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "destination");
+  fs.mkdirSync(path.join(source, "anneal", "source"), { recursive: true });
+  fs.writeFileSync(path.join(source, "anneal", "source", "package.json"), "{}\n");
+  fs.mkdirSync(path.join(source, "anneal", "source", "CLAUDE.md"));
+  fs.mkdirSync(path.join(source, "paseo", "source", "fastlane", "metadata", "android", "en-US", "images", "phoneScreenshots", "1.png"), { recursive: true });
+  fs.writeFileSync(path.join(source, "paseo", "source", "AGENTS.md"), "# paseo\n");
+  fs.writeFileSync(path.join(source, "MANIFEST.json"), "{}\n");
+
+  copyFiveStackTree(source, destination);
+
+  assert.equal(fs.readFileSync(path.join(destination, "anneal", "source", "package.json"), "utf8"), "{}\n");
+  assert.equal(fs.existsSync(path.join(destination, "anneal", "source", "CLAUDE.md")), false);
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "fastlane", "metadata", "android", "en-US", "images", "phoneScreenshots", "1.png")), false);
+  assert.equal(fs.readFileSync(path.join(destination, "paseo", "source", "AGENTS.md"), "utf8"), "# paseo\n");
 });
 
 test("rejects a tunnel archive digest mismatch before replacing prior output", () => {

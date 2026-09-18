@@ -777,6 +777,21 @@ function copyFiveStackResolved(from, to, seen) {
   fs.chmodSync(to, metadata.mode & 0o777 || 0o600);
 }
 
+function pathHasNodeModules(pathname) {
+  return String(pathname).split(/[\\/]/).some((part) => part.toLowerCase() === "node_modules");
+}
+
+function isUnsafeWindowsPackagedName(name) {
+  const base = String(name || "");
+  if (!base || /[. ]$/.test(base)) return true;
+  if (/[<>:"/\\|?*]/.test(base)) return true;
+  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(base);
+}
+
+function looksLikePackagedFileName(name) {
+  return /\.(?:md|png|jpe?g|gif|webp|json|txt|ya?ml|js|mjs|cjs|ts|tsx|css|html|svg|lock|map|xml)$/i.test(String(name || ""));
+}
+
 function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
@@ -804,7 +819,9 @@ function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
     fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${source}: ${error instanceof Error ? error.message : String(error)}`);
   }
   for (const entry of entries) {
-    if (entry.name === ".git") continue;
+    if (entry.name === ".git" || entry.name === ".bin") continue;
+    if (isUnsafeWindowsPackagedName(entry.name)) continue;
+    if (entry.name === "node_modules" && (pathHasNodeModules(source) || pathHasNodeModules(destination))) continue;
     const from = path.join(source, entry.name);
     const to = path.join(destination, entry.name);
     let linkStat;
@@ -835,6 +852,7 @@ function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set()) {
       }
     }
     if (metadata.isDirectory()) {
+      if (looksLikePackagedFileName(entry.name)) continue;
       copyFiveStackTree(resolvedFrom, to, nextSeen);
       continue;
     }

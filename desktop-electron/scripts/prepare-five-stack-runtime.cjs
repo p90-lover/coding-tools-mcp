@@ -79,7 +79,7 @@ function copyTree(sourceRoot, destinationRoot) {
   }
 }
 
-function copyTreeAcyclic(sourceRoot, destinationRoot, seen) {
+function copyTreeAcyclic(sourceRoot, destinationRoot, seen, options = {}) {
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
   let real;
@@ -101,7 +101,8 @@ function copyTreeAcyclic(sourceRoot, destinationRoot, seen) {
     fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
     for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
       if (entry.name === ".git") continue;
-      copyTreeAcyclic(path.join(source, entry.name), path.join(destination, entry.name), nextSeen);
+      if (options.skipNodeModules && entry.name === "node_modules") continue;
+      copyTreeAcyclic(path.join(source, entry.name), path.join(destination, entry.name), nextSeen, options);
     }
     return;
   }
@@ -713,7 +714,7 @@ function materializeNpmWorkspaceLinks(root) {
         }
         unlinkFilesystemLink(full);
         if (targetStat.isDirectory()) {
-          copyTreeAcyclic(resolved, full, new Set());
+          copyTreeAcyclic(resolved, full, new Set(), { skipNodeModules: true });
           stack.push(full);
         } else if (targetStat.isFile()) {
           fs.mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });

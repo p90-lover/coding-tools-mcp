@@ -6,6 +6,18 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const BUNDLED_IDS = Object.freeze(["commandcode-proxy", "paseo", "anneal"]);
+const SKIP_BUNDLED_DIRS = new Set([".git", "node_modules", ".bin", "fastlane", ".github"]);
+
+function isUnsafeWindowsPackagedName(name) {
+  const base = String(name || "");
+  if (!base || /[. ]$/.test(base)) return true;
+  if (/[<>:"/\\|?*]/.test(base)) return true;
+  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(base);
+}
+
+function looksLikePackagedFileName(name) {
+  return /\.(?:md|png|jpe?g|gif|webp|json|txt|ya?ml|js|mjs|cjs|ts|tsx|css|html|svg|lock|map|xml)$/i.test(String(name || ""));
+}
 
 function isLinkOrReparse(filePath, dirent, linkStat) {
   if ((dirent && typeof dirent.isSymbolicLink === "function" && dirent.isSymbolicLink()) || linkStat.isSymbolicLink()) {
@@ -48,7 +60,7 @@ function flattenSymlinks(root, seen = new Set()) {
     return;
   }
   for (const entry of entries) {
-    if (entry.name === ".git") continue;
+    if (SKIP_BUNDLED_DIRS.has(entry.name) || isUnsafeWindowsPackagedName(entry.name)) continue;
     const full = path.join(dir, entry.name);
     let linkStat;
     try {
@@ -76,7 +88,13 @@ function flattenSymlinks(root, seen = new Set()) {
       fs.chmodSync(full, targetStat.mode & 0o777 || 0o600);
       continue;
     }
-    if (linkStat.isDirectory()) flattenSymlinks(full, seen);
+    if (linkStat.isDirectory()) {
+      if (looksLikePackagedFileName(entry.name)) {
+        fs.rmSync(full, { recursive: true, force: true });
+        continue;
+      }
+      flattenSymlinks(full, seen);
+    }
   }
 }
 
@@ -95,7 +113,7 @@ function copyBundledTree(sourceRoot, destinationRoot) {
       return;
     }
     for (const entry of entries) {
-      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      if (SKIP_BUNDLED_DIRS.has(entry.name) || isUnsafeWindowsPackagedName(entry.name)) continue;
       const fromPath = path.join(from, entry.name);
       const toPath = path.join(to, entry.name);
       let linkStat;
@@ -120,6 +138,7 @@ function copyBundledTree(sourceRoot, destinationRoot) {
         continue;
       }
       if (linkStat.isDirectory()) {
+        if (looksLikePackagedFileName(entry.name)) continue;
         visit(fromPath, toPath);
         continue;
       }
@@ -209,5 +228,6 @@ module.exports = {
   BUNDLED_IDS,
   copyBundledTree,
   flattenSymlinks,
+  looksLikePackagedFileName,
   materializeBundledComponents,
 };

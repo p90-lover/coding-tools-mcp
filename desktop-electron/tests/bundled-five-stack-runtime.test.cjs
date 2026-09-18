@@ -604,6 +604,8 @@ test("five-stack prepare replaces npm workspace links with real copies before pu
   fs.mkdirSync(app, { recursive: true });
   fs.mkdirSync(scoped, { recursive: true });
   fs.writeFileSync(path.join(app, "index.js"), "export const app = true\n");
+  fs.mkdirSync(path.join(app, "node_modules", "left-pad"), { recursive: true });
+  fs.writeFileSync(path.join(app, "node_modules", "left-pad", "index.js"), "module.exports = 1\n");
   fs.symlinkSync(path.relative(scoped, app), path.join(scoped, "app"));
 
   materializeNpmWorkspaceLinks(source);
@@ -611,6 +613,7 @@ test("five-stack prepare replaces npm workspace links with real copies before pu
   const materialized = path.join(scoped, "app");
   assert.equal(fs.lstatSync(materialized).isSymbolicLink(), false);
   assert.equal(fs.readFileSync(path.join(materialized, "index.js"), "utf8"), "export const app = true\n");
+  assert.equal(fs.existsSync(path.join(materialized, "node_modules")), false);
   assert.equal(fs.readFileSync(path.join(app, "index.js"), "utf8"), "export const app = true\n");
 });
 
