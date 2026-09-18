@@ -116,7 +116,9 @@ fn validate_target(profile: &ProviderProfile, target: ImageGenerationTarget) -> 
             .capabilities
             .contains(&ProviderCapability::ImageGeneration)
     {
-        return Err(fail("Provider profile is not admitted for image_generation"));
+        return Err(fail(
+            "Provider profile is not admitted for image_generation",
+        ));
     }
     let allowed = match target {
         ImageGenerationTarget::Paseo => profile.paseo_enabled,
@@ -124,7 +126,9 @@ fn validate_target(profile: &ProviderProfile, target: ImageGenerationTarget) -> 
         ImageGenerationTarget::Direct => profile.direct_enabled,
     };
     if !allowed {
-        return Err(fail("Provider profile is not admitted for the selected engine"));
+        return Err(fail(
+            "Provider profile is not admitted for the selected engine",
+        ));
     }
     Ok(())
 }
@@ -141,10 +145,15 @@ fn endpoint(profile: &ProviderProfile, model: &str) -> AppResult<Url> {
             "images/generations".to_string()
         }
         ProviderProtocol::GeminiNative => {
-            format!("models/{}:generateContent", model.trim_start_matches("models/"))
+            format!(
+                "models/{}:generateContent",
+                model.trim_start_matches("models/")
+            )
         }
         ProviderProtocol::AnthropicMessages => {
-            return Err(fail("Anthropic Messages does not expose image output generation"));
+            return Err(fail(
+                "Anthropic Messages does not expose image output generation",
+            ));
         }
     };
     let base_path = url.path().trim_end_matches('/');
@@ -225,7 +234,10 @@ fn request_body(profile: &ProviderProfile, input: &ImageGenerationInput) -> Valu
 }
 
 async fn read_limited(mut response: reqwest::Response, limit: usize) -> AppResult<Vec<u8>> {
-    if response.content_length().is_some_and(|length| length > limit as u64) {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
         return Err(fail("Provider response exceeds the allowed size"));
     }
     let mut bytes = Vec::new();
@@ -370,8 +382,12 @@ fn allowed_remote_image_url(value: &str) -> AppResult<Url> {
     Ok(url)
 }
 
-fn media_type_and_extension(bytes: &[u8], claimed: Option<&str>) -> AppResult<(String, &'static str)> {
-    let format = image::guess_format(bytes).map_err(|_| fail("Provider output is not a supported image"))?;
+fn media_type_and_extension(
+    bytes: &[u8],
+    claimed: Option<&str>,
+) -> AppResult<(String, &'static str)> {
+    let format =
+        image::guess_format(bytes).map_err(|_| fail("Provider output is not a supported image"))?;
     let (media_type, extension) = match format {
         image::ImageFormat::Png => ("image/png", "png"),
         image::ImageFormat::Jpeg => ("image/jpeg", "jpg"),
@@ -430,7 +446,9 @@ pub async fn generate(input: ImageGenerationInput) -> AppResult<ImageGenerationR
     })?;
     validate_target(&profile, input.target)?;
     if !profile.models.is_empty() && !profile.models.iter().any(|model| model == &input.model) {
-        return Err(fail("Image model is not in the provider's discovered catalogue"));
+        return Err(fail(
+            "Image model is not in the provider's discovered catalogue",
+        ));
     }
 
     let client = reqwest::Client::builder()
@@ -456,7 +474,10 @@ pub async fn generate(input: ImageGenerationInput) -> AppResult<ImageGenerationR
             .and_then(Value::as_str)
             .or_else(|| payload.get("message").and_then(Value::as_str))
             .unwrap_or("Image provider rejected the request");
-        return Err(fail(format!("Image provider returned HTTP {}: {message}", status.as_u16())));
+        return Err(fail(format!(
+            "Image provider returned HTTP {}: {message}",
+            status.as_u16()
+        )));
     }
     let candidates = collect_images(&payload);
     if candidates.is_empty() {
@@ -490,12 +511,17 @@ pub async fn generate(input: ImageGenerationInput) -> AppResult<ImageGenerationR
                 }
                 (decoded, media_type, revised_prompt)
             }
-            ProviderImage::Url { url, revised_prompt } => {
+            ProviderImage::Url {
+                url,
+                revised_prompt,
+            } => {
                 let response = client
                     .get(allowed_remote_image_url(&url)?)
                     .send()
                     .await
-                    .map_err(|error| fail(format!("Could not download generated image: {error}")))?;
+                    .map_err(|error| {
+                        fail(format!("Could not download generated image: {error}"))
+                    })?;
                 if !response.status().is_success() {
                     return Err(fail(format!(
                         "Generated image download returned HTTP {}",

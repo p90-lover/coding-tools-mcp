@@ -1,10 +1,7 @@
 use crate::{
     data::DataStore,
     error::{AppError, AppResult},
-    integrations::execution::{
-        model::Engine,
-        protocol,
-    },
+    integrations::execution::{model::Engine, protocol},
     orchestrators,
 };
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
@@ -74,7 +71,10 @@ fn build_body(
     }
     let mut body = Map::new();
     body.insert("repoId".into(), json!(profile.repo_id));
-    body.insert("variables".into(), json!({ "branchName": input.branch_name }));
+    body.insert(
+        "variables".into(),
+        json!({ "branchName": input.branch_name }),
+    );
     body.insert("autoStart".into(), json!(input.auto_start));
     body.insert("name".into(), json!(input.name));
     if !input.description.trim().is_empty() {
@@ -142,7 +142,10 @@ pub async fn run(input: AnnealOrchestratorRunInput) -> AppResult<AnnealOrchestra
             .and_then(Value::as_str)
             .or_else(|| payload.get("message").and_then(Value::as_str))
             .unwrap_or("Anneal rejected the orchestrator request");
-        return Err(fail(format!("Anneal returned HTTP {}: {summary}", status.as_u16())));
+        return Err(fail(format!(
+            "Anneal returned HTTP {}: {summary}",
+            status.as_u16()
+        )));
     }
     Ok(AnnealOrchestratorRunResult {
         profile_id: profile.id,
@@ -210,7 +213,10 @@ mod tests {
         };
         let body = build_body(&profile(), &snapshot, &input).unwrap();
         assert_eq!(body["repoId"], "repo");
-        assert_eq!(body["variables"]["branchName"], "coding-tools/provider-center");
+        assert_eq!(
+            body["variables"]["branchName"],
+            "coding-tools/provider-center"
+        );
         assert_eq!(body["stepOverrides"]["1"]["assigneeAgentId"], "planner");
         assert_eq!(body["stepOverrides"]["2"]["assigneeAgentId"], "implementer");
         assert_eq!(body["staffingProfileId"], "staffing");

@@ -1,0 +1,250 @@
+name: Prepare aligned stable release
+
+on:
+  push:
+    branches:
+      - 'release/prepare-v*'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: prepare-stable-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          clean: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - id: identity
+        name: Resolve canonical stable version from branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="$GITHUB_REF_NAME"
+          if [[ ! "$branch" =~ ^release/prepare-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]]; then
+            echo "Unsupported or non-canonical release preparation branch: $branch" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          current_version="$(node -p "require('./package.json').version")"
+          VERSION="$version" CURRENT_VERSION="$current_version" node --input-type=module <<'NODE'
+          import {
+            compareStableVersions,
+            runVersionAlignmentCheck,
+          } from './scripts/check-version-alignment.mjs';
+
+          const requested = process.env.VERSION;
+          const current = process.env.CURRENT_VERSION;
+          const comparison = compareStableVersions(requested, current);
+          if (comparison < 0) {
+            throw new Error(`Refusing release version downgrade from ${current} to ${requested}`);
+          }
+          if (comparison === 0) {
+            runVersionAlignmentCheck({ expectedTag: `v${requested}` });
+            console.log(`Release branch is already aligned at ${requested}`);
+          }
+          NODE
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Update every release version observation
+        shell: bash
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/release-preparation
+          node <<'NODE'
+          const fs = require('node:fs');
+          const component = '(?:0|[1-9]\\d*)';
+          const stable = new RegExp(`^${component}\\.${component}\\.${component}$`);
+          const version = process.env.VERSION;
+          if (!stable.test(version)) {
+            throw new Error(`Invalid canonical stable version: ${version}`);
+          }
+          const updateJson = (file, mutate) => {
+            const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+            mutate(value);
+            fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+          };
+          updateJson('package.json', value => { value.version = version; });
+          updateJson('package-lock.json', value => {
+            value.version = version;
+            if (!value.packages || !value.packages['']) {
+              throw new Error('package-lock.json is missing packages[""]');
+            }
+            value.packages[''].version = version;
+          });
+          updateJson('src-tauri/tauri.conf.json', value => { value.version = version; });
+          NODE
+          python <<'PY'
+          import os
+          import pathlib
+          import re
+
+          version = os.environ['VERSION']
+          root = pathlib.Path.cwd()
+
+          cargo_toml = root / 'src-tauri' / 'Cargo.toml'
+          text = cargo_toml.read_text(encoding='utf-8')
+          package_match = re.search(r'(?ms)^\[package\]\s*$.*?(?=^\[[^\]]+\]\s*$|\Z)', text)
+          if not package_match:
+              raise SystemExit('Cargo.toml [package] section not found')
+          section = package_match.group(0)
+          replaced, count = re.subn(
+              r'(?m)^version\s*=\s*"[^"]+"\s*$',
+              f'version = "{version}"',
+              section,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('Cargo.toml package version was not updated exactly once')
+          text = text[:package_match.start()] + replaced + text[package_match.end():]
+          cargo_toml.write_text(text, encoding='utf-8')
+
+          cargo_lock = root / 'src-tauri' / 'Cargo.lock'
+          text = cargo_lock.read_text(encoding='utf-8')
+          blocks = list(re.finditer(r'(?ms)^\[\[package\]\]\s*$.*?(?=^\[\[package\]\]\s*$|\Z)', text))
+          matches = []
+          for block in blocks:
+              name = re.search(r'(?m)^name\s*=\s*"([^"]+)"\s*$', block.group(0))
+              if name and name.group(1) == 'coding-tools-mcp-desktop':
+                  matches.append(block)
+          if len(matches) != 1:
+              raise SystemExit(f'Expected one coding-tools-mcp-desktop Cargo.lock block, found {len(matches)}')
+          block = matches[0]
+          replacement, count = re.subn(
+              r'(?m)^version\s*=\s*"[^"]+"\s*$',
+              f'version = "{version}"',
+              block.group(0),
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('Cargo.lock package version was not updated exactly once')
+          text = text[:block.start()] + replacement + text[block.end():]
+          cargo_lock.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify exact aligned release identity
+        shell: bash
+        env:
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          node scripts/check-version-alignment.mjs --tag "$TAG"
+          node --test tests/stable-release-workflows.test.mjs
+          node --test tests/version-alignment.test.mjs
+          git diff -- package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock > aiTemp/release-preparation/version.diff
+
+      - name: Retire legacy manual macOS publisher globally
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/retire_legacy_macos_workflow.py aiTemp/release-preparation
+
+      - id: commit
+        name: Commit aligned version files when needed
+        shell: bash
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+          python <<'PY'
+          import subprocess
+          expected = {
+              'package.json',
+              'package-lock.json',
+              'src-tauri/tauri.conf.json',
+              'src-tauri/Cargo.toml',
+              'src-tauri/Cargo.lock',
+          }
+          actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
+          if actual and actual != expected:
+              raise SystemExit(f'Unexpected release-preparation paths: {sorted(actual)}')
+          PY
+          if git diff --cached --quiet; then
+            echo "Version files are already aligned; no preparation commit is needed."
+            source="$(git rev-parse HEAD)"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "source=$source" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "release: prepare v$VERSION"
+          source="$(git rev-parse HEAD)"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+
+      - name: Validate exact final preparation head with complete CI
+        shell: bash
+        env:
+          SOURCE: ${{ steps.commit.outputs.source }}
+        run: |
+          set -euo pipefail
+          remote_source="$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | awk '{print $1}')"
+          if [ "$remote_source" != "$SOURCE" ]; then
+            echo "Release branch moved before CI dispatch: expected $SOURCE, found $remote_source" >&2
+            exit 1
+          fi
+
+          requested_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+          run_id=""
+          for _ in $(seq 1 30); do
+            gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f event=workflow_dispatch \
+              -f branch="$GITHUB_REF_NAME" \
+              -f per_page=50 > aiTemp/release-preparation/ci-runs.json
+            run_id="$(SOURCE="$SOURCE" REQUESTED_AT="$requested_at" python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          runs = json.loads(pathlib.Path('aiTemp/release-preparation/ci-runs.json').read_text())
+          matches = [
+              run for run in runs.get('workflow_runs', [])
+              if run.get('head_sha') == os.environ['SOURCE']
+              and run.get('event') == 'workflow_dispatch'
+              and run.get('created_at', '') >= os.environ['REQUESTED_AT']
+          ]
+          matches.sort(key=lambda run: run.get('created_at', ''), reverse=True)
+          print(matches[0]['id'] if matches else '')
+          PY
+            )"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$run_id" ]; then
+            echo "Exact-source CI run was not created for $SOURCE" >&2
+            exit 1
+          fi
+          run_source="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq .head_sha)"
+          if [ "$run_source" != "$SOURCE" ]; then
+            echo "CI run source mismatch: expected $SOURCE, found $run_source" >&2
+            exit 1
+          fi
+          printf '%s\n' "$run_id" > aiTemp/release-preparation/ci-run-id.txt
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status

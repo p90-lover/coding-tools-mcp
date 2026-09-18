@@ -278,10 +278,17 @@ async fn run_command(
     let start = Instant::now();
 
     let mut command = command_for_program(&program, &args);
+    // PowerShell -File waits on an unused piped stdin instead of running the script,
+    // which shows up on hosted Windows runners as TIMEOUT with empty stdout/stderr.
+    let stdin = if should_close_unused_stdin(&program, tty, stdin_text) {
+        std::process::Stdio::null()
+    } else {
+        std::process::Stdio::piped()
+    };
     command
         .current_dir(platform_command_path(cwd))
         .kill_on_drop(true)
-        .stdin(std::process::Stdio::piped())
+        .stdin(stdin)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -820,6 +827,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn closes_unused_stdin_only_for_noninteractive_powershell_files() {
+        assert!(should_close_unused_stdin(
+            r"C:\workspace\any-name.ps1",
+            false,
+            ""
+        ));
+        assert!(should_close_unused_stdin("any-name.PS1", false, ""));
+        assert!(!should_close_unused_stdin(
+            r"C:\workspace\any-name.ps1",
+            true,
+            ""
+        ));
+        assert!(!should_close_unused_stdin(
+            r"C:\workspace\any-name.ps1",
+            false,
+            "keep-open"
+        ));
+        assert!(!should_close_unused_stdin(
+            r"C:\workspace\any-name.cmd",
+            false,
+            ""
+        ));
+        assert!(!should_close_unused_stdin("python.exe", false, ""));
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_hidden_creation_flags_match_frpc_no_window_pattern() {
@@ -850,8 +883,24 @@ mod tests {
             .get_program()
             .to_string_lossy()
             .to_ascii_lowercase();
-        assert!(runner.contains("powershell") || runner.contains("pwsh"));
-        assert!(script.as_std().get_args().any(|arg| arg == "-File"));
+        assert!(
+            runner.contains("powershell") || runner.contains("pwsh"),
+            "{runner}"
+        );
+        if which::which("powershell").is_ok() {
+            assert!(
+                !runner.contains("pwsh"),
+                "workspace .ps1 files must prefer Windows PowerShell over pwsh: {runner}"
+            );
+        }
+        let args: Vec<String> = script
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|arg| arg == "-File"));
+        assert!(args.iter().any(|arg| arg == "-NonInteractive"));
+        assert!(args.iter().any(|arg| arg == "-NoProfile"));
 
         // Ensure console-subsystem programs (python.exe) also go through the
         // hidden-window flag path; Command does not expose creation_flags for
@@ -876,7 +925,7 @@ mod tests {
         .expect("cmd script");
         std::fs::write(
             workspace.path().join("any-name.ps1"),
-            "Write-Output 'tooling-powershell-ok'\r\n",
+            "[Console]::Out.WriteLine('tooling-powershell-ok')\r\n",
         )
         .expect("powershell script");
         std::fs::write(
@@ -1000,6 +1049,14 @@ fn windows_hidden_creation_flags() -> u32 {
     CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 }
 
+fn should_close_unused_stdin(program: &str, tty: bool, stdin_text: &str) -> bool {
+    !tty && stdin_text.is_empty()
+        && Path::new(program)
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("ps1"))
+}
+
 fn command_for_program(program: &str, args: &[String]) -> Command {
     #[cfg(windows)]
     {
@@ -1018,11 +1075,16 @@ fn command_for_program(program: &str, args: &[String]) -> Command {
                 return command;
             }
             Some("ps1") => {
-                let shell = which::which("pwsh")
-                    .or_else(|_| which::which("powershell"))
+                // Prefer Windows PowerShell. GitHub-hosted runners also ship pwsh,
+                // whose first launch with CREATE_NO_WINDOW + an open stdin pipe
+                // can sit until the exec timeout with no output.
+                let shell = which::which("powershell")
+                    .or_else(|_| which::which("pwsh"))
                     .unwrap_or_else(|_| std::path::PathBuf::from("powershell.exe"));
                 let mut command = Command::new(shell);
                 command
+                    .env("POWERSHELL_TELEMETRY_OPTOUT", "1")
+                    .env("POWERSHELL_UPDATECHECK", "Off")
                     .args([
                         "-NoLogo",
                         "-NoProfile",

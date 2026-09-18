@@ -28,4 +28,6 @@ const backend=fs.readFileSync('src-tauri/src/integrations/mod.rs','utf8').split(
 assert.equal(/Command::|\.post\(|\.put\(|\.delete\(|create_agent|send_message|resume_agent/.test(backend),false);
 const state=fs.readFileSync('src/lib/control-center/state.ts','utf8');
 assert.equal(state.match(/localStorage.setItem\([^;]+/g).length,1);assert.ok(state.includes("'control-center-locale'"));
-console.log('PASS: upstream status/ordering semantics; explicit checklist states; read-only adapter and memory-only credential paths');
+const { pathToFileURL } = await import('node:url');
+await import(pathToFileURL(resolve('scripts/check-commandcode-proxy.mjs')).href);
+console.log('PASS: upstream status/ordering semantics; explicit checklist states; observation adapters stay mutation-free; credentials stay out of localStorage');

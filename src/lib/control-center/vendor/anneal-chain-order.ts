@@ -51,3 +51,20 @@ export const denseOrdinals = (rows: readonly ChainLayerRow[]): ReadonlyMap<numbe
     .sort(numberOrder);
   return new Map(layers.map((layer, index) => [layer, index + 1]));
 };
+
+/** Original Anneal hash routes from the app-managed web UI on 127.0.0.1:5173. */
+export const ANNEAL_ORIGINAL_HASH_ROUTES = {
+  tasks: "#/tasks",
+  projects: "#/projects",
+  agents: "#/agents",
+  sessions: "#/sessions",
+  inbox: "#/inbox",
+  automations: "#/automations",
+  triggers: "#/triggers",
+  costs: "#/costs",
+  goals: "#/goals",
+  connections: "#/connections",
+  settings: "#/settings",
+} as const;
+export const ANNEAL_ORIGINAL_ORIGIN = "http://127.0.0.1:5173";
+export const ANNEAL_API_ORIGIN = "http://127.0.0.1:3000";

@@ -69,6 +69,24 @@ test("all five stacks keep original visual UI and managed lifecycle wiring", () 
   assert.match(bootstrap, /DEFAULT_COMPONENT_IDS[\s\S]*cpa[\s\S]*codex-router[\s\S]*commandcode-proxy[\s\S]*paseo[\s\S]*anneal/);
   assert.match(combined, /createManagedBootstrap/);
   assert.match(readRepo("docs/superpowers/specs/2026-09-18-one-app-managed-five-stack-design.md"), /Option A — one-app managed/);
+
+  const tauriIntegrations = readRepo("src/routes/integrations/+page.svelte");
+  const tauriOriginalUi = readRepo("src/lib/components/control-center/OriginalUiPanel.svelte");
+  const commandCodePanel = readRepo("src/lib/components/control-center/CommandCodeProxyPanel.svelte");
+  const fiveStack = readRepo("src-tauri/src/integrations/five_stack.rs");
+  const paseoVendor = readRepo("src/lib/control-center/vendor/paseo-agent-state.ts");
+  const annealVendor = readRepo("src/lib/control-center/vendor/anneal-chain-order.ts");
+  assert.match(tauriIntegrations, /toolId="codex-router"/);
+  assert.match(tauriIntegrations, /toolId="cpa"/);
+  assert.match(tauriIntegrations, /toolId="paseo"/);
+  assert.match(tauriIntegrations, /toolId="anneal"/);
+  assert.match(tauriIntegrations, /Install and start all/);
+  assert.match(tauriOriginalUi, /original-ui-section-tabs/);
+  assert.match(tauriOriginalUi, /Copy management key/);
+  assert.match(commandCodePanel, /CommandCode AI Proxy/);
+  assert.match(commandCodePanel, /onStart|five_stack_start/);
+  assert.match(fiveStack, /disable-control-panel: false/);
+  assert.doesNotMatch(fiveStack.split("#[cfg(test)]")[0], /disable-control-panel: true/);
 });
 
 test("managed security boundaries stay loopback, focused-window, secret-redacted, and no-delete", () => {

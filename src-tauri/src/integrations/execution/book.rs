@@ -172,6 +172,7 @@ impl Book {
             .find(|e| e.mission.spec.mission_id == id && e.mission.spec.workspace_id == workspace)
             .ok_or_else(|| err("Mission is not in the selected workspace"))
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
         workspace: &str,

@@ -1,7 +1,9 @@
 //! Narrow, observation-only adapters. No provider CLI, mutation RPC or inference client.
 pub mod board;
 pub mod board_sync;
+pub mod commandcode;
 pub mod execution;
+pub mod five_stack;
 use crate::error::{AppError, AppResult};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};

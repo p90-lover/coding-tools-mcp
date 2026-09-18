@@ -23,6 +23,40 @@ type OriginMap = std::collections::HashMap<(String, bool), String>;
 static TRUSTED_ORIGINS: std::sync::OnceLock<std::sync::RwLock<OriginMap>> =
     std::sync::OnceLock::new();
 
+// Production owns one process-wide data store. Rust tests can run several
+// independent fixture stores in one process, so retain each fixture's latest
+// synchronized origin map by its active data-file identity. A refresh from
+// another thread using the same fixture updates the same shared entry, while a
+// nested or unrelated fixture selects a different entry. Production behavior is
+// unchanged because this registry exists only in test builds.
+#[cfg(test)]
+type TestOriginMaps = std::collections::HashMap<std::path::PathBuf, OriginMap>;
+#[cfg(test)]
+static TEST_TRUSTED_ORIGINS: std::sync::OnceLock<std::sync::RwLock<TestOriginMaps>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn sync_test_trusted_origins(origins: &OriginMap) {
+    let Some(path) = crate::data::test_data_file_path() else {
+        return;
+    };
+    let lock = TEST_TRUSTED_ORIGINS.get_or_init(Default::default);
+    if let Ok(mut fixtures) = lock.write() {
+        fixtures.insert(path, origins.clone());
+    }
+}
+
+#[cfg(test)]
+fn test_trusted_origin(id: &str, actions: bool) -> Result<Option<String>, ()> {
+    let path = crate::data::test_data_file_path().ok_or(())?;
+    let lock = TEST_TRUSTED_ORIGINS.get_or_init(Default::default);
+    let fixtures = lock.read().map_err(|_| ())?;
+    Ok(fixtures
+        .get(&path)
+        .and_then(|origins| origins.get(&(id.to_owned(), actions)))
+        .cloned())
+}
+
 pub fn sync_trusted_origins(data: &crate::data::AppData) {
     let settings = crate::settings::AppSettings::from_data(data);
     let mut origins = OriginMap::new();
@@ -36,6 +70,8 @@ pub fn sync_trusted_origins(data: &crate::data::AppData) {
             profile.actions_effective_public_url_with(&settings),
         );
     }
+    #[cfg(test)]
+    sync_test_trusted_origins(&origins);
     let lock = TRUSTED_ORIGINS.get_or_init(Default::default);
     if let Ok(mut current) = lock.write() {
         *current = origins;
@@ -43,6 +79,15 @@ pub fn sync_trusted_origins(data: &crate::data::AppData) {
 }
 
 pub fn trusted_external_base_url(id: &str, actions: bool, port: u16, configured: &str) -> String {
+    #[cfg(test)]
+    if let Ok(test_configured) = test_trusted_origin(id, actions) {
+        return external_base_url(
+            &HeaderMap::new(),
+            port,
+            test_configured.as_deref().unwrap_or(configured),
+        );
+    }
+
     let lock = TRUSTED_ORIGINS.get_or_init(Default::default);
     let Ok(origins) = lock.read() else {
         return format!("http://127.0.0.1:{port}");
@@ -101,6 +146,11 @@ pub fn authorization_server_metadata(base_url: &str, client_secret: Option<&str>
         "token_endpoint": format!("{base}/oauth/token"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
+        // OpenAI custom apps inspect authorization-server metadata before
+        // requesting durable access. Advertise offline_access here, not in
+        // protected-resource metadata, because it controls refresh issuance
+        // rather than access to the MCP resource itself.
+        "scopes_supported": ["mcp", "offline_access"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": methods,
     })
@@ -118,6 +168,23 @@ pub fn protected_resource_metadata(base_url: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_data(profile_id: &str, public_url: &str) -> crate::data::AppData {
+        let mut data = crate::data::AppData::default();
+        let mut profile = crate::workspace::WorkspaceProfile::new("fixture-workspace".into(), None);
+        profile.id = profile_id.into();
+        profile.tunnel.public_url = public_url.into();
+        data.profiles.push(profile);
+        data
+    }
+
+    fn fixture_path(label: &str) -> std::path::PathBuf {
+        std::env::current_dir()
+            .unwrap()
+            .join("aiTemp/oauth-origin-isolation")
+            .join(format!("{label}-{}", uuid::Uuid::new_v4()))
+            .join("profiles.json")
+    }
 
     #[test]
     fn oauth_enabled_only_for_oauth_type() {
@@ -140,6 +207,7 @@ mod tests {
             meta["grant_types_supported"],
             json!(["authorization_code", "refresh_token"])
         );
+        assert_eq!(meta["scopes_supported"], json!(["mcp", "offline_access"]));
         let meta = authorization_server_metadata("https://example.com", Some("secret"));
         assert_eq!(
             meta["token_endpoint_auth_methods_supported"],
@@ -154,6 +222,7 @@ mod tests {
             meta["authorization_servers"],
             json!(["https://example.com"])
         );
+        assert!(meta.get("scopes_supported").is_none());
     }
 
     #[test]
@@ -184,6 +253,69 @@ mod tests {
             external_base_url(&headers, 28767, ""),
             "http://127.0.0.1:28767"
         );
+    }
+
+    #[test]
+    fn fixture_origin_survives_unrelated_parallel_sync() {
+        let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
+        crate::data::with_test_file(fixture_path("outer"), || {
+            sync_trusted_origins(&fixture_data(&profile_id, "https://new-popup.example"));
+            let worker = std::thread::spawn(|| {
+                sync_trusted_origins(&crate::data::AppData::default());
+            });
+            worker.join().unwrap();
+            assert_eq!(
+                trusted_external_base_url(&profile_id, false, 28767, "https://old-popup.example",),
+                "https://new-popup.example"
+            );
+        });
+    }
+
+    #[test]
+    fn same_fixture_cross_thread_refresh_is_visible() {
+        let file = fixture_path("shared");
+        let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
+        crate::data::with_test_file(file.clone(), || {
+            sync_trusted_origins(&fixture_data(&profile_id, "https://old-popup.example"));
+            let worker_file = file.clone();
+            let worker_id = profile_id.clone();
+            let worker = std::thread::spawn(move || {
+                crate::data::with_test_file(worker_file, || {
+                    sync_trusted_origins(&fixture_data(&worker_id, "https://new-popup.example"));
+                });
+            });
+            worker.join().unwrap();
+            assert_eq!(
+                trusted_external_base_url(&profile_id, false, 28767, "https://old-popup.example",),
+                "https://new-popup.example"
+            );
+        });
+    }
+
+    #[test]
+    fn nested_fixture_scope_restores_outer_origin_view() {
+        let outer_file = fixture_path("outer-nested");
+        let inner_file = fixture_path("inner-nested");
+        let profile_id = format!("fixture-{}", uuid::Uuid::new_v4());
+        crate::data::with_test_file(outer_file, || {
+            sync_trusted_origins(&fixture_data(&profile_id, "https://outer-popup.example"));
+            crate::data::with_test_file(inner_file, || {
+                sync_trusted_origins(&fixture_data(&profile_id, "https://inner-popup.example"));
+                assert_eq!(
+                    trusted_external_base_url(
+                        &profile_id,
+                        false,
+                        28767,
+                        "https://configured.example",
+                    ),
+                    "https://inner-popup.example"
+                );
+            });
+            assert_eq!(
+                trusted_external_base_url(&profile_id, false, 28767, "https://configured.example",),
+                "https://outer-popup.example"
+            );
+        });
     }
 }
 

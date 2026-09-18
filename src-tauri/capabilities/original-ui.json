@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "original-ui",
+  "description": "Loopback original UI windows. No filesystem, dialog, or Coding Tools IPC.",
+  "windows": [
+    "original-ui-cpa",
+    "original-ui-codex-router",
+    "original-ui-paseo",
+    "original-ui-anneal"
+  ],
+  "permissions": ["core:default"]
+}

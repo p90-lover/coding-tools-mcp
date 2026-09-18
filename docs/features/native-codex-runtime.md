@@ -6,7 +6,7 @@
 
 ### Setup and ownership
 
-Start an authenticated MCP workspace, then open Integrations → Native Codex sessions. Select a trusted native executable and supply its independently checked SHA-256, a dedicated existing Codex home outside the delegated workspace, your configured model ID, a request limit and consent lifetime. Windows requires the actual `.exe`, not an npm `.cmd` wrapper. The executable must not be inside the delegated workspace or dedicated home. This is a selected-installation hash check, not publisher authentication or protection against another privileged local process replacing that installation.
+Start an authenticated MCP workspace, then open Integrations → Native Codex sessions. Select a trusted native executable and supply its independently checked SHA-256, a dedicated existing Codex home outside the delegated workspace, your configured model ID, a request limit and consent lifetime. The existing fields accept `0` for no app-side request ceiling and for a connection lifetime that lasts until local disconnect/revocation; this is not a provider-quota bypass. Windows requires the actual `.exe`, not an npm `.cmd` wrapper. The executable must not be inside the delegated workspace or dedicated home. This is a selected-installation hash check, not publisher authentication or protection against another privileged local process replacing that installation.
 
 Sign in to the dedicated Codex home separately using the native client's supported login flow. The bridge does not copy login files, accept provider secrets through MCP, install plugins or grant account access. It clears inherited environment variables except the listed OS/path/locale fields, supplies the dedicated `CODEX_HOME` and keeps temporary paths under its `aiTemp/`. Treat the native installation and its configuration as trusted local software; this application does not inspect or neutralize every native configuration feature.
 
@@ -38,9 +38,9 @@ After reading the returned `thread_id`, use `codex_agent_read` with that ID. A `
 
 ### Limits, cancellation and failures
 
-A connection allows at most four lifetime thread records, 64 idempotency records, 1–20 admitted model-control requests and 30–900 seconds of lifetime. These limits are not token/cost caps and do not count every internal native subagent call. One control operation is submitted at a time. Repeated `request_id` values with identical arguments return the stored result without replay; different arguments under the same ID are rejected. Rejected admissions/serialized-control conflicts can conservatively consume a reserved request allowance.
+A connection retains at most four currently owned thread records; a confirmed `close`/unsubscribe releases that in-memory slot. The existing request-limit field accepts `0` or 1–20, and the lifetime field accepts `0` or 30–900 seconds. Zero means no app-side request ceiling / until local disconnect or revocation; provider quotas still apply. One control operation is submitted at a time. Completed idempotency receipts live in bounded RAM for up to 90 minutes and are evicted oldest-first under capacity pressure; pending/unknown outcomes are never evicted to make room. Repeated `request_id` values within the retained replay window return the stored result without replay; different arguments under the same retained ID are rejected. Use a fresh UUID for each new operation and never assume an expired receipt means an old effect did not happen.
 
-The stdio frame limit is 512 KiB, the outgoing queue is bounded, and individual RPC waits expire after 15 seconds. EOF, malformed/oversized output or timeout stops the connection. A timed-out submitted action has an unknown outcome; never resend it automatically. An interruption acknowledgment is a signal, not proof of completion or rollback. Close is allowed only after an observed idle/terminal state and uses unsubscribe, never thread deletion. Interrupting standalone compaction stops the entire connection. The visible Stop button remains usable while another UI operation waits.
+The stdio frame limit is 512 KiB, the outgoing queue is bounded, and individual RPC waits expire after 60 seconds. EOF, malformed/oversized output or timeout stops the connection. A timed-out submitted action has an unknown outcome; never resend it automatically. An interruption acknowledgment is a signal, not proof of completion or rollback. Close is allowed only after an observed idle/terminal state and uses unsubscribe, never thread deletion. Interrupting standalone compaction stops the entire connection. The visible Stop button remains usable while another UI operation waits.
 
 Any changed local policy revokes the bridge; listener stop and actual desktop exit also stop its owned process. Windows uses a kill-on-close Job Object. Unix uses a dedicated process group. This supervises owned processes, not processes that deliberately escape their group or actions already committed by external services. The Stop/expiry paths do not delete files, accounts, native homes or old output.
 
@@ -60,7 +60,7 @@ Primary references: [official App Server documentation](https://developers.opena
 
 ### 設定與歸屬
 
-啟動已設定認證的 MCP 工作區，再開啟「專案整合 → 原生 Codex 會話」。選擇可信任的原生執行檔、輸入獨立核對的 SHA-256、位於委派工作區以外且已存在的專用 Codex 主目錄、模型 ID、請求上限及授權期限。Windows 必須選擇真正的 `.exe`，不能使用 npm `.cmd` 包裝程式；執行檔也不能放在委派工作區或專用主目錄內。雜湊核對不等於發佈者身分驗證，也不能防止其他具有較高權限的本機程序替換安裝內容。
+啟動已設定認證的 MCP 工作區，再開啟「專案整合 → 原生 Codex 會話」。選擇可信任的原生執行檔、輸入獨立核對的 SHA-256、位於委派工作區以外且已存在的專用 Codex 主目錄、模型 ID、請求上限及授權期限。現有欄位可填 `0`：請求上限 0 代表本程式不設請求上限，期限 0 代表保持到本機斷線／撤銷；呢個設定唔會繞過供應商配額。Windows 必須選擇真正的 `.exe`，不能使用 npm `.cmd` 包裝程式；執行檔也不能放在委派工作區或專用主目錄內。雜湊核對不等於發佈者身分驗證，也不能防止其他具有較高權限的本機程序替換安裝內容。
 
 請另用原生用戶端支援的登入方式登入該專用主目錄。介接層不會複製登入檔、不接受 MCP 傳入供應商機密、不安裝外掛，也不授予帳戶存取權。它會清除繼承的環境變數，只保留列明的作業系統／路徑／語言欄位，設定專用 `CODEX_HOME`，並把臨時路徑放在其 `aiTemp/` 內。原生安裝與設定必須視為可信任本機軟件；本程式不會檢查或消除每項原生設定的行為。
 
@@ -92,9 +92,9 @@ Start 建立新的臨時會話；send 向閒置的所屬會話傳送新回合；
 
 ### 限制、取消及失敗
 
-每個連接最多保留四個會話紀錄、64 個冪等請求紀錄，允許 1–20 個模型控制請求及 30–900 秒的授權期限。這不是 Token／費用上限，也不會計算原生環境內每次子 Agent 呼叫。同時只提交一個控制操作；相同 `request_id` 加相同參數會回傳已保存結果而不重播，改用不同參數則拒絕。部分被拒絕或遇到控制並行衝突的請求，可能保守地占用已預留的次數。
+每個連接最多保留四個目前仍由此連接擁有的會話紀錄；確認 `close`／取消訂閱後會釋放該記憶體位置。現有請求上限欄位可填 0 或 1–20，授權期限可填 0 或 30–900 秒；0 代表本程式不設請求上限／保持至本機斷線或撤銷，供應商配額仍然有效。同時只提交一個控制操作。已完成的冪等回執只存於有限 RAM，最多保留 90 分鐘，容量壓力下優先清除最舊已完成回執；結果未知／仍處理中的回執絕不會為騰空位置而被清除。在保留窗口內，相同 `request_id` 加相同參數會回傳已保存結果而不重播，改用不同參數則拒絕。每個新操作應使用新 UUID；回執過期絕不代表舊操作沒有發生。
 
-stdio 單一資料框上限為 512 KiB，送出佇列有容量限制，每次 RPC 最多等候 15 秒。EOF、格式錯誤、過大資料或逾時會停止連接；已提交但逾時的操作，其結果屬未知，不能自動重送。中斷確認只代表發出訊號，不是完成或回復操作的證明。只有觀察到閒置／終止狀態後才允許 close，使用取消訂閱而非刪除會話。中斷獨立壓縮會停止整個連接；另一個介面操作尚在等待時，可見的停止按鈕仍可使用。
+stdio 單一資料框上限為 512 KiB，送出佇列有容量限制，每次 RPC 最多等候 60 秒。EOF、格式錯誤、過大資料或逾時會停止連接；已提交但逾時的操作，其結果屬未知，不能自動重送。中斷確認只代表發出訊號，不是完成或回復操作的證明。只有觀察到閒置／終止狀態後才允許 close，使用取消訂閱而非刪除會話。中斷獨立壓縮會停止整個連接；另一個介面操作尚在等待時，可見的停止按鈕仍可使用。
 
 本機權限有任何變更都會撤銷介接授權；停止監聽服務或真正退出桌面程式，也會停止其所屬程序。Windows 使用關閉時終止的 Job Object，Unix 使用獨立程序群組；這不是對刻意逃離群組的程序或外部服務已完成動作的全面保證。停止／期限屆滿不會刪除檔案、帳戶、原生主目錄或舊輸出。
 

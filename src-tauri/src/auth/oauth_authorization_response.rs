@@ -53,6 +53,9 @@ fn with_authorization_server_issuer(mut response: Response, issuer: &str) -> Res
 }
 
 fn append_authorization_server_issuer(location: &str, issuer: &str) -> Option<String> {
+    // Validate the generated redirect without serializing it again. Re-parsing
+    // through query_pairs() would decode and re-encode a registered callback's
+    // raw query bytes, which can invalidate signed or byte-sensitive callbacks.
     url::Url::parse(location).ok()?;
 
     let fragment_at = location.find('#').unwrap_or(location.len());

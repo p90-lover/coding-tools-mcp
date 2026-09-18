@@ -1969,6 +1969,49 @@ input[type=checkbox] {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 22px;
 }
+.cc-integrations-grid > .cc-commandcode,
+.cc-integrations-grid > .original-ui-panel[data-tool="codex-router"] {
+  grid-column: 1 / -1;
+}
+.original-ui-section-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 16px 0 0;
+}
+.original-ui-section-tabs button {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--page-bg);
+  font-size: 12px;
+}
+.original-ui-section-tabs button.is-active {
+  border-color: var(--accent, #1d4ed8);
+  background: var(--accent, #1d4ed8);
+  color: #fff;
+}
+.original-ui-frame-shell {
+  margin-top: 14px;
+  min-height: 280px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+.original-ui-frame-shell iframe {
+  display: block;
+  width: 100%;
+  height: 420px;
+  border: 0;
+}
+.original-ui-frame-empty {
+  display: grid;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-secondary);
+}
 .cc-integration {
   padding: 25px;
 }

@@ -173,3 +173,68 @@ async fn control_center_paseo_handshake_and_correlated_read_only_rpc() {
     assert!(result.read_only);
     server.await.unwrap();
 }
+
+#[test]
+fn commandcode_proxy_loopback_plan_omits_credential_steps() {
+    assert!(commandcode::parse_loopback_http("https://example.com:443/v1").is_err());
+    assert!(commandcode::parse_loopback_http("http://localhost:3050/v1").is_err());
+    assert!(commandcode::parse_loopback_http("http://127.0.0.1:3050/v1").is_ok());
+    let commands = commandcode::non_secret_commands(
+        "http://127.0.0.1:3050/v1",
+        "model-router",
+        "curate-models",
+    )
+    .unwrap();
+    assert_eq!(commands.len(), 3);
+    assert!(commands
+        .iter()
+        .all(|(_, argv)| !argv.iter().any(|part| part == "credential")));
+    assert!(commands[0].1.iter().any(|part| part == "--allow-private"));
+    let applied = commandcode::apply(
+        "http://127.0.0.1:3050/v1",
+        "./bin/missing-model-router",
+        "./bin/missing-curate-models",
+    )
+    .unwrap();
+    assert!(applied.credential_prompt_required);
+    assert_eq!(applied.steps.len(), 3);
+    assert!(applied
+        .steps
+        .iter()
+        .all(|step| !step.ok && step.name != "credential"));
+}
+
+#[tokio::test]
+async fn commandcode_proxy_status_gets_models_without_authorization() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}/v1", addr.port());
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut data = vec![];
+        loop {
+            let mut b = [0; 1024];
+            let n = sock.read(&mut b).await.unwrap();
+            assert!(n > 0 && data.len() + n < 8192);
+            data.extend_from_slice(&b[..n]);
+            if data.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let raw = String::from_utf8(data).unwrap().to_lowercase();
+        assert!(raw.starts_with("get /v1/models http/1.1\r\n"));
+        assert!(!raw.contains("authorization:"));
+        let body = json!({"data":[{"id":"demo-model"}]}).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        sock.write_all(response.as_bytes()).await.unwrap();
+    });
+    let result = commandcode::status(&url).await.unwrap();
+    assert!(result.reachable);
+    assert!(result.read_only);
+    assert_eq!(result.http_status, Some(200));
+    assert_eq!(result.model_count, Some(1));
+    server.await.unwrap();
+}

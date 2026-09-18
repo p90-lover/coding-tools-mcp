@@ -114,7 +114,9 @@ pub async fn provider_image_generate(
 ) -> AppResult<ImageGenerationResult> {
     local(&window, true)?;
     if !confirm {
-        return Err(fail("Confirm provider image generation and any provider cost locally"));
+        return Err(fail(
+            "Confirm provider image generation and any provider cost locally",
+        ));
     }
     media::generate(input).await
 }

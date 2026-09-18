@@ -59,6 +59,7 @@ pub async fn execution_local_read(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execution_local_provider(
     window: WebviewWindow,
     state: State<'_, AppState>,

@@ -1,73 +1,22 @@
 import { spawnSync } from "node:child_process";
-import { commandCodeProxyProviderProfile } from "../src/routed-providers";
+import {
+  commandCodeProxyRegistrationPlan,
+  renderCommandCodeProxyPlan,
+} from "../../src/lib/control-center/commandcode-proxy-provider.ts";
 
-export interface CommandCodeProxyRegistrationPlan {
-  provider: ReturnType<typeof commandCodeProxyProviderProfile>;
-  commands: string[][];
-  credentialPromptRequired: true;
-}
-
-export interface CommandCodeProxyRegistrationOptions {
-  baseUrl: string;
-  routerCli?: string;
-  curateCli?: string;
-}
-
-function isLoopbackUrl(value: string): boolean {
-  const hostname = new URL(value).hostname;
-  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
-}
-
-export function commandCodeProxyRegistrationPlan({
-  baseUrl,
-  routerCli = "model-router",
-  curateCli = "curate-models",
-}: CommandCodeProxyRegistrationOptions): CommandCodeProxyRegistrationPlan {
-  if (!routerCli.trim()) throw new Error("Codex Router CLI path is required");
-  if (!curateCli.trim()) throw new Error("Codex Router curate-models path is required");
-  const provider = commandCodeProxyProviderProfile(baseUrl);
-  const add = [
-    routerCli,
-    "codex",
-    "providers",
-    "generic",
-    "add",
-    provider.id,
-    "--name",
-    provider.name,
-    "--base-url",
-    provider.baseUrl,
-    "--adapter",
-    provider.adapter,
-  ];
-  if (isLoopbackUrl(provider.baseUrl)) add.push("--allow-private");
-  return {
-    provider,
-    commands: [
-      add,
-      [routerCli, "codex", "providers", "generic", "credential", provider.id, "set"],
-      [routerCli, "codex", "providers", "generic", "enable", provider.id],
-      [curateCli, provider.id],
-    ],
-    credentialPromptRequired: true,
-  };
-}
-
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_./:@=-]+$/.test(value)) return value;
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-export function renderCommandCodeProxyPlan(plan: CommandCodeProxyRegistrationPlan): string {
-  return [
-    "CommandCode Proxy will be registered as a Codex Router generic provider.",
-    "The CommandCode user_* key is entered only in Codex Router's hidden credential prompt; Coding Tools never accepts it.",
-    "",
-    ...plan.commands.map(command => command.map(shellQuote).join(" ")),
-    "",
-    "Run the curation step after the provider credential and enable steps so the live /v1/models catalog becomes available to Codex subagents.",
-  ].join("\n");
-}
+export {
+  COMMANDCODE_PROXY_ALTERNATE_LISTEN,
+  COMMANDCODE_PROXY_DEFAULT_BASE_URL,
+  commandCodeProxyProviderProfile,
+  commandCodeProxyRegistrationPlan,
+  isLoopbackUrl,
+  renderCommandCodeProxyPlan,
+} from "../../src/lib/control-center/commandcode-proxy-provider.ts";
+export type {
+  CommandCodeProxyProviderProfile,
+  CommandCodeProxyRegistrationOptions,
+  CommandCodeProxyRegistrationPlan,
+} from "../../src/lib/control-center/commandcode-proxy-provider.ts";
 
 function option(args: string[], name: string, fallback: string): string {
   const index = args.indexOf(name);
@@ -103,7 +52,14 @@ export function commandCodeProxyMain(args = process.argv.slice(2)): void {
   for (const command of plan.commands) run(command);
 }
 
-if (import.meta.main) {
+function isMain(): boolean {
+  const meta = import.meta as ImportMeta & { main?: boolean };
+  if (meta.main) return true;
+  const argv1 = process.argv[1];
+  return Boolean(argv1 && argv1.replaceAll("\\", "/").endsWith("commandcode-proxy-provider.ts"));
+}
+
+if (isMain()) {
   try {
     commandCodeProxyMain();
   } catch (error) {
