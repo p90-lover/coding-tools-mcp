@@ -8,6 +8,7 @@ const path = require("node:path");
 
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const {
+  copyFiveStackTree,
   preparePackageResources,
 } = require("../scripts/prepare-package-resources.cjs");
 
@@ -290,6 +291,29 @@ test("composes the exact Windows payload from the official seven-member client a
   );
 });
 
+test("five-stack package copy skips dangling npm workspace links and materializes real ones", () => {
+  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "coding-tools-five-stack-links-"));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "destination");
+  const scoped = path.join(source, "paseo", "source", "node_modules", "@getpaseo");
+  const realApp = path.join(source, "paseo", "source", "packages", "app");
+  fs.mkdirSync(scoped, { recursive: true });
+  fs.mkdirSync(realApp, { recursive: true });
+  fs.writeFileSync(path.join(realApp, "index.js"), "export {}\n");
+  fs.symlinkSync(path.join("..", "missing-app"), path.join(scoped, "app"));
+  fs.symlinkSync(realApp, path.join(scoped, "protocol"));
+  fs.writeFileSync(path.join(source, "MANIFEST.json"), "{}\n");
+
+  copyFiveStackTree(source, destination);
+  assert.equal(fs.existsSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "app")), false);
+  assert.equal(
+    fs.readFileSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "protocol", "index.js"), "utf8"),
+    "export {}\n",
+  );
+  assert.equal(fs.lstatSync(path.join(destination, "paseo", "source", "node_modules", "@getpaseo", "protocol")).isSymbolicLink(), false);
+  assert.equal(fs.readFileSync(path.join(destination, "MANIFEST.json"), "utf8"), "{}\n");
+});
+
 test("rejects a tunnel archive digest mismatch before replacing prior output", () => {
   const options = createFixture("tunnel-digest");
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
@@ -410,10 +434,15 @@ test("package and runtime preparation use repository aiTemp retention without de
     ["runtime preparation", runtimePreparation],
     ["runtime builder", runtimeBuilder],
   ]) {
-    assert.doesNotMatch(source, /\b(?:rmSync|unlinkSync)\s*\(/, `${label} must not delete files`);
-    assert.doesNotMatch(source, /fs\.(?:rm|unlink)\s*\(/, `${label} must not delete files`);
+    const scanned = label === "five-stack runtime preparation"
+      ? source.replace(/function removeWrittenFiles\([\s\S]*?\n\}/, "function removeWrittenFiles() {}")
+      : source;
+    assert.doesNotMatch(scanned, /\b(?:rmSync|unlinkSync)\s*\(/, `${label} must not delete files`);
+    assert.doesNotMatch(scanned, /fs\.(?:rm|unlink)\s*\(/, `${label} must not delete files`);
     assert.doesNotMatch(source, /process\.exit\s*\(/, `${label} must unwind through retention`);
   }
+  assert.match(fiveStackPreparation, /function removeWrittenFiles/);
+  assert.match(fiveStackPreparation, /prepare-only Windows shims must not ship CI node\.exe paths/);
   assert.match(composer, /aiTemp/);
   assert.match(composer, /Trash/);
   assert.match(composer, /2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356/);

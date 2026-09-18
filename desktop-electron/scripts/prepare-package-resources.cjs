@@ -731,10 +731,20 @@ function copyFiveStackTree(sourceRoot, destinationRoot) {
     if (entry.name === ".git") continue;
     const from = path.join(source, entry.name);
     const to = path.join(destination, entry.name);
-    let metadata;
-    try { metadata = fs.statSync(from); }
-    catch (error) {
+    let linkStat;
+    try {
+      linkStat = fs.lstatSync(from);
+    } catch (error) {
       fail("PACKAGE_RESOURCE_FIVE_STACK_ENTRY_UNREADABLE", `${from}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let metadata = linkStat;
+    if (linkStat.isSymbolicLink()) {
+      try {
+        metadata = fs.statSync(from);
+      } catch {
+        // npm workspaces leave dangling scoped links such as @getpaseo/app
+        continue;
+      }
     }
     if (metadata.isDirectory()) {
       copyFiveStackTree(from, to);
@@ -949,6 +959,7 @@ module.exports = {
   STABLE_ROLLBACK,
   TUNNEL_VERSION,
   componentPaths,
+  copyFiveStackTree,
   createRetentionSession,
   preparePackageResources,
   readTunnelZip,
