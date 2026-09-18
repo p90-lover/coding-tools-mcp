@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -9,6 +10,8 @@ const {
   createCodingToolsShellBridge,
   mergeFiveStackCatalog,
 } = require("../electron/coding-tools-shell-bridge.cjs");
+const { createExternalServicesController } = require("../electron/external-services.cjs");
+const { probeAll } = require("../electron/five-stack-loopbacks.cjs");
 
 const root = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -87,4 +90,42 @@ test("shell MCP overlay exposes five-stack status without a headless catalog", a
   assert.equal(snapshot.available, true);
   assert.equal(snapshot.downloadRequired, false);
   assert.equal(snapshot.loopbacks.stacks.paseo.port, 6768);
+});
+
+test("inspect rejects CommandCode 401 while Start skips spawn on a listening loopback", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "hello-mcp-loopback-401-"));
+  let spawned = 0;
+  let authorization = null;
+  const fetchImpl = async (_url, options = {}) => {
+    authorization = options.headers?.Authorization || null;
+    return {
+      ok: false,
+      status: 401,
+      headers: { get: () => "application/json" },
+      clone: () => ({ json: async () => ({ error: "unauthorized" }) }),
+    };
+  };
+  const health = await probeAll({ timeoutMs: 200, fetchImpl });
+  assert.equal(health.stacks.find((stack) => stack.id === "commandcode-proxy").listening, true);
+
+  const controller = createExternalServicesController({
+    filePath: path.join(directory, "services.json"),
+    keyPath: path.join(directory, "services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    getHealthHeaders: () => ({ Authorization: "Bearer managed-secret" }),
+    fetchImpl,
+    spawnProcess: () => {
+      spawned += 1;
+      throw new Error("loopback start must not spawn when the port is already listening");
+    },
+  });
+  const inspected = await controller.inspect("commandcode-proxy");
+  assert.equal(authorization, "Bearer managed-secret");
+  assert.equal(inspected.status, "error");
+  assert.equal(inspected.statusCode, 401);
+  const started = await controller.start("commandcode-proxy");
+  assert.equal(spawned, 0);
+  assert.equal(started.status, "error");
+  assert.equal(started.statusCode, 401);
+  controller.dispose();
 });

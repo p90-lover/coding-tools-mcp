@@ -17,7 +17,7 @@ Hello Desktop shell / MCP lane. Coding Tools Electron Desktop 的原始导航（
 
 ### US-1: 操作者在 MCP 面板查看五栈 loopback 健康
 
-**优先级:** Must  
+**优先级:** Must
 **用户故事:** 作为 Desktop 操作者，我想在 MCP 面板看到五个 in-app loopback 是否在监听，以便不离开原始 shell 就能监控 CPA、Codex Router、CommandCode、Paseo 与 Anneal。
 
 #### 验收标准（EARS）
@@ -28,7 +28,7 @@ Hello Desktop shell / MCP lane. Coding Tools Electron Desktop 的原始导航（
 
 ### US-2: MCP 工具与 shell 共享同一端口图
 
-**优先级:** Must  
+**优先级:** Must
 **用户故事:** 作为 MCP 调用方，我想通过 catalog/call 读取同一份 loopback 图与健康快照，以便 Desktop 面板与 MCP 组合同一套 API。
 
 #### 验收标准（EARS）
@@ -39,7 +39,7 @@ Hello Desktop shell / MCP lane. Coding Tools Electron Desktop 的原始导航（
 
 ### US-3: Start 命中 in-app loopback，无下载门闸
 
-**优先级:** Must  
+**优先级:** Must
 **用户故事:** 作为 Desktop 操作者，我想直接 Start 五栈 loopback，以便使用已捆绑/本机监听的服务，而不是先下载或先填 GitHub token。
 
 #### 验收标准（EARS）
@@ -50,7 +50,7 @@ Hello Desktop shell / MCP lane. Coding Tools Electron Desktop 的原始导航（
 
 ### US-4: 7 日长跑下的 shell↔MCP 探测
 
-**优先级:** Must  
+**优先级:** Must
 **用户故事:** 作为长时间开着 Desktop 的操作者，我想探测自动重连且不刷日志，以便 7 日运行期间状态不漂移。
 
 #### 验收标准（EARS）

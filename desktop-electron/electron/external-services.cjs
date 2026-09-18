@@ -870,6 +870,7 @@ function createExternalServicesController({
         now: () => new Date().toISOString(),
       });
       if (probed.listening) {
+        // Loopback is up (including 401/403/404). Skip spawn/download; inspect stays auth-aware.
         return inspect(id);
       }
     }

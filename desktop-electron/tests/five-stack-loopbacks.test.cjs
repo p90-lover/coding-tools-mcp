@@ -69,3 +69,20 @@ test("health snapshots never include secrets", () => {
   const right = fingerprintStatus({ stacks: [{ id: "cpa", listening: true, fallbackUsed: false, statusCode: 401, error: null }] });
   assert.equal(left, right);
 });
+
+test("HTTP 401/403/404 still count as loopback listening", async () => {
+  for (const status of [401, 403, 404]) {
+    const snapshot = await probeAll({
+      timeoutMs: 200,
+      fetchImpl: async () => ({
+        status,
+        ok: false,
+        headers: { get: () => "application/json" },
+      }),
+    });
+    for (const stack of snapshot.stacks) {
+      assert.equal(stack.listening, true, `${stack.id} should be listening on HTTP ${status}`);
+      assert.equal(stack.statusCode, status);
+    }
+  }
+});
