@@ -20,6 +20,7 @@ import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
 import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
+import { FiveStackLoopbackPanel } from "./features/FiveStackLoopbackPanel";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -1676,6 +1677,7 @@ function McpSurface({
           </>
         ) : null}
       </div>
+      <FiveStackLoopbackPanel copy={copy} language={language} setError={setError} />
       <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
   );

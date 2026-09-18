@@ -7,6 +7,7 @@ const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { publicUrlMap } = require("./five-stack-cross-use.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
+const { FIVE_STACK_LOOPBACKS, probeStack } = require("./five-stack-loopbacks.cjs");
 
 const STORE_VERSION = 1;
 const SERVICE_IDS = Object.freeze([
@@ -775,8 +776,8 @@ function createExternalServicesController({
     const id = requiredServiceId(idValue);
     const config = state.services[id];
     if (!config.enabled) return project(id);
-    if (typeof fetchImpl !== "function") throw new Error("External service HTTP inspection is unavailable");
     const started = Date.now();
+    if (typeof fetchImpl !== "function") throw new Error("External service HTTP inspection is unavailable");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DEFAULT_INSPECT_TIMEOUT_MS);
     timer.unref?.();
@@ -861,6 +862,17 @@ function createExternalServicesController({
 
   async function start(idValue) {
     const id = requiredServiceId(idValue);
+    if (FIVE_STACK_LOOPBACKS[id]) {
+      const probed = await probeStack(id, {
+        fetchImpl,
+        headers: typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {},
+        callerKey: id === "codex-router" ? secretFor(id).callerKey : "",
+        now: () => new Date().toISOString(),
+      });
+      if (probed.listening) {
+        return inspect(id);
+      }
+    }
     const current = await inspect(id);
     if (current.status === "ready") return current;
     if (processes.has(id)) return project(id);

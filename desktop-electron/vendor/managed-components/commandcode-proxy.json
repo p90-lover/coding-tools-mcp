@@ -45,7 +45,10 @@
   },
   "health": {
     "endpoint": "http://127.0.0.1:9090/v1/models",
+    "liveness": "http://127.0.0.1:9090/health",
+    "fallbackEndpoint": "http://127.0.0.1:3050/v1/models",
+    "fallbackLiveness": "http://127.0.0.1:3050/health",
     "authorization": "Bearer {secret:proxyApiKey}",
-    "acceptStatus": [200]
+    "acceptStatus": [200, 401, 403, 404]
   }
 }

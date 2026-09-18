@@ -22,6 +22,7 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(app, /copy\.networkProxy/);
   assert.match(app, /setSidebarState\(\{ open, width \}\)/);
   assert.match(app, /className="sidebar-resize"/);
+  assert.match(app, /<FiveStackLoopbackPanel/);
   assert.match(app, /<McpLiveToolsPanel/);
   assert.match(styles, /\.content-scroll\.is-fit\s*\{[^}]*overflow-y:\s*auto;/s);
   assert.match(styles, /\.sidebar-more\s*\{/);

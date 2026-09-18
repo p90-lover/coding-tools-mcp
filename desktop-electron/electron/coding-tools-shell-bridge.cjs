@@ -1,6 +1,15 @@
 "use strict";
 
+const {
+  MCP_TOOLS,
+  STACK_IDS,
+  probeAll,
+  publicLoopbackMap,
+  sanitizePublic,
+} = require("./five-stack-loopbacks.cjs");
+
 const MCP_STATES = new Set(["stopped", "starting", "running", "stopping", "error"]);
+const FIVE_STACK_TOOL_NAMES = new Set(MCP_TOOLS.map((tool) => tool.name));
 
 function emptyPage() {
   return Object.freeze({ items: Object.freeze([]), nextCursor: null });
@@ -47,10 +56,34 @@ function pageWorkspaces(workspaces, cursor = 0, limit = 25) {
   };
 }
 
+function mergeFiveStackCatalog(catalog) {
+  const record = asRecord(catalog);
+  const existing = Array.isArray(record.tools) ? [...record.tools] : [];
+  const names = new Set(existing.flatMap((entry) => {
+    if (typeof entry === "string" && entry.trim()) return [entry];
+    const name = text(asRecord(entry).name);
+    return name ? [name] : [];
+  }));
+  for (const tool of MCP_TOOLS) {
+    if (names.has(tool.name)) continue;
+    existing.push({
+      name: tool.name,
+      description: tool.description,
+      readOnly: tool.readOnly === true,
+    });
+  }
+  return {
+    ...record,
+    tools: existing,
+    five_stack: publicLoopbackMap(),
+  };
+}
+
 function createCodingToolsShellBridge({
   assertFocusedMainWindow,
   headlessHost,
   updateController,
+  fiveStack = null,
 }) {
   const requireHost = () => {
     if (!headlessHost) throw new Error("Local Coding Tools service is unavailable");
@@ -126,10 +159,14 @@ function createCodingToolsShellBridge({
 
     async integrationsSnapshot(event) {
       assertFocusedMainWindow(event, false);
-      return {
-        available: false,
-        reason: "Paseo, Anneal, and provider integrations are owned by sibling Desktop panels.",
-      };
+      const cached = typeof fiveStack?.snapshot === "function" ? fiveStack.snapshot() : null;
+      const health = cached || await (fiveStack?.probeAll || probeAll)();
+      return sanitizePublic({
+        available: true,
+        downloadRequired: false,
+        loopbacks: publicLoopbackMap(),
+        health,
+      });
     },
 
     async updatesStatus(event) {
@@ -149,11 +186,43 @@ function createCodingToolsShellBridge({
 
     async toolsCatalog(event, input) {
       assertFocusedMainWindow(event, false);
-      const workspaceId = encodeURIComponent(input.workspaceId);
-      return requestHeadless(`/api/v1/tools/catalog?workspace_id=${workspaceId}`, null, "GET");
+      let catalog = { tools: [], source: "shell-loopback-fallback" };
+      try {
+        const workspaceId = encodeURIComponent(input.workspaceId);
+        catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${workspaceId}`, null, "GET");
+      } catch {
+        catalog = { tools: [], source: "shell-loopback-fallback" };
+      }
+      return mergeFiveStackCatalog(catalog);
     },
 
     async toolsCall(event, input) {
+      const tool = text(input.tool);
+      if (FIVE_STACK_TOOL_NAMES.has(tool)) {
+        assertFocusedMainWindow(event, tool === "five_stack_start");
+        if (tool === "five_stack_loopbacks") {
+          return sanitizePublic(publicLoopbackMap());
+        }
+        if (tool === "five_stack_status") {
+          const health = await (fiveStack?.probeAll || probeAll)();
+          return sanitizePublic(health);
+        }
+        const stackId = text(asRecord(input.arguments).stack || asRecord(input.arguments).id);
+        if (!STACK_IDS.includes(stackId)) {
+          throw new Error("Stack must be cpa, codex-router, commandcode-proxy, paseo or anneal");
+        }
+        if (typeof fiveStack?.start === "function") {
+          await fiveStack.start(stackId);
+        }
+        const health = await (fiveStack?.probeAll || probeAll)();
+        const stack = (health.stacks || []).find((entry) => entry.id === stackId) || null;
+        return sanitizePublic({
+          ok: stack?.listening === true,
+          downloadRequired: false,
+          stack,
+          health,
+        });
+      }
       assertFocusedMainWindow(event, true);
       return requestHeadless("/api/v1/tools/call", {
         request_id: text(input.requestId, `ui-${Date.now()}`),
@@ -167,6 +236,7 @@ function createCodingToolsShellBridge({
 
 module.exports = Object.freeze({
   createCodingToolsShellBridge,
+  mergeFiveStackCatalog,
   pageWorkspaces,
   toWorkspaceSummary,
 });
