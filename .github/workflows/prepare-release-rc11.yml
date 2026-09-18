@@ -111,13 +111,12 @@ jobs:
             exit 1
           fi
 
-      - name: Commit and promote the exact verified source
+      - name: Commit the exact verified source on the staging branch
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add \
-            .github/workflows/codex-router-multiprovider-release-rc11.yml \
             desktop-electron/package.json \
             desktop-electron/electron/product.cjs \
             desktop-electron/scripts/prepare-package-resources.cjs \
@@ -132,15 +131,13 @@ jobs:
           git diff --cached --check
           git commit -m 'release(rc11): publish the unified app-tabs source'
           target_sha="$(git rev-parse HEAD)"
-          remote_sha="$(git ls-remote origin refs/heads/release/codex-router-multiprovider-0.7.0-rc.11 | awk '{print $1}')"
-          if [ -n "$remote_sha" ] && [ "$remote_sha" != "$target_sha" ]; then
-            printf 'RC11_RELEASE_BRANCH_ALREADY_MOVED:%s\n' "$remote_sha" >&2
+          remote_sha="$(git ls-remote origin "refs/heads/${GITHUB_REF_NAME}" | awk '{print $1}')"
+          if [ "$remote_sha" != "$GITHUB_SHA" ]; then
+            printf 'RC11_STAGING_BRANCH_MOVED:%s\n' "$remote_sha" >&2
             exit 1
           fi
-          if [ -z "$remote_sha" ]; then
-            git push origin HEAD:refs/heads/release/codex-router-multiprovider-0.7.0-rc.11
-          fi
-          printf 'RC11_RELEASE_BRANCH_READY %s\n' "$target_sha" | tee aiTemp/evidence/rc11-promoted.txt
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
+          printf 'RC11_STAGING_SOURCE_READY %s\n' "$target_sha" | tee aiTemp/evidence/rc11-promoted.txt
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
