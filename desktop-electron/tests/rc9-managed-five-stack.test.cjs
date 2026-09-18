@@ -172,5 +172,6 @@ test("managed installation is wired through the combined controller, focused IPC
 test("packaging retains managed manifests and manager modules", () => {
   const packageJson = readJson("package.json");
   assert.ok(packageJson.build.files.includes("vendor/managed-components/**"));
+  assert.ok(packageJson.build.files.includes("vendor/bundled-runtimes/**"));
   assert.ok(packageJson.build.files.includes("electron/**"));
 });

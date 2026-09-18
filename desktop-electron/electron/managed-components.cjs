@@ -8,6 +8,14 @@ const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const {
+  bundleRequired,
+  copyFileNoFollow,
+  copyTreeDeref,
+  missingBundleError,
+  resolveBundleRoot,
+  resolveBundledPayload,
+} = require("./bundled-runtimes.cjs");
 
 const COMPONENT_IDS = Object.freeze([
   "codex-router",
@@ -320,9 +328,13 @@ function createManagedComponentController({
   resolveRuntimeExecutable = () => process.execPath,
   publish = null,
   now = () => new Date().toISOString(),
+  bundleRoot = null,
+  resourcesPath = typeof process.resourcesPath === "string" ? process.resourcesPath : null,
+  desktopRoot = path.join(__dirname, ".."),
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   if (typeof fetchImpl !== "function") throw new Error("Managed component downloads require fetch");
+  const resolvedBundleRoot = resolveBundleRoot({ bundleRoot, resourcesPath, desktopRoot });
 
   const manifests = new Map(COMPONENT_IDS.map((id) => [id, loadManagedManifest(id, manifestRoot)]));
   const componentsRoot = path.join(dataRoot, "components");
@@ -501,6 +513,11 @@ function createManagedComponentController({
       processes: serviceProcesses(id),
       secretConfigured: Object.keys(secretFor(id)).length > 0,
       missingCredentials: missingCredentials(manifest),
+      bundledRuntime: Boolean(resolveBundledPayload(manifest, {
+        bundleRoot: resolvedBundleRoot,
+        platform,
+        arch,
+      })),
     };
   }
 
@@ -704,15 +721,40 @@ function createManagedComponentController({
   async function prepareReleaseBinary(manifest, stagingHome) {
     const asset = selectedReleaseAsset(manifest);
     const artifact = path.join(stagingHome, assertSafeRelativePath(asset.fileName, `${manifest.id} filename`));
+    const bundled = resolveBundledPayload(manifest, {
+      bundleRoot: resolvedBundleRoot,
+      platform,
+      arch,
+    });
+    if (bundled?.path) {
+      setOperation(manifest.id, { state: "installing", step: "copy-bundled-archive", error: null });
+      copyFileNoFollow(bundled.path, artifact);
+      setOperation(manifest.id, { state: "installing", step: "verify-sha256", error: null });
+      verifySha256(artifact, asset.sha256);
+      if (platform !== "win32") fs.chmodSync(artifact, 0o700);
+      return { artifact, source: "bundled" };
+    }
+    if (bundleRequired(manifest)) throw missingBundleError(manifest, platform, arch);
     setOperation(manifest.id, { state: "installing", step: "download-release", error: null });
     await downloadAsset(asset.url, artifact);
     setOperation(manifest.id, { state: "installing", step: "verify-sha256", error: null });
     verifySha256(artifact, asset.sha256);
     if (platform !== "win32") fs.chmodSync(artifact, 0o700);
-    return { artifact };
+    return { artifact, source: "download" };
   }
 
   async function prepareGitSource(manifest, stagingHome) {
+    const bundled = resolveBundledPayload(manifest, {
+      bundleRoot: resolvedBundleRoot,
+      platform,
+      arch,
+    });
+    if (bundled?.path) {
+      setOperation(manifest.id, { state: "installing", step: "copy-bundled-source", error: null });
+      copyTreeDeref(bundled.path, stagingHome);
+      return { artifact: "", source: "bundled" };
+    }
+    if (bundleRequired(manifest)) throw missingBundleError(manifest, platform, arch);
     const parent = path.dirname(stagingHome);
     fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
     setOperation(manifest.id, { state: "installing", step: "clone-pinned-source", error: null });

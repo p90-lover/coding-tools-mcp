@@ -95,6 +95,15 @@ function createPackageFixture(label, mutate) {
   const componentBytes = new Map([
     ["coding-tools/coding-tools-headless.exe", Buffer.from("MZfixture-rust-headless")],
     ["coding-tools/THIRD_PARTY_NOTICES.md", Buffer.from("Coding Tools, codex-chatgpt-web, MIT and Apache-2.0 notices\n")],
+    ["bundled-runtimes/cpa/win32/x64/CLIProxyAPI_7.3.7_windows_amd64.zip", Buffer.from("PK\u0003\u0004fixture-cpa")],
+    ["bundled-runtimes/codex-router/source/CODING_TOOLS_BUNDLED.json", Buffer.from(`${JSON.stringify({
+      schemaVersion: 1,
+      id: "codex-router",
+      version: "0.6.0",
+      commit: "930f547d8d8861a47e18a83216e15e73a73aa97c",
+      skipNetworkPrepare: true,
+      includes: { source: true, nodeModules: true, pythonVenv: true, controlCenterRenderer: true },
+    }, null, 2)}\n`)],
     ["migration/manifest.json", Buffer.from(`${JSON.stringify({
       schema: 1,
       sourceVersion: "0.4.10",
@@ -122,6 +131,8 @@ function createPackageFixture(label, mutate) {
     ["third-party-notices", PRODUCT_VERSION],
     ["migration-manifest", PRODUCT_VERSION],
     ["rollback-manifest", "0.4.10"],
+    ["bundled-cpa", "7.3.7"],
+    ["bundled-codex-router", "0.6.0"],
   ]);
   const components = Object.entries(REQUIRED_COMPONENTS)
     .map(([id, relativePath]) => {

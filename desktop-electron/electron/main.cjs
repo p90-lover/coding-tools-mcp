@@ -1278,6 +1278,8 @@ async function start() {
     env: process.env,
     logger,
     publish: (value) => send("launcher:external-services-changed", value),
+    resourcesPath: process.resourcesPath,
+    desktopRoot: path.join(__dirname, ".."),
     runRuntimeCommand: async (args) => {
       if (!runtimeSupervisor) throw new Error("Packaged runtime is not ready");
       const invocation = runtimeSupervisor.runtimeCommand(args);

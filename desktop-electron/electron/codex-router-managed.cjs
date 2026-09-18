@@ -116,6 +116,36 @@ function wrappers(home, state, env) {
   );
 }
 
+function readBundledMarker(home) {
+  const markerPath = path.join(home, "CODING_TOOLS_BUNDLED.json");
+  try {
+    return JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function prepareOfflineFromBundle(home, state, env) {
+  const secret = requiredFile(home, "src/secret.mjs");
+  runChecked(process.execPath, [secret, "ensure"], home, env);
+  const catalog = path.join(home, "src", "catalog.mjs");
+  if (fs.existsSync(catalog) && fs.statSync(catalog).isFile()) {
+    try {
+      runChecked(process.execPath, [catalog, "--refresh-native", "--bundled-native"], home, env);
+    } catch {
+      runChecked(process.execPath, [catalog], home, env);
+    }
+  }
+  const liteLlm = path.join(home, "src", "litellm-config.mjs");
+  if (fs.existsSync(liteLlm) && fs.statSync(liteLlm).isFile()) {
+    runChecked(process.execPath, [liteLlm], home, env);
+  }
+  const callerSecret = path.join(state, "router", "caller-secret");
+  if (!fs.existsSync(callerSecret) || !fs.readFileSync(callerSecret, "utf8").trim()) {
+    fail("Bundled Codex Router did not create its caller secret");
+  }
+}
+
 function prepare(home, state) {
   const pkg = JSON.parse(fs.readFileSync(requiredFile(home, "package.json"), "utf8"));
   if (pkg.name !== "codex-model-router" || pkg.version !== "0.6.0") fail(`Unexpected Codex Router package ${pkg.name}@${pkg.version}`);
@@ -124,7 +154,10 @@ function prepare(home, state) {
   requiredFile(home, "apps/control-center/electron/main.mjs");
   requiredFile(home, "apps/control-center/package.json");
   const env = environment(home, state);
-  if (process.platform === "win32") {
+  const bundled = readBundledMarker(home);
+  if (bundled?.skipNetworkPrepare === true) {
+    prepareOfflineFromBundle(home, state, env);
+  } else if (process.platform === "win32") {
     runChecked("powershell.exe", [
       "-NoProfile", "-ExecutionPolicy", "Bypass",
       "-File", requiredFile(home, "install.ps1"),

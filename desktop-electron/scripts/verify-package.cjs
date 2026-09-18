@@ -56,6 +56,8 @@ const REQUIRED_TUNNEL_MEMBERS = Object.freeze([
   "tunnel-client.exe",
 ]);
 const REQUIRED_COMPONENTS = Object.freeze({
+  "bundled-cpa": "bundled-runtimes/cpa/win32/x64/CLIProxyAPI_7.3.7_windows_amd64.zip",
+  "bundled-codex-router": "bundled-runtimes/codex-router/source/CODING_TOOLS_BUNDLED.json",
   "migration-manifest": "migration/manifest.json",
   "rollback-manifest": "rollback/manifest.json",
   "runtime-manifest": "runtime/manifest.json",
@@ -70,6 +72,8 @@ const REQUIRED_ASAR_FILES = Object.freeze([
   "electron/runtime-supervisor.cjs",
 ]);
 const COMPONENT_VERSIONS = Object.freeze({
+  "bundled-cpa": "7.3.7",
+  "bundled-codex-router": "0.6.0",
   "migration-manifest": PRODUCT.version,
   "rollback-manifest": "0.4.10",
   "runtime-manifest": PRODUCT.version,

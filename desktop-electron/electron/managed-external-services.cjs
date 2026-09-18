@@ -47,6 +47,9 @@ function createManagedExternalServicesController({
     logger: options.logger,
     resolveRuntimeExecutable,
     publish: publishCombined,
+    bundleRoot: options.bundleRoot,
+    resourcesPath: options.resourcesPath,
+    desktopRoot: options.desktopRoot,
   });
 
   function managedConfiguration(serviceId) {
@@ -106,6 +109,7 @@ function createManagedExternalServicesController({
         platformMode: managed.platformMode,
         processes: managed.processes,
         missingCredentials: managed.missingCredentials,
+        bundledRuntime: managed.bundledRuntime === true,
       },
     };
   }

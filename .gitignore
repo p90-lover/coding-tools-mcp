@@ -29,6 +29,6 @@ src-tauri/icons/logo-design.png
 docs/history-session/
 tmp-run
 
-# Electron migration temporary material; permanent scripts/evidence under aiTemp stay explicit.
-/aiTemp/vendor-import/
-/aiTemp/upstream-manifest-test/
+desktop-electron/vendor/bundled-runtimes/cpa/
+desktop-electron/vendor/bundled-runtimes/codex-router/
+desktop-electron/build/bundled-runtimes/

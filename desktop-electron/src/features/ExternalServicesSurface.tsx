@@ -279,8 +279,12 @@ export function ExternalServicesSurface({
     else await api.installManagedComponent(selected.id);
     setNotice(text(
       language,
-      `${serviceName(language, selected.id)} is installed and started by Coding Tools.`,
-      `${serviceName(language, selected.id)} 已由 Coding Tools 安裝並啟動。`,
+      selected.managedInstall.bundledRuntime
+        ? `${serviceName(language, selected.id)} is started from the bundled Desktop runtime.`
+        : `${serviceName(language, selected.id)} is installed and started by Coding Tools.`,
+      selected.managedInstall.bundledRuntime
+        ? `${serviceName(language, selected.id)} 已從桌面版內建執行環境啟動。`
+        : `${serviceName(language, selected.id)} 已由 Coding Tools 安裝並啟動。`,
     ));
   });
 
@@ -307,8 +311,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Install, repair and run CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from Coding Tools. Open CPA and Codex Router original interfaces from their dedicated pages.",
-            "直接由 Coding Tools 安裝、修復同執行 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CPA 與 Codex Router 原始介面由專用頁面開啟。",
+            "Activate bundled CPA / CLIProxyAPI and Codex Router, and install CommandCode Proxy, Paseo and Anneal from Coding Tools. Open CPA and Codex Router original interfaces from their dedicated pages.",
+            "CPA／CLIProxyAPI 與 Codex Router 使用桌面版內建執行環境啟動；CommandCode Proxy、Paseo 與 Anneal 仍由 Coding Tools 安裝。CPA 與 Codex Router 原始介面由專用頁面開啟。",
           )}</p>
         </div>
         <button disabled={busy !== null} onClick={() => void refresh()} type="button">
@@ -396,6 +400,10 @@ export function ExternalServicesSurface({
             >
               {busy === "managed-install" || selected.managedInstall.state === "installing"
                 ? "…"
+                : selected.managedInstall.bundledRuntime
+                  ? selected.managedInstall.state === "installed"
+                    ? text(language, "Repair bundled runtime", "修復內建執行環境")
+                    : text(language, "Activate bundled runtime", "啟動內建執行環境")
                 : selected.managedInstall.state === "installed"
                   ? text(language, "Repair installation", "修復安裝")
                   : text(language, "Install / Repair", "安裝／修復")}

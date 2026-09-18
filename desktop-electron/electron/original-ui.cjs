@@ -102,6 +102,7 @@ function createOriginalUiCore({
       sourceConfigured: Boolean(current?.home),
       installState: current?.managedInstall?.state || "not-installed",
       originalChrome: true,
+      bundledRuntime: current?.managedInstall?.bundledRuntime === true,
     };
   }
 
