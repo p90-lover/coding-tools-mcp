@@ -31,7 +31,7 @@ test("CPA is the fifth app-managed component and external service", () => {
 
   assert.match(managed, /COMPONENT_IDS[\s\S]*["']cpa["']/);
   assert.match(external, /SERVICE_IDS[\s\S]*["']cpa["']/);
-  assert.match(combined, /["']cpa["']:\s*Object\.freeze\(\{\s*endpoint:\s*["']http:\/\/127\.0\.0\.1:8317\/["']/);
+  assert.match(combined, /(?:["']cpa["']|\bcpa):\s*Object\.freeze\(\{\s*endpoint:\s*["']http:\/\/127\.0\.0\.1:8317\/["']/);
   assert.match(types, /ExternalServiceId\s*=\s*[\s\S]*["']cpa["']/);
   assert.match(surface, /cpa:\s*\[["']CPA \/ CLIProxyAPI["']/);
   assert.match(surface, /Install, repair and run CPA \/ CLIProxyAPI/);
