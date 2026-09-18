@@ -2,7 +2,7 @@
  import { onMount } from 'svelte';
  import { Plus, Search, RefreshCw, Archive, ArrowRight, Check, X, Play, Pause, FileText, GripVertical } from '@lucide/svelte';
  import { workspaces } from '$lib/stores/app';
- import { locale, board, boardReady, boardBusy, boardError, loadBoard, refreshBoard, changeBoard, snapshots, integrationErrors } from '$lib/control-center/state';
+ import { locale, board, boardReady, boardBusy, boardError, loadBoard, refreshBoard, changeBoard, snapshots, integrationErrors, liveStatus, refreshLive } from '$lib/control-center/state';
  import { translated as t, STEPS, COLUMNS, stepLabel, sortChain, formatTime, isBoardState, boardStateLabel, type BoardState, type Change } from '$lib/control-center/model';
  import Status from '$lib/components/control-center/Status.svelte';
  import SourceDetail from '$lib/components/control-center/SourceDetail.svelte';
@@ -16,6 +16,7 @@
  let tasks = $derived($board.tasks.filter(v => (archive ? v.state === 'archived' : v.state !== 'archived') && v.title.toLowerCase().includes(query.toLowerCase())));
  let detail = $derived($board.tasks.find(v => v.id === selected));
  let remote = $derived(sortChain($snapshots.anneal?.items ?? []).filter(v => `${v.title} ${v.chain_name}`.toLowerCase().includes(query.toLowerCase())));
+ let annealLive = $derived($liveStatus.find(s => s.source === 'anneal'));
  function beginCreate(state: BoardState = 'backlog') {
   if (!canEdit || !$workspaces.length) return;
   workspace = detail?.workspace_id ?? workspace ?? '';
@@ -64,7 +65,7 @@
   control.value = state;
   await moveTask(id, requested);
  }
- onMount(() => { void loadBoard(); const timer=setInterval(() => { if (source==='local' && !dragged && document.visibilityState==='visible') void refreshBoard(); },2500); return () => clearInterval(timer); });
+ onMount(() => { void loadBoard(); void refreshLive(); const timer=setInterval(() => { if (source==='local' && !dragged && document.visibilityState==='visible') void refreshBoard(); if (document.visibilityState==='visible') void refreshLive(); },2500); return () => clearInterval(timer); });
 </script>
 <section class="cc-page cc-board-page">
  <header class="cc-page-heading"><a class="cc-button ghost" href="/tasks">{t($locale, 'Task monitor', '任務監察')}</a><div><h1>{t($locale, 'Work board', '任務看板')}</h1><p>{t($locale, 'From specification to delivery. Keep the evidence beside the work.', '從規格到交付，讓工作與依據保持一致。')}</p></div><button class="cc-button primary" disabled={!canEdit || !$workspaces.length} onclick={() => beginCreate()}><Plus size={16}/>{t($locale, 'New task', '新增任務')}</button></header>
@@ -118,9 +119,9 @@
   {/if}</div>
   {#if !$workspaces.length && $boardReady}<div class="cc-notice">{t($locale, 'Add a workspace from the sidebar before creating a task.', '建立任務前，請先從側邊欄新增工作區。')}</div>{/if}
  {:else}
-  {#if $integrationErrors.anneal}<div class="cc-notice amber">{t($locale, 'Last refresh failed. This snapshot may be stale.', '上次更新失敗，狀態可能已過期。')}</div>{/if}
+  {#if $integrationErrors.anneal || annealLive?.stale}<div class="cc-notice amber">{t($locale, 'Connection is stale or the last refresh failed. Do not act on an expired board.', '連線已過期或上次更新失敗，請勿對過期看板操作。')}</div>{/if}
   <section class="cc-panel">{#if !$snapshots.anneal}<div class="cc-empty tall"><FileText size={32}/><h2>{t($locale, 'Bring your Anneal board into view', '連接你的 Anneal 看板')}</h2><p>{t($locale, 'Connect its existing API to read task state, chain ordering and approval gates.', '連接現有 API，讀取任務狀態、流程排序及批准關卡。')}</p><a class="cc-button primary" href="/integrations">{t($locale, 'Connect Anneal', '連接 Anneal')}</a></div>{:else}<div class="cc-table-wrap"><table class="cc-table"><thead><tr><th>{t($locale, 'Task', '任務')}</th><th>{t($locale, 'Chain', '流程')}</th><th>{t($locale, 'Layer / index', '層級／索引')}</th><th>{t($locale, 'State', '狀態')}</th><th>{t($locale, 'Gate', '關卡')}</th></tr></thead><tbody>{#each remote as row (row.id)}<tr><td><button class="cc-button ghost" aria-label={t($locale,`Inspect Anneal task ${row.title||row.id}`,`檢視 Anneal 任務 ${row.title||row.id}`)} onclick={()=>{inspectedSource=row.id;inspectedEndpoint=$snapshots.anneal?.endpoint??'';}}>{row.title || row.id}</button></td><td>{row.chain_name || '—'}</td><td>{row.chain_layer ?? '—'} / {row.chain_index ?? '—'}</td><td><Status state={row.status}/></td><td>{row.requires_attention ? t($locale, 'Review in Anneal', '在 Anneal 審查') : '—'}</td></tr>{/each}</tbody></table>{#if !remote.length}<p class="cc-quiet-empty">{t($locale, 'No matching tasks.', '沒有相符任務。')}</p>{/if}</div>{/if}</section>
-  {#if $snapshots.anneal?.has_more}<p class="cc-notice amber">{t($locale, 'Partial board: first 200 records only.', '部分看板：僅顯示前 200 項。')}</p>{/if}<p class="cc-page-footnote">{t($locale, 'Read-only snapshot', '唯讀狀態')} · {formatTime($snapshots.anneal?.checked_at)}</p>
+  {#if $snapshots.anneal?.has_more}<p class="cc-notice amber">{t($locale, 'Partial board: first 200 records only.', '部分看板：僅顯示前 200 項。')}</p>{/if}<p class="cc-page-footnote">{t($locale, 'Inspect a task to run original start/hold/inbox actions.', '檢視任務以執行原版開始／暫停／Inbox 動作。')} · {formatTime($snapshots.anneal?.checked_at)}</p>
  {/if}
 {#if sourceDetail && $snapshots.anneal && source==='anneal'}<SourceDetail item={sourceDetail} snapshot={$snapshots.anneal} source="anneal" onclose={()=>inspectedSource=''}/>{/if}
 </section>

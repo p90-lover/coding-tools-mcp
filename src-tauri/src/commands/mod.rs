@@ -27,8 +27,10 @@ mod task_monitor;
 pub use task_monitor::task_monitor_read;
 mod control_center;
 pub use control_center::{
-    commandcode_proxy_apply, commandcode_proxy_status, control_board_change, control_board_read,
-    integration_read, provider_config_preview,
+    commandcode_proxy_apply, commandcode_proxy_control, commandcode_proxy_status,
+    control_board_change, control_board_read, integration_act, integration_live_connect,
+    integration_live_disconnect, integration_live_status, integration_read,
+    provider_config_preview,
 };
 mod computer;
 mod sandbox;
