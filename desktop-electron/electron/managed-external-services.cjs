@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
+const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
@@ -24,10 +25,12 @@ function createManagedExternalServicesController({
   manifestRoot = path.join(__dirname, "..", "vendor", "managed-components"),
   resolveRuntimeExecutable,
   publish = null,
+  createManagedBootstrapImpl = createManagedBootstrap,
   ...options
 } = {}) {
   let baseController = null;
   let managedController = null;
+  let bootstrap = null;
 
   const publishCombined = () => {
     if (!baseController || !managedController) return;
@@ -118,6 +121,7 @@ function createManagedExternalServicesController({
     const snapshot = baseController.snapshot();
     return {
       ...snapshot,
+      managedBootstrap: bootstrap?.getSnapshot() || null,
       services: snapshot.services.map(mergeService),
     };
   }
@@ -142,7 +146,17 @@ function createManagedExternalServicesController({
   function setManagedComponentCredential(serviceId, key, value) {
     managedController.setComponentCredential(serviceId, key, value);
     publishCombined();
-    return serviceFromSnapshot(serviceId);
+    const service = serviceFromSnapshot(serviceId);
+    void bootstrap.reconcile({
+      reason: "credential-saved",
+      componentIds: [serviceId],
+    }).catch((error) => {
+      options.logger?.warn?.("managed-bootstrap.credential-reconcile-failed", {
+        componentId: serviceId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return service;
   }
 
   async function installManagedComponent(serviceId) {
@@ -235,7 +249,19 @@ function createManagedExternalServicesController({
     };
   }
 
+  bootstrap = createManagedBootstrapImpl({
+    componentIds: Object.keys(SERVICE_ENDPOINTS),
+    snapshot: combinedSnapshot,
+    install: installManagedComponent,
+    repair: repairManagedComponent,
+    start,
+    inspect,
+    publish: publishCombined,
+    logger: options.logger,
+  });
+
   function dispose() {
+    bootstrap?.dispose();
     managedController.dispose();
     baseController.dispose();
   }
@@ -255,6 +281,8 @@ function createManagedExternalServicesController({
     repairManagedComponent,
     setManagedComponentCredential,
     managedComponentsSnapshot: () => managedController.snapshot(),
+    managedBootstrapSnapshot: () => bootstrap.getSnapshot(),
+    reconcileManagedComponents: (input) => bootstrap.reconcile(input),
     dispose,
   });
 }
