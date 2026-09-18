@@ -141,12 +141,18 @@ test('Windows package smoke selects the configured Electron Builder artifact exa
     fs.readFile(path.join(root, 'desktop-electron', 'scripts', 'smoke-package.cjs'), 'utf8'),
   ]);
   const manifest = JSON.parse(manifestSource);
+  assert.equal(
+    manifest.build.artifactName,
+    'Coding.Tools_${version}_${os}_${arch}.${ext}',
+    'the package artifact template must remain stable and exact',
+  );
+  assert.match(manifest.version, /^0\.7\.0-rc\.\d+$/);
   const expectedInstaller = manifest.build.artifactName
     .replaceAll('${version}', manifest.version)
     .replaceAll('${os}', 'win')
     .replaceAll('${arch}', 'x64')
     .replaceAll('${ext}', 'exe');
-  assert.equal(expectedInstaller, 'Coding.Tools_0.7.0-rc.1_win_x64.exe');
+  assert.equal(expectedInstaller, `Coding.Tools_${manifest.version}_win_x64.exe`);
   for (const required of [
     'function artifactNameFor(osName, arch, extension)',
     'artifact(artifactNameFor("win", process.arch, "exe"), "Windows installer")',
