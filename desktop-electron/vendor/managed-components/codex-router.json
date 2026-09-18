@@ -9,6 +9,11 @@
   "version": "0.6.0",
   "commit": "930f547d8d8861a47e18a83216e15e73a73aa97c",
   "strategy": "git-source",
+  "bundle": {
+    "required": true,
+    "kind": "source-tree",
+    "layout": "codex-router/source"
+  },
   "platformModes": {
     "win32": "native",
     "linux": "native",

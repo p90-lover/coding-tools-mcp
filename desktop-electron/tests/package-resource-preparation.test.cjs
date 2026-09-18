@@ -142,12 +142,30 @@ function createFixture(label, overrides = {}) {
     "Pinned at v5.0.6 under the MIT license.",
     "",
   ].join("\n"));
+  const bundledRuntimesRoot = path.join(desktopRoot, "build", "bundled-runtimes");
+  writeFile(
+    path.join(bundledRuntimesRoot, "cpa", "win32", "x64", "CLIProxyAPI_7.3.7_windows_amd64.zip"),
+    Buffer.from("PK\u0003\u0004fixture-cpa-archive"),
+  );
+  writeFile(
+    path.join(bundledRuntimesRoot, "codex-router", "source", "CODING_TOOLS_BUNDLED.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: "codex-router",
+      version: "0.6.0",
+      commit: "930f547d8d8861a47e18a83216e15e73a73aa97c",
+      skipNetworkPrepare: true,
+      includes: { source: true },
+    }, null, 2)}\n`,
+  );
 
   return {
     repositoryRoot: root,
     desktopRoot,
     runtimeRoot,
     outputRoot,
+    bundledRuntimesRoot,
+    bundledRuntimeVerification: "exists",
     headlessBinary,
     tunnelArchive,
     tunnelRelease: {
@@ -241,6 +259,8 @@ test("composes the exact Windows payload from the official seven-member client a
   assert.deepEqual(
     manifest.components.map((component) => component.id),
     [
+      "bundled-codex-router",
+      "bundled-cpa",
       "migration-manifest",
       "rollback-manifest",
       "runtime-manifest",
@@ -394,6 +414,7 @@ test("package and runtime preparation use repository aiTemp retention without de
 
   for (const [label, source] of [
     ["package composer", composer],
+    ["bundled runtime composer", fs.readFileSync(path.join(repositoryRoot, "desktop-electron", "scripts", "prepare-bundled-runtimes.cjs"), "utf8")],
     ["runtime preparation", runtimePreparation],
     ["runtime builder", runtimeBuilder],
   ]) {
@@ -408,7 +429,11 @@ test("package and runtime preparation use repository aiTemp retention without de
   assert.match(composer, /cloudflared-manifest\.json/);
   assert.match(runtimePreparation, /aiTemp/);
   assert.match(runtimePreparation, /Trash/);
-  assert.equal(manifest.scripts["build:package-resources"], "node scripts/prepare-package-resources.cjs");
+  assert.equal(manifest.scripts["build:bundled-runtimes"], "node scripts/prepare-bundled-runtimes.cjs");
+  assert.equal(
+    manifest.scripts["build:package-resources"],
+    "node scripts/prepare-bundled-runtimes.cjs && node scripts/prepare-package-resources.cjs",
+  );
   for (const script of ["package", "package:mac", "package:win", "package:linux"]) {
     assert.match(manifest.scripts[script], /build:runtime/);
     assert.match(manifest.scripts[script], /build:package-resources/);

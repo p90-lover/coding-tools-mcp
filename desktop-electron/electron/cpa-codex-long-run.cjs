@@ -5,6 +5,39 @@ const path = require("node:path");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router"]);
+const CPA_LOOPBACK = Object.freeze({
+  id: "cpa",
+  host: "127.0.0.1",
+  port: 8317,
+  origin: "http://127.0.0.1:8317",
+  endpoint: "http://127.0.0.1:8317/",
+  healthPath: "/v1/models",
+  healthUrl: "http://127.0.0.1:8317/v1/models",
+  openaiBasePath: "/v1",
+  openaiBaseUrl: "http://127.0.0.1:8317/v1",
+  modelsPath: "/v1/models",
+  chatCompletionsPath: "/v1/chat/completions",
+  controlPath: "/management.html",
+  controlUrl: "http://127.0.0.1:8317/management.html",
+  urlEnv: "CODING_TOOLS_CPA_URL",
+  openaiBaseUrlEnv: "CODING_TOOLS_CPA_OPENAI_BASE_URL",
+  proxyApiKeyEnv: "CODING_TOOLS_CPA_PROXY_API_KEY",
+});
+const ROUTER_LOOPBACK = Object.freeze({
+  id: "codex-router",
+  host: "127.0.0.1",
+  port: 4202,
+  origin: "http://127.0.0.1:4202",
+  endpoint: "http://127.0.0.1:4202/",
+  healthPathTemplate: "/_codex-router/{callerKey}/v1/models",
+  openaiBasePathTemplate: "/_codex-router/{callerKey}/v1",
+  chatCompletionsPathTemplate: "/_codex-router/{callerKey}/v1/chat/completions",
+  urlEnv: "CODING_TOOLS_CODEX_ROUTER_URL",
+  openaiBaseUrlEnv: "CODING_TOOLS_CODEX_ROUTER_OPENAI_BASE_URL",
+  callerKeyEnv: "CODING_TOOLS_CODEX_ROUTER_CALLER_KEY",
+});
+const PROVIDER_BACKEND_CONSUMERS = Object.freeze(["desktop", "mcp", "paseo"]);
+const PROVIDER_BACKEND_LAUNCH_IDS = Object.freeze(["codex-router", "paseo", "anneal"]);
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const EXECUTION_TIMEOUT_MS = 8 * 24 * 60 * 60 * 1000;
 const HEALTH_POLL_MS = 45_000;
@@ -78,6 +111,198 @@ function trimJournal(events, { maxEvents = MAX_JOURNAL_EVENTS, maxBytes = MAX_JO
     next = next.slice(1);
   }
   return next;
+}
+
+function startPeerIds(toolId) {
+  return String(toolId || "").trim() === "codex-router" ? ["cpa"] : [];
+}
+
+function routerHealthUrl(callerKey) {
+  const key = String(callerKey || "").trim();
+  if (!key) throw new Error("Codex Router caller key is required for loopback health");
+  return `${ROUTER_LOOPBACK.origin}/_codex-router/${encodeURIComponent(key)}/v1/models`;
+}
+
+function managedLoopbackHealthTargets({ cpaProxyApiKey, routerCallerKey } = {}) {
+  return Object.freeze({
+    cpa: Object.freeze({
+      url: CPA_LOOPBACK.healthUrl,
+      headers: cpaProxyApiKey
+        ? Object.freeze({ Authorization: `Bearer ${String(cpaProxyApiKey)}` })
+        : Object.freeze({}),
+    }),
+    "codex-router": Object.freeze({
+      url: routerCallerKey ? routerHealthUrl(routerCallerKey) : null,
+      headers: Object.freeze({}),
+    }),
+  });
+}
+
+function desktopCrossUseEnvironment({ cpaProxyApiKey, routerCallerKey } = {}) {
+  const proxyApiKey = String(cpaProxyApiKey || "").trim();
+  const callerKey = String(routerCallerKey || "").trim();
+  return {
+    [CPA_LOOPBACK.urlEnv]: CPA_LOOPBACK.origin,
+    [CPA_LOOPBACK.openaiBaseUrlEnv]: CPA_LOOPBACK.openaiBaseUrl,
+    [ROUTER_LOOPBACK.urlEnv]: ROUTER_LOOPBACK.origin,
+    ...(proxyApiKey ? { [CPA_LOOPBACK.proxyApiKeyEnv]: proxyApiKey } : {}),
+    ...(callerKey ? {
+      [ROUTER_LOOPBACK.callerKeyEnv]: callerKey,
+      [ROUTER_LOOPBACK.openaiBaseUrlEnv]: `${ROUTER_LOOPBACK.origin}/_codex-router/${callerKey}/v1`,
+    } : {}),
+  };
+}
+
+function launchConsumesProviderBackends(id) {
+  return PROVIDER_BACKEND_LAUNCH_IDS.includes(String(id || "").trim());
+}
+
+function providerBackendContract() {
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: "coding-tools-provider-backends",
+    role: "provider-backend",
+    bundled: true,
+    consumers: PROVIDER_BACKEND_CONSUMERS,
+    orchestrators: Object.freeze({
+      paseo: Object.freeze({
+        role: "orchestrator",
+        uses: Object.freeze(["cpa", "codex-router"]),
+        implements: "other-owner",
+      }),
+      anneal: Object.freeze({
+        role: "task-preview",
+        uses: Object.freeze(["cpa", "codex-router"]),
+        implements: "other-owner",
+      }),
+    }),
+    backends: Object.freeze({
+      cpa: Object.freeze({
+        id: "cpa",
+        name: "CPA / CLIProxyAPI",
+        role: "main-provider",
+        protocol: "openai_chat",
+        workloadHints: Object.freeze(["paseo", "anneal"]),
+        origin: CPA_LOOPBACK.origin,
+        openaiBaseUrl: CPA_LOOPBACK.openaiBaseUrl,
+        health: Object.freeze({
+          method: "GET",
+          url: CPA_LOOPBACK.healthUrl,
+          authorization: "Bearer {secret:proxyApiKey}",
+          acceptStatus: Object.freeze([200]),
+        }),
+        api: Object.freeze({
+          models: Object.freeze({ method: "GET", path: CPA_LOOPBACK.modelsPath }),
+          chatCompletions: Object.freeze({ method: "POST", path: CPA_LOOPBACK.chatCompletionsPath }),
+        }),
+        control: Object.freeze({
+          kind: "management.html",
+          url: CPA_LOOPBACK.controlUrl,
+          auth: "managementKey",
+        }),
+        env: Object.freeze({
+          url: CPA_LOOPBACK.urlEnv,
+          openaiBaseUrl: CPA_LOOPBACK.openaiBaseUrlEnv,
+          proxyApiKey: CPA_LOOPBACK.proxyApiKeyEnv,
+        }),
+      }),
+      "codex-router": Object.freeze({
+        id: "codex-router",
+        name: "Codex Router",
+        role: "subagent-provider",
+        protocol: "openai_chat",
+        workloadHints: Object.freeze(["subagent", "paseo"]),
+        origin: ROUTER_LOOPBACK.origin,
+        openaiBaseUrl: `${ROUTER_LOOPBACK.origin}${ROUTER_LOOPBACK.openaiBasePathTemplate}`,
+        health: Object.freeze({
+          method: "GET",
+          url: `${ROUTER_LOOPBACK.origin}${ROUTER_LOOPBACK.healthPathTemplate}`,
+          acceptStatus: Object.freeze([200]),
+        }),
+        api: Object.freeze({
+          models: Object.freeze({ method: "GET", path: ROUTER_LOOPBACK.healthPathTemplate }),
+          chatCompletions: Object.freeze({ method: "POST", path: ROUTER_LOOPBACK.chatCompletionsPathTemplate }),
+        }),
+        control: Object.freeze({
+          kind: "control-center",
+          url: ROUTER_LOOPBACK.origin,
+        }),
+        env: Object.freeze({
+          url: ROUTER_LOOPBACK.urlEnv,
+          openaiBaseUrl: ROUTER_LOOPBACK.openaiBaseUrlEnv,
+          callerKey: ROUTER_LOOPBACK.callerKeyEnv,
+        }),
+      }),
+    }),
+  });
+}
+
+function providerBackendOpenApi() {
+  return Object.freeze({
+    openapi: "3.0.3",
+    info: Object.freeze({
+      title: "Coding Tools CPA and Codex Router provider backends",
+      version: "1.0.0",
+      description: "Stable loopback OpenAI-compatible APIs for Desktop, MCP, and Paseo. Paseo/Anneal orchestration is owned elsewhere.",
+    }),
+    servers: Object.freeze([
+      Object.freeze({ url: CPA_LOOPBACK.origin, description: "CPA main provider" }),
+      Object.freeze({ url: ROUTER_LOOPBACK.origin, description: "Codex Router subagent provider" }),
+    ]),
+    paths: Object.freeze({
+      "/v1/models": Object.freeze({
+        get: Object.freeze({
+          tags: Object.freeze(["cpa"]),
+          operationId: "cpaListModels",
+          security: Object.freeze([Object.freeze({ cpaProxyApiKey: Object.freeze([]) })]),
+          responses: Object.freeze({ 200: Object.freeze({ description: "OpenAI-compatible model list" }) }),
+        }),
+      }),
+      "/v1/chat/completions": Object.freeze({
+        post: Object.freeze({
+          tags: Object.freeze(["cpa"]),
+          operationId: "cpaChatCompletions",
+          security: Object.freeze([Object.freeze({ cpaProxyApiKey: Object.freeze([]) })]),
+          responses: Object.freeze({ 200: Object.freeze({ description: "OpenAI-compatible chat completion" }) }),
+        }),
+      }),
+      "/_codex-router/{callerKey}/v1/models": Object.freeze({
+        get: Object.freeze({
+          tags: Object.freeze(["codex-router"]),
+          operationId: "routerListModels",
+          parameters: Object.freeze([Object.freeze({
+            name: "callerKey",
+            in: "path",
+            required: true,
+            schema: Object.freeze({ type: "string", minLength: 32 }),
+          })]),
+          responses: Object.freeze({ 200: Object.freeze({ description: "OpenAI-compatible model list" }) }),
+        }),
+      }),
+      "/_codex-router/{callerKey}/v1/chat/completions": Object.freeze({
+        post: Object.freeze({
+          tags: Object.freeze(["codex-router"]),
+          operationId: "routerChatCompletions",
+          parameters: Object.freeze([Object.freeze({
+            name: "callerKey",
+            in: "path",
+            required: true,
+            schema: Object.freeze({ type: "string", minLength: 32 }),
+          })]),
+          responses: Object.freeze({ 200: Object.freeze({ description: "OpenAI-compatible chat completion" }) }),
+        }),
+      }),
+    }),
+    components: Object.freeze({
+      securitySchemes: Object.freeze({
+        cpaProxyApiKey: Object.freeze({
+          type: "http",
+          scheme: "bearer",
+          description: CPA_LOOPBACK.proxyApiKeyEnv,
+        }),
+      }),
+    }),
+  });
 }
 
 function routerLongRunEnvironment() {
@@ -263,6 +488,7 @@ function attachCpaCodexLongRun(inner, {
   async function recover(toolId, reason) {
     const current = state.tools[toolId];
     if (!current.desiredRunning || shouldAbandonLongRun()) return inspect(toolId);
+    desirePeer(toolId, "desired-recover-peer");
     current.consecutiveCrashes += 1;
     current.backoffMs = nextBackoffMs(current.consecutiveCrashes - 1, { random });
     if (!current.firstFailureAt) current.firstFailureAt = new Date(now()).toISOString();
@@ -276,6 +502,7 @@ function attachCpaCodexLongRun(inner, {
         if (toolId === "codex-router") {
           try { await inner.openEmbedded(toolId); } catch {}
         }
+        for (const peerId of startPeerIds(toolId)) watchDesired(peerId);
         watchDesired(toolId);
       } catch (error) {
         current.lastError = error instanceof Error ? error.message : String(error);
@@ -345,13 +572,25 @@ function attachCpaCodexLongRun(inner, {
     schedule(toolId, 0, () => tick(toolId));
   }
 
+  function desirePeer(toolId, event) {
+    for (const peerId of startPeerIds(toolId)) {
+      state.tools[peerId].desiredRunning = true;
+      if (!state.tools[peerId].lastStartedAt) {
+        state.tools[peerId].lastStartedAt = new Date(now()).toISOString();
+      }
+      record(peerId, event);
+    }
+  }
+
   async function start(toolId) {
     const id = requiredToolId(toolId);
+    desirePeer(id, "desired-start-peer");
     state.tools[id].desiredRunning = true;
     state.tools[id].lastStartedAt = new Date(now()).toISOString();
     record(id, "desired-start");
     syncPowerSave();
     const started = decorate(await inner.start(id));
+    for (const peerId of startPeerIds(id)) watchDesired(peerId);
     watchDesired(id);
     return started;
   }
@@ -370,10 +609,12 @@ function attachCpaCodexLongRun(inner, {
 
   async function restart(toolId) {
     const id = requiredToolId(toolId);
+    desirePeer(id, "desired-restart-peer");
     state.tools[id].desiredRunning = true;
     record(id, "desired-restart");
     syncPowerSave();
     const restarted = decorate(await inner.restart(id));
+    for (const peerId of startPeerIds(id)) watchDesired(peerId);
     watchDesired(id);
     return restarted;
   }
@@ -381,6 +622,7 @@ function attachCpaCodexLongRun(inner, {
   async function openEmbedded(toolId, section) {
     const id = requiredToolId(toolId);
     if (!state.tools[id].desiredRunning) {
+      desirePeer(id, "desired-open-peer");
       state.tools[id].desiredRunning = true;
       record(id, "desired-open");
       syncPowerSave();
@@ -396,6 +638,7 @@ function attachCpaCodexLongRun(inner, {
   async function openExternalTool(toolId, section) {
     const id = requiredToolId(toolId);
     if (!state.tools[id].desiredRunning) {
+      desirePeer(id, "desired-open-peer");
       state.tools[id].desiredRunning = true;
       record(id, "desired-open");
       syncPowerSave();
@@ -451,6 +694,10 @@ function attachCpaCodexLongRun(inner, {
 
 module.exports = {
   TOOL_IDS,
+  CPA_LOOPBACK,
+  ROUTER_LOOPBACK,
+  PROVIDER_BACKEND_CONSUMERS,
+  PROVIDER_BACKEND_LAUNCH_IDS,
   WEEK_MS,
   EXECUTION_TIMEOUT_MS,
   HEALTH_POLL_MS,
@@ -460,6 +707,13 @@ module.exports = {
   applyLongRunLiteLlmTimeout,
   attachCpaCodexLongRun,
   cpaLongRunYamlLines,
+  desktopCrossUseEnvironment,
+  launchConsumesProviderBackends,
+  managedLoopbackHealthTargets,
+  providerBackendContract,
+  providerBackendOpenApi,
+  routerHealthUrl,
+  startPeerIds,
   classifyObservation,
   nextBackoffMs,
   projectLongRun,

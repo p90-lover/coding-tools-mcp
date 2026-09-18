@@ -13,7 +13,8 @@
     "build:renderer": "vite build",
     "build": "bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
-    "build:package-resources": "node scripts/prepare-package-resources.cjs",
+    "build:bundled-runtimes": "node scripts/prepare-bundled-runtimes.cjs",
+    "build:package-resources": "node scripts/prepare-bundled-runtimes.cjs && node scripts/prepare-package-resources.cjs",
     "package": "bun run build && bun run build:runtime && bun run build:package-resources && bun run scripts/package.cjs",
     "package:mac": "bun run build && bun run build:runtime && bun run build:package-resources && bun run scripts/package.cjs --mac",
     "package:win": "bun run build && bun run build:runtime && bun run build:package-resources && bun run scripts/package.cjs --win",
@@ -53,7 +54,9 @@
       "electron/codex-router-original-ui.cjs",
       "electron/cpa-managed.cjs",
       "electron/cpa-codex-long-run.cjs",
-      "electron/atomic-file.cjs"
+      "electron/atomic-file.cjs",
+      "electron/bundled-runtimes.cjs",
+      "vendor/bundled-runtimes/**"
     ],
     "directories": {
       "output": "release"
@@ -64,6 +67,7 @@
       "electron/**",
       "vendor/upstream/**",
       "vendor/managed-components/**",
+      "vendor/bundled-runtimes/**",
       "assets/icon.png",
       "assets/linux-appimage-runner.sh",
       "package.json"

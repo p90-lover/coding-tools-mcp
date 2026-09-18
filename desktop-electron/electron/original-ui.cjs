@@ -2,7 +2,7 @@
 
 const path = require("node:path");
 const { ORIGINAL_SECTIONS, openOriginalControlCenter } = require("./codex-router-original-ui.cjs");
-const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
+const { attachCpaCodexLongRun, startPeerIds } = require("./cpa-codex-long-run.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -102,6 +102,7 @@ function createOriginalUiCore({
       sourceConfigured: Boolean(current?.home),
       installState: current?.managedInstall?.state || "not-installed",
       originalChrome: true,
+      bundledRuntime: current?.managedInstall?.bundledRuntime === true,
     };
   }
 
@@ -153,6 +154,9 @@ function createOriginalUiCore({
 
   async function start(toolId) {
     requireTool(toolId);
+    for (const peerId of startPeerIds(toolId)) {
+      if (peerId !== toolId) await start(peerId);
+    }
     const current = service(toolId);
     const installState = current?.managedInstall?.state;
     if (installState === "not-installed" && externalServices?.installManagedComponent) {
@@ -180,6 +184,9 @@ function createOriginalUiCore({
 
   async function restart(toolId) {
     requireTool(toolId);
+    for (const peerId of startPeerIds(toolId)) {
+      if (peerId !== toolId) await start(peerId);
+    }
     if (toolId === "codex-router") stopControlCenter();
     if (!externalServices?.restart) throw new Error(`${requireTool(toolId).name} lifecycle is unavailable`);
     await externalServices.restart(toolId);

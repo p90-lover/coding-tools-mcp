@@ -6,6 +6,7 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
+const { copyTreeDeref } = require("../electron/bundled-runtimes.cjs");
 
 const PRODUCT_VERSION = "0.7.0-rc.10";
 const PRODUCT_NAME = "Coding Tools";
@@ -19,6 +20,35 @@ const UPSTREAM = Object.freeze({
   commit: "e85e3693fdb4e3e033348c08df0298c20fcdb612",
 });
 const TUNNEL_VERSION = "0.0.12";
+const CPA_VERSION = "7.3.7";
+const CODEX_ROUTER_VERSION = "0.6.0";
+const CODEX_ROUTER_COMMIT = "930f547d8d8861a47e18a83216e15e73a73aa97c";
+const CPA_ARCHIVES = Object.freeze({
+  "win32/x64": Object.freeze({
+    fileName: "CLIProxyAPI_7.3.7_windows_amd64.zip",
+    sha256: "da5466b81beb7c769b99e26a5f6f41d9999a07be7c36be170167f10a2a6ecfc7",
+  }),
+  "win32/arm64": Object.freeze({
+    fileName: "CLIProxyAPI_7.3.7_windows_aarch64.zip",
+    sha256: "e940427e0e09afe9b92b5902dc357a96581cd03bd820aaea72566b5844b493ea",
+  }),
+  "linux/x64": Object.freeze({
+    fileName: "CLIProxyAPI_7.3.7_linux_amd64.tar.gz",
+    sha256: "3391dff672abccffce5f9259b7ce1e12cee7b0a8aa3f5b2280406484f59f37ba",
+  }),
+  "linux/arm64": Object.freeze({
+    fileName: "CLIProxyAPI_7.3.7_linux_aarch64.tar.gz",
+    sha256: "442aad130260cc22a75d2b230826e0b2185e92baf5ef8ae57b849ae694dddf2a",
+  }),
+  "darwin/x64": Object.freeze({
+    fileName: "CLIProxyAPI_7.3.7_darwin_amd64.tar.gz",
+    sha256: "7b20a8988afe1dff0a5f3cd3d7fd30300576d630506d747e74ce25dfc46bb2af",
+  }),
+  "darwin/arm64": Object.freeze({
+    fileName: "CLIProxyAPI_7.3.7_darwin_aarch64.tar.gz",
+    sha256: "15269902173e99b834b8577a520ddf8f89fbb4a224afd2230384c1890b06875f",
+  }),
+});
 const TUNNEL_REPOSITORY = "openai/tunnel-client";
 const CLOUDFLARED_VERSION = "2026.7.2";
 const CLOUDFLARED_RELEASE_COMMIT = "8679787525edc8575b2948a7c4a50b6292c6d426";
@@ -581,8 +611,51 @@ function validateRuntime(runtimeRoot, platform, arch) {
   return { root, manifest };
 }
 
-function componentPaths(platform) {
+function bundledCpaRelative(platform, arch) {
+  const asset = CPA_ARCHIVES[`${platform}/${arch}`];
+  if (!asset) fail("PACKAGE_RESOURCE_BUNDLED_CPA_PLATFORM_UNSUPPORTED", `${platform}/${arch}`);
+  return `bundled-runtimes/cpa/${platform}/${arch}/${asset.fileName}`;
+}
+
+function bundledRouterMarkerRelative() {
+  return "bundled-runtimes/codex-router/source/CODING_TOOLS_BUNDLED.json";
+}
+
+function validateBundledRuntimes(root, platform, arch, { mode = "pinned" } = {}) {
+  const resolved = regularDirectory(root, "bundled runtimes");
+  const cpaRelative = bundledCpaRelative(platform, arch).replace(/^bundled-runtimes\//, "");
+  const cpaPath = path.join(resolved, ...cpaRelative.split("/"));
+  regularFile(cpaPath, "bundled CPA archive");
+  const markerPath = path.join(resolved, "codex-router", "source", "CODING_TOOLS_BUNDLED.json");
+  const markerFile = regularFile(markerPath, "bundled Codex Router marker");
+  if (mode === "exists") return { root: resolved };
+  const asset = CPA_ARCHIVES[`${platform}/${arch}`];
+  const digest = sha256(fs.readFileSync(cpaPath));
+  if (digest !== asset.sha256) fail("PACKAGE_RESOURCE_BUNDLED_CPA_DIGEST_MISMATCH", `${asset.fileName}: ${digest}`);
+  const marker = readJson(markerFile.path, "PACKAGE_RESOURCE_BUNDLED_ROUTER_MARKER_INVALID");
+  if (marker?.schemaVersion !== 1
+      || marker.id !== "codex-router"
+      || marker.version !== CODEX_ROUTER_VERSION
+      || marker.commit !== CODEX_ROUTER_COMMIT
+      || marker.skipNetworkPrepare !== true
+      || marker.includes?.source !== true) {
+    fail("PACKAGE_RESOURCE_BUNDLED_ROUTER_IDENTITY_MISMATCH", JSON.stringify(marker ?? null));
+  }
+  for (const relative of [
+    "package.json",
+    "src/foreground-start.mjs",
+    "src/curate-models.mjs",
+    "apps/control-center/electron/main.mjs",
+  ]) {
+    regularFile(path.join(resolved, "codex-router", "source", ...relative.split("/")), `bundled Codex Router ${relative}`);
+  }
+  return { root: resolved };
+}
+
+function componentPaths(platform, arch) {
   return Object.freeze({
+    "bundled-cpa": bundledCpaRelative(platform, arch),
+    "bundled-codex-router": bundledRouterMarkerRelative(),
     "migration-manifest": "migration/manifest.json",
     "rollback-manifest": "rollback/manifest.json",
     "runtime-manifest": "runtime/manifest.json",
@@ -594,6 +667,8 @@ function componentPaths(platform) {
 
 function componentVersions() {
   return Object.freeze({
+    "bundled-cpa": CPA_VERSION,
+    "bundled-codex-router": CODEX_ROUTER_VERSION,
     "migration-manifest": PRODUCT_VERSION,
     "rollback-manifest": "0.4.10",
     "runtime-manifest": PRODUCT_VERSION,
@@ -751,7 +826,13 @@ function preparePackageResources(options = {}) {
       || path.join(repositoryRoot, "third_party", "THIRD_PARTY_NOTICES.md"),
   );
   const notices = combinedNotices(noticesPath, runtime.root, tunnel);
-  const paths = componentPaths(platform);
+  const bundledRuntimes = validateBundledRuntimes(
+    options.bundledRuntimesRoot || path.join(desktopRoot, "build", "bundled-runtimes"),
+    platform,
+    arch,
+    { mode: options.bundledRuntimeVerification || "pinned" },
+  );
+  const paths = componentPaths(platform, arch);
   const versions = componentVersions();
   const session = createRetentionSession({
     repositoryRoot,
@@ -785,6 +866,7 @@ function preparePackageResources(options = {}) {
     });
     writeJson(path.join(stagingRoot, ...paths["rollback-manifest"].split("/")), STABLE_ROLLBACK);
     writeComponent(stagingRoot, paths["third-party-notices"], notices);
+    copyTreeDeref(bundledRuntimes.root, path.join(stagingRoot, "bundled-runtimes"));
 
     const components = Object.keys(paths).sort(compareText).map((id) => {
       const componentPath = path.join(stagingRoot, ...paths[id].split("/"));
@@ -817,6 +899,19 @@ function preparePackageResources(options = {}) {
       },
       upstream: UPSTREAM,
       supply_chain: {
+        bundled_runtimes: {
+          cpa: {
+            repository: "router-for-me/CLIProxyAPI",
+            version: CPA_VERSION,
+            path: paths["bundled-cpa"],
+          },
+          "codex-router": {
+            repository: "duolahypercho/codex-router",
+            version: CODEX_ROUTER_VERSION,
+            commit: CODEX_ROUTER_COMMIT,
+            path: paths["bundled-codex-router"],
+          },
+        },
         tunnel_client: {
           repository: tunnel.release.repository,
           version: tunnel.release.version,
@@ -876,8 +971,9 @@ if (require.main === module) {
 }
 
 module.exports = {
-  OFFICIAL_TUNNEL_RELEASES,
-  PRODUCT_VERSION,
+  CPA_VERSION,
+  CODEX_ROUTER_COMMIT,
+  CODEX_ROUTER_VERSION,
   STABLE_ROLLBACK,
   TUNNEL_VERSION,
   componentPaths,

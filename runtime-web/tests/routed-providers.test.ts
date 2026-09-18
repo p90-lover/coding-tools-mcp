@@ -8,6 +8,8 @@ import {
   parseCodexRouterModelId,
   redactRouterError,
   resolveCodexRouterConnection,
+  resolveCpaConnection,
+  describeProviderBackends,
 } from "../src/routed-providers";
 
 const CALLER_KEY = "test_router_caller_key_abcdefghijklmnopqrstuvwxyz012345";
@@ -67,6 +69,57 @@ describe("Codex Router provider contract", () => {
       CODING_TOOLS_CODEX_ROUTER_URL: "http://router.example:4202",
       CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: CALLER_KEY,
     })).toThrow("loopback");
+  });
+
+  test("constructs a loopback CPA OpenAI backend from Desktop-managed env", () => {
+    const connection = resolveCpaConnection({
+      CODING_TOOLS_CPA_URL: "http://127.0.0.1:8317/",
+      CODING_TOOLS_CPA_PROXY_API_KEY: CALLER_KEY,
+    });
+    expect(connection).toEqual({
+      origin: "http://127.0.0.1:8317",
+      proxyApiKey: CALLER_KEY,
+      baseUrl: "http://127.0.0.1:8317/v1",
+    });
+    expect(resolveCpaConnection({})).toBeUndefined();
+    expect(() => resolveCpaConnection({
+      CODING_TOOLS_CPA_URL: "http://cpa.example:8317",
+      CODING_TOOLS_CPA_PROXY_API_KEY: CALLER_KEY,
+    })).toThrow("loopback");
+  });
+
+  test("discovers CPA and Codex Router loopback APIs from Desktop-managed env without secrets", () => {
+    const discovery = describeProviderBackends({
+      CODING_TOOLS_CPA_URL: "http://127.0.0.1:8317/",
+      CODING_TOOLS_CPA_PROXY_API_KEY: CALLER_KEY,
+      CODING_TOOLS_CODEX_ROUTER_URL: "http://127.0.0.1:4202/",
+      CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: CALLER_KEY,
+    });
+    expect(discovery.backends.cpa).toEqual({
+      role: "main-provider",
+      origin: "http://127.0.0.1:8317",
+      openaiBaseUrl: "http://127.0.0.1:8317/v1",
+      healthUrl: "http://127.0.0.1:8317/v1/models",
+      chatCompletionsUrl: "http://127.0.0.1:8317/v1/chat/completions",
+    });
+    expect(discovery.backends["codex-router"]).toEqual({
+      role: "subagent-provider",
+      origin: "http://127.0.0.1:4202",
+      openaiBaseUrl: `http://127.0.0.1:4202/_codex-router/${CALLER_KEY}/v1`,
+      healthUrl: `http://127.0.0.1:4202/_codex-router/${CALLER_KEY}/v1/models`,
+      chatCompletionsUrl: `http://127.0.0.1:4202/_codex-router/${CALLER_KEY}/v1/chat/completions`,
+    });
+    expect(JSON.stringify(discovery.backends.cpa)).not.toContain(CALLER_KEY);
+    expect(JSON.stringify(discovery)).not.toContain("proxyApiKey");
+    expect(describeProviderBackends({})).toEqual({
+      kind: "coding-tools-provider-backends",
+      role: "provider-backend",
+      backends: {},
+    });
+    expect(describeProviderBackends({
+      CODING_TOOLS_CPA_URL: "http://cpa.example:8317",
+      CODING_TOOLS_CPA_PROXY_API_KEY: CALLER_KEY,
+    }).backends.cpa).toBeUndefined();
   });
 
   test("round-trips routed model ids without guessing another namespace", () => {

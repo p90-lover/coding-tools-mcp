@@ -356,6 +356,64 @@ button.external-service-card:hover,
   color: #f0a0a8 !important;
 }
 
+.provider-backend-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 16px;
+  border: 1px solid rgba(73, 190, 133, 0.24);
+  border-radius: 14px;
+  background: rgba(33, 133, 93, 0.08);
+}
+
+.provider-backend-panel > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.provider-backend-panel span,
+.provider-backend-panel small {
+  color: rgba(231, 235, 246, 0.58);
+  font-size: 10px;
+}
+
+.provider-backend-panel strong {
+  font-size: 13px;
+}
+
+.provider-backend-panel dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.provider-backend-panel dt {
+  color: rgba(231, 235, 246, 0.52);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.provider-backend-panel dd {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.provider-backend-panel code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .provider-backend-panel dl {
+    grid-template-columns: 1fr;
+  }
+}
+
 .external-service-advanced {
   margin: 14px 0;
   padding: 12px;

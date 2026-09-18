@@ -1,14 +1,21 @@
 "use strict";
 
-const crypto = require("node:crypto");
 const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
+const {
+  CPA_LOOPBACK,
+  ROUTER_LOOPBACK,
+  desktopCrossUseEnvironment,
+  launchConsumesProviderBackends,
+  providerBackendContract,
+  startPeerIds,
+} = require("./cpa-codex-long-run.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
-  "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
+  "codex-router": Object.freeze({ endpoint: ROUTER_LOOPBACK.endpoint }),
   "commandcode-proxy": Object.freeze({ endpoint: "http://127.0.0.1:9090/" }),
-  cpa: Object.freeze({ endpoint: "http://127.0.0.1:8317/" }),
+  cpa: Object.freeze({ endpoint: CPA_LOOPBACK.endpoint }),
   paseo: Object.freeze({
     endpoint: "http://127.0.0.1:6768/",
     executionEndpoint: "ws://127.0.0.1:6767/ws",
@@ -47,6 +54,22 @@ function createManagedExternalServicesController({
     logger: options.logger,
     resolveRuntimeExecutable,
     publish: publishCombined,
+    bundleRoot: options.bundleRoot,
+    resourcesPath: options.resourcesPath,
+    desktopRoot: options.desktopRoot,
+    launchEnvironmentFor: (id) => {
+      if (!launchConsumesProviderBackends(id)) return {};
+      try {
+        const secrets = managedController?.runtimeSecrets("cpa") || {};
+        const router = managedController?.runtimeConfiguration?.("codex-router") || {};
+        return desktopCrossUseEnvironment({
+          cpaProxyApiKey: secrets.proxyApiKey,
+          routerCallerKey: router.callerKey,
+        });
+      } catch {
+        return desktopCrossUseEnvironment();
+      }
+    },
   });
 
   function managedConfiguration(serviceId) {
@@ -106,6 +129,7 @@ function createManagedExternalServicesController({
         platformMode: managed.platformMode,
         processes: managed.processes,
         missingCredentials: managed.missingCredentials,
+        bundledRuntime: managed.bundledRuntime === true,
       },
     };
   }
@@ -115,6 +139,7 @@ function createManagedExternalServicesController({
     return {
       ...snapshot,
       services: snapshot.services.map(mergeService),
+      providerBackends: providerBackendContract(),
     };
   }
 
@@ -142,6 +167,7 @@ function createManagedExternalServicesController({
   }
 
   async function installManagedComponent(serviceId) {
+    await ensureStartPeers(serviceId);
     await managedController.installComponent(serviceId);
     applyManagedConfiguration(serviceId);
     await managedController.startComponent(serviceId);
@@ -151,6 +177,7 @@ function createManagedExternalServicesController({
   }
 
   async function repairManagedComponent(serviceId) {
+    await ensureStartPeers(serviceId);
     try { await managedController.stopComponent(serviceId); } catch {}
     await managedController.repairComponent(serviceId);
     applyManagedConfiguration(serviceId);
@@ -161,6 +188,7 @@ function createManagedExternalServicesController({
   }
 
   async function start(serviceId) {
+    await ensureStartPeers(serviceId);
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       applyManagedConfiguration(serviceId);
@@ -184,6 +212,7 @@ function createManagedExternalServicesController({
   }
 
   async function restart(serviceId) {
+    await ensureStartPeers(serviceId);
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       applyManagedConfiguration(serviceId);
@@ -225,10 +254,43 @@ function createManagedExternalServicesController({
       throw new Error("Managed CPA credentials are unavailable");
     }
     return {
-      baseUrl: SERVICE_ENDPOINTS.cpa.endpoint.replace(/\/$/, ""),
+      baseUrl: CPA_LOOPBACK.origin,
       managementKey,
       proxyApiKey,
     };
+  }
+
+  async function ensureStartPeers(serviceId) {
+    for (const peerId of startPeerIds(serviceId)) {
+      if (peerId === serviceId) continue;
+      const peer = managedController.project(peerId);
+      if (peer.installState === "not-installed") {
+        await managedController.installComponent(peerId);
+      } else if (peer.installState === "repair-required" || peer.installState === "error") {
+        await managedController.repairComponent(peerId);
+      }
+      if (managedController.project(peerId).installState === "installed") {
+        applyManagedConfiguration(peerId);
+        await managedController.startComponent(peerId);
+        try { await baseController.inspect(peerId); } catch {}
+      }
+    }
+  }
+
+  function runtimeEnvironment() {
+    const base = baseController.runtimeEnvironment();
+    let cpaProxyApiKey = "";
+    try {
+      cpaProxyApiKey = String(cpaConnection()?.proxyApiKey || "").trim();
+    } catch {}
+    const callerKey = String(base.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY || "").trim();
+    return Object.freeze({
+      ...base,
+      ...desktopCrossUseEnvironment({
+        cpaProxyApiKey: cpaProxyApiKey || undefined,
+        routerCallerKey: callerKey || undefined,
+      }),
+    });
   }
 
   function dispose() {
@@ -244,7 +306,8 @@ function createManagedExternalServicesController({
     stop,
     restart,
     syncCodexRouter,
-    runtimeEnvironment: () => baseController.runtimeEnvironment(),
+    runtimeEnvironment,
+    providerBackendContract,
     upstreamConfiguration,
     cpaConnection,
     installManagedComponent,
