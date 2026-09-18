@@ -201,6 +201,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /npm_config_scripts_prepend_node_path/);
   assert.match(source, /resolveNpmCliJs/);
   assert.match(source, /npm-cli\.js/);
+  assert.match(source, /coding-tools-node-shims/);
 
   const windows = npmSpawnInvocation(["ci"], "win32", {
     Path: "C:\\nodejs;C:\\Windows\\system32",
@@ -241,6 +242,7 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
 
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
+    TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
   assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
@@ -248,8 +250,13 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
   assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
   assert.equal(windows.options.env.npm_config_scripts_prepend_node_path, "true");
   const windowsPath = windows.options.env.Path;
-  assert.equal(windowsPath.split(";")[0], nodeDir);
+  assert.ok(windowsPath.split(";")[0].endsWith("coding-tools-node-shims"));
+  assert.ok(windowsPath.split(";").includes(nodeDir));
   assert.match(windowsPath, /nodejs/);
+  assert.equal(
+    fs.readFileSync(path.join(root, "coding-tools-node-shims", "node.cmd"), "utf8"),
+    `@echo off\r\n"${path.join(nodeDir, "node.exe")}" %*\r\n`,
+  );
 });
 
 test("Windows five-stack npm prepare merges Path and PATH when bun splits them", () => {
@@ -266,13 +273,14 @@ test("Windows five-stack npm prepare merges Path and PATH when bun splits them",
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     PATH: bunShimDir,
     Path: `${nodeDir};C:\\Windows\\system32`,
+    TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
   assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
   assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
   assert.equal(windows.options.env.npm_node_execpath, path.join(nodeDir, "node.exe"));
   assert.equal(windows.options.env.PATH, undefined);
-  assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
+  assert.ok(windows.options.env.Path.split(";").includes(nodeDir));
 });
 
 test("Windows five-stack npm prepare keeps an explicit node.exe even if bun dropped PATH", () => {
@@ -290,12 +298,13 @@ test("Windows five-stack npm prepare keeps an explicit node.exe even if bun drop
   const windows = npmSpawnInvocation(["ci"], "win32", {
     PATH: bunShimDir,
     CODING_TOOLS_NODE_EXE: nodeExe,
+    TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
   assert.equal(windows.options.env.npm_node_execpath, nodeExe);
   assert.doesNotMatch(String(windows.args[3]), /set "PATH=/);
   assert.ok(String(windows.args[3]).includes(path.join(nodeDir, "npm.cmd")));
-  assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
+  assert.ok(windows.options.env.Path.split(";").includes(nodeDir));
 });
 
 test("Windows five-stack npm prepare runs npm-cli.js through node.exe when present", () => {
@@ -314,6 +323,7 @@ test("Windows five-stack npm prepare runs npm-cli.js through node.exe when prese
 
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
+    TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
   assert.equal(windows.command, nodeExe);
@@ -321,7 +331,12 @@ test("Windows five-stack npm prepare runs npm-cli.js through node.exe when prese
   assert.equal(windows.options.env.npm_execpath, npmCli);
   assert.equal(windows.options.env.npm_node_execpath, nodeExe);
   assert.equal(windows.options.env.PATH, undefined);
-  assert.equal(windows.options.env.Path.split(";")[0], nodeDir);
+  assert.ok(windows.options.env.Path.split(";")[0].endsWith("coding-tools-node-shims"));
+  assert.ok(windows.options.env.Path.split(";").includes(nodeDir));
+  assert.match(
+    fs.readFileSync(path.join(root, "coding-tools-node-shims", "node.cmd"), "utf8"),
+    /node\.exe/,
+  );
 });
 
 test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {

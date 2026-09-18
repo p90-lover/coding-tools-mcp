@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { createRetentionSession, PRODUCT_VERSION } = require("./prepare-package-resources.cjs");
@@ -227,6 +228,22 @@ function resolveNpmCliJs(nodeExecutable) {
   return null;
 }
 
+function ensureWindowsNodeShims(nodeExecutable, npmExecutable, env = process.env, platform = process.platform) {
+  if (platform !== "win32" || !nodeExecutable || !isFile(nodeExecutable)) return null;
+  const root = env.CODING_TOOLS_RETENTION_ROOT || env.TEMP || env.TMP || os.tmpdir();
+  const shimDir = path.join(String(root), "coding-tools-node-shims");
+  fs.mkdirSync(shimDir, { recursive: true });
+  const nodeBody = `@echo off\r\n"${nodeExecutable}" %*\r\n`;
+  fs.writeFileSync(path.join(shimDir, "node.cmd"), nodeBody);
+  fs.writeFileSync(path.join(shimDir, "node.bat"), nodeBody);
+  if (npmExecutable && path.isAbsolute(npmExecutable) && isFile(npmExecutable)) {
+    const npmBody = `@echo off\r\ncall "${npmExecutable}" %*\r\n`;
+    fs.writeFileSync(path.join(shimDir, "npm.cmd"), npmBody);
+    fs.writeFileSync(path.join(shimDir, "npm.bat"), npmBody);
+  }
+  return shimDir;
+}
+
 function withNpmOnPath(env = process.env, platform = process.platform) {
   const next = { ...env };
   for (const key of Object.keys(next)) {
@@ -234,7 +251,9 @@ function withNpmOnPath(env = process.env, platform = process.platform) {
   }
   const nodeExecutable = resolveNodeExecutable(env, platform);
   const npmExecutable = resolveNpmExecutable(env, platform);
+  const shimDir = ensureWindowsNodeShims(nodeExecutable, npmExecutable, env, platform);
   const extras = [];
+  if (shimDir) extras.push(shimDir);
   if (nodeExecutable) extras.push(path.dirname(nodeExecutable));
   if (path.isAbsolute(npmExecutable)) extras.push(path.dirname(npmExecutable));
   const merged = [];
