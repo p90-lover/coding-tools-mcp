@@ -7,6 +7,11 @@ TARGET = Path("aiTemp/rc9-cpa-oauth/tmp/runtime_apply_patch.py")
 
 source = SOURCE.read_text(encoding="utf-8")
 
+root_anchor = "ROOT = Path(__file__).resolve().parents[2]"
+if source.count(root_anchor) != 1:
+    raise SystemExit(f"expected one repository-root anchor, found {source.count(root_anchor)}")
+source = source.replace(root_anchor, "ROOT = Path(__file__).resolve().parents[3]", 1)
+
 old = '''replace_once(
     "desktop-electron/src/providers/provider-types.ts",
     \'\'\'    models: [],
