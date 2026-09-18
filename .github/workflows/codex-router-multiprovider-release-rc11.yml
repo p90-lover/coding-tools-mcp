@@ -31,6 +31,7 @@ env:
   BUN_VERSION: 1.4.0
   RUST_TOOLCHAIN: 1.98.1
   PYTHONDONTWRITEBYTECODE: '1'
+  NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/cache/npm-release-rc11
 
 jobs:
   release-windows:

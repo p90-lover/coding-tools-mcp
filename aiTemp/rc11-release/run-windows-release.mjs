@@ -18,6 +18,7 @@ const evidence = path.join(aiTemp, 'evidence');
 const trash = path.join(aiTemp, 'Trash', `release-${releaseVersion}-windows`);
 const assets = path.join(aiTemp, 'release-assets');
 const verificationRenderer = path.join(aiTemp, 'rc11-release', 'renderer-dist', sourceSha);
+const npmCache = path.join(aiTemp, 'cache', 'npm-release-rc11');
 const preload = pathToFileURL(path.join(root, 'runtime-web', 'scripts', 'no-delete-preload.mjs')).href;
 const commandLog = [];
 
@@ -27,6 +28,7 @@ for (const directory of [
   trash,
   assets,
   verificationRenderer,
+  npmCache,
   path.join(aiTemp, 'cache', 'electron-builder'),
 ]) {
   fs.mkdirSync(directory, { recursive: true });
@@ -42,6 +44,10 @@ const childEnv = {
   CODING_TOOLS_RETENTION_ROOT: trash,
   ELECTRON_BUILDER_CACHE: path.join(aiTemp, 'cache', 'electron-builder'),
   BUN_INSTALL_CACHE_DIR: path.join(aiTemp, 'cache', 'bun-release-rc11'),
+  // Keep npm cacache on the workspace drive. The no-delete preload retains
+  // cache tmp files into aiTemp/Trash; C:\npm\cache -> D:\... is EXDEV.
+  npm_config_cache: npmCache,
+  NPM_CONFIG_CACHE: npmCache,
   TMPDIR: temp,
   TMP: temp,
   TEMP: temp,

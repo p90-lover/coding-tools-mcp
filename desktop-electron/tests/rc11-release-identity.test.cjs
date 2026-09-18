@@ -37,7 +37,14 @@ test("rc.11 exact-source runner publishes a new tag without moving frozen rc.8, 
   assert.match(runner, /docs\/releases\/v0\.7\.0-rc\.11\.md/);
   assert.match(runner, /RC11_WINDOWS_RELEASE_PUBLISHED/);
   assert.match(runner, /branch === 'main'/);
+  assert.match(runner, /npmCache = path\.join\(aiTemp, 'cache', 'npm-release-rc11'\)/);
+  assert.match(runner, /npm_config_cache: npmCache/);
+  assert.match(runner, /NPM_CONFIG_CACHE: npmCache/);
   assert.doesNotMatch(runner, /force/);
+  assert.ok(
+    workflow.includes("NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/cache/npm-release-rc11"),
+    "rc.11 publisher must pin npm cache on the workspace drive",
+  );
 
   const notes = read("docs/releases/v0.7.0-rc.11.md");
   assert.match(notes, /^## English$/m);
