@@ -1,0 +1,151 @@
+name: rc.9 managed five-stack
+
+on:
+  push:
+    branches:
+      - integration/v0.7.0-rc.9-managed-five-stack
+    paths:
+      - 'aiTemp/rc9-managed-five-stack/**'
+      - 'desktop-electron/electron/managed-components.cjs'
+      - 'desktop-electron/electron/managed-external-services.cjs'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/src/features/ExternalServicesSurface.tsx'
+      - 'desktop-electron/src/features/external-services.css'
+      - 'desktop-electron/vendor/managed-components/**'
+      - 'desktop-electron/tests/rc9-managed-five-stack.test.cjs'
+      - 'desktop-electron/package.json'
+      - '.github/workflows/rc9-managed-five-stack.yml'
+  pull_request:
+    paths:
+      - 'aiTemp/rc9-managed-five-stack/**'
+      - 'desktop-electron/electron/managed-components.cjs'
+      - 'desktop-electron/electron/managed-external-services.cjs'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/types.ts'
+      - 'desktop-electron/src/features/ExternalServicesSurface.tsx'
+      - 'desktop-electron/src/features/external-services.css'
+      - 'desktop-electron/vendor/managed-components/**'
+      - 'desktop-electron/tests/rc9-managed-five-stack.test.cjs'
+      - 'desktop-electron/package.json'
+      - '.github/workflows/rc9-managed-five-stack.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-managed-five-stack-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc9-managed-five-stack/bun-cache
+
+jobs:
+  verify:
+    name: Managed installs, runtime, renderer, and no-delete gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary directories
+        run: |
+          mkdir -p \
+            aiTemp/rc9-managed-five-stack/renderer-dist/$GITHUB_RUN_ID \
+            aiTemp/Trash/rc9-managed-five-stack
+
+      - name: Apply exact guarded production patch
+        run: python aiTemp/rc9-managed-five-stack/apply_integration.py
+
+      - name: Validate runtime syntax
+        run: |
+          node --check desktop-electron/electron/managed-components.cjs
+          node --check desktop-electron/electron/managed-external-services.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/preload.cjs
+
+      - name: Install exact desktop dependencies
+        run: bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run managed five-stack and existing integration contracts
+        run: |
+          node --test \
+            desktop-electron/tests/rc9-managed-five-stack.test.cjs \
+            desktop-electron/tests/external-services-control-plane.test.cjs \
+            desktop-electron/tests/rc7-full-integration-contract.test.cjs \
+            desktop-electron/tests/commandcode-provider-session.test.cjs \
+            desktop-electron/tests/provider-center-account-wiring.test.cjs \
+            desktop-electron/tests/provider-execution-router.test.cjs \
+            desktop-electron/tests/upstream-tools.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs
+
+      - name: Typecheck desktop renderer
+        run: bun run --cwd desktop-electron typecheck
+
+      - name: Build production renderer into retained aiTemp evidence
+        run: |
+          cd desktop-electron
+          bunx vite build \
+            --outDir ../aiTemp/rc9-managed-five-stack/renderer-dist/$GITHUB_RUN_ID \
+            --emptyOutDir false
+
+      - name: Enforce no tracked file deletion
+        shell: bash
+        run: |
+          if [ -n "${{ github.base_ref }}" ]; then
+            base_ref="origin/${{ github.base_ref }}"
+          else
+            base_ref='origin/release/codex-router-multiprovider-0.7.0-rc.8'
+          fi
+          git fetch --no-tags origin release/codex-router-multiprovider-0.7.0-rc.8
+          deleted="$(git diff -M --diff-filter=D --name-only "$base_ref"...HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted tracked paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+          working_deleted="$(git diff -M --diff-filter=D --name-only)"
+          if [ -n "$working_deleted" ]; then
+            printf 'Working-tree deletions are forbidden:\n%s\n' "$working_deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit verified materialized integration
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            desktop-electron/electron/managed-components.cjs \
+            desktop-electron/electron/managed-external-services.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/src/types.ts \
+            desktop-electron/src/features/ExternalServicesSurface.tsx \
+            desktop-electron/src/features/external-services.css \
+            desktop-electron/package.json
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'Verified source is already materialized.'
+            exit 0
+          fi
+          git commit -m 'feat(rc9): wire managed installs into the five-stack control plane'
+          git push origin HEAD:integration/v0.7.0-rc.9-managed-five-stack
+
+      - name: Preserve transient dependencies in Trash
+        if: always()
+        shell: bash
+        run: |
+          if [ -d desktop-electron/node_modules ]; then
+            mv desktop-electron/node_modules "aiTemp/Trash/rc9-managed-five-stack/node_modules-$GITHUB_RUN_ID"
+          fi
