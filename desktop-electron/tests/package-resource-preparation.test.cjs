@@ -309,6 +309,10 @@ test("five-stack package copy keeps production node_modules and omits expo, Pase
     true,
   );
   assert.equal(
+    skipFiveStackPackageEntry("typescript", { isDirectory: () => true }, "paseo/source/node_modules/typescript"),
+    true,
+  );
+  assert.equal(
     skipFiveStackPackageEntry("left-pad", { isDirectory: () => true }, "paseo/source/node_modules/left-pad"),
     false,
   );

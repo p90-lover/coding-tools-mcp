@@ -773,7 +773,20 @@ function joinRelative(prefix, name) {
   return prefix ? `${prefix}/${name}` : name;
 }
 
-const SKIP_FIVE_STACK_DIR_NAMES = new Set([".git", "fastlane", "test", "tests", "__tests__", "e2e"]);
+const SKIP_FIVE_STACK_DIR_NAMES = new Set([
+  ".git",
+  "fastlane",
+  "test",
+  "tests",
+  "__tests__",
+  "e2e",
+  "docs",
+  "examples",
+  "coverage",
+  ".turbo",
+  ".cache",
+  ".nyc_output",
+]);
 const SKIP_PASEO_WORKSPACES = new Set(["app", "website", "desktop"]);
 const SKIP_HEAVY_NODE_MODULES = new Set([
   "expo",
@@ -789,6 +802,18 @@ const SKIP_HEAVY_NODE_MODULES = new Set([
   "wrangler",
   "miniflare",
   "eas-cli",
+  "typescript",
+  "eslint",
+  "prettier",
+  "webpack",
+  "webpack-cli",
+  "vite",
+  "rollup",
+  "playwright",
+  "puppeteer",
+  "cypress",
+  "next",
+  "storybook",
 ]);
 const SKIP_HEAVY_NODE_MODULE_SCOPES = new Set([
   "@expo",
@@ -796,6 +821,11 @@ const SKIP_HEAVY_NODE_MODULE_SCOPES = new Set([
   "@react-native-community",
   "@react-navigation",
   "@cloudflare",
+  "@types",
+  "@eslint",
+  "@storybook",
+  "@playwright",
+  "@vitejs",
 ]);
 
 function skipHeavyNodeModule(parts) {

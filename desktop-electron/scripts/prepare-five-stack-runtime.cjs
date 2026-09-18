@@ -648,6 +648,9 @@ function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = [
     for (const script of extraScripts) {
       runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
     }
+    // Drop devDependencies (typescript, eslint, expo tooling) so NSIS stays
+    // small enough for the Windows silent-install smoke timeout.
+    runNpm(sourceRoot, ["prune", "--omit=dev", "--ignore-scripts"], spawnSyncProcess, "FIVE_STACK_NPM_PRUNE_FAILED");
     // Do not materialize workspace links into node_modules. NSIS 7-Zip failed on
     // a 4GB Paseo tree (react-native, expo, workerd) after that copy.
   } finally {

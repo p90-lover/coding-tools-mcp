@@ -564,10 +564,18 @@ test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async 
       if (line.includes(" ci") || line.endsWith(" ci") || /\bci\b/.test(line)) {
         assert.match(line, /ignore-scripts/);
       }
+      if (/\bprune\b/.test(line)) {
+        assert.match(line, /omit=dev/);
+        assert.match(line, /ignore-scripts/);
+      }
     } else {
       assert.match(path.basename(call.command), /^npm$/);
-      assert.ok(["ci", "run"].includes(call.args[0]));
+      assert.ok(["ci", "run", "prune"].includes(call.args[0]));
       if (call.args[0] === "ci") assert.deepEqual(call.args.slice(0, 2), ["ci", "--ignore-scripts"]);
+      if (call.args[0] === "prune") {
+        assert.ok(call.args.includes("--omit=dev"));
+        assert.ok(call.args.includes("--ignore-scripts"));
+      }
     }
   }
 });
