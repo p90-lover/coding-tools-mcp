@@ -1,0 +1,157 @@
+name: RC9 Windows Installer Upgrade Acceptance
+
+on:
+  push:
+    branches:
+      - fix/v0.7.0-rc.9-install-location-beta-update-prompt
+    paths:
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/update.cjs
+      - desktop-electron/electron/update-worker.cjs
+      - desktop-electron/tests/install-location-beta-update-prompt.test.cjs
+      - desktop-electron/tests/installer-upgrade-migration.test.cjs
+      - desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs
+      - desktop-electron/tests/update.test.cjs
+      - aiTemp/rc7-release/verify-windows-migration.ps1
+      - .github/workflows/rc9-windows-installer-upgrade-acceptance.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc9-windows-installer-upgrade-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_SHA: ${{ github.sha }}
+  CARGO_TARGET_DIR: ${{ github.workspace }}\aiTemp\rc9-install-location-beta-update\cargo-target
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}\aiTemp\rc9-install-location-beta-update\bun-cache
+  npm_config_cache: ${{ github.workspace }}\aiTemp\rc9-install-location-beta-update\npm-cache
+  ELECTRON_CACHE: ${{ github.workspace }}\aiTemp\rc9-install-location-beta-update\electron-cache
+  ELECTRON_BUILDER_CACHE: ${{ github.workspace }}\aiTemp\rc9-install-location-beta-update\electron-builder-cache
+
+jobs:
+  windows-installer:
+    runs-on: windows-2025
+    timeout-minutes: 55
+    steps:
+      - name: Check out exact repair source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Set up the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.98.1
+
+      - name: Prepare retained evidence directories
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force aiTemp/rc9-install-location-beta-update/evidence | Out-Null
+          New-Item -ItemType Directory -Force aiTemp/Trash/rc9-install-location-beta-update | Out-Null
+          git rev-parse HEAD | Set-Content aiTemp/rc9-install-location-beta-update/evidence/exact-source-sha.txt
+          if ((git rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) {
+            throw "checkout SHA does not match SOURCE_SHA"
+          }
+
+      - name: Build the packaged headless runtime prerequisite
+        shell: pwsh
+        run: |
+          cargo build --locked --release --manifest-path rust-core/coding-tools-headless/Cargo.toml 2>&1 |
+            Tee-Object aiTemp/rc9-install-location-beta-update/evidence/headless-build.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $env:CARGO_TARGET_DIR 'release\coding-tools-headless.exe'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "headless binary is missing: $binary"
+          }
+          (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash |
+            Set-Content aiTemp/rc9-install-location-beta-update/evidence/headless-sha256.txt
+
+      - name: Install locked renderer and packaged-runtime dependencies
+        shell: pwsh
+        run: |
+          bun install --cwd desktop-electron --frozen-lockfile 2>&1 |
+            Tee-Object aiTemp/rc9-install-location-beta-update/evidence/desktop-install.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun install --cwd runtime-web --frozen-lockfile 2>&1 |
+            Tee-Object aiTemp/rc9-install-location-beta-update/evidence/runtime-install.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun install --cwd runtime-web/launcher --frozen-lockfile 2>&1 |
+            Tee-Object aiTemp/rc9-install-location-beta-update/evidence/launcher-install.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Re-run focused Windows contracts and type checks
+        shell: pwsh
+        run: |
+          node --check desktop-electron/electron/update.cjs
+          node --check desktop-electron/electron/update-worker.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --test `
+            desktop-electron/tests/install-location-beta-update-prompt.test.cjs `
+            desktop-electron/tests/installer-upgrade-migration.test.cjs `
+            desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs `
+            desktop-electron/tests/update.test.cjs 2>&1 |
+            Tee-Object aiTemp/rc9-install-location-beta-update/evidence/windows-contracts.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun run --cwd desktop-electron typecheck 2>&1 |
+            Tee-Object aiTemp/rc9-install-location-beta-update/evidence/windows-typecheck.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build the exact Windows NSIS installer
+        shell: pwsh
+        run: |
+          bun run --cwd desktop-electron package:win 2>&1 |
+            Tee-Object aiTemp/rc9-install-location-beta-update/evidence/windows-package.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installers = @(Get-ChildItem desktop-electron/artifacts -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one Windows installer, found $($installers.Count)"
+          }
+          $installer = $installers[0]
+          $installer.FullName | Set-Content aiTemp/rc9-install-location-beta-update/evidence/installer-path.txt
+          (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash |
+            Set-Content aiTemp/rc9-install-location-beta-update/evidence/installer-sha256.txt
+
+      - name: Exercise real NSIS and MSI legacy-location migration
+        shell: pwsh
+        run: |
+          $installer = (Get-Content aiTemp/rc9-install-location-beta-update/evidence/installer-path.txt -Raw).Trim()
+          $trash = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\Trash\rc9-install-location-beta-update'
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc9-install-location-beta-update\evidence\migration'
+          & (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc7-release\verify-windows-migration.ps1') `
+            -InstallerPath $installer `
+            -TrashRoot $trash `
+            -EvidenceRoot $evidence
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Select-String -Path (Join-Path $evidence 'installer-upgrade-migration.json') `
+            -Pattern '"legacyLocationReused": true' | Out-Null
+
+      - name: Enforce no tracked-file deletion after packaging
+        shell: pwsh
+        run: |
+          $deleted = git diff --name-only --diff-filter=D
+          if ($deleted) { throw "packaging deleted tracked files: $deleted" }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve installer and verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rc9-windows-installer-upgrade-${{ github.run_id }}
+          path: |
+            aiTemp/rc9-install-location-beta-update/evidence/
+            desktop-electron/artifacts/*.exe
+          if-no-files-found: error
+          retention-days: 14
