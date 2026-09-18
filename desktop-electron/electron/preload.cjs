@@ -166,6 +166,10 @@ const codingToolsApi = Object.freeze({
   diagnostics: Object.freeze({
     snapshot: () => invokeContract(ipcRenderer, "diagnostics.snapshot"),
   }),
+  tools: Object.freeze({
+    catalog: (input) => invokeContract(ipcRenderer, "tools.catalog", input),
+    call: (input) => invokeContract(ipcRenderer, "tools.call", input),
+  }),
 });
 
 contextBridge.exposeInMainWorld("codingTools", codingToolsApi);

@@ -12,8 +12,10 @@ const REQUIRED_NAMESPACES = [
   "history",
   "nativeCodex",
   "integrations",
+  "execution",
   "updates",
   "diagnostics",
+  "tools",
 ];
 
 function loadPreload(respond = () => null) {

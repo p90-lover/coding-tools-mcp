@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -17,6 +18,7 @@ import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
+import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -364,7 +366,13 @@ function LauncherShell({
   );
   const devProfile = snapshot.profile === "development";
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
-  const [sidebarOpen, setSidebarOpen] = useState(!compactAtMount);
+  const [sidebarOpen, setSidebarOpen] = useState(compactAtMount ? false : snapshot.state.sidebarOpen !== false);
+  const [sidebarWidth, setSidebarWidth] = useState(snapshot.state.sidebarWidth || 252);
+  const extraSurfaceActive = surface === "providers"
+    || surface === "integrations"
+    || surface === "paseo"
+    || surface === "anneal"
+    || surface === "network";
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
@@ -474,15 +482,44 @@ function LauncherShell({
     if (show) await api!.showBrowser();
   }, []);
 
+  const persistSidebar = (open: boolean, width = sidebarWidth) => {
+    void api!.setSidebarState({ open, width })
+      .then(updateState)
+      .catch((cause) => setError(messageOf(cause)));
+  };
+
   const toggleSidebar = () => {
     const next = !sidebarOpen;
     if (compactSidebar && next && surface === "browser") {
       void api!.setBrowserSurfaceActive(false)
-        .then(() => setSidebarOpen(true))
+        .then(() => {
+          setSidebarOpen(true);
+          persistSidebar(true);
+        })
         .catch((cause) => setError(messageOf(cause)));
       return;
     }
     setSidebarOpen(next);
+    if (!compactSidebar) persistSidebar(next);
+  };
+
+  const beginSidebarResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (compactSidebar || !sidebarOpen) return;
+    event.preventDefault();
+    const origin = event.clientX;
+    const startWidth = sidebarWidth;
+    let currentWidth = startWidth;
+    const move = (next: PointerEvent) => {
+      currentWidth = Math.max(240, Math.min(420, startWidth + (next.clientX - origin)));
+      setSidebarWidth(currentWidth);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      persistSidebar(true, currentWidth);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
   };
 
   const navigateSurface = (next: Surface) => {
@@ -549,6 +586,7 @@ function LauncherShell({
       animate={{ opacity: 1 }}
       className={`app-shell${compactSidebar ? " is-compact" : ""}${sidebarOpen ? " is-sidebar-open" : ""}`}
       initial={{ opacity: 0 }}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as Record<string, string>}
     >
       <TitleBar
         copy={copy}
@@ -627,41 +665,52 @@ function LauncherShell({
                     navigateSurface("mcp");
                   }}
                 />
+              </SidebarGroup>
+              <SidebarGroup label={copy.runtime}>
+                <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
+              </SidebarGroup>
+              <details className="sidebar-more" open={extraSurfaceActive}>
+                <summary>{copy.moreTools}</summary>
                 <SidebarItem
                   active={surface === "providers"}
                   icon="providers"
-                  label={language === "zh-TW" ? "供應商" : language === "zh-CN" ? "供应商" : language === "ja" ? "プロバイダー" : "Providers"}
+                  label={copy.providers}
                   onClick={() => navigateSurface("providers")}
                 />
                 <SidebarItem
                   active={surface === "integrations"}
                   icon="globe"
-                  label={language === "zh-TW" ? "整合服務" : language === "zh-CN" ? "集成服务" : language === "ja" ? "統合サービス" : "Integrations"}
+                  label={copy.integrations}
                   onClick={() => navigateSurface("integrations")}
                 />
                 <SidebarItem
                   active={surface === "paseo"}
                   icon="orchestrator"
-                  label={language === "zh-TW" ? "Paseo 協調器" : language === "zh-CN" ? "Paseo 协调器" : language === "ja" ? "Paseo オーケストレーター" : "Paseo Orchestrator"}
+                  label={language === "zh-TW" ? "Paseo 協調器" : copy.paseoOrchestrator}
                   onClick={() => navigateSurface("paseo")}
                 />
                 <SidebarItem
                   active={surface === "anneal"}
                   icon="activity"
-                  label={language === "zh-TW" ? "Anneal 任務" : language === "zh-CN" ? "Anneal 任务" : language === "ja" ? "Anneal タスク" : "Anneal Tasks"}
+                  label={language === "zh-TW" ? "Anneal 任務" : copy.annealTasks}
                   onClick={() => navigateSurface("anneal")}
                 />
                 <SidebarItem
                   active={surface === "network"}
                   icon="globe"
-                  label={language === "zh-TW" ? "網路代理" : language === "zh-CN" ? "网络代理" : language === "ja" ? "ネットワークプロキシ" : "Network Proxy"}
+                  label={language === "zh-TW" ? "網路代理" : copy.networkProxy}
                   onClick={() => navigateSurface("network")}
                 />
-              </SidebarGroup>
-              <SidebarGroup label={copy.runtime}>
-                <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
-              </SidebarGroup>
+              </details>
             </nav>
+            {sidebarOpen && !compactSidebar ? (
+              <button
+                aria-label={copy.resizeSidebar}
+                className="sidebar-resize"
+                onPointerDown={beginSidebarResize}
+                type="button"
+              />
+            ) : null}
 
             <div className="sidebar-footer">
               {updateVisible ? (
@@ -1604,6 +1653,7 @@ function McpSurface({
           </>
         ) : null}
       </div>
+      <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
   );
 }
