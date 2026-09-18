@@ -127,21 +127,46 @@ function cachedRelease(cacheRoot, id, fileName) {
   return null;
 }
 
-function maybePrepareDependencies(sourceRoot, spawnSyncProcess) {
-  if (String(process.env.CODING_TOOLS_PREPARE_FIVE_STACK_DEPS || "").trim() !== "1") return false;
+function shouldPrepareDependencies(options) {
+  if (options.prepareDependencies === true) return true;
+  if (options.prepareDependencies === false) return false;
+  if (String(process.env.CODING_TOOLS_PREPARE_FIVE_STACK_DEPS || "").trim() === "1") return true;
+  return require.main === module;
+}
+
+function runNpm(sourceRoot, args, spawnSyncProcess, code) {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const install = spawnSyncProcess(npm, ["ci"], {
+  const result = spawnSyncProcess(npm, args, {
     cwd: sourceRoot,
     encoding: "utf8",
     shell: false,
     windowsHide: true,
     timeout: 30 * 60_000,
   });
-  if (install.error) throw install.error;
-  if (install.status !== 0) {
-    fail("FIVE_STACK_NPM_CI_FAILED", String(install.stderr || install.stdout || "").trim());
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    fail(code, String(result.stderr || result.stdout || "").trim());
+  }
+}
+
+function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
+  if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
+  runNpm(sourceRoot, ["ci"], spawnSyncProcess, "FIVE_STACK_NPM_CI_FAILED");
+  for (const script of extraScripts) {
+    runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
   }
   return true;
+}
+
+function writeBundledMarker(destination, manifest) {
+  const marker = path.join(destination, "CODING_TOOLS_BUNDLED.json");
+  if (fs.existsSync(marker)) return;
+  writeJson(marker, {
+    schemaVersion: 1,
+    id: manifest.id,
+    version: manifest.version,
+    skipNetworkPrepare: true,
+  });
 }
 
 async function materializeComponent({
@@ -153,6 +178,7 @@ async function materializeComponent({
   arch,
   fetchImpl,
   spawnSyncProcess,
+  prepareDependencies,
   now,
 }) {
   const componentRoot = path.join(outputRoot, manifest.id);
@@ -177,6 +203,7 @@ async function materializeComponent({
     if (digest !== asset.sha256) fail("FIVE_STACK_RELEASE_DIGEST_MISMATCH", `${asset.fileName}: ${digest}`);
     record.fileName = asset.fileName;
     record.sha256 = digest;
+    writeBundledMarker(componentRoot, manifest);
   } else {
     if (!COMMIT_SHA.test(String(manifest.commit || ""))) {
       fail("FIVE_STACK_COMMIT_UNPINNED", manifest.id);
@@ -193,7 +220,14 @@ async function materializeComponent({
       runGit(["checkout", "--detach", manifest.commit], cloneRoot, spawnSyncProcess);
       copyTree(cloneRoot, sourceDestination);
     }
-    if (manifest.id === "paseo") maybePrepareDependencies(sourceDestination, spawnSyncProcess);
+    if (prepareDependencies) {
+      if (manifest.id === "paseo") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build:server"]);
+      if (manifest.id === "anneal") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build"]);
+      if (manifest.id === "codex-router") {
+        maybePrepareDependencies(path.join(sourceDestination, "apps", "control-center"), spawnSyncProcess, ["build"]);
+      }
+    }
+    writeBundledMarker(sourceDestination, manifest);
     record.source = "source";
   }
 
@@ -211,6 +245,7 @@ async function prepareFiveStackRuntime(options = {}) {
   const arch = String(options.arch || process.env.CODING_TOOLS_PACKAGE_ARCH || process.arch);
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const spawnSyncProcess = options.spawnSyncProcess || spawnSync;
+  const prepareDependencies = shouldPrepareDependencies(options);
   const now = options.now || (() => new Date().toISOString());
 
   const session = createRetentionSession({
@@ -236,6 +271,7 @@ async function prepareFiveStackRuntime(options = {}) {
         arch,
         fetchImpl,
         spawnSyncProcess,
+        prepareDependencies,
         now,
       }));
     }

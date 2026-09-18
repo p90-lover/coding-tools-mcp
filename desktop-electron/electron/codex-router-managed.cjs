@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -116,23 +117,42 @@ function wrappers(home, state, env) {
   );
 }
 
-function prepare(home, state) {
+function bundledSkipNetworkPrepare(home) {
+  const marker = path.join(home, "CODING_TOOLS_BUNDLED.json");
+  if (!fs.existsSync(marker)) return false;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(marker, "utf8"));
+    return parsed?.skipNetworkPrepare === true;
+  } catch {
+    return false;
+  }
+}
+
+function assertRouterIdentity(home) {
   const pkg = JSON.parse(fs.readFileSync(requiredFile(home, "package.json"), "utf8"));
-  if (pkg.name !== "codex-model-router" || pkg.version !== "0.6.0") fail(`Unexpected Codex Router package ${pkg.name}@${pkg.version}`);
+  if (pkg.name !== "codex-model-router" || pkg.version !== "0.6.0") {
+    fail(`Unexpected Codex Router package ${pkg.name}@${pkg.version}`);
+  }
   requiredFile(home, "src/foreground-start.mjs");
   requiredFile(home, "src/curate-models.mjs");
   requiredFile(home, "apps/control-center/electron/main.mjs");
   requiredFile(home, "apps/control-center/package.json");
+}
+
+function ensureCallerSecret(state) {
+  const directory = path.join(state, "router");
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const callerSecret = path.join(directory, "caller-secret");
+  if (fs.existsSync(callerSecret) && fs.readFileSync(callerSecret, "utf8").trim()) return callerSecret;
+  fs.writeFileSync(callerSecret, `${crypto.randomBytes(24).toString("base64url")}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return callerSecret;
+}
+
+function finishPrepare(home, state) {
   const env = environment(home, state);
-  if (process.platform === "win32") {
-    runChecked("powershell.exe", [
-      "-NoProfile", "-ExecutionPolicy", "Bypass",
-      "-File", requiredFile(home, "install.ps1"),
-      "-CheckoutInstall", "-PrepareOnly", "-Target", "codex", "-InstallDir", home,
-    ], home, env);
-  } else {
-    runChecked("bash", [requiredFile(home, "bin/install"), "--prepare-only"], home, env);
-  }
   wrappers(home, state, env);
   applyLongRunLiteLlmTimeout(home);
   const { ensureOriginalControlCenter } = require("./codex-router-original-ui.cjs");
@@ -145,6 +165,31 @@ function prepare(home, state) {
   if (!fs.existsSync(callerSecret) || !fs.readFileSync(callerSecret, "utf8").trim()) {
     fail("Codex Router did not create its caller secret");
   }
+}
+
+function prepareOfflineFromBundle(home, state) {
+  assertRouterIdentity(home);
+  ensureCallerSecret(state);
+  finishPrepare(home, state);
+}
+
+function prepare(home, state) {
+  if (bundledSkipNetworkPrepare(home)) {
+    prepareOfflineFromBundle(home, state);
+    return;
+  }
+  assertRouterIdentity(home);
+  const env = environment(home, state);
+  if (process.platform === "win32") {
+    runChecked("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass",
+      "-File", requiredFile(home, "install.ps1"),
+      "-CheckoutInstall", "-PrepareOnly", "-Target", "codex", "-InstallDir", home,
+    ], home, env);
+  } else {
+    runChecked("bash", [requiredFile(home, "bin/install"), "--prepare-only"], home, env);
+  }
+  finishPrepare(home, state);
 }
 
 function run(home, state) {
@@ -179,7 +224,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  bundledSkipNetworkPrepare,
   environment,
   prepare,
+  prepareOfflineFromBundle,
   run,
 };

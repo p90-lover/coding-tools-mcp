@@ -200,8 +200,9 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.match(surface, /CommandCode Proxy/);
   assert.match(surface, /Paseo/);
   assert.match(surface, /Anneal/);
-  assert.match(surface, /Prepare bundled runtime|準備內建執行環境/);
+  assert.match(surface, /Repair runtime|修復執行環境/);
   assert.match(surface, /Start all|全部啟動/);
+  assert.doesNotMatch(surface, /Prepare bundled runtime/);
   assert.match(surface, /開啟原始介面/);
   assert.match(surface, /外部服務/);
   assert.match(packageScript, /--publish["',\s]+never/);

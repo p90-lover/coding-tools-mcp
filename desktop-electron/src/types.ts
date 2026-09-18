@@ -198,6 +198,7 @@ export interface ManagedComponentInstallSnapshot {
   platformMode: "native" | "wsl2" | string;
   processes: ManagedComponentProcessSnapshot[];
   missingCredentials: string[];
+  bundledRuntime?: boolean;
 }
 
 export interface ManagedComponentsSnapshot {

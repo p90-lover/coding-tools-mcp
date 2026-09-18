@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { prepareFiveStackRuntime } = require("../scripts/prepare-five-stack-runtime.cjs");
+const { prepare } = require("../electron/codex-router-managed.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
@@ -51,11 +52,13 @@ test("Desktop panels never tell the user to download or install a separate app",
   const originalUi = read("electron/original-ui.cjs");
 
   assert.match(surface, /Start all/);
-  assert.match(surface, /Prepare bundled runtime|Repair runtime/);
+  assert.match(surface, /Repair runtime/);
+  assert.doesNotMatch(surface, /Prepare bundled runtime/);
   assert.doesNotMatch(surface, /Install and start all/);
   assert.doesNotMatch(surface, /Install \/ Repair/);
   assert.doesNotMatch(surface, /download a separate app/i);
   assert.doesNotMatch(surface, /must download/i);
+  assert.doesNotMatch(surface, /download component first/i);
   assert.doesNotMatch(original, /Install \/ start original runtime/);
   assert.doesNotMatch(original, /Install and start the managed runtime/);
   assert.match(original, /Start original UI/);
@@ -117,6 +120,14 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
   assert.equal(result.outputRoot, outputRoot);
   assert.equal(fs.readFileSync(path.join(outputRoot, "commandcode-proxy", "source", "commandcode-proxy.txt"), "utf8"), "commandcode-proxy bundled\n");
   assert.deepEqual(fs.readFileSync(path.join(outputRoot, "cpa", "cpa.bin")), payload);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(outputRoot, "commandcode-proxy", "source", "CODING_TOOLS_BUNDLED.json"), "utf8")).skipNetworkPrepare,
+    true,
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(outputRoot, "cpa", "CODING_TOOLS_BUNDLED.json"), "utf8")).skipNetworkPrepare,
+    true,
+  );
   const manifest = JSON.parse(fs.readFileSync(path.join(outputRoot, "MANIFEST.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.productVersion, "0.7.0-rc.11");
@@ -127,4 +138,56 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
     "paseo",
     "anneal",
   ]);
+});
+
+test("production Start is fail-closed and never fetches components from the network", () => {
+  const controller = read("electron/managed-components.cjs");
+  const adapter = read("electron/codex-router-managed.cjs");
+  const originalUi = read("electron/codex-router-original-ui.cjs");
+  assert.match(controller, /allowNetworkInstall = false/);
+  assert.match(controller, /bundleRequired\(manifest\) \|\| !allowNetworkInstall/);
+  assert.match(adapter, /bundledSkipNetworkPrepare/);
+  assert.match(adapter, /prepareOfflineFromBundle/);
+  assert.doesNotMatch(originalUi, /npm ci/);
+  assert.match(originalUi, /does not download npm packages at Start/);
+  assert.match(originalUi, /is not downloaded separately/);
+});
+
+test("Codex Router prepare unpacks from CODING_TOOLS_BUNDLED.json without install.ps1 or bin/install", () => {
+  const home = temporaryDirectory("coding-tools-router-bundled-home");
+  const state = temporaryDirectory("coding-tools-router-bundled-state");
+  fs.mkdirSync(path.join(home, "src"), { recursive: true });
+  fs.mkdirSync(path.join(home, "apps", "control-center", "dist"), { recursive: true });
+  fs.mkdirSync(path.join(home, "apps", "control-center", "electron"), { recursive: true });
+  fs.writeFileSync(path.join(home, "package.json"), `${JSON.stringify({
+    name: "codex-model-router",
+    version: "0.6.0",
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(home, "src", "foreground-start.mjs"), "export {};\n");
+  fs.writeFileSync(path.join(home, "src", "curate-models.mjs"), "export {};\n");
+  fs.writeFileSync(path.join(home, "apps", "control-center", "package.json"), `${JSON.stringify({
+    name: "@codex-router/control-center",
+    version: "0.6.0",
+    main: "electron/main.mjs",
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(home, "apps", "control-center", "electron", "main.mjs"), "export {};\n");
+  fs.writeFileSync(path.join(home, "apps", "control-center", "dist", "index.html"), "<!doctype html><title>Control Center</title>");
+  writeJson(path.join(home, "CODING_TOOLS_BUNDLED.json"), {
+    schemaVersion: 1,
+    id: "codex-router",
+    version: "0.6.0",
+    skipNetworkPrepare: true,
+  });
+  fs.writeFileSync(path.join(home, "install.ps1"), "throw 'network install must not run'\n");
+  fs.mkdirSync(path.join(home, "bin"), { recursive: true });
+  fs.writeFileSync(path.join(home, "bin", "install"), "#!/bin/bash\nexit 1\n");
+
+  prepare(home, state);
+
+  const callerSecret = fs.readFileSync(path.join(state, "router", "caller-secret"), "utf8").trim();
+  assert.ok(callerSecret.length >= 32);
+  const wrapper = process.platform === "win32"
+    ? path.join(state, "bin", "model-router.cmd")
+    : path.join(state, "bin", "model-router");
+  assert.equal(fs.existsSync(wrapper), true);
 });

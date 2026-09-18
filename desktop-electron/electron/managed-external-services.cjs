@@ -111,6 +111,7 @@ function createManagedExternalServicesController({
         platformMode: managed.platformMode,
         processes: managed.processes,
         missingCredentials: managed.missingCredentials,
+        bundledRuntime: managed.bundledRuntime === true,
       },
     };
   }

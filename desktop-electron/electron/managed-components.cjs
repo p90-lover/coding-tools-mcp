@@ -334,6 +334,7 @@ function createManagedComponentController({
   manifestRoot = path.join(__dirname, "..", "vendor", "managed-components"),
   dataRoot,
   bundleRoot = null,
+  allowNetworkInstall = false,
   platform = process.platform,
   arch = process.arch,
   env = process.env,
@@ -526,6 +527,7 @@ function createManagedComponentController({
       processes: serviceProcesses(id),
       secretConfigured: Object.keys(secretFor(id)).length > 0,
       missingCredentials: missingCredentials(manifest),
+      bundledRuntime: hasBundledRuntime(manifest),
     };
   }
 
@@ -621,6 +623,46 @@ function createManagedComponentController({
     const candidate = path.join(root, manifest.id, assertSafeRelativePath(asset.fileName, `${manifest.id} bundled filename`));
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
     return null;
+  }
+
+  function bundleRequired(manifest) {
+    return manifest.bundle?.required === true;
+  }
+
+  function missingBundleError(manifest) {
+    return new Error(`${manifest.name} is bundled inside Coding Tools Desktop; the runtime is missing from this build`);
+  }
+
+  function hasBundledRuntime(manifest) {
+    try {
+      if (manifest.strategy === "release-binary") {
+        return Boolean(bundledReleaseAssetPath(manifest, selectedReleaseAsset(manifest)));
+      }
+      return Boolean(bundledSourceRoot(manifest));
+    } catch {
+      return false;
+    }
+  }
+
+  function writeBundledMarker(destination, manifest) {
+    const marker = path.join(destination, "CODING_TOOLS_BUNDLED.json");
+    if (fs.existsSync(marker)) return;
+    writeJson(marker, {
+      schemaVersion: 1,
+      id: manifest.id,
+      version: manifest.version,
+      skipNetworkPrepare: true,
+    });
+  }
+
+  function isNetworkInstallStep(step) {
+    const executable = String(step.executable || "").toLowerCase();
+    const args = (step.arguments || []).map(String);
+    if (step.kind === "download" || step.kind === "git-checkout") return true;
+    if (executable.includes("npm") && args.some((value) => value === "ci" || value === "install" || value === "i")) {
+      return true;
+    }
+    return path.basename(executable).replace(/\.(?:cmd|exe)$/iu, "") === "git";
   }
 
   function copyBundleTree(sourceRoot, destinationRoot) {
@@ -901,6 +943,9 @@ function createManagedComponentController({
     if (bundledAsset) {
       setOperation(manifest.id, { state: "installing", step: "copy-bundled-release", error: null });
       fs.copyFileSync(bundledAsset, artifact);
+      writeBundledMarker(stagingHome, manifest);
+    } else if (bundleRequired(manifest) || !allowNetworkInstall) {
+      throw missingBundleError(manifest);
     } else {
       setOperation(manifest.id, { state: "installing", step: "download-release", error: null });
       await downloadAsset(asset.url, artifact, manifest);
@@ -918,10 +963,19 @@ function createManagedComponentController({
     }
     setOperation(manifest.id, { state: "installing", step: "unpack-bundled-source", error: null });
     copyBundleTree(source, stagingHome);
+    writeBundledMarker(stagingHome, manifest);
     return { artifact: "" };
   }
 
   async function prepareGitSource(manifest, stagingHome) {
+    const bundled = bundledSourceRoot(manifest);
+    if (bundled) {
+      setOperation(manifest.id, { state: "installing", step: "unpack-bundled-source", error: null });
+      copyBundleTree(bundled, stagingHome);
+      writeBundledMarker(stagingHome, manifest);
+      return { artifact: "" };
+    }
+    if (bundleRequired(manifest) || !allowNetworkInstall) throw missingBundleError(manifest);
     const parent = path.dirname(stagingHome);
     fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
     setOperation(manifest.id, { state: "installing", step: "clone-pinned-source", error: null });
@@ -996,6 +1050,11 @@ function createManagedComponentController({
         const skipPath = path.join(stagingHome, assertSafeRelativePath(step.skipIfFile, `${step.id} skipIfFile`));
         assertWithin(stagingHome, skipPath, "Managed component skip path");
         if (fs.existsSync(skipPath)) continue;
+        if ((bundleRequired(manifest) || !allowNetworkInstall) && isNetworkInstallStep(step)) {
+          throw new Error(`${manifest.name} bundled runtime is incomplete (missing ${step.skipIfFile})`);
+        }
+      } else if ((bundleRequired(manifest) || !allowNetworkInstall) && isNetworkInstallStep(step)) {
+        throw new Error(`${manifest.name} is bundled inside Coding Tools Desktop; Start does not fetch ${step.id}`);
       }
       if (step.kind === "assert-file") {
         const expected = path.join(stagingHome, assertSafeRelativePath(step.path, `${step.id} path`));

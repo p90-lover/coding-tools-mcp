@@ -9,6 +9,7 @@
   "version": "0.9.0",
   "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e",
   "strategy": "bundled-source",
+  "bundle": { "required": true },
   "platformModes": {
     "win32": "wsl2",
     "linux": "native",

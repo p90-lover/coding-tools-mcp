@@ -9,6 +9,7 @@
   "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96",
   "version": "0.8.0",
   "strategy": "bundled-source",
+  "bundle": { "required": true },
   "license": "Apache-2.0",
   "install": {
     "steps": [

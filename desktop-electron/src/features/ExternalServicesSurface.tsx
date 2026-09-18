@@ -98,7 +98,7 @@ function statusLabel(language: Language, service: ExternalServiceSnapshot): stri
 function installStateLabel(language: Language, service: ExternalServiceSnapshot): string {
   const labels: Record<ExternalServiceSnapshot["managedInstall"]["state"], [string, string]> = {
     "not-installed": ["Bundled · ready to start", "已內建 · 可啟動"],
-    installing: ["Preparing bundled runtime", "正在準備內建執行環境"],
+    installing: ["Unpacking bundled runtime", "正在解包內建執行環境"],
     installed: ["Bundled runtime ready", "內建執行環境已就緒"],
     "repair-required": ["Repair required", "需要修復"],
     external: ["External install", "外部安裝"],
@@ -426,15 +426,14 @@ export function ExternalServicesSurface({
             <button
               className="primary"
               disabled={busy !== null
-                || selected.managedInstall.state === "installing"}
+                || selected.managedInstall.state === "installing"
+                || selected.managedInstall.state === "not-installed"}
               onClick={() => void installOrRepair()}
               type="button"
             >
               {busy === "managed-install" || selected.managedInstall.state === "installing"
                 ? "…"
-                : selected.managedInstall.state === "installed"
-                  ? text(language, "Repair runtime", "修復執行環境")
-                  : text(language, "Prepare bundled runtime", "準備內建執行環境")}
+                : text(language, "Repair runtime", "修復執行環境")}
             </button>
           </section>
 

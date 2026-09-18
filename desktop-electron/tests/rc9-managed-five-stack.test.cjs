@@ -19,6 +19,7 @@ test("all external runtimes have pinned in-app managed component manifests", () 
     assert.equal(manifest.managedBy, "Coding Tools");
     assert.equal(manifest.loopbackOnly, true);
     assert.ok(manifest.version);
+    assert.equal(manifest.bundle?.required, true);
     assert.ok(manifest.strategy);
     assert.ok(manifest.health?.endpoint);
     assert.ok(Array.isArray(manifest.install?.steps));
@@ -175,8 +176,9 @@ test("managed installation is wired through the combined controller, focused IPC
   assert.match(preload, /reconcileManagedBootstrap/);
   assert.match(types, /ManagedBootstrapSnapshot/);
   assert.match(types, /reconcileManagedBootstrap\(/);
-  assert.match(surface, /Prepare bundled runtime|準備內建執行環境/);
+  assert.match(surface, /Repair runtime|修復執行環境/);
   assert.match(surface, /Start all|全部啟動/);
+  assert.doesNotMatch(surface, /Prepare bundled runtime/);
   assert.match(surface, /managedInstall/);
   assert.match(surface, /Advanced manual configuration|進階手動設定/);
 });

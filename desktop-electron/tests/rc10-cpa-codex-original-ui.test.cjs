@@ -191,6 +191,9 @@ test("managed Codex Router prepare also builds the original Control Center", () 
   const manifest = JSON.parse(read("vendor/managed-components/codex-router.json"));
   assert.match(managed, /apps\/control-center\/electron\/main\.mjs/);
   assert.match(managed, /ensureOriginalControlCenter/);
+  assert.match(managed, /bundledSkipNetworkPrepare/);
+  assert.match(managed, /prepareOfflineFromBundle/);
+  assert.equal(manifest.bundle.required, true);
   assert.equal(
     manifest.install.steps.find((step) => step.id === "assert-control-center")?.path,
     "apps/control-center/electron/main.mjs",

@@ -93,7 +93,7 @@ function mockChild(pid = 8100) {
   return child;
 }
 
-function controllerFixture({ fetchImpl } = {}) {
+function controllerFixture({ fetchImpl, allowNetworkInstall = true } = {}) {
   const payload = Buffer.from("managed-component-fixture-v1", "utf8");
   const manifestRoot = manifestFixture(payload);
   const dataRoot = temporaryDirectory("coding-tools-managed-data");
@@ -101,6 +101,7 @@ function controllerFixture({ fetchImpl } = {}) {
   const controller = createManagedComponentController({
     manifestRoot,
     dataRoot,
+    allowNetworkInstall,
     safeStorage: { isEncryptionAvailable: () => false },
     fetchImpl: fetchImpl ?? (async () => new Response(payload, {
       status: 200,
@@ -365,5 +366,40 @@ test("release-binary copies a bundled archive instead of downloading it", async 
   assert.equal(installed.installState, "installed");
   assert.equal(fetched, 0);
   assert.deepEqual(fs.readFileSync(path.join(installed.managedHome, "cpa.bin")), payload);
+  controller.dispose();
+});
+
+test("Start fails closed when the bundled CPA archive is missing from app resources", async () => {
+  const { controller } = controllerFixture({ allowNetworkInstall: false });
+  await assert.rejects(
+    () => controller.installComponent("cpa"),
+    /bundled inside Coding Tools Desktop|missing from this build/i,
+  );
+  controller.dispose();
+});
+
+test("bundled-source Start fails closed when app resources are missing", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const manifestRoot = temporaryDirectory("coding-tools-missing-bundle-manifests");
+  const dataRoot = temporaryDirectory("coding-tools-missing-bundle-data");
+  for (const id of COMPONENT_IDS) {
+    writeJson(path.join(manifestRoot, `${id}.json`), id === "commandcode-proxy"
+      ? { ...bundledSourceManifest(id), bundle: { required: true } }
+      : releaseManifest(id, payload));
+  }
+  const controller = createManagedComponentController({
+    manifestRoot,
+    dataRoot,
+    allowNetworkInstall: false,
+    safeStorage: { isEncryptionAvailable: () => false },
+    fetchImpl: async () => {
+      throw new Error("network fetch must not run when the bundled runtime is missing");
+    },
+    spawnProcess: () => mockChild(9300),
+  });
+  await assert.rejects(
+    () => controller.startComponent("commandcode-proxy"),
+    /bundled runtime is missing|bundled inside Coding Tools Desktop/i,
+  );
   controller.dispose();
 });

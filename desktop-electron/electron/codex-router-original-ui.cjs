@@ -106,11 +106,7 @@ function ensureOriginalControlCenter(home, { npm = "npm", run = runChecked } = {
     throw new Error("Codex Router Control Center main entry is not the original Electron host");
   }
   if (!fs.existsSync(rendererPath(home))) {
-    run(npm, ["ci", "--ignore-scripts"], { cwd: root, stdio: "inherit" });
-    run(npm, ["run", "build"], { cwd: root, stdio: "inherit" });
-  }
-  if (!fs.existsSync(rendererPath(home))) {
-    throw new Error("Codex Router Control Center renderer was not built");
+    throw new Error("Codex Router Control Center renderer is not bundled; Coding Tools does not download npm packages at Start");
   }
   return {
     root,
@@ -124,13 +120,8 @@ function ensureOriginalControlCenter(home, { npm = "npm", run = runChecked } = {
 function resolveElectronExecutable(root, fallback, run = runChecked) {
   const bundled = bundledElectronPath(root);
   if (fs.existsSync(bundled)) return bundled;
-  const installer = path.join(root, "node_modules", "electron", "install.js");
-  if (fs.existsSync(installer)) {
-    run(process.execPath, [installer], { cwd: root, stdio: "inherit" });
-    if (fs.existsSync(bundled)) return bundled;
-  }
   if (fallback) return fallback;
-  throw new Error("Codex Router Control Center Electron runtime is not installed");
+  throw new Error("Codex Router Control Center uses the Coding Tools Electron runtime; it is not downloaded separately");
 }
 
 function controlCenterEnvironment(home, state) {
