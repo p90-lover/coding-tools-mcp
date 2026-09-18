@@ -6,7 +6,7 @@ from pathlib import Path
 def replace_once(pathname: str, old: str, new: str) -> None:
     path = Path(pathname)
     text = path.read_text(encoding="utf-8")
-    if new in text:
+    if new and new in text:
         return
     count = text.count(old)
     if count != 1:
