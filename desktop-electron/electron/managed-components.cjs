@@ -745,6 +745,12 @@ function createManagedComponentController({
     return path.basename(executable).replace(/\.(?:cmd|exe)$/iu, "") === "git";
   }
 
+  function wsl2ManagedPrepareAllowed(step, context) {
+    return context.mode === "wsl2"
+      && step.execution === "managed-mode"
+      && isNetworkInstallStep(step);
+  }
+
   function copyBundleTree(sourceRoot, destinationRoot) {
     const source = path.resolve(sourceRoot);
     const destination = path.resolve(destinationRoot);
@@ -1168,10 +1174,10 @@ function createManagedComponentController({
         const skipPath = path.join(stagingHome, assertSafeRelativePath(step.skipIfFile, `${step.id} skipIfFile`));
         assertWithin(stagingHome, skipPath, "Managed component skip path");
         if (fs.existsSync(skipPath)) continue;
-        if ((bundleRequired(manifest) || !allowNetworkInstall) && isNetworkInstallStep(step)) {
+        if ((bundleRequired(manifest) || !allowNetworkInstall) && isNetworkInstallStep(step) && !wsl2ManagedPrepareAllowed(step, context)) {
           throw new Error(`${manifest.name} bundled runtime is incomplete (missing ${step.skipIfFile})`);
         }
-      } else if ((bundleRequired(manifest) || !allowNetworkInstall) && isNetworkInstallStep(step)) {
+      } else if ((bundleRequired(manifest) || !allowNetworkInstall) && isNetworkInstallStep(step) && !wsl2ManagedPrepareAllowed(step, context)) {
         throw new Error(`${manifest.name} is bundled inside Coding Tools Desktop; Start does not fetch ${step.id}`);
       }
       if (step.kind === "assert-file") {

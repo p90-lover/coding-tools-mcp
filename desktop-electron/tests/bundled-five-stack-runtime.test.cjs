@@ -157,6 +157,8 @@ test("production Start is fail-closed and never fetches components from the netw
   const originalUi = read("electron/codex-router-original-ui.cjs");
   assert.match(controller, /allowNetworkInstall = false/);
   assert.match(controller, /bundleRequired\(manifest\) \|\| !allowNetworkInstall/);
+  assert.match(controller, /wsl2ManagedPrepareAllowed/);
+  assert.match(controller, /context\.mode === "wsl2"/);
   assert.match(adapter, /bundledSkipNetworkPrepare/);
   assert.match(adapter, /prepareOfflineFromBundle/);
   assert.doesNotMatch(originalUi, /npm ci/);
