@@ -167,6 +167,9 @@ jobs:
           bun install --cwd runtime-web --frozen-lockfile 2>&1 |
             Tee-Object aiTemp/installer-location-beta-popup/evidence/windows-runtime-web-install.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun install --cwd runtime-web/launcher --frozen-lockfile 2>&1 |
+            Tee-Object aiTemp/installer-location-beta-popup/evidence/windows-runtime-launcher-install.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test `
             desktop-electron/tests/installer-location-beta-popup.test.cjs `
             desktop-electron/tests/update.test.cjs `
