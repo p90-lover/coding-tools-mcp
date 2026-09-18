@@ -105,6 +105,34 @@
   color: #991b1b;
 }
 
+.original-ui-section-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgb(15 23 42 / 8%);
+  background: #eef1f5;
+}
+
+.original-ui-section-tabs button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgb(15 23 42 / 10%);
+  border-radius: 999px;
+  background: #fff;
+  color: #4b5563;
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.original-ui-section-tabs button.is-active {
+  border-color: #1d4ed8;
+  background: #1d4ed8;
+  color: #fff;
+}
+
 .original-ui-frame-shell {
   position: relative;
   flex: 1 1 auto;

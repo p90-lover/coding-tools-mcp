@@ -1,19 +1,9 @@
-# Exact-source Windows publish for the next version after frozen v0.7.0-rc.8 and v0.7.0-rc.9.
+# Frozen after v0.7.0-rc.10 publication. Auto-publish is disabled so later
+# commits cannot rewrite the existing v0.7.0-rc.10 tag.
+# Current Windows publish is codex-router-multiprovider-release-rc11.yml.
 name: Coding Tools v0.7.0-rc.10 exact-source Windows release
 
 on:
-  push:
-    branches:
-      - release/codex-router-multiprovider-0.7.0-rc.8
-    paths:
-      - .github/workflows/codex-router-multiprovider-release-rc10.yml
-      - aiTemp/rc10-release/run-windows-release.mjs
-      - aiTemp/rc10-release/verify-windows-migration.ps1
-      - desktop-electron/**
-      - runtime-web/**
-      - rust-core/**
-      - scripts/release/**
-      - docs/releases/v0.7.0-rc.10.md
   workflow_dispatch:
 
 permissions:

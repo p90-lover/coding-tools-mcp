@@ -55,3 +55,28 @@ test("section URLs stay inside the selected loopback service", () => {
     /Unsupported anneal section/,
   );
 });
+
+test("Anneal hash routes and Paseo Expo paths stay on loopback", () => {
+  const anneal = {
+    id: "anneal",
+    sections: ["tasks"],
+    sectionPaths: { tasks: "#/tasks" },
+  };
+  const paseo = {
+    id: "paseo",
+    sections: ["agents", "workspaces"],
+    sectionPaths: { agents: "/sessions", workspaces: "/open-project" },
+  };
+  assert.equal(
+    sectionUrl(anneal, "http://127.0.0.1:3000/", "tasks"),
+    "http://127.0.0.1:3000/#/tasks",
+  );
+  assert.equal(
+    sectionUrl(paseo, "http://127.0.0.1:6768/", "agents"),
+    "http://127.0.0.1:6768/sessions",
+  );
+  assert.equal(
+    sectionUrl(paseo, "http://127.0.0.1:6768/", "workspaces"),
+    "http://127.0.0.1:6768/open-project",
+  );
+});

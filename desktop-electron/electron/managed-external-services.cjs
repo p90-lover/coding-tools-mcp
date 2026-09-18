@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
+const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
@@ -28,6 +29,7 @@ function createManagedExternalServicesController({
 } = {}) {
   let baseController = null;
   let managedController = null;
+  let bootstrap = null;
 
   const publishCombined = () => {
     if (!baseController || !managedController) return;
@@ -90,7 +92,11 @@ function createManagedExternalServicesController({
         sourceConfigured: true,
       } : {}),
       ...(running ? {
-        status: service.status === "error" ? "error" : "starting",
+        status: service.status === "error"
+          ? "error"
+          : service.status === "ready"
+            ? "ready"
+            : "starting",
         pid: running.pid,
         owned: true,
       } : {}),
@@ -115,6 +121,13 @@ function createManagedExternalServicesController({
     return {
       ...snapshot,
       services: snapshot.services.map(mergeService),
+      managedBootstrap: bootstrap ? bootstrap.getSnapshot() : {
+        status: "idle",
+        reason: null,
+        startedAt: null,
+        completedAt: null,
+        components: [],
+      },
     };
   }
 
@@ -138,6 +151,10 @@ function createManagedExternalServicesController({
   function setManagedComponentCredential(serviceId, key, value) {
     managedController.setComponentCredential(serviceId, key, value);
     publishCombined();
+    void bootstrap?.reconcile({
+      reason: "credential-saved",
+      componentIds: [serviceId],
+    });
     return serviceFromSnapshot(serviceId);
   }
 
@@ -231,10 +248,31 @@ function createManagedExternalServicesController({
     };
   }
 
+  function reconcileManagedComponents(options = {}) {
+    if (!bootstrap) throw new Error("Managed bootstrap is unavailable");
+    return bootstrap.reconcile(options);
+  }
+
+  function managedBootstrapSnapshot() {
+    if (!bootstrap) throw new Error("Managed bootstrap is unavailable");
+    return bootstrap.getSnapshot();
+  }
+
   function dispose() {
+    bootstrap?.dispose();
     managedController.dispose();
     baseController.dispose();
   }
+
+  bootstrap = createManagedBootstrap({
+    snapshot: combinedSnapshot,
+    install: installManagedComponent,
+    repair: repairManagedComponent,
+    start,
+    inspect,
+    publish: publishCombined,
+    logger: options.logger,
+  });
 
   return Object.freeze({
     snapshot: combinedSnapshot,
@@ -250,6 +288,8 @@ function createManagedExternalServicesController({
     installManagedComponent,
     repairManagedComponent,
     setManagedComponentCredential,
+    reconcileManagedComponents,
+    managedBootstrapSnapshot,
     managedComponentsSnapshot: () => managedController.snapshot(),
     dispose,
   });

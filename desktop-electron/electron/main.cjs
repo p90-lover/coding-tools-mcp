@@ -648,6 +648,12 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("Managed components controller is unavailable");
     return externalServicesController.setManagedComponentCredential(serviceId, key, value);
   });
+  handle("launcher:managed-components-retry-all", async (event) => {
+    assertFocusedMainWindow(event, true);
+    if (!externalServicesController) throw new Error("Managed components controller is unavailable");
+    await externalServicesController.reconcileManagedComponents({ reason: "manual" });
+    return externalServicesController.snapshot();
+  });
   handle("launcher:external-services-snapshot", (event) => {
     assertFocusedMainWindow(event, false);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
@@ -750,7 +756,7 @@ function registerIpc({ logger, stateStore }) {
     return originalUiController.restart(toolId);
   });
   handle("launcher:original-ui-open", (event, toolId, section) => {
-    assertFocusedMainWindow(event, false);
+    assertFocusedMainWindow(event, true);
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.openEmbedded(toolId, section);
   });
@@ -1296,6 +1302,10 @@ async function start() {
     },
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
+  void externalServicesController.reconcileManagedComponents({ reason: "startup" })
+    .catch((error) => logger.warn("managed-bootstrap.startup-failed", {
+      message: error instanceof Error ? error.message : String(error),
+    }));
   upstreamToolController = createUpstreamToolController({
     env: process.env,
     logger,

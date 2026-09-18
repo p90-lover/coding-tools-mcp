@@ -219,6 +219,45 @@ export interface ManagedComponentsSnapshot {
   }>;
 }
 
+export interface CommandCodeProxyHealth {
+  status?: string;
+  proxy?: string;
+  version?: string;
+  endpoints?: Record<string, string>;
+  user?: {
+    id?: string;
+    email?: string;
+  };
+  credits?: number;
+  models?: string[];
+}
+
+export type ManagedBootstrapStatus = "idle" | "running" | "ready" | "blocked" | "error";
+export type ManagedBootstrapComponentStatus =
+  | "pending"
+  | "installing"
+  | "repairing"
+  | "starting"
+  | "ready"
+  | "blocked"
+  | "error";
+
+export interface ManagedBootstrapComponentSnapshot {
+  id: string;
+  status: ManagedBootstrapComponentStatus;
+  action: "install" | "repair" | "start" | "inspect" | null;
+  missingCredentials: string[];
+  message: string | null;
+}
+
+export interface ManagedBootstrapSnapshot {
+  status: ManagedBootstrapStatus;
+  reason: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  components: ManagedBootstrapComponentSnapshot[];
+}
+
 export interface ExternalServiceSnapshot {
   id: ExternalServiceId;
   name: string;
@@ -247,12 +286,14 @@ export interface ExternalServiceSnapshot {
   accountCount?: number;
   connectedAccountCount?: number;
   providerModelCount?: number;
+  health?: CommandCodeProxyHealth;
   managedInstall: ManagedComponentInstallSnapshot;
 }
 
 export interface ExternalServicesSnapshot {
   version: 1;
   services: ExternalServiceSnapshot[];
+  managedBootstrap?: ManagedBootstrapSnapshot;
 }
 
 export interface ExternalServiceConfigurationInput {
@@ -517,6 +558,7 @@ export interface LauncherApi {
     key: string,
     value: string,
   ): Promise<ExternalServiceSnapshot>;
+  retryManagedComponents(): Promise<ExternalServicesSnapshot>;
   configureExternalService(serviceId: ExternalServiceId, input: ExternalServiceConfigurationInput): Promise<ExternalServiceSnapshot>;
   inspectExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   startExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;

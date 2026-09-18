@@ -36,6 +36,56 @@
   line-height: 1.55;
 }
 
+.managed-bootstrap-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border: 1px solid rgb(78 139 255 / 22%);
+  border-radius: 14px;
+  background: rgb(78 139 255 / 8%);
+}
+
+.managed-bootstrap-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.managed-bootstrap-card span {
+  color: var(--color-accent-primary);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.managed-bootstrap-card strong {
+  font-size: 16px;
+}
+
+.managed-bootstrap-card small {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.managed-bootstrap-card.state-ready {
+  border-color: rgb(47 204 133 / 28%);
+  background: rgb(47 204 133 / 8%);
+}
+
+.managed-bootstrap-card.state-blocked,
+.managed-bootstrap-card.state-error {
+  border-color: rgb(255 98 112 / 28%);
+  background: rgb(255 98 112 / 8%);
+}
+
+.managed-bootstrap-card button {
+  min-height: 36px;
+  padding: 0 14px;
+}
+
 .external-services-heading button,
 .external-service-card button,
 .external-service-actions button {

@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
     key,
     value,
   ),
+  retryManagedComponents: () => ipcRenderer.invoke("launcher:managed-components-retry-all"),
   configureExternalService: (serviceId, input) => ipcRenderer.invoke(
     "launcher:external-service-configure",
     serviceId,

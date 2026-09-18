@@ -191,6 +191,24 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       {tool.error ? <p className="original-ui-error">{tool.error}</p> : null}
       {notice ? <p className="original-ui-note">{notice}</p> : null}
 
+      <nav className="original-ui-section-tabs" aria-label={`${tool.name} sections`}>
+        {tool.sections.map((section) => (
+          <button
+            className={section === selectedSection ? "is-active" : ""}
+            key={section}
+            onClick={() => {
+              setSelectedSection(section);
+              if (frameUrl || originalWindow || ready) {
+                void openSection(section).catch((cause) => setError(messageOf(cause)));
+              }
+            }}
+            type="button"
+          >
+            {section.replaceAll("-", " ")}
+          </button>
+        ))}
+      </nav>
+
       <div className="original-ui-frame-shell">
         {frameUrl ? (
           <iframe

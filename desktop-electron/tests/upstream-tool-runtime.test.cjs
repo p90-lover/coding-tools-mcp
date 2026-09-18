@@ -35,7 +35,7 @@ test("upstream controller exposes a bounded restart operation", () => {
   controller.dispose();
 });
 
-test("main, preload, types, and renderer expose the same upstream runtime surface", () => {
+test("main, preload, and types retain diagnostic restart while the renderer delegates lifecycle to managed controls", () => {
   const main = read("electron/main.cjs");
   const preload = read("electron/preload.cjs");
   const types = read("src/types.ts");
@@ -56,5 +56,9 @@ test("main, preload, types, and renderer expose the same upstream runtime surfac
   );
   assert.match(types, /restartUpstreamTool\(toolId: UpstreamToolId\)/);
   assert.match(app, /<UpstreamToolSurface/);
-  assert.match(surface, /restartUpstreamTool/);
+  assert.match(surface, /nativeControl/);
+  assert.match(surface, /Coding Tools managed connection controls/);
+  assert.doesNotMatch(surface, /restartUpstreamTool/);
+  assert.doesNotMatch(surface, /startUpstreamTool/);
+  assert.doesNotMatch(surface, /stopUpstreamTool/);
 });

@@ -254,7 +254,6 @@ function createOriginalUiController({
     restart,
     openEmbedded,
     openExternalTool,
-    cpaManagementKey,
     copyCpaManagementKey,
     dispose,
   });

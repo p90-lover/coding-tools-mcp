@@ -5,8 +5,10 @@ import type {
   ExternalServiceSnapshot,
   ExternalServicesSnapshot,
   Language,
+  ManagedBootstrapSnapshot,
   ProviderNetworkSnapshot,
 } from "../types";
+import { CommandCodeProxySurface } from "./CommandCodeProxySurface";
 import "./external-services.css";
 
 interface ExternalServicesSurfaceProps {
@@ -32,7 +34,18 @@ interface ServiceDraft {
   webBaseUrl: string;
 }
 
-const EMPTY_SERVICES: ExternalServicesSnapshot = { version: 1, services: [] };
+const EMPTY_BOOTSTRAP: ManagedBootstrapSnapshot = {
+  status: "idle",
+  reason: null,
+  startedAt: null,
+  completedAt: null,
+  components: [],
+};
+const EMPTY_SERVICES: ExternalServicesSnapshot = {
+  version: 1,
+  services: [],
+  managedBootstrap: EMPTY_BOOTSTRAP,
+};
 const EMPTY_PROVIDERS: ProviderNetworkSnapshot = {
   version: 1,
   accounts: [],
@@ -133,6 +146,7 @@ export function ExternalServicesSurface({
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
 
+  const bootstrap = services.managedBootstrap ?? EMPTY_BOOTSTRAP;
   const selected = services.services.find((service) => service.id === selectedId) ?? null;
   const activeAccounts = providers.accounts.filter((account) => !account.archivedAt);
   const connectedAccounts = activeAccounts.filter((account) => account.enabled && account.status === "connected");
@@ -290,6 +304,20 @@ export function ExternalServicesSurface({
     setNotice(result.stdout?.trim() || text(language, "Codex Router integration synchronized.", "Codex Router 整合已同步。"));
   });
 
+  const retryAll = () => run("retry-all", async () => {
+    if (!api) return;
+    await api.retryManagedComponents();
+    setNotice(text(language, "Install and start all is running.", "正在執行「全部安裝並啟動」。"));
+  });
+
+  const bootstrapTitle = () => {
+    if (bootstrap.status === "running") return text(language, "Preparing integrations", "正在準備整合功能");
+    if (bootstrap.status === "ready") return text(language, "All integrations are ready", "所有整合功能已就緒");
+    if (bootstrap.status === "blocked") return text(language, "Setup is blocked", "設定暫時受阻");
+    if (bootstrap.status === "error") return text(language, "Setup needs attention", "設定需要處理");
+    return text(language, "Install and start all", "全部安裝並啟動");
+  };
+
   const openSelected = () => {
     if (!selected) return;
     if (selected.id === "cpa") openCpa();
@@ -315,6 +343,36 @@ export function ExternalServicesSurface({
           {text(language, "Refresh all", "全部刷新")}
         </button>
       </header>
+
+      <section className={`managed-bootstrap-card state-${bootstrap.status}`}>
+        <div>
+          <span>{text(language, "ONE-APP SETUP", "單一應用程式設定")}</span>
+          <strong>{bootstrapTitle()}</strong>
+          <small>
+            {bootstrap.reason
+              ? text(language, `Last action: ${bootstrap.reason}`, `上次動作：${bootstrap.reason}`)
+              : text(language, "Coding Tools installs, repairs, starts, and inspects the five managed engines.", "Coding Tools 會安裝、修復、啟動並檢查五個受管引擎。")}
+          </small>
+          {bootstrap.components.filter((component) => component.status === "blocked" || component.status === "error").map((component) => (
+            <small key={component.id} className={component.status === "error" ? "managed-install-error" : undefined}>
+              {serviceName(language, component.id as ExternalServiceId)}
+              {component.missingCredentials.length > 0
+                ? ` · ${text(language, "missing", "缺少")} ${component.missingCredentials.join(", ")}`
+                : component.message ? ` · ${component.message}` : ""}
+            </small>
+          ))}
+        </div>
+        <button
+          className="primary"
+          disabled={busy !== null || bootstrap.status === "running"}
+          onClick={() => void retryAll()}
+          type="button"
+        >
+          {busy === "retry-all" || bootstrap.status === "running"
+            ? "…"
+            : text(language, "Retry all", "全部重試")}
+        </button>
+      </section>
 
       <div className="external-services-summary">
         {serviceRows.map((service) => (
@@ -351,6 +409,19 @@ export function ExternalServicesSurface({
             </div>
             <span className={`external-service-status status-${selected.status}`}>{statusLabel(language, selected)}</span>
           </header>
+
+          {selected.id === "commandcode-proxy" ? (
+            <CommandCodeProxySurface
+              busy={busy}
+              language={language}
+              onCheck={() => void inspect()}
+              onOpenProviders={openProviders}
+              onRestart={() => void restart()}
+              onStart={() => void start()}
+              onStop={() => void stop()}
+              service={selected}
+            />
+          ) : null}
 
           <section className={`managed-install-panel state-${selected.managedInstall.state}`}>
             <div>
