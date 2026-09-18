@@ -79,15 +79,32 @@ export function UpstreamToolSurface({
   useEffect(() => {
     let cancelled = false;
     if (!api) return;
-    void api.upstreamToolsSnapshot().then((next) => {
-      if (cancelled) return;
-      setSnapshot(next);
-      const current = toolFrom(next, toolId);
-      if (current) {
+    void (async () => {
+      try {
+        await api.inspectUpstreamTool(toolId);
+        const next = await api.upstreamToolsSnapshot();
+        if (cancelled) return;
+        setSnapshot(next);
+        const current = toolFrom(next, toolId);
+        if (!current) return;
         setEndpoint(current.endpoint);
-        setSelectedSection(current.sections[0] || "");
+        const section = current.sections[0] || "";
+        setSelectedSection(section);
+        if (current.status === "ready" && section) {
+          const result = await api.openEmbeddedTool(toolId, section);
+          if (cancelled) return;
+          setFrameUrl(result.url);
+          setSnapshot((value) => value
+            ? {
+                ...value,
+                tools: value.tools.map((candidate) => candidate.id === result.tool.id ? result.tool : candidate),
+              }
+            : { version: 1, tools: [result.tool] });
+        }
+      } catch (cause) {
+        if (!cancelled) setError(messageOf(cause));
       }
-    }).catch((cause) => setError(messageOf(cause)));
+    })();
     return () => { cancelled = true; };
   }, [api, setError, toolId]);
 

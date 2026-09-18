@@ -176,3 +176,11 @@
     font-size: 12px;
   }
 }
+
+.integrated-app-panel-body .external-services-surface.is-focused .external-services-summary {
+  display: none;
+}
+
+.integrated-app-panel-body .external-services-surface.is-focused .external-services-heading {
+  padding-top: 20px;
+}

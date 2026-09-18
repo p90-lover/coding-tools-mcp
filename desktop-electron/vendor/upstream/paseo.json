@@ -19,17 +19,20 @@
     "settings"
   ],
   "sectionPaths": {
-    "agents": "/agents",
+    "agents": "/sessions",
     "sessions": "/sessions",
-    "workspaces": "/workspaces",
-    "providers": "/providers",
-    "plugins": "/plugins",
-    "voice": "/voice",
+    "workspaces": "/open-project",
+    "providers": "/settings",
+    "plugins": "/settings",
+    "voice": "/settings",
     "settings": "/settings"
   },
   "launch": {
     "executable": "npm",
-    "arguments": ["run", "dev:server"],
+    "arguments": [
+      "run",
+      "dev:server"
+    ],
     "workingDirectoryEnvironment": "CODING_TOOLS_PASEO_HOME"
   }
 }

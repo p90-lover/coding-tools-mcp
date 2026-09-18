@@ -17,6 +17,7 @@ import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
+import { IntegratedAppsSurface } from "./features/IntegratedAppsSurface";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -628,28 +629,10 @@ function LauncherShell({
                   }}
                 />
                 <SidebarItem
-                  active={surface === "providers"}
-                  icon="providers"
-                  label={language === "zh-TW" ? "供應商" : language === "zh-CN" ? "供应商" : language === "ja" ? "プロバイダー" : "Providers"}
-                  onClick={() => navigateSurface("providers")}
-                />
-                <SidebarItem
-                  active={surface === "integrations"}
-                  icon="globe"
-                  label={language === "zh-TW" ? "整合服務" : language === "zh-CN" ? "集成服务" : language === "ja" ? "統合サービス" : "Integrations"}
-                  onClick={() => navigateSurface("integrations")}
-                />
-                <SidebarItem
-                  active={surface === "paseo"}
+                  active={surface === "apps"}
                   icon="orchestrator"
-                  label={language === "zh-TW" ? "Paseo 協調器" : language === "zh-CN" ? "Paseo 协调器" : language === "ja" ? "Paseo オーケストレーター" : "Paseo Orchestrator"}
-                  onClick={() => navigateSurface("paseo")}
-                />
-                <SidebarItem
-                  active={surface === "anneal"}
-                  icon="activity"
-                  label={language === "zh-TW" ? "Anneal 任務" : language === "zh-CN" ? "Anneal 任务" : language === "ja" ? "Anneal タスク" : "Anneal Tasks"}
-                  onClick={() => navigateSurface("anneal")}
+                  label={language === "zh-TW" ? "應用程式" : language === "zh-CN" ? "应用程序" : language === "ja" ? "アプリ" : "Apps"}
+                  onClick={() => navigateSurface("apps")}
                 />
                 <SidebarItem
                   active={surface === "network"}
@@ -740,6 +723,9 @@ function LauncherShell({
             ) : null}
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+            ) : null}
+            {surface === "apps" ? (
+              <IntegratedAppsSurface language={language} setError={setError} />
             ) : null}
             {surface === "providers" ? (
               <ProviderCenterSurface language={language} setError={setError} />
