@@ -19,6 +19,60 @@ if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) { throw "instal
 New-Item -ItemType Directory -Path $TrashRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 
+# PowerShell's process-tree wait includes descendants. electron-builder
+# runAfterFinish launches Coding Tools.exe, which would keep the gate blocked
+# until the GUI/tray app exits. WaitForExit(ms) waits for the installer PID
+# only. Smoke already installed once; leftover Coding Tools.exe then blocks
+# the upgrade installer.
+$installerTimeoutMilliseconds = 45 * 60 * 1000
+$harnessTimeoutMilliseconds = 10 * 60 * 1000
+
+function Stop-CodingToolsLeftovers {
+    param([int[]] $KeepProcessIds = @())
+    $keep = @{}
+    foreach ($id in $KeepProcessIds) { $keep[$id] = $true }
+    Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ProcessId -and
+            -not $keep.ContainsKey([int]$_.ProcessId) -and
+            (
+                $_.Name -eq 'Coding Tools.exe' -or
+                $_.Name -like 'Coding.Tools_*setup.exe'
+            )
+        } |
+        ForEach-Object {
+            Write-Host "Stopping leftover $($_.Name) pid=$($_.ProcessId)"
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+}
+
+function Invoke-BoundedSilentProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $FilePath,
+        [Parameter(Mandatory = $true)]
+        [string[]] $ArgumentList,
+        [Parameter(Mandatory = $true)]
+        [int] $TimeoutMilliseconds,
+        [Parameter(Mandatory = $true)]
+        [string] $Label
+    )
+    Stop-CodingToolsLeftovers
+    Write-Host "Starting $Label (timeout ${TimeoutMilliseconds}ms, process-only wait)"
+    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru
+    if ($null -eq $process) { throw "$Label did not start" }
+    $exited = $process.WaitForExit($TimeoutMilliseconds)
+    if (-not $exited) {
+        Write-Host "$Label still running after timeout; stopping installer and leftovers"
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        Stop-CodingToolsLeftovers
+        throw "$Label timed out after $TimeoutMilliseconds ms"
+    }
+    [void]$process.WaitForExit()
+    Stop-CodingToolsLeftovers -KeepProcessIds @($process.Id)
+    return $process
+}
+
 $legacyRoot = Join-Path $workspace 'aiTemp\installer-upgrade\legacy-uninstall-fixture'
 $legacyTrash = Join-Path $TrashRoot 'legacy-uninstall-fixture'
 & (Join-Path $workspace 'desktop-electron\scripts\create-legacy-uninstall-fixture.ps1') `
@@ -31,7 +85,11 @@ $legacyMarker = Join-Path $legacyRoot 'legacy-uninstaller-ran.txt'
 $env:CODING_TOOLS_LEGACY_UNINSTALL_MARKER = $legacyMarker
 $env:CODING_TOOLS_LEGACY_INSTALL_LOCATION = $legacyInstall
 $env:CODING_TOOLS_LEGACY_TRASH_DIR = $legacyTrash
-$installProcess = Start-Process -FilePath $InstallerPath -ArgumentList '/S', '/currentuser' -Wait -PassThru
+$installProcess = Invoke-BoundedSilentProcess `
+    -FilePath $InstallerPath `
+    -ArgumentList @('/S', '/currentuser') `
+    -TimeoutMilliseconds $installerTimeoutMilliseconds `
+    -Label 'rc.11 installer'
 if ($installProcess.ExitCode -ne 0) { throw "rc.11 installer failed with exit code $($installProcess.ExitCode)" }
 if (-not (Test-Path -LiteralPath $legacyMarker)) { throw 'legacy NSIS uninstaller was not executed' }
 if (Test-Path -LiteralPath (Join-Path $legacyInstall 'legacy-app.bin')) { throw 'legacy payload remains in the old installation' }
@@ -90,7 +148,11 @@ $env:CODING_TOOLS_LEGACY_MSI_MARKER = $msiMarker
 $env:CODING_TOOLS_LEGACY_MSI_PAYLOAD = $msiPayload
 $env:CODING_TOOLS_LEGACY_MSI_RETAINED_PAYLOAD = $retainedMsiPayload
 $harness = Join-Path $msiRoot 'legacy-msi-upgrade-harness.exe'
-$msiProcess = Start-Process -FilePath $harness -ArgumentList '/S' -Wait -PassThru
+$msiProcess = Invoke-BoundedSilentProcess `
+    -FilePath $harness `
+    -ArgumentList @('/S') `
+    -TimeoutMilliseconds $harnessTimeoutMilliseconds `
+    -Label 'rc.11 MSI migration harness'
 $markerText = if (Test-Path -LiteralPath $msiMarker) { Get-Content -LiteralPath $msiMarker -Raw } else { '<missing>' }
 
 $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
