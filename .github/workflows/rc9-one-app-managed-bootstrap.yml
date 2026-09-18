@@ -3,7 +3,6 @@ name: rc.9 one-app managed bootstrap
 on:
   push:
     branches:
-      - feature/rc9-one-app-managed-bootstrap-core
       - integration/v0.7.0-rc.9-one-app-managed
     paths:
       - '.github/workflows/rc9-one-app-managed-bootstrap.yml'
