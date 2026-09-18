@@ -43,6 +43,11 @@ if (Test-Path -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Unin
 
 $currentKey = 'HKCU:\Software\3cb2ea96-3319-55b8-95a5-7f180a5f3ed4'
 $currentLocation = (Get-ItemPropertyValue -Path $currentKey -Name InstallLocation).Trim('"')
+$expectedLegacyLocation = [IO.Path]::GetFullPath($legacyInstall).TrimEnd('\')
+$currentLocationNormalized = [IO.Path]::GetFullPath($currentLocation).TrimEnd('\')
+if (-not [String]::Equals($currentLocationNormalized, $expectedLegacyLocation, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "current install location changed from legacy path: expected $expectedLegacyLocation, got $currentLocationNormalized"
+}
 $currentApplication = Join-Path $currentLocation 'Coding Tools.exe'
 if (-not (Test-Path -LiteralPath $currentApplication -PathType Leaf)) { throw "installed application is missing: $currentApplication" }
 
@@ -54,6 +59,7 @@ if (-not (Test-Path -LiteralPath $currentApplication -PathType Leaf)) { throw "i
     legacyRegistryRemoved = $true
     legacyPayloadPreserved = $true
     legacyUninstallerPreserved = $true
+    legacyLocationReused = $true
     currentInstallLocation = $currentLocation
     currentApplication = $currentApplication
 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $EvidenceRoot 'installer-upgrade-migration.json') -Encoding UTF8
