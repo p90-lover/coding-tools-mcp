@@ -66,7 +66,7 @@ jobs:
 
           $runnerSource = Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc8-release\run-windows-release.mjs'
           $runnerTarget = Join-Path $targetRoot 'run-windows-release.mjs'
-          $runner = [System.IO.File]::ReadAllText($runnerSource)
+          $runner = [System.IO.File]::ReadAllText($runnerSource).Replace("`r`n", "`n")
           $replacements = @(
             @('release/codex-router-multiprovider-0.7.0-rc.8', 'release/codex-router-multiprovider-0.7.0-rc.9'),
             @('codex-router-multiprovider-release-rc8.yml', 'codex-router-multiprovider-release-rc9.yml'),
@@ -83,27 +83,29 @@ jobs:
           foreach ($pair in $replacements) { $runner = $runner.Replace($pair[0], $pair[1]) }
 
           $testAnchor = "    'desktop-electron/tests/external-services-control-plane.test.cjs',`n"
-          $extraTests = @"
-              'desktop-electron/tests/cpa-oauth-adapter.test.cjs',
-              'desktop-electron/tests/cpa-provider-login-routing.test.cjs',
-              'desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs',
-              'desktop-electron/tests/managed-components-runtime.test.cjs',
-              'desktop-electron/tests/rc9-five-stack-completion.test.cjs',
-              'desktop-electron/tests/rc9-managed-five-stack.test.cjs',
-              'desktop-electron/tests/rc9-package-identity-alignment.test.cjs',
-          "@ -replace '^ {6}', ''
+          $extraTests = @(
+            "    'desktop-electron/tests/cpa-oauth-adapter.test.cjs',"
+            "    'desktop-electron/tests/cpa-provider-login-routing.test.cjs',"
+            "    'desktop-electron/tests/cpa-unified-oauth-catalog.test.cjs',"
+            "    'desktop-electron/tests/managed-components-runtime.test.cjs',"
+            "    'desktop-electron/tests/rc9-five-stack-completion.test.cjs',"
+            "    'desktop-electron/tests/rc9-managed-five-stack.test.cjs',"
+            "    'desktop-electron/tests/rc9-package-identity-alignment.test.cjs',"
+          ) -join "`n"
+          $extraTests += "`n"
           if (-not $runner.Contains('managed-components-runtime.test.cjs')) {
             if (-not $runner.Contains($testAnchor)) { throw 'RC9_TEST_INSERTION_ANCHOR_MISSING' }
             $runner = $runner.Replace($testAnchor, $testAnchor + $extraTests)
           }
 
           $syntaxAnchor = "    'desktop-electron/electron/external-services.cjs',`n"
-          $extraSyntax = @"
-              'desktop-electron/electron/managed-components.cjs',
-              'desktop-electron/electron/managed-external-services.cjs',
-              'desktop-electron/electron/cpa-oauth-adapter.cjs',
-              'desktop-electron/electron/codex-router-managed.cjs',
-          "@ -replace '^ {6}', ''
+          $extraSyntax = @(
+            "    'desktop-electron/electron/managed-components.cjs',"
+            "    'desktop-electron/electron/managed-external-services.cjs',"
+            "    'desktop-electron/electron/cpa-oauth-adapter.cjs',"
+            "    'desktop-electron/electron/codex-router-managed.cjs',"
+          ) -join "`n"
+          $extraSyntax += "`n"
           if (-not $runner.Contains('managed-external-services.cjs')) {
             if (-not $runner.Contains($syntaxAnchor)) { throw 'RC9_SYNTAX_INSERTION_ANCHOR_MISSING' }
             $runner = $runner.Replace($syntaxAnchor, $syntaxAnchor + $extraSyntax)
