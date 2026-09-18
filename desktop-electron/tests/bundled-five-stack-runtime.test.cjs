@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { prepareFiveStackRuntime } = require("../scripts/prepare-five-stack-runtime.cjs");
+const { npmSpawnInvocation, prepareFiveStackRuntime } = require("../scripts/prepare-five-stack-runtime.cjs");
 const { prepare } = require("../electron/codex-router-managed.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
@@ -190,4 +190,96 @@ test("Codex Router prepare unpacks from CODING_TOOLS_BUNDLED.json without instal
     ? path.join(state, "bin", "model-router.cmd")
     : path.join(state, "bin", "model-router");
   assert.equal(fs.existsSync(wrapper), true);
+});
+
+test("Windows five-stack npm prepare uses cmd.exe instead of spawning npm.cmd", () => {
+  const source = read("scripts/prepare-five-stack-runtime.cjs");
+  assert.doesNotMatch(source, /["']npm\.cmd["']/);
+
+  const windows = npmSpawnInvocation(["ci"], "win32");
+  assert.equal(path.basename(windows.command).toLowerCase(), "cmd.exe");
+  assert.deepEqual(windows.args.slice(0, 4), ["/d", "/s", "/c", "npm"]);
+  assert.deepEqual(windows.args.slice(4), ["ci"]);
+  assert.equal(windows.options.shell, false);
+  assert.deepEqual(windows.options.stdio, ["ignore", "pipe", "pipe"]);
+
+  const posix = npmSpawnInvocation(["run", "build:server"], "linux");
+  assert.equal(posix.command, "npm");
+  assert.deepEqual(posix.args, ["run", "build:server"]);
+  assert.equal(posix.options.shell, false);
+  assert.deepEqual(posix.options.stdio, ["ignore", "pipe", "pipe"]);
+});
+
+test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {
+  const repositoryRoot = temporaryDirectory("coding-tools-five-stack-npm");
+  const desktopDir = path.join(repositoryRoot, "desktop-electron");
+  const manifestRoot = path.join(desktopDir, "vendor", "managed-components");
+  const cacheRoot = path.join(repositoryRoot, "cache");
+  const outputRoot = path.join(desktopDir, "build", "five-stack-runtime");
+  const payload = Buffer.from("bundled-cpa-archive", "utf8");
+  const digest = sha256(payload);
+
+  for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
+    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id));
+    const sourceRoot = path.join(cacheRoot, id, "source");
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    fs.writeFileSync(path.join(sourceRoot, `${id}.txt`), `${id} bundled\n`);
+    if (id === "paseo") {
+      writeJson(path.join(sourceRoot, "package.json"), { name: "paseo", private: true });
+    }
+    if (id === "anneal") {
+      writeJson(path.join(sourceRoot, "package.json"), { name: "anneal", private: true });
+    }
+    if (id === "codex-router") {
+      const controlCenter = path.join(sourceRoot, "apps", "control-center");
+      fs.mkdirSync(controlCenter, { recursive: true });
+      writeJson(path.join(controlCenter, "package.json"), { name: "control-center", private: true });
+    }
+  }
+  writeJson(path.join(manifestRoot, "cpa.json"), bundledManifest("cpa", {
+    strategy: "release-binary",
+    platforms: {
+      [process.platform]: {
+        [process.arch]: {
+          fileName: "cpa.bin",
+          url: "https://example.invalid/cpa.bin",
+          sha256: digest,
+        },
+      },
+    },
+  }));
+  fs.mkdirSync(path.join(cacheRoot, "cpa"), { recursive: true });
+  fs.writeFileSync(path.join(cacheRoot, "cpa", "cpa.bin"), payload);
+
+  const calls = [];
+  await prepareFiveStackRuntime({
+    repositoryRoot,
+    desktopRoot: desktopDir,
+    manifestRoot,
+    outputRoot,
+    cacheRoot,
+    prepareDependencies: true,
+    fetchImpl: async () => {
+      throw new Error("prepare-five-stack-runtime must not fetch when a cache is present");
+    },
+    spawnSyncProcess: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: "", stderr: "", error: null };
+    },
+    now: () => "2026-09-18T12:00:00.000Z",
+    nonce: () => "fixture-npm",
+  });
+
+  assert.ok(calls.length >= 3);
+  for (const call of calls) {
+    assert.equal(call.options.shell, false);
+    assert.deepEqual(call.options.stdio, ["ignore", "pipe", "pipe"]);
+    if (process.platform === "win32") {
+      assert.equal(path.basename(call.command).toLowerCase(), "cmd.exe");
+      assert.deepEqual(call.args.slice(0, 4), ["/d", "/s", "/c", "npm"]);
+    } else {
+      assert.equal(call.command, "npm");
+      assert.ok(["ci", "run"].includes(call.args[0]));
+    }
+  }
 });

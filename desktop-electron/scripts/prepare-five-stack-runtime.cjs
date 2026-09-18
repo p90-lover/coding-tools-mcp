@@ -134,14 +134,33 @@ function shouldPrepareDependencies(options) {
   return require.main === module;
 }
 
-function runNpm(sourceRoot, args, spawnSyncProcess, code) {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = spawnSyncProcess(npm, args, {
-    cwd: sourceRoot,
+function npmSpawnInvocation(args, platform = process.platform) {
+  const options = {
     encoding: "utf8",
     shell: false,
     windowsHide: true,
     timeout: 30 * 60_000,
+    stdio: ["ignore", "pipe", "pipe"],
+  };
+  if (platform === "win32") {
+    return {
+      command: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", "npm", ...args],
+      options,
+    };
+  }
+  return {
+    command: "npm",
+    args: [...args],
+    options,
+  };
+}
+
+function runNpm(sourceRoot, args, spawnSyncProcess, code, platform = process.platform) {
+  const invocation = npmSpawnInvocation(args, platform);
+  const result = spawnSyncProcess(invocation.command, invocation.args, {
+    cwd: sourceRoot,
+    ...invocation.options,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -317,5 +336,6 @@ if (require.main === module) {
 
 module.exports = {
   COMPONENT_IDS,
+  npmSpawnInvocation,
   prepareFiveStackRuntime,
 };
