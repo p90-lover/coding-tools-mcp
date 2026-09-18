@@ -374,8 +374,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime on in-app loopbacks (CPA :8317, Router :4202, CommandCode :9090 / fallback :3050, Paseo :6768, Anneal :3000/#/tasks and web :5173). Start hits bundled local ports. A separate download is not required. Open CPA and Codex Router original interfaces from their dedicated pages.",
-            "直接由 Coding Tools 內建執行環境在 App 內 loopback 啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal（CPA :8317、Router :4202、CommandCode :9090／回退 :3050、Paseo :6768、Anneal :3000/#/tasks 與 web :5173）。Start 連接內建本機端口，無需另外下載。CPA 與 Codex Router 原始介面由專用頁面開啟。",
+            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime. CommandCode Proxy, Paseo and Anneal are bundled inside this app — Start them without a separate download. They share in-app loopbacks (CPA :8317, Router :4202, CommandCode :9090 / fallback :3050, Paseo :6768, Anneal :3000/#/tasks and web :5173) so cross-use does not need a separate install. Start hits bundled local ports. A separate download is not required. Open CPA and Codex Router original interfaces from their dedicated pages.",
+            "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CommandCode Proxy、Paseo 與 Anneal 已內建於本 App，Start 不必另外下載。五棧共用 App 內 loopback（CPA :8317、Router :4202、CommandCode :9090／回退 :3050、Paseo :6768、Anneal :3000/#/tasks 與 web :5173），交叉使用唔使另外安裝。Start 連接內建本機端口，無需另外下載。CPA 與 Codex Router 原始介面由專用頁面開啟。",
           )}</p>
         </div>
         <div className="external-services-heading-actions">
