@@ -80,7 +80,11 @@ export function McpLiveToolsPanel({ copy, language, setError }: McpLiveToolsPane
 
   useEffect(() => {
     void refresh();
-    // Load once when the MCP surface mounts; later refreshes are explicit.
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+    // Quiet reconnect while the MCP surface stays mounted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

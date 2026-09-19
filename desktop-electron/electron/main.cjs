@@ -30,6 +30,8 @@ const {
 const { RuntimeHost } = require("./runtime.cjs");
 const { HeadlessHost } = require("./headless-host.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
+const { probeAll } = require("./five-stack-loopbacks.cjs");
+const { createFiveStackLoopbackProbes } = require("./five-stack-loopback-probes.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
@@ -118,6 +120,7 @@ let catalogVerificationInFlight = false;
 let updateController = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
+let fiveStackLoopbackProbes = null;
 let upstreamToolController = null;
 let originalUiController = null;
 
@@ -576,6 +579,16 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow,
     headlessHost,
     updateController,
+    fiveStack: {
+      probeAll: () => probeAll({
+        headers: {},
+      }),
+      snapshot: () => fiveStackLoopbackProbes?.snapshot() || null,
+      start: async (stackId) => {
+        if (!externalServicesController) throw new Error("External services controller is unavailable");
+        return externalServicesController.start(stackId);
+      },
+    },
   });
   const fiveStackControlPlane = createFiveStackControlPlane({
     planProvider: createProviderExecutionPlan,
@@ -1539,6 +1552,7 @@ async function start() {
   app.once("before-quit", () => {
     managedBootstrapController?.dispose();
     originalUiController?.dispose();
+    fiveStackLoopbackProbes?.stop();
     externalServicesController?.dispose();
     upstreamToolController?.dispose();
   });
@@ -1617,6 +1631,11 @@ async function start() {
       });
     });
   }
+  fiveStackLoopbackProbes = createFiveStackLoopbackProbes({
+    probeAll: () => probeAll({}),
+    logger,
+  });
+  fiveStackLoopbackProbes.start();
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),

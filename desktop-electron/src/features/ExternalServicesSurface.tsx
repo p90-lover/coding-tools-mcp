@@ -321,7 +321,7 @@ export function ExternalServicesSurface({
   const saveManagedCredential = () => run("managed-credential", async () => {
     if (!api || !selected || selected.id !== "anneal") return;
     const value = managedCredential.trim();
-    if (!value) throw new Error(text(language, "Enter a GitHub read token first.", "請先輸入 GitHub 唯讀 Token。"));
+    if (!value) throw new Error(text(language, "Enter an optional GitHub read token to save.", "請輸入要儲存的 GitHub 唯讀 Token。"));
     await api.setManagedComponentCredential("anneal", "githubReadToken", value);
     setManagedCredential("");
     setNotice(text(language, "Anneal credential saved securely.", "Anneal 憑證已安全儲存。"));
@@ -374,8 +374,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime. CommandCode Proxy, Paseo and Anneal are bundled inside this app — Start them without a separate download. They share in-app loopbacks (CPA :8317, Router :4202, CommandCode :9090, Paseo :6768, Anneal :5173/:3000) so cross-use does not need a separate install. Open CPA and Codex Router original interfaces from their dedicated pages.",
-            "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CommandCode Proxy、Paseo 與 Anneal 已內建於本 App，Start 不必另外下載。五棧共用 App 內 loopback（CPA :8317、Router :4202、CommandCode :9090、Paseo :6768、Anneal :5173/:3000），交叉使用唔使另外安裝。CPA 與 Codex Router 原始介面由專用頁面開啟。",
+            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime. CommandCode Proxy, Paseo and Anneal are bundled inside this app — Start them without a separate download. They share in-app loopbacks (CPA :8317, Router :4202, CommandCode :9090 / fallback :3050, Paseo :6768, Anneal :3000/#/tasks and web :5173) so cross-use does not need a separate install. Start hits bundled local ports. A separate download is not required. Open CPA and Codex Router original interfaces from their dedicated pages.",
+            "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CommandCode Proxy、Paseo 與 Anneal 已內建於本 App，Start 不必另外下載。五棧共用 App 內 loopback（CPA :8317、Router :4202、CommandCode :9090／回退 :3050、Paseo :6768、Anneal :3000/#/tasks 與 web :5173），交叉使用唔使另外安裝。Start 連接內建本機端口，無需另外下載。CPA 與 Codex Router 原始介面由專用頁面開啟。",
           )}</p>
         </div>
         <div className="external-services-heading-actions">
@@ -441,10 +441,10 @@ export function ExternalServicesSurface({
 
           <section className={`managed-install-panel state-${selected.managedInstall.state}`}>
             <div>
-              <span>{text(language, "APP-MANAGED COMPONENT", "APP 受管理元件")}</span>
+              <span>{text(language, "IN-APP LOOPBACK", "APP 內 LOOPBACK")}</span>
               <strong>{installStateLabel(language, selected)}</strong>
               <small>
-                {text(language, "Pinned version", "固定版本")} {selected.managedInstall.version}
+                {text(language, "Hard-targeted", "硬編碼")} {selected.endpoint}
                 {selected.managedInstall.commit ? ` · ${selected.managedInstall.commit.slice(0, 12)}` : ""}
                 {selected.managedInstall.platformMode === "wsl2" ? " · WSL2" : ""}
               </small>
@@ -455,8 +455,8 @@ export function ExternalServicesSurface({
               <label className="managed-secret-field">
                 <span>{text(
                   language,
-                  "GitHub read token (optional, for extra GitHub features / Anneal setup:local)",
-                  "GitHub 唯讀 Token（選填，用於額外 GitHub 功能／Anneal setup:local）",
+                  "GitHub read token (optional, never required to Start; used for extra GitHub features / Anneal setup:local)",
+                  "GitHub 唯讀 Token（選填，啟動不需要；用於額外 GitHub 功能／Anneal setup:local）",
                 )}</span>
                 <input
                   autoComplete="off"
@@ -488,7 +488,7 @@ export function ExternalServicesSurface({
             >
               {busy === "managed-install" || selected.managedInstall.state === "installing"
                 ? "…"
-                : text(language, "Repair runtime", "修復執行環境")}
+                : text(language, "Optional Repair runtime", "選用修復執行環境")}
             </button>
             )}
           </section>
@@ -584,7 +584,7 @@ export function ExternalServicesSurface({
                 </button>
               </>
             ) : null}
-            <button disabled={busy !== null || !selected.enabled || selected.status === "ready"} onClick={() => void start()} type="button">{busy === "start" ? "…" : text(language, "Start", "啟動")}</button>
+            <button className="primary" disabled={busy !== null || !selected.enabled || selected.status === "ready"} onClick={() => void start()} type="button">{busy === "start" ? "…" : text(language, "Start", "啟動")}</button>
             <button disabled={busy !== null || !selected.owned} onClick={() => void restart()} type="button">{busy === "restart" ? "…" : text(language, "Restart", "重新啟動")}</button>
             <button disabled={busy !== null || !selected.owned} onClick={() => void stop()} type="button">{busy === "stop" ? "…" : text(language, "Stop", "停止")}</button>
             {selected.id === "codex-router" ? (

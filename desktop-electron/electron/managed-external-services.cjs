@@ -6,6 +6,7 @@ const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
+const { probeStack } = require("./five-stack-loopbacks.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
@@ -221,6 +222,17 @@ function createManagedExternalServicesController({
   }
 
   async function start(serviceId) {
+    const probed = await probeStack(serviceId, {
+      fetchImpl: options.fetchImpl,
+      headers: managedController.healthHeaders(serviceId),
+    });
+    if (probed.listening) {
+      await inspect(serviceId);
+      publishCombined();
+      return serviceFromSnapshot(serviceId);
+    }
+    const inspected = await inspect(serviceId);
+    if (inspected.status === "ready") return inspected;
     const managed = managedController.project(serviceId);
     if (managed.installState === "repair-required" || (managed.installState === "error" && managed.installedAt)) {
       return repairManagedComponent(serviceId);
@@ -229,13 +241,23 @@ function createManagedExternalServicesController({
       return installManagedComponent(serviceId);
     }
     if (managed.installState === "installed") {
-      applyManagedConfiguration(serviceId);
-      await managedController.startComponent(serviceId);
+      try {
+        applyManagedConfiguration(serviceId);
+        await managedController.startComponent(serviceId);
+      } catch {
+        // Loopback Start must not become a download/install gate.
+      }
       await baseController.inspect(serviceId);
       publishCombined();
       return serviceFromSnapshot(serviceId);
     }
-    return mergeService(await baseController.start(serviceId));
+    try {
+      return mergeService(await baseController.start(serviceId));
+    } catch {
+      await baseController.inspect(serviceId);
+      publishCombined();
+      return serviceFromSnapshot(serviceId);
+    }
   }
 
   async function stop(serviceId) {

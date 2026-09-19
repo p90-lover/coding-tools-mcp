@@ -1856,6 +1856,63 @@ code {
   white-space: pre-wrap;
 }
 
+.five-stack-loopbacks {
+  flex: none;
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+}
+
+.five-stack-loopbacks > p,
+.five-stack-loopback-empty {
+  max-width: 640px;
+  margin: 8px 0 14px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.five-stack-loopback-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.five-stack-loopback-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+}
+
+.five-stack-loopback-card.is-listening {
+  border-color: color-mix(in srgb, var(--color-text-accent) 45%, var(--color-border));
+}
+
+.five-stack-loopback-card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.five-stack-loopback-card header em,
+.five-stack-loopback-card small,
+.five-stack-loopback-card code {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.five-stack-loopback-card code,
+.five-stack-loopback-card small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 820px) {
   .content-scroll {
     width: min(var(--content-width), calc(100% - 28px));
