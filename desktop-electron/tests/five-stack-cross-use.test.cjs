@@ -169,3 +169,151 @@ test("Integrations copy and sync plan advertise in-app cross-use instead of exte
   assert.match(managed, /peerEnvironmentFor/);
   assert.match(managed, /runtime-supervisor/);
 });
+
+test("crossUseSecrets reads caller-secret from disk and never calls runtimeConfiguration", () => {
+  const managed = read("electron/managed-external-services.cjs");
+  const components = read("electron/managed-components.cjs");
+  assert.match(managed, /function readRouterCallerKey\(/);
+  assert.match(managed, /charCodeAt\(0\) === 0xFEFF/);
+  assert.match(managed, /readRouterCallerKey\(\)/);
+  const start = managed.indexOf("function crossUseSecrets(");
+  const end = managed.indexOf("function managedConfiguration(");
+  assert.ok(start >= 0 && end > start);
+  const body = managed.slice(start, end);
+  assert.match(body, /readRouterCallerKey\(\)/);
+  assert.doesNotMatch(body, /runtimeConfiguration\s*\(\s*["']codex-router["']\s*\)/);
+  assert.equal((components.match(/let peerEnvBusy = false/g) || []).length, 1);
+  assert.equal((components.match(/let crossUseEnvBusy = false/g) || []).length, 1);
+  assert.match(components, /managed-component\.cross-use-environment-reentered/);
+  assert.match(components, /managed-component\.peer-environment-reentered/);
+});
+
+test("managed runtimeEnvironment reads a BOM-prefixed router caller-secret from disk", () => {
+  const { createManagedExternalServicesController } = require("../electron/managed-external-services.cjs");
+  const { EventEmitter } = require("node:events");
+  const directory = temporaryDirectory("coding-tools-caller-secret");
+  const dataRoot = path.join(directory, "integrations");
+  const callerKey = "A".repeat(32);
+  fs.mkdirSync(path.join(dataRoot, "state", "codex-router", "router"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dataRoot, "state", "codex-router", "router", "caller-secret"),
+    `\uFEFF${callerKey}\n`,
+    "utf8",
+  );
+  const controller = createManagedExternalServicesController({
+    dataRoot,
+    filePath: path.join(directory, "external-services.json"),
+    keyPath: path.join(directory, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      clone: () => ({ json: async () => ({ data: [] }) }),
+    }),
+    spawnProcess: () => {
+      const child = new EventEmitter();
+      child.pid = 1;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.exitCode = null;
+      child.signalCode = null;
+      child.kill = () => true;
+      return child;
+    },
+  });
+  try {
+    const env = controller.runtimeEnvironment();
+    assert.equal(env.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY, callerKey);
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("commandSpec reentry through runtimeConfiguration does not overflow", async () => {
+  const { EventEmitter } = require("node:events");
+  const crypto = require("node:crypto");
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const sha256 = crypto.createHash("sha256").update(payload).digest("hex");
+  const manifestRoot = temporaryDirectory("coding-tools-reentry-manifests");
+  const dataRoot = temporaryDirectory("coding-tools-reentry-data");
+  const ids = ["codex-router", "commandcode-proxy", "cpa", "paseo", "anneal"];
+  for (const id of ids) {
+    fs.writeFileSync(path.join(manifestRoot, `${id}.json`), `${JSON.stringify({
+      schemaVersion: 1,
+      id,
+      name: id,
+      managedBy: "Coding Tools",
+      loopbackOnly: true,
+      repository: `fixture/${id}`,
+      version: "1.0.0",
+      strategy: "release-binary",
+      platforms: {
+        [process.platform]: {
+          [process.arch]: {
+            url: `https://github.com/fixture/${id}/releases/download/v1.0.0/${id}.bin`,
+            sha256,
+            fileName: `${id}.bin`,
+          },
+        },
+      },
+      install: {
+        steps: [
+          { id: "download-release", kind: "download" },
+          { id: "verify-sha256", kind: "verify" },
+          { id: "activate", kind: "activate" },
+        ],
+      },
+      launch: {
+        processes: [{ id: "service", mode: "foreground", executable: "{artifact}", arguments: [] }],
+      },
+      health: { endpoint: "http://127.0.0.1:4202/", acceptStatus: [200] },
+    }, null, 2)}\n`);
+  }
+
+  const warnings = [];
+  const spawned = [];
+  const controller = createManagedComponentController({
+    manifestRoot,
+    dataRoot,
+    allowNetworkInstall: true,
+    safeStorage: { isEncryptionAvailable: () => false },
+    logger: {
+      warn: (event, details) => warnings.push({ event, details }),
+    },
+    fetchImpl: async () => new Response(payload, {
+      status: 200,
+      headers: { "content-length": String(payload.length) },
+    }),
+    spawnProcess: (_executable, _args, options) => {
+      spawned.push(options.env);
+      const child = new EventEmitter();
+      child.pid = 9500 + spawned.length;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.exitCode = null;
+      child.signalCode = null;
+      child.killed = false;
+      child.kill = () => {
+        child.killed = true;
+        queueMicrotask(() => child.emit("exit", 0, "SIGTERM"));
+      };
+      return child;
+    },
+    resolveCrossUseEnvironment: (componentId) => {
+      controller.runtimeConfiguration(componentId);
+      return { CODING_TOOLS_TEST_CROSS_USE: "1" };
+    },
+    peerEnvironment: () => {
+      controller.runtimeConfiguration("codex-router");
+      return { CODING_TOOLS_TEST_PEER: "1" };
+    },
+  });
+
+  await controller.startComponent("codex-router");
+  const env = spawned.at(-1);
+  assert.equal(env.CODING_TOOLS_TEST_CROSS_USE, "1");
+  assert.ok(warnings.some((entry) => entry.event === "managed-component.cross-use-environment-reentered"));
+  assert.ok(warnings.some((entry) => entry.event === "managed-component.peer-environment-reentered"));
+  controller.dispose();
+});

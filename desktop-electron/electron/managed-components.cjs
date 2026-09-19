@@ -440,6 +440,8 @@ function createManagedComponentController({
   const codec = createSecretCodec({ safeStorage, keyPath: secretKeyPath });
   const operations = new Map();
   const processes = new Map();
+  let peerEnvBusy = false;
+  let crossUseEnvBusy = false;
   let secrets = readJson(secretPath) || { version: SECRET_VERSION, components: {} };
 
   for (const directory of [componentsRoot, stateRoot, aiTempRoot, trashRoot]) {
@@ -791,7 +793,6 @@ function createManagedComponentController({
       });
   }
 
-  let peerEnvBusy = false;
   function peerEnv(context) {
     if (typeof peerEnvironment !== "function") return {};
     if (peerEnvBusy) {
@@ -826,9 +827,21 @@ function createManagedComponentController({
       key,
       expandToken(value, context),
     ]));
-    const crossUseEnvironment = typeof resolveCrossUseEnvironment === "function"
-      ? (resolveCrossUseEnvironment(context.id, context) || {})
-      : {};
+    let crossUseEnvironment = {};
+    if (typeof resolveCrossUseEnvironment === "function") {
+      if (crossUseEnvBusy) {
+        logger?.warn?.("managed-component.cross-use-environment-reentered", {
+          componentId: context.id,
+        });
+      } else {
+        crossUseEnvBusy = true;
+        try {
+          crossUseEnvironment = resolveCrossUseEnvironment(context.id, context) || {};
+        } finally {
+          crossUseEnvBusy = false;
+        }
+      }
+    }
     const mergedEnvironment = { ...crossUseEnvironment, ...peerEnv(context), ...environment };
     const managedMode = entry.execution === "managed-mode";
     if (context.mode === "wsl2" && managedMode) {
@@ -1260,6 +1273,10 @@ function createManagedComponentController({
       if (fs.existsSync(target)) moveToTrash(target, manifest, repair ? "repair-replaced" : "version-replaced");
       fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
       fs.renameSync(stagingHome, target);
+      if (id === "codex-router") {
+        const { ensureBinWrappers } = require("./codex-router-managed.cjs");
+        ensureBinWrappers(target, componentState(manifest));
+      }
       writeJson(path.join(stagingRoot, "COMPLETED.json"), {
         schemaVersion: 1,
         id,
@@ -1324,6 +1341,8 @@ function createManagedComponentController({
     const context = launchContext(manifest);
     if (id === "codex-router") {
       writeInAppProvidersFile(path.join(context.state, "router"));
+      const { ensureBinWrappers } = require("./codex-router-managed.cjs");
+      ensureBinWrappers(context.home, context.state);
     }
     const existing = processes.get(id);
     if (existing && [...existing.values()].some((child) => child && child.exitCode === null && child.signalCode === null)) {

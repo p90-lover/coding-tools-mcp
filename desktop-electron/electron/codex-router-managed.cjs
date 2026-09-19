@@ -82,9 +82,89 @@ function wrapperExports(env, quote) {
   ].map(([name, value]) => [name, quote ? quote(value) : value]);
 }
 
-function wrappers(home, state, env) {
+function isAiTempPath(value) {
+  return String(value || "")
+    .replaceAll("\\", "/")
+    .split("/")
+    .some((part) => part.toLowerCase() === "aitemp");
+}
+
+function readJson(filePath) {
+  try { return JSON.parse(fs.readFileSync(filePath, "utf8")); }
+  catch { return null; }
+}
+
+function safeSegment(value) {
+  return String(value || "unknown").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 120);
+}
+
+function routerVersion(home) {
+  const bundled = readJson(path.join(home, "CODING_TOOLS_BUNDLED.json"));
+  if (bundled?.version) return safeSegment(bundled.version);
+  const marker = readJson(path.join(home, ".coding-tools-managed-component.json"));
+  if (marker?.version) return safeSegment(marker.version);
+  const pkg = readJson(path.join(home, "package.json"));
+  if (pkg?.version) return safeSegment(pkg.version);
+  return "";
+}
+
+function resolveLiveComponentHome(home, stateDir) {
+  const resolvedHome = path.resolve(home);
+  if (!isAiTempPath(resolvedHome)) return resolvedHome;
+  const resolvedState = path.resolve(stateDir);
+  const dataRoot = path.dirname(path.dirname(resolvedState));
+  const version = routerVersion(resolvedHome);
+  if (!version) {
+    throw new Error("Managed Codex Router wrappers cannot target a temporary unpack directory");
+  }
+  return path.resolve(dataRoot, "components", "codex-router", version);
+}
+
+function wrapperFileTargets(content) {
+  const targets = [];
+  for (const match of String(content || "").matchAll(/-File\s+(?:"([^"]+)"|'([^']+)'|(\S+))/gi)) {
+    targets.push(match[1] || match[2] || match[3]);
+  }
+  return targets;
+}
+
+function quotedPaths(content) {
+  const values = [];
+  for (const match of String(content || "").matchAll(/"([^"\r\n]+)"|'([^'\r\n]+)'/g)) {
+    values.push(match[1] || match[2]);
+  }
+  return values;
+}
+
+function wrapperLooksStale(filePath, liveHome) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return true;
+  const content = fs.readFileSync(filePath, "utf8");
+  const liveNormalized = path.resolve(liveHome).replaceAll("\\", "/").toLowerCase();
+  const candidates = [...wrapperFileTargets(content), ...quotedPaths(content)];
+  let sawLiveTarget = false;
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (isAiTempPath(candidate)) return true;
+    const resolved = path.resolve(candidate);
+    if (isAiTempPath(resolved)) return true;
+    const normalized = resolved.replaceAll("\\", "/").toLowerCase();
+    if (normalized.startsWith(`${liveNormalized}/`) || normalized === liveNormalized) {
+      sawLiveTarget = true;
+      continue;
+    }
+    if (
+      /\.(?:ps1|mjs|cmd)$/i.test(candidate)
+      || /(?:^|[/\\])(?:model-router|curate-models)$/i.test(candidate)
+    ) {
+      if (!fs.existsSync(resolved)) return true;
+    }
+  }
+  return !sawLiveTarget;
+}
+
+function wrappers(home, state, env, platform = process.platform) {
   const bin = path.join(state, "bin");
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     writeWrapper(path.join(bin, "model-router.cmd"), [
       "@echo off",
       "setlocal",
@@ -115,6 +195,25 @@ function wrappers(home, state, env) {
     `#!/usr/bin/env bash\nset -euo pipefail\n${exports}\nexec ${quoteSh(process.execPath)} ${quoteSh(path.join(home, "src", "curate-models.mjs"))} "$@"\n`,
     0o700,
   );
+}
+
+function binWrapperPaths(stateDir, platform = process.platform) {
+  const bin = path.join(stateDir, "bin");
+  if (platform === "win32") {
+    return [path.join(bin, "model-router.cmd"), path.join(bin, "curate-models.cmd")];
+  }
+  return [path.join(bin, "model-router"), path.join(bin, "curate-models")];
+}
+
+function ensureBinWrappers(home, state, platform = process.platform) {
+  if (!home || !path.isAbsolute(home)) throw new Error("Codex Router home must be absolute");
+  if (!state || !path.isAbsolute(state)) throw new Error("Codex Router state directory must be absolute");
+  const liveHome = resolveLiveComponentHome(home, state);
+  if (isAiTempPath(liveHome)) {
+    throw new Error("Managed Codex Router wrappers cannot target a temporary unpack directory");
+  }
+  wrappers(liveHome, state, environment(liveHome, state), platform);
+  return liveHome;
 }
 
 function bundledSkipNetworkPrepare(home) {
@@ -152,8 +251,8 @@ function ensureCallerSecret(state) {
 }
 
 function finishPrepare(home, state) {
-  const env = environment(home, state);
-  wrappers(home, state, env);
+  const liveHome = resolveLiveComponentHome(home, state);
+  wrappers(liveHome, state, environment(liveHome, state));
   applyLongRunLiteLlmTimeout(home);
   const { ensureOriginalControlCenter } = require("./codex-router-original-ui.cjs");
   try {
@@ -193,10 +292,11 @@ function prepare(home, state) {
 }
 
 function run(home, state) {
-  applyLongRunLiteLlmTimeout(home);
-  const env = environment(home, state);
-  const child = spawn(process.execPath, [requiredFile(home, "src/foreground-start.mjs")], {
-    cwd: home,
+  const liveHome = ensureBinWrappers(home, state);
+  applyLongRunLiteLlmTimeout(liveHome);
+  const env = environment(liveHome, state);
+  const child = spawn(process.execPath, [requiredFile(liveHome, "src/foreground-start.mjs")], {
+    cwd: liveHome,
     env,
     stdio: "inherit",
     windowsHide: true,
@@ -224,9 +324,16 @@ if (require.main === module) {
 }
 
 module.exports = {
+  binWrapperPaths,
   bundledSkipNetworkPrepare,
+  ensureBinWrappers,
   environment,
+  isAiTempPath,
   prepare,
   prepareOfflineFromBundle,
+  resolveLiveComponentHome,
   run,
+  wrapperFileTargets,
+  wrapperLooksStale,
+  wrappers,
 };
