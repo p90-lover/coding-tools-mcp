@@ -47,6 +47,9 @@ jobs:
           install -m 0644 \
             aiTemp/rc11-managed-apps-current-main/templates/ManagedAppsSurface.tsx \
             desktop-electron/src/features/ManagedAppsSurface.tsx
+          install -m 0644 \
+            aiTemp/rc11-managed-apps-current-main/templates/managed-apps.css \
+            desktop-electron/src/features/managed-apps.css
           node aiTemp/rc11-managed-apps-current-main/materialize-sidebar-label.mjs \
             2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-locale.txt
           grep -E 'RC11_MANAGED_APPS_LOCALE_(MATERIALIZED|ALREADY_MATERIALIZED)' \
