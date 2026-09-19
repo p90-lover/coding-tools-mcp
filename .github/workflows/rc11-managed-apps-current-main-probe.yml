@@ -1,0 +1,65 @@
+name: rc.11 Managed Apps current-main probe
+
+on:
+  push:
+    branches:
+      - integration/rc11-managed-apps-current-main-probe
+    paths:
+      - .github/workflows/rc11-managed-apps-current-main-probe.yml
+      - aiTemp/rc11-managed-apps-current-main/**
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/electron/state.cjs
+      - desktop-electron/src/App.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/src/features/ExternalServicesSurface.tsx
+      - desktop-electron/src/features/ManagedAppsSurface.tsx
+      - desktop-electron/src/features/managed-apps.css
+      - desktop-electron/tests/rc11-managed-apps-current-main-probe.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc11-managed-apps-current-main-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run current-main Managed Apps contract
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-managed-apps-current-main/evidence
+          node --test desktop-electron/tests/rc11-managed-apps-current-main-probe.test.cjs \
+            2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/results.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-apps-current-main/evidence/results.txt
+
+      - name: Enforce preservation
+        if: always()
+        run: |
+          set -euo pipefail
+          git fetch origin main --no-tags
+          git diff --check origin/main...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/main...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-managed-apps-current-main-probe-${{ github.sha }}
+          path: aiTemp/rc11-managed-apps-current-main/evidence/
+          if-no-files-found: error
+          retention-days: 14
