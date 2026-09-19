@@ -219,6 +219,7 @@ module.exports = {
   modelIdsFromCatalog,
   openaiOperations,
   probeOpenAi,
+  providerCatalogIds,
   publicError,
   redactPublicValue,
   resolveLoopback,

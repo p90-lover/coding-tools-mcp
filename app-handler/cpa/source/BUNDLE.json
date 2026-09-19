@@ -1,0 +1,12 @@
+{
+  "id": "cpa",
+  "strategy": "preferLocal",
+  "repository": "router-for-me/CLIProxyAPI",
+  "commit": "v7.3.7",
+  "entrypoint": "README.md",
+  "prebuilt": true,
+  "source": "package-time extraResources",
+  "visual": "coding-tools-embedded",
+  "processOptional": true,
+  "note": "In-process CPA handlers and CT-hosted panel. The Go proxy on :8317 is optional for live traffic only."
+}

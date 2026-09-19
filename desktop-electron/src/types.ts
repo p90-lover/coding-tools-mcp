@@ -436,6 +436,9 @@ export interface OriginalUiSnapshot {
   sourceConfigured: boolean;
   installState: ManagedComponentInstallState;
   originalChrome: boolean;
+  inProcessVisual?: boolean;
+  processOptional?: boolean;
+  visualHost?: "coding-tools" | "iframe";
   longRun?: OriginalUiLongRun;
 }
 
@@ -455,7 +458,10 @@ export interface OriginalUiOpenResult {
     moduleId: string;
     origin?: string;
     via?: string;
+    transport?: string;
   };
+  visual?: "in-process-panel" | "iframe";
+  processOptional?: boolean;
   unavailable?: boolean;
   dependency?: "postgres" | null;
   error?: string | null;

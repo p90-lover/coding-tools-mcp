@@ -51,9 +51,29 @@ function controllerFor(services, extra = {}) {
   });
 }
 
+test("original-ui-open hosts the CPA panel in-process without starting :8317", async () => {
+  const calls = [];
+  const controller = controllerFor([service("cpa", { status: "offline", pid: null })], {
+    start: async (id) => { calls.push(["start", id]); },
+    installManagedComponent: async (id) => { calls.push(["install", id]); },
+  });
+
+  const opened = await controller.openEmbedded("cpa", "dashboard");
+  assert.deepEqual(calls, []);
+  assert.equal(opened.embedded, true);
+  assert.equal(opened.originalWindow, false);
+  assert.equal(opened.url, "");
+  assert.equal(opened.visual, "in-process-panel");
+  assert.equal(opened.processOptional, true);
+  assert.equal(opened.api.via, "codingTools.apps");
+  assert.equal(opened.api.transport, "in-process");
+  assert.doesNotMatch(opened.url || "", /8317/);
+  controller.dispose();
+});
+
 test("original UI covers CPA, Codex Router, Paseo, and Anneal loopback manifests", () => {
   assert.deepEqual(TOOL_IDS, ["cpa", "codex-router", "paseo", "anneal"]);
-  assert.deepEqual(IFRAME_TOOL_IDS, ["cpa", "paseo", "anneal"]);
+  assert.deepEqual(IFRAME_TOOL_IDS, ["paseo", "anneal"]);
   const paseo = loadManifest("paseo");
   const anneal = loadManifest("anneal");
   assert.equal(
@@ -84,7 +104,10 @@ test("original-ui-open attaches to an already-ready headless service without sta
   assert.equal(paseo.api.via, "codingTools.apps");
   assert.equal(paseo.api.transport, "in-process");
   assert.equal(paseo.url, "http://127.0.0.1:6768/sessions");
-  assert.equal(cpa.url, "http://127.0.0.1:8317/management.html#/oauth");
+  assert.equal(cpa.url, "");
+  assert.equal(cpa.visual, "in-process-panel");
+  assert.equal(cpa.api.via, "codingTools.apps");
+  assert.equal(cpa.processOptional, true);
   assert.deepEqual(calls, []);
   controller.dispose();
 });
@@ -208,6 +231,9 @@ test("desktop screens inspect modules through Coding Tools APIs without auto-ope
   assert.match(original, /data-dependency="postgres"/);
   assert.match(original, /standalone app window is not launched/);
   assert.match(original, /<iframe/);
+  assert.match(original, /CpaOriginalPanel/);
+  assert.match(original, /Start proxy \(optional\)/);
+  assert.match(original, /data-visual=\{inProcessPanel \? "in-process-panel"/);
   assert.match(original, /data-transport="in-process"/);
   assert.match(upstream, /codingTools\?\.apps/);
   assert.match(upstream, /data-dependency="postgres"/);

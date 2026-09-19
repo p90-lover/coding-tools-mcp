@@ -321,8 +321,8 @@ test("codingTools.apps list/catalog/call/invoke stay in-process and inspect does
     assert.equal(Array.isArray(catalog.modules), true);
     assert.equal(catalog.transport, "in-process");
 
-    const loopbackInspect = ["cpa", "codex-router"];
-    const bundledInspect = ["commandcode-proxy", "paseo", "anneal"];
+    const loopbackInspect = ["codex-router"];
+    const bundledInspect = ["cpa", "commandcode-proxy", "paseo", "anneal"];
     for (const moduleId of MODULE_IDS) {
       const viaCall = await apps.call({ moduleId, operation: "inspect" });
       assert.equal(viaCall.ok, true, `${moduleId} call inspect`);
@@ -346,7 +346,7 @@ test("codingTools.apps list/catalog/call/invoke stay in-process and inspect does
     assert.equal(
       calls.filter((entry) => entry[0] === "inspect").length,
       loopbackInspect.length * 2,
-      "CPA/Router inspect still uses the injected service; CC/Paseo/Anneal stay in-process",
+      "Router inspect still uses the injected service; CPA/CC/Paseo/Anneal stay in-process",
     );
   } finally {
     stub.restore();
@@ -396,6 +396,7 @@ test("CPA, Router, and CommandCode key operations dispatch through the in-proces
     const management = await apps.call({ moduleId: "cpa", operation: "managementHealth" });
     assert.equal(management.ok, true);
     assert.equal(management.result.reachable, true);
+    assert.equal(management.result.hosted, true);
     assert.equal(management.result.authFileCount, 1);
 
     const listed = await apps.invoke({ handle: "cpa", operation: "listProviders" });

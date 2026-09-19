@@ -19,6 +19,7 @@ import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
+import { CpaOriginalPanel } from "./features/CpaOriginalPanel";
 import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
 import { InProcessAppsPanel } from "./features/InProcessAppsPanel";
 import type {
@@ -1959,6 +1960,17 @@ function SettingsSurface({
           <LanguageMenu copy={copy} language={language} onChange={(next) => void updateLanguage(next)} />
         </SettingRow>
       </div>
+
+      <SectionHeading
+        label={language === "zh-TW" || language === "zh-CN" ? "CPA 原始介面" : "CPA original panel"}
+        spaced
+      />
+      <p className="settings-copy">
+        {language === "zh-TW" || language === "zh-CN"
+          ? "此區透過 codingTools.apps 讀取供應商／模型，不必先按「啟動」，也不依賴 127.0.0.1:8317。"
+          : "This section reads providers and models through codingTools.apps. It does not require Start and does not depend on 127.0.0.1:8317."}
+      </p>
+      <CpaOriginalPanel compact language={language} setError={setError} />
 
       {!devProfile && snapshot.state.codexRestartRequired ? (
         <NoticeRow icon="alert" tone="warning">

@@ -94,7 +94,7 @@ test("apps MCP tools list, call, invoke, and report ready without spawning ports
   assert.equal(cpa.dedicatedListenPort, false);
   assert.deepEqual(calls.filter((entry) => entry[0] === "start"), []);
   const inspectCalls = calls.filter((entry) => entry[0] === "inspect");
-  assert.ok(inspectCalls.some((entry) => entry[1] === "cpa"));
+  assert.equal(inspectCalls.some((entry) => entry[1] === "cpa"), false);
   assert.equal(inspectCalls.some((entry) => entry[1] === "commandcode-proxy"), false);
   assert.equal(inspectCalls.some((entry) => entry[1] === "paseo"), false);
   assert.equal(inspectCalls.some((entry) => entry[1] === "anneal"), false);

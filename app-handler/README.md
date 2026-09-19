@@ -27,7 +27,7 @@ One tree. Do not add a second `app-handler/` root. CommandCode’s folder/handle
 
 | Handle | Folder | Handler entry | Host / IPC | CT visual |
 | --- | --- | --- | --- | --- |
-| `cpa` | [`app-handler/cpa/`](cpa/) | [`handler.cjs`](cpa/handler.cjs) → [`handlers.cjs`](cpa/handlers.cjs) | [`handler-registry.cjs`](handler-registry.cjs) `invoke("cpa", op, args, ctx)` · [`host.cjs`](host.cjs) `call`/`invoke` · preload `codingTools.apps` | [`OriginalUiSurface`](../desktop-electron/src/features/OriginalUiSurface.tsx) `toolId="cpa"` (management.html iframe in CT) |
+| `cpa` | [`app-handler/cpa/`](cpa/) | [`handler.cjs`](cpa/handler.cjs) → [`handlers.cjs`](cpa/handlers.cjs) | [`handler-registry.cjs`](handler-registry.cjs) `invoke("cpa", op, args, ctx)` · [`host.cjs`](host.cjs) `call`/`invoke` · preload `codingTools.apps` | [`OriginalUiSurface`](../desktop-electron/src/features/OriginalUiSurface.tsx) `toolId="cpa"` + [`CpaOriginalPanel`](../desktop-electron/src/features/CpaOriginalPanel.tsx) (CT-hosted; no `:8317` iframe) |
 | `codex-router` | [`app-handler/codex-router/`](codex-router/) | [`handler.cjs`](codex-router/handler.cjs) → [`handlers.cjs`](codex-router/handlers.cjs) | same registry/host; `FOREIGN_SLOTS` | [`OriginalUiSurface`](../desktop-electron/src/features/OriginalUiSurface.tsx) `toolId="codex-router"` (Control Center `dist/index.html` file URL in CT; no second Electron window) |
 | `commandcode-proxy` | [`app-handler/commandcode-proxy/`](commandcode-proxy/) | [`handler.cjs`](commandcode-proxy/handler.cjs) → [`handlers.cjs`](commandcode-proxy/handlers.cjs) | same; aliases `banner`, `registration-plan`, `registration-apply` | [`CommandCodeProxySurface`](../desktop-electron/src/features/CommandCodeProxySurface.tsx) inside Integrations (native CT chrome) |
 | `paseo` | [`app-handler/paseo/`](paseo/) | [`handler.cjs`](paseo/handler.cjs) → [`handlers.cjs`](paseo/handlers.cjs) | same; `ctx.act` / lazy `ctx.getFiveStack` | [`UpstreamToolSurface`](../desktop-electron/src/features/UpstreamToolSurface.tsx) `toolId="paseo"` + [`PaseoOrchestratorSurface`](../desktop-electron/src/features/PaseoOrchestratorSurface.tsx) |
@@ -91,7 +91,7 @@ Desktop MCP/shell tools map onto the same host (no loopback-port overlay):
 
 ## Visuals
 
-CT hosts original chrome in-app: CPA management panel, Codex Router Control Center `dist/index.html` (file URL, not a second Electron window), Paseo web UI, Anneal board (`:5173` visual origin). Handlers power those screens.
+CT hosts original chrome in-app: CPA management panel via `codingTools.apps` (no `:8317` iframe; Start is optional for proxy traffic), Codex Router Control Center `dist/index.html` (file URL, not a second Electron window), Paseo web UI, Anneal board (`:5173` visual origin). Handlers power those screens.
 
 ## Network
 
