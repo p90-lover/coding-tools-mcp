@@ -209,27 +209,32 @@ test("managed CPA keeps the original control panel enabled on loopback", () => {
   assert.match(adapter, /cpa-codex-long-run/);
 });
 
-test("desktop shell routes CPA and Codex Router to the original UI surface", () => {
+test("desktop shell routes CPA and Codex Router through Managed Apps to the original UI surfaces", () => {
   const app = read("src/App.tsx");
   const types = read("src/types.ts");
   const preload = read("electron/preload.cjs");
   const main = read("electron/main.cjs");
+  const managedApps = read("src/features/ManagedAppsSurface.tsx");
   const surface = read("src/features/OriginalUiSurface.tsx");
   const css = read("src/features/original-ui.css");
   const integrations = read("src/features/ExternalServicesSurface.tsx");
 
-  assert.match(types, /Surface = .* "cpa" \| "codex-router"/);
+  assert.match(types, /Surface = .* "apps"/);
   assert.match(types, /originalUiSnapshot\(\): Promise<OriginalUiCatalog>/);
   assert.match(preload, /launcher:original-ui-snapshot/);
   assert.match(preload, /launcher:original-ui-copy-cpa-key/);
   assert.match(main, /createOriginalUiController/);
   assert.match(main, /launcher:original-ui-open/);
-  assert.match(app, /navigateSurface\("cpa"\)/);
-  assert.match(app, /navigateSurface\("codex-router"\)/);
+  assert.match(app, /selectManagedAppTab\("cpa"\)/);
+  assert.match(app, /selectManagedAppTab\("codex-router"\)/);
+  assert.match(app, /navigateSurface\("apps"\)/);
   assert.match(app, /<details className="sidebar-more"/);
-  assert.match(app, /surface === "cpa"/);
-  assert.match(app, /toolId="cpa"/);
-  assert.match(app, /toolId="codex-router"/);
+  assert.match(app, /surface === "apps"/);
+  assert.match(app, /<ManagedAppsSurface/);
+  assert.match(managedApps, /data-managed-app="cpa"/);
+  assert.match(managedApps, /toolId="cpa"/);
+  assert.match(managedApps, /data-managed-app="codex-router"/);
+  assert.match(managedApps, /toolId="codex-router"/);
   assert.match(surface, /data-original-chrome="true"/);
   assert.match(surface, /Copy management key/);
   assert.match(surface, /reconnectGeneration/);
