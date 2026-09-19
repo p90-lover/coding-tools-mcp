@@ -104,6 +104,13 @@ function redactText(value, maximum = 2_000) {
   return value
     .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
     .replace(/\b(authorization|token|secret|password|api[_-]?key|management[_-]?key|caller[_-]?key|set[-_]?cookie|cookies?)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .replace(/\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{16,}\b/g, "[REDACTED]")
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "[REDACTED]")
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED]")
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "[REDACTED]")
+    .replace(/\bya29\.[A-Za-z0-9_-]{20,}\b/g, "[REDACTED]")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "[REDACTED]")
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
     .replace(/\buser_[A-Za-z0-9._~-]+/g, "user_[REDACTED]")
     .replaceAll("\0", "")
     .slice(0, maximum);
@@ -183,6 +190,14 @@ function optionalIdentifier(value, name, maximum = 160) {
     throw new Error(`${name} is invalid`);
   }
   return normalized;
+}
+
+function validateReconcileReason(value) {
+  const reason = optionalIdentifier(value, "reason", 128) || "managed-app-api";
+  if (redactText(reason, 128) !== reason) {
+    throw new Error("Managed app reconcile reason must not contain credentials, sensitive values, or tokens");
+  }
+  return reason;
 }
 
 function activeAccounts(providerSnapshot) {
@@ -718,7 +733,7 @@ function createManagedAppApiHandler({
         ? input.handles.map(requiredHandle)
         : (() => { throw new Error("Managed app reconcile handles must be an array"); })();
     const uniqueHandles = [...new Set(handles)];
-    const reason = optionalIdentifier(input.reason, "reason", 128) || "managed-app-api";
+    const reason = validateReconcileReason(input.reason);
     logger?.info?.("managed-app-api.reconcile", { handles: uniqueHandles, reason });
     const bootstrap = await managedBootstrap.reconcile({
       reason,
@@ -743,4 +758,5 @@ module.exports = Object.freeze({
   providerInventory,
   redactPlan,
   sanitizePublic,
+  validateReconcileReason,
 });
