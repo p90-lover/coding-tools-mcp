@@ -1,7 +1,9 @@
 const { contextBridge, ipcRenderer } = require("electron");
 const { createBrowserSurfaceActiveInvoker } = require("./browser-surface-ipc.cjs");
+const { createRetryingInvoker } = require("./launcher-ready-path.cjs");
 
 const setBrowserSurfaceActive = createBrowserSurfaceActiveInvoker(ipcRenderer);
+const snapshot = createRetryingInvoker(ipcRenderer, "launcher:snapshot");
 
 function subscription(channel, listener) {
   const wrapped = (_event, value) => listener(value);
@@ -10,7 +12,7 @@ function subscription(channel, listener) {
 }
 
 contextBridge.exposeInMainWorld("codexWebLauncher", {
-  snapshot: () => ipcRenderer.invoke("launcher:snapshot"),
+  snapshot,
   setLanguage: (language) => ipcRenderer.invoke("launcher:set-language", language),
   openSocial: (target) => ipcRenderer.invoke("launcher:open-social", target),
   completeOnboarding: (language, browserInteractionMode) => ipcRenderer.invoke(

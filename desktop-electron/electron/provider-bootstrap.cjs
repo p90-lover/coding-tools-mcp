@@ -80,7 +80,11 @@ function installProviderNetwork({
 
     const snapshot = controller.store.snapshot();
     if (snapshot.routing.globalEnabled && snapshot.routing.globalProfileId) {
-      await controller.applyGlobalRouting();
+      void controller.applyGlobalRouting().catch((error) => {
+        logger.warn("proxy.global_routing_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     }
     try {
       await controller.reviveCommandCodeSessions();

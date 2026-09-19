@@ -48,6 +48,13 @@ const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
 const {
+  createLazyFactory,
+  createRendererLoader,
+  deferUiWork,
+  safeRead,
+  scheduleAfterPaint,
+} = require("./launcher-ready-path.cjs");
+const {
   applyCommandCodeProxyPlan,
   commandCodeProxyRegistrationPlan,
   renderCommandCodeProxyPlan,
@@ -512,6 +519,42 @@ async function loadRenderer(window) {
   await window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
 }
 
+async function ensureRendererLoaded(window, logger) {
+  const packagedRendererUrl = isDev ? process.env.VITE_DEV_SERVER_URL : PACKAGED_RENDERER_URL;
+  const loader = createRendererLoader({
+    getUrl: () => {
+      try {
+        if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return "";
+        return window.webContents.getURL();
+      } catch {
+        return "";
+      }
+    },
+    load: () => loadRenderer(window),
+    packagedRendererUrl,
+  });
+  try {
+    await loader.loadOnce();
+    logger.info("launcher.renderer_loaded", {
+      url: window.isDestroyed() ? "" : window.webContents.getURL(),
+    });
+  } catch (error) {
+    logger.warn("launcher.early_renderer_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+  loader.startRetries({
+    onLoad: () => logger.info("launcher.renderer_loaded", {
+      retry: true,
+      url: window.isDestroyed() ? "" : window.webContents.getURL(),
+    }),
+    onError: (error) => logger.warn("launcher.early_renderer_failed", {
+      retry: true,
+      message: error instanceof Error ? error.message : String(error),
+    }),
+  });
+}
+
 function validateLanguage(value) {
   if (value !== "en" && value !== "zh-CN" && value !== "zh-TW" && value !== "ja") {
     throw new Error("Language must be en, zh-CN, zh-TW, or ja");
@@ -577,16 +620,21 @@ function registerIpc({ logger, stateStore }) {
     headlessHost,
     updateController,
   });
-  const fiveStackControlPlane = createFiveStackControlPlane({
+  const fiveStackControlPlane = createLazyFactory(() => createFiveStackControlPlane({
     planProvider: createProviderExecutionPlan,
     getProviderSnapshot: async () => {
       const providerNetwork = await providerNetworkReady();
       return providerNetwork.store.snapshot();
     },
-    getServicesSnapshot: () => {
-      if (!externalServicesController) return { version: 1, services: [] };
-      return externalServicesController.snapshot();
-    },
+    getServicesSnapshot: () => safeRead(
+      "five-stack.services_snapshot",
+      () => {
+        if (!externalServicesController) return { version: 1, services: [] };
+        return externalServicesController.snapshot();
+      },
+      { version: 1, services: [] },
+      logger,
+    ),
     inspectService: (stack) => {
       if (!externalServicesController) throw new Error("External services controller is unavailable");
       return externalServicesController.inspect(stack);
@@ -622,7 +670,7 @@ function registerIpc({ logger, stateStore }) {
       });
       return result.body;
     },
-  });
+  }));
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
@@ -632,10 +680,11 @@ function registerIpc({ logger, stateStore }) {
   handle("coding-tools:native-codex:status", (event) => codingTools.nativeCodexStatus(event));
   handle("coding-tools:integrations:snapshot", async (event) => {
     const snapshot = await codingTools.integrationsSnapshot(event);
+    const plane = fiveStackControlPlane.tryGet();
     return {
       ...snapshot,
       available: true,
-      five_stack: fiveStackControlPlane.apiMap(),
+      five_stack: plane.ok ? plane.value.apiMap() : null,
     };
   });
   handle("coding-tools:updates:status", (event) => codingTools.updatesStatus(event));
@@ -648,12 +697,14 @@ function registerIpc({ logger, stateStore }) {
     } catch {
       headless = { tools: [], unavailable: true };
     }
-    return fiveStackControlPlane.mergeCatalog(headless);
+    const plane = fiveStackControlPlane.tryGet();
+    return plane.ok ? plane.value.mergeCatalog(headless) : headless;
   });
   handle("coding-tools:tools:call", async (event, input) => {
-    if (fiveStackControlPlane.hasTool(input.tool)) {
-      assertFocusedMainWindow(event, !fiveStackControlPlane.isReadOnly(input.tool));
-      return fiveStackControlPlane.callTool(input.tool, input.arguments ?? {}, {
+    const plane = fiveStackControlPlane.tryGet();
+    if (plane.ok && plane.value.hasTool(input.tool)) {
+      assertFocusedMainWindow(event, !plane.value.isReadOnly(input.tool));
+      return plane.value.callTool(input.tool, input.arguments ?? {}, {
         workspaceId: input.workspaceId,
         requestId: input.requestId,
       });
@@ -735,7 +786,12 @@ function registerIpc({ logger, stateStore }) {
       userData: launcherUserData,
     },
     state: stateStore.read(),
-    browser: browserHost?.snapshot() ?? null,
+    browser: safeRead(
+      "launcher.browser_snapshot",
+      () => browserHost?.snapshot() ?? null,
+      null,
+      logger,
+    ),
     connectorName: runtimeHost.browserConnectorName(),
     connectorNames: {
       automatic: runtimeHost.setupConnectorName(),
@@ -749,8 +805,18 @@ function registerIpc({ logger, stateStore }) {
     version: app.getVersion(),
     smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
     operation: lastOperation,
-    upstreamTools: upstreamToolController?.snapshot() ?? { version: 1, tools: [] },
-    externalServices: externalServicesController?.snapshot() ?? { version: 1, services: [] },
+    upstreamTools: safeRead(
+      "launcher.upstream_tools_snapshot",
+      () => upstreamToolController?.snapshot() ?? { version: 1, tools: [] },
+      { version: 1, tools: [] },
+      logger,
+    ),
+    externalServices: safeRead(
+      "launcher.external_services_snapshot",
+      () => externalServicesController?.snapshot() ?? { version: 1, services: [] },
+      { version: 1, services: [] },
+      logger,
+    ),
     update: updateController?.getState() ?? { status: "disabled" },
   }));
 
@@ -983,7 +1049,16 @@ function registerIpc({ logger, stateStore }) {
     browserHost?.setBounds(validateBounds(bounds), event.sender.getZoomFactor());
     return true;
   });
-  handle("launcher:browser-surface-active", (_event, active) => browserHost.setSurfaceActive(active === true));
+  handle("launcher:browser-surface-active", (_event, active) => {
+    const nextActive = active === true;
+    return deferUiWork(() => {
+      browserHost?.setSurfaceActive(nextActive);
+    }, {
+      onError: (error) => logger.warn("browser.surface_active_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    });
+  });
   handle("launcher:browser-show", () => browserHost.reveal(
     stateStore.read().browserInteractionMode === "automatic",
   ));
@@ -1608,15 +1683,6 @@ async function start() {
   });
   await browserHost.ready();
   setProviderBrowserHost(() => browserHost);
-  for (const service of externalServicesController?.snapshot().services ?? []) {
-    if (!service.enabled || !service.autoStart) continue;
-    void externalServicesController.start(service.id).catch((error) => {
-      logger.warn("external-service.autostart-failed", {
-        serviceId: service.id,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    });
-  }
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
     currentVersion: app.getVersion(),
@@ -1648,7 +1714,24 @@ async function start() {
       });
     });
   }
-  await loadRenderer(mainWindow);
+  await ensureRendererLoaded(mainWindow, logger);
+  scheduleAfterPaint(() => {
+    const services = safeRead(
+      "external-service.autostart_snapshot",
+      () => externalServicesController?.snapshot().services ?? [],
+      [],
+      logger,
+    );
+    for (const service of services) {
+      if (!service.enabled || !service.autoStart) continue;
+      void externalServicesController.start(service.id).catch((error) => {
+        logger.warn("external-service.autostart-failed", {
+          serviceId: service.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+  });
   if (!launcherSmokeTest) {
     void updateController.checkNow({ force: true }).catch((error) => {
       logger.warn("launcher.update_check_failed", {

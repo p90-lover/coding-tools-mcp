@@ -571,7 +571,7 @@ export interface LauncherApi {
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
   openExternal(url: string): Promise<boolean>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
-  setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;
+  setBrowserSurfaceActive(active: boolean): Promise<BrowserState | true>;
   showBrowser(): Promise<BrowserState>;
   hideBrowser(): Promise<BrowserState>;
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;

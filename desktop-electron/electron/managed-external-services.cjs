@@ -75,7 +75,9 @@ function createManagedExternalServicesController({
       try {
         commandCodeApiKey = String(managedController.runtimeSecrets("commandcode-proxy").proxyApiKey || "");
       } catch {}
-      return persistMeshFromServices(combinedSnapshot().services, manifest.id, commandCodeApiKey);
+      // Mesh URLs come from the base service snapshot. combinedSnapshot() overlays
+      // runtimeConfiguration → commandSpec → peerEnv and would recurse forever.
+      return persistMeshFromServices(baseController.snapshot().services, manifest.id, commandCodeApiKey);
     },
   });
 
@@ -170,12 +172,19 @@ function createManagedExternalServicesController({
     };
   }
 
+  let snapshotBusy = false;
   function combinedSnapshot() {
     const snapshot = baseController.snapshot();
-    return {
-      ...snapshot,
-      services: snapshot.services.map(mergeService),
-    };
+    if (snapshotBusy) return snapshot;
+    snapshotBusy = true;
+    try {
+      return {
+        ...snapshot,
+        services: snapshot.services.map(mergeService),
+      };
+    } finally {
+      snapshotBusy = false;
+    }
   }
 
   function serviceFromSnapshot(serviceId) {

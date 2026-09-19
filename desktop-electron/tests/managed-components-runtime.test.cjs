@@ -226,6 +226,38 @@ test("repair preserves the previous installation under Trash instead of deleting
   controller.dispose();
 });
 
+test("peer environment reentry through runtimeConfiguration does not overflow", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const manifestRoot = manifestFixture(payload);
+  const dataRoot = temporaryDirectory("coding-tools-peer-reentry");
+  let controller;
+  let entries = 0;
+  controller = createManagedComponentController({
+    manifestRoot,
+    dataRoot,
+    allowNetworkInstall: true,
+    safeStorage: { isEncryptionAvailable: () => false },
+    fetchImpl: async () => new Response(payload, {
+      status: 200,
+      headers: { "content-length": String(payload.length) },
+    }),
+    spawnProcess: () => mockChild(9100),
+    resolveRuntimeExecutable: () => process.execPath,
+    peerEnvironment: (manifest) => {
+      entries += 1;
+      if (entries > 40) throw new Error("Maximum call stack size exceeded");
+      const configuration = controller.runtimeConfiguration(manifest.id);
+      assert.ok(configuration);
+      return { CODING_TOOLS_PEER_MARK: "1" };
+    },
+  });
+  await controller.installComponent("commandcode-proxy");
+  const configuration = controller.runtimeConfiguration("commandcode-proxy");
+  assert.equal(configuration.home.includes("commandcode-proxy"), true);
+  assert.ok(entries >= 1 && entries < 40);
+  controller.dispose();
+});
+
 test("CommandCode managed proxy key is encrypted and never appears in projected snapshots", async () => {
   const { controller, dataRoot } = controllerFixture();
   const installed = await controller.installComponent("commandcode-proxy");

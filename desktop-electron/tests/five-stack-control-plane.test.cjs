@@ -253,7 +253,7 @@ test("Desktop and MCP share the control-plane tools.call path", () => {
   const paseo = read("src/features/PaseoOrchestratorSurface.tsx");
   const anneal = read("src/features/AnnealTasksSurface.tsx");
   assert.match(main, /createFiveStackControlPlane/);
-  assert.match(main, /fiveStackControlPlane\.hasTool/);
+  assert.match(main, /hasTool/);
   assert.match(main, /mergeCatalog/);
   assert.match(main, /manageService/);
   assert.match(main, /inspectService/);

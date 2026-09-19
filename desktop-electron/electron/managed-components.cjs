@@ -791,8 +791,16 @@ function createManagedComponentController({
       });
   }
 
+  let peerEnvBusy = false;
   function peerEnv(context) {
     if (typeof peerEnvironment !== "function") return {};
+    if (peerEnvBusy) {
+      logger?.warn?.("managed-component.peer-environment-reentered", {
+        componentId: context.id,
+      });
+      return {};
+    }
+    peerEnvBusy = true;
     try {
       const value = peerEnvironment(manifestFor(context.id)) || {};
       return Object.fromEntries(
@@ -806,6 +814,8 @@ function createManagedComponentController({
         message: error instanceof Error ? error.message : String(error),
       });
       return {};
+    } finally {
+      peerEnvBusy = false;
     }
   }
 

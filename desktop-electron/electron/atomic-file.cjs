@@ -40,7 +40,10 @@ function writePrivateFileAtomic(filePath, content, { mode = 0o600, protectDirect
   }
   const temporary = `${filePath}.tmp-${process.pid}-${Date.now()}-${++sequence}`;
   try {
-    fs.writeFileSync(temporary, content, { flag: "wx", mode });
+    const payload = Buffer.isBuffer(content)
+      ? content
+      : Buffer.from(String(content).replace(/^\uFEFF/, ""), "utf8");
+    fs.writeFileSync(temporary, payload, { flag: "wx", mode });
     renameAtomicFile(temporary, filePath);
     try { fs.chmodSync(filePath, mode); } catch {}
   } finally {
