@@ -8,9 +8,13 @@ const test = require("node:test");
 const root = path.resolve(__dirname, "..", "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 
-test("Electron exposes separate Paseo, Anneal, and Network surfaces", () => {
+test("Electron exposes separate Paseo, Anneal, and Network surfaces through composed components", () => {
   const types = read("desktop-electron/src/types.ts");
   const app = read("desktop-electron/src/App.tsx");
+  const paseo = read("desktop-electron/src/features/PaseoOrchestratorSurface.tsx");
+  const anneal = read("desktop-electron/src/features/AnnealTasksSurface.tsx");
+  const network = read("desktop-electron/src/features/NetworkProxySurface.tsx");
+  const copy = read("desktop-electron/src/features/orchestration-copy.ts");
 
   for (const surface of ["paseo", "anneal", "network"]) {
     assert.match(types, new RegExp(`\\"${surface}\\"`), `missing ${surface} surface type`);
@@ -20,9 +24,13 @@ test("Electron exposes separate Paseo, Anneal, and Network surfaces", () => {
   assert.match(app, /PaseoOrchestratorSurface/);
   assert.match(app, /AnnealTasksSurface/);
   assert.match(app, /NetworkProxySurface/);
-  assert.match(app, /Paseo Orchestrator|Paseo 協調器/);
-  assert.match(app, /Anneal Tasks|Anneal 任務/);
-  assert.match(app, /Network Proxy|網路代理/);
+  assert.match(paseo, /copyForOrchestration/);
+  assert.match(anneal, /copyForOrchestration/);
+  assert.match(copy, /Paseo Orchestrator/);
+  assert.match(copy, /Paseo 協調器/);
+  assert.match(copy, /Anneal Tasks/);
+  assert.match(copy, /Anneal 任務/);
+  assert.match(network, /localText\(language, "Network Proxy", "網路代理"/);
 });
 
 test("Paseo surface can plan ChatGPT Web work and control an owned mission", () => {
@@ -70,5 +78,6 @@ test("Network surface manages app-wide and per-provider proxy routing", () => {
   assert.match(source, /All application traffic|所有應用程式流量/);
   assert.match(source, /socks5/);
   assert.match(source, /websocket/);
+  assert.match(source, /subagent/);
   assert.match(source, /localhost|127\.0\.0\.1/);
 });
