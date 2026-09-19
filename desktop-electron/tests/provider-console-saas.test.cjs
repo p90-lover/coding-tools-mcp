@@ -19,6 +19,10 @@ const metadata = fs.readFileSync(
   "utf8",
 );
 const app = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
+const managedApps = fs.readFileSync(
+  path.join(root, "src/features/ManagedAppsSurface.tsx"),
+  "utf8",
+);
 
 test("Provider Hub exposes every requested OAuth and reverse-proxy provider", () => {
   for (const providerId of [
@@ -69,11 +73,16 @@ test("Provider Hub localizes the new management controls in Traditional Chinese"
   }
 });
 
-test("The application exposes one active Provider destination and imports the SaaS surface", () => {
-  const providerDestinations = app.match(/active=\{surface === "providers"\}/g) ?? [];
-  const providerSurfaceMounts = app.match(/<ProviderCenterSurface\b/g) ?? [];
-  assert.equal(providerDestinations.length, 1);
+test("The application exposes one visible Provider destination through Managed Apps", () => {
+  const managedAppsDestinations = app.match(/active=\{surface === "apps"\}/g) ?? [];
+  const standaloneProviderDestinations = app.match(/active=\{surface === "providers"\}/g) ?? [];
+  const providerSurfaceMounts = managedApps.match(/<ProviderCenterSurface\b/g) ?? [];
+
+  assert.equal(managedAppsDestinations.length, 1);
+  assert.equal(standaloneProviderDestinations.length, 0);
   assert.equal(providerSurfaceMounts.length, 1);
-  assert.match(app, /ProviderHubSaasSurface/);
+  assert.match(app, /ManagedAppsSurface/);
+  assert.match(managedApps, /ProviderHubSaasSurface/);
+  assert.match(managedApps, /data-managed-app="cpa"/);
   assert.doesNotMatch(app, /from "\.\/features\/ProviderHubSurface"/);
 });
