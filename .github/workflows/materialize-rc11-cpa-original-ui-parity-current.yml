@@ -8,6 +8,7 @@ on:
       - .github/workflows/materialize-rc11-cpa-original-ui-parity-current.yml
       - aiTemp/rc11-cpa-original-ui-parity/materialize-current.mjs
       - desktop-electron/tests/rc11-cpa-original-ui-parity-current.test.cjs
+      - desktop-electron/tests/rc10-cpa-codex-original-ui.test.cjs
   workflow_dispatch:
 
 permissions:
