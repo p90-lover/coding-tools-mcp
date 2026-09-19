@@ -132,6 +132,7 @@ test("stale main-process browser ownership falls back without covering non-brows
     BROWSER_HIDE_CHANNEL,
     BROWSER_SHOW_CHANNEL,
     BROWSER_SURFACE_ACTIVE_CHANNEL,
+    SNAPSHOT_CHANNEL,
     createBrowserSurfaceActiveInvoker,
   } = require("../electron/browser-surface-ipc.cjs");
   const calls = [];
@@ -143,6 +144,7 @@ test("stale main-process browser ownership falls back without covering non-brows
           `Error invoking remote method '${channel}': Error: No handler registered for '${channel}'`,
         );
       }
+      if (channel === SNAPSHOT_CHANNEL) return { browser: { visible: true } };
       return { channel };
     },
   });
@@ -151,6 +153,7 @@ test("stale main-process browser ownership falls back without covering non-brows
   assert.deepEqual(await invoke(true), { channel: BROWSER_SHOW_CHANNEL });
   assert.deepEqual(calls, [
     [BROWSER_SURFACE_ACTIVE_CHANNEL, false],
+    [SNAPSHOT_CHANNEL, undefined],
     [BROWSER_HIDE_CHANNEL, undefined],
     [BROWSER_SURFACE_ACTIVE_CHANNEL, true],
     [BROWSER_SHOW_CHANNEL, undefined],
