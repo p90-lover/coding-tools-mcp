@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/rc11-managed-app-api-handles
+      - fix/rc11-managed-app-api-cookie-redaction
     paths:
       - '.github/workflows/rc11-managed-app-api.yml'
       - 'aiTemp/rc11-managed-app-api/**'
@@ -18,6 +19,7 @@ on:
   pull_request:
     branches:
       - feature/rc11-managed-apps-shell-current
+      - feature/rc11-managed-app-api-handles
     paths:
       - '.github/workflows/rc11-managed-app-api.yml'
       - 'aiTemp/rc11-managed-app-api/**'
@@ -117,6 +119,7 @@ jobs:
           set -euo pipefail
           node --test \
             desktop-electron/tests/rc11-managed-app-api.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-cookie-redaction.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-degraded.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-wiring.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-ui.test.cjs \
