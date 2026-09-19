@@ -82,7 +82,7 @@ const MUTATING_OPERATIONS = new Set([
   "act",
 ]);
 const PLAN_WORKLOADS = new Set(["subagent", "paseo", "anneal"]);
-const SENSITIVE_KEY = /(?:^|_)(?:access_token|refresh_token|api_key|private_key|client_secret|password|secret|token|credential|bearer|authorization|caller_key|proxy_api_key|management_key|session_cookie)(?:_|$)/i;
+const SENSITIVE_KEY = /(?:^|_)(?:access_token|refresh_token|api_key|private_key|client_secret|password|secret|token|credential|bearer|authorization|caller_key|proxy_api_key|management_key|session_cookie|cookies?)(?:_|$)/i;
 const MAX_DEPTH = 24;
 const MAX_ITEMS = 2_000;
 
@@ -103,7 +103,7 @@ function redactText(value, maximum = 2_000) {
   if (typeof value !== "string" || !value) return "";
   return value
     .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
-    .replace(/\b(authorization|token|secret|password|api[_-]?key|management[_-]?key|caller[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .replace(/\b(authorization|token|secret|password|api[_-]?key|management[_-]?key|caller[_-]?key|set[-_]?cookie|cookies?)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
     .replace(/\buser_[A-Za-z0-9._~-]+/g, "user_[REDACTED]")
     .replaceAll("\0", "")
     .slice(0, maximum);
