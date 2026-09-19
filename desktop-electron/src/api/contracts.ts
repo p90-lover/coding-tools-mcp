@@ -24,6 +24,100 @@ export interface JsonObject {
   readonly [key: string]: JsonValue;
 }
 
+export type ManagedAppHandle = "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+export type ManagedAppOperation =
+  | "inspect"
+  | "install"
+  | "repair"
+  | "start"
+  | "stop"
+  | "restart"
+  | "providers"
+  | "plan"
+  | "sync"
+  | "ui-inspect"
+  | "ui-start"
+  | "ui-stop"
+  | "ui-restart"
+  | "ui-open"
+  | "registration-plan"
+  | "registration-apply"
+  | "open"
+  | "act";
+
+export interface ManagedAppManagedState {
+  readonly state: string;
+  readonly version: string;
+  readonly platformMode: string;
+  readonly bundledRuntime: boolean;
+  readonly missingInputs: readonly string[];
+}
+
+export interface ManagedAppSetupState {
+  readonly status: string;
+  readonly action: string | null;
+  readonly missingInputs: readonly string[];
+  readonly message: string | null;
+}
+
+export interface ManagedAppUiState {
+  readonly status: string;
+  readonly available: boolean;
+  readonly sections: readonly string[];
+  readonly endpoint: string | null;
+  readonly originalWindow: boolean;
+  readonly error: string | null;
+}
+
+export interface ManagedAppSummary {
+  readonly handle: ManagedAppHandle;
+  readonly name: string;
+  readonly kind: "provider-network" | "managed-service" | "managed-upstream";
+  readonly status: string;
+  readonly available: boolean;
+  readonly operations: readonly ManagedAppOperation[];
+  readonly endpoint: string | null;
+  readonly executionEndpoint: string | null;
+  readonly pid: number | null;
+  readonly owned: boolean;
+  readonly modelCount: number | null;
+  readonly accountCount: number;
+  readonly connectedAccountCount: number;
+  readonly enabledAccountCount: number;
+  readonly providerCount: number;
+  readonly providerModelCount: number;
+  readonly providerNetworkStatus?: string;
+  readonly error: string | null;
+  readonly managed: ManagedAppManagedState;
+  readonly setup: ManagedAppSetupState;
+  readonly ui?: ManagedAppUiState;
+}
+
+export interface ManagedAppsSnapshot {
+  readonly version: 1;
+  readonly bootstrap: {
+    readonly status: string;
+    readonly reason: string | null;
+    readonly startedAt: string | null;
+    readonly completedAt: string | null;
+    readonly error: string | null;
+  };
+  readonly apps: readonly ManagedAppSummary[];
+}
+
+export interface ManagedAppInvokeInput {
+  readonly handle: ManagedAppHandle;
+  readonly operation: ManagedAppOperation;
+  readonly arguments?: JsonObject;
+  readonly confirm?: boolean;
+}
+
+export interface ManagedAppsReconcileInput {
+  readonly handles?: readonly ManagedAppHandle[];
+  readonly reason?: string;
+  readonly confirm: boolean;
+}
+
 export interface CodingToolsApi {
   readonly runtime: {
     status(): Promise<JsonObject>;
@@ -53,6 +147,12 @@ export interface CodingToolsApi {
   };
   readonly integrations: {
     snapshot(): Promise<JsonObject>;
+  };
+  readonly apps: {
+    snapshot(): Promise<ManagedAppsSnapshot>;
+    invoke(input: ManagedAppInvokeInput): Promise<JsonObject>;
+    reconcile(input: ManagedAppsReconcileInput): Promise<JsonObject>;
+    onChanged(listener: (snapshot: ManagedAppsSnapshot) => void): () => void;
   };
   readonly execution: {
     read(input: {

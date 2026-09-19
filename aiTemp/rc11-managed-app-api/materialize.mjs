@@ -250,7 +250,7 @@ replaceOnce(
     onChanged: (listener) => subscribeManagedApps(listener),
   }),
   execution: Object.freeze({`,
-  'invokeContract(ipcRenderer, "apps.snapshot")',
+  'reconcile: (input) => invokeContract(ipcRenderer, "apps.reconcile", input)',
 );
 
 replaceOnce(

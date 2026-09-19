@@ -425,6 +425,58 @@ const executionUpdateRequest = Object.freeze({
   additionalProperties: false,
 });
 
+const managedAppHandle = Object.freeze({
+  type: "string",
+  enum: Object.freeze(["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]),
+});
+
+const managedAppOperation = Object.freeze({
+  type: "string",
+  enum: Object.freeze([
+    "inspect",
+    "install",
+    "repair",
+    "start",
+    "stop",
+    "restart",
+    "providers",
+    "plan",
+    "sync",
+    "ui-inspect",
+    "ui-start",
+    "ui-stop",
+    "ui-restart",
+    "ui-open",
+    "registration-plan",
+    "registration-apply",
+    "open",
+    "act",
+  ]),
+});
+
+const managedAppInvokeRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["handle", "operation"]),
+  properties: Object.freeze({
+    handle: managedAppHandle,
+    operation: managedAppOperation,
+    arguments: genericObject,
+    confirm: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
+const managedAppsReconcileRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["confirm"]),
+  properties: Object.freeze({
+    handles: Object.freeze({ type: "array", items: managedAppHandle, maxItems: 5 }),
+    reason: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    confirm: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
 const CONTRACTS = Object.freeze({
   "runtime.status": Object.freeze({
     channel: "coding-tools:runtime:status",
@@ -464,6 +516,21 @@ const CONTRACTS = Object.freeze({
   "integrations.snapshot": Object.freeze({
     channel: "coding-tools:integrations:snapshot",
     request: emptyObject,
+    response: genericObject,
+  }),
+  "apps.snapshot": Object.freeze({
+    channel: "coding-tools:apps:snapshot",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "apps.invoke": Object.freeze({
+    channel: "coding-tools:apps:invoke",
+    request: managedAppInvokeRequest,
+    response: genericObject,
+  }),
+  "apps.reconcile": Object.freeze({
+    channel: "coding-tools:apps:reconcile",
+    request: managedAppsReconcileRequest,
     response: genericObject,
   }),
   "execution.read": Object.freeze({
