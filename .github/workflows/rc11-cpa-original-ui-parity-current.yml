@@ -1,0 +1,81 @@
+name: rc.11 CPA original UI parity current
+
+on:
+  push:
+    branches:
+      - fix/rc11-cpa-original-ui-parity-current
+    paths:
+      - .github/workflows/rc11-cpa-original-ui-parity-current.yml
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/src/features/OriginalUiSurface.tsx
+      - desktop-electron/src/features/original-ui.css
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/rc11-cpa-original-ui-parity-current.test.cjs
+      - desktop-electron/vendor/upstream/cpa.json
+  pull_request:
+    branches:
+      - main
+      - feature/rc11-managed-apps-shell-current
+      - integration/v0.7.0-rc.11-five-stack-final
+    paths:
+      - .github/workflows/rc11-cpa-original-ui-parity-current.yml
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/src/features/OriginalUiSurface.tsx
+      - desktop-electron/src/features/original-ui.css
+      - desktop-electron/src/types.ts
+      - desktop-electron/tests/rc11-cpa-original-ui-parity-current.test.cjs
+      - desktop-electron/vendor/upstream/cpa.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc11-cpa-original-ui-parity-current-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run CPA original-UI parity contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-cpa-original-ui-parity/evidence
+          (
+            node --check desktop-electron/electron/main.cjs
+            node --check desktop-electron/electron/preload.cjs
+            node --test \
+              desktop-electron/tests/rc11-cpa-original-ui-parity-current.test.cjs \
+              desktop-electron/tests/rc10-cpa-codex-original-ui.test.cjs \
+              desktop-electron/tests/rc9-managed-cpa-runtime.test.cjs
+          ) 2>&1 | tee aiTemp/rc11-cpa-original-ui-parity/evidence/results.txt
+          grep -F '# fail 0' aiTemp/rc11-cpa-original-ui-parity/evidence/results.txt
+
+      - name: Enforce preservation and diff safety
+        run: |
+          set -euo pipefail
+          git fetch origin feature/rc11-managed-apps-shell-current --no-tags
+          git diff --check origin/feature/rc11-managed-apps-shell-current...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/feature/rc11-managed-apps-shell-current...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-cpa-original-ui-parity-${{ github.sha }}
+          path: aiTemp/rc11-cpa-original-ui-parity/evidence/
+          if-no-files-found: error
+          retention-days: 14
