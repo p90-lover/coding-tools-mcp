@@ -15,7 +15,7 @@ fn py(arguments: &str) -> String {
     )
 }
 fn fixture() -> (ToolContext, PathBuf) {
-    let base = std::env.current_dir()
+    let base = std::env::current_dir()
         .unwrap()
         .join("aiTemp/long-runtime")
         .join(uuid::Uuid::new_v4().to_string());
