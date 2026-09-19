@@ -9,15 +9,18 @@ const target = path.resolve(
 const source = fs.readFileSync(target, "utf8");
 const before = `  '{ id: "anneal", english: "Anneal", traditionalChinese: "Anneal" },',`;
 const after = `  "const appByHandle = useMemo(",`;
+const beforeCount = source.split(before).length - 1;
+const afterCount = source.split(after).length - 1;
 
-if (source.includes(after)) {
+if (beforeCount === 0 && afterCount >= 2) {
   process.stdout.write("RC11_MANAGED_APP_LOCALE_MATERIALIZER_ALREADY_REPAIRED\n");
   process.exit(0);
 }
 
-const occurrences = source.split(before).length - 1;
-if (occurrences !== 1) {
-  throw new Error(`Expected one locale-sensitive materializer sentinel, found ${occurrences}`);
+if (beforeCount !== 1 || afterCount !== 1) {
+  throw new Error(
+    `Expected one locale-sensitive sentinel and one existing API sentinel, found ${beforeCount} and ${afterCount}`,
+  );
 }
 
 fs.writeFileSync(target, source.replace(before, after), "utf8");
