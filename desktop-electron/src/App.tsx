@@ -694,7 +694,13 @@ function LauncherShell({
                 <SidebarItem
                   active={surface === "apps"}
                   icon="providers"
-                  label={language === "zh-TW" ? "受管理應用程式" : "Managed Apps"}
+                  label={language === "zh-TW"
+                    ? "受管理應用程式"
+                    : language === "zh-CN"
+                      ? "托管应用"
+                      : language === "ja"
+                        ? "管理対象アプリ"
+                        : "Managed Apps"}
                   onClick={() => navigateSurface("apps")}
                 />
                 <SidebarItem
