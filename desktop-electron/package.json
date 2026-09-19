@@ -68,7 +68,16 @@
       "vendor/bundled/**",
       "assets/icon.png",
       "assets/linux-appimage-runner.sh",
-      "package.json"
+      "package.json",
+      {
+        "from": "../app-handler",
+        "to": "app-handler",
+        "filter": [
+          "**/*",
+          "!**/node_modules/**",
+          "!**/source/test/**"
+        ]
+      }
     ],
     "extraResources": [
       {

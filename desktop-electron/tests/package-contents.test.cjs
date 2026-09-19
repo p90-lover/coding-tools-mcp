@@ -311,6 +311,7 @@ test("rejects a package that omits in-process module handlers next to app.asar",
     fs.rmSync(path.join(resourcesRoot, "app-handler", "host.cjs"));
   });
   assert.ok(REQUIRED_MODULE_FILES.includes("app-handler/host.cjs"));
+  assert.ok(REQUIRED_ASAR_FILES.includes("app-handler/host.cjs"));
   assert.throws(
     () => inspectExtractedApplication(appRoot, packageOptions()),
     /PACKAGE_MODULES_HOST/,

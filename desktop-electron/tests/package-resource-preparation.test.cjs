@@ -555,4 +555,7 @@ test("package and runtime preparation use repository aiTemp retention without de
       ],
     },
   ]);
+  assert.ok(manifest.build.files.some((entry) => (
+    entry && entry.from === "../app-handler" && entry.to === "app-handler"
+  )), "asar root must include app-handler/**");
 });

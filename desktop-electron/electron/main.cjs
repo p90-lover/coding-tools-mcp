@@ -47,7 +47,8 @@ const { createManagedExternalServicesController } = require("./managed-external-
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
-const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
+const { requireAppHandler } = require("./app-handler-paths.cjs");
+const { createCodingToolsAppsHost } = requireAppHandler("host.cjs");
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
 const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {

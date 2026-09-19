@@ -68,6 +68,14 @@ const REQUIRED_ASAR_FILES = Object.freeze([
   "electron/preload.cjs",
   "electron/product.cjs",
   "electron/runtime-supervisor.cjs",
+  "app-handler/host.cjs",
+  "app-handler/handler-registry.cjs",
+  "app-handler/lib/in-process-handler.cjs",
+  "app-handler/cpa/handler.cjs",
+  "app-handler/codex-router/handler.cjs",
+  "app-handler/commandcode-proxy/handler.cjs",
+  "app-handler/paseo/handler.cjs",
+  "app-handler/anneal/handler.cjs",
 ]);
 const REQUIRED_MODULE_FILES = Object.freeze([
   "app-handler/host.cjs",

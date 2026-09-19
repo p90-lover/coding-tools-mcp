@@ -14,13 +14,21 @@ const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePa
 
 test("app-handler tree hosts CPA, Codex Router, CommandCode, Paseo, and Anneal", () => {
   assert.deepEqual(MODULE_IDS, ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]);
+  assert.equal(MODULE_IDS.includes("commandcode"), false);
   assert.deepEqual(FOREIGN_SLOTS, ["cpa", "codex-router"]);
+  const folderIds = fs.readdirSync(path.join(repoRoot, "app-handler"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(repoRoot, "app-handler", entry.name, "module.json")))
+    .map((entry) => entry.name)
+    .sort();
+  assert.deepEqual([...MODULE_IDS].sort(), folderIds);
   for (const id of MODULE_IDS) {
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "handler.cjs")), true, id);
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "handlers.cjs")), true, id);
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "module.json")), true, id);
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "README.md")), true, id);
     assert.equal(fs.existsSync(path.join(repoRoot, "modules", id, "handler.cjs")), true, `${id} shim`);
+    assert.equal(fs.existsSync(path.join(repoRoot, "modules", id, "README.md")), true, `${id} shim readme`);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(repoRoot, "app-handler", id, "module.json"), "utf8")).id, id);
   }
   assert.deepEqual(defaultRegistry.ids().sort(), [...MODULE_IDS].sort());
   const shimHost = require("../../modules/host.cjs");
@@ -107,7 +115,8 @@ test("desktop shell wires codingTools.apps without constructing five-stack at bo
   const host = fs.readFileSync(path.join(repoRoot, "app-handler/host.cjs"), "utf8");
 
   assert.match(main, /createCodingToolsAppsHost/);
-  assert.match(main, /require\("\.\.\/\.\.\/app-handler\/host\.cjs"\)/);
+  assert.match(main, /requireAppHandler\("host\.cjs"\)/);
+  assert.match(read("electron/app-handler-paths.cjs"), /path\.join\(__dirname, "\.\.", "app-handler"\)/);
   assert.match(main, /coding-tools:apps:list/);
   assert.match(main, /coding-tools:apps:catalog/);
   assert.match(main, /coding-tools:apps:call/);
