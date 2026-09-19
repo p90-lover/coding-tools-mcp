@@ -1,4 +1,7 @@
 const { contextBridge, ipcRenderer } = require("electron");
+const { createBrowserSurfaceActiveInvoker } = require("./browser-surface-ipc.cjs");
+
+const setBrowserSurfaceActive = createBrowserSurfaceActiveInvoker(ipcRenderer);
 
 function subscription(channel, listener) {
   const wrapped = (_event, value) => listener(value);
@@ -17,7 +20,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   ),
   openExternal: (url) => ipcRenderer.invoke("launcher:open-external", url),
   setBrowserBounds: (bounds) => ipcRenderer.invoke("launcher:browser-bounds", bounds),
-  setBrowserSurfaceActive: (active) => ipcRenderer.invoke("launcher:browser-surface-active", active),
+  setBrowserSurfaceActive,
   showBrowser: () => ipcRenderer.invoke("launcher:browser-show"),
   hideBrowser: () => ipcRenderer.invoke("launcher:browser-hide"),
   navigateBrowser: (action) => ipcRenderer.invoke("launcher:browser-navigate", action),

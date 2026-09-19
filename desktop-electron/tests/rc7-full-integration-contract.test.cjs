@@ -126,3 +126,38 @@ test("architecture B exposes one GUI control plane for Provider Hub and external
   assert.match(surface, /Paseo/);
   assert.match(surface, /Anneal/);
 });
+
+test("stale main-process browser ownership falls back without covering non-browser tabs", async () => {
+  const {
+    BROWSER_HIDE_CHANNEL,
+    BROWSER_SHOW_CHANNEL,
+    BROWSER_SURFACE_ACTIVE_CHANNEL,
+    SNAPSHOT_CHANNEL,
+    createBrowserSurfaceActiveInvoker,
+  } = require("../electron/browser-surface-ipc.cjs");
+  const calls = [];
+  const invoke = createBrowserSurfaceActiveInvoker({
+    invoke: async (channel, value) => {
+      calls.push([channel, value]);
+      if (channel === BROWSER_SURFACE_ACTIVE_CHANNEL) {
+        throw new Error(
+          `Error invoking remote method '${channel}': Error: No handler registered for '${channel}'`,
+        );
+      }
+      if (channel === SNAPSHOT_CHANNEL) return { browser: { visible: true } };
+      return { channel };
+    },
+  });
+
+  assert.deepEqual(await invoke(false), { channel: BROWSER_HIDE_CHANNEL });
+  assert.deepEqual(await invoke(true), { channel: BROWSER_SHOW_CHANNEL });
+  assert.deepEqual(calls, [
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, false],
+    [SNAPSHOT_CHANNEL, undefined],
+    [BROWSER_HIDE_CHANNEL, undefined],
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, true],
+    [BROWSER_SHOW_CHANNEL, undefined],
+  ]);
+  assert.match(read("electron/preload.cjs"), /createBrowserSurfaceActiveInvoker/);
+  assert.match(read("electron/main.cjs"), /launcher:browser-surface-active/);
+});
