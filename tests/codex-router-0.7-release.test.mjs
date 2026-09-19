@@ -146,7 +146,7 @@ test('Windows package smoke selects the configured Electron Builder artifact exa
     .replaceAll('${os}', 'win')
     .replaceAll('${arch}', 'x64')
     .replaceAll('${ext}', 'exe');
-  assert.equal(expectedInstaller, 'Coding.Tools_0.7.0-rc.11_win_x64.exe');
+  assert.equal(expectedInstaller, 'Coding.Tools_0.7.0-rc.12_win_x64.exe');
   for (const required of [
     'function artifactNameFor(osName, arch, extension)',
     'artifact(artifactNameFor("win", process.arch, "exe"), "Windows installer")',
@@ -160,7 +160,9 @@ test('every required ASAR entry is backed by a real desktop source file', async 
   const { REQUIRED_ASAR_FILES } = require('../desktop-electron/scripts/verify-package.cjs');
   assert.ok(Array.isArray(REQUIRED_ASAR_FILES) && REQUIRED_ASAR_FILES.length > 0);
   for (const relativePath of REQUIRED_ASAR_FILES) {
-    const sourcePath = path.join(root, 'desktop-electron', ...relativePath.split('/'));
+    const sourcePath = relativePath.startsWith('app-handler/')
+      ? path.join(root, ...relativePath.split('/'))
+      : path.join(root, 'desktop-electron', ...relativePath.split('/'));
     const stat = await fs.stat(sourcePath);
     assert.equal(stat.isFile(), true, `Required ASAR entry is not a file: ${relativePath}`);
   }

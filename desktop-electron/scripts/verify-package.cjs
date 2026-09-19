@@ -15,7 +15,7 @@ const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const PRODUCT = Object.freeze({
   name: "Coding Tools",
   packageName: "coding-tools-full-harness-desktop",
-  version: "0.7.0-rc.11",
+  version: "0.7.0-rc.12",
   appId: "dev.codingtools.fullharness",
   platform: "win32",
   arch: "x64",
@@ -68,6 +68,28 @@ const REQUIRED_ASAR_FILES = Object.freeze([
   "electron/preload.cjs",
   "electron/product.cjs",
   "electron/runtime-supervisor.cjs",
+  "app-handler/host.cjs",
+  "app-handler/handler-registry.cjs",
+  "app-handler/lib/in-process-handler.cjs",
+  "app-handler/cpa/handler.cjs",
+  "app-handler/codex-router/handler.cjs",
+  "app-handler/commandcode-proxy/handler.cjs",
+  "app-handler/paseo/handler.cjs",
+  "app-handler/anneal/handler.cjs",
+]);
+const REQUIRED_MODULE_FILES = Object.freeze([
+  "app-handler/host.cjs",
+  "app-handler/handler-registry.cjs",
+  "app-handler/lib/in-process-handler.cjs",
+  "app-handler/cpa/handler.cjs",
+  "app-handler/codex-router/handler.cjs",
+  "app-handler/commandcode-proxy/handler.cjs",
+  "app-handler/paseo/handler.cjs",
+  "app-handler/anneal/handler.cjs",
+]);
+const REQUIRED_MODULE_SHIMS = Object.freeze([
+  "modules/host.cjs",
+  "modules/handler-registry.cjs",
 ]);
 const COMPONENT_VERSIONS = Object.freeze({
   "migration-manifest": PRODUCT.version,
@@ -540,6 +562,13 @@ function inspectExtractedApplication(appRoot, options = {}) {
   if (fs.readFileSync(launcher.absolutePath).subarray(0, 2).toString("ascii") !== "MZ") fail("PACKAGE_LAUNCHER_NOT_WINDOWS_EXECUTABLE", launcher.absolutePath);
   const resources = path.join(root, "resources");
   if (!fs.existsSync(resources) || !fs.statSync(resources).isDirectory()) fail("PACKAGE_RESOURCES_MISSING", resources);
+  for (const relative of REQUIRED_MODULE_FILES) {
+    regularFile(resources, relative, "PACKAGE_MODULES_HOST");
+    regularFile(resources, relative.replace(/^app-handler\//, "app-modules/"), "PACKAGE_APP_MODULES_HOST");
+  }
+  for (const relative of REQUIRED_MODULE_SHIMS) {
+    regularFile(resources, relative, "PACKAGE_MODULES_SHIM");
+  }
   const asarPath = path.join(resources, "app.asar");
   const appManifest = options.appManifest ?? asarManifest(asarPath);
   const asarEntries = options.asarEntries ? normalizeAsarEntries(options.asarEntries) : listAsarEntries(asarPath);
@@ -673,6 +702,8 @@ module.exports = {
   OFFICIAL_TUNNEL_RELEASE,
   PRODUCT,
   REQUIRED_ASAR_FILES,
+  REQUIRED_MODULE_FILES,
+  REQUIRED_MODULE_SHIMS,
   REQUIRED_COMPONENTS,
   REQUIRED_TUNNEL_MEMBERS,
   bundledRouterVendorPath,

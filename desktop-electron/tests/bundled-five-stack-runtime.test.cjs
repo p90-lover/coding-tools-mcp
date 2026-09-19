@@ -73,7 +73,7 @@ test("Desktop panels never tell the user to download or install a separate app",
   assert.doesNotMatch(surface, /download component first/i);
   assert.doesNotMatch(original, /Install \/ start original runtime/);
   assert.doesNotMatch(original, /Install and start the managed runtime/);
-  assert.match(original, /Start original UI/);
+  assert.match(original, /Start module/);
   assert.match(original, /Start the bundled runtime/);
   assert.doesNotMatch(originalUi, /Install the pinned Codex Router source/);
   assert.doesNotMatch(originalUi, /Install and start managed CPA/);
@@ -142,7 +142,7 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
   );
   const manifest = JSON.parse(fs.readFileSync(path.join(outputRoot, "MANIFEST.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 1);
-  assert.equal(manifest.productVersion, "0.7.0-rc.11");
+  assert.equal(manifest.productVersion, "0.7.0-rc.12");
   assert.deepEqual(manifest.components.map((component) => component.id), [
     "codex-router",
     "commandcode-proxy",

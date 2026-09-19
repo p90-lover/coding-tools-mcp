@@ -594,7 +594,7 @@ export function ExternalServicesSurface({
             ) : null}
             <button onClick={openSelected} type="button">
               {selected.id === "cpa" || selected.id === "codex-router"
-                ? text(language, "Open original UI", "開啟原始介面")
+                ? text(language, "Open module APIs", "開啟模組 API")
                 : text(language, "Open related controls", "開啟相關控制")}
             </button>
           </div>

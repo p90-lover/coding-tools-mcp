@@ -6,6 +6,8 @@ import { join } from "node:path";
 import {
   LAUNCHER_BROWSER_HOST_KIND,
   LAUNCHER_BROWSER_IDLE_URL,
+  LAUNCHER_BROWSER_PARTITION_PRODUCTION,
+  expectedLauncherBrowserPartition,
   LauncherManualTurnTimedOutError,
   LauncherRetainedConversationUnavailableError,
   LauncherBrowserTurnCancelledError,
@@ -51,9 +53,7 @@ function descriptorFile(
       executable: process.execPath,
       script: import.meta.path,
     },
-    partition: profile === "development"
-      ? "persist:codex-web-gpt-dev-chatgpt"
-      : "persist:codex-web-gpt-chatgpt",
+    partition: expectedLauncherBrowserPartition(profile),
     idleUrl: LAUNCHER_BROWSER_IDLE_URL,
     surfaceId: "launcher_surface_id_0123456789AB",
     surfaceTargets: { ["launcher_surface_id_0123456789AB"]: "native-owned-target" },
@@ -343,11 +343,26 @@ test("launcher descriptor rejects non-loopback browser ownership", () => {
   expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("http://127.0.0.1");
 });
 
+test("launcher descriptor rejects legacy Codex browser partitions", () => {
+  const path = descriptorFile();
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  value.partition = "persist:codex-web-gpt-chatgpt";
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+  value.partition = "persist:codex-web-gpt-dev-chatgpt";
+  value.profile = "development";
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+  value.partition = LAUNCHER_BROWSER_PARTITION_PRODUCTION;
+  writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  expect(() => readLauncherBrowserHostDescriptor(path)).toThrow("unexpected browser partition");
+});
+
 test("launcher profile checks reject cross-profile browser ownership", async () => {
   const path = descriptorFile("http://127.0.0.1:39111", "development");
   expect(readLauncherBrowserHostDescriptor(path)).toMatchObject({
     profile: "development",
-    partition: "persist:codex-web-gpt-dev-chatgpt",
+    partition: expectedLauncherBrowserPartition("development"),
   });
   await expect(inspectLauncherBrowserHost(path, { expectedProfile: "production", timeoutMs: 5 }))
     .rejects.toThrow("belongs to development");

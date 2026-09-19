@@ -370,7 +370,7 @@ export interface UpstreamToolActResult {
 }
 
 export type UpstreamToolId = "anneal" | "paseo";
-export type OriginalUiId = "cpa" | "codex-router";
+export type OriginalUiId = "cpa" | "codex-router" | "paseo" | "anneal";
 export type UpstreamToolStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 
 export interface UpstreamToolSnapshot {
@@ -402,6 +402,14 @@ export interface UpstreamToolOpenResult {
   section: string;
   url: string;
   embedded: boolean;
+  api?: {
+    moduleId: string;
+    origin?: string;
+    via?: string;
+  };
+  unavailable?: boolean;
+  dependency?: "postgres" | null;
+  error?: string | null;
 }
 
 export interface OriginalUiLongRun {
@@ -443,6 +451,14 @@ export interface OriginalUiOpenResult {
   embedded: boolean;
   originalWindow: boolean;
   pid?: number | null;
+  api?: {
+    moduleId: string;
+    origin?: string;
+    via?: string;
+  };
+  unavailable?: boolean;
+  dependency?: "postgres" | null;
+  error?: string | null;
 }
 
 export interface LauncherState {
@@ -571,7 +587,7 @@ export interface LauncherApi {
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
   openExternal(url: string): Promise<boolean>;
   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
-  setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;
+  setBrowserSurfaceActive(active: boolean): Promise<BrowserState | true>;
   showBrowser(): Promise<BrowserState>;
   hideBrowser(): Promise<BrowserState>;
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;

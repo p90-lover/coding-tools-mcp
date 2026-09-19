@@ -80,5 +80,7 @@ test("Network surface manages app-wide and per-provider proxy routing", () => {
   assert.match(source, /socks5/);
   assert.match(source, /websocket/);
   assert.match(source, /subagent/);
+  assert.match(source, /17891/);
+  assert.match(source, /mcp/);
   assert.match(source, /localhost|127\.0\.0\.1/);
 });

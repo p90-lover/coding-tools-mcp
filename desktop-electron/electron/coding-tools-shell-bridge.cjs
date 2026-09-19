@@ -49,12 +49,21 @@ function pageWorkspaces(workspaces, cursor = 0, limit = 25) {
 
 function createCodingToolsShellBridge({
   assertFocusedMainWindow,
-  headlessHost,
-  updateController,
-}) {
+  headlessHost = null,
+  updateController = null,
+  getHeadlessHost,
+  getUpdateController,
+} = {}) {
+  const resolveHost = () => (
+    typeof getHeadlessHost === "function" ? getHeadlessHost() : headlessHost
+  );
+  const resolveUpdater = () => (
+    typeof getUpdateController === "function" ? getUpdateController() : updateController
+  );
   const requireHost = () => {
-    if (!headlessHost) throw new Error("Local Coding Tools service is unavailable");
-    return headlessHost;
+    const host = resolveHost();
+    if (!host) throw new Error("Local Coding Tools service is unavailable");
+    return host;
   };
 
   const requestHeadless = (pathname, body = null, method) => requireHost().request(pathname, body, { method });
@@ -134,7 +143,8 @@ function createCodingToolsShellBridge({
 
     async updatesStatus(event) {
       assertFocusedMainWindow(event, false);
-      const snapshot = typeof updateController?.getState === "function" ? updateController.getState() : null;
+      const updater = resolveUpdater();
+      const snapshot = typeof updater?.getState === "function" ? updater.getState() : null;
       return asRecord(snapshot);
     },
 

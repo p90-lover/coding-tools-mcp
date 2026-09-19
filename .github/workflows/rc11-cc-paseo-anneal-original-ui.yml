@@ -1,0 +1,86 @@
+name: rc.11 CommandCode Paseo Anneal modules
+
+on:
+  push:
+    branches:
+      - cursor/rc11-cc-paseo-anneal-original-ui-7a2a
+      - feature/rc11-cc-paseo-anneal-original-ui
+    paths:
+      - '.github/workflows/rc11-cc-paseo-anneal-original-ui.yml'
+      - 'app-handler/**'
+      - 'modules/**'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/App.tsx'
+      - 'desktop-electron/src/features/CommandCodeProxySurface.tsx'
+      - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
+      - 'desktop-electron/tests/rc11-cc-paseo-anneal-original-ui.test.cjs'
+      - 'desktop-electron/tests/modules-apps-host.test.cjs'
+      - 'docs/features/paseo-anneal-commandcode-original-panels.md'
+  pull_request:
+    branches:
+      - cursor/desktop-ui-ipc-proxy-fix-dc79
+    paths:
+      - '.github/workflows/rc11-cc-paseo-anneal-original-ui.yml'
+      - 'app-handler/**'
+      - 'modules/**'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/App.tsx'
+      - 'desktop-electron/src/features/CommandCodeProxySurface.tsx'
+      - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
+      - 'desktop-electron/tests/rc11-cc-paseo-anneal-original-ui.test.cjs'
+      - 'desktop-electron/tests/modules-apps-host.test.cjs'
+      - 'docs/features/paseo-anneal-commandcode-original-panels.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc11-cc-paseo-anneal-original-ui-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: CommandCode Paseo Anneal module contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run focused module and handler contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-cc-paseo-anneal-original-ui/evidence
+          (
+            node --check app-handler/handler-registry.cjs
+            node --check app-handler/host.cjs
+            node --check app-handler/commandcode-proxy/handler.cjs
+            node --check app-handler/commandcode-proxy/handlers.cjs
+            node --check app-handler/paseo/handler.cjs
+            node --check app-handler/paseo/handlers.cjs
+            node --check app-handler/anneal/handler.cjs
+            node --check app-handler/anneal/handlers.cjs
+            node --check modules/host.cjs
+            node --check modules/handler-registry.cjs
+            node --test \
+              desktop-electron/tests/rc11-cc-paseo-anneal-original-ui.test.cjs \
+              desktop-electron/tests/modules-apps-host.test.cjs
+          ) 2>&1 | tee aiTemp/rc11-cc-paseo-anneal-original-ui/evidence/results.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-cc-paseo-anneal-original-ui-${{ github.sha }}
+          path: aiTemp/rc11-cc-paseo-anneal-original-ui/evidence/
+          if-no-files-found: warn
+          retention-days: 14

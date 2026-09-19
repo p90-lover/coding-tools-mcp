@@ -35,3 +35,7 @@ Manual:
 3. Open **Integrations → CommandCode Proxy**. The banner should list Cursor `.../v1` and `ANTHROPIC_BASE_URL`. Check fills health/models. Start / Stop call the managed loopback proxy, not a stub.
 
 CommandCode chat completions remain client traffic to the proxy. This panel does not invent a second chat UI.
+
+## PR #224 on LOL #221
+
+This lane now stacks on `cursor/desktop-ui-ipc-proxy-fix-dc79`. Shared `app-handler/handler-registry.cjs` and `app-handler/host.cjs` stay on #221. CommandCode / Paseo / Anneal in-tree source lives under `app-handler/<app>/source/`. Repo-root `modules/` is a temporary re-export shim. Product calls remain in-process `codingTools.apps`; visuals stay inside the Coding Tools GUI.

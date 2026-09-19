@@ -1,7 +1,16 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const { createBrowserSurfaceActiveInvoker } = require("./browser-surface-ipc.cjs");
 
-const setBrowserSurfaceActive = createBrowserSurfaceActiveInvoker(ipcRenderer);
+let setBrowserSurfaceActive;
+let snapshot;
+try {
+  const { createBrowserSurfaceActiveInvoker } = require("./browser-surface-ipc.cjs");
+  const { createRetryingInvoker } = require("./launcher-ready-path.cjs");
+  setBrowserSurfaceActive = createBrowserSurfaceActiveInvoker(ipcRenderer);
+  snapshot = createRetryingInvoker(ipcRenderer, "launcher:snapshot");
+} catch {
+  setBrowserSurfaceActive = (active) => ipcRenderer.invoke("launcher:browser-surface-active", active === true);
+  snapshot = () => ipcRenderer.invoke("launcher:snapshot");
+}
 
 function subscription(channel, listener) {
   const wrapped = (_event, value) => listener(value);
@@ -10,7 +19,7 @@ function subscription(channel, listener) {
 }
 
 contextBridge.exposeInMainWorld("codexWebLauncher", {
-  snapshot: () => ipcRenderer.invoke("launcher:snapshot"),
+  snapshot,
   setLanguage: (language) => ipcRenderer.invoke("launcher:set-language", language),
   openSocial: (target) => ipcRenderer.invoke("launcher:open-social", target),
   completeOnboarding: (language, browserInteractionMode) => ipcRenderer.invoke(
@@ -190,6 +199,21 @@ const codingToolsApi = Object.freeze({
   tools: Object.freeze({
     catalog: (input) => invokeContract(ipcRenderer, "tools.catalog", input),
     call: (input) => invokeContract(ipcRenderer, "tools.call", input),
+  }),
+  apps: Object.freeze({
+    list: () => invokeContract(ipcRenderer, "apps.list"),
+    catalog: () => invokeContract(ipcRenderer, "apps.catalog"),
+    call: (input) => invokeContract(ipcRenderer, "apps.call", input),
+    invoke: (input) => invokeContract(ipcRenderer, "apps.call", {
+      moduleId: input.handle || input.moduleId,
+      operation: input.operation,
+      ...(typeof input.requestId === "string" && input.requestId
+        ? { requestId: input.requestId }
+        : {}),
+      ...(input.arguments && typeof input.arguments === "object"
+        ? { arguments: input.arguments }
+        : {}),
+    }),
   }),
 });
 

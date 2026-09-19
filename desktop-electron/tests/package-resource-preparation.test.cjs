@@ -13,7 +13,7 @@ const {
   skipFiveStackPackageEntry,
 } = require("../scripts/prepare-package-resources.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.11";
+const PRODUCT_VERSION = "0.7.0-rc.12";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
@@ -527,5 +527,35 @@ test("package and runtime preparation use repository aiTemp retention without de
       from: "build/package-resources",
       to: ".",
     },
+    {
+      from: "../app-handler",
+      to: "app-handler",
+      filter: [
+        "**/*",
+        "!**/node_modules/**",
+        "!**/source/test/**",
+      ],
+    },
+    {
+      from: "../app-handler",
+      to: "app-modules",
+      filter: [
+        "**/*",
+        "!**/node_modules/**",
+        "!**/source/test/**",
+      ],
+    },
+    {
+      from: "../modules",
+      to: "modules",
+      filter: [
+        "**/*",
+        "!**/node_modules/**",
+        "!**/source/test/**",
+      ],
+    },
   ]);
+  assert.ok(manifest.build.files.some((entry) => (
+    entry && entry.from === "../app-handler" && entry.to === "app-handler"
+  )), "asar root must include app-handler/**");
 });

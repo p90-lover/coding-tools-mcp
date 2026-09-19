@@ -20,6 +20,7 @@ import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
 import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
+import { InProcessAppsPanel } from "./features/InProcessAppsPanel";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -32,16 +33,24 @@ import type {
   Surface,
 } from "./types";
 
-const api = window.codexWebLauncher;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
 const COMPACT_SIDEBAR_QUERY = "(max-width: 820px)";
+const IPC_API_RETRY_DELAYS_MS = [0, 50, 200, 500, 1_500, 3_000] as const;
 const MCP_GUIDE_MEDIA = [
   new URL("./assets/mcp-create-tunnel.mp4", import.meta.url).href,
   new URL("./assets/mcp-connect-connector.mp4", import.meta.url).href,
   new URL("./assets/mcp-connect-connector.mp4", import.meta.url).href,
 ] as const;
 
+function readLauncherApi() {
+  return window.codexWebLauncher;
+}
+
+let api = readLauncherApi();
+
 export function App() {
+  const [apiReady, setApiReady] = useState(() => Boolean(api));
+  const [apiTimedOut, setApiTimedOut] = useState(false);
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
@@ -50,11 +59,40 @@ export function App() {
   const documentLanguage = snapshot?.state.language ?? "en";
 
   useEffect(() => {
+    if (api) {
+      setApiReady(true);
+      return undefined;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = (index: number) => {
+      const current = readLauncherApi();
+      if (current) {
+        api = current;
+        setApiReady(true);
+        return;
+      }
+      if (index >= IPC_API_RETRY_DELAYS_MS.length - 1) {
+        setApiTimedOut(true);
+        return;
+      }
+      timer = setTimeout(() => {
+        if (!cancelled) attempt(index + 1);
+      }, IPC_API_RETRY_DELAYS_MS[index + 1]);
+    };
+    attempt(0);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [apiReady]);
+
+  useEffect(() => {
     document.documentElement.lang = documentLanguage;
   }, [documentLanguage]);
 
   useEffect(() => {
-    if (!api) return;
+    if (!api) return undefined;
     let cancelled = false;
     void api.snapshot().then((next) => {
       if (cancelled) return;
@@ -93,7 +131,7 @@ export function App() {
       unsubscribeLog();
       unsubscribeUpdate();
     };
-  }, []);
+  }, [apiReady]);
 
   const updateState = useCallback((state: LauncherState) => {
     setSnapshot((current) => current
@@ -106,7 +144,11 @@ export function App() {
       : current);
   }, []);
 
-  if (!api) return <FatalMessage message="Launcher IPC is unavailable." />;
+  if (!apiReady || !api) {
+    return apiTimedOut
+      ? <FatalMessage message="Launcher IPC is unavailable." />
+      : <LaunchLoading />;
+  }
   if (!snapshot) return <LaunchLoading />;
 
   const language = snapshot.state.language ?? "en";
@@ -1676,6 +1718,7 @@ function McpSurface({
           </>
         ) : null}
       </div>
+      <InProcessAppsPanel copy={copy} language={language} setError={setError} />
       <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
   );

@@ -80,6 +80,7 @@ jobs:
           test -s docs/superpowers/plans/2026-09-18-rc9-managed-five-stack.md
           (
             node --check desktop-electron/electron/browser-surface-ipc.cjs
+            node --check desktop-electron/electron/launcher-ready-path.cjs
             node --check desktop-electron/electron/codex-router-managed.cjs
             node --check desktop-electron/electron/external-services.cjs
             node --check desktop-electron/electron/main.cjs
@@ -90,6 +91,7 @@ jobs:
             node --check desktop-electron/scripts/prepare-five-stack-runtime.cjs
             node --test \
               desktop-electron/tests/browser-surface-ipc.test.cjs \
+              desktop-electron/tests/launcher-ready-path.test.cjs \
               desktop-electron/tests/commandcode-provider-session.test.cjs \
               desktop-electron/tests/external-services-control-plane.test.cjs \
               desktop-electron/tests/managed-bootstrap.test.cjs \

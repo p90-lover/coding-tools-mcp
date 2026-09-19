@@ -311,6 +311,21 @@ const toolsCallRequest = Object.freeze({
   additionalProperties: false,
 });
 
+const appsCallRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["moduleId", "operation"]),
+  properties: Object.freeze({
+    moduleId: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]),
+    }),
+    operation: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+    requestId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    arguments: genericObject,
+  }),
+  additionalProperties: false,
+});
+
 const taskListRequest = Object.freeze({
   type: "object",
   properties: Object.freeze({
@@ -499,6 +514,21 @@ const CONTRACTS = Object.freeze({
   "tools.call": Object.freeze({
     channel: "coding-tools:tools:call",
     request: toolsCallRequest,
+    response: genericObject,
+  }),
+  "apps.list": Object.freeze({
+    channel: "coding-tools:apps:list",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "apps.catalog": Object.freeze({
+    channel: "coding-tools:apps:catalog",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "apps.call": Object.freeze({
+    channel: "coding-tools:apps:call",
+    request: appsCallRequest,
     response: genericObject,
   }),
 });

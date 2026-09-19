@@ -9,6 +9,8 @@ const path = require("node:path");
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const {
   REQUIRED_ASAR_FILES,
+  REQUIRED_MODULE_FILES,
+  REQUIRED_MODULE_SHIMS,
   REQUIRED_COMPONENTS,
   inspectExtractedApplication,
   findWindowsInstaller,
@@ -18,7 +20,7 @@ const {
   bundledUpstreamSourcePath,
 } = require("../scripts/verify-package.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.11";
+const PRODUCT_VERSION = "0.7.0-rc.12";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
@@ -117,6 +119,16 @@ function createPackageFixture(label, mutate) {
   ]);
   for (const [relativePath, bytes] of componentBytes) {
     writeFile(path.join(resourcesRoot, ...relativePath.split("/")), bytes);
+  }
+  for (const relativePath of REQUIRED_MODULE_FILES) {
+    writeFile(path.join(resourcesRoot, ...relativePath.split("/")), Buffer.from("module.exports = {};\n"));
+    writeFile(
+      path.join(resourcesRoot, ...relativePath.replace(/^app-handler\//, "app-modules/").split("/")),
+      Buffer.from("module.exports = {};\n"),
+    );
+  }
+  for (const relativePath of REQUIRED_MODULE_SHIMS) {
+    writeFile(path.join(resourcesRoot, ...relativePath.split("/")), Buffer.from("module.exports = {};\n"));
   }
 
   const componentVersions = new Map([
@@ -291,6 +303,29 @@ test("rejects a package that omits a required desktop ASAR module", () => {
       asarEntries: REQUIRED_ASAR_FILES.filter((entry) => entry !== requiredModule),
     })),
     /PACKAGE_ASAR_REQUIRED_FILE_MISSING/,
+  );
+});
+
+test("rejects a package that omits in-process module handlers next to app.asar", () => {
+  const { appRoot } = createPackageFixture("missing-modules-host", ({ resourcesRoot }) => {
+    fs.rmSync(path.join(resourcesRoot, "app-handler", "host.cjs"));
+  });
+  assert.ok(REQUIRED_MODULE_FILES.includes("app-handler/host.cjs"));
+  assert.ok(REQUIRED_ASAR_FILES.includes("app-handler/host.cjs"));
+  assert.throws(
+    () => inspectExtractedApplication(appRoot, packageOptions()),
+    /PACKAGE_MODULES_HOST/,
+  );
+});
+
+test("rejects a package that omits the modules host shim next to app.asar", () => {
+  const { appRoot } = createPackageFixture("missing-modules-shim", ({ resourcesRoot }) => {
+    fs.rmSync(path.join(resourcesRoot, "modules", "host.cjs"));
+  });
+  assert.ok(REQUIRED_MODULE_SHIMS.includes("modules/host.cjs"));
+  assert.throws(
+    () => inspectExtractedApplication(appRoot, packageOptions()),
+    /PACKAGE_MODULES_SHIM/,
   );
 });
 

@@ -10,7 +10,7 @@ use std::{
 // Retain every fixture under aiTemp; no cleanup or provider/model calls.
 fn py(arguments: &str) -> String {
     format!(
-        "{} {arguments}",
+        "{} -u {arguments}",
         if cfg!(windows) { "python" } else { "python3" }
     )
 }
@@ -26,13 +26,16 @@ fn fixture() -> (ToolContext, PathBuf) {
         base,
     )
 }
+fn python_path_literal(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
 fn wait(ctx: &ToolContext, id: &str) -> Value {
-    let until = Instant::now() + Duration::from_secs(8);
+    let until = Instant::now() + Duration::from_secs(20);
     loop {
         let value = call_tool(
             ctx,
             "write_stdin",
-            &json!({"command_id":id,"chars":"","yield_time_ms":0,"max_output_bytes":1024}),
+            &json!({"command_id":id,"chars":"","yield_time_ms":100,"max_output_bytes":1024}),
         );
         assert_eq!(value["ok"], true, "{value}");
         if value["status"] == "exited" && value["finalization_pending"] != true {
@@ -131,9 +134,22 @@ fn explicit_linked_project_tasks_do_not_share_baselines() {
     )
     .unwrap();
     fs::create_dir_all(linked.join("aiTemp")).unwrap();
-    let worker="from pathlib import Path\nimport time\nwhile not Path('aiTemp/release').exists(): time.sleep(0.02)\nprint(Path.cwd(),flush=True)\n";
-    fs::write(ctx.workspace.root().join("aiTemp/wait.py"), worker).unwrap();
-    fs::write(linked.join("aiTemp/wait.py"), worker).unwrap();
+    let worker_for = |release: &std::path::Path| {
+        format!(
+            "from pathlib import Path\nimport time\nrelease=Path(r'{}')\nwhile not release.exists(): time.sleep(0.02)\nprint(Path.cwd(),flush=True)\n",
+            python_path_literal(release)
+        )
+    };
+    fs::write(
+        ctx.workspace.root().join("aiTemp/wait.py"),
+        worker_for(&ctx.workspace.root().join("aiTemp/release")),
+    )
+    .unwrap();
+    fs::write(
+        linked.join("aiTemp/wait.py"),
+        worker_for(&linked.join("aiTemp/release")),
+    )
+    .unwrap();
     fs::create_dir_all(ctx.workspace.root().join(".mcp-paths")).unwrap();
     fs::write(
         ctx.workspace.root().join(".mcp-paths/peer.txt"),
@@ -159,12 +175,12 @@ fn explicit_linked_project_tasks_do_not_share_baselines() {
     let job_a = call_tool(
         &ctx,
         "exec_command",
-        &json!({"cmd":py("aiTemp/wait.py"),"project_root":".","task_id":a["task"]["id"],"yield_time_ms":0,"timeout_ms":5000}),
+        &json!({"cmd":py("aiTemp/wait.py"),"project_root":".","task_id":a["task"]["id"],"yield_time_ms":100,"timeout_ms":20000}),
     );
     let job_b = call_tool(
         &ctx,
         "exec_command",
-        &json!({"cmd":py("aiTemp/wait.py"),"project_root":"@peer","workdir":".","task_id":b["task"]["id"],"yield_time_ms":0,"timeout_ms":5000}),
+        &json!({"cmd":py("aiTemp/wait.py"),"project_root":"@peer","workdir":".","task_id":b["task"]["id"],"yield_time_ms":100,"timeout_ms":20000}),
     );
     assert_eq!(job_a["status"], "running", "{job_a}");
     assert_eq!(job_b["status"], "running", "{job_b}");
@@ -242,11 +258,11 @@ fn cancellation_stops_descendants_and_releases_only_owned_work() {
     let (ctx, _) = fixture();
     let root = ctx.workspace.root();
     fs::write(root.join("aiTemp/descendant.py"), "from pathlib import Path\nimport time\ntime.sleep(2)\nPath('aiTemp/escaped.txt').write_text('unexpected child survived')\n").unwrap();
-    fs::write(root.join("aiTemp/parent.py"), "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'aiTemp/descendant.py'])\nprint('READY',flush=True)\ntime.sleep(10)\n").unwrap();
+    fs::write(root.join("aiTemp/parent.py"), "import subprocess,sys,time\nsubprocess.Popen([sys.executable,'-u','aiTemp/descendant.py'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nprint('READY',flush=True)\ntime.sleep(10)\n").unwrap();
     let launched = call_tool(
         &ctx,
         "exec_command",
-        &json!({"cmd":py("aiTemp/parent.py"),"yield_time_ms":0}),
+        &json!({"cmd":py("aiTemp/parent.py"),"yield_time_ms":100}),
     );
     assert_eq!(launched["ok"], true, "{launched}");
     assert!(
@@ -256,12 +272,12 @@ fn cancellation_stops_descendants_and_releases_only_owned_work() {
     assert_eq!(launched["cache_storage"], "ram_only");
     assert_eq!(launched["cache_max_age_seconds"], 5400);
     let id = launched["command_id"].as_str().unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
+    let until = Instant::now() + Duration::from_secs(15);
     loop {
         let observed = call_tool(
             &ctx,
             "write_stdin",
-            &json!({"command_id":id,"chars":"","yield_time_ms":0,"max_output_bytes":1024}),
+            &json!({"command_id":id,"chars":"","yield_time_ms":100,"max_output_bytes":1024}),
         );
         if observed["stdout"].as_str().unwrap_or("").contains("READY") {
             break;

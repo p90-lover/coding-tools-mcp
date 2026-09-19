@@ -27,6 +27,7 @@ const SCOPES: readonly ProxyScope[] = [
 ];
 const MODES: readonly ProxyPolicyMode[] = ["inherit", "global", "direct", "profile"];
 const LOOPBACK_BYPASS = "localhost,127.0.0.1,::1";
+const PROXY_PATH_PROVIDERS = new Set(["claude-oauth", "anthropic-api"]);
 
 type ProxyStatus = "error" | "enabled" | "disabled";
 
@@ -98,10 +99,10 @@ function emptyDraft(language: Language): ProfileDraft {
   return {
     name: localText(language, "Global proxy", "全域代理", "全局代理", "グローバルプロキシ"),
     enabled: true,
-    protocol: "socks5",
+    protocol: "http",
     host: "127.0.0.1",
-    port: "7890",
-    scopes: ["all", "browser", "provider", "oauth", "subagent", "paseo", "anneal", "websocket", "http", "update"],
+    port: "17891",
+    scopes: ["all", "browser", "provider", "oauth", "subagent", "paseo", "anneal", "mcp", "websocket", "http", "update"],
     bypass: LOOPBACK_BYPASS,
     username: "",
     password: "",
@@ -275,18 +276,41 @@ export function NetworkProxySurface({
   const setProviderPolicy = async (providerId: string, mode: ProxyPolicyMode, profileId?: string) => {
     const api = window.codexWebLauncher;
     if (!api) return;
+    const nextMode = mode === "direct" && PROXY_PATH_PROVIDERS.has(providerId) ? "inherit" : mode;
+    if (nextMode !== mode) {
+      setNotice(localText(
+        language,
+        "Claude and Anthropic traffic stays on the proxy/SOCKS path; Direct is not used.",
+        "Claude 同 Anthropic 流量必須走代理／SOCKS，唔會改成 Direct。",
+        "Claude 和 Anthropic 流量必须走代理／SOCKS，不会改为 Direct。",
+        "Claude / Anthropic の通信はプロキシ/SOCKS 経路のままです。Direct にはしません。",
+      ));
+    }
     await run(
-      () => api.setProviderProxyPolicy({ providerId, mode, ...(profileId ? { profileId } : {}) }),
-      `${providerId}: ${policyModeLabel(language, mode)}`,
+      () => api.setProviderProxyPolicy({ providerId, mode: nextMode, ...(profileId ? { profileId } : {}) }),
+      `${providerId}: ${policyModeLabel(language, nextMode)}`,
     );
   };
 
   const setAccountPolicy = async (accountId: string, mode: ProxyPolicyMode, profileId?: string) => {
     const api = window.codexWebLauncher;
     if (!api) return;
+    const account = snapshot?.accounts.find((candidate) => candidate.id === accountId);
+    const nextMode = mode === "direct" && account && PROXY_PATH_PROVIDERS.has(account.providerId)
+      ? "inherit"
+      : mode;
+    if (nextMode !== mode) {
+      setNotice(localText(
+        language,
+        "Claude and Anthropic traffic stays on the proxy/SOCKS path; Direct is not used.",
+        "Claude 同 Anthropic 流量必須走代理／SOCKS，唔會改成 Direct。",
+        "Claude 和 Anthropic 流量必须走代理／SOCKS，不会改为 Direct。",
+        "Claude / Anthropic の通信はプロキシ/SOCKS 経路のままです。Direct にはしません。",
+      ));
+    }
     await run(
-      () => api.setAccountProxyPolicy({ accountId, mode, ...(profileId ? { profileId } : {}) }),
-      `${accountId}: ${policyModeLabel(language, mode)}`,
+      () => api.setAccountProxyPolicy({ accountId, mode: nextMode, ...(profileId ? { profileId } : {}) }),
+      `${accountId}: ${policyModeLabel(language, nextMode)}`,
     );
   };
 
@@ -309,10 +333,10 @@ export function NetworkProxySurface({
           <h1>{localText(language, "Network Proxy", "網路代理", "网络代理", "ネットワークプロキシ")}</h1>
           <p>{localText(
             language,
-            "Route all application traffic or selected provider, account, OAuth, WebSocket and HTTP traffic through saved HTTP, HTTPS or SOCKS proxies.",
-            "將所有應用程式流量，或指定供應商、帳戶、OAuth、WebSocket 及 HTTP 流量，路由至已儲存 HTTP、HTTPS 或 SOCKS 代理。",
-            "将所有应用程序流量，或指定供应商、账户、OAuth、WebSocket 及 HTTP 流量，路由至已保存 HTTP、HTTPS 或 SOCKS 代理。",
-            "アプリ全体または個別通信を HTTP / HTTPS / SOCKS プロキシへルーティングします。",
+            "Route application, provider, OAuth, MCP, WebSocket and HTTP traffic through saved HTTP, HTTPS or SOCKS proxies. Local ProxyBridge listens on http://127.0.0.1:17891; do not seed Clash :7890 unless that port is listening. Claude and Anthropic stay on the proxy/SOCKS path, never Direct.",
+            "將應用程式、供應商、OAuth、MCP、WebSocket 及 HTTP 流量路由至已儲存代理。本機 ProxyBridge 監聽 http://127.0.0.1:17891；除非 :7890 真係喺聽，否則唔好用 Clash 埠。Claude / Anthropic 必須走代理／SOCKS，不可 Direct。",
+            "将应用、供应商、OAuth、MCP、WebSocket 及 HTTP 流量路由至已保存代理。本地 ProxyBridge 监听 http://127.0.0.1:17891；不要使用未在监听的 Clash :7890。Claude / Anthropic 必须走代理／SOCKS，不可 Direct。",
+            "アプリ・プロバイダー・OAuth・MCP・WebSocket・HTTP を保存済みプロキシへルーティングします。ローカル ProxyBridge は http://127.0.0.1:17891 で待ち受けます。未起動の Clash :7890 は使わないでください。Claude / Anthropic は Direct ではなくプロキシ/SOCKS 経路です。",
           )}</p>
         </div>
         <button className="secondary-button" disabled={busy} onClick={() => setDraft(emptyDraft(language))} type="button">
@@ -340,10 +364,10 @@ export function NetworkProxySurface({
         </select>
         <small>{localText(
           language,
-          "Loopback control traffic remains direct: localhost, 127.0.0.1 and ::1.",
-          "Loopback 控制流量保持直接連線：localhost、127.0.0.1 及 ::1。",
-          "Loopback 控制流量保持直接连接：localhost、127.0.0.1 和 ::1。",
-          "ループバック制御通信は直接接続のままです：localhost、127.0.0.1、::1。",
+          "Loopback control traffic remains direct: localhost, 127.0.0.1 and ::1. In-app session routing is not an OS-wide proxy; ProxyBridge/WFP covers other apps.",
+          "Loopback 控制流量保持直接連線：localhost、127.0.0.1 及 ::1。呢度只係應用程式內路由，唔等於系統全域代理；其他程式要靠 ProxyBridge／WFP。",
+          "Loopback 控制流量保持直接连接：localhost、127.0.0.1 和 ::1。此处只是应用内路由，不是系统全局代理；其他程序需 ProxyBridge／WFP。",
+          "ループバック制御通信は直接接続のままです。これはアプリ内ルーティングであり、OS 全体のプロキシではありません。",
         )}</small>
       </section>
 

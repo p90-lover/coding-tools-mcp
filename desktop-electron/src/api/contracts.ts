@@ -93,6 +93,24 @@ export interface CodingToolsApi {
       readonly arguments?: JsonObject;
     }): Promise<JsonObject>;
   };
+  readonly apps: {
+    list(): Promise<JsonObject>;
+    catalog(): Promise<JsonObject>;
+    call(input: {
+      readonly moduleId: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly operation: string;
+      readonly requestId?: string;
+      readonly arguments?: JsonObject;
+    }): Promise<JsonObject>;
+    invoke(input: {
+      readonly handle?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly moduleId?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly operation: string;
+      readonly requestId?: string;
+      readonly arguments?: JsonObject;
+      readonly confirm?: boolean;
+    }): Promise<JsonObject>;
+  };
 }
 
 declare global {

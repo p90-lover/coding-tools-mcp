@@ -23,6 +23,9 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(app, /setSidebarState\(\{ open, width \}\)/);
   assert.match(app, /className="sidebar-resize"/);
   assert.match(app, /<McpLiveToolsPanel/);
+  assert.match(app, /<InProcessAppsPanel/);
+  assert.match(app, /label="MCP"/);
+  assert.doesNotMatch(app, /FiveStackLoopbackPanel/);
   assert.match(styles, /\.content-scroll\.is-fit\s*\{[^}]*overflow-y:\s*auto;/s);
   assert.match(styles, /\.sidebar-more\s*\{/);
   assert.match(i18n, /product: "Coding Tools"/);
@@ -39,13 +42,25 @@ test("live MCP tool controls call the typed Coding Tools API", () => {
   assert.match(panel, /client\.workspaces\.list/);
   assert.match(panel, /client\.tools\.catalog/);
   assert.match(panel, /tools\.call/);
+  const appsPanel = read("src/features/InProcessAppsPanel.tsx");
+  assert.match(appsPanel, /client\.apps\.list/);
+  assert.match(appsPanel, /client\.apps\.call/);
+  assert.match(appsPanel, /client\.apps\.invoke/);
+  assert.match(appsPanel, /apps_list/);
+  assert.match(appsPanel, /apps_invoke/);
   assert.match(contracts, /readonly tools:/);
+  assert.match(contracts, /readonly apps:/);
   assert.match(preload, /"tools.catalog"/);
   assert.match(preload, /"tools.call"/);
+  assert.match(preload, /"apps.call"/);
   assert.match(main, /coding-tools:workspaces:list/);
   assert.match(main, /coding-tools:tools:catalog/);
   assert.match(main, /coding-tools:tools:call/);
+  assert.match(main, /coding-tools:apps:call/);
+  assert.match(main, /mergeAppsCatalog/);
+  assert.match(main, /appsMcp\.hasTool/);
   assert.match(schema, /"tools.catalog"/);
+  assert.match(schema, /"apps.call"/);
 });
 
 test("the shell bridge adapts headless workspaces into the typed page contract", () => {

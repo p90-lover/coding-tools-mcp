@@ -1,16 +1,41 @@
 "use strict";
 
+const fs = require("node:fs");
 const path = require("node:path");
-const { ORIGINAL_SECTIONS, openOriginalControlCenter } = require("./codex-router-original-ui.cjs");
+const { pathToFileURL } = require("node:url");
 const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
 
-const TOOL_IDS = Object.freeze(["cpa", "codex-router"]);
+const TOOL_IDS = Object.freeze(["cpa", "codex-router", "paseo", "anneal"]);
+const IFRAME_TOOL_IDS = Object.freeze(["cpa", "paseo", "anneal"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const READY_WAIT_MS = {
   cpa: 45_000,
   "codex-router": 5 * 60_000,
+  paseo: 90_000,
+  anneal: 2 * 60_000,
 };
 const READY_POLL_MS = 250;
+
+function errorMessage(value) {
+  return value instanceof Error ? value.message : String(value || "");
+}
+
+function classifyOriginalUiUnavailable(toolId, error) {
+  const message = errorMessage(error).trim();
+  if (toolId !== "anneal" || !message) return null;
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("postgres")
+    || lower.includes("postgresql")
+    || /\b5432\b/.test(lower)
+    || lower.includes("database is unavailable")
+    || lower.includes("database connection")
+    || (lower.includes("docker") && (lower.includes("database") || lower.includes("postgres")))
+  ) {
+    return { dependency: "postgres", message };
+  }
+  return null;
+}
 
 function manifestPath(toolId) {
   return path.join(__dirname, "..", "vendor", "upstream", `${toolId}.json`);
@@ -19,7 +44,7 @@ function manifestPath(toolId) {
 function loadManifest(toolId) {
   if (!TOOL_IDS.includes(toolId)) throw new Error(`Unknown original UI: ${toolId}`);
   const filePath = manifestPath(toolId);
-  const manifest = JSON.parse(require("node:fs").readFileSync(filePath, "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(filePath, "utf8"));
   if (manifest.id !== toolId) throw new Error(`Original UI manifest ID mismatch: ${toolId}`);
   if (!Array.isArray(manifest.sections) || manifest.sections.length === 0) {
     throw new Error(`Original UI manifest has no sections: ${toolId}`);
@@ -55,12 +80,49 @@ function sectionUrl(manifest, endpoint, section) {
   if (!manifest.sections.includes(section)) {
     throw new Error(`Unsupported ${manifest.id} section: ${section}`);
   }
-  const pathname = manifest.sectionPaths?.[section] || `/${section}`;
-  const target = new URL(pathname, normalizeLoopbackEndpoint(endpoint));
+  const raw = String(manifest.sectionPaths?.[section] || `/${section}`);
+  const base = normalizeLoopbackEndpoint(endpoint);
+  const target = new URL(base);
+  if (raw.startsWith("#") || raw.startsWith("/#")) {
+    target.hash = raw.replace(/^\/?#/u, "");
+  } else {
+    const resolved = new URL(raw, base);
+    if (!LOOPBACK_HOSTS.has(canonicalHostname(resolved.hostname))) {
+      throw new Error("Original UI section URL escaped the loopback boundary");
+    }
+    target.pathname = resolved.pathname;
+    target.search = resolved.search;
+    target.hash = resolved.hash;
+  }
   if (!LOOPBACK_HOSTS.has(canonicalHostname(target.hostname))) {
     throw new Error("Original UI section URL escaped the loopback boundary");
   }
   return target.toString();
+}
+
+function annealVisualEndpoint() {
+  return "http://127.0.0.1:5173/";
+}
+
+function embeddedVisualUrl(toolId, manifest, state, section) {
+  if (toolId === "codex-router") {
+    const home = state?.home;
+    if (!home) return "";
+    try {
+      const { rendererPath } = require("./codex-router-original-ui.cjs");
+      const file = rendererPath(home);
+      if (!fs.existsSync(file)) return "";
+      const url = pathToFileURL(file);
+      if (section) url.hash = section;
+      return url.toString();
+    } catch {
+      return "";
+    }
+  }
+  if (toolId === "anneal") {
+    return sectionUrl(manifest, annealVisualEndpoint(), section);
+  }
+  return sectionUrl(manifest, state.endpoint, section);
 }
 
 function createOriginalUiCore({
@@ -102,6 +164,7 @@ function createOriginalUiCore({
       sourceConfigured: Boolean(current?.home),
       installState: current?.managedInstall?.state || "not-installed",
       originalChrome: true,
+      home: current?.home || null,
     };
   }
 
@@ -111,7 +174,15 @@ function createOriginalUiCore({
 
   async function inspect(toolId) {
     requireTool(toolId);
-    if (externalServices?.inspect) await externalServices.inspect(toolId);
+    try {
+      if (externalServices?.inspect) await externalServices.inspect(toolId);
+    } catch (error) {
+      return {
+        ...project(toolId),
+        status: "error",
+        error: errorMessage(error) || `${requireTool(toolId).name} inspect failed`,
+      };
+    }
     return project(toolId);
   }
 
@@ -141,11 +212,14 @@ function createOriginalUiCore({
     while (true) {
       const state = await inspect(toolId);
       if (state.status === "ready") return state;
-      if (state.status === "error") {
-        throw new Error(state.error || `${requireTool(toolId).name} failed to start`);
+      const unavailable = classifyOriginalUiUnavailable(toolId, state.error);
+      if (unavailable) {
+        const error = new Error(unavailable.message);
+        error.dependency = unavailable.dependency;
+        throw error;
       }
       if (Date.now() - started >= (READY_WAIT_MS[toolId] || 45_000)) {
-        throw new Error(`${requireTool(toolId).name} is not ready`);
+        throw new Error(state.error || `${requireTool(toolId).name} is not ready`);
       }
       await sleep(READY_POLL_MS);
     }
@@ -186,50 +260,66 @@ function createOriginalUiCore({
     return inspect(toolId);
   }
 
-  async function openEmbedded(toolId, section) {
-    const manifest = requireTool(toolId);
-    const selected = section || manifest.sections[0];
-    let state = await inspect(toolId);
-    if (state.status !== "ready") {
-      await start(toolId);
-      state = await waitUntilReady(toolId);
-    }
-    if (toolId === "codex-router") {
-      const current = service(toolId);
-      if (!current?.home) throw new Error("Start the bundled Codex Router runtime before opening its original Control Center");
-      const stateDir = current.stateDir
-        || path.join(path.dirname(path.dirname(path.dirname(current.home))), "state", "codex-router");
-      const opened = openOriginalControlCenter({
-        home: current.home,
-        state: stateDir,
-        section: ORIGINAL_SECTIONS.includes(selected) ? selected : "dashboard",
-        electronExecutable,
-        spawnProcess: spawnProcess || require("node:child_process").spawn,
-        npm,
-      });
-      rememberControlCenter(opened.child);
-      return {
-        tool: state,
-        section: selected,
-        url: "",
-        embedded: false,
-        originalWindow: true,
-        pid: opened.pid,
-      };
-    }
+  function unavailableOpenResult(toolId, section, error, state) {
+    const classified = classifyOriginalUiUnavailable(toolId, error)
+      || classifyOriginalUiUnavailable(toolId, state?.error);
+    const message = errorMessage(error) || state?.error || `${requireTool(toolId).name} is unavailable`;
     return {
-      tool: state,
-      section: selected,
-      url: sectionUrl(manifest, state.endpoint, selected),
+      tool: {
+        ...(state || project(toolId)),
+        status: state?.status === "ready" ? "error" : (state?.status || "error"),
+        error: message,
+      },
+      section,
+      url: "",
       embedded: true,
       originalWindow: false,
+      api: {
+        moduleId: toolId,
+        origin: state?.endpoint,
+        via: "codingTools.apps",
+        transport: "in-process",
+      },
+      unavailable: true,
+      dependency: classified?.dependency || (toolId === "anneal" ? "postgres" : null),
+      error: message,
     };
   }
 
+  async function openEmbedded(toolId, section) {
+    const manifest = requireTool(toolId);
+    const selected = section || manifest.sections[0];
+    try {
+      let state = await inspect(toolId);
+      if (state.status !== "ready") {
+        await start(toolId);
+        state = await waitUntilReady(toolId);
+      }
+      const visual = embeddedVisualUrl(toolId, manifest, state, selected);
+      return {
+        tool: state,
+        section: selected,
+        url: visual,
+        embedded: Boolean(visual),
+        originalWindow: false,
+        api: {
+          moduleId: toolId,
+          origin: state.endpoint,
+          via: "codingTools.apps",
+          transport: "in-process",
+        },
+      };
+    } catch (error) {
+      if (toolId === "anneal") {
+        const latest = await inspect(toolId).catch(() => project(toolId));
+        return unavailableOpenResult(toolId, selected, error, latest);
+      }
+      throw error;
+    }
+  }
+
   async function openExternalTool(toolId, section) {
-    const result = await openEmbedded(toolId, section);
-    if (result.url && typeof openExternal === "function") await openExternal(result.url);
-    return { ...result, embedded: false };
+    return openEmbedded(toolId, section);
   }
 
   function cpaManagementKey() {
@@ -279,7 +369,9 @@ function createOriginalUiController(options = {}) {
 
 module.exports = {
   TOOL_IDS,
+  IFRAME_TOOL_IDS,
   READY_WAIT_MS,
+  classifyOriginalUiUnavailable,
   createOriginalUiController,
   createOriginalUiCore,
   loadManifest,

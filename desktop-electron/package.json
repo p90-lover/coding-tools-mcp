@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.7.0-rc.11",
+  "version": "0.7.0-rc.12",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -68,12 +68,48 @@
       "vendor/bundled/**",
       "assets/icon.png",
       "assets/linux-appimage-runner.sh",
-      "package.json"
+      "package.json",
+      {
+        "from": "../app-handler",
+        "to": "app-handler",
+        "filter": [
+          "**/*",
+          "!**/node_modules/**",
+          "!**/source/test/**"
+        ]
+      }
     ],
     "extraResources": [
       {
         "from": "build/package-resources",
         "to": "."
+      },
+      {
+        "from": "../app-handler",
+        "to": "app-handler",
+        "filter": [
+          "**/*",
+          "!**/node_modules/**",
+          "!**/source/test/**"
+        ]
+      },
+      {
+        "from": "../app-handler",
+        "to": "app-modules",
+        "filter": [
+          "**/*",
+          "!**/node_modules/**",
+          "!**/source/test/**"
+        ]
+      },
+      {
+        "from": "../modules",
+        "to": "modules",
+        "filter": [
+          "**/*",
+          "!**/node_modules/**",
+          "!**/source/test/**"
+        ]
       }
     ],
     "mac": {
