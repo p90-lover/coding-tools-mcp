@@ -29,7 +29,7 @@ test("the launcher persists one of the five fixed managed-app tabs through focus
   assert.match(preload, /setManagedAppTab: \(tab\) => ipcRenderer\.invoke\("launcher:managed-app-tab", tab\)/);
 });
 
-test("the product shell exposes one Managed Apps destination instead of six fragmented engine destinations", () => {
+test("the product shell exposes one localized Managed Apps destination instead of six fragmented engine destinations", () => {
   const app = read("src/App.tsx");
   const managedApps = read("src/features/ManagedAppsSurface.tsx");
   assert.match(app, /import \{ ManagedAppsSurface \} from "\.\/features\/ManagedAppsSurface"/);
@@ -40,7 +40,10 @@ test("the product shell exposes one Managed Apps destination instead of six frag
   assert.match(app, /selectManagedAppTab\("anneal"\)/);
   assert.match(managedApps, /id: "commandcode-proxy"/);
   assert.match(managedApps, /onSelectedTabChange\(tab\)/);
-  assert.match(app, /language === "zh-TW" \? "受管理應用程式" : "Managed Apps"/);
+  assert.match(app, /language === "zh-TW" \? "受管理應用程式"/);
+  assert.match(app, /language === "zh-CN" \? "托管应用"/);
+  assert.match(app, /language === "ja" \? "管理対象アプリ"/);
+  assert.match(app, /: "Managed Apps"/);
   assert.match(app, /surface === "apps"/);
   assert.match(app, /<ManagedAppsSurface/);
 });
