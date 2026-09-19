@@ -30,6 +30,7 @@ const {
 const { RuntimeHost } = require("./runtime.cjs");
 const { HeadlessHost } = require("./headless-host.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
+const { createManagedAppApiHandler } = require("./managed-app-api.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
@@ -494,9 +495,25 @@ function executionSettingsPayload(settings) {
 
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  const managedAppApi = createManagedAppApiHandler({
+    externalServices: externalServicesController,
+    originalUi: originalUiController,
+    upstreamTools: upstreamToolController,
+    managedBootstrap: managedBootstrapController,
+    getProviderController: providerNetworkReady,
+    createExecutionPlan: createProviderExecutionPlan,
+    commandCodePlan: (options) => {
+      const plan = commandCodeProxyRegistrationPlan(options);
+      return { ...plan, text: renderCommandCodeProxyPlan(plan) };
+    },
+    commandCodeApply: (options) => applyCommandCodeProxyPlan(options),
+    performUpstreamAction: (input) => actUpstream(input),
+    logger,
+  });
   const codingTools = createCodingToolsShellBridge({
     assertFocusedMainWindow,
     headlessHost,
+    managedAppApi,
     updateController,
   });
   const fiveStackControlPlane = createFiveStackControlPlane({
@@ -560,6 +577,9 @@ function registerIpc({ logger, stateStore }) {
       five_stack: fiveStackControlPlane.apiMap(),
     };
   });
+  handle("coding-tools:apps:snapshot", (event) => codingTools.managedAppsSnapshot(event));
+  handle("coding-tools:apps:invoke", (event, input) => codingTools.managedAppInvoke(event, input));
+  handle("coding-tools:apps:reconcile", (event, input) => codingTools.managedAppsReconcile(event, input));
   handle("coding-tools:updates:status", (event) => codingTools.updatesStatus(event));
   handle("coding-tools:diagnostics:snapshot", (event) => codingTools.diagnosticsSnapshot(event));
   handle("coding-tools:tools:catalog", async (event, input) => {

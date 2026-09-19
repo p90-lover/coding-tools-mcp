@@ -1,0 +1,130 @@
+name: Repair rc.11 managed app API materializer
+
+on:
+  push:
+    branches:
+      - feature/rc11-managed-app-api-handles
+    paths:
+      - '.github/workflows/rc11-managed-app-api-repair.yml'
+      - 'aiTemp/rc11-managed-app-api/repair-materializer.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc11-managed-app-api-repair-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc11-managed-app-api/bun-cache
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained evidence roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-managed-app-api/bun-cache
+          mkdir -p aiTemp/rc11-managed-app-api/evidence
+          mkdir -p aiTemp/Trash/rc11-managed-app-api
+
+      - name: Repair materializer and repeatable RED gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc11-managed-app-api/repair-materializer.mjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/repair.txt
+          grep -F RC11_MANAGED_APP_MATERIALIZER_REPAIRED \
+            aiTemp/rc11-managed-app-api/evidence/repair.txt
+
+      - name: Materialize exact API source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc11-managed-app-api/materialize.mjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/materialize-after-repair.txt
+          grep -F RC11_MANAGED_APP_API_MATERIALIZED \
+            aiTemp/rc11-managed-app-api/evidence/materialize-after-repair.txt
+
+      - name: Install exact Electron dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Verify the repaired boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/rc11-managed-app-api-wiring.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-ui.test.cjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/repaired-boundary.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-app-api/evidence/repaired-boundary.txt
+          node --check desktop-electron/electron/managed-app-api.cjs
+          node --check desktop-electron/electron/preload.cjs
+          bun run --cwd desktop-electron typecheck
+
+      - name: Enforce preservation contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin feature/rc11-managed-apps-shell-current --no-tags
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only origin/feature/rc11-managed-apps-shell-current...HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit repaired materializer and verified source
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='feature/rc11-managed-app-api-handles'
+          git add \
+            aiTemp/rc11-managed-app-api/materialize.mjs \
+            desktop-electron/electron/coding-tools-shell-bridge.cjs \
+            desktop-electron/electron/ipc-schema.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ManagedAppsSurface.tsx
+          if git diff --cached --quiet; then
+            echo 'Repaired source is already materialized.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(rc11): materialize repeatable managed app API wiring'
+          git fetch origin "$branch" --no-tags
+          current_remote="$(git rev-parse "origin/$branch")"
+          if ! git merge-base --is-ancestor "$current_remote" HEAD; then
+            echo 'Feature branch advanced during verification; refusing to overwrite newer work.' >&2
+            exit 1
+          fi
+          git push origin "HEAD:$branch"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-managed-app-api-repair-${{ github.sha }}
+          path: aiTemp/rc11-managed-app-api/evidence/
+          if-no-files-found: warn
+          retention-days: 14

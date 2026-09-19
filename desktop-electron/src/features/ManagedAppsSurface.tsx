@@ -1,10 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import type {
-  ExternalServiceId,
-  ExternalServicesSnapshot,
-  Language,
-  ManagedAppTabId,
-} from "../types";
+import type { ManagedAppsSnapshot } from "../api/contracts";
+import type { Language, ManagedAppTabId } from "../types";
 import { AnnealTasksSurface } from "./AnnealTasksSurface";
 import { ExternalServicesSurface } from "./ExternalServicesSurface";
 import { OriginalUiSurface } from "./OriginalUiSurface";
@@ -26,10 +22,13 @@ interface ManagedAppTabDefinition {
   simplifiedChinese: string;
   traditionalChinese: string;
   japanese: string;
-  serviceId: ExternalServiceId;
 }
 
-const EMPTY_SERVICES: ExternalServicesSnapshot = { version: 1, services: [] };
+const EMPTY_APPS: ManagedAppsSnapshot = {
+  version: 1,
+  bootstrap: { status: "idle", reason: null, startedAt: null, completedAt: null, error: null },
+  apps: [],
+};
 
 const MANAGED_APP_TABS: readonly ManagedAppTabDefinition[] = [
   {
@@ -38,7 +37,6 @@ const MANAGED_APP_TABS: readonly ManagedAppTabDefinition[] = [
     simplifiedChinese: "CPA",
     traditionalChinese: "CPA",
     japanese: "CPA",
-    serviceId: "cpa",
   },
   {
     id: "codex-router",
@@ -46,7 +44,6 @@ const MANAGED_APP_TABS: readonly ManagedAppTabDefinition[] = [
     simplifiedChinese: "Codex Router",
     traditionalChinese: "Codex Router",
     japanese: "Codex Router",
-    serviceId: "codex-router",
   },
   {
     id: "commandcode-proxy",
@@ -54,7 +51,6 @@ const MANAGED_APP_TABS: readonly ManagedAppTabDefinition[] = [
     simplifiedChinese: "CommandCode",
     traditionalChinese: "CommandCode",
     japanese: "CommandCode",
-    serviceId: "commandcode-proxy",
   },
   {
     id: "paseo",
@@ -62,7 +58,6 @@ const MANAGED_APP_TABS: readonly ManagedAppTabDefinition[] = [
     simplifiedChinese: "Paseo",
     traditionalChinese: "Paseo",
     japanese: "Paseo",
-    serviceId: "paseo",
   },
   {
     id: "anneal",
@@ -70,7 +65,6 @@ const MANAGED_APP_TABS: readonly ManagedAppTabDefinition[] = [
     simplifiedChinese: "Anneal",
     traditionalChinese: "Anneal",
     japanese: "Anneal",
-    serviceId: "anneal",
   },
 ] as const;
 
@@ -97,27 +91,27 @@ export function ManagedAppsSurface({
   onSelectedTabChange,
   setError,
 }: ManagedAppsSurfaceProps) {
-  const api = window.codexWebLauncher;
-  const [services, setServices] = useState<ExternalServicesSnapshot>(EMPTY_SERVICES);
+  const api = window.codingTools?.apps;
+  const [snapshot, setSnapshot] = useState<ManagedAppsSnapshot>(EMPTY_APPS);
 
   useEffect(() => {
     if (!api) return;
     let cancelled = false;
-    void api.externalServicesSnapshot()
-      .then((snapshot) => {
-        if (!cancelled) setServices(snapshot);
+    void api.snapshot()
+      .then((next) => {
+        if (!cancelled) setSnapshot(next);
       })
       .catch((cause) => setError(messageOf(cause)));
-    const unsubscribe = api.onExternalServicesChanged(setServices);
+    const unsubscribe = api.onChanged(setSnapshot);
     return () => {
       cancelled = true;
       unsubscribe();
     };
   }, [api, setError]);
 
-  const serviceById = useMemo(
-    () => new Map(services.services.map((service) => [service.id, service] as const)),
-    [services],
+  const appByHandle = useMemo(
+    () => new Map(snapshot.apps.map((app) => [app.handle, app] as const)),
+    [snapshot],
   );
 
   const select = (tab: ManagedAppTabId) => onSelectedTabChange(tab);
@@ -171,10 +165,16 @@ export function ManagedAppsSurface({
         role="tablist"
       >
         {MANAGED_APP_TABS.map((tab) => {
-          const service = serviceById.get(tab.serviceId);
-          const status = service?.status ?? "unknown";
-          const actionRequired = service?.managedInstall.state === "repair-required"
-            || service?.managedInstall.state === "error";
+          const app = appByHandle.get(tab.id);
+          const status = app?.status ?? "unknown";
+          const managedState = app?.managed?.state;
+          const setupStatus = app?.setup?.status;
+          const actionRequired = status === "error"
+            || managedState === "repair-required"
+            || managedState === "error"
+            || managedState === "unavailable"
+            || setupStatus === "blocked"
+            || setupStatus === "error";
           return (
             <button
               aria-controls={`managed-app-panel-${tab.id}`}
