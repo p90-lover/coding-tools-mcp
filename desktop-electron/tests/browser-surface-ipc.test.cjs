@@ -79,6 +79,61 @@ test("stale main process does not reveal a GPT browser that was already hidden",
   ]);
 });
 
+test("failed compatibility hide does not arm a later browser restore", async () => {
+  const calls = [];
+  const invoke = createBrowserSurfaceActiveInvoker({
+    invoke: async (channel, value) => {
+      calls.push([channel, value]);
+      if (channel === BROWSER_SURFACE_ACTIVE_CHANNEL) {
+        throw new Error(`No handler registered for '${channel}'`);
+      }
+      if (channel === SNAPSHOT_CHANNEL) return { browser: { visible: true } };
+      if (channel === BROWSER_HIDE_CHANNEL) throw new Error("compatibility hide failed");
+      return { channel };
+    },
+  });
+
+  await assert.rejects(invoke(false), /compatibility hide failed/);
+  assert.equal(await invoke(true), null);
+  assert.deepEqual(calls, [
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, false],
+    [SNAPSHOT_CHANNEL, undefined],
+    [BROWSER_HIDE_CHANNEL, undefined],
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, true],
+  ]);
+});
+
+test("failed compatibility show remains armed for the next browser restore retry", async () => {
+  const calls = [];
+  let showAttempts = 0;
+  const invoke = createBrowserSurfaceActiveInvoker({
+    invoke: async (channel, value) => {
+      calls.push([channel, value]);
+      if (channel === BROWSER_SURFACE_ACTIVE_CHANNEL) {
+        throw new Error(`No handler registered for '${channel}'`);
+      }
+      if (channel === SNAPSHOT_CHANNEL) return { browser: { visible: true } };
+      if (channel === BROWSER_SHOW_CHANNEL && showAttempts++ === 0) {
+        throw new Error("compatibility show failed");
+      }
+      return { channel };
+    },
+  });
+
+  assert.deepEqual(await invoke(false), { channel: BROWSER_HIDE_CHANNEL });
+  await assert.rejects(invoke(true), /compatibility show failed/);
+  assert.deepEqual(await invoke(true), { channel: BROWSER_SHOW_CHANNEL });
+  assert.deepEqual(calls, [
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, false],
+    [SNAPSHOT_CHANNEL, undefined],
+    [BROWSER_HIDE_CHANNEL, undefined],
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, true],
+    [BROWSER_SHOW_CHANNEL, undefined],
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, true],
+    [BROWSER_SHOW_CHANNEL, undefined],
+  ]);
+});
+
 test("surface compatibility is narrowly scoped and remains wired through preload plus main", async () => {
   const invoke = createBrowserSurfaceActiveInvoker({
     invoke: async () => {
