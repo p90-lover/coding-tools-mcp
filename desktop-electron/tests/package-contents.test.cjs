@@ -10,6 +10,7 @@ const repositoryRoot = path.resolve(__dirname, "..", "..");
 const {
   REQUIRED_ASAR_FILES,
   REQUIRED_MODULE_FILES,
+  REQUIRED_MODULE_SHIMS,
   REQUIRED_COMPONENTS,
   inspectExtractedApplication,
   findWindowsInstaller,
@@ -122,9 +123,12 @@ function createPackageFixture(label, mutate) {
   for (const relativePath of REQUIRED_MODULE_FILES) {
     writeFile(path.join(resourcesRoot, ...relativePath.split("/")), Buffer.from("module.exports = {};\n"));
     writeFile(
-      path.join(resourcesRoot, ...relativePath.replace(/^modules\//, "app-modules/").split("/")),
+      path.join(resourcesRoot, ...relativePath.replace(/^app-handler\//, "app-modules/").split("/")),
       Buffer.from("module.exports = {};\n"),
     );
+  }
+  for (const relativePath of REQUIRED_MODULE_SHIMS) {
+    writeFile(path.join(resourcesRoot, ...relativePath.split("/")), Buffer.from("module.exports = {};\n"));
   }
 
   const componentVersions = new Map([
@@ -304,12 +308,23 @@ test("rejects a package that omits a required desktop ASAR module", () => {
 
 test("rejects a package that omits in-process module handlers next to app.asar", () => {
   const { appRoot } = createPackageFixture("missing-modules-host", ({ resourcesRoot }) => {
-    fs.rmSync(path.join(resourcesRoot, "modules", "host.cjs"));
+    fs.rmSync(path.join(resourcesRoot, "app-handler", "host.cjs"));
   });
-  assert.ok(REQUIRED_MODULE_FILES.includes("modules/host.cjs"));
+  assert.ok(REQUIRED_MODULE_FILES.includes("app-handler/host.cjs"));
   assert.throws(
     () => inspectExtractedApplication(appRoot, packageOptions()),
     /PACKAGE_MODULES_HOST/,
+  );
+});
+
+test("rejects a package that omits the modules host shim next to app.asar", () => {
+  const { appRoot } = createPackageFixture("missing-modules-shim", ({ resourcesRoot }) => {
+    fs.rmSync(path.join(resourcesRoot, "modules", "host.cjs"));
+  });
+  assert.ok(REQUIRED_MODULE_SHIMS.includes("modules/host.cjs"));
+  assert.throws(
+    () => inspectExtractedApplication(appRoot, packageOptions()),
+    /PACKAGE_MODULES_SHIM/,
   );
 });
 

@@ -38,4 +38,4 @@ CommandCode chat completions remain client traffic to the proxy. This panel does
 
 ## PR #224 on LOL #221
 
-This lane now stacks on `cursor/desktop-ui-ipc-proxy-fix-dc79`. Shared `modules/handler-registry.cjs` and `modules/host.cjs` stay on #221. CommandCode / Paseo / Anneal in-tree source lives under `modules/<app>/source/`. Do not add `modules/cpa` or `modules/codex-router` here. Product calls remain in-process `codingTools.apps`; visuals stay inside the Coding Tools GUI.
+This lane now stacks on `cursor/desktop-ui-ipc-proxy-fix-dc79`. Shared `app-handler/handler-registry.cjs` and `app-handler/host.cjs` stay on #221. CommandCode / Paseo / Anneal in-tree source lives under `app-handler/<app>/source/`. Repo-root `modules/` is a temporary re-export shim. Product calls remain in-process `codingTools.apps`; visuals stay inside the Coding Tools GUI.

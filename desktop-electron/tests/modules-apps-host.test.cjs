@@ -5,24 +5,27 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const { MODULE_IDS, createCodingToolsAppsHost } = require("../../modules/host.cjs");
-const { FOREIGN_SLOTS, defaultRegistry } = require("../../modules/handler-registry.cjs");
+const { MODULE_IDS, createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
+const { FOREIGN_SLOTS, defaultRegistry } = require("../../app-handler/handler-registry.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
 
-test("modules tree hosts CPA, Codex Router, CommandCode, Paseo, and Anneal", () => {
+test("app-handler tree hosts CPA, Codex Router, CommandCode, Paseo, and Anneal", () => {
   assert.deepEqual(MODULE_IDS, ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]);
   assert.deepEqual(FOREIGN_SLOTS, ["cpa", "codex-router"]);
   for (const id of MODULE_IDS) {
-    assert.equal(fs.existsSync(path.join(repoRoot, "modules", id, "handler.cjs")), true, id);
-    assert.equal(fs.existsSync(path.join(repoRoot, "modules", id, "handlers.cjs")), true, id);
-    assert.equal(fs.existsSync(path.join(repoRoot, "modules", id, "module.json")), true, id);
-    assert.equal(fs.existsSync(path.join(repoRoot, "modules", id, "README.md")), true, id);
+    assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "handler.cjs")), true, id);
+    assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "handlers.cjs")), true, id);
+    assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "module.json")), true, id);
+    assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "README.md")), true, id);
+    assert.equal(fs.existsSync(path.join(repoRoot, "modules", id, "handler.cjs")), true, `${id} shim`);
   }
   assert.deepEqual(defaultRegistry.ids().sort(), [...MODULE_IDS].sort());
-  const readme = fs.readFileSync(path.join(repoRoot, "modules", "README.md"), "utf8");
+  const shimHost = require("../../modules/host.cjs");
+  assert.deepEqual(shimHost.MODULE_IDS, MODULE_IDS);
+  const readme = fs.readFileSync(path.join(repoRoot, "app-handler", "README.md"), "utf8");
   assert.match(readme, /codingTools\.apps/);
   assert.match(readme, /in-process/);
   assert.match(readme, /handler-registry\.cjs/);
@@ -101,9 +104,10 @@ test("desktop shell wires codingTools.apps without constructing five-stack at bo
   const schema = read("electron/ipc-schema.cjs");
   const contracts = read("src/api/contracts.ts");
   const original = read("electron/original-ui.cjs");
-  const host = fs.readFileSync(path.join(repoRoot, "modules/host.cjs"), "utf8");
+  const host = fs.readFileSync(path.join(repoRoot, "app-handler/host.cjs"), "utf8");
 
   assert.match(main, /createCodingToolsAppsHost/);
+  assert.match(main, /require\("\.\.\/\.\.\/app-handler\/host\.cjs"\)/);
   assert.match(main, /coding-tools:apps:list/);
   assert.match(main, /coding-tools:apps:catalog/);
   assert.match(main, /coding-tools:apps:call/);

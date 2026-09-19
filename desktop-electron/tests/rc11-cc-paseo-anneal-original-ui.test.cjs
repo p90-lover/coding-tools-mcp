@@ -8,8 +8,8 @@ const {
   createHandlerRegistry,
   FOREIGN_SLOTS,
   defaultRegistry,
-} = require("../../modules/handler-registry.cjs");
-const { MODULE_IDS, createCodingToolsAppsHost } = require("../../modules/host.cjs");
+} = require("../../app-handler/handler-registry.cjs");
+const { MODULE_IDS, createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 
 const ROOT = path.resolve(__dirname, "../..");
 const source = (relative) => fs.readFileSync(path.join(ROOT, relative), "utf8");
@@ -17,26 +17,28 @@ const source = (relative) => fs.readFileSync(path.join(ROOT, relative), "utf8");
 test("this lane keeps CommandCode Paseo Anneal on #221's shared registry", () => {
   assert.deepEqual(FOREIGN_SLOTS, ["cpa", "codex-router"]);
   assert.deepEqual(MODULE_IDS, ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]);
+  assert.equal(fs.existsSync(path.join(ROOT, "app-handler/handler-registry.cjs")), true);
+  assert.equal(fs.existsSync(path.join(ROOT, "app-handler/host.cjs")), true);
+  assert.equal(fs.existsSync(path.join(ROOT, "app-handler/lib/in-process-handler.cjs")), true);
   assert.equal(fs.existsSync(path.join(ROOT, "modules/handler-registry.cjs")), true);
   assert.equal(fs.existsSync(path.join(ROOT, "modules/host.cjs")), true);
-  assert.equal(fs.existsSync(path.join(ROOT, "modules/lib/in-process-handler.cjs")), true);
-  assert.match(source("modules/handler-registry.cjs"), /createHandlerRegistry/);
-  assert.doesNotMatch(source("modules/handler-registry.cjs"), /createServer/);
+  assert.match(source("app-handler/handler-registry.cjs"), /createHandlerRegistry/);
+  assert.doesNotMatch(source("app-handler/handler-registry.cjs"), /createServer/);
   assert.deepEqual(defaultRegistry.ids().sort(), [...MODULE_IDS].sort());
   for (const id of ["commandcode-proxy", "paseo", "anneal"]) {
-    assert.equal(defaultRegistry.get(id).root, `modules/${id}`);
-    assert.match(source(`modules/${id}/handler.cjs`), /wrapInProcessHandler/);
-    assert.equal(fs.existsSync(path.join(ROOT, "modules", id, "handlers.cjs")), true);
+    assert.equal(defaultRegistry.get(id).root, `app-handler/${id}`);
+    assert.match(source(`app-handler/${id}/handler.cjs`), /wrapInProcessHandler/);
+    assert.equal(fs.existsSync(path.join(ROOT, "app-handler", id, "handlers.cjs")), true);
   }
 });
 
 test("CommandCode Paseo Anneal keep in-tree source without a second module root", () => {
-  assert.equal(fs.existsSync(path.join(ROOT, "modules/commandcode-proxy/source/proxy.mjs")), true);
-  assert.equal(fs.existsSync(path.join(ROOT, "modules/paseo/source/BUNDLE.json")), true);
-  assert.equal(fs.existsSync(path.join(ROOT, "modules/anneal/source/BUNDLE.json")), true);
-  assert.equal(JSON.parse(source("modules/commandcode-proxy/module.json")).source.path, "modules/commandcode-proxy/source");
-  assert.equal(JSON.parse(source("modules/paseo/module.json")).source.path, "modules/paseo/source");
-  assert.equal(JSON.parse(source("modules/anneal/module.json")).source.path, "modules/anneal/source");
+  assert.equal(fs.existsSync(path.join(ROOT, "app-handler/commandcode-proxy/source/proxy.mjs")), true);
+  assert.equal(fs.existsSync(path.join(ROOT, "app-handler/paseo/source/BUNDLE.json")), true);
+  assert.equal(fs.existsSync(path.join(ROOT, "app-handler/anneal/source/BUNDLE.json")), true);
+  assert.equal(JSON.parse(source("app-handler/commandcode-proxy/module.json")).source.path, "app-handler/commandcode-proxy/source");
+  assert.equal(JSON.parse(source("app-handler/paseo/module.json")).source.path, "app-handler/paseo/source");
+  assert.equal(JSON.parse(source("app-handler/anneal/module.json")).source.path, "app-handler/anneal/source");
   assert.equal(fs.existsSync(path.join(ROOT, "apps")), false);
   assert.equal(fs.existsSync(path.join(ROOT, "vendored")), false);
   assert.equal(fs.existsSync(path.join(ROOT, "integrations")), false);
@@ -82,7 +84,7 @@ test("in-process handlers for the three apps use #221 invoke without listen port
 
 test("Coding Tools still hosts CommandCode Paseo Anneal visuals in-process", () => {
   const app = source("desktop-electron/src/App.tsx");
-  const registry = source("modules/handler-registry.cjs");
+  const registry = source("app-handler/handler-registry.cjs");
   assert.match(app, /PaseoOrchestratorSurface/);
   assert.match(app, /AnnealTasksSurface/);
   assert.match(app, /toolId="paseo"/);
@@ -90,6 +92,6 @@ test("Coding Tools still hosts CommandCode Paseo Anneal visuals in-process", () 
   assert.match(source("desktop-electron/src/features/CommandCodeProxySurface.tsx"), /commandcode-proxy-surface/);
   assert.match(source("desktop-electron/electron/preload.cjs"), /invoke: \(input\) => invokeContract\(ipcRenderer, "apps.call"/);
   assert.doesNotMatch(registry, /createServer\(/);
-  assert.doesNotMatch(source("modules/host.cjs"), /createServer\(/);
+  assert.doesNotMatch(source("app-handler/host.cjs"), /createServer\(/);
   assert.doesNotMatch(app, /browser-surface-active/);
 });

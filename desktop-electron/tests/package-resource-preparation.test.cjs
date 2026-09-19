@@ -528,8 +528,17 @@ test("package and runtime preparation use repository aiTemp retention without de
       to: ".",
     },
     {
-      from: "../modules",
-      to: "modules",
+      from: "../app-handler",
+      to: "app-handler",
+      filter: [
+        "**/*",
+        "!**/node_modules/**",
+        "!**/source/test/**",
+      ],
+    },
+    {
+      from: "../app-handler",
+      to: "app-modules",
       filter: [
         "**/*",
         "!**/node_modules/**",
@@ -538,7 +547,7 @@ test("package and runtime preparation use repository aiTemp retention without de
     },
     {
       from: "../modules",
-      to: "app-modules",
+      to: "modules",
       filter: [
         "**/*",
         "!**/node_modules/**",

@@ -8,8 +8,8 @@ const { PassThrough } = require("node:stream");
 const test = require("node:test");
 const Module = require("node:module");
 
-const { MODULE_IDS, createCodingToolsAppsHost } = require("../../modules/host.cjs");
-const { defaultRegistry } = require("../../modules/handler-registry.cjs");
+const { MODULE_IDS, createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
+const { defaultRegistry } = require("../../app-handler/handler-registry.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
@@ -603,9 +603,9 @@ test("preload invoke remaps handle onto coding-tools:apps:call and omits undefin
   );
 });
 
-test("modules tree does not add listen ports and IPC names stay list/catalog/call", () => {
-  const hostSource = fs.readFileSync(path.join(repoRoot, "modules/host.cjs"), "utf8");
-  const registrySource = fs.readFileSync(path.join(repoRoot, "modules/handler-registry.cjs"), "utf8");
+test("app-handler tree does not add listen ports and IPC names stay list/catalog/call", () => {
+  const hostSource = fs.readFileSync(path.join(repoRoot, "app-handler/host.cjs"), "utf8");
+  const registrySource = fs.readFileSync(path.join(repoRoot, "app-handler/handler-registry.cjs"), "utf8");
   const main = readDesktop("electron/main.cjs");
   const schema = readDesktop("electron/ipc-schema.cjs");
   const preload = readDesktop("electron/preload.cjs");

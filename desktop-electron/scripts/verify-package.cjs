@@ -70,14 +70,18 @@ const REQUIRED_ASAR_FILES = Object.freeze([
   "electron/runtime-supervisor.cjs",
 ]);
 const REQUIRED_MODULE_FILES = Object.freeze([
+  "app-handler/host.cjs",
+  "app-handler/handler-registry.cjs",
+  "app-handler/lib/in-process-handler.cjs",
+  "app-handler/cpa/handler.cjs",
+  "app-handler/codex-router/handler.cjs",
+  "app-handler/commandcode-proxy/handler.cjs",
+  "app-handler/paseo/handler.cjs",
+  "app-handler/anneal/handler.cjs",
+]);
+const REQUIRED_MODULE_SHIMS = Object.freeze([
   "modules/host.cjs",
   "modules/handler-registry.cjs",
-  "modules/lib/in-process-handler.cjs",
-  "modules/cpa/handler.cjs",
-  "modules/codex-router/handler.cjs",
-  "modules/commandcode-proxy/handler.cjs",
-  "modules/paseo/handler.cjs",
-  "modules/anneal/handler.cjs",
 ]);
 const COMPONENT_VERSIONS = Object.freeze({
   "migration-manifest": PRODUCT.version,
@@ -552,7 +556,10 @@ function inspectExtractedApplication(appRoot, options = {}) {
   if (!fs.existsSync(resources) || !fs.statSync(resources).isDirectory()) fail("PACKAGE_RESOURCES_MISSING", resources);
   for (const relative of REQUIRED_MODULE_FILES) {
     regularFile(resources, relative, "PACKAGE_MODULES_HOST");
-    regularFile(resources, relative.replace(/^modules\//, "app-modules/"), "PACKAGE_APP_MODULES_HOST");
+    regularFile(resources, relative.replace(/^app-handler\//, "app-modules/"), "PACKAGE_APP_MODULES_HOST");
+  }
+  for (const relative of REQUIRED_MODULE_SHIMS) {
+    regularFile(resources, relative, "PACKAGE_MODULES_SHIM");
   }
   const asarPath = path.join(resources, "app.asar");
   const appManifest = options.appManifest ?? asarManifest(asarPath);
@@ -688,6 +695,7 @@ module.exports = {
   PRODUCT,
   REQUIRED_ASAR_FILES,
   REQUIRED_MODULE_FILES,
+  REQUIRED_MODULE_SHIMS,
   REQUIRED_COMPONENTS,
   REQUIRED_TUNNEL_MEMBERS,
   bundledRouterVendorPath,

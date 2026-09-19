@@ -5,7 +5,7 @@ const http = require("node:http");
 const net = require("node:net");
 const test = require("node:test");
 
-const { createCodingToolsAppsHost } = require("../../modules/host.cjs");
+const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 
 function forbidTcp(label) {
   const originalHttp = http.request;

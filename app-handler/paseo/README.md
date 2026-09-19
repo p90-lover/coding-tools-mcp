@@ -21,4 +21,4 @@ await codingTools.apps.call({
 Protocol operations: `send`, `resume`, `cancel`, `archive`, `permission`, `create`.
 Five-stack: `plan`, `run`, `submitResult`, `review`.
 
-In-tree source pointer: `modules/paseo/source/`. Handlers stay in this folder’s `handler.cjs` / `handlers.cjs` and load through the shared `modules/handler-registry.cjs`.
+In-tree source pointer: `app-handler/paseo/source/`. Handlers stay in this folder’s `handler.cjs` / `handlers.cjs` and load through the shared `app-handler/handler-registry.cjs`.

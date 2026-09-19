@@ -11,7 +11,7 @@ const {
   createCodingToolsAppsMcp,
   mergeAppsCatalog,
 } = require("../electron/coding-tools-apps-mcp.cjs");
-const { createCodingToolsAppsHost } = require("../../modules/host.cjs");
+const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 
 const root = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(root, "..");
@@ -119,7 +119,7 @@ test("desktop shell and MCP catalog share the in-process apps overlay", () => {
   const panel = read("src/features/InProcessAppsPanel.tsx");
   const app = read("src/App.tsx");
   const i18n = read("src/i18n.ts");
-  const readme = readRepo("modules/README.md");
+  const readme = readRepo("app-handler/README.md");
 
   assert.match(main, /createCodingToolsAppsMcp/);
   assert.match(main, /mergeAppsCatalog/);

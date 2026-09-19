@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { createCodingToolsAppsHost } = require("../../modules/host.cjs");
+const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { createAppsProviderServices } = require("../electron/apps-provider-services.cjs");
 const { createProviderNetworkStore } = require("../electron/provider-network.cjs");
 
@@ -72,12 +72,12 @@ test("CPA and Codex Router expose the full in-process ops table without an apps 
     .operations.find((entry) => entry.name === "models");
   assert.equal(models.readOnly, true);
   assert.match(models.description, /models/i);
-  assert.doesNotMatch(readRepo("modules/host.cjs"), /createServer/);
-  assert.doesNotMatch(readRepo("modules/host.cjs"), /listenLoopback/);
-  assert.doesNotMatch(readRepo("modules/cpa/handlers.cjs"), /createServer|listenLoopback/);
-  assert.doesNotMatch(readRepo("modules/codex-router/handlers.cjs"), /createServer|listenLoopback/);
-  assert.match(readRepo("modules/README.md"), /listProviders/);
-  assert.match(readRepo("modules/README.md"), /linkProvider/);
+  assert.doesNotMatch(readRepo("app-handler/host.cjs"), /createServer/);
+  assert.doesNotMatch(readRepo("app-handler/host.cjs"), /listenLoopback/);
+  assert.doesNotMatch(readRepo("app-handler/cpa/handlers.cjs"), /createServer|listenLoopback/);
+  assert.doesNotMatch(readRepo("app-handler/codex-router/handlers.cjs"), /createServer|listenLoopback/);
+  assert.match(readRepo("app-handler/README.md"), /listProviders/);
+  assert.match(readRepo("app-handler/README.md"), /linkProvider/);
 });
 
 test("CPA models/health/chatCompletions talk to a mocked loopback with bearer auth", async () => {
