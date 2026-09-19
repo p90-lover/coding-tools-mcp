@@ -52,6 +52,16 @@ jobs:
           persist-credentials: true
           ref: ${{ github.head_ref || github.ref_name }}
 
+      - name: Merge latest one-app base
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin integration/v0.7.0-rc.9-one-app-managed
+          git merge --no-edit --no-ff origin/integration/v0.7.0-rc.9-one-app-managed
+
       - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with:
           bun-version: 1.4.0
@@ -96,13 +106,13 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
-          deleted="$(git diff --diff-filter=D --name-only)"
+          deleted="$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.9-one-app-managed...HEAD)"
           if [ -n "$deleted" ]; then
             printf 'Tracked deletions are forbidden:\n%s\n' "$deleted" >&2
             exit 1
           fi
 
-      - name: Commit materialized API wiring
+      - name: Commit and push verified API source
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
@@ -114,13 +124,13 @@ jobs:
             desktop-electron/electron/main.cjs \
             desktop-electron/electron/preload.cjs \
             desktop-electron/src/api/contracts.ts
-          if git diff --cached --quiet; then
-            echo 'Managed app API wiring is already materialized.'
-            exit 0
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(rc9): expose managed apps through Coding Tools API'
           fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'feat(rc9): expose managed apps through Coding Tools API'
           git fetch origin "$branch"
-          git rebase "origin/$branch"
+          current_remote="$(git rev-parse "origin/$branch")"
+          if ! git merge-base --is-ancestor "$current_remote" HEAD; then
+            echo 'Feature branch advanced during verification; refusing to overwrite newer work.' >&2
+            exit 1
+          fi
           git push origin "HEAD:$branch"
