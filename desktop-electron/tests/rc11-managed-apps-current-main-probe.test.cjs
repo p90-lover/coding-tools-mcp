@@ -65,6 +65,6 @@ test("current main packages the stylesheet imported by the Managed Apps surface"
 
   assert.match(surface, /import "\.\/managed-apps\.css"/);
   assert.match(css, /\.managed-apps-surface\s*\{/);
-  assert.match(css, /\.managed-apps-tabs\s*\{/);
-  assert.match(css, /\.managed-apps-content\s*\{/);
+  assert.match(css, /\.managed-app-tabs\s*\{/);
+  assert.match(css, /\.managed-app-panel\s*\{/);
 });
