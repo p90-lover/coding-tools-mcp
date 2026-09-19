@@ -15,7 +15,7 @@ const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const PRODUCT = Object.freeze({
   name: "Coding Tools",
   packageName: "coding-tools-full-harness-desktop",
-  version: "0.7.0-rc.11",
+  version: "0.7.0-rc.12",
   appId: "dev.codingtools.fullharness",
   platform: "win32",
   arch: "x64",
@@ -552,6 +552,7 @@ function inspectExtractedApplication(appRoot, options = {}) {
   if (!fs.existsSync(resources) || !fs.statSync(resources).isDirectory()) fail("PACKAGE_RESOURCES_MISSING", resources);
   for (const relative of REQUIRED_MODULE_FILES) {
     regularFile(resources, relative, "PACKAGE_MODULES_HOST");
+    regularFile(resources, relative.replace(/^modules\//, "app-modules/"), "PACKAGE_APP_MODULES_HOST");
   }
   const asarPath = path.join(resources, "app.asar");
   const appManifest = options.appManifest ?? asarManifest(asarPath);

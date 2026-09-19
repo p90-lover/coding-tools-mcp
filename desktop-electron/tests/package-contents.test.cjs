@@ -19,7 +19,7 @@ const {
   bundledUpstreamSourcePath,
 } = require("../scripts/verify-package.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.11";
+const PRODUCT_VERSION = "0.7.0-rc.12";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
@@ -121,6 +121,10 @@ function createPackageFixture(label, mutate) {
   }
   for (const relativePath of REQUIRED_MODULE_FILES) {
     writeFile(path.join(resourcesRoot, ...relativePath.split("/")), Buffer.from("module.exports = {};\n"));
+    writeFile(
+      path.join(resourcesRoot, ...relativePath.replace(/^modules\//, "app-modules/").split("/")),
+      Buffer.from("module.exports = {};\n"),
+    );
   }
 
   const componentVersions = new Map([

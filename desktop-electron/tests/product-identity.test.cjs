@@ -9,7 +9,7 @@ test('uses Coding Tools identities without impersonating upstream', () => {
   assert.deepEqual(PRODUCT_IDENTITY, {
     appId: 'dev.codingtools.fullharness',
     productName: 'Coding Tools',
-    version: '0.7.0-rc.11',
+    version: '0.7.0-rc.12',
     protocolVersion: 1,
     connectorName: 'Coding Tools Native2',
     devConnectorName: 'Coding Tools Native2 DEV',

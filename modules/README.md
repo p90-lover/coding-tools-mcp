@@ -88,6 +88,17 @@ CT hosts original chrome in-app: CPA management panel, Codex Router Control Cent
 
 Claude/Anthropic traffic uses ProxyBridge `http://127.0.0.1:17891` (SOCKS/proxy inherit). Direct is not a supported path for that family.
 
+## Packaged layout (offline / preferLocal / noDownload)
+
+Electron Builder copies this tree twice next to `app.asar`:
+
+- `resources/modules/` — canonical. Packaged `electron/main.cjs` does `require("../../modules/host.cjs")`.
+- `resources/app-modules/` — simon/offline alias of the same files.
+
+Do **not** git-clone or download handlers at runtime. `preferLocal` / `noDownload` means use the extraResources payload already in the installer. Five-stack Start still uses bundled-source (`skipNetworkPrepare`); that is separate from `codingTools.apps`.
+
+Asar-only renderer patches are not enough: copy this tree into both `resources/modules` and `resources/app-modules`.
+
 ## Anneal / Postgres
 
 If Postgres is down, Anneal handlers return `{ ok: false, unavailable: true, dependency: "postgres" }`. The Coding Tools shell stays up.

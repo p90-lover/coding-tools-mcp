@@ -13,7 +13,7 @@ const {
   skipFiveStackPackageEntry,
 } = require("../scripts/prepare-package-resources.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.11";
+const PRODUCT_VERSION = "0.7.0-rc.12";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
@@ -530,6 +530,15 @@ test("package and runtime preparation use repository aiTemp retention without de
     {
       from: "../modules",
       to: "modules",
+      filter: [
+        "**/*",
+        "!**/node_modules/**",
+        "!**/source/test/**",
+      ],
+    },
+    {
+      from: "../modules",
+      to: "app-modules",
       filter: [
         "**/*",
         "!**/node_modules/**",

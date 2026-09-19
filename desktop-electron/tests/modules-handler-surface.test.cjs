@@ -26,7 +26,18 @@ const LIFECYCLE = Object.freeze([
 ]);
 
 const EXPECTED_OPS = Object.freeze({
-  cpa: [...LIFECYCLE, "health", "models", "chatCompletions", "managementHealth"],
+  cpa: [
+    ...LIFECYCLE,
+    "health",
+    "models",
+    "chatCompletions",
+    "managementHealth",
+    "listProviders",
+    "providers",
+    "linkProvider",
+    "unlinkProvider",
+    "providerStatus",
+  ],
   "codex-router": [...LIFECYCLE, "health", "models", "chatCompletions", "sync"],
   "commandcode-proxy": [
     ...LIFECYCLE,
@@ -148,6 +159,22 @@ function createFixtureHost(overrides = {}) {
         calls.push(["applyCommandCodeProxyPlan", args]);
         return { applied: true, provider: args.provider || "commandcode" };
       },
+      loopbackRequest: (id) => {
+        if (id === "cpa") {
+          return {
+            origin: "http://127.0.0.1:8317/",
+            managementHeaders: { Authorization: "Bearer test-mgmt" },
+          };
+        }
+        if (id === "codex-router") {
+          return { origin: "http://127.0.0.1:4202/" };
+        }
+        return { origin: `http://127.0.0.1:${id === "commandcode-proxy" ? "9090" : "6768"}/` };
+      },
+      listProviders: async () => ({ ok: true, accounts: [], summary: { total: 0, enabled: 0, connected: 0, disabled: 0, archived: 0 } }),
+      linkProvider: async (input) => ({ ok: true, linked: true, provider: input?.provider || "test" }),
+      unlinkProvider: async (input) => ({ ok: true, unlinked: true, provider: input?.provider || "test" }),
+      providerStatus: async () => ({ ok: true, status: "unknown" }),
       ...overrides.services,
     },
     actUpstream: overrides.actUpstream || (async (input) => {
@@ -327,6 +354,9 @@ test("CPA, Router, and CommandCode key operations dispatch through the in-proces
     if (request.pathname === "/management.html") {
       return { statusCode: 200, body: "<html></html>" };
     }
+    if (request.pathname === "/v0/management/auth-files") {
+      return { statusCode: 200, body: JSON.stringify({ files: [{ name: "acct.json", provider: "openai", status: "ok" }] }) };
+    }
     return { statusCode: 200, body: JSON.stringify({ ok: true }) };
   });
 
@@ -355,6 +385,24 @@ test("CPA, Router, and CommandCode key operations dispatch through the in-proces
     const management = await apps.call({ moduleId: "cpa", operation: "managementHealth" });
     assert.equal(management.ok, true);
     assert.equal(management.result.reachable, true);
+    assert.equal(management.result.authFileCount, 1);
+
+    const listed = await apps.invoke({ handle: "cpa", operation: "listProviders" });
+    assert.equal(listed.ok, true);
+    const linked = await apps.call({
+      moduleId: "cpa",
+      operation: "linkProvider",
+      arguments: { provider: "openai" },
+    });
+    assert.equal(linked.ok, true);
+    const status = await apps.invoke({ handle: "cpa", operation: "providerStatus" });
+    assert.equal(status.ok, true);
+    const unlinked = await apps.call({
+      moduleId: "cpa",
+      operation: "unlinkProvider",
+      arguments: { provider: "openai" },
+    });
+    assert.equal(unlinked.ok, true);
 
     const routerSync = await apps.invoke({ handle: "codex-router", operation: "sync" });
     assert.equal(routerSync.ok, true);
