@@ -18,8 +18,22 @@ function createCodingToolsAppsHost({
   registry = defaultRegistry,
 } = {}) {
   function contextFor(moduleId) {
+    const base = services && typeof services === "object" ? services : {};
     return {
-      services,
+      services: {
+        ...base,
+        loopbackRequest: () => (
+          typeof base.loopbackRequest === "function" ? base.loopbackRequest(moduleId) : null
+        ),
+        explainEmptyModels: (details) => (
+          typeof base.explainEmptyModels === "function"
+            ? base.explainEmptyModels(moduleId, details)
+            : null
+        ),
+        providerCatalog: () => (
+          typeof base.providerCatalog === "function" ? base.providerCatalog(moduleId) : null
+        ),
+      },
       act: actUpstream,
       actUpstream,
       inspect: typeof services?.inspect === "function"
@@ -57,14 +71,19 @@ function createCodingToolsAppsHost({
     const listed = list();
     return {
       ...listed,
-      modules: listed.modules.map((entry) => ({
-        ...entry,
-        operations: registry.operations(entry.id).map((name) => ({
-          name,
-          readOnly: isReadOnly(entry.id, name),
-          description: "",
-        })),
-      })),
+      modules: listed.modules.map((entry) => {
+        const handler = registry.get(entry.id)?.handler;
+        const specs = Array.isArray(handler?.module?.operations) ? handler.module.operations : [];
+        const byName = new Map(specs.map((spec) => [spec.name, spec]));
+        return {
+          ...entry,
+          operations: registry.operations(entry.id).map((name) => ({
+            name,
+            readOnly: isReadOnly(entry.id, name),
+            description: byName.get(name)?.description || "",
+          })),
+        };
+      }),
     };
   }
 

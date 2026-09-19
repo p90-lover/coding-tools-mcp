@@ -48,6 +48,7 @@ const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
 const { createCodingToolsAppsHost } = require("../../modules/host.cjs");
+const { createAppsProviderServices } = require("./apps-provider-services.cjs");
 const {
   createLazyFactory,
   createRendererLoader,
@@ -1631,6 +1632,7 @@ async function start() {
       powerSaveBlocker,
     },
   });
+  const providerServices = createAppsProviderServices({ providerNetworkReady });
   appsHost = createCodingToolsAppsHost({
     services: {
       inspect: (id) => externalServicesController.inspect(id),
@@ -1639,6 +1641,13 @@ async function start() {
       restart: (id) => externalServicesController.restart(id),
       repair: (id) => externalServicesController.repairManagedComponent(id),
       syncCodexRouter: () => externalServicesController.syncCodexRouter(),
+      loopbackRequest: (id) => externalServicesController.loopbackRequest?.(id) || null,
+      listProviders: (input) => providerServices.listProviders(input),
+      linkProvider: (input) => providerServices.linkProvider(input),
+      unlinkProvider: (input) => providerServices.unlinkProvider(input),
+      providerStatus: (input) => providerServices.providerStatus(input),
+      providerCatalog: (id) => providerServices.providerCatalog(id),
+      explainEmptyModels: (id, details) => providerServices.explainEmptyModels(id, details),
       commandCodeProxyPlan: (input = {}) => {
         const snapshot = externalServicesController.snapshot();
         const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");

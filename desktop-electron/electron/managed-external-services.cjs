@@ -306,6 +306,80 @@ function createManagedExternalServicesController({
     };
   }
 
+  function routerCallerKey() {
+    try {
+      const managed = managedController.runtimeConfiguration("codex-router");
+      const fromManaged = String(managed?.callerKey || "").trim();
+      if (fromManaged) return fromManaged;
+    } catch {}
+    try {
+      return String(baseController.runtimeEnvironment()?.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  function loopbackRequest(serviceId) {
+    if (serviceId === "cpa") {
+      const origin = SERVICE_ENDPOINTS.cpa.endpoint;
+      let headers = {};
+      let managementHeaders = {};
+      let credentialReason = null;
+      try {
+        const connection = cpaConnection();
+        if (!connection) {
+          credentialReason = "Managed CPA is not installed";
+        } else {
+          if (connection.proxyApiKey) {
+            headers = { Authorization: `Bearer ${connection.proxyApiKey}` };
+          } else {
+            credentialReason = "CPA proxy API key is unavailable";
+          }
+          if (connection.managementKey) {
+            managementHeaders = {
+              Authorization: `Bearer ${connection.managementKey}`,
+              "X-Management-Key": connection.managementKey,
+            };
+          }
+        }
+      } catch (error) {
+        credentialReason = error instanceof Error ? error.message : String(error);
+      }
+      return {
+        origin,
+        headers,
+        managementHeaders,
+        modelsPath: "/v1/models",
+        chatPath: "/v1/chat/completions",
+        healthPath: "/v1/models",
+        credentialReason,
+      };
+    }
+    if (serviceId === "codex-router") {
+      const origin = SERVICE_ENDPOINTS["codex-router"].endpoint;
+      const callerKey = routerCallerKey();
+      if (!callerKey) {
+        return {
+          origin,
+          headers: {},
+          modelsPath: "/v1/models",
+          chatPath: "/v1/chat/completions",
+          healthPath: "/",
+          credentialReason: "Codex Router caller secret is not configured",
+        };
+      }
+      const prefix = `/_codex-router/${encodeURIComponent(callerKey)}`;
+      return {
+        origin,
+        headers: {},
+        modelsPath: `${prefix}/v1/models`,
+        chatPath: `${prefix}/v1/chat/completions`,
+        healthPath: `${prefix}/v1/models`,
+      };
+    }
+    return null;
+  }
+
   function dispose() {
     managedController.dispose();
     baseController.dispose();
@@ -342,6 +416,7 @@ function createManagedExternalServicesController({
     loopbackMesh: () => buildLoopbackMesh(combinedSnapshot().services),
     upstreamConfiguration,
     cpaConnection,
+    loopbackRequest,
     installManagedComponent,
     repairManagedComponent,
     setManagedComponentCredential,
