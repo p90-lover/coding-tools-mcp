@@ -46,8 +46,10 @@ function readLauncherApi() {
   return window.codexWebLauncher;
 }
 
+let api = readLauncherApi();
+
 export function App() {
-  const [api, setApi] = useState(readLauncherApi);
+  const [apiReady, setApiReady] = useState(() => Boolean(api));
   const [apiTimedOut, setApiTimedOut] = useState(false);
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
@@ -57,13 +59,17 @@ export function App() {
   const documentLanguage = snapshot?.state.language ?? "en";
 
   useEffect(() => {
-    if (api) return undefined;
+    if (api) {
+      setApiReady(true);
+      return undefined;
+    }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const attempt = (index: number) => {
       const current = readLauncherApi();
       if (current) {
-        setApi(() => current);
+        api = current;
+        setApiReady(true);
         return;
       }
       if (index >= IPC_API_RETRY_DELAYS_MS.length - 1) {
@@ -79,7 +85,7 @@ export function App() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [api]);
+  }, [apiReady]);
 
   useEffect(() => {
     document.documentElement.lang = documentLanguage;
@@ -125,7 +131,7 @@ export function App() {
       unsubscribeLog();
       unsubscribeUpdate();
     };
-  }, [api]);
+  }, [apiReady]);
 
   const updateState = useCallback((state: LauncherState) => {
     setSnapshot((current) => current
@@ -138,7 +144,7 @@ export function App() {
       : current);
   }, []);
 
-  if (!api) {
+  if (!apiReady || !api) {
     return apiTimedOut
       ? <FatalMessage message="Launcher IPC is unavailable." />
       : <LaunchLoading />;
