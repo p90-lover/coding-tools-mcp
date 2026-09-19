@@ -26,14 +26,14 @@ test("CPA retains every original CLIProxyAPI management section", () => {
   }
 });
 
-test("the original CPA host retains selected section and shows reconnect-aware status", () => {
+test("the original CPA host retains a valid selected section and shows reconnect-aware status", () => {
   const surface = read("src/features/OriginalUiSurface.tsx");
   const types = read("src/types.ts");
   const styles = read("src/features/original-ui.css");
 
   assert.match(types, /selectedSection\?: string/);
   assert.match(types, /uiStatus\?: "ready" \| "starting" \| "reconnecting" \| "blocked" \| "stopped" \| "offline"/);
-  assert.match(surface, /function selectedFrom\(tool: OriginalUiSnapshot \| null\)/);
+  assert.match(surface, /function selectedFrom\(tool: OriginalUiSnapshot \| null, preferredSection = ""\)/);
   assert.match(surface, /function displayStatusOf\(tool: OriginalUiSnapshot\)/);
   assert.match(surface, /className="original-ui-section-tabs"/);
   assert.match(surface, /tool\.sections\.map\(\(section\) =>/);
@@ -48,12 +48,12 @@ test("the original CPA host retains selected section and shows reconnect-aware s
   assert.match(styles, /status-blocked/);
 });
 
-test("CPA recovery reopens the last selected original section", () => {
+test("CPA recovery reopens the last valid selected original section", () => {
   const surface = read("src/features/OriginalUiSurface.tsx");
   assert.match(surface, /const recovered = lastStatus\.current !== ""/);
   assert.match(surface, /const generationBumped = generation > lastGeneration\.current/);
-  assert.match(surface, /openSection\(selectedSection \|\| selectedFrom\(tool\)\)/);
-  assert.match(surface, /setSelectedSection\(\(value\) => value \|\| selectedFrom\(current\)\)/);
+  assert.match(surface, /openSection\(selectedFrom\(tool, selectedSection\)\)/);
+  assert.match(surface, /setSelectedSection\(\(value\) => selectedFrom\(current, value\)\)/);
 });
 
 test("CPA management key stays behind focused privileged IPC", () => {
