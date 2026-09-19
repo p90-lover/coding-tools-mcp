@@ -50,11 +50,16 @@ function pageWorkspaces(workspaces, cursor = 0, limit = 25) {
 function createCodingToolsShellBridge({
   assertFocusedMainWindow,
   headlessHost,
+  managedAppApi,
   updateController,
 }) {
   const requireHost = () => {
     if (!headlessHost) throw new Error("Local Coding Tools service is unavailable");
     return headlessHost;
+  };
+  const requireManagedAppApi = () => {
+    if (!managedAppApi) throw new Error("Managed application API is unavailable");
+    return managedAppApi;
   };
 
   const requestHeadless = (pathname, body = null, method) => requireHost().request(pathname, body, { method });
@@ -126,10 +131,19 @@ function createCodingToolsShellBridge({
 
     async integrationsSnapshot(event) {
       assertFocusedMainWindow(event, false);
-      return {
-        available: false,
-        reason: "Paseo, Anneal, and provider integrations are owned by sibling Desktop panels.",
-      };
+      return requireManagedAppApi().snapshot();
+    },
+
+    async managedAppsSnapshot(event) {
+      assertFocusedMainWindow(event, false);
+      return requireManagedAppApi().snapshot();
+    },
+
+    async managedAppInvoke(event, input) {
+      const mutating = ["install", "repair", "start", "stop", "restart", "sync"]
+        .includes(input?.operation);
+      assertFocusedMainWindow(event, mutating);
+      return requireManagedAppApi().invoke(input);
     },
 
     async updatesStatus(event) {

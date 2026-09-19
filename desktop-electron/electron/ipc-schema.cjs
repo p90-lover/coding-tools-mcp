@@ -425,6 +425,26 @@ const executionUpdateRequest = Object.freeze({
   additionalProperties: false,
 });
 
+const managedAppInvokeRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["handle", "operation"]),
+  properties: Object.freeze({
+    handle: Object.freeze({
+      type: "string",
+      enum: Object.freeze(["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]),
+    }),
+    operation: Object.freeze({
+      type: "string",
+      enum: Object.freeze([
+        "inspect", "providers", "plan", "install", "repair", "start", "stop", "restart", "sync", "open",
+      ]),
+    }),
+    arguments: genericObject,
+    confirm: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
 const CONTRACTS = Object.freeze({
   "runtime.status": Object.freeze({
     channel: "coding-tools:runtime:status",
@@ -464,6 +484,16 @@ const CONTRACTS = Object.freeze({
   "integrations.snapshot": Object.freeze({
     channel: "coding-tools:integrations:snapshot",
     request: emptyObject,
+    response: genericObject,
+  }),
+  "apps.snapshot": Object.freeze({
+    channel: "coding-tools:apps:snapshot",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "apps.invoke": Object.freeze({
+    channel: "coding-tools:apps:invoke",
+    request: managedAppInvokeRequest,
     response: genericObject,
   }),
   "execution.read": Object.freeze({

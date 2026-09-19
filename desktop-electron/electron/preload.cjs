@@ -156,6 +156,10 @@ const codingToolsApi = Object.freeze({
   integrations: Object.freeze({
     snapshot: () => invokeContract(ipcRenderer, "integrations.snapshot"),
   }),
+  apps: Object.freeze({
+    snapshot: () => invokeContract(ipcRenderer, "apps.snapshot"),
+    invoke: (input) => invokeContract(ipcRenderer, "apps.invoke", input),
+  }),
   execution: Object.freeze({
     read: (input) => invokeContract(ipcRenderer, "execution.read", input),
     provider: (input) => invokeContract(ipcRenderer, "execution.provider", input),

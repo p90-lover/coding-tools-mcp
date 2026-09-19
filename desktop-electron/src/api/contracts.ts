@@ -24,6 +24,47 @@ export interface JsonObject {
   readonly [key: string]: JsonValue;
 }
 
+export type ManagedAppHandle = "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+export type ManagedAppOperation =
+  | "inspect"
+  | "providers"
+  | "plan"
+  | "install"
+  | "repair"
+  | "start"
+  | "stop"
+  | "restart"
+  | "sync"
+  | "open";
+
+export interface ManagedAppSummary {
+  readonly handle: ManagedAppHandle;
+  readonly name: string;
+  readonly kind: "provider-network" | "managed-service" | "managed-upstream";
+  readonly status: string;
+  readonly available: boolean;
+  readonly operations: readonly ManagedAppOperation[];
+  readonly endpoint?: string | null;
+  readonly executionEndpoint?: string | null;
+  readonly accountCount: number;
+  readonly connectedAccountCount: number;
+  readonly modelCount: number | null;
+  readonly error: string | null;
+  readonly [key: string]: JsonValue | undefined;
+}
+
+export interface ManagedAppsSnapshot {
+  readonly version: 1;
+  readonly apps: readonly ManagedAppSummary[];
+}
+
+export interface ManagedAppInvokeInput {
+  readonly handle: ManagedAppHandle;
+  readonly operation: ManagedAppOperation;
+  readonly arguments?: JsonObject;
+  readonly confirm?: boolean;
+}
+
 export interface CodingToolsApi {
   readonly runtime: {
     status(): Promise<JsonObject>;
@@ -52,7 +93,11 @@ export interface CodingToolsApi {
     status(): Promise<JsonObject>;
   };
   readonly integrations: {
-    snapshot(): Promise<JsonObject>;
+    snapshot(): Promise<ManagedAppsSnapshot>;
+  };
+  readonly apps: {
+    snapshot(): Promise<ManagedAppsSnapshot>;
+    invoke(input: ManagedAppInvokeInput): Promise<JsonObject>;
   };
   readonly execution: {
     read(input: {
