@@ -40,10 +40,10 @@ test("the product shell exposes one localized Managed Apps destination instead o
   assert.match(app, /selectManagedAppTab\("anneal"\)/);
   assert.match(managedApps, /id: "commandcode-proxy"/);
   assert.match(managedApps, /onSelectedTabChange\(tab\)/);
-  assert.match(app, /language === "zh-TW" \? "受管理應用程式"/);
-  assert.match(app, /language === "zh-CN" \? "托管应用"/);
-  assert.match(app, /language === "ja" \? "管理対象アプリ"/);
-  assert.match(app, /: "Managed Apps"/);
+  assert.match(app, /language === "zh-TW"\s*\?\s*"受管理應用程式"/);
+  assert.match(app, /language === "zh-CN"\s*\?\s*"托管应用"/);
+  assert.match(app, /language === "ja"\s*\?\s*"管理対象アプリ"/);
+  assert.match(app, /:\s*"Managed Apps"/);
   assert.match(app, /surface === "apps"/);
   assert.match(app, /<ManagedAppsSurface/);
 });
