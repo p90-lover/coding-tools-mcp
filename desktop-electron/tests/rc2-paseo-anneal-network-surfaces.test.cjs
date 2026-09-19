@@ -26,10 +26,11 @@ test("Electron exposes separate Paseo, Anneal, and Network surfaces through comp
   assert.match(app, /NetworkProxySurface/);
   assert.match(paseo, /orchestrationCopy/);
   assert.match(anneal, /orchestrationCopy/);
-  assert.match(copy, /Paseo Orchestrator/);
-  assert.match(copy, /Paseo 協調器/);
-  assert.match(copy, /Anneal Tasks/);
-  assert.match(copy, /Anneal 任務/);
+  assert.match(copy, /paseoTitle:\s*"Paseo"/);
+  assert.match(copy, /paseoOrchestrator:\s*"Main orchestrator"/);
+  assert.match(copy, /paseoOrchestrator:\s*"主協調器"/);
+  assert.match(copy, /annealTitle:\s*"Anneal Tasks"/);
+  assert.match(copy, /annealTitle:\s*"Anneal 任務"/);
   assert.match(network, /localText\(language, "Network Proxy", "網路代理"/);
 });
 
