@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { JsonObject } from "../api/contracts";
 import type { Language, OriginalUiId, OriginalUiSnapshot, OriginalUiCatalog } from "../types";
 import "./original-ui.css";
 
@@ -85,7 +86,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     setSelectedSection("");
   }, [toolId]);
 
-  const callModule = async (operation: string, args: Record<string, unknown> = {}) => {
+  const callModule = async (operation: string, args: JsonObject = {}) => {
     const apps = window.codingTools?.apps;
     if (apps?.invoke) {
       return apps.invoke({ handle: toolId, moduleId: toolId, operation, arguments: args });
