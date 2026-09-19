@@ -89,7 +89,7 @@ function wrappers(home, state, env) {
       "@echo off",
       "setlocal",
       ...wrapperExports(env).map(([name, value]) => `set ${name}=${value}`),
-      `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${quoteCmd(path.join(home, "codex-router.ps1"))} %*`,
+      `powershell.exe -NoProfile -File ${quoteCmd(path.join(home, "codex-router.ps1"))} %*`,
       "",
     ].join("\r\n"), 0o600);
     writeWrapper(path.join(bin, "curate-models.cmd"), [
@@ -182,7 +182,7 @@ function prepare(home, state) {
   const env = environment(home, state);
   if (process.platform === "win32") {
     runChecked("powershell.exe", [
-      "-NoProfile", "-ExecutionPolicy", "Bypass",
+      "-NoProfile",
       "-File", requiredFile(home, "install.ps1"),
       "-CheckoutInstall", "-PrepareOnly", "-Target", "codex", "-InstallDir", home,
     ], home, env);

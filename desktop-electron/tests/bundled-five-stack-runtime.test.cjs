@@ -167,6 +167,14 @@ test("production Start is fail-closed and never fetches components from the netw
   assert.match(originalUi, /is not downloaded separately/);
 });
 
+test("Windows managed Codex prepare launches PowerShell with -NoProfile -File only", () => {
+  const adapter = read("electron/codex-router-managed.cjs");
+  assert.doesNotMatch(adapter, /ExecutionPolicy/);
+  assert.doesNotMatch(adapter, /EncodedCommand/);
+  assert.match(adapter, /powershell\.exe -NoProfile -File /);
+  assert.match(adapter, /runChecked\("powershell\.exe", \[\s*"-NoProfile",\s*"-File"/);
+});
+
 test("Codex Router prepare unpacks from CODING_TOOLS_BUNDLED.json without install.ps1 or bin/install", () => {
   const home = temporaryDirectory("coding-tools-router-bundled-home");
   const state = temporaryDirectory("coding-tools-router-bundled-state");
