@@ -59,7 +59,7 @@ function messageOf(value: unknown): string {
 function appStatusLabel(language: Language, app: ManagedAppSummary | undefined): string {
   if (!app) return text(language, "Waiting for app controller", "正在等候應用程式控制器");
   if (app.setup.status === "blocked") {
-    return text(language, "Setup needs credentials", "設定需要憑證");
+    return text(language, "Setup needs input", "設定需要輸入");
   }
   if (app.setup.status === "error" || app.status === "error") {
     return app.error || app.setup.message || text(language, "Action required", "需要處理");
@@ -97,9 +97,7 @@ export function ManagedAppsSurface({
         if (!cancelled) setSnapshot(next);
       })
       .catch((cause) => setError(messageOf(cause)));
-    const unsubscribe = api.onChanged((next) => {
-      if (!cancelled) setSnapshot(next);
-    });
+    const unsubscribe = api.onChanged(setSnapshot);
     return () => {
       cancelled = true;
       unsubscribe();
