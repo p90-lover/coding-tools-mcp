@@ -53,7 +53,7 @@ test("stale main process falls back to hide and restore instead of leaving ChatG
   ]);
 });
 
-test("surface compatibility is narrowly scoped and main plus preload share one channel constant", async () => {
+test("surface compatibility is narrowly scoped and remains wired through preload plus main", async () => {
   const invoke = createBrowserSurfaceActiveInvoker({
     invoke: async () => {
       throw new Error("Browser host failed for an unrelated reason");
@@ -65,5 +65,5 @@ test("surface compatibility is narrowly scoped and main plus preload share one c
   const preload = fs.readFileSync(path.join(electronRoot, "preload.cjs"), "utf8");
   const main = fs.readFileSync(path.join(electronRoot, "main.cjs"), "utf8");
   assert.match(preload, /createBrowserSurfaceActiveInvoker/);
-  assert.match(main, /BROWSER_SURFACE_ACTIVE_CHANNEL/);
+  assert.match(main, /handle\("launcher:browser-surface-active"/);
 });
