@@ -14,6 +14,7 @@ on:
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/src/api/contracts.ts'
       - 'desktop-electron/tests/managed-app-api.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-wiring.test.cjs'
   pull_request:
     branches:
       - integration/v0.7.0-rc.9-one-app-managed
@@ -27,6 +28,7 @@ on:
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/src/api/contracts.ts'
       - 'desktop-electron/tests/managed-app-api.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-wiring.test.cjs'
   workflow_dispatch:
 
 permissions:
@@ -79,7 +81,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node --test desktop-electron/tests/managed-app-api.test.cjs
+          node --test \
+            desktop-electron/tests/managed-app-api.test.cjs \
+            desktop-electron/tests/managed-app-api-wiring.test.cjs
           node --check desktop-electron/electron/managed-app-api.cjs
           node --check desktop-electron/electron/coding-tools-shell-bridge.cjs
           node --check desktop-electron/electron/ipc-schema.cjs
