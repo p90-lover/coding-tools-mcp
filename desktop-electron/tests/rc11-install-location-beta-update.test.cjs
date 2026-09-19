@@ -74,7 +74,10 @@ test("a discovered prerelease prompts Install Now or Later before download", () 
 test("current prerelease discovery keeps a newer beta eligible", () => {
   const { compareVersions, selectCompatibleRelease } = require(updatePath);
   const current = manifest.version;
-  const older = current.replace(/\.\d+$/u, (value) => String(Math.max(0, Number(value.slice(1)) - 1)).padStart(value.length - 1, "0"));
+  const older = current.replace(/\.\d+$/u, (value) => {
+    const previous = Math.max(0, Number(value.slice(1)) - 1);
+    return `.${String(previous).padStart(value.length - 1, "0")}`;
+  });
   assert.equal(compareVersions(current, older), 1);
   assert.equal(compareVersions("0.7.0", current), 1);
 
