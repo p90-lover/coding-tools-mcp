@@ -50,7 +50,7 @@ function copyReleaseTemplate(sourcePath, targetPath) {
     .replaceAll(fromVersion, toVersion)
     .replaceAll('rc11', 'rc12')
     .replaceAll('RC11', 'RC12');
-  if (transformed === source || transformed.includes(fromVersion)) {
+  if (source.includes(fromVersion) && transformed.includes(fromVersion)) {
     fail('RC12_TEMPLATE_TRANSFORM_FAILED', `${sourcePath} -> ${targetPath}`);
   }
   write(targetPath, transformed);
