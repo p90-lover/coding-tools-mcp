@@ -36,26 +36,38 @@ function createBrowserSurfaceActiveInvoker(ipcRenderer) {
       // A running pre-update main process can host a newly reloaded renderer/preload.
       // Older main processes understand show/hide but not the surface-ownership channel.
       // Hide the native WebContentsView while another React surface is selected so it
-      // cannot remain above the renderer. Preserve whether it was visible so returning
-      // to Browser does not reveal a view the user had already hidden.
+      // cannot remain above the renderer. Commit fallback state only after the matching
+      // mutation succeeds, keeping failed hide/show operations safely retryable.
       if (!nextActive) {
-        if (!hiddenByCompatibilityFallback) {
-          hiddenByCompatibilityFallback = true;
-          try {
-            const snapshot = await ipcRenderer.invoke(SNAPSHOT_CHANNEL);
-            restoreAfterCompatibilityFallback = snapshot?.browser?.visible === true;
-          } catch {
-            restoreAfterCompatibilityFallback = false;
-          }
+        if (hiddenByCompatibilityFallback) {
+          return ipcRenderer.invoke(BROWSER_HIDE_CHANNEL);
         }
-        return ipcRenderer.invoke(BROWSER_HIDE_CHANNEL);
+
+        let shouldRestore = false;
+        try {
+          const snapshot = await ipcRenderer.invoke(SNAPSHOT_CHANNEL);
+          shouldRestore = snapshot?.browser?.visible === true;
+        } catch {
+          shouldRestore = false;
+        }
+
+        const result = await ipcRenderer.invoke(BROWSER_HIDE_CHANNEL);
+        hiddenByCompatibilityFallback = true;
+        restoreAfterCompatibilityFallback = shouldRestore;
+        return result;
       }
 
       if (!hiddenByCompatibilityFallback) return null;
-      const shouldRestore = restoreAfterCompatibilityFallback;
+      if (!restoreAfterCompatibilityFallback) {
+        hiddenByCompatibilityFallback = false;
+        restoreAfterCompatibilityFallback = false;
+        return null;
+      }
+
+      const result = await ipcRenderer.invoke(BROWSER_SHOW_CHANNEL);
       hiddenByCompatibilityFallback = false;
       restoreAfterCompatibilityFallback = false;
-      return shouldRestore ? ipcRenderer.invoke(BROWSER_SHOW_CHANNEL) : null;
+      return result;
     }
   }
 
