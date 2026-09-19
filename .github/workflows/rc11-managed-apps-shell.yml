@@ -15,6 +15,8 @@ on:
       - desktop-electron/src/features/ExternalServicesSurface.tsx
       - desktop-electron/src/features/ManagedAppsSurface.tsx
       - desktop-electron/src/features/managed-apps.css
+      - desktop-electron/tests/desktop-shell-fidelity.test.cjs
+      - desktop-electron/tests/provider-console-saas.test.cjs
       - desktop-electron/tests/rc11-managed-apps-shell.test.cjs
       - desktop-electron/tests/state.test.cjs
   pull_request:
@@ -32,6 +34,8 @@ on:
       - desktop-electron/src/features/ExternalServicesSurface.tsx
       - desktop-electron/src/features/ManagedAppsSurface.tsx
       - desktop-electron/src/features/managed-apps.css
+      - desktop-electron/tests/desktop-shell-fidelity.test.cjs
+      - desktop-electron/tests/provider-console-saas.test.cjs
       - desktop-electron/tests/rc11-managed-apps-shell.test.cjs
       - desktop-electron/tests/state.test.cjs
   workflow_dispatch:
@@ -71,6 +75,7 @@ jobs:
               desktop-electron/tests/rc11-managed-apps-shell.test.cjs \
               desktop-electron/tests/state.test.cjs \
               desktop-electron/tests/desktop-shell-fidelity.test.cjs \
+              desktop-electron/tests/provider-console-saas.test.cjs \
               desktop-electron/tests/renderer-wiring.test.cjs
           ) 2>&1 | tee aiTemp/rc11-managed-apps/evidence/results.txt
           grep -F '# fail 0' aiTemp/rc11-managed-apps/evidence/results.txt
