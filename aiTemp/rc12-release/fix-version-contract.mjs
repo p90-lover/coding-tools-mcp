@@ -22,6 +22,12 @@ replaceExactlyOnce(
 );
 
 replaceExactlyOnce(
+  'tests/codex-router-0.7-release.test.mjs',
+  "assert.equal(expectedInstaller, 'Coding.Tools_0.7.0-rc.11_win_x64.exe');",
+  "assert.equal(expectedInstaller, 'Coding.Tools_0.7.0-rc.12_win_x64.exe');",
+);
+
+replaceExactlyOnce(
   'aiTemp/rc12-release/run-windows-release.mjs',
   "focused Provider Center, Paseo, Anneal, proxy, localization, and rc.11 identity contracts",
   "focused Provider Center, Paseo, Anneal, proxy, localization, and rc.12 identity contracts",
