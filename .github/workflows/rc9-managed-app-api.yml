@@ -13,9 +13,11 @@ on:
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ManagedAppsSurface.tsx'
       - 'desktop-electron/tests/managed-app-api.test.cjs'
       - 'desktop-electron/tests/managed-app-api-wiring.test.cjs'
       - 'desktop-electron/tests/managed-app-api-degraded.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-ui.test.cjs'
   pull_request:
     branches:
       - integration/v0.7.0-rc.9-one-app-managed
@@ -28,9 +30,11 @@ on:
       - 'desktop-electron/electron/main.cjs'
       - 'desktop-electron/electron/preload.cjs'
       - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ManagedAppsSurface.tsx'
       - 'desktop-electron/tests/managed-app-api.test.cjs'
       - 'desktop-electron/tests/managed-app-api-wiring.test.cjs'
       - 'desktop-electron/tests/managed-app-api-degraded.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-ui.test.cjs'
   workflow_dispatch:
 
 permissions:
@@ -96,7 +100,8 @@ jobs:
           node --test \
             desktop-electron/tests/managed-app-api.test.cjs \
             desktop-electron/tests/managed-app-api-wiring.test.cjs \
-            desktop-electron/tests/managed-app-api-degraded.test.cjs
+            desktop-electron/tests/managed-app-api-degraded.test.cjs \
+            desktop-electron/tests/managed-app-api-ui.test.cjs
           node --check desktop-electron/electron/managed-app-api.cjs
           node --check desktop-electron/electron/coding-tools-shell-bridge.cjs
           node --check desktop-electron/electron/ipc-schema.cjs
@@ -126,7 +131,8 @@ jobs:
             desktop-electron/electron/ipc-schema.cjs \
             desktop-electron/electron/main.cjs \
             desktop-electron/electron/preload.cjs \
-            desktop-electron/src/api/contracts.ts
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ManagedAppsSurface.tsx
           if ! git diff --cached --quiet; then
             git commit -m 'feat(rc9): expose managed apps through Coding Tools API'
           fi
