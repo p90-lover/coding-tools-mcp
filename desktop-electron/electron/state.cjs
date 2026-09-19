@@ -3,6 +3,13 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 420;
 const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
+const MANAGED_APP_TAB_SET = new Set([
+  "cpa",
+  "codex-router",
+  "commandcode-proxy",
+  "paseo",
+  "anneal",
+]);
 
 const DEFAULT_STATE = Object.freeze({
   version: 1,
@@ -21,6 +28,7 @@ const DEFAULT_STATE = Object.freeze({
   browserSmokeVersion: null,
   sidebarOpen: true,
   sidebarWidth: 252,
+  managedAppTab: "cpa",
   mcpGuideStep: 0,
   sessionRefreshReminderAt: null,
 });
@@ -38,6 +46,9 @@ function readState(filePath) {
     delete state.bridgeEnabled;
     if (state.language !== null && state.language !== "en" && state.language !== "zh-CN" && state.language !== "zh-TW" && state.language !== "ja") {
       state.language = DEFAULT_STATE.language;
+    }
+    if (!MANAGED_APP_TAB_SET.has(state.managedAppTab)) {
+      state.managedAppTab = DEFAULT_STATE.managedAppTab;
     }
     for (const key of [
       "onboardingComplete",
@@ -97,6 +108,13 @@ function writeState(filePath, state) {
   writePrivateFileAtomic(filePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
+function validateManagedAppTab(value) {
+  if (typeof value !== "string" || !MANAGED_APP_TAB_SET.has(value)) {
+    throw new Error("Managed app tab is invalid");
+  }
+  return value;
+}
+
 function validateSidebarState(value) {
   if (!value || typeof value !== "object" || typeof value.open !== "boolean") {
     throw new Error("Sidebar state is invalid");
@@ -128,5 +146,6 @@ module.exports = {
   SIDEBAR_MIN_WIDTH,
   createStateStore,
   nextSessionRefreshReminderAt,
+  validateManagedAppTab,
   validateSidebarState,
 };
