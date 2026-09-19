@@ -107,15 +107,16 @@ jobs:
             exit 1
           fi
 
-      - name: Commit prepared source to the same branch
+      - name: Commit prepared non-workflow source to the same branch
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Workflow files were validated above but are published separately through
+          # an explicit reviewed connector write because GITHUB_TOKEN cannot mutate
+          # workflow definitions. No workflow content is silently dropped.
           git add \
-            .github/workflows/codex-router-multiprovider-release-rc11.yml \
-            .github/workflows/codex-router-multiprovider-release-rc12.yml \
             aiTemp/rc12-release/prepare-rc12.mjs \
             aiTemp/rc12-release/run-windows-release.mjs \
             aiTemp/rc12-release/verify-windows-migration.ps1 \
