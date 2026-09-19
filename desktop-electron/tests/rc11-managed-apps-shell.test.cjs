@@ -40,26 +40,28 @@ test("the product shell exposes one Managed Apps destination instead of six frag
   assert.match(app, /selectManagedAppTab\("anneal"\)/);
   assert.match(managedApps, /id: "commandcode-proxy"/);
   assert.match(managedApps, /onSelectedTabChange\(tab\)/);
-  assert.match(app, /language === "zh-TW" \? "受管理應用程式"/);
-  assert.match(app, /language === "zh-CN" \? "托管应用"/);
-  assert.match(app, /language === "ja" \? "管理対象アプリ"/);
-  assert.match(app, /: "Managed Apps"/);
+  assert.match(app, /language === "zh-TW" \? "受管理應用程式" : "Managed Apps"/);
   assert.match(app, /surface === "apps"/);
   assert.match(app, /<ManagedAppsSurface/);
 });
 
-test("Managed Apps copy keeps Simplified Chinese, Traditional Chinese, and Japanese distinct", () => {
+test("Managed Apps copy keeps Simplified Chinese, Traditional Chinese, Japanese, and English distinct", () => {
   const managedApps = read("src/features/ManagedAppsSurface.tsx");
   assert.doesNotMatch(managedApps, /language === "zh-TW" \|\| language === "zh-CN"/);
   assert.match(managedApps, /simplifiedChinese: string/);
   assert.match(managedApps, /traditionalChinese: string/);
   assert.match(managedApps, /japanese: string/);
-  assert.match(managedApps, /language === "zh-CN"/);
-  assert.match(managedApps, /language === "zh-TW"/);
-  assert.match(managedApps, /language === "ja"/);
+  assert.match(managedApps, /if \(language === "zh-CN"\) return simplifiedChinese/);
+  assert.match(managedApps, /if \(language === "zh-TW"\) return traditionalChinese/);
+  assert.match(managedApps, /if \(language === "ja"\) return japanese/);
+  assert.match(managedApps, /return english/);
   assert.match(managedApps, /托管应用/);
   assert.match(managedApps, /受管理應用程式/);
   assert.match(managedApps, /管理対象アプリ/);
+  assert.match(managedApps, /MANAGED APPS/);
+  assert.match(managedApps, /托管应用标签页/);
+  assert.match(managedApps, /受管理應用程式分頁/);
+  assert.match(managedApps, /管理対象アプリのタブ/);
 });
 
 test("each managed-app tab reuses the real current runtime surface without storing secrets in tab state", () => {
