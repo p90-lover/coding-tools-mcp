@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/rc11-managed-app-api-handles
+      - fix/rc11-managed-app-api-cookie-redaction
     paths:
       - '.github/workflows/rc11-managed-app-api.yml'
       - 'aiTemp/rc11-managed-app-api/**'
@@ -18,6 +19,7 @@ on:
   pull_request:
     branches:
       - feature/rc11-managed-apps-shell-current
+      - feature/rc11-managed-app-api-handles
     paths:
       - '.github/workflows/rc11-managed-app-api.yml'
       - 'aiTemp/rc11-managed-app-api/**'
@@ -111,12 +113,20 @@ jobs:
           node aiTemp/rc11-managed-app-api/materialize.mjs \
             2>&1 | tee aiTemp/rc11-managed-app-api/evidence/materialize.txt
 
+      - name: Harden managed app API cookie redaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc11-managed-app-api/harden-cookie-redaction.mjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/cookie-redaction.txt
+
       - name: Run focused GREEN contracts
         shell: bash
         run: |
           set -euo pipefail
           node --test \
             desktop-electron/tests/rc11-managed-app-api.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-cookie-redaction.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-degraded.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-wiring.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-ui.test.cjs \
@@ -161,16 +171,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          branch='feature/rc11-managed-app-api-handles'
+          branch="$GITHUB_REF_NAME"
           git add \
             desktop-electron/electron/coding-tools-shell-bridge.cjs \
             desktop-electron/electron/ipc-schema.cjs \
             desktop-electron/electron/main.cjs \
+            desktop-electron/electron/managed-app-api.cjs \
             desktop-electron/electron/preload.cjs \
             desktop-electron/src/api/contracts.ts \
             desktop-electron/src/features/ManagedAppsSurface.tsx
           if ! git diff --cached --quiet; then
-            git commit -m 'feat(rc11): expose managed apps through Coding Tools API'
+            git commit -m 'fix(rc11): harden managed app API public projection'
           fi
           git fetch origin "$branch" --no-tags
           current_remote="$(git rev-parse "origin/$branch")"
