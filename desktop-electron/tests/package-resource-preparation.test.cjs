@@ -527,5 +527,14 @@ test("package and runtime preparation use repository aiTemp retention without de
       from: "build/package-resources",
       to: ".",
     },
+    {
+      from: "../modules",
+      to: "modules",
+      filter: [
+        "**/*",
+        "!**/node_modules/**",
+        "!**/source/test/**",
+      ],
+    },
   ]);
 });

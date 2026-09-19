@@ -74,6 +74,15 @@
       {
         "from": "build/package-resources",
         "to": "."
+      },
+      {
+        "from": "../modules",
+        "to": "modules",
+        "filter": [
+          "**/*",
+          "!**/node_modules/**",
+          "!**/source/test/**"
+        ]
       }
     ],
     "mac": {
