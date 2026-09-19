@@ -321,6 +321,8 @@ test("codingTools.apps list/catalog/call/invoke stay in-process and inspect does
     assert.equal(Array.isArray(catalog.modules), true);
     assert.equal(catalog.transport, "in-process");
 
+    const loopbackInspect = ["cpa", "codex-router"];
+    const bundledInspect = ["commandcode-proxy", "paseo", "anneal"];
     for (const moduleId of MODULE_IDS) {
       const viaCall = await apps.call({ moduleId, operation: "inspect" });
       assert.equal(viaCall.ok, true, `${moduleId} call inspect`);
@@ -329,14 +331,23 @@ test("codingTools.apps list/catalog/call/invoke stay in-process and inspect does
       assert.equal(viaCall.transport, "in-process");
       assert.equal(viaCall.result.status, "ready");
       assert.doesNotMatch(JSON.stringify(viaCall), /401/);
+      assert.doesNotMatch(JSON.stringify(viaCall), /ECONNREFUSED/);
 
       const viaInvoke = await apps.invoke({ handle: moduleId, operation: "inspect" });
       assert.equal(viaInvoke.ok, true, `${moduleId} invoke inspect`);
       assert.equal(viaInvoke.handle, moduleId);
       assert.equal(viaInvoke.moduleId, moduleId);
     }
+    for (const moduleId of bundledInspect) {
+      const inspected = await apps.call({ moduleId, operation: "inspect" });
+      assert.equal(inspected.result.listening, false, `${moduleId} inspect must not require a listen port`);
+    }
     assert.equal(stub.requests.length, 0, "inspect must not probe loopback HTTP");
-    assert.equal(calls.filter((entry) => entry[0] === "inspect").length, MODULE_IDS.length * 2);
+    assert.equal(
+      calls.filter((entry) => entry[0] === "inspect").length,
+      loopbackInspect.length * 2,
+      "CPA/Router inspect still uses the injected service; CC/Paseo/Anneal stay in-process",
+    );
   } finally {
     stub.restore();
   }
@@ -410,6 +421,8 @@ test("CPA, Router, and CommandCode key operations dispatch through the in-proces
 
     const banner = await apps.call({ moduleId: "commandcode-proxy", operation: "banner" });
     assert.equal(banner.ok, true);
+    assert.equal(banner.result.listening, false);
+    assert.equal(banner.result.reachable, undefined);
     const plan = await apps.invoke({
       handle: "commandcode-proxy",
       operation: "plan",

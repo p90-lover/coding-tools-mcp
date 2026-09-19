@@ -1,7 +1,7 @@
 "use strict";
 
 const { defineModule } = require("../lib/define-module.cjs");
-const { requestJson } = require("../lib/loopback.cjs");
+const { inspectResult, moduleSnapshot, runtimeUnavailable } = require("../lib/in-process-runtime.cjs");
 const { classifyAnnealUnavailable, errorMessage, sanitizePublic } = require("../lib/sanitize.cjs");
 
 const LOOPBACK = Object.freeze({
@@ -11,7 +11,7 @@ const LOOPBACK = Object.freeze({
 
 async function act(op, args, context) {
   if (typeof context.actUpstream !== "function") {
-    throw new Error("Anneal actions are unavailable");
+    return runtimeUnavailable("anneal", "anneal-runtime", "Anneal runtime is not started");
   }
   try {
     return sanitizePublic(await context.actUpstream({
@@ -31,8 +31,10 @@ async function act(op, args, context) {
     if (unavailable) {
       return {
         ok: false,
+        softFail: true,
         unavailable: true,
         dependency: unavailable.dependency,
+        detail: unavailable.message,
         error: unavailable.message,
       };
     }
@@ -40,26 +42,45 @@ async function act(op, args, context) {
   }
 }
 
+function inProcessBoard() {
+  const snapshot = moduleSnapshot("anneal");
+  if (!snapshot.present) {
+    return {
+      ok: false,
+      softFail: true,
+      unavailable: true,
+      detail: "Anneal bundled source is missing",
+      listening: false,
+      runtimeStarted: false,
+      source: snapshot.source,
+      vendor: snapshot.vendor,
+    };
+  }
+  return sanitizePublic({
+    ok: true,
+    status: 200,
+    tasks: [],
+    json: [],
+    listening: false,
+    runtimeStarted: false,
+    transport: "in-process",
+    source: snapshot.source,
+    vendor: snapshot.vendor,
+    legacyLoopback: snapshot.legacyLoopback,
+  });
+}
+
 function createModule() {
   const extraOperations = {
+      inspect: {
+        readOnly: true,
+        description: "Inspect the in-process Anneal handler and bundled source. Does not probe :3000/:5173.",
+        run: () => inspectResult("anneal"),
+      },
       listTasks: {
         readOnly: true,
-        description: "GET allowlisted /tasks from the managed Anneal API.",
-        run: async (_args, context) => {
-          try {
-            const result = await requestJson(context.loopback?.api || LOOPBACK.api, {
-              method: "GET",
-              pathname: "/tasks",
-            });
-            return sanitizePublic({ ok: result.ok, status: result.status, json: result.json });
-          } catch (error) {
-            const unavailable = classifyAnnealUnavailable(error);
-            if (unavailable) {
-              return { ok: false, unavailable: true, dependency: "postgres", error: unavailable.message };
-            }
-            throw error;
-          }
-        },
+        description: "List Anneal tasks in-process from bundled module state. Does not require :3000.",
+        run: () => inProcessBoard(),
       },
       preview: {
         readOnly: true,
@@ -112,7 +133,7 @@ function createModule() {
         run: async (args, context) => {
           const plane = typeof context.getFiveStack === "function" ? context.getFiveStack() : null;
           if (!plane?.ok || typeof plane.value?.callTool !== "function") {
-            throw new Error("Five-stack control plane is not ready");
+            return runtimeUnavailable("anneal", "anneal-runtime", "Anneal runtime is not started");
           }
           try {
             return sanitizePublic(await plane.value.callTool("anneal_open_from_review", args, {
@@ -122,7 +143,14 @@ function createModule() {
           } catch (error) {
             const unavailable = classifyAnnealUnavailable(error);
             if (unavailable) {
-              return { ok: false, unavailable: true, dependency: "postgres", error: unavailable.message };
+              return {
+                ok: false,
+                softFail: true,
+                unavailable: true,
+                dependency: unavailable.dependency,
+                detail: unavailable.message,
+                error: unavailable.message,
+              };
             }
             throw error;
           }

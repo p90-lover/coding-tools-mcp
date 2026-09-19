@@ -49,6 +49,18 @@ function createCodingToolsAppsHost({
     return id;
   }
 
+  function callInput(moduleId, operation, args) {
+    if (moduleId && typeof moduleId === "object" && !Array.isArray(moduleId)) {
+      const input = moduleId;
+      return {
+        moduleId: input.moduleId || input.handle,
+        operation: input.operation,
+        args: input.arguments || input.args || {},
+      };
+    }
+    return { moduleId, operation, args: args || {} };
+  }
+
   function list() {
     return {
       version: 1,
@@ -88,19 +100,22 @@ function createCodingToolsAppsHost({
   }
 
   function isReadOnly(moduleId, operation) {
-    const handler = registry.get(moduleId)?.handler;
-    if (typeof handler?.isReadOnly === "function") return handler.isReadOnly(operation);
+    const input = callInput(moduleId, operation);
+    const handler = registry.get(input.moduleId)?.handler;
+    if (typeof handler?.isReadOnly === "function") return handler.isReadOnly(input.operation);
     return false;
   }
 
   async function call(moduleId, operation, args = {}) {
-    const id = requireId(moduleId);
-    const result = await registry.invoke(id, String(operation || ""), args, contextFor(id));
+    const input = callInput(moduleId, operation, args);
+    const id = requireId(input.moduleId);
+    const op = String(input.operation || "");
+    const result = await registry.invoke(id, op, input.args, contextFor(id));
     return sanitizePublic({
       ok: result?.ok !== false,
       moduleId: id,
       handle: id,
-      operation: String(operation || ""),
+      operation: op,
       transport: "in-process",
       result,
     });

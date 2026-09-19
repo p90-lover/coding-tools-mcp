@@ -56,6 +56,13 @@ await apps.invoke({
 });
 ```
 
+The in-process host accepts both the contract object and positional forms:
+
+```js
+await host.call({ moduleId: "commandcode-proxy", operation: "health" });
+await host.call("commandcode-proxy", "health");
+```
+
 IPC (before first paint): `coding-tools:apps:list`, `catalog`, `call`. `invoke` is the same in-process channel (`handle` maps to `moduleId`). There is no apps HTTP listener.
 
 Desktop MCP/shell tools map onto the same host (no loopback-port overlay):
