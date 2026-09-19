@@ -1,9 +1,16 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const { createBrowserSurfaceActiveInvoker } = require("./browser-surface-ipc.cjs");
-const { createRetryingInvoker } = require("./launcher-ready-path.cjs");
 
-const setBrowserSurfaceActive = createBrowserSurfaceActiveInvoker(ipcRenderer);
-const snapshot = createRetryingInvoker(ipcRenderer, "launcher:snapshot");
+let setBrowserSurfaceActive;
+let snapshot;
+try {
+  const { createBrowserSurfaceActiveInvoker } = require("./browser-surface-ipc.cjs");
+  const { createRetryingInvoker } = require("./launcher-ready-path.cjs");
+  setBrowserSurfaceActive = createBrowserSurfaceActiveInvoker(ipcRenderer);
+  snapshot = createRetryingInvoker(ipcRenderer, "launcher:snapshot");
+} catch {
+  setBrowserSurfaceActive = (active) => ipcRenderer.invoke("launcher:browser-surface-active", active === true);
+  snapshot = () => ipcRenderer.invoke("launcher:snapshot");
+}
 
 function subscription(channel, listener) {
   const wrapped = (_event, value) => listener(value);

@@ -48,15 +48,27 @@ const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
 const { requireAppHandler } = require("./app-handler-paths.cjs");
-const { createCodingToolsAppsHost } = requireAppHandler("host.cjs");
+function loadCreateCodingToolsAppsHost() {
+  try {
+    return requireAppHandler("host.cjs").createCodingToolsAppsHost;
+  } catch (error) {
+    const failed = error;
+    return function createCodingToolsAppsHostUnavailable() {
+      throw failed;
+    };
+  }
+}
+const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost();
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
 const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {
+  KEEP_UI_RESPONSIVE_SKIP_REASON,
+  createIpcRegistrar,
   createLazyFactory,
   createRendererLoader,
   deferUiWork,
   safeRead,
-  scheduleAfterPaint,
+  scheduleFullIpcAfterPaint,
 } = require("./launcher-ready-path.cjs");
 const {
   applyCommandCodeProxyPlan,
@@ -136,6 +148,8 @@ let getFiveStack = () => ({ ok: false });
 const appsMcp = createCodingToolsAppsMcp({
   getHost: () => appsHost,
 });
+const ipcRegistrar = createIpcRegistrar();
+const registeredIpcChannels = new Set();
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -622,12 +636,88 @@ function executionSettingsPayload(settings) {
   };
 }
 
+function launcherSnapshotPayload(stateStore, logger) {
+  return {
+    profile: LAUNCHER_PROFILE.kind,
+    profilePaths: {
+      coreHome: CORE_HOME,
+      codexHome: LAUNCHER_PROFILE.codexHome,
+      userData: launcherUserData,
+    },
+    state: stateStore.read(),
+    browser: safeRead(
+      "launcher.browser_snapshot",
+      () => browserHost?.snapshot() ?? null,
+      null,
+      logger,
+    ),
+    connectorName: runtimeHost?.browserConnectorName?.() ?? "",
+    connectorNames: {
+      automatic: runtimeHost?.setupConnectorName?.() ?? "",
+      manual: "Codex Zero Risk",
+    },
+    mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured?.() ?? false,
+    logs: logger.recent(),
+    urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
+    platform: process.platform,
+    packaged: app.isPackaged,
+    version: app.getVersion(),
+    smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
+    operation: lastOperation,
+    upstreamTools: safeRead(
+      "launcher.upstream_tools_snapshot",
+      () => upstreamToolController?.snapshot() ?? { version: 1, tools: [] },
+      { version: 1, tools: [] },
+      logger,
+    ),
+    externalServices: safeRead(
+      "launcher.external_services_snapshot",
+      () => externalServicesController?.snapshot() ?? { version: 1, services: [] },
+      { version: 1, services: [] },
+      logger,
+    ),
+    update: updateController?.getState() ?? { status: "disabled" },
+  };
+}
+
+function installWindowControlIpc() {
+  if (registeredIpcChannels.has("launcher:window-control")) return;
+  registeredIpcChannels.add("launcher:window-control");
+  ipcMain.on("launcher:window-control", (event, action) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) return;
+    if (action === "close") window.close();
+    else if (action === "minimize") window.minimize();
+    else if (action === "zoom") window.isMaximized() ? window.unmaximize() : window.maximize();
+  });
+}
+
+function registerMinimalPreRendererIpc({ logger, stateStore }) {
+  const handle = (channel, handler) => {
+    if (registeredIpcChannels.has(channel)) return;
+    registeredIpcChannels.add(channel);
+    registerLoggedIpc(ipcMain, logger, channel, handler);
+  };
+  handle("launcher:snapshot", async () => launcherSnapshotPayload(stateStore, logger));
+  installWindowControlIpc();
+  ipcRegistrar.markMinimal();
+  logger.info("launcher.ipc_minimal_registered", { reason: "pre-renderer" });
+}
+
 function registerIpc({ logger, stateStore }) {
-  const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  if (ipcRegistrar.isFull()) {
+    logger.info("launcher.ipc_already_registered", { reason: "idempotent" });
+    return;
+  }
+  const handle = (channel, handler) => {
+    if (registeredIpcChannels.has(channel)) return;
+    registeredIpcChannels.add(channel);
+    registerLoggedIpc(ipcMain, logger, channel, handler);
+  };
   const codingTools = createCodingToolsShellBridge({
     assertFocusedMainWindow,
-    headlessHost,
-    updateController,
+    getHeadlessHost: () => headlessHost,
+    getUpdateController: () => updateController,
   });
   const fiveStackControlPlane = createLazyFactory(() => createFiveStackControlPlane({
     planProvider: createProviderExecutionPlan,
@@ -796,47 +886,7 @@ function registerIpc({ logger, stateStore }) {
     });
   });
 
-  handle("launcher:snapshot", async () => ({
-    profile: LAUNCHER_PROFILE.kind,
-    profilePaths: {
-      coreHome: CORE_HOME,
-      codexHome: LAUNCHER_PROFILE.codexHome,
-      userData: launcherUserData,
-    },
-    state: stateStore.read(),
-    browser: safeRead(
-      "launcher.browser_snapshot",
-      () => browserHost?.snapshot() ?? null,
-      null,
-      logger,
-    ),
-    connectorName: runtimeHost.browserConnectorName(),
-    connectorNames: {
-      automatic: runtimeHost.setupConnectorName(),
-      manual: "Codex Zero Risk",
-    },
-    mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
-    logs: logger.recent(),
-    urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
-    platform: process.platform,
-    packaged: app.isPackaged,
-    version: app.getVersion(),
-    smokePassed: smokePassedThisSession || smokePassedForCurrentVersion(stateStore.read()),
-    operation: lastOperation,
-    upstreamTools: safeRead(
-      "launcher.upstream_tools_snapshot",
-      () => upstreamToolController?.snapshot() ?? { version: 1, tools: [] },
-      { version: 1, tools: [] },
-      logger,
-    ),
-    externalServices: safeRead(
-      "launcher.external_services_snapshot",
-      () => externalServicesController?.snapshot() ?? { version: 1, services: [] },
-      { version: 1, services: [] },
-      logger,
-    ),
-    update: updateController?.getState() ?? { status: "disabled" },
-  }));
+  handle("launcher:snapshot", async () => launcherSnapshotPayload(stateStore, logger));
 
   handle("launcher:set-language", (_event, language) => {
     const state = stateStore.update({ language: validateLanguage(language) });
@@ -1478,12 +1528,11 @@ function registerIpc({ logger, stateStore }) {
     const window = BrowserWindow.fromWebContents(event.sender);
     return windowStateSnapshot(window);
   });
-  ipcMain.on("launcher:window-control", (event, action) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window || window.isDestroyed()) return;
-    if (action === "close") window.close();
-    else if (action === "minimize") window.minimize();
-    else if (action === "zoom") window.isMaximized() ? window.unmaximize() : window.maximize();
+  installWindowControlIpc();
+  ipcRegistrar.markFull();
+  logger.info("launcher.ipc_full_registered", {
+    reason: "ready-path",
+    channels: registeredIpcChannels.size,
   });
 }
 
@@ -1587,6 +1636,7 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  registerMinimalPreRendererIpc({ logger, stateStore });
   externalServicesController = createManagedExternalServicesController({
     dataRoot: path.join(app.getPath("userData"), "integrations"),
     resolveRuntimeExecutable: () => {
@@ -1646,7 +1696,8 @@ async function start() {
     },
   });
   const providerServices = createAppsProviderServices({ providerNetworkReady });
-  appsHost = createCodingToolsAppsHost({
+  try {
+    appsHost = createCodingToolsAppsHost({
     services: {
       inspect: (id) => externalServicesController.inspect(id),
       start: (id) => externalServicesController.start(id),
@@ -1690,6 +1741,13 @@ async function start() {
     actUpstream,
     getFiveStack: () => getFiveStack(),
   });
+  } catch (error) {
+    logger.warn("apps.host_prefer_local_failed", {
+      message: error instanceof Error ? error.message : String(error),
+      softFail: true,
+    });
+    appsHost = null;
+  }
   app.once("before-quit", () => {
     managedBootstrapController?.dispose();
     originalUiController?.dispose();
@@ -1708,6 +1766,26 @@ async function start() {
     windowStatePath: path.join(app.getPath("userData"), "window-state.json"),
     startHidden,
   });
+  registerIpc({ logger, stateStore });
+  await ensureRendererLoaded(mainWindow, logger);
+  scheduleFullIpcAfterPaint(() => {
+    registerIpc({ logger, stateStore });
+    const services = safeRead(
+      "external-service.autostart_snapshot",
+      () => externalServicesController?.snapshot().services ?? [],
+      [],
+      logger,
+    );
+    for (const service of services) {
+      if (!service.enabled || !service.autoStart) continue;
+      void externalServicesController.start(service.id).catch((error) => {
+        logger.warn("external-service.autostart-failed", {
+          serviceId: service.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+  }, { logger });
   browserControl = await new BrowserControlServer({
     logger,
     getBrowserHost: () => browserHost,
@@ -1760,7 +1838,6 @@ async function start() {
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
-  await browserHost.ready();
   setProviderBrowserHost(() => browserHost);
   const updaterRuntimeRoot = runtimeRootProvider();
   updateController = createUpdateController({
@@ -1786,6 +1863,20 @@ async function start() {
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = LAUNCHER_SMOKE_TEST;
   let startupAuthenticationRefresh = Promise.resolve();
+  await ensureRendererLoaded(mainWindow, logger);
+  try {
+    await browserHost.ready();
+  } catch (error) {
+    logger.warn("browser.ready_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    scheduleFullIpcAfterPaint(() => {
+      registerIpc({ logger, stateStore });
+    }, {
+      logger,
+      skipReason: KEEP_UI_RESPONSIVE_SKIP_REASON,
+    });
+  }
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
     startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
       logger.warn("browser.session_refresh_failed", {
@@ -1793,24 +1884,6 @@ async function start() {
       });
     });
   }
-  await ensureRendererLoaded(mainWindow, logger);
-  scheduleAfterPaint(() => {
-    const services = safeRead(
-      "external-service.autostart_snapshot",
-      () => externalServicesController?.snapshot().services ?? [],
-      [],
-      logger,
-    );
-    for (const service of services) {
-      if (!service.enabled || !service.autoStart) continue;
-      void externalServicesController.start(service.id).catch((error) => {
-        logger.warn("external-service.autostart-failed", {
-          serviceId: service.id,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }
-  });
   if (!launcherSmokeTest) {
     void updateController.checkNow({ force: true }).catch((error) => {
       logger.warn("launcher.update_check_failed", {

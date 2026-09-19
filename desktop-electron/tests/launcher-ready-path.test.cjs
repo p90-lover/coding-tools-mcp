@@ -5,11 +5,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const {
+  KEEP_UI_RESPONSIVE_SKIP_REASON,
+  createIpcRegistrar,
   createLazyFactory,
   createRendererLoader,
   createRetryingInvoker,
   deferUiWork,
   isBlankRendererUrl,
+  scheduleFullIpcAfterPaint,
   shouldLoadRenderer,
 } = require("../electron/launcher-ready-path.cjs");
 
@@ -93,18 +96,57 @@ test("snapshot invoker retries until the launcher handler is registered", async 
   assert.equal(calls, 3);
 });
 
+test("keep-ui-responsive skip still completes full IPC after paint", () => {
+  const registrar = createIpcRegistrar();
+  const events = [];
+  let full = 0;
+  const scheduled = [];
+  scheduleFullIpcAfterPaint(({ reason }) => {
+    assert.equal(reason, "after-paint:local-repair-keep-ui-responsive");
+    assert.equal(registrar.markFull(), true);
+    full += 1;
+  }, {
+    schedule: (work) => scheduled.push(work),
+    logger: {
+      warn(event, detail) { events.push([event, detail]); },
+    },
+    skipReason: KEEP_UI_RESPONSIVE_SKIP_REASON,
+  });
+  assert.equal(full, 0);
+  assert.equal(scheduled.length, 1);
+  assert.deepEqual(events, [[
+    "launcher.bootstrap_skipped",
+    { reason: "local-repair-keep-ui-responsive" },
+  ]]);
+  scheduled[0]();
+  assert.equal(full, 1);
+  assert.equal(registrar.isFull(), true);
+  assert.equal(registrar.markFull(), false);
+});
+
 test("critical IPC is registered before the renderer file is loaded", () => {
   const main = read("electron/main.cjs");
   const preload = read("electron/preload.cjs");
-  const registerAt = main.indexOf("registerIpc({ logger, stateStore })");
+  const registerAt = main.indexOf("registerIpc({ logger, stateStore });");
   const loadAt = main.indexOf("await ensureRendererLoaded(mainWindow, logger)");
+  const readyAt = main.indexOf("await browserHost.ready()");
+  const minimalAt = main.indexOf("registerMinimalPreRendererIpc({ logger, stateStore })");
   assert.ok(registerAt >= 0, "registerIpc must remain on the ready path");
   assert.ok(loadAt > registerAt, "renderer load must happen after IPC registration");
+  assert.ok(readyAt > registerAt, "BrowserHost.ready must not block IPC registration");
+  assert.ok(minimalAt >= 0 && minimalAt < registerAt, "minimal pre-renderer IPC must register first");
   assert.match(main, /handle\("launcher:snapshot"/);
   assert.match(main, /handle\("launcher:browser-surface-active"/);
   assert.match(main, /handle\("launcher:original-ui-snapshot"/);
   assert.match(main, /handle\("coding-tools:apps:list"/);
   assert.match(main, /deferUiWork/);
   assert.match(main, /createLazyFactory\(\(\) => createFiveStackControlPlane/);
+  assert.match(main, /scheduleFullIpcAfterPaint/);
+  assert.match(main, /KEEP_UI_RESPONSIVE_SKIP_REASON/);
+  assert.match(main, /runtimeHost\?\.browserConnectorName/);
   assert.match(preload, /createRetryingInvoker\(ipcRenderer, "launcher:snapshot"\)/);
+  const app = read("src/App.tsx");
+  assert.match(app, /IPC_API_RETRY_DELAYS_MS/);
+  assert.match(app, /readLauncherApi/);
+  assert.match(app, /apiTimedOut/);
 });

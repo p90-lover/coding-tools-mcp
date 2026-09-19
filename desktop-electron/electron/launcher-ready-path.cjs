@@ -93,6 +93,41 @@ function scheduleAfterPaint(work, { schedule = setImmediate, onError } = {}) {
   return deferUiWork(work, { schedule, onError });
 }
 
+const KEEP_UI_RESPONSIVE_SKIP_REASON = "local-repair-keep-ui-responsive";
+
+function createIpcRegistrar() {
+  let phase = "none";
+  return {
+    phase: () => phase,
+    markMinimal() {
+      if (phase === "none") phase = "minimal";
+      return phase;
+    },
+    markFull() {
+      const already = phase === "full";
+      phase = "full";
+      return !already;
+    },
+    isFull: () => phase === "full",
+  };
+}
+
+function scheduleFullIpcAfterPaint(registerFull, {
+  schedule = scheduleAfterPaint,
+  logger,
+  skipReason = null,
+} = {}) {
+  if (typeof registerFull !== "function") {
+    throw new TypeError("Full IPC completion requires registerFull");
+  }
+  if (skipReason) {
+    logger?.warn?.("launcher.bootstrap_skipped", { reason: skipReason });
+  }
+  return schedule(() => {
+    registerFull({ reason: skipReason ? `after-paint:${skipReason}` : "after-paint" });
+  });
+}
+
 function createRendererLoader({
   getUrl,
   load,
@@ -202,7 +237,9 @@ module.exports = {
   DEFAULT_RENDERER_LOAD_TIMEOUT_MS,
   DEFAULT_RENDERER_RETRY_DELAYS_MS,
   DEFAULT_SNAPSHOT_RETRY_DELAYS_MS,
+  KEEP_UI_RESPONSIVE_SKIP_REASON,
   canonicalizeRendererUrl,
+  createIpcRegistrar,
   createLazyFactory,
   createRendererLoader,
   createRetryingInvoker,
@@ -211,6 +248,7 @@ module.exports = {
   missingHandlerMessage,
   safeRead,
   scheduleAfterPaint,
+  scheduleFullIpcAfterPaint,
   shouldLoadRenderer,
   withReentryGuard,
 };

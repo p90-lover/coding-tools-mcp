@@ -1,7 +1,16 @@
 "use strict";
 
 const { requireAppHandler } = require("./app-handler-paths.cjs");
-const { sanitizePublic } = requireAppHandler("lib/sanitize.cjs");
+
+function loadSanitizePublic() {
+  try {
+    return requireAppHandler("lib/sanitize.cjs").sanitizePublic;
+  } catch {
+    return (value) => value;
+  }
+}
+
+const sanitizePublic = loadSanitizePublic();
 
 const PROXY_SEED = "http://127.0.0.1:17891";
 const TOOL_NAMES = Object.freeze([
