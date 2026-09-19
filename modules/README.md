@@ -10,12 +10,35 @@ modules/
   host.cjs               codingTools.apps list/catalog/call/invoke
   cpa/                   LOL slot — in-process CPA handlers + CT-hosted visual
   codex-router/          LOL slot — in-process Router handlers + CT-hosted Control Center chrome
-  commandcode-proxy/     shared with #224
+  commandcode-proxy/     CommandCode handle (not modules/commandcode/) — shared with #224
   paseo/                 shared with #224
   anneal/                shared with #224
 ```
 
 Each folder has `module.json`, `handler.cjs` (`invoke`), and `handlers.cjs` (operation table). Visuals are **embedded inside the Coding Tools GUI** (iframe/webview in CT). Modules must not launch their own windows.
+
+## Attach map (Bot GG / Main seeker / hello)
+
+One tree. Do not add a second `modules/` root. CommandCode’s folder/handle is `commandcode-proxy`.
+
+| Handle | Folder | Handler entry | Host / IPC | CT visual |
+| --- | --- | --- | --- | --- |
+| `cpa` | [`modules/cpa/`](cpa/) | [`handler.cjs`](cpa/handler.cjs) → [`handlers.cjs`](cpa/handlers.cjs) | [`handler-registry.cjs`](handler-registry.cjs) `invoke("cpa", op, args, ctx)` · [`host.cjs`](host.cjs) `call`/`invoke` · preload `codingTools.apps` | [`OriginalUiSurface`](../desktop-electron/src/features/OriginalUiSurface.tsx) `toolId="cpa"` (management.html iframe in CT) |
+| `codex-router` | [`modules/codex-router/`](codex-router/) | [`handler.cjs`](codex-router/handler.cjs) → [`handlers.cjs`](codex-router/handlers.cjs) | same registry/host; `FOREIGN_SLOTS` | [`OriginalUiSurface`](../desktop-electron/src/features/OriginalUiSurface.tsx) `toolId="codex-router"` (Control Center `dist/index.html` file URL in CT; no second Electron window) |
+| `commandcode-proxy` | [`modules/commandcode-proxy/`](commandcode-proxy/) | [`handler.cjs`](commandcode-proxy/handler.cjs) → [`handlers.cjs`](commandcode-proxy/handlers.cjs) | same; aliases `banner`, `registration-plan`, `registration-apply` | [`CommandCodeProxySurface`](../desktop-electron/src/features/CommandCodeProxySurface.tsx) inside Integrations (native CT chrome) |
+| `paseo` | [`modules/paseo/`](paseo/) | [`handler.cjs`](paseo/handler.cjs) → [`handlers.cjs`](paseo/handlers.cjs) | same; `ctx.act` / lazy `ctx.getFiveStack` | [`UpstreamToolSurface`](../desktop-electron/src/features/UpstreamToolSurface.tsx) `toolId="paseo"` + [`PaseoOrchestratorSurface`](../desktop-electron/src/features/PaseoOrchestratorSurface.tsx) |
+| `anneal` | [`modules/anneal/`](anneal/) | [`handler.cjs`](anneal/handler.cjs) → [`handlers.cjs`](anneal/handlers.cjs) | same; aliases `board`, `activity`, `task-start`, `inbox_decision` / `inbox_reply` / `inbox_close` | [`UpstreamToolSurface`](../desktop-electron/src/features/UpstreamToolSurface.tsx) `toolId="anneal"` + [`AnnealTasksSurface`](../desktop-electron/src/features/AnnealTasksSurface.tsx) (visual origin `:5173`) |
+
+Shared call path (in-process, no new ports):
+
+```js
+window.codingTools.apps.invoke({ handle: "<id>", operation: "inspect" })
+window.codingTools.apps.call({ moduleId: "<id>", operation: "start" })
+```
+
+IPC channels (registered before first paint): `coding-tools:apps:list`, `coding-tools:apps:catalog`, `coding-tools:apps:call`. `apps.invoke` is the same channel (`handle` → `moduleId`).
+
+Startup stays freeze-safe: `launcher:browser-surface-active` is deferred; five-stack is `createLazyFactory(() => createFiveStackControlPlane(...))`; managed `peerEnv` uses a reentry guard so registerIpc/ready does not recurse.
 
 ## How to call (in-process)
 
