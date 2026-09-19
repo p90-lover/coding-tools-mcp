@@ -28,6 +28,7 @@ const {
 const { RuntimeHost } = require("./runtime.cjs");
 const { HeadlessHost } = require("./headless-host.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
+const { createManagedAppApiHandler } = require("./managed-app-api.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
@@ -480,9 +481,17 @@ function executionSettingsPayload(settings) {
 
 function registerIpc({ logger, stateStore }) {
   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+  const managedAppApi = createManagedAppApiHandler({
+    externalServices: externalServicesController,
+    upstreamTools: upstreamToolController,
+    getProviderController: providerNetworkReady,
+    createExecutionPlan: createProviderExecutionPlan,
+    logger,
+  });
   const codingTools = createCodingToolsShellBridge({
     assertFocusedMainWindow,
     headlessHost,
+    managedAppApi,
     updateController,
   });
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
@@ -493,6 +502,8 @@ function registerIpc({ logger, stateStore }) {
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
   handle("coding-tools:native-codex:status", (event) => codingTools.nativeCodexStatus(event));
   handle("coding-tools:integrations:snapshot", (event) => codingTools.integrationsSnapshot(event));
+  handle("coding-tools:apps:snapshot", (event) => codingTools.managedAppsSnapshot(event));
+  handle("coding-tools:apps:invoke", (event, input) => codingTools.managedAppInvoke(event, input));
   handle("coding-tools:updates:status", (event) => codingTools.updatesStatus(event));
   handle("coding-tools:diagnostics:snapshot", (event) => codingTools.diagnosticsSnapshot(event));
   handle("coding-tools:tools:catalog", (event, input) => codingTools.toolsCatalog(event, input));

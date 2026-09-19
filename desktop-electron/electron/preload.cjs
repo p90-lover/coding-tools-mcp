@@ -131,6 +131,43 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
 
 const { invokeContract } = require("./ipc-schema.cjs");
 
+function subscribeManagedApps(listener) {
+  if (typeof listener !== "function") {
+    throw new Error("Managed app listener must be a function");
+  }
+  const channels = [
+    "launcher:external-services-changed",
+    "launcher:provider-network-changed",
+  ];
+  let disposed = false;
+  let queued = false;
+  let refreshPromise = null;
+  const refresh = () => {
+    if (disposed) return;
+    if (refreshPromise) {
+      queued = true;
+      return;
+    }
+    refreshPromise = invokeContract(ipcRenderer, "apps.snapshot")
+      .then((snapshot) => {
+        if (!disposed) listener(snapshot);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        refreshPromise = null;
+        if (!disposed && queued) {
+          queued = false;
+          refresh();
+        }
+      });
+  };
+  for (const channel of channels) ipcRenderer.on(channel, refresh);
+  return () => {
+    disposed = true;
+    for (const channel of channels) ipcRenderer.removeListener(channel, refresh);
+  };
+}
+
 const codingToolsApi = Object.freeze({
   runtime: Object.freeze({
     status: () => invokeContract(ipcRenderer, "runtime.status"),
@@ -155,6 +192,11 @@ const codingToolsApi = Object.freeze({
   }),
   integrations: Object.freeze({
     snapshot: () => invokeContract(ipcRenderer, "integrations.snapshot"),
+  }),
+  apps: Object.freeze({
+    snapshot: () => invokeContract(ipcRenderer, "apps.snapshot"),
+    invoke: (input) => invokeContract(ipcRenderer, "apps.invoke", input),
+    onChanged: (listener) => subscribeManagedApps(listener),
   }),
   execution: Object.freeze({
     read: (input) => invokeContract(ipcRenderer, "execution.read", input),

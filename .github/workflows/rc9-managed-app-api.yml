@@ -1,0 +1,144 @@
+name: rc.9 managed app API
+
+on:
+  push:
+    branches:
+      - feature/rc9-managed-app-api-handler
+    paths:
+      - '.github/workflows/rc9-managed-app-api.yml'
+      - 'aiTemp/rc9-managed-app-api/**'
+      - 'desktop-electron/electron/managed-app-api.cjs'
+      - 'desktop-electron/electron/coding-tools-shell-bridge.cjs'
+      - 'desktop-electron/electron/ipc-schema.cjs'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ManagedAppsSurface.tsx'
+      - 'desktop-electron/tests/managed-app-api.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-wiring.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-degraded.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-ui.test.cjs'
+  pull_request:
+    branches:
+      - integration/v0.7.0-rc.9-one-app-managed
+    paths:
+      - '.github/workflows/rc9-managed-app-api.yml'
+      - 'aiTemp/rc9-managed-app-api/**'
+      - 'desktop-electron/electron/managed-app-api.cjs'
+      - 'desktop-electron/electron/coding-tools-shell-bridge.cjs'
+      - 'desktop-electron/electron/ipc-schema.cjs'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ManagedAppsSurface.tsx'
+      - 'desktop-electron/tests/managed-app-api.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-wiring.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-degraded.test.cjs'
+      - 'desktop-electron/tests/managed-app-api-ui.test.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc9-managed-app-api-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc9-managed-app-api/bun-cache
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Merge latest one-app base
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin integration/v0.7.0-rc.9-one-app-managed
+          git merge --no-edit --no-ff origin/integration/v0.7.0-rc.9-one-app-managed
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc9-managed-app-api/bun-cache
+          mkdir -p aiTemp/Trash/rc9-managed-app-api
+
+      - name: Materialize API wiring and UI consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc9-managed-app-api/materialize.mjs
+          node aiTemp/rc9-managed-app-api/materialize-ui.mjs
+
+      - name: Install exact Electron dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Run focused API contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/managed-app-api.test.cjs \
+            desktop-electron/tests/managed-app-api-wiring.test.cjs \
+            desktop-electron/tests/managed-app-api-degraded.test.cjs \
+            desktop-electron/tests/managed-app-api-ui.test.cjs
+          node --check desktop-electron/electron/managed-app-api.cjs
+          node --check desktop-electron/electron/coding-tools-shell-bridge.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/preload.cjs
+          bun run --cwd desktop-electron typecheck
+
+      - name: Enforce preservation contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          deleted="$(git diff --diff-filter=D --name-only origin/integration/v0.7.0-rc.9-one-app-managed...HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Tracked deletions are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit and push verified API source
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='feature/rc9-managed-app-api-handler'
+          git add \
+            desktop-electron/electron/coding-tools-shell-bridge.cjs \
+            desktop-electron/electron/ipc-schema.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ManagedAppsSurface.tsx
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(rc9): expose managed apps through Coding Tools API'
+          fi
+          git fetch origin "$branch"
+          current_remote="$(git rev-parse "origin/$branch")"
+          if ! git merge-base --is-ancestor "$current_remote" HEAD; then
+            echo 'Feature branch advanced during verification; refusing to overwrite newer work.' >&2
+            exit 1
+          fi
+          git push origin "HEAD:$branch"
