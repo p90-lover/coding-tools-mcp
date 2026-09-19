@@ -23,8 +23,12 @@ function withReconnect(url: string, generation: number): string {
   return parsed.toString();
 }
 
-function selectedFrom(tool: OriginalUiSnapshot | null): string {
-  return tool?.longRun?.selectedSection || tool?.sections[0] || "";
+function selectedFrom(tool: OriginalUiSnapshot | null, preferredSection = ""): string {
+  const sections = tool?.sections ?? [];
+  if (preferredSection && sections.includes(preferredSection)) return preferredSection;
+  const persistedSection = tool?.longRun?.selectedSection;
+  if (persistedSection && sections.includes(persistedSection)) return persistedSection;
+  return sections[0] || "";
 }
 
 function reconnectGenerationOf(tool: OriginalUiSnapshot | null): number {
@@ -61,7 +65,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     const next = await api.originalUiSnapshot();
     setSnapshot(next);
     const current = toolFrom(next, toolId);
-    if (current) setSelectedSection((value) => value || selectedFrom(current));
+    if (current) setSelectedSection((value) => selectedFrom(current, value));
     return current;
   };
 
@@ -82,7 +86,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       if (cancelled) return;
       setSnapshot(next);
       const current = toolFrom(next, toolId);
-      if (current) setSelectedSection(current.sections[0] || "");
+      if (current) setSelectedSection(selectedFrom(current));
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribe = api.onExternalServicesChanged?.(() => {
       void api.originalUiSnapshot().then((next) => {
@@ -94,6 +98,11 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       unsubscribe?.();
     };
   }, [api, setError, toolId]);
+
+  useEffect(() => {
+    if (!tool) return;
+    setSelectedSection((value) => selectedFrom(tool, value));
+  }, [tool]);
 
   const run = async (name: string, action: () => Promise<unknown>) => {
     setBusy(name);
@@ -111,7 +120,9 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
 
   const openSection = async (section = selectedSection) => {
     if (!api) throw new Error("Launcher IPC is unavailable");
-    const result = await api.openOriginalUi(toolId, section);
+    const resolvedSection = selectedFrom(tool, section);
+    if (!resolvedSection) throw new Error("Original interface has no available sections");
+    const result = await api.openOriginalUi(toolId, resolvedSection);
     setSelectedSection(result.section);
     setFrameUrl(result.url);
     setOriginalWindow(result.originalWindow);
@@ -141,11 +152,11 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     if (toolId !== "cpa" || tool.status !== "ready") return;
     if (!autoOpened.current) {
       autoOpened.current = true;
-      void openSection(selectedSection || selectedFrom(tool)).catch((cause) => setError(messageOf(cause)));
+      void openSection(selectedFrom(tool, selectedSection)).catch((cause) => setError(messageOf(cause)));
       return;
     }
     if (recovered || generationBumped) {
-      void openSection(selectedSection || selectedFrom(tool)).catch((cause) => setError(messageOf(cause)));
+      void openSection(selectedFrom(tool, selectedSection)).catch((cause) => setError(messageOf(cause)));
     }
   }, [api, busy, selectedSection, setError, tool, toolId]);
 
@@ -182,7 +193,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
           <button className="primary" disabled={busy !== null} onClick={() => void run(ready ? "open" : "start", async () => {
             if (!api) throw new Error("Launcher IPC is unavailable");
             if (!ready) await api.startOriginalUi(toolId);
-            await openSection();
+            await openSection(selectedFrom(tool, selectedSection));
           })} type="button">
             {busy === "start" || busy === "open" ? "…" : ready
               ? localize(language, "Open original UI", "開啟原始介面")
@@ -203,14 +214,14 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
           ) : null}
           <button disabled={busy !== null || !ready} onClick={() => void run("external", async () => {
             if (!api) throw new Error("Launcher IPC is unavailable");
-            await api.openOriginalUiExternal(toolId, selectedSection);
+            await api.openOriginalUiExternal(toolId, selectedFrom(tool, selectedSection));
           })} type="button">
             {busy === "external" ? "…" : localize(language, "Open externally", "外部開啟")}
           </button>
           <button disabled={busy !== null || tool.pid === null} onClick={() => void run("restart", async () => {
             if (!api) throw new Error("Launcher IPC is unavailable");
             await api.restartOriginalUi(toolId);
-            await openSection();
+            await openSection(selectedFrom(tool, selectedSection));
           })} type="button">
             {busy === "restart" ? "…" : localize(language, "Restart", "重新啟動")}
           </button>
