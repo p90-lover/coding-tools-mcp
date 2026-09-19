@@ -54,9 +54,19 @@ test("apps host catalogs operations and drives modules in-process without listen
   assert.equal(listed.transport, "in-process");
   assert.deepEqual(listed.modules.map((entry) => entry.id), MODULE_IDS);
   assert.ok(listed.modules.find((entry) => entry.id === "cpa").operations.includes("chatCompletions"));
+  assert.ok(listed.modules.find((entry) => entry.id === "cpa").operations.includes("listProviders"));
+  assert.ok(listed.modules.find((entry) => entry.id === "cpa").operations.includes("linkProvider"));
+  assert.ok(listed.modules.find((entry) => entry.id === "codex-router").operations.includes("sync"));
+  assert.ok(listed.modules.find((entry) => entry.id === "codex-router").operations.includes("chatCompletions"));
   assert.ok(listed.modules.find((entry) => entry.id === "paseo").operations.includes("send"));
   assert.ok(listed.modules.find((entry) => entry.id === "anneal").operations.includes("startTask"));
   assert.ok(listed.modules.find((entry) => entry.id === "anneal").operations.includes("task-start"));
+
+  const catalog = host.catalog();
+  const cpaModels = catalog.modules.find((entry) => entry.id === "cpa")
+    .operations.find((entry) => entry.name === "models");
+  assert.equal(cpaModels.readOnly, true);
+  assert.match(cpaModels.description, /models/i);
 
   const inspected = await host.call("cpa", "inspect");
   assert.equal(inspected.ok, true);

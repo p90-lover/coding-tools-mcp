@@ -60,7 +60,7 @@ IPC (before first paint): `coding-tools:apps:list`, `catalog`, `call`. `invoke` 
 
 | Module | Lifecycle | Meaningful functions |
 | --- | --- | --- |
-| `cpa` | inspect/start/stop/restart/repair/install | health, models, chatCompletions, managementHealth |
+| `cpa` | inspect/start/stop/restart/repair/install | health, models, chatCompletions, managementHealth, listProviders, linkProvider, unlinkProvider, providerStatus |
 | `codex-router` | same | health, models, chatCompletions, sync |
 | `commandcode-proxy` | same | health, models, banner, plan, applyPlan, registration-plan, registration-apply |
 | `paseo` | same | send, resume, cancel, archive, permission, create, plan, run, submitResult, review |

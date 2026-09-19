@@ -14,6 +14,13 @@ function wrapServices(moduleId, ctx) {
     syncCodexRouter: ctx.syncCodexRouter,
     commandCodeProxyPlan: ctx.commandCodeProxyPlan,
     applyCommandCodeProxyPlan: ctx.applyCommandCodeProxyPlan,
+    loopbackRequest: ctx.loopbackRequest,
+    listProviders: ctx.listProviders,
+    linkProvider: ctx.linkProvider,
+    unlinkProvider: ctx.unlinkProvider,
+    providerStatus: ctx.providerStatus,
+    providerCatalog: ctx.providerCatalog,
+    explainEmptyModels: ctx.explainEmptyModels,
   };
 }
 
