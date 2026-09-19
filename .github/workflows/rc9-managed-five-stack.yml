@@ -88,6 +88,7 @@ jobs:
             node --check desktop-electron/electron/preload.cjs
             node --check desktop-electron/scripts/prepare-five-stack-runtime.cjs
             node --test \
+              desktop-electron/tests/browser-surface-ipc.test.cjs \
               desktop-electron/tests/commandcode-provider-session.test.cjs \
               desktop-electron/tests/external-services-control-plane.test.cjs \
               desktop-electron/tests/managed-bootstrap.test.cjs \
