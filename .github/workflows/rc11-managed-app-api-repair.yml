@@ -99,7 +99,6 @@ jobs:
           set -euo pipefail
           branch='feature/rc11-managed-app-api-handles'
           git add \
-            .github/workflows/rc11-managed-app-api.yml \
             aiTemp/rc11-managed-app-api/materialize.mjs \
             desktop-electron/electron/coding-tools-shell-bridge.cjs \
             desktop-electron/electron/ipc-schema.cjs \
