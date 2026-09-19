@@ -106,5 +106,5 @@ test("managed app API materializer stays idempotent after four-locale shell comp
 
   assert.equal(materializer.split(sentinel).length - 1, 2);
   assert.match(repair, /RC11_MANAGED_APP_LOCALE_MATERIALIZER_REPAIRED/);
-  assert.match(repair, /Expected one locale-sensitive materializer sentinel/);
+  assert.match(repair, /Expected one locale-sensitive sentinel and one existing API sentinel/);
 });
