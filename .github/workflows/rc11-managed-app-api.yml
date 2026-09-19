@@ -85,6 +85,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if grep -Fq 'apps: Object.freeze({' desktop-electron/electron/preload.cjs; then
+            echo 'Managed app API source is already materialized; first-run RED evidence is retained in its artifact.'
+            exit 0
+          fi
           set +e
           node --test \
             desktop-electron/tests/rc11-managed-app-api-wiring.test.cjs \
