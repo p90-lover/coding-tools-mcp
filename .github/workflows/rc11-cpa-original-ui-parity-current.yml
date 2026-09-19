@@ -6,12 +6,14 @@ on:
       - fix/rc11-cpa-original-ui-parity-current
     paths:
       - .github/workflows/rc11-cpa-original-ui-parity-current.yml
+      - aiTemp/rc11-cpa-original-ui-parity/**
       - desktop-electron/electron/main.cjs
       - desktop-electron/electron/preload.cjs
       - desktop-electron/src/features/OriginalUiSurface.tsx
       - desktop-electron/src/features/original-ui.css
       - desktop-electron/src/types.ts
       - desktop-electron/tests/rc11-cpa-original-ui-parity-current.test.cjs
+      - desktop-electron/tests/rc10-cpa-codex-original-ui.test.cjs
       - desktop-electron/vendor/upstream/cpa.json
   pull_request:
     branches:
@@ -20,12 +22,14 @@ on:
       - integration/v0.7.0-rc.11-five-stack-final
     paths:
       - .github/workflows/rc11-cpa-original-ui-parity-current.yml
+      - aiTemp/rc11-cpa-original-ui-parity/**
       - desktop-electron/electron/main.cjs
       - desktop-electron/electron/preload.cjs
       - desktop-electron/src/features/OriginalUiSurface.tsx
       - desktop-electron/src/features/original-ui.css
       - desktop-electron/src/types.ts
       - desktop-electron/tests/rc11-cpa-original-ui-parity-current.test.cjs
+      - desktop-electron/tests/rc10-cpa-codex-original-ui.test.cjs
       - desktop-electron/vendor/upstream/cpa.json
   workflow_dispatch:
 
