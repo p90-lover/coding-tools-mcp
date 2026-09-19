@@ -60,3 +60,12 @@ test("Network Proxy routes all visible controls through localization", () => {
   assert.match(source, /policyModeLabel\(language, item\)/);
   assert.match(source, /statusLabel\(language,/);
 });
+
+test("Network Proxy exposes and localizes the typed subagent routing scope", () => {
+  assert.match(source, /const SCOPES:[\s\S]*"subagent"/);
+  assert.match(source, /case "subagent":/);
+  assert.match(source, /"Subagents"/);
+  assert.match(source, /"子代理程式"/);
+  assert.match(source, /"子代理"/);
+  assert.match(source, /"サブエージェント"/);
+});
