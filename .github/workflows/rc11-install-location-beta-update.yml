@@ -1,0 +1,80 @@
+name: rc.11 installer location and beta update
+
+on:
+  push:
+    branches:
+      - fix/rc11-install-location-beta-update-current
+    paths:
+      - .github/workflows/rc11-install-location-beta-update.yml
+      - aiTemp/rc11-install-location-beta-update/**
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/update.cjs
+      - desktop-electron/electron/update-worker.cjs
+      - desktop-electron/tests/rc11-install-location-beta-update.test.cjs
+  pull_request:
+    branches:
+      - main
+      - integration/v0.7.0-rc.11-five-stack-final
+    paths:
+      - .github/workflows/rc11-install-location-beta-update.yml
+      - aiTemp/rc11-install-location-beta-update/**
+      - desktop-electron/build/installer.nsh
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/update.cjs
+      - desktop-electron/electron/update-worker.cjs
+      - desktop-electron/tests/rc11-install-location-beta-update.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc11-install-location-beta-update-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  focused-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run current installer and update contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-install-location-beta-update/evidence
+          (
+            node --check desktop-electron/electron/main.cjs
+            node --check desktop-electron/electron/update.cjs
+            node --check desktop-electron/electron/update-worker.cjs
+            node --test \
+              desktop-electron/tests/rc11-install-location-beta-update.test.cjs \
+              desktop-electron/tests/installer-upgrade-migration.test.cjs \
+              desktop-electron/tests/legacy-msi-upgrade-contract.test.cjs \
+              desktop-electron/tests/update.test.cjs
+          ) 2>&1 | tee aiTemp/rc11-install-location-beta-update/evidence/results.txt
+          grep -F '# fail 0' aiTemp/rc11-install-location-beta-update/evidence/results.txt
+
+      - name: Enforce preservation and diff safety
+        run: |
+          set -euo pipefail
+          git fetch origin main --no-tags
+          git diff --check origin/main...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/main...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-install-location-beta-update-${{ github.sha }}
+          path: aiTemp/rc11-install-location-beta-update/evidence/
+          if-no-files-found: error
+          retention-days: 14
