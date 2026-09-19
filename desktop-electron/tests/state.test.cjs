@@ -7,6 +7,7 @@ const {
   SESSION_REFRESH_REMINDER_INTERVAL_MS,
   createStateStore,
   nextSessionRefreshReminderAt,
+  validateManagedAppTab,
   validateSidebarState,
 } = require("../electron/state.cjs");
 
@@ -22,6 +23,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      automaticUpdates: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -31,6 +33,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       browserSmokeVersion: null,
       sidebarOpen: true,
       sidebarWidth: 252,
+      managedAppTab: "cpa",
       mcpGuideStep: 0,
       sessionRefreshReminderAt: null,
     });
@@ -48,6 +51,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      automaticUpdates: true,
       keepRunningOnClose: false,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -57,6 +61,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       browserSmokeVersion: "0.2.0",
       sidebarOpen: true,
       sidebarWidth: 252,
+      managedAppTab: "cpa",
       mcpGuideStep: 0,
       sessionRefreshReminderAt: null,
     });
@@ -75,6 +80,13 @@ test("sidebar state accepts only bounded native shell dimensions", () => {
   assert.throws(() => validateSidebarState({ open: "yes", width: 300 }), /invalid/);
   assert.throws(() => validateSidebarState({ open: true, width: 100 }), /between 240 and 420/);
   assert.throws(() => validateSidebarState({ open: true, width: 900 }), /between 240 and 420/);
+});
+
+test("managed application tab accepts only the fixed five-stack destinations", () => {
+  for (const tab of ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]) {
+    assert.equal(validateManagedAppTab(tab), tab);
+  }
+  assert.throws(() => validateManagedAppTab("other"), /invalid/);
 });
 
 test("Japanese is preserved as a supported persisted launcher language", () => {
@@ -113,6 +125,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      automaticUpdates: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -122,6 +135,7 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       browserSmokeVersion: null,
       sidebarOpen: true,
       sidebarWidth: 252,
+      managedAppTab: "cpa",
       mcpGuideStep: 0,
       sessionRefreshReminderAt: null,
     });
