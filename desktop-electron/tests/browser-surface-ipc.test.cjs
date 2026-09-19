@@ -79,6 +79,49 @@ test("stale main process does not reveal a GPT browser that was already hidden",
   ]);
 });
 
+test("failed compatibility hide does not arm a later restore", async () => {
+  const calls = [];
+  const invoke = createBrowserSurfaceActiveInvoker({
+    invoke: async (channel, value) => {
+      calls.push([channel, value]);
+      if (channel === BROWSER_SURFACE_ACTIVE_CHANNEL) {
+        throw new Error(`No handler registered for '${channel}'`);
+      }
+      if (channel === SNAPSHOT_CHANNEL) return { browser: { visible: true } };
+      if (channel === BROWSER_HIDE_CHANNEL) throw new Error("hide failed");
+      return { channel };
+    },
+  });
+
+  await assert.rejects(invoke(false), /hide failed/);
+  assert.equal(await invoke(true), null);
+  assert.equal(calls.filter(([channel]) => channel === BROWSER_SHOW_CHANNEL).length, 0);
+});
+
+test("failed compatibility show remains armed for a later active retry", async () => {
+  const calls = [];
+  let showAttempts = 0;
+  const invoke = createBrowserSurfaceActiveInvoker({
+    invoke: async (channel, value) => {
+      calls.push([channel, value]);
+      if (channel === BROWSER_SURFACE_ACTIVE_CHANNEL) {
+        throw new Error(`No handler registered for '${channel}'`);
+      }
+      if (channel === SNAPSHOT_CHANNEL) return { browser: { visible: true } };
+      if (channel === BROWSER_SHOW_CHANNEL) {
+        showAttempts += 1;
+        if (showAttempts === 1) throw new Error("show failed");
+      }
+      return { channel };
+    },
+  });
+
+  await invoke(false);
+  await assert.rejects(invoke(true), /show failed/);
+  assert.deepEqual(await invoke(true), { channel: BROWSER_SHOW_CHANNEL });
+  assert.equal(showAttempts, 2);
+});
+
 test("surface compatibility is narrowly scoped and remains wired through preload plus main", async () => {
   const invoke = createBrowserSurfaceActiveInvoker({
     invoke: async () => {
