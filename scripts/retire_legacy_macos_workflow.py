@@ -58,6 +58,17 @@ def write_json(path: pathlib.Path, value: Any) -> None:
     path.write_text(f"{json.dumps(value, indent=2, sort_keys=True)}\n", encoding="utf-8")
 
 
+def workflow_retirement_action(state: Any) -> str:
+    if state == "active":
+        return "disable"
+    if state == "disabled_manually":
+        return "already_disabled"
+    fail(
+        "Registered legacy macOS workflow has an unsupported state "
+        f"{state!r}; refusing to continue"
+    )
+
+
 def main() -> None:
     if len(sys.argv) > 2:
         fail("usage: retire_legacy_macos_workflow.py [evidence-directory]")
@@ -113,17 +124,20 @@ def main() -> None:
         workflow_id = matches[0].get("id")
         if not isinstance(workflow_id, int):
             fail("Registered legacy macOS workflow is missing a numeric ID")
-        status, body = api_request(
-            "PUT",
-            f"/repos/{repository}/actions/workflows/{workflow_id}/disable",
-            token,
-            data=b"",
-        )
-        if status != HTTPStatus.NO_CONTENT:
-            fail(
-                f"Disabling legacy macOS workflow {workflow_id} failed with HTTP {status}: "
-                f"{body.decode('utf-8', errors='replace')}"
+        registered_state = matches[0].get("state")
+        action = workflow_retirement_action(registered_state)
+        if action == "disable":
+            status, body = api_request(
+                "PUT",
+                f"/repos/{repository}/actions/workflows/{workflow_id}/disable",
+                token,
+                data=b"",
             )
+            if status != HTTPStatus.NO_CONTENT:
+                fail(
+                    f"Disabling legacy macOS workflow {workflow_id} failed with HTTP {status}: "
+                    f"{body.decode('utf-8', errors='replace')}"
+                )
         status, body = api_request(
             "GET", f"/repos/{repository}/actions/workflows/{workflow_id}", token
         )
@@ -137,7 +151,12 @@ def main() -> None:
                 f"observed {state!r}"
             )
         identity = str(workflow_id)
-        probe = {"status": status, "workflow": workflow}
+        probe = {
+            "action": action,
+            "registered_state": registered_state,
+            "status": status,
+            "workflow": workflow,
+        }
     else:
         status, body = api_request(
             "GET",
