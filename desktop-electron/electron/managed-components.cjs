@@ -1273,6 +1273,10 @@ function createManagedComponentController({
       if (fs.existsSync(target)) moveToTrash(target, manifest, repair ? "repair-replaced" : "version-replaced");
       fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
       fs.renameSync(stagingHome, target);
+      if (id === "codex-router") {
+        const { ensureBinWrappers } = require("./codex-router-managed.cjs");
+        ensureBinWrappers({ home: target, stateDir: componentState(manifest) });
+      }
       writeJson(path.join(stagingRoot, "COMPLETED.json"), {
         schemaVersion: 1,
         id,
@@ -1337,6 +1341,8 @@ function createManagedComponentController({
     const context = launchContext(manifest);
     if (id === "codex-router") {
       writeInAppProvidersFile(path.join(context.state, "router"));
+      const { ensureBinWrappers } = require("./codex-router-managed.cjs");
+      ensureBinWrappers({ home: context.home, stateDir: context.state });
     }
     const existing = processes.get(id);
     if (existing && [...existing.values()].some((child) => child && child.exitCode === null && child.signalCode === null)) {

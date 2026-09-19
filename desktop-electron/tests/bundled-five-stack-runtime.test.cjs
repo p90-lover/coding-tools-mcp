@@ -280,6 +280,9 @@ test("Codex Router prepare unpacks from CODING_TOOLS_BUNDLED.json without instal
     ? path.join(state, "bin", "model-router.cmd")
     : path.join(state, "bin", "model-router");
   assert.equal(fs.existsSync(wrapper), true);
+  const wrapperText = fs.readFileSync(wrapper, "utf8");
+  assert.equal(wrapperText.includes(home), true);
+  assert.doesNotMatch(wrapperText, /aiTemp/i);
 });
 
 test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () => {

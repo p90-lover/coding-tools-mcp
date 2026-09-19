@@ -153,6 +153,10 @@ test("managed component controller stages under aiTemp and preserves replaced in
   assert.match(source, /verifySha256/);
   assert.match(source, /assertSafeManifest/);
   assert.doesNotMatch(source, /\b(?:rmSync|unlinkSync|rmdirSync)\s*\(/);
+  assert.match(source, /ensureBinWrappers/);
+  assert.match(read("electron/codex-router-managed.cjs"), /function ensureBinWrappers/);
+  assert.match(read("electron/codex-router-managed.cjs"), /resolveLiveComponentHome/);
+  assert.match(read("electron/managed-external-services.cjs"), /ensureBinWrappers/);
 });
 
 test("managed installation is wired through the combined controller, focused IPC, preload, types and UI", () => {
