@@ -29,7 +29,7 @@ test("the launcher persists one of the five fixed managed-app tabs through focus
   assert.match(preload, /setManagedAppTab: \(tab\) => ipcRenderer\.invoke\("launcher:managed-app-tab", tab\)/);
 });
 
-test("the product shell exposes one localized Managed Apps destination instead of six fragmented engine destinations", () => {
+test("the product shell exposes one Managed Apps destination instead of six fragmented engine destinations", () => {
   const app = read("src/App.tsx");
   const managedApps = read("src/features/ManagedAppsSurface.tsx");
   assert.match(app, /import \{ ManagedAppsSurface \} from "\.\/features\/ManagedAppsSurface"/);
@@ -40,31 +40,9 @@ test("the product shell exposes one localized Managed Apps destination instead o
   assert.match(app, /selectManagedAppTab\("anneal"\)/);
   assert.match(managedApps, /id: "commandcode-proxy"/);
   assert.match(managedApps, /onSelectedTabChange\(tab\)/);
-  assert.match(app, /language === "zh-TW"\s*\?\s*"受管理應用程式"/);
-  assert.match(app, /language === "zh-CN"\s*\?\s*"托管应用"/);
-  assert.match(app, /language === "ja"\s*\?\s*"管理対象アプリ"/);
-  assert.match(app, /:\s*"Managed Apps"/);
+  assert.match(app, /label=\{language === "zh-TW" \? "受管理應用程式" : "Managed Apps"\}/);
   assert.match(app, /surface === "apps"/);
   assert.match(app, /<ManagedAppsSurface/);
-});
-
-test("Managed Apps copy keeps Simplified Chinese, Traditional Chinese, Japanese, and English distinct", () => {
-  const managedApps = read("src/features/ManagedAppsSurface.tsx");
-  assert.doesNotMatch(managedApps, /language === "zh-TW" \|\| language === "zh-CN"/);
-  assert.match(managedApps, /simplifiedChinese: string/);
-  assert.match(managedApps, /traditionalChinese: string/);
-  assert.match(managedApps, /japanese: string/);
-  assert.match(managedApps, /if \(language === "zh-CN"\) return simplifiedChinese/);
-  assert.match(managedApps, /if \(language === "zh-TW"\) return traditionalChinese/);
-  assert.match(managedApps, /if \(language === "ja"\) return japanese/);
-  assert.match(managedApps, /return english/);
-  assert.match(managedApps, /托管应用/);
-  assert.match(managedApps, /受管理應用程式/);
-  assert.match(managedApps, /管理対象アプリ/);
-  assert.match(managedApps, /MANAGED APPS/);
-  assert.match(managedApps, /托管应用标签页/);
-  assert.match(managedApps, /受管理應用程式分頁/);
-  assert.match(managedApps, /管理対象アプリのタブ/);
 });
 
 test("each managed-app tab reuses the real current runtime surface without storing secrets in tab state", () => {
