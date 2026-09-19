@@ -33,6 +33,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const file = 'aiTemp/rc12-release/prepare-rc12.mjs';
+          const source = fs.readFileSync(file, 'utf8');
+          const before = "if (transformed === source || transformed.includes(fromVersion)) {";
+          const after = "if (source.includes(fromVersion) && transformed.includes(fromVersion)) {";
+          if (!source.includes(before)) throw new Error('RC12_TEMPLATE_GUARD_ANCHOR_MISSING');
+          fs.writeFileSync(file, source.replace(before, after), 'utf8');
+          NODE
           export RC12_ORIGINAL_WORKFLOW="$(base64 -w0 .github/workflows/codex-router-multiprovider-release-rc11.yml)"
           node aiTemp/rc12-release/prepare-rc12.mjs
 
@@ -82,6 +91,7 @@ jobs:
           git add \
             .github/workflows/codex-router-multiprovider-release-rc11.yml \
             .github/workflows/codex-router-multiprovider-release-rc12.yml \
+            aiTemp/rc12-release/prepare-rc12.mjs \
             aiTemp/rc12-release/run-windows-release.mjs \
             aiTemp/rc12-release/verify-windows-migration.ps1 \
             desktop-electron/electron/product.cjs \
