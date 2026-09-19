@@ -563,7 +563,7 @@ replaceOnce(
   },
   { id: "paseo", english: "Paseo", traditionalChinese: "Paseo" },
   { id: "anneal", english: "Anneal", traditionalChinese: "Anneal" },`,
-  '{ id: "anneal", english: "Anneal", traditionalChinese: "Anneal" },',
+  "const appByHandle = useMemo(",
 );
 
 replaceOnce(
