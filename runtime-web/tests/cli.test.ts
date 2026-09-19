@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { defaultBrokerEndpoint, defaultConfig, ZERO_RISK_CHATGPT_CONNECTOR_NAME } from "../src/config";
-import { LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+import { expectedLauncherBrowserPartition, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
 
 setDefaultTimeout(30_000);
 
@@ -307,7 +307,7 @@ test("DEV browser-only setup persists only the isolated harness profile", async 
       endpoint: "http://127.0.0.1:48121",
       control: { endpoint: `http://127.0.0.1:${address.port}`, token: controlToken },
       helper: { executable: process.execPath, script: helperScript },
-      partition: "persist:codex-web-gpt-dev-chatgpt",
+      partition: expectedLauncherBrowserPartition("development"),
       idleUrl: LAUNCHER_BROWSER_IDLE_URL,
       surfaceId: "d".repeat(32),
       surfaceTargets: { ["d".repeat(32)]: "native-owned-target" },
@@ -368,7 +368,7 @@ test("DEV setup accepts explicit browser-interaction flags and preserves manual 
         token: "dev-manual-control-token-0123456789abcdefghijklmnop",
       },
       helper: { executable: process.execPath, script: helperScript },
-      partition: "persist:codex-web-gpt-dev-chatgpt",
+      partition: expectedLauncherBrowserPartition("development"),
       idleUrl: LAUNCHER_BROWSER_IDLE_URL,
       surfaceId: "m".repeat(32),
       surfaceTargets: { ["m".repeat(32)]: "native-owned-target" },
@@ -442,7 +442,7 @@ test("browser check uses metadata-only launcher liveness in Zero Risk", async ()
         token: "manual-browser-check-token-0123456789abcdefghijklmnop",
       },
       helper: { executable: process.execPath, script: helperScript },
-      partition: "persist:codex-web-gpt-chatgpt",
+      partition: expectedLauncherBrowserPartition("production"),
       idleUrl: LAUNCHER_BROWSER_IDLE_URL,
       surfaceId: "s".repeat(32),
       surfaceTargets: { ["s".repeat(32)]: "native-owned-target" },
@@ -541,7 +541,7 @@ test("authorized launcher uninstall does not re-probe an already stopped full ru
     endpoint: "http://127.0.0.1:48111",
     control: { endpoint: "http://127.0.0.1:48112", token },
     helper: { executable: process.execPath, script: helperScript },
-    partition: "persist:codex-web-gpt-chatgpt",
+    partition: expectedLauncherBrowserPartition("production"),
     idleUrl: LAUNCHER_BROWSER_IDLE_URL,
     surfaceId: "a".repeat(32),
     surfaceTargets: { ["a".repeat(32)]: "native-owned-target" },
