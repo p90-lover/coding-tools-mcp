@@ -9,6 +9,7 @@ const {
   BROWSER_HIDE_CHANNEL,
   BROWSER_SHOW_CHANNEL,
   BROWSER_SURFACE_ACTIVE_CHANNEL,
+  SNAPSHOT_CHANNEL,
   createBrowserSurfaceActiveInvoker,
 } = require("../electron/browser-surface-ipc.cjs");
 
@@ -29,7 +30,7 @@ test("browser surface uses the dedicated IPC handler when main and renderer vers
   ]);
 });
 
-test("stale main process falls back to hide and restore instead of leaving ChatGPT over other tabs", async () => {
+test("stale main process hides and restores a GPT browser that was visible before the tab switch", async () => {
   const calls = [];
   const invoke = createBrowserSurfaceActiveInvoker({
     invoke: async (channel, value) => {
@@ -39,6 +40,7 @@ test("stale main process falls back to hide and restore instead of leaving ChatG
           `Error invoking remote method '${channel}': Error: No handler registered for '${channel}'`,
         );
       }
+      if (channel === SNAPSHOT_CHANNEL) return { browser: { visible: true } };
       return { channel };
     },
   });
@@ -47,9 +49,33 @@ test("stale main process falls back to hide and restore instead of leaving ChatG
   assert.deepEqual(await invoke(true), { channel: BROWSER_SHOW_CHANNEL });
   assert.deepEqual(calls, [
     [BROWSER_SURFACE_ACTIVE_CHANNEL, false],
+    [SNAPSHOT_CHANNEL, undefined],
     [BROWSER_HIDE_CHANNEL, undefined],
     [BROWSER_SURFACE_ACTIVE_CHANNEL, true],
     [BROWSER_SHOW_CHANNEL, undefined],
+  ]);
+});
+
+test("stale main process does not reveal a GPT browser that was already hidden", async () => {
+  const calls = [];
+  const invoke = createBrowserSurfaceActiveInvoker({
+    invoke: async (channel, value) => {
+      calls.push([channel, value]);
+      if (channel === BROWSER_SURFACE_ACTIVE_CHANNEL) {
+        throw new Error(`No handler registered for '${channel}'`);
+      }
+      if (channel === SNAPSHOT_CHANNEL) return { browser: { visible: false } };
+      return { channel };
+    },
+  });
+
+  assert.deepEqual(await invoke(false), { channel: BROWSER_HIDE_CHANNEL });
+  assert.equal(await invoke(true), null);
+  assert.deepEqual(calls, [
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, false],
+    [SNAPSHOT_CHANNEL, undefined],
+    [BROWSER_HIDE_CHANNEL, undefined],
+    [BROWSER_SURFACE_ACTIVE_CHANNEL, true],
   ]);
 });
 
