@@ -79,13 +79,12 @@ jobs:
           mkdir -p aiTemp/rc9-managed-app-api/bun-cache
           mkdir -p aiTemp/Trash/rc9-managed-app-api
 
-      - name: Materialize API wiring when available
+      - name: Materialize API wiring and UI consumer
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f aiTemp/rc9-managed-app-api/materialize.mjs ]; then
-            node aiTemp/rc9-managed-app-api/materialize.mjs
-          fi
+          node aiTemp/rc9-managed-app-api/materialize.mjs
+          node aiTemp/rc9-managed-app-api/materialize-ui.mjs
 
       - name: Install exact Electron dependencies
         shell: bash
