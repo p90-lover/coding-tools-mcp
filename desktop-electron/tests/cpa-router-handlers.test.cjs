@@ -377,25 +377,213 @@ test("Codex Router models/sync/chatCompletions use the caller-secret path and ne
 });
 
 test("Codex Router models reports a missing caller secret instead of hanging on an unauthenticated probe", async () => {
-  const host = createCodingToolsAppsHost({
-    services: {
-      loopbackRequest: () => ({
-        origin: "http://127.0.0.1:1/",
-        headers: {},
-        modelsPath: "/v1/models",
-        chatPath: "/v1/chat/completions",
-        healthPath: "/",
-        credentialReason: "Codex Router caller secret is not configured",
-      }),
-      explainEmptyModels: async (_id, probed) => ({
-        reason: probed.reason || "Codex Router caller secret is not configured",
-      }),
-    },
+  const seen = [];
+  const mock = await listenMock((request, response) => {
+    seen.push(request.url);
+    json(response, 200, { data: [{ id: "should-not-be-used" }] });
   });
-  const models = await host.call("codex-router", "models");
-  assert.equal(models.ok, false);
-  assert.deepEqual(models.result.models, []);
-  assert.match(models.result.reason, /caller secret is not configured/);
+  try {
+    const host = createCodingToolsAppsHost({
+      services: {
+        loopbackRequest: () => ({
+          origin: mock.origin,
+          headers: {},
+          modelsPath: "/v1/models",
+          chatPath: "/v1/chat/completions",
+          healthPath: "/",
+          credentialReason: "Codex Router caller secret is not configured",
+        }),
+      },
+    });
+    const models = await host.call("codex-router", "models");
+    const chat = await host.call("codex-router", "chatCompletions", { model: "x", messages: [] });
+    assert.equal(models.ok, false);
+    assert.deepEqual(models.result.models, []);
+    assert.match(models.result.reason, /caller secret is not configured/);
+    assert.equal(chat.ok, false);
+    assert.match(chat.result.reason, /caller secret is not configured/);
+    assert.deepEqual(seen, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("CPA models does not advertise cached catalogs when loopback auth fails", async () => {
+  const mock = await listenMock((request, response) => {
+    if (request.url === "/v1/models") {
+      json(response, 401, { error: "invalid api key" });
+      return;
+    }
+    json(response, 404, {});
+  });
+  try {
+    const host = createCodingToolsAppsHost({
+      services: {
+        loopbackRequest: () => ({
+          origin: mock.origin,
+          headers: { Authorization: "Bearer proxy-secret" },
+          modelsPath: "/v1/models",
+          chatPath: "/v1/chat/completions",
+          healthPath: "/v1/models",
+        }),
+        providerCatalog: async () => ({ models: ["stale-claude"] }),
+      },
+    });
+    const models = await host.call("cpa", "models");
+    assert.equal(models.ok, false);
+    assert.deepEqual(models.result.models, []);
+    assert.equal(models.result.status, 401);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("Codex Router models stay empty until sync even if provider-network has cached models", async () => {
+  const mock = await listenMock((request, response) => {
+    json(response, 200, { data: [] });
+  });
+  try {
+    const directory = temporaryDirectory("coding-tools-router-catalog");
+    const store = createProviderNetworkStore({
+      filePath: path.join(directory, "provider-network.json"),
+      keyPath: path.join(directory, "provider-network.key"),
+      safeStorage: { isEncryptionAvailable: () => false },
+    });
+    store.saveAccount({
+      providerId: "claude-oauth",
+      label: "Claude",
+      auth: "oauth",
+      status: "connected",
+      enabled: true,
+      models: ["claude-sonnet"],
+    });
+    const providerServices = createAppsProviderServices({
+      providerNetworkReady: async () => ({ store }),
+    });
+    const host = createCodingToolsAppsHost({
+      services: {
+        loopbackRequest: () => ({
+          origin: mock.origin,
+          modelsPath: "/v1/models",
+          chatPath: "/v1/chat/completions",
+          healthPath: "/v1/models",
+        }),
+        providerCatalog: (id) => providerServices.providerCatalog(id),
+        explainEmptyModels: (id, details) => providerServices.explainEmptyModels(id, details),
+      },
+    });
+    const models = await host.call("codex-router", "models");
+    assert.equal(models.ok, false);
+    assert.deepEqual(models.result.models, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("CPA provider catalog fallback excludes disconnected accounts", async () => {
+  const mock = await listenMock((request, response) => {
+    json(response, 200, { data: [] });
+  });
+  try {
+    const directory = temporaryDirectory("coding-tools-cpa-stale");
+    const store = createProviderNetworkStore({
+      filePath: path.join(directory, "provider-network.json"),
+      keyPath: path.join(directory, "provider-network.key"),
+      safeStorage: { isEncryptionAvailable: () => false },
+    });
+    store.saveAccount({
+      providerId: "claude-oauth",
+      label: "Stale Claude",
+      auth: "oauth",
+      status: "pending",
+      enabled: true,
+      models: ["claude-sonnet"],
+      loginAdapterId: "cpa-claude",
+      credentialSource: "cpa",
+    });
+    const providerServices = createAppsProviderServices({
+      providerNetworkReady: async () => ({ store }),
+    });
+    const host = createCodingToolsAppsHost({
+      services: {
+        loopbackRequest: () => ({
+          origin: mock.origin,
+          modelsPath: "/v1/models",
+          chatPath: "/v1/chat/completions",
+          healthPath: "/v1/models",
+        }),
+        providerCatalog: (id) => providerServices.providerCatalog(id),
+        explainEmptyModels: (id, details) => providerServices.explainEmptyModels(id, details),
+      },
+    });
+    const models = await host.call("cpa", "models");
+    assert.equal(models.ok, false);
+    assert.deepEqual(models.result.models, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("CPA managementHealth is not ok when the authenticated management API fails", async () => {
+  const mock = await listenMock((request, response) => {
+    if (request.url === "/management.html") {
+      text(response, 200, "<html>cpa</html>");
+      return;
+    }
+    if (request.url === "/v0/management/auth-files") {
+      json(response, 401, { error: "unauthorized" });
+      return;
+    }
+    json(response, 404, {});
+  });
+  try {
+    const host = createCodingToolsAppsHost({
+      services: {
+        loopbackRequest: () => ({
+          origin: mock.origin,
+          managementHeaders: { Authorization: "Bearer management-secret" },
+        }),
+      },
+    });
+    const management = await host.call("cpa", "managementHealth");
+    assert.equal(management.ok, false);
+    assert.equal(management.result.reachable, true);
+    assert.match(management.result.reason, /HTTP 401|unavailable/i);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("Codex Router chatCompletions redacts caller keys inside JSON error payloads", async () => {
+  const callerKey = "router-caller-secret-value-32chars!!";
+  const prefix = `/_codex-router/${encodeURIComponent(callerKey)}`;
+  const mock = await listenMock((request, response) => {
+    json(response, 500, {
+      error: { message: `upstream failed at ${prefix}/v1/chat/completions` },
+    });
+  });
+  try {
+    const host = createCodingToolsAppsHost({
+      services: {
+        loopbackRequest: () => ({
+          origin: mock.origin,
+          modelsPath: `${prefix}/v1/models`,
+          chatPath: `${prefix}/v1/chat/completions`,
+          healthPath: `${prefix}/v1/models`,
+        }),
+      },
+    });
+    const chat = await host.call("codex-router", "chatCompletions", {
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: "ping" }],
+    });
+    assert.equal(chat.ok, false);
+    const payload = JSON.stringify(chat);
+    assert.equal(payload.includes(callerKey), false);
+    assert.match(chat.result.json.error.message, /_codex-router\/\[REDACTED\]/);
+  } finally {
+    await mock.close();
+  }
 });
 
 test("desktop wiring keeps CPA/Router handler auth in-process", () => {

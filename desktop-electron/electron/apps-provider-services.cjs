@@ -189,10 +189,13 @@ function createAppsProviderServices({ providerNetworkReady }) {
   async function providerCatalog(moduleId) {
     const listed = await listProviders();
     const selected = moduleId === "cpa"
-      ? listed.accounts.filter((account) => !account.archivedAt && account.enabled && isCpaAccount(account))
-      : moduleId === "codex-router"
-        ? listed.accounts.filter((account) => account.enabled && !account.archivedAt)
-        : [];
+      ? listed.accounts.filter((account) => (
+        !account.archivedAt
+        && account.enabled
+        && account.status === "connected"
+        && isCpaAccount(account)
+      ))
+      : [];
     return {
       models: [...new Set(selected.flatMap((account) => account.models))],
       accounts: selected,

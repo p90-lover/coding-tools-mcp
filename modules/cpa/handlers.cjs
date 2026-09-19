@@ -81,11 +81,13 @@ function createModule() {
         const auth = await listAuthFiles(context);
         const reason = !panel.reachable
           ? (panel.error || "CPA management panel is unreachable")
-          : auth.count === 0
-            ? (auth.reason || "CPA auth-dir is empty")
-            : undefined;
+          : !auth.ok
+            ? (auth.reason || "CPA management API is unavailable")
+            : auth.count === 0
+              ? (auth.reason || "CPA auth-dir is empty")
+              : undefined;
         return sanitizePublic({
-          ok: panel.reachable,
+          ok: panel.reachable && auth.ok === true,
           reachable: panel.reachable,
           status: panel.status,
           authFileCount: auth.count || 0,

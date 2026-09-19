@@ -10,6 +10,21 @@ function publicError(error) {
     .replace(/\/_codex-router\/[^/?#]+/g, "/_codex-router/[REDACTED]");
 }
 
+function redactPublicValue(value) {
+  if (typeof value === "string") return publicError(value);
+  if (Array.isArray(value)) return value.map((entry) => redactPublicValue(entry));
+  if (value && typeof value === "object") {
+    const snapshot = {};
+    for (const [key, entry] of Object.entries(value)) snapshot[key] = redactPublicValue(entry);
+    return snapshot;
+  }
+  return value;
+}
+
+function publicResult(value) {
+  return sanitizePublic(redactPublicValue(value));
+}
+
 function modelIdsFromCatalog(json) {
   const fromEntry = (entry) => {
     if (typeof entry === "string" && entry.trim()) return entry.trim();
@@ -76,8 +91,20 @@ async function emptyCatalogDetails(context, probed) {
   }
 }
 
+function credentialFailure(kind, loopback) {
+  return publicResult({
+    ok: false,
+    reachable: false,
+    status: 0,
+    models: kind === "models" ? [] : undefined,
+    reason: loopback.credentialReason,
+  });
+}
+
 async function probeOpenAi(kind, args, context, getOrigin) {
   const loopback = resolveLoopback(getOrigin, context);
+  if (loopback.credentialReason) return credentialFailure(kind, loopback);
+
   const pathByKind = {
     health: loopback.healthPath,
     models: loopback.modelsPath,
@@ -99,22 +126,22 @@ async function probeOpenAi(kind, args, context, getOrigin) {
     const models = modelIdsFromCatalog(result.json);
     const reachable = result.ok || result.status > 0;
     if (kind === "health") {
-      return sanitizePublic({
+      return publicResult({
         ok: result.ok,
         reachable,
         status: result.status,
         modelCount: models.length,
         json: result.json,
         ...(result.ok ? {} : {
-          reason: loopback.credentialReason || (reachable ? `HTTP ${result.status}` : "loopback is unreachable"),
+          reason: reachable ? `HTTP ${result.status}` : "loopback is unreachable",
         }),
       });
     }
     if (kind === "models") {
-      const linked = await providerCatalogIds(context);
+      const linked = result.ok ? await providerCatalogIds(context) : [];
       const combined = uniqueModelIds([...models, ...linked]);
-      if (combined.length > 0) {
-        return sanitizePublic({
+      if (result.ok && combined.length > 0) {
+        return publicResult({
           ok: true,
           reachable,
           status: result.status,
@@ -126,9 +153,9 @@ async function probeOpenAi(kind, args, context, getOrigin) {
         ok: false,
         reachable,
         status: result.status,
-        reason: loopback.credentialReason || (result.ok ? "catalog is empty" : `HTTP ${result.status}`),
+        reason: result.ok ? "catalog is empty" : `HTTP ${result.status}`,
       });
-      return sanitizePublic({
+      return publicResult({
         ok: false,
         reachable,
         status: result.status,
@@ -138,13 +165,13 @@ async function probeOpenAi(kind, args, context, getOrigin) {
         ...extra,
       });
     }
-    return sanitizePublic({
+    return publicResult({
       ok: result.ok,
       reachable,
       status: result.status,
       json: result.json,
       ...(result.ok ? {} : {
-        reason: loopback.credentialReason || (reachable ? `HTTP ${result.status}` : "loopback is unreachable"),
+        reason: reachable ? `HTTP ${result.status}` : "loopback is unreachable",
       }),
     });
   } catch (error) {
@@ -153,16 +180,16 @@ async function probeOpenAi(kind, args, context, getOrigin) {
         ok: false,
         reachable: false,
         status: 0,
-        reason: loopback.credentialReason || publicError(error),
+        reason: publicError(error),
       })
       : {};
-    return sanitizePublic({
+    return publicResult({
       ok: false,
       reachable: false,
       status: 0,
       models: kind === "models" ? [] : undefined,
       error: publicError(error),
-      reason: extra.reason || loopback.credentialReason || publicError(error),
+      reason: extra.reason || publicError(error),
       ...extra,
     });
   }
@@ -193,5 +220,6 @@ module.exports = {
   openaiOperations,
   probeOpenAi,
   publicError,
+  redactPublicValue,
   resolveLoopback,
 };
