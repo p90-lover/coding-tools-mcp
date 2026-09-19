@@ -37,6 +37,13 @@ export type ManagedAppOperation =
   | "sync"
   | "open";
 
+export interface ManagedAppManagedState extends JsonObject {
+  readonly state: string;
+  readonly version: string;
+  readonly platformMode: string;
+  readonly missingInputs: readonly string[];
+}
+
 export interface ManagedAppSummary {
   readonly handle: ManagedAppHandle;
   readonly name: string;
@@ -50,6 +57,7 @@ export interface ManagedAppSummary {
   readonly connectedAccountCount: number;
   readonly modelCount: number | null;
   readonly error: string | null;
+  readonly managed?: ManagedAppManagedState;
   readonly [key: string]: JsonValue | undefined;
 }
 
@@ -98,6 +106,7 @@ export interface CodingToolsApi {
   readonly apps: {
     snapshot(): Promise<ManagedAppsSnapshot>;
     invoke(input: ManagedAppInvokeInput): Promise<JsonObject>;
+    onChanged(listener: (snapshot: ManagedAppsSnapshot) => void): () => void;
   };
   readonly execution: {
     read(input: {
