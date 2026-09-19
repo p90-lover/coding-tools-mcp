@@ -10,3 +10,5 @@ await codingTools.apps.call({ moduleId: "commandcode-proxy", operation: "plan", 
 ```
 
 Operations: `inspect`, `start`, `stop`, `restart`, `repair`, `health`, `models`, `chatCompletions`, `plan`, `applyPlan`.
+
+In-tree source for this lane lives at `modules/commandcode-proxy/source/` (`proxy.mjs`). Handlers stay in `handler.cjs` / `handlers.cjs` and register through the shared `modules/handler-registry.cjs`.
