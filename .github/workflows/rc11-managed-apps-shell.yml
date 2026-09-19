@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/rc11-managed-apps-shell-current
+      - fix/rc11-managed-apps-locale-parity
     paths:
       - .github/workflows/rc11-managed-apps-shell.yml
       - aiTemp/rc11-managed-apps/**
@@ -23,6 +24,7 @@ on:
     branches:
       - main
       - integration/v0.7.0-rc.11-five-stack-final
+      - feature/rc11-managed-apps-shell-current
     paths:
       - .github/workflows/rc11-managed-apps-shell.yml
       - aiTemp/rc11-managed-apps/**

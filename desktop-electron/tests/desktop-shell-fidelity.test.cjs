@@ -19,7 +19,7 @@ test("the main shell keeps the original core navigation order and consolidates m
     'SidebarGroup label={copy.configuration}',
     'SidebarGroup label={copy.runtime}',
     '<details className="sidebar-more"',
-    'label={language === "zh-TW" ? "受管理應用程式" : "Managed Apps"}',
+    'label={language === "zh-TW"',
     'label={language === "zh-TW" ? "網路代理" : copy.networkProxy}',
   ];
   let previous = -1;
@@ -32,6 +32,10 @@ test("the main shell keeps the original core navigation order and consolidates m
   assert.match(app, /import \{ ManagedAppsSurface \} from "\.\/features\/ManagedAppsSurface"/);
   assert.match(app, /active=\{surface === "apps"\}/);
   assert.match(app, /onClick=\{\(\) => navigateSurface\("apps"\)\}/);
+  assert.match(app, /language === "zh-TW"\s*\?\s*"受管理應用程式"/);
+  assert.match(app, /language === "zh-CN"\s*\?\s*"托管应用"/);
+  assert.match(app, /language === "ja"\s*\?\s*"管理対象アプリ"/);
+  assert.match(app, /:\s*"Managed Apps"/);
   assert.match(app, /<ManagedAppsSurface/);
   for (const id of ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]) {
     assert.match(managedApps, new RegExp(`id: "${id}"`));
