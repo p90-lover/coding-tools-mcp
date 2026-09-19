@@ -4,13 +4,37 @@ const path = require("node:path");
 const { ORIGINAL_SECTIONS, openOriginalControlCenter } = require("./codex-router-original-ui.cjs");
 const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
 
-const TOOL_IDS = Object.freeze(["cpa", "codex-router"]);
+const TOOL_IDS = Object.freeze(["cpa", "codex-router", "paseo", "anneal"]);
+const IFRAME_TOOL_IDS = Object.freeze(["cpa", "paseo", "anneal"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const READY_WAIT_MS = {
   cpa: 45_000,
   "codex-router": 5 * 60_000,
+  paseo: 90_000,
+  anneal: 2 * 60_000,
 };
 const READY_POLL_MS = 250;
+
+function errorMessage(value) {
+  return value instanceof Error ? value.message : String(value || "");
+}
+
+function classifyOriginalUiUnavailable(toolId, error) {
+  const message = errorMessage(error).trim();
+  if (toolId !== "anneal" || !message) return null;
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("postgres")
+    || lower.includes("postgresql")
+    || /\b5432\b/.test(lower)
+    || lower.includes("database is unavailable")
+    || lower.includes("database connection")
+    || (lower.includes("docker") && (lower.includes("database") || lower.includes("postgres")))
+  ) {
+    return { dependency: "postgres", message };
+  }
+  return null;
+}
 
 function manifestPath(toolId) {
   return path.join(__dirname, "..", "vendor", "upstream", `${toolId}.json`);
@@ -55,8 +79,20 @@ function sectionUrl(manifest, endpoint, section) {
   if (!manifest.sections.includes(section)) {
     throw new Error(`Unsupported ${manifest.id} section: ${section}`);
   }
-  const pathname = manifest.sectionPaths?.[section] || `/${section}`;
-  const target = new URL(pathname, normalizeLoopbackEndpoint(endpoint));
+  const raw = String(manifest.sectionPaths?.[section] || `/${section}`);
+  const base = normalizeLoopbackEndpoint(endpoint);
+  const target = new URL(base);
+  if (raw.startsWith("#") || raw.startsWith("/#")) {
+    target.hash = raw.replace(/^\/?#/u, "");
+  } else {
+    const resolved = new URL(raw, base);
+    if (!LOOPBACK_HOSTS.has(canonicalHostname(resolved.hostname))) {
+      throw new Error("Original UI section URL escaped the loopback boundary");
+    }
+    target.pathname = resolved.pathname;
+    target.search = resolved.search;
+    target.hash = resolved.hash;
+  }
   if (!LOOPBACK_HOSTS.has(canonicalHostname(target.hostname))) {
     throw new Error("Original UI section URL escaped the loopback boundary");
   }
@@ -111,7 +147,15 @@ function createOriginalUiCore({
 
   async function inspect(toolId) {
     requireTool(toolId);
-    if (externalServices?.inspect) await externalServices.inspect(toolId);
+    try {
+      if (externalServices?.inspect) await externalServices.inspect(toolId);
+    } catch (error) {
+      return {
+        ...project(toolId),
+        status: "error",
+        error: errorMessage(error) || `${requireTool(toolId).name} inspect failed`,
+      };
+    }
     return project(toolId);
   }
 
@@ -141,11 +185,14 @@ function createOriginalUiCore({
     while (true) {
       const state = await inspect(toolId);
       if (state.status === "ready") return state;
-      if (state.status === "error") {
-        throw new Error(state.error || `${requireTool(toolId).name} failed to start`);
+      const unavailable = classifyOriginalUiUnavailable(toolId, state.error);
+      if (unavailable) {
+        const error = new Error(unavailable.message);
+        error.dependency = unavailable.dependency;
+        throw error;
       }
       if (Date.now() - started >= (READY_WAIT_MS[toolId] || 45_000)) {
-        throw new Error(`${requireTool(toolId).name} is not ready`);
+        throw new Error(state.error || `${requireTool(toolId).name} is not ready`);
       }
       await sleep(READY_POLL_MS);
     }
@@ -186,44 +233,72 @@ function createOriginalUiCore({
     return inspect(toolId);
   }
 
+  function unavailableOpenResult(toolId, section, error, state) {
+    const classified = classifyOriginalUiUnavailable(toolId, error)
+      || classifyOriginalUiUnavailable(toolId, state?.error);
+    const message = errorMessage(error) || state?.error || `${requireTool(toolId).name} is unavailable`;
+    return {
+      tool: {
+        ...(state || project(toolId)),
+        status: state?.status === "ready" ? "error" : (state?.status || "error"),
+        error: message,
+      },
+      section,
+      url: "",
+      embedded: IFRAME_TOOL_IDS.includes(toolId),
+      originalWindow: false,
+      unavailable: true,
+      dependency: classified?.dependency || (toolId === "anneal" ? "postgres" : null),
+      error: message,
+    };
+  }
+
   async function openEmbedded(toolId, section) {
     const manifest = requireTool(toolId);
     const selected = section || manifest.sections[0];
-    let state = await inspect(toolId);
-    if (state.status !== "ready") {
-      await start(toolId);
-      state = await waitUntilReady(toolId);
-    }
-    if (toolId === "codex-router") {
-      const current = service(toolId);
-      if (!current?.home) throw new Error("Start the bundled Codex Router runtime before opening its original Control Center");
-      const stateDir = current.stateDir
-        || path.join(path.dirname(path.dirname(path.dirname(current.home))), "state", "codex-router");
-      const opened = openOriginalControlCenter({
-        home: current.home,
-        state: stateDir,
-        section: ORIGINAL_SECTIONS.includes(selected) ? selected : "dashboard",
-        electronExecutable,
-        spawnProcess: spawnProcess || require("node:child_process").spawn,
-        npm,
-      });
-      rememberControlCenter(opened.child);
+    try {
+      let state = await inspect(toolId);
+      if (state.status !== "ready") {
+        await start(toolId);
+        state = await waitUntilReady(toolId);
+      }
+      if (toolId === "codex-router") {
+        const current = service(toolId);
+        if (!current?.home) throw new Error("Start the bundled Codex Router runtime before opening its original Control Center");
+        const stateDir = current.stateDir
+          || path.join(path.dirname(path.dirname(path.dirname(current.home))), "state", "codex-router");
+        const opened = openOriginalControlCenter({
+          home: current.home,
+          state: stateDir,
+          section: ORIGINAL_SECTIONS.includes(selected) ? selected : "dashboard",
+          electronExecutable,
+          spawnProcess: spawnProcess || require("node:child_process").spawn,
+          npm,
+        });
+        rememberControlCenter(opened.child);
+        return {
+          tool: state,
+          section: selected,
+          url: "",
+          embedded: false,
+          originalWindow: true,
+          pid: opened.pid,
+        };
+      }
       return {
         tool: state,
         section: selected,
-        url: "",
-        embedded: false,
-        originalWindow: true,
-        pid: opened.pid,
+        url: sectionUrl(manifest, state.endpoint, selected),
+        embedded: true,
+        originalWindow: false,
       };
+    } catch (error) {
+      if (toolId === "anneal") {
+        const latest = await inspect(toolId).catch(() => project(toolId));
+        return unavailableOpenResult(toolId, selected, error, latest);
+      }
+      throw error;
     }
-    return {
-      tool: state,
-      section: selected,
-      url: sectionUrl(manifest, state.endpoint, selected),
-      embedded: true,
-      originalWindow: false,
-    };
   }
 
   async function openExternalTool(toolId, section) {
@@ -279,7 +354,9 @@ function createOriginalUiController(options = {}) {
 
 module.exports = {
   TOOL_IDS,
+  IFRAME_TOOL_IDS,
   READY_WAIT_MS,
+  classifyOriginalUiUnavailable,
   createOriginalUiController,
   createOriginalUiCore,
   loadManifest,

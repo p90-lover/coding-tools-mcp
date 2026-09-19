@@ -1030,7 +1030,7 @@ function registerIpc({ logger, stateStore }) {
     return originalUiController.restart(toolId);
   });
   handle("launcher:original-ui-open", (event, toolId, section) => {
-    assertFocusedMainWindow(event, true);
+    assertFocusedMainWindow(event, false);
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.openEmbedded(toolId, section);
   });

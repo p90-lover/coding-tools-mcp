@@ -72,6 +72,8 @@ export function UpstreamToolSurface({
   const [createProvider, setCreateProvider] = useState("claude");
   const [inboxDecision, setInboxDecision] = useState("approve");
   const [actDetail, setActDetail] = useState("");
+  const [unavailable, setUnavailable] = useState(false);
+  const [dependency, setDependency] = useState<"postgres" | null>(null);
   const tool = useMemo(() => toolFrom(snapshot, toolId), [snapshot, toolId]);
 
   const refresh = async () => {
@@ -91,7 +93,7 @@ export function UpstreamToolSurface({
     if (!api) return;
     void (async () => {
       try {
-        await api.inspectUpstreamTool(toolId);
+        try { await api.inspectUpstreamTool(toolId); } catch { /* attach even if inspect is down */ }
         const next = await api.upstreamToolsSnapshot();
         if (cancelled) return;
         setSnapshot(next);
@@ -100,17 +102,17 @@ export function UpstreamToolSurface({
         setEndpoint(current.endpoint);
         const section = current.sections[0] || "";
         setSelectedSection(section);
-        if (current.status === "ready" && section) {
-          const result = await api.openEmbeddedTool(toolId, section);
-          if (cancelled) return;
-          setFrameUrl(result.url);
-          setSnapshot((value) => value
-            ? {
-                ...value,
-                tools: value.tools.map((candidate) => candidate.id === result.tool.id ? result.tool : candidate),
-              }
-            : { version: 1, tools: [result.tool] });
-        }
+        const result = await api.openEmbeddedTool(toolId, section);
+        if (cancelled) return;
+        setFrameUrl(result.url);
+        setUnavailable(result.unavailable === true);
+        setDependency(result.dependency ?? null);
+        setSnapshot((value) => value
+          ? {
+              ...value,
+              tools: value.tools.map((candidate) => candidate.id === result.tool.id ? result.tool : candidate),
+            }
+          : { version: 1, tools: [result.tool] });
       } catch (cause) {
         if (!cancelled) setError(messageOf(cause));
       }
@@ -135,12 +137,16 @@ export function UpstreamToolSurface({
     if (!api) throw new Error("Launcher IPC is unavailable");
     const result = await api.openEmbeddedTool(toolId, section);
     setFrameUrl(result.url);
+    setUnavailable(result.unavailable === true);
+    setDependency(result.dependency ?? null);
     setSnapshot((current) => current
       ? {
           ...current,
           tools: current.tools.map((candidate) => candidate.id === result.tool.id ? result.tool : candidate),
         }
       : current);
+    if (result.unavailable && toolId === "anneal") return result;
+    return result;
   };
 
   const saveEndpoint = () => run("endpoint", async () => {
@@ -252,10 +258,10 @@ export function UpstreamToolSurface({
         <button disabled={busy !== null} onClick={() => void probe()} type="button">
           {busy === "probe" ? "…" : localize(language, "Check", "檢查")}
         </button>
-        <button className="primary" disabled={busy !== null || !ready} onClick={() => void openEmbedded()} type="button">
+        <button className="primary" disabled={busy !== null} onClick={() => void openEmbedded()} type="button">
           {busy === "open" ? "…" : ready
             ? localize(language, "Open full UI", "開啟完整介面")
-            : localize(language, "Waiting for managed service", "等待受管服務")}
+            : localize(language, "Start original UI", "啟動原始介面")}
         </button>
         <button disabled={busy !== null || !ready} onClick={() => void openExternal()} type="button">
           {busy === "external" ? "…" : localize(language, "Open externally", "外部開啟")}
@@ -280,11 +286,20 @@ export function UpstreamToolSurface({
 
       {tool.error ? <p className="upstream-tool-error">{tool.error}</p> : null}
       {annealManagedHint ? <p className="upstream-tool-hint">{annealManagedHint}</p> : null}
+      {unavailable && (dependency === "postgres" || toolId === "anneal") ? (
+        <p className="upstream-tool-hint" data-dependency="postgres">
+          {localize(
+            language,
+            "Anneal's original board needs Postgres. Loopback APIs stay exposed; start Postgres and open the original UI again. Coding Tools remains usable.",
+            "Anneal 原版看板需要 Postgres。Loopback API 仍會對外開放；請先啟動 Postgres，再重新開啟原始介面。Coding Tools 本身仍可使用。",
+          )}
+        </p>
+      ) : null}
       {!ready ? (
         <p className="upstream-tool-hint">
           {localize(
             language,
-            "Use the connection controls below to start or inspect the bundled in-app service. Coding Tools does not download Paseo or Anneal at runtime.",
+            "Waiting for managed service. Use the connection controls below to start or inspect the bundled in-app service. Coding Tools does not download Paseo or Anneal at runtime.",
             "請使用下方連線控制啟動或檢查已內建服務。Coding Tools 不會在執行時下載 Paseo 或 Anneal。",
           )}
         </p>

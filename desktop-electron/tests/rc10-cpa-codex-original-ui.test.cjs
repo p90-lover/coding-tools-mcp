@@ -46,7 +46,7 @@ test("original UI manifests pin CPA management.html hash routes and Codex Router
   const cpa = loadManifest("cpa");
   const router = loadManifest("codex-router");
 
-  assert.deepEqual(TOOL_IDS, ["cpa", "codex-router"]);
+  assert.deepEqual(TOOL_IDS, ["cpa", "codex-router", "paseo", "anneal"]);
   assert.equal(cpa.repository, "router-for-me/CLIProxyAPI");
   assert.equal(cpa.version, "7.3.7");
   assert.equal(cpa.defaultEndpoint, "http://127.0.0.1:8317/");
@@ -223,7 +223,7 @@ test("desktop shell routes CPA and Codex Router to the original UI surface", () 
   assert.match(preload, /launcher:original-ui-snapshot/);
   assert.match(preload, /launcher:original-ui-copy-cpa-key/);
   assert.match(main, /createOriginalUiController/);
-  assert.match(main, /launcher:original-ui-open/);
+  assert.match(main, /handle\("launcher:original-ui-open", \(event, toolId, section\) => \{\s*assertFocusedMainWindow\(event, false\)/);
   assert.match(app, /navigateSurface\("cpa"\)/);
   assert.match(app, /navigateSurface\("codex-router"\)/);
   assert.match(app, /<details className="sidebar-more"/);

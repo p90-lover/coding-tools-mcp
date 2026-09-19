@@ -345,7 +345,12 @@ function attachCpaCodexLongRun(inner, {
     schedule(toolId, 0, () => tick(toolId));
   }
 
+  function isLongRunTool(toolId) {
+    return TOOL_IDS.includes(String(toolId || "").trim());
+  }
+
   async function start(toolId) {
+    if (!isLongRunTool(toolId)) return inner.start(toolId);
     const id = requiredToolId(toolId);
     state.tools[id].desiredRunning = true;
     state.tools[id].lastStartedAt = new Date(now()).toISOString();
@@ -357,6 +362,7 @@ function attachCpaCodexLongRun(inner, {
   }
 
   async function stop(toolId) {
+    if (!isLongRunTool(toolId)) return inner.stop(toolId);
     const id = requiredToolId(toolId);
     state.tools[id].desiredRunning = false;
     state.tools[id].consecutiveBlips = 0;
@@ -369,6 +375,7 @@ function attachCpaCodexLongRun(inner, {
   }
 
   async function restart(toolId) {
+    if (!isLongRunTool(toolId)) return inner.restart(toolId);
     const id = requiredToolId(toolId);
     state.tools[id].desiredRunning = true;
     record(id, "desired-restart");
@@ -379,6 +386,7 @@ function attachCpaCodexLongRun(inner, {
   }
 
   async function openEmbedded(toolId, section) {
+    if (!isLongRunTool(toolId)) return inner.openEmbedded(toolId, section);
     const id = requiredToolId(toolId);
     if (!state.tools[id].desiredRunning) {
       state.tools[id].desiredRunning = true;
@@ -394,6 +402,7 @@ function attachCpaCodexLongRun(inner, {
   }
 
   async function openExternalTool(toolId, section) {
+    if (!isLongRunTool(toolId)) return inner.openExternalTool(toolId, section);
     const id = requiredToolId(toolId);
     if (!state.tools[id].desiredRunning) {
       state.tools[id].desiredRunning = true;

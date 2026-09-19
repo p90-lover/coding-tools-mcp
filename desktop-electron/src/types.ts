@@ -370,7 +370,7 @@ export interface UpstreamToolActResult {
 }
 
 export type UpstreamToolId = "anneal" | "paseo";
-export type OriginalUiId = "cpa" | "codex-router";
+export type OriginalUiId = "cpa" | "codex-router" | "paseo" | "anneal";
 export type UpstreamToolStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 
 export interface UpstreamToolSnapshot {
@@ -402,6 +402,9 @@ export interface UpstreamToolOpenResult {
   section: string;
   url: string;
   embedded: boolean;
+  unavailable?: boolean;
+  dependency?: "postgres" | null;
+  error?: string | null;
 }
 
 export interface OriginalUiLongRun {
@@ -443,6 +446,9 @@ export interface OriginalUiOpenResult {
   embedded: boolean;
   originalWindow: boolean;
   pid?: number | null;
+  unavailable?: boolean;
+  dependency?: "postgres" | null;
+  error?: string | null;
 }
 
 export interface LauncherState {

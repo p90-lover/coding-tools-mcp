@@ -5,6 +5,7 @@ const http = require("node:http");
 const https = require("node:https");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { classifyOriginalUiUnavailable } = require("./original-ui.cjs");
 
 const TOOL_IDS = Object.freeze(["anneal", "paseo"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
@@ -247,13 +248,42 @@ function createUpstreamToolController({
   async function openEmbeddedTool(toolId, section) {
     const manifest = requireTool(toolId);
     const selectedSection = section || manifest.sections[0];
-    const state = await inspect(toolId);
-    return {
-      tool: state,
-      section: selectedSection,
-      url: sectionUrl(manifest, state.endpoint, selectedSection),
-      embedded: true,
-    };
+    try {
+      let state = await inspect(toolId);
+      if (state.status !== "ready") {
+        await start(toolId);
+        state = await waitUntilReady(toolId);
+      }
+      return {
+        tool: state,
+        section: selectedSection,
+        url: sectionUrl(manifest, state.endpoint, selectedSection),
+        embedded: true,
+      };
+    } catch (error) {
+      const latest = await inspect(toolId).catch(() => project(toolId));
+      const classified = classifyOriginalUiUnavailable(toolId, error)
+        || classifyOriginalUiUnavailable(toolId, latest.error);
+      if (toolId === "anneal") {
+        const message = error instanceof Error
+          ? error.message
+          : String(error || latest.error || "Anneal is unavailable");
+        return {
+          tool: {
+            ...latest,
+            status: latest.status === "ready" ? "error" : (latest.status || "error"),
+            error: message,
+          },
+          section: selectedSection,
+          url: "",
+          embedded: true,
+          unavailable: true,
+          dependency: classified?.dependency || "postgres",
+          error: message,
+        };
+      }
+      throw error;
+    }
   }
 
   async function openExternalTool(toolId, section) {
@@ -261,7 +291,7 @@ function createUpstreamToolController({
       throw new Error("External upstream-tool navigation is unavailable");
     }
     const result = await openEmbeddedTool(toolId, section);
-    await openExternal(result.url);
+    if (result.url) await openExternal(result.url);
     return { ...result, embedded: false };
   }
 
@@ -269,11 +299,13 @@ function createUpstreamToolController({
     const deadline = Date.now() + timeoutMs;
     let latest = await inspect(toolId);
     while (latest.status !== "ready" && Date.now() < deadline) {
+      const classified = classifyOriginalUiUnavailable(toolId, latest.error);
+      if (classified) throw new Error(classified.message);
       await new Promise((resolve) => setTimeout(resolve, 500));
       latest = await inspect(toolId);
     }
     if (latest.status !== "ready") {
-      throw new Error(`${latest.name} did not become reachable at ${latest.endpoint}`);
+      throw new Error(latest.error || `${latest.name} did not become reachable at ${latest.endpoint}`);
     }
     return latest;
   }
