@@ -1,0 +1,77 @@
+name: rc.11 managed app API sensitive values
+
+on:
+  push:
+    branches:
+      - fix/rc11-managed-app-api-sensitive-values
+    paths:
+      - '.github/workflows/rc11-managed-app-api-sensitive-values.yml'
+      - 'aiTemp/rc11-managed-app-api/**'
+      - 'desktop-electron/electron/managed-app-api.cjs'
+      - 'desktop-electron/tests/rc11-managed-app-api-sensitive-values.test.cjs'
+  pull_request:
+    branches:
+      - feature/rc11-managed-app-api-handles
+    paths:
+      - '.github/workflows/rc11-managed-app-api-sensitive-values.yml'
+      - 'aiTemp/rc11-managed-app-api/**'
+      - 'desktop-electron/electron/managed-app-api.cjs'
+      - 'desktop-electron/tests/rc11-managed-app-api-sensitive-values.test.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc11-managed-app-sensitive-values-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Prepare retained evidence roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-managed-app-api/evidence
+          mkdir -p aiTemp/Trash/rc11-managed-app-api
+
+      - name: Run sensitive-value contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/rc11-managed-app-api-sensitive-values.test.cjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/sensitive-values.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-app-api/evidence/sensitive-values.txt
+          node --check desktop-electron/electron/managed-app-api.cjs
+
+      - name: Enforce preservation contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin feature/rc11-managed-app-api-handles --no-tags
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only origin/feature/rc11-managed-app-api-handles...HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-managed-app-sensitive-values-${{ github.sha }}
+          path: aiTemp/rc11-managed-app-api/evidence/
+          if-no-files-found: warn
+          retention-days: 14
