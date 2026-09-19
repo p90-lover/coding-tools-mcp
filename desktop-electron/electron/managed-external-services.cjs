@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
@@ -79,15 +80,25 @@ function createManagedExternalServicesController({
     },
   });
 
+  function readRouterCallerKey() {
+    const callerSecretPath = path.join(dataRoot, "state", "codex-router", "router", "caller-secret");
+    try {
+      if (!fs.existsSync(callerSecretPath)) return "";
+      let value = fs.readFileSync(callerSecretPath, "utf8");
+      if (value.charCodeAt(0) === 0xFEFF) value = value.slice(1);
+      return value.trim();
+    } catch {
+      return "";
+    }
+  }
+
   function crossUseSecrets() {
     let cpa = {};
     let commandCode = {};
     let callerKey = "";
     try { cpa = managedController.runtimeSecrets("cpa") || {}; } catch {}
     try { commandCode = managedController.runtimeSecrets("commandcode-proxy") || {}; } catch {}
-    try {
-      callerKey = String(managedController.runtimeConfiguration("codex-router")?.callerKey || "").trim();
-    } catch {}
+    try { callerKey = String(readRouterCallerKey() || "").trim(); } catch {}
     return {
       cpaProxyApiKey: cpa.proxyApiKey,
       commandCodeProxyApiKey: commandCode.proxyApiKey,

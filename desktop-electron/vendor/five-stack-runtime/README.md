@@ -14,6 +14,12 @@ five-stack-runtime/
   <git-component>/BUNDLE.json
 ```
 
+Pinned git sources may be patched after checkout from
+`desktop-electron/vendor/five-stack-runtime/overlays/<component-id>/`.
+Overlays overwrite matching relative paths in the materialized `source/`
+tree so Desktop-managed launches can ship a small identity-gate fix
+without bumping the upstream commit pin.
+
 Do not put a download or separate-app install gate in front of the Desktop
 panels. Start unpacks this tree locally. Anneal still needs host Docker and,
 on Windows, WSL2.

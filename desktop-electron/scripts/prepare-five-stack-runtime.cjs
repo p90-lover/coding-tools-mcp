@@ -112,6 +112,42 @@ function copyTreeAcyclic(sourceRoot, destinationRoot, seen, options = {}) {
   fs.chmodSync(destination, metadata.mode & 0o777 || 0o600);
 }
 
+function overlayTree(sourceRoot, destinationRoot) {
+  const source = path.resolve(sourceRoot);
+  const destination = path.resolve(destinationRoot);
+  let metadata;
+  try {
+    metadata = fs.statSync(source);
+  } catch (error) {
+    fail("FIVE_STACK_OVERLAY_UNREADABLE", `${source}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (metadata.isDirectory()) {
+    fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+    for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+      overlayTree(path.join(source, entry.name), path.join(destination, entry.name));
+    }
+    return;
+  }
+  if (!metadata.isFile()) fail("FIVE_STACK_OVERLAY_ENTRY_UNSUPPORTED", source);
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  fs.copyFileSync(source, destination);
+  fs.chmodSync(destination, metadata.mode & 0o777 || 0o600);
+}
+
+function applySourceOverlays(desktopRoot, componentId, sourceDestination) {
+  if (!desktopRoot || !componentId) return;
+  const overlayRoot = path.join(desktopRoot, "vendor", "five-stack-runtime", "overlays", componentId);
+  if (!fs.existsSync(overlayRoot)) return;
+  let metadata;
+  try {
+    metadata = fs.statSync(overlayRoot);
+  } catch (error) {
+    fail("FIVE_STACK_OVERLAY_UNREADABLE", `${overlayRoot}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!metadata.isDirectory()) fail("FIVE_STACK_OVERLAY_ENTRY_UNSUPPORTED", overlayRoot);
+  overlayTree(overlayRoot, sourceDestination);
+}
+
 function runGit(args, cwd, spawnSyncProcess) {
   const result = spawnSyncProcess("git", args, {
     cwd,
@@ -746,6 +782,7 @@ async function materializeComponent({
   outputRoot,
   cacheRoot,
   workRoot,
+  desktopRoot,
   platform,
   arch,
   fetchImpl,
@@ -792,6 +829,7 @@ async function materializeComponent({
       runGit(["checkout", "--detach", manifest.commit], cloneRoot, spawnSyncProcess);
       copyTree(cloneRoot, sourceDestination);
     }
+    applySourceOverlays(desktopRoot, manifest.id, sourceDestination);
     if (prepareDependencies && hostNpmPrepareAllowed(manifest, platform)) {
       if (manifest.id === "paseo") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build:server"]);
       if (manifest.id === "anneal") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build"]);
@@ -839,6 +877,7 @@ async function prepareFiveStackRuntime(options = {}) {
         outputRoot: stagingRoot,
         cacheRoot,
         workRoot: session.workRoot,
+        desktopRoot,
         platform,
         arch,
         fetchImpl,
@@ -889,6 +928,7 @@ if (require.main === module) {
 
 module.exports = {
   COMPONENT_IDS,
+  applySourceOverlays,
   hostNpmPrepareAllowed,
   installWindowsCwdLifecycleFallbacks,
   installWindowsCwdNodeCommands,

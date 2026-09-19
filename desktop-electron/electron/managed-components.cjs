@@ -440,6 +440,8 @@ function createManagedComponentController({
   const codec = createSecretCodec({ safeStorage, keyPath: secretKeyPath });
   const operations = new Map();
   const processes = new Map();
+  let peerEnvBusy = false;
+  let crossUseEnvBusy = false;
   let secrets = readJson(secretPath) || { version: SECRET_VERSION, components: {} };
 
   for (const directory of [componentsRoot, stateRoot, aiTempRoot, trashRoot]) {
@@ -793,6 +795,13 @@ function createManagedComponentController({
 
   function peerEnv(context) {
     if (typeof peerEnvironment !== "function") return {};
+    if (peerEnvBusy) {
+      logger?.warn?.("managed-component.peer-environment-reentered", {
+        componentId: context.id,
+      });
+      return {};
+    }
+    peerEnvBusy = true;
     try {
       const value = peerEnvironment(manifestFor(context.id)) || {};
       return Object.fromEntries(
@@ -806,6 +815,8 @@ function createManagedComponentController({
         message: error instanceof Error ? error.message : String(error),
       });
       return {};
+    } finally {
+      peerEnvBusy = false;
     }
   }
 
@@ -816,9 +827,21 @@ function createManagedComponentController({
       key,
       expandToken(value, context),
     ]));
-    const crossUseEnvironment = typeof resolveCrossUseEnvironment === "function"
-      ? (resolveCrossUseEnvironment(context.id, context) || {})
-      : {};
+    let crossUseEnvironment = {};
+    if (typeof resolveCrossUseEnvironment === "function") {
+      if (crossUseEnvBusy) {
+        logger?.warn?.("managed-component.cross-use-environment-reentered", {
+          componentId: context.id,
+        });
+      } else {
+        crossUseEnvBusy = true;
+        try {
+          crossUseEnvironment = resolveCrossUseEnvironment(context.id, context) || {};
+        } finally {
+          crossUseEnvBusy = false;
+        }
+      }
+    }
     const mergedEnvironment = { ...crossUseEnvironment, ...peerEnv(context), ...environment };
     const managedMode = entry.execution === "managed-mode";
     if (context.mode === "wsl2" && managedMode) {

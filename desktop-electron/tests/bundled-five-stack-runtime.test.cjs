@@ -152,6 +152,82 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
   ]);
 });
 
+test("Codex Router source overlay accepts managed foreground-start.mjs identity", () => {
+  const overlay = read("vendor/five-stack-runtime/overlays/codex-router/src/service-process.mjs");
+  assert.match(overlay, /function commandLineMatchesServiceEntrypoint/);
+  assert.match(overlay, /foreground-start\.mjs/);
+  assert.match(overlay, /start\.mjs/);
+  assert.match(overlay, /replaceAll\("\\\\", "\/"\)\.toLowerCase\(\)/);
+  assert.doesNotMatch(overlay, /function entrypointFor\(/);
+  assert.match(read("scripts/prepare-five-stack-runtime.cjs"), /function applySourceOverlays\(/);
+});
+
+test("prepare-five-stack-runtime overlays Codex Router service-process.mjs onto cached source", async () => {
+  const repositoryRoot = temporaryDirectory("coding-tools-five-stack-overlay-repo");
+  const desktopDir = path.join(repositoryRoot, "desktop-electron");
+  const manifestRoot = path.join(desktopDir, "vendor", "managed-components");
+  const cacheRoot = path.join(repositoryRoot, "cache");
+  const outputRoot = path.join(desktopDir, "build", "five-stack-runtime");
+  const payload = Buffer.from("bundled-cpa-archive", "utf8");
+  const digest = sha256(payload);
+
+  for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
+    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id));
+    const source = path.join(cacheRoot, id, "source");
+    fs.mkdirSync(path.join(source, "src"), { recursive: true });
+    fs.writeFileSync(path.join(source, `${id}.txt`), `${id} bundled\n`);
+    if (id === "codex-router") {
+      fs.writeFileSync(path.join(source, "src", "service-process.mjs"), "export function entrypointFor() {}\n");
+    }
+  }
+  writeJson(path.join(manifestRoot, "cpa.json"), bundledManifest("cpa", {
+    strategy: "release-binary",
+    commit: undefined,
+    platforms: {
+      [process.platform]: {
+        [process.arch]: {
+          url: "https://github.com/fixture/cpa/releases/download/v1.0.0/cpa.bin",
+          sha256: digest,
+          fileName: "cpa.bin",
+        },
+      },
+    },
+  }));
+  fs.mkdirSync(path.join(cacheRoot, "cpa"), { recursive: true });
+  fs.writeFileSync(path.join(cacheRoot, "cpa", "cpa.bin"), payload);
+
+  const overlayDir = path.join(desktopDir, "vendor", "five-stack-runtime", "overlays", "codex-router", "src");
+  fs.mkdirSync(overlayDir, { recursive: true });
+  fs.copyFileSync(
+    path.join(desktopRoot, "vendor", "five-stack-runtime", "overlays", "codex-router", "src", "service-process.mjs"),
+    path.join(overlayDir, "service-process.mjs"),
+  );
+
+  await prepareFiveStackRuntime({
+    repositoryRoot,
+    desktopRoot: desktopDir,
+    manifestRoot,
+    outputRoot,
+    cacheRoot,
+    fetchImpl: async () => {
+      throw new Error("prepare-five-stack-runtime must not fetch when a cache is present");
+    },
+    spawnSyncProcess: () => {
+      throw new Error("prepare-five-stack-runtime must not git clone when a cache is present");
+    },
+    now: () => "2026-09-18T12:00:00.000Z",
+    nonce: () => "overlay",
+  });
+
+  const patched = fs.readFileSync(
+    path.join(outputRoot, "codex-router", "source", "src", "service-process.mjs"),
+    "utf8",
+  );
+  assert.match(patched, /commandLineMatchesServiceEntrypoint/);
+  assert.match(patched, /foreground-start\.mjs/);
+  assert.doesNotMatch(patched, /function entrypointFor\(/);
+});
+
 test("production Start is fail-closed and never fetches components from the network", () => {
   const controller = read("electron/managed-components.cjs");
   const adapter = read("electron/codex-router-managed.cjs");
