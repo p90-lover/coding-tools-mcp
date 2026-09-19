@@ -64,8 +64,12 @@ test("Network Proxy routes all visible controls through localization", () => {
 test("Network Proxy exposes and localizes the typed subagent routing scope", () => {
   assert.match(source, /const SCOPES:[\s\S]*"subagent"/);
   assert.match(source, /case "subagent":/);
-  assert.match(source, /"Subagents"/);
-  assert.match(source, /"子代理程式"/);
-  assert.match(source, /"子代理"/);
-  assert.match(source, /"サブエージェント"/);
+  assert.match(
+    source,
+    /localText\(language, "Subagents", "子代理", "子代理", "サブエージェント"\)/,
+  );
+  assert.match(
+    source,
+    /scopes: \[[^\]]*"oauth", "subagent", "paseo"[^\]]*\]/,
+  );
 });
