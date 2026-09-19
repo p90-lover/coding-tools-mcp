@@ -49,12 +49,23 @@ jobs:
           mkdir -p aiTemp/rc11-managed-app-api/evidence
           mkdir -p aiTemp/Trash/rc11-managed-app-api
 
-      - name: Run sensitive-value contracts
+      - name: Harden bare sensitive values and reconcile reasons
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc11-managed-app-api/harden-sensitive-values.mjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/sensitive-value-hardener.txt
+          grep -E 'RC11_MANAGED_APP_SENSITIVE_VALUES_(HARDENED|ALREADY_HARDENED)' \
+            aiTemp/rc11-managed-app-api/evidence/sensitive-value-hardener.txt
+
+      - name: Run sensitive-value and projection contracts
         shell: bash
         run: |
           set -euo pipefail
           node --test \
             desktop-electron/tests/rc11-managed-app-api-sensitive-values.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-cookie-redaction.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api.test.cjs \
             2>&1 | tee aiTemp/rc11-managed-app-api/evidence/sensitive-values.txt
           grep -F '# fail 0' aiTemp/rc11-managed-app-api/evidence/sensitive-values.txt
           node --check desktop-electron/electron/managed-app-api.cjs
@@ -67,6 +78,26 @@ jobs:
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only origin/feature/rc11-managed-app-api-handles...HEAD)"
           test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit and push verified exact source
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="$GITHUB_REF_NAME"
+          git add desktop-electron/electron/managed-app-api.cjs
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'fix(rc11): redact bare managed app credentials'
+          fi
+          git fetch origin "$branch" --no-tags
+          current_remote="$(git rev-parse "origin/$branch")"
+          if ! git merge-base --is-ancestor "$current_remote" HEAD; then
+            echo 'Sensitive-value branch advanced during verification; refusing to overwrite newer work.' >&2
+            exit 1
+          fi
+          git push origin "HEAD:$branch"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
