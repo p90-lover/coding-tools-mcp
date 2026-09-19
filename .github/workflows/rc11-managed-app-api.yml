@@ -1,0 +1,185 @@
+name: rc.11 managed app API handles
+
+on:
+  push:
+    branches:
+      - feature/rc11-managed-app-api-handles
+    paths:
+      - '.github/workflows/rc11-managed-app-api.yml'
+      - 'aiTemp/rc11-managed-app-api/**'
+      - 'desktop-electron/electron/coding-tools-shell-bridge.cjs'
+      - 'desktop-electron/electron/ipc-schema.cjs'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/managed-app-api.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ManagedAppsSurface.tsx'
+      - 'desktop-electron/tests/rc11-managed-app-api*.test.cjs'
+  pull_request:
+    branches:
+      - feature/rc11-managed-apps-shell-current
+    paths:
+      - '.github/workflows/rc11-managed-app-api.yml'
+      - 'aiTemp/rc11-managed-app-api/**'
+      - 'desktop-electron/electron/coding-tools-shell-bridge.cjs'
+      - 'desktop-electron/electron/ipc-schema.cjs'
+      - 'desktop-electron/electron/main.cjs'
+      - 'desktop-electron/electron/managed-app-api.cjs'
+      - 'desktop-electron/electron/preload.cjs'
+      - 'desktop-electron/src/api/contracts.ts'
+      - 'desktop-electron/src/features/ManagedAppsSurface.tsx'
+      - 'desktop-electron/tests/rc11-managed-app-api*.test.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rc11-managed-app-api-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc11-managed-app-api/bun-cache
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Merge latest rc.11 Managed Apps shell
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin feature/rc11-managed-apps-shell-current --no-tags
+          git merge --no-edit --no-ff origin/feature/rc11-managed-apps-shell-current
+
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.0
+
+      - name: Prepare retained temporary roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-managed-app-api/bun-cache
+          mkdir -p aiTemp/rc11-managed-app-api/evidence
+          mkdir -p aiTemp/Trash/rc11-managed-app-api
+
+      - name: Install exact Electron dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --cwd desktop-electron --frozen-lockfile
+
+      - name: Prove wiring contracts are RED before materialization
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          node --test \
+            desktop-electron/tests/rc11-managed-app-api-wiring.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-ui.test.cjs \
+            > aiTemp/rc11-managed-app-api/evidence/red.txt 2>&1
+          status=$?
+          set -e
+          cat aiTemp/rc11-managed-app-api/evidence/red.txt
+          if [ "$status" -eq 0 ]; then
+            echo 'Managed app API wiring unexpectedly passed before materialization.' >&2
+            exit 1
+          fi
+          grep -F 'not ok' aiTemp/rc11-managed-app-api/evidence/red.txt
+          grep -F 'managed-app API' aiTemp/rc11-managed-app-api/evidence/red.txt
+
+      - name: Materialize managed app API wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc11-managed-app-api/materialize.mjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/materialize.txt
+
+      - name: Run focused GREEN contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/rc11-managed-app-api.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-degraded.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-wiring.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-ui.test.cjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/focused-green.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-app-api/evidence/focused-green.txt
+          node --check desktop-electron/electron/managed-app-api.cjs
+          node --check desktop-electron/electron/coding-tools-shell-bridge.cjs
+          node --check desktop-electron/electron/ipc-schema.cjs
+          node --check desktop-electron/electron/main.cjs
+          node --check desktop-electron/electron/preload.cjs
+          bun run --cwd desktop-electron typecheck
+
+      - name: Run affected rc.11 regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/rc11-managed-apps-shell.test.cjs \
+            desktop-electron/tests/state.test.cjs \
+            desktop-electron/tests/desktop-shell-fidelity.test.cjs \
+            desktop-electron/tests/renderer-wiring.test.cjs \
+            desktop-electron/tests/managed-bootstrap.test.cjs \
+            desktop-electron/tests/commandcode-proxy-plan.test.cjs \
+            desktop-electron/tests/original-ui.test.cjs \
+            desktop-electron/tests/upstream-actions.test.cjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/regressions.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-app-api/evidence/regressions.txt
+
+      - name: Enforce preservation contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          deleted="$(git diff --diff-filter=D --name-only origin/feature/rc11-managed-apps-shell-current...HEAD)"
+          if [ -n "$deleted" ]; then
+            printf 'Tracked deletions are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit and push verified exact source
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='feature/rc11-managed-app-api-handles'
+          git add \
+            desktop-electron/electron/coding-tools-shell-bridge.cjs \
+            desktop-electron/electron/ipc-schema.cjs \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/src/api/contracts.ts \
+            desktop-electron/src/features/ManagedAppsSurface.tsx
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(rc11): expose managed apps through Coding Tools API'
+          fi
+          git fetch origin "$branch" --no-tags
+          current_remote="$(git rev-parse "origin/$branch")"
+          if ! git merge-base --is-ancestor "$current_remote" HEAD; then
+            echo 'Feature branch advanced during verification; refusing to overwrite newer work.' >&2
+            exit 1
+          fi
+          git push origin "HEAD:$branch"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-managed-app-api-${{ github.sha }}
+          path: aiTemp/rc11-managed-app-api/evidence/
+          if-no-files-found: warn
+          retention-days: 14
