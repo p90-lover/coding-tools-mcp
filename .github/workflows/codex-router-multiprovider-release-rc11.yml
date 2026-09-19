@@ -76,6 +76,16 @@ jobs:
             throw 'PowerShell rc.11 migration runner syntax validation failed'
           }
 
+      - name: Run browser ownership and Network Proxy regressions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node --test `
+            desktop-electron/tests/browser-surface-ipc.test.cjs `
+            desktop-electron/tests/network-proxy-localization.test.cjs `
+            desktop-electron/tests/rc2-paseo-anneal-network-surfaces.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Browser ownership or Network Proxy regression gate failed' }
+
       - name: Run exact-source five-stack release pipeline
         shell: pwsh
         env:
