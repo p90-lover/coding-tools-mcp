@@ -83,6 +83,15 @@ jobs:
           set -euo pipefail
           bun install --cwd desktop-electron --frozen-lockfile
 
+      - name: Repair locale-compatible materializer
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc11-managed-app-api/repair-locale-materializer.mjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/locale-materializer-repair.txt
+          grep -E 'RC11_MANAGED_APP_LOCALE_MATERIALIZER_(REPAIRED|ALREADY_REPAIRED)' \
+            aiTemp/rc11-managed-app-api/evidence/locale-materializer-repair.txt
+
       - name: Prove wiring contracts are RED before materialization
         shell: bash
         run: |
@@ -183,6 +192,7 @@ jobs:
           set -euo pipefail
           branch="$GITHUB_REF_NAME"
           git add \
+            aiTemp/rc11-managed-app-api/materialize.mjs \
             desktop-electron/electron/coding-tools-shell-bridge.cjs \
             desktop-electron/electron/ipc-schema.cjs \
             desktop-electron/electron/main.cjs \
@@ -191,7 +201,7 @@ jobs:
             desktop-electron/src/api/contracts.ts \
             desktop-electron/src/features/ManagedAppsSurface.tsx
           if ! git diff --cached --quiet; then
-            git commit -m 'fix(rc11): harden managed app API public projection'
+            git commit -m 'fix(rc11): keep managed app API materializer locale-compatible'
           fi
           git fetch origin "$branch" --no-tags
           current_remote="$(git rev-parse "origin/$branch")"
