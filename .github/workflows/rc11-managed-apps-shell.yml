@@ -1,0 +1,91 @@
+name: rc.11 managed apps shell
+
+on:
+  push:
+    branches:
+      - feature/rc11-managed-apps-shell-current
+    paths:
+      - .github/workflows/rc11-managed-apps-shell.yml
+      - aiTemp/rc11-managed-apps/**
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/electron/state.cjs
+      - desktop-electron/src/App.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/src/features/ExternalServicesSurface.tsx
+      - desktop-electron/src/features/ManagedAppsSurface.tsx
+      - desktop-electron/src/features/managed-apps.css
+      - desktop-electron/tests/rc11-managed-apps-shell.test.cjs
+      - desktop-electron/tests/state.test.cjs
+  pull_request:
+    branches:
+      - main
+      - integration/v0.7.0-rc.11-five-stack-final
+    paths:
+      - .github/workflows/rc11-managed-apps-shell.yml
+      - aiTemp/rc11-managed-apps/**
+      - desktop-electron/electron/main.cjs
+      - desktop-electron/electron/preload.cjs
+      - desktop-electron/electron/state.cjs
+      - desktop-electron/src/App.tsx
+      - desktop-electron/src/types.ts
+      - desktop-electron/src/features/ExternalServicesSurface.tsx
+      - desktop-electron/src/features/ManagedAppsSurface.tsx
+      - desktop-electron/src/features/managed-apps.css
+      - desktop-electron/tests/rc11-managed-apps-shell.test.cjs
+      - desktop-electron/tests/state.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rc11-managed-apps-shell-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Managed Apps shell contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Run focused shell contracts
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-managed-apps/evidence
+          (
+            node --check desktop-electron/electron/state.cjs
+            node --check desktop-electron/electron/main.cjs
+            node --check desktop-electron/electron/preload.cjs
+            node --test \
+              desktop-electron/tests/rc11-managed-apps-shell.test.cjs \
+              desktop-electron/tests/state.test.cjs \
+              desktop-electron/tests/desktop-shell-fidelity.test.cjs \
+              desktop-electron/tests/renderer-wiring.test.cjs
+          ) 2>&1 | tee aiTemp/rc11-managed-apps/evidence/results.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-apps/evidence/results.txt
+
+      - name: Enforce preservation and diff safety
+        run: |
+          set -euo pipefail
+          git fetch origin main --no-tags
+          git diff --check origin/main...HEAD
+          test -z "$(git diff --diff-filter=D --name-only origin/main...HEAD)"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rc11-managed-apps-shell-${{ github.sha }}
+          path: aiTemp/rc11-managed-apps/evidence/
+          if-no-files-found: error
+          retention-days: 14
