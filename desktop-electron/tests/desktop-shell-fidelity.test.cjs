@@ -8,18 +8,35 @@ const test = require("node:test");
 const root = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 
-test("the main shell keeps the original Coding Tools navigation order", () => {
+test("the main shell keeps the original core navigation order and consolidates managed engines", () => {
   const app = read("src/App.tsx");
+  const managedApps = read("src/features/ManagedAppsSurface.tsx");
   const styles = read("src/styles.css");
   const i18n = read("src/i18n.ts");
 
-  assert.match(app, /SidebarGroup label=\{copy\.workspace\}/);
-  assert.match(app, /SidebarGroup label=\{copy\.configuration\}/);
-  assert.match(app, /SidebarGroup label=\{copy\.runtime\}/);
-  assert.match(app, /<details className="sidebar-more"/);
-  assert.match(app, /copy\.paseoOrchestrator/);
-  assert.match(app, /copy\.annealTasks/);
-  assert.match(app, /copy\.networkProxy/);
+  const navigationAnchors = [
+    'SidebarGroup label={copy.workspace}',
+    'SidebarGroup label={copy.configuration}',
+    'SidebarGroup label={copy.runtime}',
+    '<details className="sidebar-more"',
+    'label={language === "zh-TW" ? "受管理應用程式" : "Managed Apps"}',
+    'label={language === "zh-TW" ? "網路代理" : copy.networkProxy}',
+  ];
+  let previous = -1;
+  for (const anchor of navigationAnchors) {
+    const index = app.indexOf(anchor);
+    assert.ok(index > previous, `navigation anchor is missing or out of order: ${anchor}`);
+    previous = index;
+  }
+
+  assert.match(app, /import \{ ManagedAppsSurface \} from "\.\/features\/ManagedAppsSurface"/);
+  assert.match(app, /active=\{surface === "apps"\}/);
+  assert.match(app, /onClick=\{\(\) => navigateSurface\("apps"\)\}/);
+  assert.match(app, /<ManagedAppsSurface/);
+  for (const id of ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]) {
+    assert.match(managedApps, new RegExp(`id: "${id}"`));
+  }
+
   assert.match(app, /setSidebarState\(\{ open, width \}\)/);
   assert.match(app, /className="sidebar-resize"/);
   assert.match(app, /<McpLiveToolsPanel/);
