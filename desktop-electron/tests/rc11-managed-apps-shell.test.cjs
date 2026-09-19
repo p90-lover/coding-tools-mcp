@@ -31,13 +31,15 @@ test("the launcher persists one of the five fixed managed-app tabs through focus
 
 test("the product shell exposes one Managed Apps destination instead of six fragmented engine destinations", () => {
   const app = read("src/App.tsx");
+  const managedApps = read("src/features/ManagedAppsSurface.tsx");
   assert.match(app, /import \{ ManagedAppsSurface \} from "\.\/features\/ManagedAppsSurface"/);
   assert.match(app, /useState<ManagedAppTabId>\(snapshot\.state\.managedAppTab\)/);
   assert.match(app, /selectManagedAppTab\("cpa"\)/);
   assert.match(app, /selectManagedAppTab\("codex-router"\)/);
-  assert.match(app, /selectManagedAppTab\("commandcode-proxy"\)/);
   assert.match(app, /selectManagedAppTab\("paseo"\)/);
   assert.match(app, /selectManagedAppTab\("anneal"\)/);
+  assert.match(managedApps, /id: "commandcode-proxy"/);
+  assert.match(managedApps, /onSelectedTabChange\(tab\)/);
   assert.match(app, /label=\{language === "zh-TW" \? "受管理應用程式" : "Managed Apps"\}/);
   assert.match(app, /surface === "apps"/);
   assert.match(app, /<ManagedAppsSurface/);
