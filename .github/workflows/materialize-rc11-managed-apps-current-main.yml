@@ -40,18 +40,31 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p aiTemp/rc11-managed-apps-current-main/evidence
-          node aiTemp/rc11-managed-apps-current-main/materialize-shell.mjs \
-            2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-shell.txt
-          grep -F RC11_MANAGED_APPS_SHELL_MATERIALIZED \
+
+          if grep -Fq 'onSelectedTabChange={selectManagedAppTab}' desktop-electron/src/App.tsx \
+            && grep -Fq 'export type ManagedAppTabId = "cpa"' desktop-electron/src/types.ts \
+            && grep -Fq 'managedAppTab: "cpa"' desktop-electron/electron/state.cjs \
+            && test -f desktop-electron/src/features/ManagedAppsSurface.tsx \
+            && test -f desktop-electron/src/features/managed-apps.css; then
+            echo RC11_MANAGED_APPS_SHELL_ALREADY_MATERIALIZED \
+              | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-shell.txt
+            echo RC11_MANAGED_APPS_LOCALE_ALREADY_MATERIALIZED \
+              | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-locale.txt
+          else
+            node aiTemp/rc11-managed-apps-current-main/materialize-shell.mjs \
+              2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-shell.txt
+            install -m 0644 \
+              aiTemp/rc11-managed-apps-current-main/templates/ManagedAppsSurface.tsx \
+              desktop-electron/src/features/ManagedAppsSurface.tsx
+            install -m 0644 \
+              aiTemp/rc11-managed-apps-current-main/templates/managed-apps.css \
+              desktop-electron/src/features/managed-apps.css
+            node aiTemp/rc11-managed-apps-current-main/materialize-sidebar-label.mjs \
+              2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-locale.txt
+          fi
+
+          grep -E 'RC11_MANAGED_APPS_SHELL_(MATERIALIZED|ALREADY_MATERIALIZED)' \
             aiTemp/rc11-managed-apps-current-main/evidence/materialize-shell.txt
-          install -m 0644 \
-            aiTemp/rc11-managed-apps-current-main/templates/ManagedAppsSurface.tsx \
-            desktop-electron/src/features/ManagedAppsSurface.tsx
-          install -m 0644 \
-            aiTemp/rc11-managed-apps-current-main/templates/managed-apps.css \
-            desktop-electron/src/features/managed-apps.css
-          node aiTemp/rc11-managed-apps-current-main/materialize-sidebar-label.mjs \
-            2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-locale.txt
           grep -E 'RC11_MANAGED_APPS_LOCALE_(MATERIALIZED|ALREADY_MATERIALIZED)' \
             aiTemp/rc11-managed-apps-current-main/evidence/materialize-locale.txt
 
