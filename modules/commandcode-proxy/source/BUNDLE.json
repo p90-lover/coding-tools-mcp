@@ -1,0 +1,1 @@
+{"id":"commandcode-proxy","strategy":"bundled-source","commit":"c123a3ebe017415ef45e619600a1110198dea7f8","entrypoint":"proxy.mjs","prebuilt":true}

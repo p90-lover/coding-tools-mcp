@@ -3,6 +3,13 @@
   "name": "Anneal",
   "kind": "managed-upstream",
   "transport": "in-process",
+  "source": {
+    "strategy": "in-tree",
+    "path": "modules/anneal/source",
+    "entrypoint": "package.json",
+    "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e",
+    "repository": "mosonlab/anneal"
+  },
   "legacyLoopback": {
     "note": "Temporary compatibility only. Product surface is the in-process handler, not a listen port.",
     "url": "http://127.0.0.1:3000/"

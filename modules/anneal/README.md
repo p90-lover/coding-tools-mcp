@@ -16,3 +16,5 @@ await codingTools.apps.call({
 ```
 
 Operations: `inspect`, `start`, `stop`, `restart`, `repair`, `listTasks`, `preview`, `create`, `startTask`, `retry`, `hold`, `resume`, `archive`, `unarchive`, `inboxDecision`, `openFromReview`.
+
+In-tree source pointer: `modules/anneal/source/`. Handlers stay in this folder’s `handler.cjs` / `handlers.cjs` and load through the shared `modules/handler-registry.cjs`. Postgres outages soft-fail; they must not freeze Coding Tools.

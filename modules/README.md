@@ -17,6 +17,8 @@ modules/
 
 Each folder has `module.json`, `handler.cjs` (`invoke`), and `handlers.cjs` (operation table). Visuals are **embedded inside the Coding Tools GUI** (iframe/webview in CT). Modules must not launch their own windows.
 
+PR #224 adds in-tree source under `modules/commandcode-proxy/source/`, `modules/paseo/source/`, and `modules/anneal/source/`. It does not fork `handler-registry.cjs` and does not add `modules/cpa` or `modules/codex-router`.
+
 ## Attach map (Bot GG / Main seeker / hello)
 
 One tree. Do not add a second `modules/` root. CommandCode’s folder/handle is `commandcode-proxy`.

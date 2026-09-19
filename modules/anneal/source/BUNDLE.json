@@ -1,0 +1,9 @@
+{
+  "id": "anneal",
+  "strategy": "bundled-source",
+  "repository": "mosonlab/anneal",
+  "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e",
+  "entrypoint": "package.json",
+  "prebuilt": false,
+  "source": "package-time extraResources"
+}
