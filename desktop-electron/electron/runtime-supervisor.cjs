@@ -11,6 +11,7 @@ const {
   terminateOwnedProcessTree,
 } = require("./process-tree.cjs");
 const { runtimeInvocation } = require("./runtime-command.cjs");
+const { resolveExpectedRuntimeRelease } = require("./runtime-release.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -324,12 +325,14 @@ class RuntimeSupervisor {
     publishOperation,
     runtimeInvocationFactory = runtimeInvocation,
     getRuntimeEnvironment = () => ({}),
+    expectedRuntimeRelease,
   }) {
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
     this.installedRuntimeRoot = installedRuntimeRoot;
     this.runtimeRootProvider = runtimeRootProvider;
+    this.expectedRuntimeReleaseOverride = expectedRuntimeRelease;
     this.coreHome = coreHome;
     this.browserDescriptorPath = browserDescriptorPath;
     if (launcherProfile !== "production" && launcherProfile !== "development") {
@@ -558,6 +561,15 @@ class RuntimeSupervisor {
       sourceRoot: this.sourceRoot,
       installedRuntimeRoot: this.installedRuntimeRoot,
       args,
+    });
+  }
+
+  expectedRuntimeRelease() {
+    return resolveExpectedRuntimeRelease({
+      app: this.app,
+      installedRuntimeRoot: this.installedRuntimeRoot,
+      runtimeRootProvider: this.runtimeRootProvider,
+      expectedRuntimeRelease: this.expectedRuntimeReleaseOverride,
     });
   }
 
@@ -1213,7 +1225,17 @@ class RuntimeSupervisor {
       this.clearState();
       return { status: "ready", daemonPid: null, tunnelPid: null };
     }
-    if (!tunnelOnly && config.releaseVersion !== this.app.getVersion()) {
+    const expectedRuntimeRelease = this.expectedRuntimeRelease();
+    const launcherVersion = this.app.getVersion();
+    if (expectedRuntimeRelease !== launcherVersion) {
+      this.logger.info("runtime.release_namespaces", {
+        configReleaseVersion: config.releaseVersion,
+        expectedRuntimeRelease,
+        launcherVersion,
+        detail: "config.releaseVersion tracks the bundled ChatGPT-web runtime package, not the Electron launcher",
+      });
+    }
+    if (!tunnelOnly && config.releaseVersion !== expectedRuntimeRelease) {
       const ownershipState = this.readState();
       if ((!tunnelOnly && await this.proxyHealth(config)) || runtimeOwnershipMayBeLive(ownershipState)) {
         try {
@@ -1231,9 +1253,9 @@ class RuntimeSupervisor {
           return { status: "external", detail };
         }
       }
-      const detail = `Config requires ${config.releaseVersion}; launcher is ${this.app.getVersion()}`;
+      const detail = `Config requires ${config.releaseVersion}; runtime package is ${expectedRuntimeRelease}`;
       this.writeState("needs-setup", detail);
-      this.logger.warn("runtime.setup_required", { detail });
+      this.logger.warn("runtime.setup_required", { detail, launcherVersion });
       return { status: "needs-setup", detail };
     }
     if (!this.daemon && !this.tunnel) {
@@ -2110,5 +2132,6 @@ module.exports = {
   TUNNEL_START_TIMEOUT_MS,
   RuntimeSupervisor,
   managedTunnelConnectArgs,
+  resolveExpectedRuntimeRelease,
   validateConfig,
 };

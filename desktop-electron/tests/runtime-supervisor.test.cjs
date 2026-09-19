@@ -218,6 +218,97 @@ test("DEV runtime supervision ignores launcher version mismatch and starts only 
   }
 });
 
+test("production readiness compares config.releaseVersion to the runtime package, not Electron", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "electron", "runtime-supervisor.cjs"), "utf8");
+  assert.doesNotMatch(source, /config\.releaseVersion !== this\.app\.getVersion\(\)/);
+  assert.match(source, /config\.releaseVersion !== expectedRuntimeRelease/);
+  assert.match(source, /resolveExpectedRuntimeRelease/);
+  assert.doesNotMatch(
+    fs.readFileSync(path.join(__dirname, "..", "electron", "runtime.cjs"), "utf8"),
+    /const currentVersion = this\.app\.getVersion\(\);/,
+  );
+});
+
+test("preferLocal production setup accepts launcher 0.7.0-rc.12 when runtime package is 5.0.6", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-prefer-local-runtime-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const installedRuntimeRoot = path.join(root, "versions", "0.7.0-rc.12-win32-x64");
+  fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
+  fs.mkdirSync(path.join(installedRuntimeRoot, "app"), { recursive: true });
+  fs.writeFileSync(
+    path.join(installedRuntimeRoot, "app", "package.json"),
+    `${JSON.stringify({ name: "codex-chatgpt-web", version: "5.0.6" })}\n`,
+  );
+  const config = launcherConfig(descriptorPath, { releaseVersion: "5.0.6" });
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify(config)}\n`);
+  const logs = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.7.0-rc.12", isPackaged: true },
+    logger: {
+      info(event, fields) { logs.push({ event, fields }); },
+      warn(event, fields) { logs.push({ event, fields }); },
+      error() {},
+    },
+    sourceRoot: root,
+    installedRuntimeRoot,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.proxyHealth = async () => false;
+  supervisor.startDaemon = async () => {
+    supervisor.daemon = { pid: 4242 };
+  };
+  try {
+    const runtime = await supervisor.startConfigured();
+    assert.equal(runtime.status, "ready");
+    assert.equal(runtime.daemonPid, 4242);
+    assert.equal(logs.some((entry) => entry.event === "runtime.setup_required"), false);
+    const namespaces = logs.find((entry) => entry.event === "runtime.release_namespaces");
+    assert.equal(namespaces?.fields?.configReleaseVersion, "5.0.6");
+    assert.equal(namespaces?.fields?.expectedRuntimeRelease, "5.0.6");
+    assert.equal(namespaces?.fields?.launcherVersion, "0.7.0-rc.12");
+  } finally {
+    supervisor.daemon = null;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("production readiness still requires setup when the installed runtime package changed", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-package-mismatch-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const installedRuntimeRoot = path.join(root, "versions", "0.7.0-rc.12-win32-x64");
+  fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
+  fs.mkdirSync(path.join(installedRuntimeRoot, "app"), { recursive: true });
+  fs.writeFileSync(
+    path.join(installedRuntimeRoot, "app", "package.json"),
+    `${JSON.stringify({ name: "codex-chatgpt-web", version: "5.0.7" })}\n`,
+  );
+  fs.writeFileSync(
+    path.join(root, "config.json"),
+    `${JSON.stringify(launcherConfig(descriptorPath, { releaseVersion: "5.0.6" }))}\n`,
+  );
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.7.0-rc.12", isPackaged: true },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    installedRuntimeRoot,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.proxyHealth = async () => false;
+  supervisor.startDaemon = async () => {
+    throw new Error("daemon must not start while the runtime package is mismatched");
+  };
+  try {
+    const runtime = await supervisor.startConfigured();
+    assert.equal(runtime.status, "needs-setup");
+    assert.match(runtime.detail, /Config requires 5\.0\.6; runtime package is 5\.0\.7/);
+    assert.doesNotMatch(runtime.detail, /launcher is 0\.7\.0-rc\.12/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher runtime validation rejects a relative full-mode executable before spawn", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
   assert.throws(() => validateConfig(launcherConfig(descriptorPath, {

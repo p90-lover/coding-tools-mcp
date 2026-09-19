@@ -14,6 +14,7 @@ const {
   validateConnectorName,
 } = require("./connector-identity.cjs");
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
+const { resolveExpectedRuntimeRelease } = require("./runtime-release.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
@@ -168,6 +169,7 @@ class RuntimeHost {
     sourceRoot,
     installedRuntimeRoot,
     runtimeRootProvider,
+    expectedRuntimeRelease,
     browserDescriptorPath,
     coreHome,
     codexHome,
@@ -183,6 +185,7 @@ class RuntimeHost {
     this.sourceRoot = sourceRoot;
     this.installedRuntimeRoot = installedRuntimeRoot;
     this.runtimeRootProvider = runtimeRootProvider;
+    this.expectedRuntimeReleaseOverride = expectedRuntimeRelease;
     this.browserDescriptorPath = browserDescriptorPath;
     if (launcherProfile !== "production" && launcherProfile !== "development") {
       throw new Error("Runtime host launcher profile is invalid");
@@ -388,6 +391,15 @@ class RuntimeHost {
       sourceRoot: this.sourceRoot,
       installedRuntimeRoot: this.installedRuntimeRoot,
       args,
+    });
+  }
+
+  expectedRuntimeRelease() {
+    return resolveExpectedRuntimeRelease({
+      app: this.app,
+      installedRuntimeRoot: this.installedRuntimeRoot,
+      runtimeRootProvider: this.runtimeRootProvider,
+      expectedRuntimeRelease: this.expectedRuntimeReleaseOverride,
     });
   }
 
@@ -1134,7 +1146,7 @@ class RuntimeHost {
     this.assertProductionProfile("Managed Codex runtime upgrade");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const existing = this.runtimeConfigSnapshot();
-    const currentVersion = this.app.getVersion();
+    const currentVersion = this.expectedRuntimeRelease();
     const connectorMigrationRequired = existing.mode === "full"
       && isLegacyConnectorName(validateConnectorName(existing.config?.appName));
     const interactionMode = existing.config?.browserInteractionMode ?? "automatic";
