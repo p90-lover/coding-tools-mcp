@@ -234,7 +234,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       >
         {inProcessPanel ? (
           <div className="original-ui-frame-shell">
-            <CpaOriginalPanel language={language} section={selectedSection || "dashboard"} setError={setLocalError} />
+            <CpaOriginalPanel language={language} section={selectedSection || "dashboard"} setError={(error) => setLocalError(error ?? "")} />
           </div>
         ) : (
           <div className="original-ui-frame-empty">
@@ -338,7 +338,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
               void openSection(next).catch((cause) => setLocalError(messageOf(cause)));
             }}
             section={selectedSection || "dashboard"}
-            setError={setLocalError}
+            setError={(error) => setLocalError(error ?? "")}
           />
         ) : frameUrl ? (
           <iframe
