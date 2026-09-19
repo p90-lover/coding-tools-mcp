@@ -6,7 +6,7 @@ const { pathToFileURL } = require("node:url");
 const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router", "paseo", "anneal"]);
-const IFRAME_TOOL_IDS = Object.freeze(["cpa", "paseo", "anneal"]);
+const IFRAME_TOOL_IDS = Object.freeze(["paseo", "anneal"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const READY_WAIT_MS = {
   cpa: 45_000,
@@ -149,6 +149,7 @@ function createOriginalUiCore({
   function project(toolId) {
     const manifest = requireTool(toolId);
     const current = service(toolId);
+    const inProcessVisual = toolId === "cpa";
     return {
       id: manifest.id,
       name: manifest.name,
@@ -161,9 +162,12 @@ function createOriginalUiCore({
       status: current?.status || "unknown",
       pid: current?.pid ?? null,
       error: current?.error || null,
-      sourceConfigured: Boolean(current?.home),
-      installState: current?.managedInstall?.state || "not-installed",
+      sourceConfigured: Boolean(current?.home) || inProcessVisual,
+      installState: current?.managedInstall?.state || (inProcessVisual ? "installed" : "not-installed"),
       originalChrome: true,
+      inProcessVisual,
+      processOptional: inProcessVisual,
+      visualHost: inProcessVisual ? "coding-tools" : "iframe",
       home: current?.home || null,
     };
   }
@@ -289,6 +293,31 @@ function createOriginalUiCore({
   async function openEmbedded(toolId, section) {
     const manifest = requireTool(toolId);
     const selected = section || manifest.sections[0];
+    if (toolId === "cpa") {
+      const state = await inspect(toolId).catch(() => project(toolId));
+      return {
+        tool: {
+          ...project(toolId),
+          ...state,
+          originalChrome: true,
+          inProcessVisual: true,
+          processOptional: true,
+          visualHost: "coding-tools",
+          error: state?.error || null,
+        },
+        section: selected,
+        url: "",
+        embedded: true,
+        originalWindow: false,
+        visual: "in-process-panel",
+        processOptional: true,
+        api: {
+          moduleId: "cpa",
+          via: "codingTools.apps",
+          transport: "in-process",
+        },
+      };
+    }
     try {
       let state = await inspect(toolId);
       if (state.status !== "ready") {

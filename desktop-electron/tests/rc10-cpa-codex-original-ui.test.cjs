@@ -113,8 +113,11 @@ test("CPA original UI installs when missing, then returns the Coding Tools API h
   assert.equal(opened.originalWindow, false);
   assert.equal(opened.api.via, "codingTools.apps");
   assert.equal(opened.api.moduleId, "cpa");
-  assert.equal(opened.url, "http://127.0.0.1:8317/management.html#/oauth");
+  assert.equal(opened.api.transport, "in-process");
+  assert.equal(opened.visual, "in-process-panel");
+  assert.equal(opened.url, "");
   assert.equal(opened.tool.originalChrome, true);
+  assert.equal(opened.tool.inProcessVisual, true);
 
   const copied = controller.copyCpaManagementKey({
     writeText: (value) => { clipboard.written = value; },
@@ -229,6 +232,7 @@ test("desktop shell routes CPA and Codex Router to the original UI surface", () 
   assert.match(app, /toolId="codex-router"/);
   assert.match(surface, /data-original-chrome="true"/);
   assert.match(surface, /Copy management key/);
+  assert.match(surface, /CpaOriginalPanel/);
   assert.match(surface, /codingTools\?\.apps/);
   assert.match(surface, /reconnectGeneration/);
   assert.match(css, /\.original-ui-surface/);

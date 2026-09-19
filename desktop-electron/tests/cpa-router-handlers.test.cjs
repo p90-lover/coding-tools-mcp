@@ -164,6 +164,7 @@ test("CPA models/health/chatCompletions talk to a mocked loopback with bearer au
     assert.equal(serialized.includes("management-secret"), false);
     assert.ok(seen.some((entry) => entry.authorization === "Bearer proxy-secret"));
     assert.ok(seen.some((entry) => entry.url === "/v0/management/auth-files"));
+    assert.equal(seen.some((entry) => entry.url === "/management.html"), false);
   } finally {
     await mock.close();
   }
@@ -524,7 +525,7 @@ test("CPA provider catalog fallback excludes disconnected accounts", async () =>
   }
 });
 
-test("CPA managementHealth is not ok when the authenticated management API fails", async () => {
+test("CPA managementHealth is hosted in-process even when the authenticated management API fails", async () => {
   const mock = await listenMock((request, response) => {
     if (request.url === "/management.html") {
       text(response, 200, "<html>cpa</html>");
@@ -546,8 +547,10 @@ test("CPA managementHealth is not ok when the authenticated management API fails
       },
     });
     const management = await host.call("cpa", "managementHealth");
-    assert.equal(management.ok, false);
+    assert.equal(management.ok, true);
+    assert.equal(management.result.hosted, true);
     assert.equal(management.result.reachable, true);
+    assert.equal(management.result.authOk, false);
     assert.match(management.result.reason, /HTTP 401|unavailable/i);
   } finally {
     await mock.close();

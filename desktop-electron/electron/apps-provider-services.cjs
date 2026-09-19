@@ -211,7 +211,7 @@ function createAppsProviderServices({ providerNetworkReady }) {
       if (listed.summary.total === 0) {
         return {
           reason: probed.reachable === false
-            ? (probed.reason || "CPA loopback is unreachable")
+            ? "CPA process is optional; link a provider in Coding Tools"
             : "CPA auth-dir is empty; link a provider first",
           summary: listed.summary,
         };

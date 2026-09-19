@@ -388,12 +388,18 @@ function attachCpaCodexLongRun(inner, {
   async function openEmbedded(toolId, section) {
     if (!isLongRunTool(toolId)) return inner.openEmbedded(toolId, section);
     const id = requiredToolId(toolId);
+    const opened = await inner.openEmbedded(id, section);
+    if (id === "cpa") {
+      return {
+        ...opened,
+        tool: decorate(opened.tool),
+      };
+    }
     if (!state.tools[id].desiredRunning) {
       state.tools[id].desiredRunning = true;
       record(id, "desired-open");
       syncPowerSave();
     }
-    const opened = await inner.openEmbedded(id, section);
     watchDesired(id);
     return {
       ...opened,
@@ -404,12 +410,15 @@ function attachCpaCodexLongRun(inner, {
   async function openExternalTool(toolId, section) {
     if (!isLongRunTool(toolId)) return inner.openExternalTool(toolId, section);
     const id = requiredToolId(toolId);
+    const opened = await inner.openExternalTool(id, section);
+    if (id === "cpa") {
+      return { ...opened, tool: decorate(opened.tool) };
+    }
     if (!state.tools[id].desiredRunning) {
       state.tools[id].desiredRunning = true;
       record(id, "desired-open");
       syncPowerSave();
     }
-    const opened = await inner.openExternalTool(id, section);
     watchDesired(id);
     return { ...opened, tool: decorate(opened.tool) };
   }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JsonObject } from "../api/contracts";
 import type { Language, OriginalUiId, OriginalUiSnapshot, OriginalUiCatalog } from "../types";
+import { CpaOriginalPanel } from "./CpaOriginalPanel";
 import "./original-ui.css";
 
 interface OriginalUiSurfaceProps {
@@ -36,6 +37,16 @@ function emptyCopy(language: Language, toolId: OriginalUiId, ready: boolean): { 
       : toolId === "paseo"
         ? "Paseo"
         : "Anneal";
+  if (toolId === "cpa") {
+    return {
+      title: localize(language, "CPA in Coding Tools", "CPA（Coding Tools 內嵌）"),
+      body: localize(
+        language,
+        "Original CPA chrome is hosted inside Coding Tools. Handlers run in-process (codingTools.apps); Start is optional for proxy traffic only.",
+        "原始 CPA 畫面由 Coding Tools 內嵌。處理常式在行程內執行（codingTools.apps）；「啟動」僅供可選的代理流量。",
+      ),
+    };
+  }
   return {
     title: localize(language, `${name} in Coding Tools`, `${name}（Coding Tools 內嵌）`),
     body: ready
@@ -65,6 +76,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   const lastStatus = useRef("");
   const lastGeneration = useRef(0);
   const tool = useMemo(() => toolFrom(snapshot, toolId), [snapshot, toolId]);
+  const inProcessPanel = toolId === "cpa";
 
   const refresh = async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
@@ -99,7 +111,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     if (!api) throw new Error("Launcher IPC is unavailable");
     const result = await api.openOriginalUi(toolId, section);
     setSelectedSection(result.section);
-    setFrameUrl(result.url);
+    if (!inProcessPanel) setFrameUrl(result.url);
     setSnapshot((current) => current
       ? {
           ...current,
@@ -144,6 +156,18 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
         const current = toolFrom(next, toolId);
         const section = current?.sections[0] || "";
         if (current) setSelectedSection(section);
+        if (inProcessPanel) {
+          try {
+            const opened = await openSection(section);
+            if (!cancelled && opened) autoOpened.current = true;
+          } catch (cause) {
+            if (!cancelled) {
+              autoOpened.current = true;
+              setLocalError(messageOf(cause));
+            }
+          }
+          return;
+        }
         if (current?.status === "ready" || current?.status === "offline" || current?.status === "starting") {
           const opened = await openSection(section);
           if (!cancelled && opened) autoOpened.current = true;
@@ -151,7 +175,10 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
           autoOpened.current = true;
         }
       } catch (cause) {
-        if (!cancelled) setLocalError(messageOf(cause));
+        if (!cancelled) {
+          if (inProcessPanel) autoOpened.current = true;
+          setLocalError(messageOf(cause));
+        }
       }
     })();
     const unsubscribe = api.onExternalServicesChanged?.(() => {
@@ -183,7 +210,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   };
 
   useEffect(() => {
-    if (!tool || busy || !api) return;
+    if (!tool || busy || !api || inProcessPanel) return;
     const generation = tool.longRun?.reconnectGeneration ?? 0;
     const recovered = lastStatus.current !== "" && lastStatus.current !== "ready" && tool.status === "ready";
     const generationBumped = generation > lastGeneration.current;
@@ -194,42 +221,71 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     if (recovered || generationBumped) {
       void openSection(selectedSection || tool.sections[0]).catch((cause) => setLocalError(messageOf(cause)));
     }
-  }, [api, busy, frameUrl, selectedSection, tool, toolId]);
+  }, [api, busy, frameUrl, inProcessPanel, selectedSection, tool, toolId]);
 
   if (!tool) {
     return (
-      <section className="original-ui-surface" data-tool={toolId} data-original-chrome="true" data-transport="in-process">
-        <div className="original-ui-frame-empty">
-          <strong>{localize(language, "Loading Coding Tools module…", "正在載入 Coding Tools 模組…")}</strong>
-        </div>
+      <section
+        className="original-ui-surface"
+        data-tool={toolId}
+        data-original-chrome="true"
+        data-transport="in-process"
+        data-visual={inProcessPanel ? "in-process-panel" : undefined}
+      >
+        {inProcessPanel ? (
+          <div className="original-ui-frame-shell">
+            <CpaOriginalPanel language={language} section={selectedSection || "dashboard"} setError={(error) => setLocalError(error ?? "")} />
+          </div>
+        ) : (
+          <div className="original-ui-frame-empty">
+            <strong>{localize(language, "Loading Coding Tools module…", "正在載入 Coding Tools 模組…")}</strong>
+          </div>
+        )}
       </section>
     );
   }
 
   const ready = tool.status === "ready";
-  const statusText = ready
-    ? localize(language, "Connected", "已連線")
-    : tool.status === "starting"
-      ? localize(language, "Starting", "正在啟動")
-      : tool.status === "error"
-        ? localize(language, "Error", "錯誤")
-        : localize(language, "Offline", "離線");
-  const copy = emptyCopy(language, toolId, ready);
+  const panelReady = inProcessPanel || ready;
+  const statusText = inProcessPanel
+    ? localize(language, "In-process", "行程內")
+    : ready
+      ? localize(language, "Connected", "已連線")
+      : tool.status === "starting"
+        ? localize(language, "Starting", "正在啟動")
+        : tool.status === "error"
+          ? localize(language, "Error", "錯誤")
+          : localize(language, "Offline", "離線");
+  const copy = emptyCopy(language, toolId, panelReady);
 
   return (
-    <section className="original-ui-surface" data-tool={toolId} data-original-chrome="true" data-transport="in-process">
+    <section
+      className="original-ui-surface"
+      data-process-optional={inProcessPanel ? "true" : undefined}
+      data-tool={toolId}
+      data-original-chrome="true"
+      data-transport="in-process"
+      data-visual={inProcessPanel ? "in-process-panel" : "iframe"}
+    >
       <header className="original-ui-hostbar">
         <strong>{tool.name}</strong>
-        <span className={`original-ui-status status-${tool.status}`}>{statusText}</span>
+        <span className={`original-ui-status ${inProcessPanel ? "status-ready" : `status-${tool.status}`}`}>{statusText}</span>
         <div className="original-ui-hostbar-actions">
-          <button className="primary" disabled={busy !== null} onClick={() => void run(ready ? "open" : "start", async () => {
-            if (!ready) await callModule("start");
+          <button className="primary" disabled={busy !== null} onClick={() => void run(panelReady || inProcessPanel ? "open" : "start", async () => {
+            if (!inProcessPanel && !ready) await callModule("start");
             await openSection();
           })} type="button">
-            {busy === "start" || busy === "open" ? "…" : ready
+            {busy === "start" || busy === "open" ? "…" : inProcessPanel || ready
               ? localize(language, "Reload visual", "重新載入畫面")
               : localize(language, "Start module", "啟動模組")}
           </button>
+          {inProcessPanel && !ready ? (
+            <button disabled={busy !== null} onClick={() => void run("start-proxy", async () => {
+              await callModule("start");
+            })} type="button">
+              {busy === "start-proxy" ? "…" : localize(language, "Start proxy (optional)", "啟動代理（可選）")}
+            </button>
+          ) : null}
           {toolId === "cpa" ? (
             <button disabled={busy !== null} onClick={() => void run("copy-key", async () => {
               if (!api) throw new Error("Launcher IPC is unavailable");
@@ -251,8 +307,10 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
           </button>
           <button disabled={busy !== null || (!ready && tool.pid === null)} onClick={() => void run("stop", async () => {
             await callModule("stop");
-            setFrameUrl("");
-            autoOpened.current = false;
+            if (!inProcessPanel) {
+              setFrameUrl("");
+              autoOpened.current = false;
+            }
           })} type="button">
             {busy === "stop" ? "…" : localize(language, "Stop", "停止")}
           </button>
@@ -272,7 +330,17 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       {notice ? <p className="original-ui-note">{notice}</p> : null}
 
       <div className="original-ui-frame-shell">
-        {frameUrl ? (
+        {inProcessPanel ? (
+          <CpaOriginalPanel
+            language={language}
+            onSectionChange={(next) => {
+              setSelectedSection(next);
+              void openSection(next).catch((cause) => setLocalError(messageOf(cause)));
+            }}
+            section={selectedSection || "dashboard"}
+            setError={(error) => setLocalError(error ?? "")}
+          />
+        ) : frameUrl ? (
           <iframe
             allow="clipboard-read; clipboard-write"
             referrerPolicy="no-referrer"

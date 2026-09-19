@@ -1054,6 +1054,13 @@ code {
   font-weight: 500;
 }
 
+.settings-copy {
+  margin: 0 0 12px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
 .setup-list {
   border-top: 1px solid var(--color-border);
 }

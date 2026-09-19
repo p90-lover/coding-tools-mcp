@@ -112,7 +112,8 @@
   background: #fff;
 }
 
-.original-ui-frame-shell iframe {
+.original-ui-frame-shell iframe,
+.original-ui-frame-shell .cpa-original-panel {
   display: block;
   width: 100%;
   height: 100%;

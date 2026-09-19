@@ -258,7 +258,8 @@ test("original UI controller keeps CPA and Codex Router chrome and wires the lon
   assert.equal(opened.embedded, true);
   assert.equal(opened.originalWindow, false);
   assert.equal(opened.api.via, "codingTools.apps");
-  assert.equal(opened.url, "http://127.0.0.1:8317/management.html#/logs");
+  assert.equal(opened.url, "");
+  assert.equal(opened.visual, "in-process-panel");
   assert.equal(opened.tool.originalChrome, true);
   controller.dispose();
 
