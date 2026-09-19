@@ -1,0 +1,109 @@
+name: Materialize rc.11 Managed Apps on current main
+
+on:
+  push:
+    branches:
+      - integration/rc11-managed-apps-current-main-probe
+    paths:
+      - .github/workflows/materialize-rc11-managed-apps-current-main.yml
+      - aiTemp/rc11-managed-apps-current-main/**
+      - desktop-electron/tests/rc11-managed-apps-current-main-probe.test.cjs
+      - desktop-electron/tests/rc11-managed-apps-shell.test.cjs
+      - desktop-electron/tests/desktop-shell-fidelity.test.cjs
+      - desktop-electron/tests/provider-console-saas.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-rc11-managed-apps-current-main-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Apply guarded shell and locale materializers
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-managed-apps-current-main/evidence
+          node aiTemp/rc11-managed-apps-current-main/materialize-shell.mjs \
+            2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-shell.txt
+          grep -F RC11_MANAGED_APPS_SHELL_MATERIALIZED \
+            aiTemp/rc11-managed-apps-current-main/evidence/materialize-shell.txt
+          install -m 0644 \
+            aiTemp/rc11-managed-apps-current-main/templates/ManagedAppsSurface.tsx \
+            desktop-electron/src/features/ManagedAppsSurface.tsx
+          node aiTemp/rc11-managed-apps-current-main/materialize-sidebar-label.mjs \
+            2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/materialize-locale.txt
+          grep -E 'RC11_MANAGED_APPS_LOCALE_(MATERIALIZED|ALREADY_MATERIALIZED)' \
+            aiTemp/rc11-managed-apps-current-main/evidence/materialize-locale.txt
+
+      - name: Run focused current-main contracts
+        run: |
+          set -euo pipefail
+          (
+            node --check desktop-electron/electron/state.cjs
+            node --check desktop-electron/electron/main.cjs
+            node --check desktop-electron/electron/preload.cjs
+            node --test \
+              desktop-electron/tests/rc11-managed-apps-current-main-probe.test.cjs \
+              desktop-electron/tests/rc11-managed-apps-shell.test.cjs \
+              desktop-electron/tests/state.test.cjs \
+              desktop-electron/tests/desktop-shell-fidelity.test.cjs \
+              desktop-electron/tests/provider-console-saas.test.cjs \
+              desktop-electron/tests/renderer-wiring.test.cjs
+          ) 2>&1 | tee aiTemp/rc11-managed-apps-current-main/evidence/materialized-tests.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-apps-current-main/evidence/materialized-tests.txt
+
+      - name: Enforce current-main preservation
+        run: |
+          set -euo pipefail
+          git fetch origin main --no-tags
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only origin/main...HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit verified production source
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/electron/state.cjs \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/types.ts \
+            desktop-electron/src/features/ExternalServicesSurface.tsx \
+            desktop-electron/src/features/ManagedAppsSurface.tsx \
+            desktop-electron/src/features/managed-apps.css \
+            desktop-electron/tests/state.test.cjs
+          if git diff --cached --quiet; then
+            echo 'Managed Apps current-main production source is already materialized'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(rc11): materialize Managed Apps on current main'
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: materialize-rc11-managed-apps-current-main-${{ github.sha }}
+          path: aiTemp/rc11-managed-apps-current-main/evidence/
+          if-no-files-found: error
+          retention-days: 14
