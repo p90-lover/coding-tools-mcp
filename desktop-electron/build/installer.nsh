@@ -29,6 +29,24 @@ Var LegacyRegistryAfter
   Abort
 !macroend
 
+!macro CaptureLegacyInstallLocation ROOT
+  ClearErrors
+  ReadRegStr $LegacyInstallLocation ${ROOT} "$LegacyRegistryKey" "InstallLocation"
+  ${Unless} ${Errors}
+    StrCpy $LegacyFirstChar $LegacyInstallLocation 1
+    StrCpy $LegacyLastChar $LegacyInstallLocation 1 -1
+    ${If} $LegacyFirstChar == "$\""
+    ${AndIf} $LegacyLastChar == "$\""
+      StrCpy $LegacyInstallLocation $LegacyInstallLocation -1 1
+    ${EndIf}
+    ${If} $LegacyInstallLocation != ""
+      IfFileExists "$LegacyInstallLocation\*.*" 0 +3
+        StrCpy $INSTDIR $LegacyInstallLocation
+        DetailPrint "Reusing legacy Coding Tools install location: $INSTDIR"
+    ${EndIf}
+  ${EndUnless}
+!macroend
+
 !macro RemoveLegacyMsi ROOT VIEW
   StrLen $LegacySubKeyLength $LegacySubKey
   ${If} $LegacySubKeyLength != 38
@@ -158,6 +176,7 @@ Var LegacyRegistryAfter
     ReadRegStr $LegacyDisplayName ${ROOT} "$LegacyRegistryKey" "DisplayName"
     ${Unless} ${Errors}
       ${If} $LegacyDisplayName == "${LEGACY_PRODUCT_NAME}"
+        !insertmacro CaptureLegacyInstallLocation ${ROOT}
         ClearErrors
         ReadRegDWORD $LegacyWindowsInstaller ${ROOT} "$LegacyRegistryKey" "WindowsInstaller"
         ${If} ${Errors}

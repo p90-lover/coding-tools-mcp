@@ -201,6 +201,7 @@ function buildJob({ version, platform, executablePath, assetPath, stagingRoot, t
       parentPid: process.pid,
       tempRoot,
       logPath,
+      installDirectory: path.dirname(executablePath),
       source: assetPath,
       target: executablePath,
     };

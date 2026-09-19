@@ -60,9 +60,28 @@ function updateMac(job) {
   launch("/usr/bin/open", [job.target]);
 }
 
+function windowsInstallerArguments(job) {
+  const args = ["/S", "/UPDATE", "/CLOSEAPPLICATIONS", "/NORESTART"];
+  const installDirectory = typeof job.installDirectory === "string"
+    ? path.win32.normalize(job.installDirectory.trim())
+    : "";
+  if (installDirectory) {
+    if (!path.win32.isAbsolute(installDirectory)) {
+      throw new Error(`Windows install directory must be absolute: ${installDirectory}`);
+    }
+    // electron-builder/NSIS requires /D to be the final argument and it must not be quoted.
+    args.push(`/D=${installDirectory}`);
+  }
+  return args;
+}
+
 function updateWindows(job) {
   requireFile(job.source, "Windows installer");
-  const result = spawnSync(job.source, ["/S"], { encoding: "utf8", timeout: 45 * 60_000, windowsHide: true });
+  const result = spawnSync(job.source, windowsInstallerArguments(job), {
+    encoding: "utf8",
+    timeout: 15 * 60_000,
+    windowsHide: true,
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`Windows installer exited with code ${result.status}`);
   requireFile(job.target, "Installed Windows launcher");
@@ -141,4 +160,10 @@ async function main() {
   }
 }
 
-void main().catch(() => process.exit(1));
+if (require.main === module) {
+  void main().catch(() => process.exit(1));
+}
+
+module.exports = {
+  windowsInstallerArguments,
+};
