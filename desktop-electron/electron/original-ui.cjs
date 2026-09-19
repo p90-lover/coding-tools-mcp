@@ -1,6 +1,8 @@
 "use strict";
 
+const fs = require("node:fs");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router", "paseo", "anneal"]);
@@ -42,7 +44,7 @@ function manifestPath(toolId) {
 function loadManifest(toolId) {
   if (!TOOL_IDS.includes(toolId)) throw new Error(`Unknown original UI: ${toolId}`);
   const filePath = manifestPath(toolId);
-  const manifest = JSON.parse(require("node:fs").readFileSync(filePath, "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(filePath, "utf8"));
   if (manifest.id !== toolId) throw new Error(`Original UI manifest ID mismatch: ${toolId}`);
   if (!Array.isArray(manifest.sections) || manifest.sections.length === 0) {
     throw new Error(`Original UI manifest has no sections: ${toolId}`);
@@ -98,6 +100,31 @@ function sectionUrl(manifest, endpoint, section) {
   return target.toString();
 }
 
+function annealVisualEndpoint() {
+  return "http://127.0.0.1:5173/";
+}
+
+function embeddedVisualUrl(toolId, manifest, state, section) {
+  if (toolId === "codex-router") {
+    const home = state?.home;
+    if (!home) return "";
+    try {
+      const { rendererPath } = require("./codex-router-original-ui.cjs");
+      const file = rendererPath(home);
+      if (!fs.existsSync(file)) return "";
+      const url = pathToFileURL(file);
+      if (section) url.hash = section;
+      return url.toString();
+    } catch {
+      return "";
+    }
+  }
+  if (toolId === "anneal") {
+    return sectionUrl(manifest, annealVisualEndpoint(), section);
+  }
+  return sectionUrl(manifest, state.endpoint, section);
+}
+
 function createOriginalUiCore({
   externalServices = null,
   openExternal = null,
@@ -137,6 +164,7 @@ function createOriginalUiCore({
       sourceConfigured: Boolean(current?.home),
       installState: current?.managedInstall?.state || "not-installed",
       originalChrome: true,
+      home: current?.home || null,
     };
   }
 
@@ -244,12 +272,13 @@ function createOriginalUiCore({
       },
       section,
       url: "",
-      embedded: false,
+      embedded: true,
       originalWindow: false,
       api: {
         moduleId: toolId,
         origin: state?.endpoint,
         via: "codingTools.apps",
+        transport: "in-process",
       },
       unavailable: true,
       dependency: classified?.dependency || (toolId === "anneal" ? "postgres" : null),
@@ -266,16 +295,18 @@ function createOriginalUiCore({
         await start(toolId);
         state = await waitUntilReady(toolId);
       }
+      const visual = embeddedVisualUrl(toolId, manifest, state, selected);
       return {
         tool: state,
         section: selected,
-        url: "",
-        embedded: false,
+        url: visual,
+        embedded: Boolean(visual),
         originalWindow: false,
         api: {
           moduleId: toolId,
           origin: state.endpoint,
           via: "codingTools.apps",
+          transport: "in-process",
         },
       };
     } catch (error) {

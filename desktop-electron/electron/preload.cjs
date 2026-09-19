@@ -197,6 +197,12 @@ const codingToolsApi = Object.freeze({
     list: () => invokeContract(ipcRenderer, "apps.list"),
     catalog: () => invokeContract(ipcRenderer, "apps.catalog"),
     call: (input) => invokeContract(ipcRenderer, "apps.call", input),
+    invoke: (input) => invokeContract(ipcRenderer, "apps.call", {
+      moduleId: input.handle || input.moduleId,
+      operation: input.operation,
+      requestId: input.requestId,
+      arguments: input.arguments,
+    }),
   }),
 });
 

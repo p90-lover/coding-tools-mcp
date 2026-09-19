@@ -41,6 +41,7 @@ test("UpstreamToolSurface inspects managed modules through Coding Tools APIs wit
   const styles = read("src/features/upstream-tool.css");
   assert.match(surface, /inspectUpstreamTool\(toolId\)/);
   assert.match(surface, /codingTools\?\.apps/);
+  assert.match(surface, /openEmbeddedTool/);
   assert.match(surface, /is-immersive/);
   assert.match(surface, /Coding Tools manages Anneal through WSL2 and Docker on Windows/);
   assert.match(surface, /start or inspect the bundled in-app service/);

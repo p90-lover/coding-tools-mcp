@@ -42,6 +42,16 @@ function lifecycleOperations(moduleId) {
         return run("restart", context);
       },
     },
+    install: {
+      readOnly: false,
+      description: `Install or repair the managed ${moduleId} runtime through Coding Tools.`,
+      run: async (_args, context) => {
+        if (typeof context.services?.repair === "function") {
+          return sanitizePublic(await context.services.repair(moduleId));
+        }
+        return run("start", context);
+      },
+    },
   };
 }
 

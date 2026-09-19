@@ -62,6 +62,7 @@ export function UpstreamToolSurface({
   const [snapshot, setSnapshot] = useState<UpstreamToolsSnapshot | null>(null);
   const [selectedSection, setSelectedSection] = useState("");
   const [endpoint, setEndpoint] = useState("");
+  const [frameUrl, setFrameUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [chromeOpen, setChromeOpen] = useState(false);
   const [agentId, setAgentId] = useState("");
@@ -110,6 +111,15 @@ export function UpstreamToolSurface({
         setSelectedSection(section);
         setUnavailable(false);
         setDependency(null);
+        try {
+          const opened = await api.openEmbeddedTool(toolId, section);
+          if (cancelled) return;
+          setFrameUrl(opened.url);
+          setUnavailable(opened.unavailable === true);
+          setDependency(opened.dependency ?? null);
+        } catch {
+          setFrameUrl("");
+        }
       } catch (cause) {
         if (!cancelled) setError(messageOf(cause));
       }
@@ -209,7 +219,7 @@ export function UpstreamToolSurface({
         ? localize(language, "Error", "錯誤")
         : localize(language, "Offline", "離線");
 
-  const immersive = Boolean(nativeControl);
+  const immersive = Boolean(frameUrl) || Boolean(nativeControl);
   const annealManagedHint = toolId === "anneal"
     ? localize(
       language,
@@ -283,6 +293,13 @@ export function UpstreamToolSurface({
             key={section}
             onClick={() => {
               setSelectedSection(section);
+              if (api) {
+                void api.openEmbeddedTool(toolId, section).then((opened) => {
+                  setFrameUrl(opened.url);
+                  setUnavailable(opened.unavailable === true);
+                  setDependency(opened.dependency ?? null);
+                }).catch((cause) => setError(messageOf(cause)));
+              }
             }}
             type="button"
           >
@@ -313,14 +330,24 @@ export function UpstreamToolSurface({
       ) : null}
 
       <div className="upstream-tool-frame-shell">
-        <div className="upstream-tool-frame-empty">
-          <strong>{localize(language, "Coding Tools module APIs", "Coding Tools 模組 API")}</strong>
-          <span>
-            {ready
-              ? localize(language, "Drive this module through codingTools.apps. The original standalone UI is not opened.", "透過 codingTools.apps 驅動此模組，不會開啟原版獨立介面。")
-              : localize(language, "Coding Tools is preparing the managed loopback service.", "Coding Tools 正在準備受管 loopback 服務。")}
-          </span>
-        </div>
+        {frameUrl ? (
+          <iframe
+            allow="clipboard-read; clipboard-write; microphone"
+            referrerPolicy="no-referrer"
+            sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+            src={frameUrl}
+            title={`${tool.name} hosted in Coding Tools`}
+          />
+        ) : (
+          <div className="upstream-tool-frame-empty">
+            <strong>{localize(language, "Coding Tools hosted visual", "Coding Tools 內嵌畫面")}</strong>
+            <span>
+              {ready
+                ? localize(language, "Original chrome is hosted inside Coding Tools. Handlers stay in-process; no standalone window.", "原始畫面由 Coding Tools 內嵌。處理常式留在行程內，不開啟獨立視窗。")
+                : localize(language, "Coding Tools is preparing the managed visual.", "Coding Tools 正在準備受管畫面。")}
+            </span>
+          </div>
+        )}
       </div>
 
       <section className="upstream-original-function" aria-label="Original function">

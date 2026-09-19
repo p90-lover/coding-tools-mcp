@@ -1,13 +1,10 @@
 {
   "id": "commandcode-proxy",
   "name": "CommandCode Proxy",
-  "runtime": "managed-child",
-  "loopback": {
-    "origin": "http://127.0.0.1:9090/",
-    "openai": "http://127.0.0.1:9090/v1"
-  },
-  "operations": [
-    "inspect", "start", "stop", "restart", "repair",
-    "health", "models", "chatCompletions", "plan", "applyPlan"
-  ]
+  "kind": "managed-service",
+  "transport": "in-process",
+  "legacyLoopback": {
+    "note": "Temporary compatibility only. Product surface is the in-process handler, not a listen port.",
+    "url": "http://127.0.0.1:9090/"
+  }
 }

@@ -41,11 +41,7 @@ async function act(op, args, context) {
 }
 
 function createModule() {
-  return defineModule({
-    id: "anneal",
-    name: "Anneal",
-    loopback: LOOPBACK,
-    extraOperations: {
+  const extraOperations = {
       listTasks: {
         readOnly: true,
         description: "GET allowlisted /tasks from the managed Anneal API.",
@@ -132,7 +128,26 @@ function createModule() {
           }
         },
       },
-    },
+  };
+  extraOperations.board = extraOperations.listTasks;
+  extraOperations.activity = extraOperations.preview;
+  extraOperations["task-start"] = extraOperations.startTask;
+  extraOperations.inbox_decision = extraOperations.inboxDecision;
+  extraOperations.inbox_reply = {
+    readOnly: false,
+    description: "POST an inbox reply on the managed Anneal API.",
+    run: (args, context) => act("inbox_reply", args, context),
+  };
+  extraOperations.inbox_close = {
+    readOnly: false,
+    description: "POST inbox close on the managed Anneal API.",
+    run: (args, context) => act("inbox_close", args, context),
+  };
+  return defineModule({
+    id: "anneal",
+    name: "Anneal",
+    loopback: LOOPBACK,
+    extraOperations,
   });
 }
 

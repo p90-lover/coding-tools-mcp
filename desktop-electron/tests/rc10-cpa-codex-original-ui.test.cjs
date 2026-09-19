@@ -109,11 +109,11 @@ test("CPA original UI installs when missing, then returns the Coding Tools API h
   assert.deepEqual(calls, [["install", "cpa"]]);
 
   const opened = await controller.openEmbedded("cpa", "oauth");
-  assert.equal(opened.embedded, false);
+  assert.equal(opened.embedded, true);
   assert.equal(opened.originalWindow, false);
   assert.equal(opened.api.via, "codingTools.apps");
   assert.equal(opened.api.moduleId, "cpa");
-  assert.equal(opened.url, "");
+  assert.equal(opened.url, "http://127.0.0.1:8317/management.html#/oauth");
   assert.equal(opened.tool.originalChrome, true);
 
   const copied = controller.copyCpaManagementKey({
@@ -156,11 +156,12 @@ test("Codex Router open path uses Coding Tools APIs and does not launch Control 
   });
 
   const opened = await controller.openEmbedded("codex-router", "models");
-  assert.equal(opened.embedded, false);
   assert.equal(opened.originalWindow, false);
   assert.equal(opened.api.moduleId, "codex-router");
   assert.equal(opened.api.via, "codingTools.apps");
   assert.equal(spawned.length, 0);
+  assert.match(opened.url, /control-center.*index\.html/i);
+  assert.equal(opened.embedded, true);
   controller.dispose();
 });
 
@@ -229,6 +230,7 @@ test("desktop shell routes CPA and Codex Router to the original UI surface", () 
   assert.match(surface, /data-original-chrome="true"/);
   assert.match(surface, /Copy management key/);
   assert.match(surface, /codingTools\?\.apps/);
+  assert.match(surface, /reconnectGeneration/);
   assert.match(css, /\.original-ui-surface/);
   assert.match(css, /flex: 1 1 auto/);
   assert.match(integrations, /Open module APIs/);

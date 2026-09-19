@@ -257,12 +257,17 @@ function createUpstreamToolController({
       return {
         tool: state,
         section: selectedSection,
-        url: "",
-        embedded: false,
+        url: sectionUrl(
+          manifest,
+          toolId === "anneal" ? "http://127.0.0.1:5173/" : state.endpoint,
+          selectedSection,
+        ),
+        embedded: true,
         api: {
           moduleId: toolId,
           origin: state.endpoint,
           via: "codingTools.apps",
+          transport: "in-process",
         },
       };
     } catch (error) {
@@ -281,11 +286,12 @@ function createUpstreamToolController({
           },
           section: selectedSection,
           url: "",
-          embedded: false,
+          embedded: true,
           api: {
             moduleId: toolId,
             origin: latest.endpoint,
             via: "codingTools.apps",
+            transport: "in-process",
           },
           unavailable: true,
           dependency: classified?.dependency || "postgres",

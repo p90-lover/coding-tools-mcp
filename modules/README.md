@@ -1,59 +1,51 @@
 # Coding Tools modules
 
-CPA, Codex Router, CommandCode Proxy, Paseo, and Anneal are **modules inside Coding Tools**. Coding Tools is the single host. Consumers call Coding Tools APIs; they do not launch each app’s standalone GUI.
+CPA, Codex Router, CommandCode Proxy, Paseo, and Anneal live under one tree: `modules/<app>/`. Coding Tools is the single host. **#224 (CommandCode / Paseo / Anneal) uses this same root** via `modules/handler-registry.cjs`.
+
+Handlers run **in-process**. The designed surface is `window.codingTools.apps` (IPC). **Do not open extra listen ports** for these modules. Existing child loopbacks (`:8317`, `:4202`, `:9090`, `:6768`, `:3000`, `:5173`) are legacy compatibility only so already-running managed children can keep their sockets; consumers must not be told to hit those ports.
 
 ```
 modules/
-  cpa/                 CLIProxyAPI — OpenAI-compat loopback :8317
-  codex-router/        Codex Router — OpenAI-compat loopback :4202
-  commandcode-proxy/   CommandCode Proxy — OpenAI-compat loopback :9090
-  paseo/               Paseo orchestrator — HTTP/WS :6768
-  anneal/              Anneal tasks — API :3000 (web :5173 is not the integration path)
-  host.cjs             Coding Tools apps host (IPC + optional loopback HTTP)
-  lib/                 Shared loopback client, lifecycle, sanitizer
+  handler-registry.cjs   Shared registry: loads module.json + handler.cjs
+  host.cjs               codingTools.apps list/catalog/call/invoke
+  cpa/                   LOL slot — in-process CPA handlers + CT-hosted visual
+  codex-router/          LOL slot — in-process Router handlers + CT-hosted Control Center chrome
+  commandcode-proxy/     shared with #224
+  paseo/                 shared with #224
+  anneal/                shared with #224
 ```
 
-Runtimes stay **managed child services** owned by Coding Tools (bundled five-stack / managed-components). Each folder here is the Coding Tools adapter: handlers, operation catalog, and loopback client. Source is adapted as needed rather than shipping a second standalone app tree.
+Each folder has `module.json`, `handler.cjs` (`invoke`), and `handlers.cjs` (operation table). Visuals are **embedded inside the Coding Tools GUI** (iframe/webview in CT). Modules must not launch their own windows.
 
-## How to call
-
-Renderer / preload (`window.codingTools`, same contract style as `codingTools.tools`):
+## How to call (in-process)
 
 ```js
 const apps = window.codingTools.apps;
 await apps.list();
 await apps.catalog();
 await apps.call({ moduleId: "cpa", operation: "inspect" });
-await apps.call({
-  moduleId: "paseo",
+await apps.invoke({
+  handle: "paseo",
   operation: "send",
   arguments: { agentId: "agent-1", text: "ping" },
 });
 ```
 
-IPC channels (registered with the rest of the Coding Tools shell, before first paint):
-
-- `coding-tools:apps:list`
-- `coding-tools:apps:catalog`
-- `coding-tools:apps:call`
-
-Optional loopback HTTP is **not** started at UI bootstrap. Tests or an explicit host call can bind `127.0.0.1` only:
-
-- `GET /api/v1/apps`
-- `GET /api/v1/apps/catalog`
-- `POST /api/v1/apps/call` with `{ "moduleId", "operation", "arguments" }`
+IPC (before first paint): `coding-tools:apps:list`, `catalog`, `call`. `invoke` is the same in-process channel (`handle` maps to `moduleId`). There is no apps HTTP listener.
 
 ## Operations
 
 | Module | Lifecycle | Meaningful functions |
 | --- | --- | --- |
-| `cpa` | inspect/start/stop/restart/repair | health, models, chatCompletions, managementHealth |
+| `cpa` | inspect/start/stop/restart/repair/install | health, models, chatCompletions, managementHealth |
 | `codex-router` | same | health, models, chatCompletions, sync |
-| `commandcode-proxy` | same | health, models, chatCompletions, plan, applyPlan |
+| `commandcode-proxy` | same | health, models, banner, plan, applyPlan, registration-plan, registration-apply |
 | `paseo` | same | send, resume, cancel, archive, permission, create, plan, run, submitResult, review |
-| `anneal` | same | listTasks, preview, create, startTask, retry, hold, resume, archive, unarchive, inboxDecision, openFromReview |
+| `anneal` | same | listTasks/board, preview/activity, create, startTask/task-start, retry, hold, resume, archive, unarchive, inboxDecision/inbox_decision, inbox_reply, inbox_close, openFromReview |
 
-Each per-module folder has a README with copy-paste `codingTools.apps.call` examples.
+## Visuals
+
+CT hosts original chrome in-app: CPA management panel, Codex Router Control Center `dist/index.html` (file URL, not a second Electron window), Paseo web UI, Anneal board (`:5173` visual origin). Handlers power those screens.
 
 ## Network
 

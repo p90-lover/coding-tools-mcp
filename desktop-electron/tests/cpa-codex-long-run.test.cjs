@@ -255,10 +255,10 @@ test("original UI controller keeps CPA and Codex Router chrome and wires the lon
     },
   });
   const opened = await controller.openEmbedded("cpa", "logs");
-  assert.equal(opened.embedded, false);
+  assert.equal(opened.embedded, true);
   assert.equal(opened.originalWindow, false);
   assert.equal(opened.api.via, "codingTools.apps");
-  assert.equal(opened.url, "");
+  assert.equal(opened.url, "http://127.0.0.1:8317/management.html#/logs");
   assert.equal(opened.tool.originalChrome, true);
   controller.dispose();
 
@@ -268,6 +268,8 @@ test("original UI controller keeps CPA and Codex Router chrome and wires the lon
   assert.match(main, /cpa-codex-long-run\.json/);
   assert.match(main, /powerSaveBlocker/);
   assert.match(surface, /codingTools\?\.apps/);
+  assert.match(surface, /reconnectGeneration/);
+  assert.match(surface, /searchParams\.set\("lr"/);
   assert.ok(pack.build.asarUnpack.includes("electron/cpa-codex-long-run.cjs"));
   assert.doesNotMatch(read("src/features/ExternalServicesSurface.tsx"), /CPA Provider Hub/);
 });

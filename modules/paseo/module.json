@@ -1,14 +1,10 @@
 {
   "id": "paseo",
   "name": "Paseo",
-  "runtime": "managed-child",
-  "loopback": {
-    "origin": "http://127.0.0.1:6768/",
-    "execution": "ws://127.0.0.1:6768/ws"
-  },
-  "operations": [
-    "inspect", "start", "stop", "restart", "repair",
-    "send", "resume", "cancel", "archive", "permission", "create",
-    "plan", "run", "submitResult", "review"
-  ]
+  "kind": "managed-upstream",
+  "transport": "in-process",
+  "legacyLoopback": {
+    "note": "Temporary compatibility only. Product surface is the in-process handler, not a listen port.",
+    "url": "http://127.0.0.1:6768/"
+  }
 }
