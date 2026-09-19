@@ -98,3 +98,13 @@ test("IPC schemas bound handles, operations and explicit reconcile confirmation"
   );
   assert.equal(seen.length, 3);
 });
+
+test("managed app API materializer stays idempotent after four-locale shell composition", () => {
+  const materializer = source("../aiTemp/rc11-managed-app-api/materialize.mjs");
+  const repair = source("../aiTemp/rc11-managed-app-api/repair-locale-materializer.mjs");
+  const sentinel = '  "const appByHandle = useMemo(",';
+
+  assert.equal(materializer.split(sentinel).length - 1, 2);
+  assert.match(repair, /RC11_MANAGED_APP_LOCALE_MATERIALIZER_REPAIRED/);
+  assert.match(repair, /Expected one locale-sensitive sentinel and one existing API sentinel/);
+});
