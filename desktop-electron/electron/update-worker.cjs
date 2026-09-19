@@ -79,7 +79,7 @@ function updateWindows(job) {
   requireFile(job.source, "Windows installer");
   const result = spawnSync(job.source, windowsInstallerArguments(job), {
     encoding: "utf8",
-    timeout: 15 * 60_000,
+    timeout: 45 * 60_000,
     windowsHide: true,
   });
   if (result.error) throw result.error;
