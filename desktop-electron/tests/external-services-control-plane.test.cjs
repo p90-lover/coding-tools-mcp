@@ -201,7 +201,7 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.match(main, /launcher:commandcode-proxy-apply/);
   assert.match(main, /launcher:upstream-tool-act/);
   assert.match(read("src/features/UpstreamToolSurface.tsx"), /actUpstreamTool/);
-  assert.match(read("src/features/UpstreamToolSurface.tsx"), /Opening the original embedded interface/);
+  assert.match(read("src/features/UpstreamToolSurface.tsx"), /codingTools\?\.apps/);
   assert.match(read("src/features/UpstreamToolSurface.tsx"), /Original function/);
   assert.match(types, /export interface ExternalServiceSnapshot/);
   assert.match(types, /export type ManagedComponentInstallState/);
@@ -223,7 +223,7 @@ test("BrowserHost, IPC, GUI, Provider Hub, and package-only builder are wired to
   assert.match(read("electron/external-services.cjs"), /--with-cpa/);
   assert.match(read("electron/five-stack-cross-use.cjs"), /CODING_TOOLS_CPA_OPENAI_BASE_URL/);
   assert.doesNotMatch(surface, /Prepare bundled runtime/);
-  assert.match(surface, /開啟原始介面/);
+  assert.match(surface, /開啟模組 API/);
   assert.match(surface, /外部服務/);
   assert.match(surface, /Copy plan/);
   assert.match(surface, /Apply non-secret/);

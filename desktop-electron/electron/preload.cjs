@@ -193,6 +193,11 @@ const codingToolsApi = Object.freeze({
     catalog: (input) => invokeContract(ipcRenderer, "tools.catalog", input),
     call: (input) => invokeContract(ipcRenderer, "tools.call", input),
   }),
+  apps: Object.freeze({
+    list: () => invokeContract(ipcRenderer, "apps.list"),
+    catalog: () => invokeContract(ipcRenderer, "apps.catalog"),
+    call: (input) => invokeContract(ipcRenderer, "apps.call", input),
+  }),
 });
 
 contextBridge.exposeInMainWorld("codingTools", codingToolsApi);

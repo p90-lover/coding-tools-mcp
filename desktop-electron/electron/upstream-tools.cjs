@@ -257,8 +257,13 @@ function createUpstreamToolController({
       return {
         tool: state,
         section: selectedSection,
-        url: sectionUrl(manifest, state.endpoint, selectedSection),
-        embedded: true,
+        url: "",
+        embedded: false,
+        api: {
+          moduleId: toolId,
+          origin: state.endpoint,
+          via: "codingTools.apps",
+        },
       };
     } catch (error) {
       const latest = await inspect(toolId).catch(() => project(toolId));
@@ -276,7 +281,12 @@ function createUpstreamToolController({
           },
           section: selectedSection,
           url: "",
-          embedded: true,
+          embedded: false,
+          api: {
+            moduleId: toolId,
+            origin: latest.endpoint,
+            via: "codingTools.apps",
+          },
           unavailable: true,
           dependency: classified?.dependency || "postgres",
           error: message,

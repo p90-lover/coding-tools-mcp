@@ -79,7 +79,7 @@ test("original UI endpoints stay on loopback and never carry credentials", () =>
   assert.throws(() => normalizeLoopbackEndpoint("http://user:secret@127.0.0.1:8317"), /credentials/);
 });
 
-test("CPA original UI installs when missing, then returns the original management panel URL", async () => {
+test("CPA original UI installs when missing, then returns the Coding Tools API handle", async () => {
   const calls = [];
   const clipboard = { written: "" };
   const controller = createOriginalUiController({
@@ -109,9 +109,11 @@ test("CPA original UI installs when missing, then returns the original managemen
   assert.deepEqual(calls, [["install", "cpa"]]);
 
   const opened = await controller.openEmbedded("cpa", "oauth");
-  assert.equal(opened.embedded, true);
+  assert.equal(opened.embedded, false);
   assert.equal(opened.originalWindow, false);
-  assert.equal(opened.url, "http://127.0.0.1:8317/management.html#/oauth");
+  assert.equal(opened.api.via, "codingTools.apps");
+  assert.equal(opened.api.moduleId, "cpa");
+  assert.equal(opened.url, "");
   assert.equal(opened.tool.originalChrome, true);
 
   const copied = controller.copyCpaManagementKey({
@@ -123,7 +125,7 @@ test("CPA original UI installs when missing, then returns the original managemen
   controller.dispose();
 });
 
-test("Codex Router original UI launches the pinned Control Center Electron app with isolated user data", async () => {
+test("Codex Router open path uses Coding Tools APIs and does not launch Control Center", async () => {
   const fixture = controlCenterFixture();
   const spawned = [];
   const fakeElectron = path.join(fixture.appRoot, "fake-electron");
@@ -155,16 +157,10 @@ test("Codex Router original UI launches the pinned Control Center Electron app w
 
   const opened = await controller.openEmbedded("codex-router", "models");
   assert.equal(opened.embedded, false);
-  assert.equal(opened.originalWindow, true);
-  assert.equal(opened.pid, 4202);
-  assert.equal(spawned.length, 1);
-  assert.equal(spawned[0].executable, fakeElectron);
-  assert.equal(spawned[0].options.cwd, fixture.appRoot);
-  assert.ok(spawned[0].args[0].startsWith("--user-data-dir="));
-  assert.equal(spawned[0].args[1], ".");
-  assert.equal(spawned[0].options.env.CODEX_ROUTER_SOURCE_ROOT, fixture.home);
-  assert.equal(spawned[0].options.env.MODEL_ROUTER_SOURCE_ROOT, fixture.home);
-  assert.equal(spawned[0].options.env.VITE_DEV_SERVER_URL, undefined);
+  assert.equal(opened.originalWindow, false);
+  assert.equal(opened.api.moduleId, "codex-router");
+  assert.equal(opened.api.via, "codingTools.apps");
+  assert.equal(spawned.length, 0);
   controller.dispose();
 });
 
@@ -232,10 +228,10 @@ test("desktop shell routes CPA and Codex Router to the original UI surface", () 
   assert.match(app, /toolId="codex-router"/);
   assert.match(surface, /data-original-chrome="true"/);
   assert.match(surface, /Copy management key/);
-  assert.match(surface, /reconnectGeneration/);
+  assert.match(surface, /codingTools\?\.apps/);
   assert.match(css, /\.original-ui-surface/);
   assert.match(css, /flex: 1 1 auto/);
-  assert.match(integrations, /Open original UI/);
+  assert.match(integrations, /Open module APIs/);
   assert.doesNotMatch(integrations, /CPA Provider Hub/);
   assert.match(main, /cpa-codex-long-run\.json/);
 });

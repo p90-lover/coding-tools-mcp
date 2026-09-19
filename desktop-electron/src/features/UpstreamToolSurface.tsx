@@ -62,7 +62,6 @@ export function UpstreamToolSurface({
   const [snapshot, setSnapshot] = useState<UpstreamToolsSnapshot | null>(null);
   const [selectedSection, setSelectedSection] = useState("");
   const [endpoint, setEndpoint] = useState("");
-  const [frameUrl, setFrameUrl] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [chromeOpen, setChromeOpen] = useState(false);
   const [agentId, setAgentId] = useState("");
@@ -93,7 +92,14 @@ export function UpstreamToolSurface({
     if (!api) return;
     void (async () => {
       try {
-        try { await api.inspectUpstreamTool(toolId); } catch { /* attach even if inspect is down */ }
+        try {
+          const apps = window.codingTools?.apps;
+          if (apps?.call) {
+            await apps.call({ moduleId: toolId, operation: "inspect" });
+          } else {
+            try { await api.inspectUpstreamTool(toolId); } catch { /* attach even if inspect is down */ }
+          }
+        } catch { /* module inspect is best-effort on screen visit */ }
         const next = await api.upstreamToolsSnapshot();
         if (cancelled) return;
         setSnapshot(next);
@@ -102,17 +108,8 @@ export function UpstreamToolSurface({
         setEndpoint(current.endpoint);
         const section = current.sections[0] || "";
         setSelectedSection(section);
-        const result = await api.openEmbeddedTool(toolId, section);
-        if (cancelled) return;
-        setFrameUrl(result.url);
-        setUnavailable(result.unavailable === true);
-        setDependency(result.dependency ?? null);
-        setSnapshot((value) => value
-          ? {
-              ...value,
-              tools: value.tools.map((candidate) => candidate.id === result.tool.id ? result.tool : candidate),
-            }
-          : { version: 1, tools: [result.tool] });
+        setUnavailable(false);
+        setDependency(null);
       } catch (cause) {
         if (!cancelled) setError(messageOf(cause));
       }
@@ -133,22 +130,6 @@ export function UpstreamToolSurface({
     }
   };
 
-  const openEmbeddedTool = async (section = selectedSection) => {
-    if (!api) throw new Error("Launcher IPC is unavailable");
-    const result = await api.openEmbeddedTool(toolId, section);
-    setFrameUrl(result.url);
-    setUnavailable(result.unavailable === true);
-    setDependency(result.dependency ?? null);
-    setSnapshot((current) => current
-      ? {
-          ...current,
-          tools: current.tools.map((candidate) => candidate.id === result.tool.id ? result.tool : candidate),
-        }
-      : current);
-    if (result.unavailable && toolId === "anneal") return result;
-    return result;
-  };
-
   const saveEndpoint = () => run("endpoint", async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
     await api.setUpstreamToolEndpoint(toolId, endpoint);
@@ -156,23 +137,46 @@ export function UpstreamToolSurface({
 
   const probe = () => run("probe", async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
+    const apps = window.codingTools?.apps;
+    if (apps?.call) {
+      await apps.call({ moduleId: toolId, operation: "inspect" });
+      return;
+    }
     await api.inspectUpstreamTool(toolId);
   });
 
-  const openEmbedded = () => run("open", async () => {
-    await openEmbeddedTool();
-  });
-
-  const openExternal = () => run("external", async () => {
-    if (!api) throw new Error("Launcher IPC is unavailable");
-    await api.openUpstreamToolExternal(toolId, selectedSection);
-  });
+  const moduleOperation = (op: string): string => {
+    if (toolId === "anneal") {
+      if (op === "start") return "startTask";
+      if (op === "inbox_decision") return "inboxDecision";
+    }
+    return op;
+  };
 
   const act = async (name: string, input: Omit<UpstreamToolActInput, "toolId">) => {
     if (!api) throw new Error("Launcher IPC is unavailable");
     setBusy(name);
     setError(null);
     try {
+      const apps = window.codingTools?.apps;
+      if (apps?.call) {
+        const output = await apps.call({
+          moduleId: toolId,
+          operation: moduleOperation(input.op),
+          arguments: { ...input },
+        });
+        const detail = JSON.stringify(output.result ?? output);
+        setActDetail(detail);
+        if (output.ok === false) setError(detail);
+        const result = output.result && typeof output.result === "object"
+          ? output.result as Record<string, unknown>
+          : null;
+        if (result?.unavailable === true) {
+          setUnavailable(true);
+          setDependency(result.dependency === "postgres" ? "postgres" : null);
+        }
+        return;
+      }
       const result: UpstreamToolActResult = await api.actUpstreamTool({
         toolId,
         ...input,
@@ -205,12 +209,12 @@ export function UpstreamToolSurface({
         ? localize(language, "Error", "錯誤")
         : localize(language, "Offline", "離線");
 
-  const immersive = Boolean(frameUrl);
+  const immersive = Boolean(nativeControl);
   const annealManagedHint = toolId === "anneal"
     ? localize(
       language,
-      "Coding Tools manages Anneal through WSL2 and Docker on Windows. Its original board is embedded from the managed loopback web service at 127.0.0.1:5173.",
-      "Coding Tools 會喺 Windows 透過 WSL2 同 Docker 管理 Anneal，並由 127.0.0.1:5173 嘅受管 loopback 網頁服務內嵌原版看板。",
+      "Coding Tools manages Anneal through WSL2 and Docker on Windows. Drive it with codingTools.apps; Postgres outages return { unavailable: true } without freezing the shell.",
+      "Coding Tools 會喺 Windows 透過 WSL2 同 Docker 管理 Anneal。請用 codingTools.apps 驅動；Postgres 中斷會回傳 { unavailable: true }，不會凍結主介面。",
     )
     : null;
 
@@ -226,8 +230,8 @@ export function UpstreamToolSurface({
             <p>
               {localize(
                 language,
-                `Full ${tool.name} interface pinned to ${tool.commit.slice(0, 12)} under ${tool.license}.`,
-                `完整 ${tool.name} 介面，固定於 ${tool.commit.slice(0, 12)}，授權為 ${tool.license}。`,
+                `${tool.name} is a Coding Tools module pinned to ${tool.commit.slice(0, 12)} under ${tool.license}. Call it through codingTools.apps.`,
+                `${tool.name} 是 Coding Tools 模組，固定於 ${tool.commit.slice(0, 12)}，授權為 ${tool.license}。請透過 codingTools.apps 呼叫。`,
               )}
             </p>
           )}
@@ -258,13 +262,17 @@ export function UpstreamToolSurface({
         <button disabled={busy !== null} onClick={() => void probe()} type="button">
           {busy === "probe" ? "…" : localize(language, "Check", "檢查")}
         </button>
-        <button className="primary" disabled={busy !== null} onClick={() => void openEmbedded()} type="button">
-          {busy === "open" ? "…" : ready
-            ? localize(language, "Open full UI", "開啟完整介面")
-            : localize(language, "Start original UI", "啟動原始介面")}
-        </button>
-        <button disabled={busy !== null || !ready} onClick={() => void openExternal()} type="button">
-          {busy === "external" ? "…" : localize(language, "Open externally", "外部開啟")}
+        <button className="primary" disabled={busy !== null} onClick={() => void run("inspect", async () => {
+          const apps = window.codingTools?.apps;
+          if (apps?.call) {
+            await apps.call({ moduleId: toolId, operation: ready ? "inspect" : "start" });
+            return;
+          }
+          await api?.inspectUpstreamTool(toolId);
+        })} type="button">
+          {busy === "inspect" ? "…" : ready
+            ? localize(language, "Inspect via API", "以 API 檢查")
+            : localize(language, "Start module", "啟動模組")}
         </button>
       </div>
 
@@ -275,7 +283,6 @@ export function UpstreamToolSurface({
             key={section}
             onClick={() => {
               setSelectedSection(section);
-              if (frameUrl) void openEmbeddedTool(section).catch((cause) => setError(messageOf(cause)));
             }}
             type="button"
           >
@@ -290,8 +297,8 @@ export function UpstreamToolSurface({
         <p className="upstream-tool-hint" data-dependency="postgres">
           {localize(
             language,
-            "Anneal's original board needs Postgres. Loopback APIs stay exposed; start Postgres and open the original UI again. Coding Tools remains usable.",
-            "Anneal 原版看板需要 Postgres。Loopback API 仍會對外開放；請先啟動 Postgres，再重新開啟原始介面。Coding Tools 本身仍可使用。",
+            "Anneal APIs need Postgres. Handlers return { unavailable: true, dependency: \"postgres\" }. Coding Tools remains usable.",
+            "Anneal API 需要 Postgres。處理常式會回傳 { unavailable: true, dependency: \"postgres\" }。Coding Tools 本身仍可使用。",
           )}
         </p>
       ) : null}
@@ -299,31 +306,21 @@ export function UpstreamToolSurface({
         <p className="upstream-tool-hint">
           {localize(
             language,
-            "Waiting for managed service. Use the connection controls below to start or inspect the bundled in-app service. Coding Tools does not download Paseo or Anneal at runtime.",
+            "Waiting for managed service. Use Coding Tools APIs or the connection controls below to start or inspect the bundled in-app service. Coding Tools does not download Paseo or Anneal at runtime.",
             "請使用下方連線控制啟動或檢查已內建服務。Coding Tools 不會在執行時下載 Paseo 或 Anneal。",
           )}
         </p>
       ) : null}
 
       <div className="upstream-tool-frame-shell">
-        {frameUrl ? (
-          <iframe
-            allow="clipboard-read; clipboard-write; microphone"
-            referrerPolicy="no-referrer"
-            sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-            src={frameUrl}
-            title={`${tool.name} ${selectedSection}`}
-          />
-        ) : (
-          <div className="upstream-tool-frame-empty">
-            <strong>{localize(language, "Full upstream interface", "完整上游介面")}</strong>
-            <span>
-              {ready
-                ? localize(language, "Opening the original embedded interface.", "正在開啟原版內嵌介面。")
-                : localize(language, "Coding Tools is preparing the managed loopback service.", "Coding Tools 正在準備受管 loopback 服務。")}
-            </span>
-          </div>
-        )}
+        <div className="upstream-tool-frame-empty">
+          <strong>{localize(language, "Coding Tools module APIs", "Coding Tools 模組 API")}</strong>
+          <span>
+            {ready
+              ? localize(language, "Drive this module through codingTools.apps. The original standalone UI is not opened.", "透過 codingTools.apps 驅動此模組，不會開啟原版獨立介面。")
+              : localize(language, "Coding Tools is preparing the managed loopback service.", "Coding Tools 正在準備受管 loopback 服務。")}
+          </span>
+        </div>
       </div>
 
       <section className="upstream-original-function" aria-label="Original function">
@@ -399,7 +396,7 @@ export function UpstreamToolSurface({
       </section>
 
       {nativeControl ? (
-        <details className="upstream-native-control" open={!ready}>
+        <details className="upstream-native-control" open>
           <summary>{localize(language, "Coding Tools managed connection controls", "Coding Tools 受管連線控制")}</summary>
           <div>{nativeControl}</div>
         </details>

@@ -42,10 +42,13 @@ test("live MCP tool controls call the typed Coding Tools API", () => {
   assert.match(contracts, /readonly tools:/);
   assert.match(preload, /"tools.catalog"/);
   assert.match(preload, /"tools.call"/);
+  assert.match(preload, /"apps.call"/);
   assert.match(main, /coding-tools:workspaces:list/);
   assert.match(main, /coding-tools:tools:catalog/);
   assert.match(main, /coding-tools:tools:call/);
+  assert.match(main, /coding-tools:apps:call/);
   assert.match(schema, /"tools.catalog"/);
+  assert.match(schema, /"apps.call"/);
 });
 
 test("the shell bridge adapts headless workspaces into the typed page contract", () => {

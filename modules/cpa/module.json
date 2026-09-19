@@ -1,0 +1,13 @@
+{
+  "id": "cpa",
+  "name": "CPA / CLIProxyAPI",
+  "runtime": "managed-child",
+  "loopback": {
+    "origin": "http://127.0.0.1:8317/",
+    "openai": "http://127.0.0.1:8317/v1"
+  },
+  "operations": [
+    "inspect", "start", "stop", "restart", "repair",
+    "health", "models", "chatCompletions", "managementHealth"
+  ]
+}

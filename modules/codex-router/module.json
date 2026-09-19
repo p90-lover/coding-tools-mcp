@@ -1,0 +1,13 @@
+{
+  "id": "codex-router",
+  "name": "Codex Router",
+  "runtime": "managed-child",
+  "loopback": {
+    "origin": "http://127.0.0.1:4202/",
+    "openai": "http://127.0.0.1:4202/v1"
+  },
+  "operations": [
+    "inspect", "start", "stop", "restart", "repair", "sync",
+    "health", "models", "chatCompletions"
+  ]
+}

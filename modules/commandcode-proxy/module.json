@@ -1,0 +1,13 @@
+{
+  "id": "commandcode-proxy",
+  "name": "CommandCode Proxy",
+  "runtime": "managed-child",
+  "loopback": {
+    "origin": "http://127.0.0.1:9090/",
+    "openai": "http://127.0.0.1:9090/v1"
+  },
+  "operations": [
+    "inspect", "start", "stop", "restart", "repair",
+    "health", "models", "chatCompletions", "plan", "applyPlan"
+  ]
+}

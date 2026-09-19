@@ -402,6 +402,11 @@ export interface UpstreamToolOpenResult {
   section: string;
   url: string;
   embedded: boolean;
+  api?: {
+    moduleId: string;
+    origin?: string;
+    via?: string;
+  };
   unavailable?: boolean;
   dependency?: "postgres" | null;
   error?: string | null;
@@ -446,6 +451,11 @@ export interface OriginalUiOpenResult {
   embedded: boolean;
   originalWindow: boolean;
   pid?: number | null;
+  api?: {
+    moduleId: string;
+    origin?: string;
+    via?: string;
+  };
   unavailable?: boolean;
   dependency?: "postgres" | null;
   error?: string | null;

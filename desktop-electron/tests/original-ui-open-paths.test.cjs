@@ -79,9 +79,12 @@ test("original-ui-open attaches to an already-ready headless service without sta
 
   const paseo = await controller.openEmbedded("paseo", "sessions");
   const cpa = await controller.openEmbedded("cpa", "oauth");
-  assert.equal(paseo.embedded, true);
-  assert.equal(paseo.url, "http://127.0.0.1:6768/sessions");
-  assert.equal(cpa.url, "http://127.0.0.1:8317/management.html#/oauth");
+  assert.equal(paseo.embedded, false);
+  assert.equal(paseo.originalWindow, false);
+  assert.equal(paseo.api.via, "codingTools.apps");
+  assert.equal(paseo.api.moduleId, "paseo");
+  assert.equal(cpa.api.moduleId, "cpa");
+  assert.equal(cpa.url, "");
   assert.deepEqual(calls, []);
   controller.dispose();
 });
@@ -99,7 +102,8 @@ test("original-ui-open starts a managed Paseo runtime when the headless API is n
 
   const opened = await controller.openEmbedded("paseo", "workspaces");
   assert.deepEqual(calls, [["start", "paseo"]]);
-  assert.equal(opened.url, "http://127.0.0.1:6768/open-project");
+  assert.equal(opened.api.via, "codingTools.apps");
+  assert.equal(opened.url, "");
   assert.equal(opened.tool.status, "ready");
   controller.dispose();
 });
@@ -123,16 +127,18 @@ test("Anneal original UI stays in the Coding Tools window when Postgres is down"
   assert.equal(opened.unavailable, true);
   assert.equal(opened.dependency, "postgres");
   assert.equal(opened.url, "");
-  assert.equal(opened.embedded, true);
+  assert.equal(opened.embedded, false);
+  assert.equal(opened.api.via, "codingTools.apps");
   assert.match(opened.error, /postgres/i);
   controller.dispose();
 });
 
-test("CPA/Codex long-run wrapping still passes Paseo and Anneal open through to the original UI core", async () => {
+test("CPA/Codex long-run wrapping still passes Paseo and Anneal open through to the module API host", async () => {
   const core = controllerFor([service("paseo"), service("anneal")]);
   const wrapped = attachCpaCodexLongRun(core, { resumeOnCreate: false });
   const opened = await wrapped.openEmbedded("paseo", "agents");
-  assert.equal(opened.url, "http://127.0.0.1:6768/sessions");
+  assert.equal(opened.api.via, "codingTools.apps");
+  assert.equal(opened.originalWindow, false);
   wrapped.dispose();
 });
 
@@ -157,7 +163,8 @@ test("managed-app openEmbeddedTool starts Paseo when needed and degrades Anneal 
   });
   const opened = await paseo.openEmbeddedTool("paseo", "settings");
   assert.deepEqual(calls, [["start", "paseo"]]);
-  assert.equal(opened.url, "http://127.0.0.1:6768/settings");
+  assert.equal(opened.api.via, "codingTools.apps");
+  assert.equal(opened.url, "");
   paseo.dispose();
 
   const anneal = createUpstreamToolController({
@@ -186,28 +193,28 @@ test("managed-app openEmbeddedTool starts Paseo when needed and degrades Anneal 
   anneal.dispose();
 });
 
-test("desktop screens auto-open original UIs and keep native Paseo/Anneal panels", () => {
+test("desktop screens inspect modules through Coding Tools APIs without auto-opening standalone UIs", () => {
   const original = read("src/features/OriginalUiSurface.tsx");
   const upstream = read("src/features/UpstreamToolSurface.tsx");
   const app = read("src/App.tsx");
   const types = read("src/types.ts");
   const main = read("electron/main.cjs");
 
-  assert.match(original, /inspectOriginalUi\(toolId\)/);
-  assert.match(original, /openOriginalUi\(toolId, section\)/);
+  assert.match(original, /codingTools\?\.apps/);
+  assert.match(original, /operation: "inspect"/);
   assert.match(original, /data-dependency="postgres"/);
-  assert.doesNotMatch(original, /toolId !== "cpa"/);
-  assert.match(upstream, /openEmbeddedTool\(toolId, section\)/);
-  assert.match(upstream, /Start original UI/);
-  assert.match(upstream, /Waiting for managed service/);
+  assert.match(original, /standalone app window is not launched/);
+  assert.match(upstream, /codingTools\?\.apps/);
   assert.match(upstream, /data-dependency="postgres"/);
   assert.doesNotMatch(upstream, /startUpstreamTool/);
+  assert.doesNotMatch(upstream, /Opening the original embedded interface/);
   assert.match(app, /toolId="cpa"/);
   assert.match(app, /toolId="codex-router"/);
   assert.match(app, /<UpstreamToolSurface/);
   assert.match(app, /PaseoOrchestratorSurface/);
   assert.match(app, /AnnealTasksSurface/);
   assert.match(types, /OriginalUiId = "cpa" \| "codex-router" \| "paseo" \| "anneal"/);
-  assert.match(main, /handle\("launcher:original-ui-open", \(event, toolId, section\) => \{\s*assertFocusedMainWindow\(event, false\)/);
+  assert.match(main, /createCodingToolsAppsHost/);
+  assert.match(main, /coding-tools:apps:call/);
   assert.match(main, /createLazyFactory\(\(\) => createFiveStackControlPlane/);
 });

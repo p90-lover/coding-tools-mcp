@@ -47,6 +47,7 @@ const { createManagedExternalServicesController } = require("./managed-external-
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
+const { createCodingToolsAppsHost } = require("../../modules/host.cjs");
 const {
   createLazyFactory,
   createRendererLoader,
@@ -127,6 +128,8 @@ let externalServicesController = null;
 let managedBootstrapController = null;
 let upstreamToolController = null;
 let originalUiController = null;
+let appsHost = null;
+let getFiveStack = () => ({ ok: false });
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -671,6 +674,7 @@ function registerIpc({ logger, stateStore }) {
       return result.body;
     },
   }));
+  getFiveStack = () => fiveStackControlPlane.tryGet();
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
@@ -1043,6 +1047,22 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.copyCpaManagementKey(clipboard);
+  });
+
+  handle("coding-tools:apps:list", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!appsHost) throw new Error("Apps host is unavailable");
+    return appsHost.list();
+  });
+  handle("coding-tools:apps:catalog", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!appsHost) throw new Error("Apps host is unavailable");
+    return appsHost.catalog();
+  });
+  handle("coding-tools:apps:call", (event, input = {}) => {
+    if (!appsHost) throw new Error("Apps host is unavailable");
+    assertFocusedMainWindow(event, !appsHost.isReadOnly(input.moduleId, input.operation));
+    return appsHost.call(input.moduleId, input.operation, input.arguments || {});
   });
 
   handle("launcher:browser-bounds", (event, bounds) => {
@@ -1610,6 +1630,43 @@ async function start() {
       statePath: path.join(app.getPath("userData"), "cpa-codex-long-run.json"),
       powerSaveBlocker,
     },
+  });
+  appsHost = createCodingToolsAppsHost({
+    services: {
+      inspect: (id) => externalServicesController.inspect(id),
+      start: (id) => externalServicesController.start(id),
+      stop: (id) => externalServicesController.stop(id),
+      restart: (id) => externalServicesController.restart(id),
+      repair: (id) => externalServicesController.repairManagedComponent(id),
+      syncCodexRouter: () => externalServicesController.syncCodexRouter(),
+      commandCodeProxyPlan: (input = {}) => {
+        const snapshot = externalServicesController.snapshot();
+        const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");
+        const router = snapshot.services.find((service) => service.id === "codex-router");
+        const plan = commandCodeProxyRegistrationPlan({
+          baseUrl: input.baseUrl || commandCode?.endpoint || "http://127.0.0.1:9090/",
+          routerCli: input.routerCli || router?.routerCli || "model-router",
+          curateCli: input.curateCli || router?.curateCli || "curate-models",
+        });
+        return {
+          text: renderCommandCodeProxyPlan(plan),
+          credentialPromptRequired: true,
+          provider: plan.provider,
+        };
+      },
+      applyCommandCodeProxyPlan: (input = {}) => {
+        const snapshot = externalServicesController.snapshot();
+        const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");
+        const router = snapshot.services.find((service) => service.id === "codex-router");
+        return applyCommandCodeProxyPlan({
+          baseUrl: input.baseUrl || commandCode?.endpoint || "http://127.0.0.1:9090/",
+          routerCli: input.routerCli || router?.routerCli || "model-router",
+          curateCli: input.curateCli || router?.curateCli || "curate-models",
+        });
+      },
+    },
+    actUpstream,
+    getFiveStack: () => getFiveStack(),
   });
   app.once("before-quit", () => {
     managedBootstrapController?.dispose();

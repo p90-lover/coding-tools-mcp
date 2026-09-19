@@ -96,7 +96,7 @@ test("the app contains pinned, licensed full upstream Paseo and Anneal integrati
   assert.match(host, /paseo/);
   assert.match(host, /127\.0\.0\.1/);
   assert.match(surface, /UpstreamToolSurface/);
-  assert.match(surface, /openEmbeddedTool/);
+  assert.match(surface, /codingTools\?\.apps/);
   assert.match(app, /UpstreamToolSurface/);
 });
 

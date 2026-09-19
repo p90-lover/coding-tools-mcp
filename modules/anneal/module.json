@@ -1,0 +1,15 @@
+{
+  "id": "anneal",
+  "name": "Anneal",
+  "runtime": "managed-child",
+  "loopback": {
+    "web": "http://127.0.0.1:5173/",
+    "api": "http://127.0.0.1:3000/"
+  },
+  "operations": [
+    "inspect", "start", "stop", "restart", "repair",
+    "listTasks", "preview", "create", "startTask", "retry",
+    "hold", "resume", "archive", "unarchive", "inboxDecision",
+    "openFromReview"
+  ]
+}

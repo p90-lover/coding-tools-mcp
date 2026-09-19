@@ -16,6 +16,7 @@ const REQUIRED_NAMESPACES = [
   "updates",
   "diagnostics",
   "tools",
+  "apps",
 ];
 
 function loadPreload(respond = () => null) {
@@ -85,6 +86,17 @@ test("a typed workspace list call uses its exact channel and validates its respo
   assert.deepEqual(invocations, [{
     channel: "coding-tools:workspaces:list",
     payload: { cursor: 0, limit: 25 },
+  }]);
+});
+
+test("a typed apps catalog call uses its exact channel", async () => {
+  const response = { version: 1, host: "coding-tools-apps", modules: [] };
+  const { api, invocations } = loadPreload(() => response);
+
+  assert.deepEqual(await api.apps.catalog(), response);
+  assert.deepEqual(invocations, [{
+    channel: "coding-tools:apps:catalog",
+    payload: {},
   }]);
 });
 

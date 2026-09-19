@@ -1,7 +1,6 @@
 "use strict";
 
 const path = require("node:path");
-const { ORIGINAL_SECTIONS, openOriginalControlCenter } = require("./codex-router-original-ui.cjs");
 const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router", "paseo", "anneal"]);
@@ -245,8 +244,13 @@ function createOriginalUiCore({
       },
       section,
       url: "",
-      embedded: IFRAME_TOOL_IDS.includes(toolId),
+      embedded: false,
       originalWindow: false,
+      api: {
+        moduleId: toolId,
+        origin: state?.endpoint,
+        via: "codingTools.apps",
+      },
       unavailable: true,
       dependency: classified?.dependency || (toolId === "anneal" ? "postgres" : null),
       error: message,
@@ -262,35 +266,17 @@ function createOriginalUiCore({
         await start(toolId);
         state = await waitUntilReady(toolId);
       }
-      if (toolId === "codex-router") {
-        const current = service(toolId);
-        if (!current?.home) throw new Error("Start the bundled Codex Router runtime before opening its original Control Center");
-        const stateDir = current.stateDir
-          || path.join(path.dirname(path.dirname(path.dirname(current.home))), "state", "codex-router");
-        const opened = openOriginalControlCenter({
-          home: current.home,
-          state: stateDir,
-          section: ORIGINAL_SECTIONS.includes(selected) ? selected : "dashboard",
-          electronExecutable,
-          spawnProcess: spawnProcess || require("node:child_process").spawn,
-          npm,
-        });
-        rememberControlCenter(opened.child);
-        return {
-          tool: state,
-          section: selected,
-          url: "",
-          embedded: false,
-          originalWindow: true,
-          pid: opened.pid,
-        };
-      }
       return {
         tool: state,
         section: selected,
-        url: sectionUrl(manifest, state.endpoint, selected),
-        embedded: true,
+        url: "",
+        embedded: false,
         originalWindow: false,
+        api: {
+          moduleId: toolId,
+          origin: state.endpoint,
+          via: "codingTools.apps",
+        },
       };
     } catch (error) {
       if (toolId === "anneal") {
@@ -302,9 +288,7 @@ function createOriginalUiCore({
   }
 
   async function openExternalTool(toolId, section) {
-    const result = await openEmbedded(toolId, section);
-    if (result.url && typeof openExternal === "function") await openExternal(result.url);
-    return { ...result, embedded: false };
+    return openEmbedded(toolId, section);
   }
 
   function cpaManagementKey() {

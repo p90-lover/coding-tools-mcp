@@ -36,11 +36,11 @@ test("pinned Paseo and app-managed Anneal manifests open original in-app routes"
   assert.equal(sectionUrl(anneal, anneal.defaultEndpoint, "inbox"), "http://127.0.0.1:5173/#/inbox");
 });
 
-test("UpstreamToolSurface auto-embeds managed services without manual port-forward or source setup", () => {
+test("UpstreamToolSurface inspects managed modules through Coding Tools APIs without opening original GUIs", () => {
   const surface = read("src/features/UpstreamToolSurface.tsx");
   const styles = read("src/features/upstream-tool.css");
   assert.match(surface, /inspectUpstreamTool\(toolId\)/);
-  assert.match(surface, /openEmbeddedTool\(toolId, section\)/);
+  assert.match(surface, /codingTools\?\.apps/);
   assert.match(surface, /is-immersive/);
   assert.match(surface, /Coding Tools manages Anneal through WSL2 and Docker on Windows/);
   assert.match(surface, /start or inspect the bundled in-app service/);
@@ -48,6 +48,7 @@ test("UpstreamToolSurface auto-embeds managed services without manual port-forwa
   assert.doesNotMatch(surface, /port-forward/);
   assert.doesNotMatch(surface, /Start pinned source/);
   assert.doesNotMatch(surface, /configure its pinned source directory/);
+  assert.doesNotMatch(surface, /Opening the original embedded interface/);
   assert.match(styles, /\.upstream-tool-surface\.is-immersive/);
 });
 
