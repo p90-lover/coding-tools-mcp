@@ -23,6 +23,22 @@ function withReconnect(url: string, generation: number): string {
   return parsed.toString();
 }
 
+function selectedFrom(tool: OriginalUiSnapshot | null): string {
+  return tool?.longRun?.selectedSection || tool?.sections[0] || "";
+}
+
+function reconnectGenerationOf(tool: OriginalUiSnapshot | null): number {
+  return tool?.longRun?.reconnectGeneration ?? 0;
+}
+
+function displayStatusOf(tool: OriginalUiSnapshot): string {
+  if (tool.longRun?.uiStatus) return tool.longRun.uiStatus;
+  if (tool.longRun?.lastEvent === "crash-recover" || tool.longRun?.lastEvent === "restart-failed") {
+    return "reconnecting";
+  }
+  return tool.status;
+}
+
 function toolFrom(snapshot: OriginalUiCatalog | null, toolId: OriginalUiId): OriginalUiSnapshot | null {
   return snapshot?.tools.find((candidate) => candidate.id === toolId) ?? null;
 }
@@ -45,7 +61,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     const next = await api.originalUiSnapshot();
     setSnapshot(next);
     const current = toolFrom(next, toolId);
-    if (current) setSelectedSection((value) => value || current.sections[0] || "");
+    if (current) setSelectedSection((value) => value || selectedFrom(current));
     return current;
   };
 
@@ -117,7 +133,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
 
   useEffect(() => {
     if (!tool || busy || !api) return;
-    const generation = tool.longRun?.reconnectGeneration ?? 0;
+    const generation = reconnectGenerationOf(tool);
     const recovered = lastStatus.current !== "" && lastStatus.current !== "ready" && tool.status === "ready";
     const generationBumped = generation > lastGeneration.current;
     lastStatus.current = tool.status;
@@ -125,11 +141,11 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     if (toolId !== "cpa" || tool.status !== "ready") return;
     if (!autoOpened.current) {
       autoOpened.current = true;
-      void openSection(tool.sections[0]).catch((cause) => setError(messageOf(cause)));
+      void openSection(selectedSection || selectedFrom(tool)).catch((cause) => setError(messageOf(cause)));
       return;
     }
     if (recovered || generationBumped) {
-      void openSection(selectedSection || tool.sections[0]).catch((cause) => setError(messageOf(cause)));
+      void openSection(selectedSection || selectedFrom(tool)).catch((cause) => setError(messageOf(cause)));
     }
   }, [api, busy, selectedSection, setError, tool, toolId]);
 
@@ -144,19 +160,24 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   }
 
   const ready = tool.status === "ready";
-  const statusText = ready
+  const displayStatus = displayStatusOf(tool);
+  const statusText = displayStatus === "ready"
     ? localize(language, "Connected", "已連線")
-    : tool.status === "starting"
-      ? localize(language, "Starting", "正在啟動")
-      : tool.status === "error"
-        ? localize(language, "Error", "錯誤")
-        : localize(language, "Offline", "離線");
+    : displayStatus === "reconnecting"
+      ? localize(language, "Reconnecting", "正在重連")
+      : displayStatus === "blocked"
+        ? localize(language, "Reconnect paused", "重連已暫停")
+        : displayStatus === "starting"
+          ? localize(language, "Starting", "正在啟動")
+          : tool.status === "error"
+            ? localize(language, "Error", "錯誤")
+            : localize(language, "Offline", "離線");
 
   return (
     <section className="original-ui-surface" data-tool={toolId} data-original-chrome="true">
       <header className="original-ui-hostbar">
         <strong>{tool.name}</strong>
-        <span className={`original-ui-status status-${tool.status}`}>{statusText}</span>
+        <span className={`original-ui-status status-${displayStatus}`}>{statusText}</span>
         <div className="original-ui-hostbar-actions">
           <button className="primary" disabled={busy !== null} onClick={() => void run(ready ? "open" : "start", async () => {
             if (!api) throw new Error("Launcher IPC is unavailable");
@@ -208,13 +229,31 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       {tool.error ? <p className="original-ui-error">{tool.error}</p> : null}
       {notice ? <p className="original-ui-note">{notice}</p> : null}
 
+      <nav className="original-ui-section-tabs" aria-label={`${tool.name} sections`}>
+        {tool.sections.map((section) => (
+          <button
+            className={section === selectedSection ? "is-active" : ""}
+            key={section}
+            onClick={() => {
+              setSelectedSection(section);
+              if (frameUrl || originalWindow || ready) {
+                void openSection(section).catch((cause) => setError(messageOf(cause)));
+              }
+            }}
+            type="button"
+          >
+            {section.replaceAll("-", " ")}
+          </button>
+        ))}
+      </nav>
+
       <div className="original-ui-frame-shell">
         {frameUrl ? (
           <iframe
             allow="clipboard-read; clipboard-write"
             referrerPolicy="no-referrer"
             sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-            src={withReconnect(frameUrl, tool.longRun?.reconnectGeneration ?? 0)}
+            src={withReconnect(frameUrl, reconnectGenerationOf(tool))}
             title={`${tool.name} original ${selectedSection}`}
           />
         ) : (

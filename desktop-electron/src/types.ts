@@ -412,6 +412,8 @@ export interface OriginalUiLongRun {
   lastError: string | null;
   backoffMs: number;
   keptAliveAt: string | null;
+  selectedSection?: string;
+  uiStatus?: "ready" | "starting" | "reconnecting" | "blocked" | "stopped" | "offline";
 }
 
 export interface OriginalUiSnapshot {
