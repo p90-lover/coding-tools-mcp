@@ -2,6 +2,7 @@
 
 const { defineModule } = require("../lib/define-module.cjs");
 const { openaiOperations } = require("../lib/openai.cjs");
+const { inspectResult, moduleSnapshot } = require("../lib/in-process-runtime.cjs");
 const { sanitizePublic } = require("../lib/sanitize.cjs");
 
 const LOOPBACK = Object.freeze({
@@ -9,9 +10,52 @@ const LOOPBACK = Object.freeze({
   openai: "http://127.0.0.1:9090/v1",
 });
 
+function inProcessHealth() {
+  const snapshot = moduleSnapshot("commandcode-proxy");
+  if (!snapshot.present) {
+    return {
+      ok: false,
+      softFail: true,
+      unavailable: true,
+      detail: "CommandCode bundled source is missing",
+      listening: false,
+      runtimeStarted: false,
+      source: snapshot.source,
+      vendor: snapshot.vendor,
+    };
+  }
+  return {
+    ok: true,
+    status: "ok",
+    proxy: "commandcode-proxy",
+    version: snapshot.version || "1.0.0",
+    listening: false,
+    runtimeStarted: false,
+    transport: "in-process",
+    endpoints: {
+      openai_chat: "/v1/chat/completions",
+      openai_models: "/v1/models",
+      anthropic_messages: "/v1/messages",
+    },
+    source: snapshot.source,
+    vendor: snapshot.vendor,
+    legacyLoopback: snapshot.legacyLoopback,
+  };
+}
+
 function createModule() {
   const extraOperations = {
     ...openaiOperations((context) => context.loopback?.origin || LOOPBACK.origin),
+    inspect: {
+      readOnly: true,
+      description: "Inspect the in-process CommandCode handler and bundled source. Does not probe :9090/:3050.",
+      run: () => inspectResult("commandcode-proxy"),
+    },
+    health: {
+      readOnly: true,
+      description: "Report in-process CommandCode health from bundled source. Does not open a listen port.",
+      run: () => inProcessHealth(),
+    },
     plan: {
       readOnly: true,
       description: "Preview the CommandCode proxy plan through Coding Tools. No standalone GUI.",

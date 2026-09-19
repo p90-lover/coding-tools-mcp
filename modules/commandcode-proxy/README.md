@@ -1,6 +1,6 @@
 # CommandCode Proxy module
 
-Coding Tools owns CommandCode Proxy as a **managed child** on `http://127.0.0.1:9090/`.
+Coding Tools owns CommandCode Proxy as an **in-process handler**. `inspect` / `health` / `banner` read `modules/commandcode-proxy/source/` and `vendor/bundled/commandcode-proxy/` and do **not** probe `:9090` or `:3050`. Legacy loopback URLs are compatibility metadata only.
 
 ## Call
 

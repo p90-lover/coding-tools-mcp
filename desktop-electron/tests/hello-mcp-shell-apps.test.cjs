@@ -93,7 +93,14 @@ test("apps MCP tools list, call, invoke, and report ready without spawning ports
   assert.equal(cpa.listening, false);
   assert.equal(cpa.dedicatedListenPort, false);
   assert.deepEqual(calls.filter((entry) => entry[0] === "start"), []);
-  assert.ok(calls.filter((entry) => entry[0] === "inspect").length >= 5);
+  const inspectCalls = calls.filter((entry) => entry[0] === "inspect");
+  assert.ok(inspectCalls.some((entry) => entry[1] === "cpa"));
+  assert.equal(inspectCalls.some((entry) => entry[1] === "commandcode-proxy"), false);
+  assert.equal(inspectCalls.some((entry) => entry[1] === "paseo"), false);
+  assert.equal(inspectCalls.some((entry) => entry[1] === "anneal"), false);
+  const commandCode = status.modules.find((entry) => entry.id === "commandcode-proxy");
+  assert.equal(commandCode.ready, true);
+  assert.equal(commandCode.listening, false);
   assert.equal(mcp.isReadOnly("apps_list"), true);
   assert.equal(mcp.isReadOnly("apps_call", { moduleId: "cpa", operation: "inspect" }), true);
   assert.equal(mcp.isReadOnly("apps_call", { moduleId: "cpa", operation: "start" }), false);

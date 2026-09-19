@@ -1,8 +1,8 @@
 # Anneal module
 
-Coding Tools owns Anneal as a **managed child** (web `http://127.0.0.1:5173/`, API `http://127.0.0.1:3000/`). Drive it through `codingTools.apps`. The original board is not the integration path.
+Coding Tools owns Anneal as an **in-process handler**. `inspect` / `board` / `listTasks` read bundled module state and do **not** probe `:3000` or `:5173`. Drive it through `codingTools.apps`. The original board is not the integration path.
 
-Anneal may require Postgres. If the database is down, handlers return `{ ok: false, unavailable: true, dependency: "postgres" }` instead of crashing the Coding Tools shell.
+Anneal mutations may require Postgres. If the database is down, handlers return `{ ok: false, softFail: true, unavailable: true, dependency: "postgres" }` instead of crashing the Coding Tools shell.
 
 ## Call
 

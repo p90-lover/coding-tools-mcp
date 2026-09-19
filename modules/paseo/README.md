@@ -1,6 +1,6 @@
 # Paseo module
 
-Coding Tools owns Paseo as a **managed child** (`http://127.0.0.1:6768/`, `ws://127.0.0.1:6768/ws`). Drive it through `codingTools.apps`; do not open the Paseo web app as the integration path.
+Coding Tools owns Paseo as an **in-process handler**. `inspect` / `plan` use bundled module source and do **not** require `:6768` or a ready five-stack control plane. Protocol `send`/`run` soft-fail when the daemon is not started. Drive it through `codingTools.apps`; do not open the Paseo web app as the integration path.
 
 ## Call
 

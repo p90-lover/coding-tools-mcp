@@ -35,6 +35,12 @@ function classifyAnnealUnavailable(error) {
   ) {
     return { dependency: "postgres", message };
   }
+  if (
+    lower.includes("econnrefused")
+    && (lower.includes(":3000") || lower.includes(":5173") || lower.includes("127.0.0.1"))
+  ) {
+    return { dependency: "anneal-runtime", message };
+  }
   return null;
 }
 

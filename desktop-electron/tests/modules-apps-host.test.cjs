@@ -76,7 +76,10 @@ test("apps host catalogs operations and drives modules in-process without listen
   assert.equal(inspected.result.id, "cpa");
   const invoked = await host.invoke({ handle: "cpa", operation: "inspect" });
   assert.equal(invoked.handle, "cpa");
-  assert.deepEqual(calls, [["inspect", "cpa"], ["inspect", "cpa"]]);
+  const viaObject = await host.call({ moduleId: "cpa", operation: "inspect" });
+  assert.equal(viaObject.ok, true);
+  assert.equal(viaObject.moduleId, "cpa");
+  assert.deepEqual(calls, [["inspect", "cpa"], ["inspect", "cpa"], ["inspect", "cpa"]]);
   assert.equal(host.isReadOnly("cpa", "inspect"), true);
   assert.equal(host.isReadOnly("cpa", "start"), false);
 });
