@@ -288,7 +288,7 @@ function createManagedExternalServicesController({
       const installed = managedController.runtimeConfiguration("codex-router");
       if (installed?.home && installed?.state) {
         const { ensureBinWrappers } = require("./codex-router-managed.cjs");
-        ensureBinWrappers({ home: installed.home, stateDir: installed.state });
+        ensureBinWrappers(installed.home, installed.state);
       }
     }
     return baseController.syncCodexRouter();

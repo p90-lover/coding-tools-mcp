@@ -205,14 +205,14 @@ function binWrapperPaths(stateDir, platform = process.platform) {
   return [path.join(bin, "model-router"), path.join(bin, "curate-models")];
 }
 
-function ensureBinWrappers({ home, stateDir, platform = process.platform } = {}) {
+function ensureBinWrappers(home, state, platform = process.platform) {
   if (!home || !path.isAbsolute(home)) throw new Error("Codex Router home must be absolute");
-  if (!stateDir || !path.isAbsolute(stateDir)) throw new Error("Codex Router state directory must be absolute");
-  const liveHome = resolveLiveComponentHome(home, stateDir);
+  if (!state || !path.isAbsolute(state)) throw new Error("Codex Router state directory must be absolute");
+  const liveHome = resolveLiveComponentHome(home, state);
   if (isAiTempPath(liveHome)) {
     throw new Error("Managed Codex Router wrappers cannot target a temporary unpack directory");
   }
-  wrappers(liveHome, stateDir, environment(liveHome, stateDir), platform);
+  wrappers(liveHome, state, environment(liveHome, state), platform);
   return liveHome;
 }
 
@@ -251,7 +251,8 @@ function ensureCallerSecret(state) {
 }
 
 function finishPrepare(home, state) {
-  ensureBinWrappers({ home, stateDir: state });
+  const liveHome = resolveLiveComponentHome(home, state);
+  wrappers(liveHome, state, environment(liveHome, state));
   applyLongRunLiteLlmTimeout(home);
   const { ensureOriginalControlCenter } = require("./codex-router-original-ui.cjs");
   try {
@@ -291,7 +292,7 @@ function prepare(home, state) {
 }
 
 function run(home, state) {
-  const liveHome = ensureBinWrappers({ home, stateDir: state });
+  const liveHome = ensureBinWrappers(home, state);
   applyLongRunLiteLlmTimeout(liveHome);
   const env = environment(liveHome, state);
   const child = spawn(process.execPath, [requiredFile(liveHome, "src/foreground-start.mjs")], {
@@ -323,6 +324,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  binWrapperPaths,
   bundledSkipNetworkPrepare,
   ensureBinWrappers,
   environment,
@@ -333,5 +335,5 @@ module.exports = {
   run,
   wrapperFileTargets,
   wrapperLooksStale,
-  binWrapperPaths,
+  wrappers,
 };

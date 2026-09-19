@@ -154,8 +154,9 @@ test("managed component controller stages under aiTemp and preserves replaced in
   assert.match(source, /assertSafeManifest/);
   assert.doesNotMatch(source, /\b(?:rmSync|unlinkSync|rmdirSync)\s*\(/);
   assert.match(source, /ensureBinWrappers/);
-  assert.match(read("electron/codex-router-managed.cjs"), /function ensureBinWrappers/);
+  assert.match(read("electron/codex-router-managed.cjs"), /function ensureBinWrappers\(home, state/);
   assert.match(read("electron/codex-router-managed.cjs"), /resolveLiveComponentHome/);
+  assert.match(read("electron/codex-router-managed.cjs"), /\bwrappers,/);
   assert.match(read("electron/managed-external-services.cjs"), /ensureBinWrappers/);
 });
 

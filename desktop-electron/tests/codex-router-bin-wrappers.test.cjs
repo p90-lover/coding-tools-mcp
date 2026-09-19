@@ -12,6 +12,7 @@ const {
   resolveLiveComponentHome,
   wrapperFileTargets,
   wrapperLooksStale,
+  wrappers,
 } = require("../electron/codex-router-managed.cjs");
 
 function temporaryDirectory(name) {
@@ -81,7 +82,7 @@ test("ensureBinWrappers retargets stale Windows cmds from wiped aiTemp to live c
   fs.rmSync(stagingHome, { recursive: true, force: true });
   assert.equal(fs.existsSync(stalePs1), false);
 
-  const resolved = ensureBinWrappers({ home: liveHome, stateDir, platform: "win32" });
+  const resolved = ensureBinWrappers(liveHome, stateDir, "win32");
   assert.equal(resolved, liveHome);
 
   const [routerCmd, curateCmd] = binWrapperPaths(stateDir, "win32");
@@ -113,9 +114,23 @@ test("ensureBinWrappers maps a staging home onto the live component path before 
   );
   seedRouterHome(stagingHome);
 
-  const resolved = ensureBinWrappers({ home: stagingHome, stateDir, platform: "win32" });
+  const resolved = ensureBinWrappers(stagingHome, stateDir, "win32");
   assert.equal(resolved, liveHome);
   const routerText = fs.readFileSync(path.join(stateDir, "bin", "model-router.cmd"), "utf8");
   assert.doesNotMatch(routerText, /aiTemp/i);
   assert.equal(routerText.includes(liveHome), true);
+});
+
+test("run always rewrites wrappers before spawning foreground-start, and wrappers is exported", () => {
+  const adapter = fs.readFileSync(path.join(__dirname, "..", "electron", "codex-router-managed.cjs"), "utf8");
+  const runStart = adapter.indexOf("function run(home, state)");
+  const spawnStart = adapter.indexOf("src/foreground-start.mjs", runStart);
+  assert.ok(runStart >= 0 && spawnStart > runStart);
+  const runBody = adapter.slice(runStart, spawnStart);
+  assert.match(runBody, /ensureBinWrappers\(home, state\)/);
+  assert.equal(typeof wrappers, "function");
+  assert.equal(typeof ensureBinWrappers, "function");
+  const prepareStart = adapter.indexOf("function finishPrepare(home, state)");
+  const prepareBody = adapter.slice(prepareStart, adapter.indexOf("function prepareOfflineFromBundle", prepareStart));
+  assert.match(prepareBody, /wrappers\(liveHome, state, environment\(liveHome, state\)\)/);
 });
