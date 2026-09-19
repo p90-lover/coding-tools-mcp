@@ -68,6 +68,19 @@ function optionalIdentifier(value, name, maximum = 160) {
   return normalized;
 }
 
+function redactText(value, maximum = 2_000) {
+  if (typeof value !== "string" || !value) return "";
+  return value
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(authorization|token|secret|password|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .slice(0, maximum);
+}
+
+function errorMessage(error, fallback) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return redactText(message || fallback || "Managed application is unavailable");
+}
+
 function activeAccounts(providerSnapshot) {
   return (Array.isArray(providerSnapshot?.accounts) ? providerSnapshot.accounts : [])
     .filter((account) => account && typeof account === "object" && !account.archivedAt);
@@ -83,7 +96,6 @@ function providerInventory(providerSnapshot) {
       accountCount: 0,
       connectedAccountCount: 0,
       enabledAccountCount: 0,
-      modelCount: 0,
       models: new Set(),
     };
     current.accountCount += 1;
@@ -105,41 +117,43 @@ function providerInventory(providerSnapshot) {
     }));
 }
 
-function projectCpa(providerSnapshot) {
-  const accounts = activeAccounts(providerSnapshot);
+function projectCpa(providerSnapshot, failure = null) {
+  const available = Boolean(providerSnapshot && typeof providerSnapshot === "object");
+  const accounts = available ? activeAccounts(providerSnapshot) : [];
   const models = new Set();
   for (const account of accounts) {
     for (const model of Array.isArray(account.models) ? account.models : []) {
       if (typeof model === "string" && model.trim()) models.add(model.trim());
     }
   }
-  const providers = providerInventory(providerSnapshot);
+  const providers = available ? providerInventory(providerSnapshot) : [];
   return {
     handle: "cpa",
     name: APP_DEFINITIONS.cpa.name,
     kind: APP_DEFINITIONS.cpa.kind,
-    status: "ready",
-    available: true,
+    status: available ? "ready" : "error",
+    available,
     operations: [...APP_DEFINITIONS.cpa.operations],
     accountCount: accounts.length,
     connectedAccountCount: accounts.filter((account) => account.status === "connected").length,
     enabledAccountCount: accounts.filter((account) => account.enabled !== false).length,
     providerCount: providers.length,
     modelCount: models.size,
-    error: null,
+    error: available ? null : errorMessage(failure, "CPA provider network is unavailable"),
   };
 }
 
-function projectManagedService(handle, service) {
+function projectManagedService(handle, service, failure = null) {
   const definition = APP_DEFINITIONS[handle];
   const install = service?.managedInstall && typeof service.managedInstall === "object"
     ? service.managedInstall
     : {};
+  const failed = !service && Boolean(failure);
   return {
     handle,
     name: typeof service?.name === "string" && service.name ? service.name : definition.name,
     kind: definition.kind,
-    status: typeof service?.status === "string" ? service.status : "unknown",
+    status: typeof service?.status === "string" ? service.status : failed ? "error" : "unknown",
     available: service?.status === "ready",
     operations: [...definition.operations],
     endpoint: typeof service?.endpoint === "string" ? service.endpoint : null,
@@ -148,9 +162,11 @@ function projectManagedService(handle, service) {
     accountCount: Number.isInteger(service?.accountCount) ? service.accountCount : 0,
     connectedAccountCount: Number.isInteger(service?.connectedAccountCount) ? service.connectedAccountCount : 0,
     providerModelCount: Number.isInteger(service?.providerModelCount) ? service.providerModelCount : 0,
-    error: typeof service?.error === "string" && service.error ? service.error.slice(0, 2_000) : null,
+    error: typeof service?.error === "string" && service.error
+      ? errorMessage(service.error)
+      : failed ? errorMessage(failure, `${definition.name} control plane is unavailable`) : null,
     managed: {
-      state: typeof install.state === "string" ? install.state : "external",
+      state: typeof install.state === "string" ? install.state : failed ? "unavailable" : "external",
       version: typeof install.version === "string" ? install.version : "",
       platformMode: typeof install.platformMode === "string" ? install.platformMode : "native",
       missingInputs: Array.isArray(install.missingCredentials)
@@ -231,27 +247,58 @@ function createManagedAppApiHandler({
     return value;
   }
 
-  function serviceFor(handle, snapshot = externalServices.snapshot()) {
-    const service = Array.isArray(snapshot?.services)
-      ? snapshot.services.find((candidate) => candidate?.id === handle)
+  async function providerSnapshotResult() {
+    try {
+      return { value: await providerSnapshot(), error: null };
+    } catch (error) {
+      logger?.warn?.("managed-app-api.provider-snapshot-unavailable", {
+        message: errorMessage(error, "CPA provider network is unavailable"),
+      });
+      return { value: null, error: new Error("CPA provider network is unavailable") };
+    }
+  }
+
+  function serviceSnapshotResult() {
+    try {
+      const value = externalServices.snapshot();
+      return { value: value && typeof value === "object" ? value : { version: 1, services: [] }, error: null };
+    } catch (error) {
+      logger?.warn?.("managed-app-api.service-snapshot-unavailable", {
+        message: errorMessage(error, "Managed service control plane is unavailable"),
+      });
+      return { value: { version: 1, services: [] }, error };
+    }
+  }
+
+  function findService(handle, serviceSnapshot) {
+    return Array.isArray(serviceSnapshot?.services)
+      ? serviceSnapshot.services.find((candidate) => candidate?.id === handle) || null
       : null;
-    if (!service) throw new Error(`${APP_DEFINITIONS[handle].name} service is unavailable`);
-    return service;
   }
 
   async function appSnapshot(handle) {
-    if (handle === "cpa") return projectCpa(await providerSnapshot());
-    return projectManagedService(handle, serviceFor(handle));
+    if (handle === "cpa") {
+      const provider = await providerSnapshotResult();
+      return projectCpa(provider.value, provider.error);
+    }
+    const services = serviceSnapshotResult();
+    return projectManagedService(handle, findService(handle, services.value), services.error);
   }
 
   async function snapshot() {
-    const provider = await providerSnapshot();
-    const serviceSnapshot = externalServices.snapshot();
+    const [provider, services] = await Promise.all([
+      providerSnapshotResult(),
+      Promise.resolve().then(serviceSnapshotResult),
+    ]);
     return {
       version: 1,
       apps: [
-        projectCpa(provider),
-        ...APP_HANDLES.slice(1).map((handle) => projectManagedService(handle, serviceFor(handle, serviceSnapshot))),
+        projectCpa(provider.value, provider.error),
+        ...APP_HANDLES.slice(1).map((handle) => projectManagedService(
+          handle,
+          findService(handle, services.value),
+          services.error,
+        )),
       ],
     };
   }
@@ -284,17 +331,14 @@ function createManagedAppApiHandler({
       }
       const workload = optionalIdentifier(argumentsValue.workload, "workload", 32) || "subagent";
       if (!PLAN_WORKLOADS.has(workload)) throw new Error(`Unsupported provider workload: ${workload}`);
+      const providerId = optionalIdentifier(argumentsValue.providerId, "providerId");
+      const accountId = optionalIdentifier(argumentsValue.accountId, "accountId");
+      const model = optionalIdentifier(argumentsValue.model, "model", 256);
       const plan = createExecutionPlan(provider, {
         workload,
-        ...(optionalIdentifier(argumentsValue.providerId, "providerId")
-          ? { providerId: optionalIdentifier(argumentsValue.providerId, "providerId") }
-          : {}),
-        ...(optionalIdentifier(argumentsValue.accountId, "accountId")
-          ? { accountId: optionalIdentifier(argumentsValue.accountId, "accountId") }
-          : {}),
-        ...(optionalIdentifier(argumentsValue.model, "model", 256)
-          ? { model: optionalIdentifier(argumentsValue.model, "model", 256) }
-          : {}),
+        ...(providerId ? { providerId } : {}),
+        ...(accountId ? { accountId } : {}),
+        ...(model ? { model } : {}),
         allowFallback: argumentsValue.allowFallback !== false,
       });
       return {
@@ -335,15 +379,17 @@ function createManagedAppApiHandler({
       version: 1,
       handle,
       operation,
-      app: await appSnapshot(handle),
+      app: operation === "sync"
+        ? await appSnapshot(handle)
+        : projectManagedService(handle, result),
       ...(operation === "sync" ? {
         sync: {
           ok: result?.ok === true,
           args: Array.isArray(result?.args)
             ? result.args.filter((entry) => typeof entry === "string").slice(0, 64)
             : [],
-          stdout: typeof result?.stdout === "string" ? result.stdout.slice(-8_192) : "",
-          stderr: typeof result?.stderr === "string" ? result.stderr.slice(-8_192) : "",
+          stdout: redactText(result?.stdout, 8_192),
+          stderr: redactText(result?.stderr, 8_192),
         },
       } : {}),
     };
