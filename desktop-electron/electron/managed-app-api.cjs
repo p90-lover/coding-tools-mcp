@@ -127,7 +127,7 @@ function sanitizePublic(value, depth = 0, seen = new Set()) {
   try {
     const result = {};
     for (const [key, entry] of Object.entries(value).slice(0, MAX_ITEMS)) {
-      if (SENSITIVE_KEY.test(normalizedKey(key))) continue;
+      if (SENSITIVE_KEY.test(normalizedKey(key)) && typeof entry !== "boolean") continue;
       result[key] = sanitizePublic(entry, depth + 1, seen);
     }
     return result;
