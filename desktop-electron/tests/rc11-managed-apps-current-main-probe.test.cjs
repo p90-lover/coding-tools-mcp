@@ -8,14 +8,19 @@ const test = require("node:test");
 const desktopRoot = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
 const managedAppsPath = path.join(desktopRoot, "src", "features", "ManagedAppsSurface.tsx");
+const managedAppsCssPath = path.join(desktopRoot, "src", "features", "managed-apps.css");
+
+function readRequiredFile(filePath, label) {
+  assert.equal(
+    fs.existsSync(filePath),
+    true,
+    `${label} must exist on the current-main integration lane`,
+  );
+  return fs.readFileSync(filePath, "utf8");
+}
 
 function readManagedAppsSurface() {
-  assert.equal(
-    fs.existsSync(managedAppsPath),
-    true,
-    "ManagedAppsSurface.tsx must exist on the current-main integration lane",
-  );
-  return fs.readFileSync(managedAppsPath, "utf8");
+  return readRequiredFile(managedAppsPath, "ManagedAppsSurface.tsx");
 }
 
 test("current main exposes one persisted five-tab Managed Apps workspace", () => {
@@ -52,4 +57,14 @@ test("current main keeps each Managed Apps locale distinct", () => {
   assert.match(surface, /if \(language === "zh-TW"\) return traditionalChinese/);
   assert.match(surface, /if \(language === "ja"\) return japanese/);
   assert.match(surface, /return english/);
+});
+
+test("current main packages the stylesheet imported by the Managed Apps surface", () => {
+  const surface = readManagedAppsSurface();
+  const css = readRequiredFile(managedAppsCssPath, "managed-apps.css");
+
+  assert.match(surface, /import "\.\/managed-apps\.css"/);
+  assert.match(css, /\.managed-apps-surface\s*\{/);
+  assert.match(css, /\.managed-apps-tabs\s*\{/);
+  assert.match(css, /\.managed-apps-content\s*\{/);
 });
