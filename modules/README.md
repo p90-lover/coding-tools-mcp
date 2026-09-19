@@ -58,6 +58,18 @@ await apps.invoke({
 
 IPC (before first paint): `coding-tools:apps:list`, `catalog`, `call`. `invoke` is the same in-process channel (`handle` maps to `moduleId`). There is no apps HTTP listener.
 
+Desktop MCP/shell tools map onto the same host (no loopback-port overlay):
+
+| MCP tool | Maps to |
+| --- | --- |
+| `apps_list` | `codingTools.apps.list()` |
+| `apps_catalog` | `codingTools.apps.catalog()` |
+| `apps_call` | `codingTools.apps.call({ moduleId, operation, arguments })` |
+| `apps_invoke` | `codingTools.apps.invoke({ handle, operation, arguments })` |
+| `apps_status` | inspect-only ready report (`listening: false`, no dedicated ports) |
+
+`apps_status` never starts children and never opens listen ports. Temporary child loopbacks remain smoke-only.
+
 ## Operations
 
 | Module | Lifecycle | Meaningful functions |

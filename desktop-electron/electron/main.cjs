@@ -49,6 +49,7 @@ const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
 const { createCodingToolsAppsHost } = require("../../modules/host.cjs");
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
+const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {
   createLazyFactory,
   createRendererLoader,
@@ -131,6 +132,9 @@ let upstreamToolController = null;
 let originalUiController = null;
 let appsHost = null;
 let getFiveStack = () => ({ ok: false });
+const appsMcp = createCodingToolsAppsMcp({
+  getHost: () => appsHost,
+});
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -703,9 +707,17 @@ function registerIpc({ logger, stateStore }) {
       headless = { tools: [], unavailable: true };
     }
     const plane = fiveStackControlPlane.tryGet();
-    return plane.ok ? plane.value.mergeCatalog(headless) : headless;
+    const merged = plane.ok ? plane.value.mergeCatalog(headless) : headless;
+    return mergeAppsCatalog(merged);
   });
   handle("coding-tools:tools:call", async (event, input) => {
+    if (appsMcp.hasTool(input.tool)) {
+      assertFocusedMainWindow(event, !appsMcp.isReadOnly(input.tool, input.arguments ?? {}));
+      return appsMcp.callTool(input.tool, input.arguments ?? {}, {
+        workspaceId: input.workspaceId,
+        requestId: input.requestId,
+      });
+    }
     const plane = fiveStackControlPlane.tryGet();
     if (plane.ok && plane.value.hasTool(input.tool)) {
       assertFocusedMainWindow(event, !plane.value.isReadOnly(input.tool));

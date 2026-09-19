@@ -1841,6 +1841,49 @@ code {
   font-size: var(--text-xs);
 }
 
+.in-process-apps-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.in-process-apps-tools code {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.in-process-apps-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.in-process-apps-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.in-process-apps-list strong {
+  color: var(--color-text-primary);
+}
+
+.in-process-apps-list em {
+  color: var(--color-text-tertiary);
+  font-style: normal;
+  font-size: var(--text-xs);
+}
+
 .mcp-live-result {
   max-height: 240px;
   margin: 14px 0 0;

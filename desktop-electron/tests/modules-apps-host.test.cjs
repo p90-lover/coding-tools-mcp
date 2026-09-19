@@ -27,6 +27,8 @@ test("modules tree hosts CPA, Codex Router, CommandCode, Paseo, and Anneal", () 
   assert.match(readme, /in-process/);
   assert.match(readme, /handler-registry\.cjs/);
   assert.match(readme, /127\.0\.0\.1:17891/);
+  assert.match(readme, /apps_list/);
+  assert.match(readme, /apps_invoke/);
   assert.doesNotMatch(readme, /launch Control Center/i);
   assert.doesNotMatch(readme, /\/api\/v1\/apps/);
 });
