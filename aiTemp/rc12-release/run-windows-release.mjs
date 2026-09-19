@@ -164,7 +164,7 @@ async function main() {
     'desktop-electron/tests/rc6-ui-parity-contract.test.cjs',
     'desktop-electron/tests/rc12-release-identity.test.cjs',
     'desktop-electron/tests/rc9-package-identity-alignment.test.cjs',
-  ], { label: 'focused Provider Center, Paseo, Anneal, proxy, localization, and rc.11 identity contracts' });
+  ], { label: 'focused Provider Center, Paseo, Anneal, proxy, localization, and rc.12 identity contracts' });
 
   for (const file of [
     'desktop-electron/electron/main.cjs',
@@ -271,7 +271,7 @@ async function main() {
   writeExclusive(path.join(assets, 'SHA256SUMS.txt'), `${checksumNames.map((name) => `${sha256(path.join(assets, name))}  ${name}`).join('\n')}\n`);
 
   run('node', ['scripts/release/verify-assets.mjs', '--directory', assets, '--tag', releaseTag, '--version', releaseVersion, '--source', sourceSha, '--json-out', path.join(evidence, 'asset-verification.json')], { label: 'verify release assets' });
-  run('node', ['scripts/release/publish-v0.6.0-rc.1.mjs', '--repository', repository, '--tag', releaseTag, '--source', sourceSha, '--assets', assets, '--notes', 'docs/releases/v0.7.0-rc.12.md', '--json-out', path.join(evidence, 'publication.json')], { label: 'publish and read back rc.11 prerelease' });
+  run('node', ['scripts/release/publish-v0.6.0-rc.1.mjs', '--repository', repository, '--tag', releaseTag, '--source', sourceSha, '--assets', assets, '--notes', 'docs/releases/v0.7.0-rc.12.md', '--json-out', path.join(evidence, 'publication.json')], { label: 'publish and read back rc.12 prerelease' });
 
   writeExclusive(path.join(evidence, 'windows-release-summary.json'), `${JSON.stringify({ releaseVersion, releaseTag, sourceSha, installerName, installerSha, commands: commandLog }, null, 2)}\n`);
   process.stdout.write(`\nRC12_WINDOWS_RELEASE_PUBLISHED ${releaseTag} ${sourceSha} ${installerSha}\n`);
