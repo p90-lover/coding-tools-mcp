@@ -120,6 +120,15 @@ jobs:
           node aiTemp/rc11-managed-app-api/harden-cookie-redaction.mjs \
             2>&1 | tee aiTemp/rc11-managed-app-api/evidence/cookie-redaction.txt
 
+      - name: Harden bare sensitive values and reconcile reasons
+        shell: bash
+        run: |
+          set -euo pipefail
+          node aiTemp/rc11-managed-app-api/harden-sensitive-values.mjs \
+            2>&1 | tee aiTemp/rc11-managed-app-api/evidence/sensitive-value-hardener.txt
+          grep -E 'RC11_MANAGED_APP_SENSITIVE_VALUES_(HARDENED|ALREADY_HARDENED)' \
+            aiTemp/rc11-managed-app-api/evidence/sensitive-value-hardener.txt
+
       - name: Run focused GREEN contracts
         shell: bash
         run: |
@@ -127,6 +136,7 @@ jobs:
           node --test \
             desktop-electron/tests/rc11-managed-app-api.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-cookie-redaction.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-sensitive-values.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-degraded.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-wiring.test.cjs \
             desktop-electron/tests/rc11-managed-app-api-ui.test.cjs \
