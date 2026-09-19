@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -46,6 +47,32 @@ test('legacy manual macOS publication is retired or proven unregistered before s
     promotion.indexOf(command) < promotion.indexOf(tag),
     'the legacy publisher must be retired or proven unregistered before a stable tag can be created',
   );
+});
+
+test('legacy macOS workflow retirement is idempotent when it is already disabled', () => {
+  const script = String.raw`
+import importlib.util
+import pathlib
+
+path = pathlib.Path('scripts/retire_legacy_macos_workflow.py')
+spec = importlib.util.spec_from_file_location('retire_legacy_macos_workflow', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+assert module.workflow_retirement_action('active') == 'disable'
+assert module.workflow_retirement_action('disabled_manually') == 'already_disabled'
+try:
+    module.workflow_retirement_action('disabled_inactivity')
+except SystemExit:
+    pass
+else:
+    raise AssertionError('unexpected disabled workflow states must fail closed')
+`;
+  const probe = spawnSync('python', ['-c', script], {
+    cwd: root,
+    encoding: 'utf8',
+  });
+  assert.equal(probe.status, 0, probe.stderr || probe.stdout);
 });
 
 test('preparation validates its exact final head after any generated commit', () => {
