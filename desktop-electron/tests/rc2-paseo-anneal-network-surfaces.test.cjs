@@ -24,8 +24,8 @@ test("Electron exposes separate Paseo, Anneal, and Network surfaces through comp
   assert.match(app, /PaseoOrchestratorSurface/);
   assert.match(app, /AnnealTasksSurface/);
   assert.match(app, /NetworkProxySurface/);
-  assert.match(paseo, /copyForOrchestration/);
-  assert.match(anneal, /copyForOrchestration/);
+  assert.match(paseo, /orchestrationCopy/);
+  assert.match(anneal, /orchestrationCopy/);
   assert.match(copy, /Paseo Orchestrator/);
   assert.match(copy, /Paseo 協調器/);
   assert.match(copy, /Anneal Tasks/);
