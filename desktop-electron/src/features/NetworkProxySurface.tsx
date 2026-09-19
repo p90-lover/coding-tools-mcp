@@ -17,6 +17,7 @@ const SCOPES: readonly ProxyScope[] = [
   "browser",
   "provider",
   "oauth",
+  "subagent",
   "paseo",
   "anneal",
   "mcp",
@@ -52,6 +53,8 @@ function scopeLabel(language: Language, scope: ProxyScope): string {
       return localText(language, "Provider", "供應商", "供应商", "プロバイダー");
     case "oauth":
       return "OAuth";
+    case "subagent":
+      return localText(language, "Subagents", "子代理", "子代理", "サブエージェント");
     case "paseo":
       return "Paseo";
     case "anneal":
@@ -98,7 +101,7 @@ function emptyDraft(language: Language): ProfileDraft {
     protocol: "socks5",
     host: "127.0.0.1",
     port: "7890",
-    scopes: ["all", "browser", "provider", "oauth", "paseo", "anneal", "websocket", "http", "update"],
+    scopes: ["all", "browser", "provider", "oauth", "subagent", "paseo", "anneal", "websocket", "http", "update"],
     bypass: LOOPBACK_BYPASS,
     username: "",
     password: "",
