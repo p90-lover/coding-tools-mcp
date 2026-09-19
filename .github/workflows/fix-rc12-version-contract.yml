@@ -1,0 +1,70 @@
+name: Fix rc.12 package-version contract
+
+on:
+  push:
+    branches:
+      - release/v0.7.0-rc.12-browser-network-fix
+    paths:
+      - aiTemp/rc12-release/fix-version-contract.mjs
+      - .github/workflows/fix-rc12-version-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-rc12-version-contract
+  cancel-in-progress: true
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: release/v0.7.0-rc.12-browser-network-fix
+          fetch-depth: 0
+          clean: false
+
+      - name: Apply guarded rc.12 identity repair
+        run: node aiTemp/rc12-release/fix-version-contract.mjs
+
+      - name: Verify focused contracts and no deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check aiTemp/rc12-release/run-windows-release.mjs
+          node --test \
+            tests/codex-router-0.7-release.test.mjs \
+            desktop-electron/tests/bundled-five-stack-runtime.test.cjs \
+            desktop-electron/tests/rc12-release-identity.test.cjs
+          git diff --check
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit exact verified source repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            aiTemp/rc12-release/run-windows-release.mjs \
+            desktop-electron/tests/bundled-five-stack-runtime.test.cjs \
+            tests/codex-router-0.7-release.test.mjs
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'rc.12 package-version contract already aligned.'
+            exit 0
+          fi
+          git commit -m 'test(rc12): align all Windows package identities'
+          remote_head="$(git ls-remote origin refs/heads/release/v0.7.0-rc.12-browser-network-fix | awk '{print $1}')"
+          if [ "$remote_head" != "$GITHUB_SHA" ]; then
+            printf 'RC12_BRANCH_MOVED expected=%s actual=%s\n' "$GITHUB_SHA" "$remote_head" >&2
+            exit 1
+          fi
+          git push origin HEAD:release/v0.7.0-rc.12-browser-network-fix

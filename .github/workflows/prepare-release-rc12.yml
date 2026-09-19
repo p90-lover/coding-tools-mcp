@@ -1,0 +1,147 @@
+name: Prepare Coding Tools v0.7.0-rc.12 source
+
+on:
+  push:
+    branches:
+      - release/v0.7.0-rc.12-browser-network-fix
+    paths:
+      - aiTemp/rc12-release/prepare-rc12.mjs
+      - .github/workflows/prepare-release-rc12.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-v0.7.0-rc.12-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Materialize and validate immutable rc.12 source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - name: Materialize rc.12 without rewriting rc.11 history
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const file = 'aiTemp/rc12-release/prepare-rc12.mjs';
+          const source = fs.readFileSync(file, 'utf8');
+          const before = "if (transformed === source || transformed.includes(fromVersion)) {";
+          const after = "if (source.includes(fromVersion) && transformed.includes(fromVersion)) {";
+          if (!source.includes(before)) throw new Error('RC12_TEMPLATE_GUARD_ANCHOR_MISSING');
+          fs.writeFileSync(file, source.replace(before, after), 'utf8');
+          NODE
+          export RC12_ORIGINAL_WORKFLOW="$(base64 -w0 .github/workflows/codex-router-multiprovider-release-rc11.yml)"
+          node aiTemp/rc12-release/prepare-rc12.mjs
+
+          # Keep the retained one-shot materializer reproducible while aligning
+          # generated tests with the current test names and escaped regex literals.
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function replaceRequired(file, replacements) {
+            let source = fs.readFileSync(file, 'utf8');
+            for (const [from, to] of replacements) {
+              if (!source.includes(from)) {
+                throw new Error(`RC12_GENERATED_TEST_ANCHOR_MISSING: ${file}: ${from}`);
+              }
+              source = source.replaceAll(from, to);
+            }
+            fs.writeFileSync(file, source, 'utf8');
+          }
+
+          replaceRequired('desktop-electron/tests/rc12-release-identity.test.cjs', [
+            ['/missing dedicated handler falls back/', '/stale main process hides and restores/'],
+          ]);
+          replaceRequired('desktop-electron/tests/rc9-package-identity-alignment.test.cjs', [
+            ['0\\.7\\.0-rc\\.11', '0\\.7\\.0-rc\\.12'],
+            ['rc\\.11', 'rc\\.12'],
+          ]);
+          NODE
+
+      - name: Validate generated release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check aiTemp/rc12-release/prepare-rc12.mjs
+          node --check aiTemp/rc12-release/run-windows-release.mjs
+          pwsh -NoLogo -NoProfile -Command '
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $env:GITHUB_WORKSPACE "aiTemp/rc12-release/verify-windows-migration.ps1"),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.ToString() }
+              exit 1
+            }
+          '
+          node --test \
+            desktop-electron/tests/browser-surface-ipc.test.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/network-proxy-localization.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/rc2-paseo-anneal-network-surfaces.test.cjs \
+            desktop-electron/tests/rc9-package-identity-alignment.test.cjs \
+            desktop-electron/tests/rc11-release-identity.test.cjs \
+            desktop-electron/tests/rc12-release-identity.test.cjs
+          git diff --check
+          deleted="$(git diff --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+
+      - name: Commit prepared non-workflow source to the same branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Workflow files were validated above but are published separately through
+          # an explicit reviewed connector write because GITHUB_TOKEN cannot mutate
+          # workflow definitions. No workflow content is silently dropped.
+          git add \
+            aiTemp/rc12-release/prepare-rc12.mjs \
+            aiTemp/rc12-release/run-windows-release.mjs \
+            aiTemp/rc12-release/verify-windows-migration.ps1 \
+            desktop-electron/electron/product.cjs \
+            desktop-electron/package.json \
+            desktop-electron/scripts/prepare-package-resources.cjs \
+            desktop-electron/scripts/verify-package.cjs \
+            desktop-electron/tests/installer-upgrade-migration.test.cjs \
+            desktop-electron/tests/package-contents.test.cjs \
+            desktop-electron/tests/package-resource-preparation.test.cjs \
+            desktop-electron/tests/product-identity.test.cjs \
+            desktop-electron/tests/rc9-package-identity-alignment.test.cjs \
+            desktop-electron/tests/rc11-release-identity.test.cjs \
+            desktop-electron/tests/rc12-release-identity.test.cjs \
+            docs/releases/v0.7.0-rc.12.md
+          git diff --cached --check
+          deleted="$(git diff --cached --diff-filter=D --name-only)"
+          if [ -n "$deleted" ]; then
+            printf 'Staged deletions are forbidden:\n%s\n' "$deleted" >&2
+            exit 1
+          fi
+          git commit -m 'release(rc12): prepare browser ownership and Network Proxy fixes'
+          remote_head="$(git ls-remote origin "refs/heads/${GITHUB_REF_NAME}" | awk '{print $1}')"
+          if [ "$remote_head" != "$GITHUB_SHA" ]; then
+            printf 'RC12_PREPARATION_BRANCH_MOVED expected=%s actual=%s\n' "$GITHUB_SHA" "$remote_head" >&2
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"

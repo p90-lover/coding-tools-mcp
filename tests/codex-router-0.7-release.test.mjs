@@ -146,7 +146,7 @@ test('Windows package smoke selects the configured Electron Builder artifact exa
     .replaceAll('${os}', 'win')
     .replaceAll('${arch}', 'x64')
     .replaceAll('${ext}', 'exe');
-  assert.equal(expectedInstaller, 'Coding.Tools_0.7.0-rc.11_win_x64.exe');
+  assert.equal(expectedInstaller, 'Coding.Tools_0.7.0-rc.12_win_x64.exe');
   for (const required of [
     'function artifactNameFor(osName, arch, extension)',
     'artifact(artifactNameFor("win", process.arch, "exe"), "Windows installer")',

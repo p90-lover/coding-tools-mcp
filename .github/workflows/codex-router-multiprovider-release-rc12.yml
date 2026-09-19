@@ -1,20 +1,19 @@
-# Frozen historical exact-source Windows publisher for v0.7.0-rc.11.
-# New main-branch releases use a new immutable versioned workflow.
-name: Coding Tools v0.7.0-rc.11 exact-source Windows release
+# Exact-source Windows publisher for the browser ownership and Network Proxy repair.
+name: Coding Tools v0.7.0-rc.12 exact-source Windows release
 
 on:
   push:
     branches:
-      - release/codex-router-multiprovider-0.7.0-rc.11
+      - main
     paths:
-      - .github/workflows/codex-router-multiprovider-release-rc11.yml
-      - aiTemp/rc11-release/run-windows-release.mjs
-      - aiTemp/rc11-release/verify-windows-migration.ps1
+      - .github/workflows/codex-router-multiprovider-release-rc12.yml
+      - aiTemp/rc12-release/run-windows-release.mjs
+      - aiTemp/rc12-release/verify-windows-migration.ps1
       - desktop-electron/**
       - runtime-web/**
       - rust-core/**
       - scripts/release/**
-      - docs/releases/v0.7.0-rc.11.md
+      - docs/releases/v0.7.0-rc.12.md
   workflow_dispatch:
 
 permissions:
@@ -22,21 +21,21 @@ permissions:
   contents: write
 
 concurrency:
-  group: coding-tools-v0.7.0-rc.11-${{ github.ref }}
+  group: coding-tools-v0.7.0-rc.12-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: 0.7.0-rc.11
-  RELEASE_TAG: v0.7.0-rc.11
+  RELEASE_VERSION: 0.7.0-rc.12
+  RELEASE_TAG: v0.7.0-rc.12
   NODE_VERSION: '22'
   BUN_VERSION: 1.4.0
   RUST_TOOLCHAIN: 1.98.1
   PYTHONDONTWRITEBYTECODE: '1'
-  NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/cache/npm-release-rc11
+  NPM_CONFIG_CACHE: ${{ github.workspace }}/aiTemp/cache/npm-release-rc12
 
 jobs:
   release-windows:
-    name: Verify five-stack, package, migrate, and publish Windows x64
+    name: Verify browser ownership, five-stack, package, migrate, and publish Windows x64
     runs-on: windows-latest
     timeout-minutes: 180
     steps:
@@ -63,18 +62,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          node --check aiTemp/rc11-release/run-windows-release.mjs
-          if ($LASTEXITCODE -ne 0) { throw 'Node rc.11 release runner syntax validation failed' }
+          node --check aiTemp/rc12-release/run-windows-release.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Node rc.12 release runner syntax validation failed' }
           $tokens = $null
           $errors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc11-release\verify-windows-migration.ps1'),
+            (Join-Path $env:GITHUB_WORKSPACE 'aiTemp\rc12-release\verify-windows-migration.ps1'),
             [ref]$tokens,
             [ref]$errors
           )
           if ($errors.Count -gt 0) {
             $errors | ForEach-Object { Write-Error $_.ToString() }
-            throw 'PowerShell rc.11 migration runner syntax validation failed'
+            throw 'PowerShell rc.12 migration runner syntax validation failed'
           }
 
       - name: Run browser ownership and Network Proxy regressions
@@ -93,15 +92,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          node aiTemp/rc11-release/run-windows-release.mjs
-          if ($LASTEXITCODE -ne 0) { throw "rc.11 release runner failed with exit code $LASTEXITCODE" }
+          node aiTemp/rc12-release/run-windows-release.mjs
+          if ($LASTEXITCODE -ne 0) { throw "rc.12 release runner failed with exit code $LASTEXITCODE" }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: coding-tools-v0.7.0-rc.11-evidence-${{ github.sha }}
+          name: coding-tools-v0.7.0-rc.12-evidence-${{ github.sha }}
           path: |
             aiTemp/evidence/
             aiTemp/release-assets/
+            aiTemp/rc12-release/
           if-no-files-found: warn
           retention-days: 14
