@@ -182,8 +182,8 @@ test("crossUseSecrets reads caller-secret from disk and never calls runtimeConfi
   const body = managed.slice(start, end);
   assert.match(body, /readRouterCallerKey\(\)/);
   assert.doesNotMatch(body, /runtimeConfiguration\s*\(\s*["']codex-router["']\s*\)/);
-  assert.match(components, /let peerEnvBusy = false/);
-  assert.match(components, /let crossUseEnvBusy = false/);
+  assert.equal((components.match(/let peerEnvBusy = false/g) || []).length, 1);
+  assert.equal((components.match(/let crossUseEnvBusy = false/g) || []).length, 1);
   assert.match(components, /managed-component\.cross-use-environment-reentered/);
   assert.match(components, /managed-component\.peer-environment-reentered/);
 });

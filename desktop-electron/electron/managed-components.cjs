@@ -793,7 +793,6 @@ function createManagedComponentController({
       });
   }
 
-  let peerEnvBusy = false;
   function peerEnv(context) {
     if (typeof peerEnvironment !== "function") return {};
     if (peerEnvBusy) {
