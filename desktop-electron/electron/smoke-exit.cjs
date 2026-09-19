@@ -1,29 +1,9 @@
 "use strict";
 
-const fs = require("node:fs");
-const path = require("node:path");
-
-const RUNTIME_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/;
+const { runtimePackageVersion } = require("./runtime-release.cjs");
 
 function runtimeCliVersion(runtimeRoot) {
-  if (typeof runtimeRoot !== "string" || !path.isAbsolute(runtimeRoot)) {
-    throw new TypeError("Launcher runtime verification requires an absolute runtime root");
-  }
-  const packagePath = path.join(runtimeRoot, "app", "package.json");
-  let packageJson;
-  try {
-    packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-  } catch (error) {
-    throw new Error(
-      `Installed launcher runtime package metadata is invalid: ${packagePath}`
-      + `: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  const version = typeof packageJson?.version === "string" ? packageJson.version.trim() : "";
-  if (!RUNTIME_VERSION.test(version)) {
-    throw new Error(`Installed launcher runtime package version is invalid: ${JSON.stringify(version)}`);
-  }
-  return version;
+  return runtimePackageVersion(runtimeRoot);
 }
 
 function assertLauncherRuntimeVersion({ runtimeRoot, result }) {

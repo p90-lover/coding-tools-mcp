@@ -470,6 +470,48 @@ test("launcher update transaction leaves current and externally owned runtimes u
   assert.equal(external.invocation(), undefined);
 });
 
+test("launcher upgrade does not treat preferLocal runtime 5.0.6 vs Electron 0.7.0-rc.12 as a release mismatch", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-host-prefer-local-"));
+  const installedRuntimeRoot = path.join(root, "versions", "0.7.0-rc.12-win32-x64");
+  fs.mkdirSync(path.join(installedRuntimeRoot, "app"), { recursive: true });
+  fs.writeFileSync(
+    path.join(installedRuntimeRoot, "app", "package.json"),
+    `${JSON.stringify({ name: "codex-chatgpt-web", version: "5.0.6" })}\n`,
+  );
+  const host = new RuntimeHost({
+    app: {
+      getPath: () => root,
+      getVersion: () => "0.7.0-rc.12",
+    },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    installedRuntimeRoot,
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor: {
+      readConfig: () => ({
+        mode: "browser-only",
+        browserHost: "launcher",
+        releaseVersion: "5.0.6",
+      }),
+      readSetupConfig: () => ({
+        mode: "browser-only",
+        browserHost: "launcher",
+        releaseVersion: "5.0.6",
+      }),
+      stopForSetup: async () => ({ status: "stopped" }),
+      startIfConfigured: async () => ({ status: "ready" }),
+    },
+  });
+  host.runSetup = async () => {
+    throw new Error("setup must not re-run for a launcher/runtime version namespace mismatch");
+  };
+  try {
+    assert.deepEqual(await host.upgradeManagedRuntime(), { updated: false });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("MCP setup reuses valid private credentials without exposing or rewriting them", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-saved-mcp-"));
   const keyPath = path.join(root, "tunnel-runtime.key");
