@@ -23,32 +23,68 @@ interface ManagedAppsSurfaceProps {
 interface ManagedAppTabDefinition {
   id: ManagedAppTabId;
   english: string;
+  simplifiedChinese: string;
   traditionalChinese: string;
+  japanese: string;
   serviceId: ExternalServiceId;
 }
 
 const EMPTY_SERVICES: ExternalServicesSnapshot = { version: 1, services: [] };
 
 const MANAGED_APP_TABS: readonly ManagedAppTabDefinition[] = [
-  { id: "cpa", english: "CPA", traditionalChinese: "CPA", serviceId: "cpa" },
+  {
+    id: "cpa",
+    english: "CPA",
+    simplifiedChinese: "CPA",
+    traditionalChinese: "CPA",
+    japanese: "CPA",
+    serviceId: "cpa",
+  },
   {
     id: "codex-router",
     english: "Codex Router",
+    simplifiedChinese: "Codex Router",
     traditionalChinese: "Codex Router",
+    japanese: "Codex Router",
     serviceId: "codex-router",
   },
   {
     id: "commandcode-proxy",
     english: "CommandCode",
+    simplifiedChinese: "CommandCode",
     traditionalChinese: "CommandCode",
+    japanese: "CommandCode",
     serviceId: "commandcode-proxy",
   },
-  { id: "paseo", english: "Paseo", traditionalChinese: "Paseo", serviceId: "paseo" },
-  { id: "anneal", english: "Anneal", traditionalChinese: "Anneal", serviceId: "anneal" },
+  {
+    id: "paseo",
+    english: "Paseo",
+    simplifiedChinese: "Paseo",
+    traditionalChinese: "Paseo",
+    japanese: "Paseo",
+    serviceId: "paseo",
+  },
+  {
+    id: "anneal",
+    english: "Anneal",
+    simplifiedChinese: "Anneal",
+    traditionalChinese: "Anneal",
+    japanese: "Anneal",
+    serviceId: "anneal",
+  },
 ] as const;
 
-function text(language: Language, english: string, traditionalChinese: string): string {
-  return language === "zh-TW" || language === "zh-CN" ? traditionalChinese : english;
+function text(
+  language: Language,
+  english: string,
+  simplifiedChinese: string,
+  traditionalChinese: string,
+  japanese: string,
+): string {
+  if (language === "zh-CN") return simplifiedChinese;
+  if (language === "zh-TW") return traditionalChinese;
+  if (language === "ja") return japanese;
+  return english;
 }
 
 function messageOf(value: unknown): string {
@@ -99,18 +135,38 @@ export function ManagedAppsSurface({
     <section className="managed-apps-surface">
       <header className="managed-apps-header">
         <div>
-          <span>{text(language, "MANAGED APPS", "受管理應用程式")}</span>
-          <h1>{text(language, "One window, every engine", "一個視窗，管理所有引擎")}</h1>
+          <span>{text(
+            language,
+            "MANAGED APPS",
+            "托管应用",
+            "受管理應用程式",
+            "管理対象アプリ",
+          )}</span>
+          <h1>{text(
+            language,
+            "One window, every engine",
+            "一个窗口，管理所有引擎",
+            "一個視窗，管理所有引擎",
+            "1つのウィンドウですべてのエンジンを管理",
+          )}</h1>
           <p>{text(
             language,
             "Manage CPA, Codex Router, CommandCode Proxy, Paseo and Anneal without leaving Coding Tools.",
+            "无需离开 Coding Tools，即可管理 CPA、Codex Router、CommandCode Proxy、Paseo 和 Anneal。",
             "毋須離開 Coding Tools，即可管理 CPA、Codex Router、CommandCode Proxy、Paseo 同 Anneal。",
+            "Coding Tools から離れずに、CPA、Codex Router、CommandCode Proxy、Paseo、Anneal を管理できます。",
           )}</p>
         </div>
       </header>
 
       <div
-        aria-label={text(language, "Managed application tabs", "受管理應用程式分頁")}
+        aria-label={text(
+          language,
+          "Managed application tabs",
+          "托管应用标签页",
+          "受管理應用程式分頁",
+          "管理対象アプリのタブ",
+        )}
         className="managed-app-tabs"
         role="tablist"
       >
@@ -134,7 +190,13 @@ export function ManagedAppsSurface({
                 aria-hidden="true"
                 className={`managed-app-status is-${actionRequired ? "action-required" : status}`}
               />
-              <span>{text(language, tab.english, tab.traditionalChinese)}</span>
+              <span>{text(
+                language,
+                tab.english,
+                tab.simplifiedChinese,
+                tab.traditionalChinese,
+                tab.japanese,
+              )}</span>
             </button>
           );
         })}
