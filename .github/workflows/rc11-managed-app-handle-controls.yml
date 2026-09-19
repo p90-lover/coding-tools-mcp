@@ -20,17 +20,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: rc11-managed-app-handle-controls-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  BUN_INSTALL_CACHE_DIR: ${{ github.workspace }}/aiTemp/rc11-managed-app-controls/bun-cache
+
 jobs:
-  red:
-    name: Managed app handle controls RED contract
+  verify:
+    name: Managed app handle controls
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -38,46 +41,50 @@ jobs:
           clean: false
           persist-credentials: false
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
         with:
-          node-version: '22'
+          bun-version: 1.4.0
 
-      - name: Prepare retained RED evidence
+      - name: Prepare retained GREEN evidence
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p aiTemp/rc11-managed-app-controls/evidence
+          mkdir -p aiTemp/rc11-managed-app-controls/bun-cache
           mkdir -p aiTemp/Trash/rc11-managed-app-controls
 
-      - name: Prove toolbar contract is RED
+      - name: Install exact Electron dependencies
         shell: bash
         run: |
           set -euo pipefail
-          set +e
-          node --test desktop-electron/tests/rc11-managed-app-handle-controls.test.cjs \
-            > aiTemp/rc11-managed-app-controls/evidence/red.txt 2>&1
-          status=$?
-          set -e
-          cat aiTemp/rc11-managed-app-controls/evidence/red.txt
-          if [ "$status" -eq 0 ]; then
-            echo 'Managed app handle controls unexpectedly passed before implementation.' >&2
-            exit 1
-          fi
-          grep -F 'not ok' aiTemp/rc11-managed-app-controls/evidence/red.txt
-          grep -F 'managed-app-toolbar' aiTemp/rc11-managed-app-controls/evidence/red.txt
+          bun install --cwd desktop-electron --frozen-lockfile
 
-      - name: Enforce no-delete contract
+      - name: Run handle-control and shell contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test \
+            desktop-electron/tests/rc11-managed-app-handle-controls.test.cjs \
+            desktop-electron/tests/rc11-managed-app-api-ui.test.cjs \
+            desktop-electron/tests/rc11-managed-apps-shell.test.cjs \
+            desktop-electron/tests/renderer-wiring.test.cjs \
+            2>&1 | tee aiTemp/rc11-managed-app-controls/evidence/green.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-app-controls/evidence/green.txt
+          bun run --cwd desktop-electron typecheck
+
+      - name: Enforce no-delete and clean patch contracts
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin fix/rc11-managed-app-api-sensitive-values --no-tags
           git diff --check
           test -z "$(git diff --diff-filter=D --name-only origin/fix/rc11-managed-app-api-sensitive-values...HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: rc11-managed-app-controls-red-${{ github.sha }}
+          name: rc11-managed-app-controls-${{ github.sha }}
           path: aiTemp/rc11-managed-app-controls/evidence/
           if-no-files-found: warn
           retention-days: 14
