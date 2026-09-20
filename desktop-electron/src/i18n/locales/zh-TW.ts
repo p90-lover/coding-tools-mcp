@@ -8,6 +8,8 @@ export default {
   instantMcpTools: "即時 MCP 工具",
   instantMcpToolsHostBody: "工作區、工具、參數與執行工具在此畫面。處理程式透過 codingTools.apps 在行程內執行；此應用程式不會開放監聽連接埠，也不使用 Start。",
   instantMcpToolsHandlerStub: "現在可以呼叫 apps_list。instant-mcp-tools 的 app-handler 仍由 Bot GG 負責（inspect / listTools / runTool / listWorkspaces；kebab 別名 list-tools / run-tool）。此介面不會開放專用監聽連接埠。",
+  instantMcpToolsConnected: "已連線",
+  instantMcpToolsInProcessStatus: "行程內畫面",
   openInstantMcpTools: "開啟即時 MCP 工具",
   inProcessApps: "行程內模組處理程式",
   inProcessAppsBody: "列出已註冊模組，並透過 codingTools.apps.call / invoke 呼叫。處理程式在行程內執行，不會開放專用監聽連接埠或額外應用程式視窗。ProxyBridge 種子為 http://127.0.0.1:17891。",

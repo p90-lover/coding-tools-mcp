@@ -1,5 +1,32 @@
 .instant-mcp-tools-surface {
-  background: #fff;
+  /* original-ui.css sizes against --titlebar-height, which is unset globally. */
+  --titlebar-height: var(--height-titlebar, 46px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--titlebar-height));
+  max-height: calc(100vh - var(--titlebar-height));
+  min-height: 0;
+  overflow: hidden;
+  color: #111827;
+  color-scheme: light;
+  --color-background-elevated: #f8fafc;
+  --color-background-control: #f3f4f6;
+  --color-background-control-hover: #e5e7eb;
+  --color-background-control-active: #d1d5db;
+  --color-background-button-secondary: #eef2ff;
+  --color-background-button-secondary-hover: #e0e7ff;
+  --color-text-primary: #111827;
+  --color-text-secondary: #374151;
+  --color-text-tertiary: #6b7280;
+  --color-text-disabled: #9ca3af;
+  --color-text-accent: #1d4ed8;
+  --color-icon-primary: #111827;
+  --color-icon-secondary: #4b5563;
+  --color-icon-tertiary: #6b7280;
+  --color-border: rgb(15 23 42 / 16%);
+  --color-border-light: rgb(15 23 42 / 10%);
+  --color-border-heavy: rgb(15 23 42 / 22%);
 }
 
 .instant-mcp-tools-transport {
@@ -38,8 +65,21 @@
 }
 
 .instant-mcp-tools-embed {
+  flex: 1 1 auto;
   overflow: auto;
+  min-height: 0;
   padding: 16px 20px 32px;
+}
+
+.instant-mcp-tools-surface .button-primary {
+  background: #1d4ed8;
+  color: #fff;
+}
+
+.instant-mcp-tools-surface .button-secondary {
+  border: 1px solid rgb(15 23 42 / 12%);
+  background: #fff;
+  color: #111827;
 }
 
 .instant-mcp-tools-embed .mcp-live-tools {

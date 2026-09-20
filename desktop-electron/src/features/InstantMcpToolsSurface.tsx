@@ -18,10 +18,6 @@ interface InstantMcpToolsSurfaceProps {
   setError: (error: string | null) => void;
 }
 
-function localize(language: Language, english: string, traditionalChinese: string): string {
-  return language === "zh-TW" || language === "zh-CN" ? traditionalChinese : english;
-}
-
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -77,9 +73,7 @@ export function InstantMcpToolsSurface({ copy, language, setError }: InstantMcpT
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const statusText = handlerReady
-    ? localize(language, "Connected", "已連線")
-    : localize(language, "In-process UI", "行程內畫面");
+  const statusText = handlerReady ? copy.instantMcpToolsConnected : copy.instantMcpToolsInProcessStatus;
 
   return (
     <section

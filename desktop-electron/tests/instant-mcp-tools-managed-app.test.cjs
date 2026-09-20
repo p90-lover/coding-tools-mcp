@@ -38,6 +38,9 @@ test("Instant MCP Tools is a Managed App sidebar surface with in-process embed",
   assert.doesNotMatch(surface, /setupCore/);
   assert.doesNotMatch(surface, /--restart-service/);
   assert.match(integrations, /openInstantMcpTools/);
+  assert.match(surface, /copy\.instantMcpToolsConnected/);
+  assert.match(surface, /copy\.instantMcpToolsInProcessStatus/);
+  assert.doesNotMatch(surface, /function localize\(/);
 });
 
 test("MCP setup page keeps a thin Instant MCP Tools link instead of the live-tool panels", () => {
@@ -105,4 +108,29 @@ test("typed Instant MCP Tools stubs prefer camelCase ops and keep kebab aliases"
   assert.doesNotMatch(panel, /setupCore/);
   assert.doesNotMatch(panel, /--restart-service/);
   assert.equal(fs.existsSync(path.join(repoRoot, "app-handler/instant-mcp-tools")), false);
+});
+
+test("Instant MCP Tools white chrome uses light tokens, bounded height, and locale-specific status copy", () => {
+  const css = read("src/features/instant-mcp-tools.css");
+  const originalUi = read("src/features/original-ui.css");
+  const surface = read("src/features/InstantMcpToolsSurface.tsx");
+  const i18n = read("src/i18n.ts");
+  const zhTW = read("src/i18n/locales/zh-TW.ts");
+
+  assert.match(css, /color-scheme:\s*light/);
+  assert.match(css, /--color-text-primary:\s*#111827/);
+  assert.match(css, /--color-background-control:\s*#f3f4f6/);
+  assert.match(css, /--titlebar-height:\s*var\(--height-titlebar,\s*46px\)/);
+  assert.match(css, /height:\s*calc\(100vh - var\(--titlebar-height\)\)/);
+  assert.match(css, /\.instant-mcp-tools-embed \{[\s\S]*overflow:\s*auto/);
+  assert.doesNotMatch(originalUi, /--height-titlebar/);
+  assert.match(originalUi, /var\(--titlebar-height\)/);
+  assert.match(surface, /copy\.instantMcpToolsConnected/);
+  assert.match(i18n, /instantMcpToolsConnected: "Connected"/);
+  assert.match(i18n, /instantMcpToolsConnected: "已连接"/);
+  assert.match(i18n, /instantMcpToolsInProcessStatus: "进程内画面"/);
+  assert.doesNotMatch(i18n, /instantMcpToolsConnected: "已連線"/);
+  assert.doesNotMatch(i18n, /instantMcpToolsInProcessStatus: "行程內畫面"/);
+  assert.match(zhTW, /instantMcpToolsConnected: "已連線"/);
+  assert.match(zhTW, /instantMcpToolsInProcessStatus: "行程內畫面"/);
 });
