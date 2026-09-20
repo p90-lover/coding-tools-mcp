@@ -24,6 +24,7 @@ import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
+import { persistCodexDesktopModelCatalog } from "./codex-desktop-catalog";
 import {
   readCodexModelContextOverride,
   readCodexSubagentProtocol,
@@ -407,6 +408,11 @@ export async function modelsRequest(
     })();
     if (routerConnection) {
       catalog = await augmentWithCodexRouterModels(catalog, config, routerConnection);
+    }
+    try {
+      persistCodexDesktopModelCatalog(catalog);
+    } catch {
+      // Refreshing ~/.codex/chatgpt-web-model-catalog.json must not fail the live /v1/models route.
     }
   } catch (error) {
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));

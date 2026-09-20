@@ -8,6 +8,7 @@ import {
   getCodexHome,
   getCodexJournalPath,
   getCodexJournalRecoveryPath,
+  getCodexDesktopModelCatalogPath,
   getCodexModelsCachePath,
   installCodexIntegration,
   inspectCodexIntegration,
@@ -18,6 +19,7 @@ import {
   uninstallCodexIntegration,
 } from "../src/codex-integration";
 import { defaultConfig, loadConfig, saveConfig } from "../src/config";
+import { augmentNativeModelCatalog } from "../src/model-catalog";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   MANAGED_COMMENT,
@@ -651,6 +653,59 @@ describe("reversible native Codex route integration", () => {
     writeFileSync(cachePath, '{"models":["native-and-web"]}\n');
     uninstallCodexIntegration();
     expect(() => readFileSync(cachePath, "utf8")).toThrow();
+  });
+
+  test("writes a merged Codex Desktop catalog and points model_catalog_json at it", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
+    const native = {
+      models: [{
+        slug: "gpt-5.6-sol",
+        display_name: "GPT-5.6 Sol",
+        description: "native",
+        priority: 1,
+        shell_type: "shell_command",
+        visibility: "list",
+        supported_in_api: true,
+        multi_agent_version: "v2",
+        supported_reasoning_levels: [
+          { effort: "low", description: "Low" },
+          { effort: "medium", description: "Medium" },
+        ],
+        tool_mode: "code_mode_only",
+      }],
+    };
+    const config = nativeConfig("browser-only");
+    config.proAvailable = true;
+    const journal = installCodexIntegration(config, {
+      modelCatalog: augmentNativeModelCatalog(native, config),
+    });
+    const catalogPath = getCodexDesktopModelCatalogPath();
+    expect(journal.installed.model_catalog_json).toBe(catalogPath);
+    const installed = readFileSync(configPath, "utf8");
+    expect(installed).toContain(`model_catalog_json = ${JSON.stringify(catalogPath)}`);
+    expect(installed).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
+    const catalog = JSON.parse(readFileSync(catalogPath, "utf8")) as {
+      models: Array<Record<string, unknown> & { slug: string }>;
+    };
+    expect(catalog.models.map(model => model.slug)).toEqual([
+      "gpt-5.6-sol",
+      "chatgpt-web/light",
+      "chatgpt-web/medium",
+      "chatgpt-web/high",
+      "chatgpt-web/extra-high",
+      "chatgpt-web/pro",
+    ]);
+    const medium = catalog.models.find(model => model.slug === "chatgpt-web/medium")!;
+    expect(medium.display_name).toBe("ChatGPT Web");
+    expect((medium.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
+      .toContain("max");
+    expect(medium.shell_type).toBe("shell_command");
+
+    uninstallCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe('model = "gpt-5.6-sol"\n');
+    expect(existsSync(catalogPath)).toBe(false);
   });
 
   test("requires explicit replacement and preserves every non-port route assignment", () => {
