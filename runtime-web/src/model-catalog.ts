@@ -3,6 +3,8 @@ import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_MODEL_PREFIX,
+  CHATGPT_WEB_PICKER_REASONING_LEVELS,
+  chatgptWebPickerDefaultEffort,
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -28,6 +30,36 @@ function reasoningLevel(template: JsonObject, effort: string, description: strin
     : [];
   const source = levels.find(level => level.effort === effort);
   return { ...(source ? structuredClone(source) : {}), effort, description };
+}
+
+function catalogShellType(template: JsonObject): string {
+  return typeof template.shell_type === "string" && template.shell_type.length > 0
+    ? template.shell_type
+    : "shell_command";
+}
+
+function chatgptWebPickerReasoningLevels(template: JsonObject): JsonObject[] {
+  return CHATGPT_WEB_PICKER_REASONING_LEVELS.map(level => reasoningLevel(
+    template,
+    level.effort,
+    level.description,
+  ));
+}
+
+export function serializeCodexDesktopModelCatalog(catalog: JsonObject): string {
+  return `${JSON.stringify(catalog, null, 2)}\n`;
+}
+
+export function isMergedCodexDesktopCatalog(value: unknown): value is JsonObject {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const models = (value as JsonObject).models;
+  if (!Array.isArray(models) || models.length === 0) return false;
+  const slugs = models.map(slug).filter((candidate): candidate is string => Boolean(candidate));
+  const hasNative = slugs.some(candidate => (
+    !candidate.startsWith(CHATGPT_WEB_MODEL_PREFIX) && !candidate.startsWith("codex-router/")
+  ));
+  const hasWeb = slugs.some(candidate => candidate.startsWith(CHATGPT_WEB_MODEL_PREFIX));
+  return hasNative && hasWeb;
 }
 
 function modelPriority(template: JsonObject): number | undefined {
@@ -131,8 +163,9 @@ export function buildChatGptWebModel(
     // Responses tool surface so MCP namespaces, deferred tool_search, and custom tools reach us.
     tool_mode: null,
     upgrade: null,
-    default_reasoning_level: route.codexEffort,
-    supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
+    shell_type: catalogShellType(template),
+    default_reasoning_level: chatgptWebPickerDefaultEffort(route),
+    supported_reasoning_levels: chatgptWebPickerReasoningLevels(template),
     context_window: limits.contextWindow,
     max_context_window: limits.contextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,

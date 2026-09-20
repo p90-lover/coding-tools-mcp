@@ -44,7 +44,11 @@ describe("fixed ChatGPT Web model routes", () => {
       ["chatgpt-web/extra-high", "xhigh", "xhigh"],
       ["chatgpt-web/pro", "ultra", "max"],
     ]);
-    expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web — Instant");
+    expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web Instant");
+    expect(CHATGPT_WEB_MODEL_ROUTES[1]?.displayName).toBe("ChatGPT Web");
+    expect(CHATGPT_WEB_MODEL_ROUTES[2]?.displayName).toBe("ChatGPT Web Deep");
+    expect(CHATGPT_WEB_MODEL_ROUTES[3]?.displayName).toBe("ChatGPT Web Extra");
+    expect(CHATGPT_WEB_MODEL_ROUTES[4]?.displayName).toBe("ChatGPT Web Pro");
   });
 
   test("exposes only Plus-eligible routes without the Pro account capability", () => {
@@ -56,7 +60,7 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(availableChatGptWebModelRoutes({ solAvailable: true, proAvailable: true }))
       .toEqual(CHATGPT_WEB_MODEL_ROUTES);
     expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", plus))
-      .toThrow("Extra High is not available for this account");
+      .toThrow("ChatGPT Web Extra is not available for this account");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
       .toThrow("Pro is not available for this account");
   });

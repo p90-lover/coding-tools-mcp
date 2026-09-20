@@ -24,6 +24,7 @@ import {
   preflightCodexIntegration,
   readCodexSubagentProtocol,
 } from "./codex-integration";
+import { resolveMergedCodexDesktopCatalog } from "./codex-desktop-catalog";
 import { inspectLauncherBrowserHost } from "./launcher-browser-host";
 import {
   DEV_CONFIG_PURPOSE,
@@ -602,8 +603,12 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     launcherOwned && existing && existing.browserHost !== "launcher",
   );
   if (!migratingTerminalRuntime) removeLegacyRuntimeArtifacts(config);
+  const modelCatalog = await resolveMergedCodexDesktopCatalog(config, {
+    preferLocalBridge: !launcherOwned,
+  });
   installCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
+    ...(modelCatalog ? { modelCatalog } : {}),
   });
 
   return {

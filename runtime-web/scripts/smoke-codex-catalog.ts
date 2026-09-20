@@ -57,15 +57,22 @@ try {
     }>;
   };
   const web = catalog.models?.filter(model => model.slug?.startsWith("chatgpt-web/")) ?? [];
-  const expected = CHATGPT_WEB_MODEL_ROUTES.map(route => ({ slug: route.slug, effort: route.codexEffort }));
-  const actual = web.map(model => ({
-    slug: model.slug,
-    effort: Array.isArray(model.supported_reasoning_levels)
-      ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort).join(",")
-      : "",
-  }));
+  const natives = catalog.models?.filter(model => model.slug && !model.slug.startsWith("chatgpt-web/") && !model.slug.startsWith("codex-router/")) ?? [];
+  if (natives.length < 1) {
+    throw new Error(`Codex dropped native models from the merged catalog: ${JSON.stringify(catalog.models?.map(model => model.slug))}`);
+  }
+  const expected = CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug);
+  const actual = web.map(model => model.slug);
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`Codex did not preserve the fixed ChatGPT Web model contract: ${JSON.stringify(actual)}`);
+    throw new Error(`Codex did not preserve ChatGPT Web slugs: ${JSON.stringify(actual)}`);
+  }
+  for (const model of web) {
+    const efforts = Array.isArray(model.supported_reasoning_levels)
+      ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort)
+      : [];
+    if (!efforts.includes("max")) {
+      throw new Error(`ChatGPT Web model ${model.slug} is missing max/Pro in the picker effort ladder: ${efforts.join(",")}`);
+    }
   }
   const nativeSol = catalog.models?.find(model => model.slug === "gpt-5.6-sol");
   const webPro = catalog.models?.find(model => model.slug === "chatgpt-web/pro");

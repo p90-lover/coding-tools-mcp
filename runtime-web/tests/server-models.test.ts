@@ -3,6 +3,7 @@ import { defaultConfig } from "../src/config";
 import {
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
+  CHATGPT_WEB_PICKER_REASONING_LEVELS,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
 import { modelsRequest } from "../src/server";
@@ -130,7 +131,10 @@ test("Zero Risk returns one generic Web row without using scanned capabilities",
     description: CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE.description,
     visibility: "list",
     supported_in_api: true,
-    supported_reasoning_levels: [{ effort: "low", description: CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE.displayName }],
+    supported_reasoning_levels: CHATGPT_WEB_PICKER_REASONING_LEVELS.map(level => ({
+      effort: level.effort,
+      description: level.description,
+    })),
     tool_mode: null,
     upgrade: null,
     default_reasoning_level: "low",
@@ -143,6 +147,7 @@ test("Zero Risk returns one generic Web row without using scanned capabilities",
     service_tiers: [],
     default_service_tier: null,
     multi_agent_version: "v1",
+    shell_type: "shell_command",
   }]);
 });
 

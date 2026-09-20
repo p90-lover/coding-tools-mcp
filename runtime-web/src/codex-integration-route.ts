@@ -72,6 +72,27 @@ function compatibilityV1Evidence(
   };
 }
 
+function installedModelCatalogPath(journal: ManagedRouteJournal): string | undefined {
+  return journal.version === 10 ? journal.installed.model_catalog_json : undefined;
+}
+
+function restoreModelCatalogAssignment(
+  document: ReturnType<typeof parseDocument>,
+  journal: ManagedRouteJournal,
+): void {
+  const installedPath = installedModelCatalogPath(journal);
+  if (!installedPath) return;
+  const current = findTopLevelAssignment(document.lines, "model_catalog_json");
+  if (current.value !== installedPath || current.index === undefined) return;
+  const previous = journal.previous.model_catalog_json;
+  if (previous.present) {
+    if (!previous.rawLine) throw new Error("Codex integration journal is missing the prior model_catalog_json line");
+    document.lines[current.index] = previous.rawLine;
+  } else {
+    removeDocumentLine(document, current.index);
+  }
+}
+
 function restoreOwnedManagedFeatures(text: string, journal: ManagedRouteJournal): string {
   let restored = text;
   if (journal.version === 8 || journal.version === 9 || journal.version === 10) {
@@ -202,6 +223,7 @@ export function replacementBaseline(
         removeDocumentLine(document, current.index);
       }
     }
+    restoreModelCatalogAssignment(document, journal);
     return renderDocument(document);
   }
 
@@ -232,6 +254,7 @@ export function installRoute(
   installedUrl: string,
   replaceExistingRoute: boolean,
   replaceExistingRealtimeRoute: boolean,
+  catalogPath?: string,
 ): {
   text: string;
   previous: CodexIntegrationJournal["previous"];
@@ -274,6 +297,16 @@ export function installRoute(
     const installedBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
     insertDocumentLine(document, installedBaseUrl.index! + 1, realtimeLine);
   }
+  if (catalogPath) {
+    const catalogLine = `model_catalog_json = ${JSON.stringify(catalogPath)}`;
+    const currentCatalog = findTopLevelAssignment(document.lines, "model_catalog_json");
+    if (currentCatalog.index !== undefined) {
+      document.lines[currentCatalog.index] = catalogLine;
+    } else {
+      const installedBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
+      insertDocumentLine(document, installedBaseUrl.index! + 1, catalogLine);
+    }
+  }
   removeManagedComment(document);
   const installedBaseUrl = findTopLevelAssignment(document.lines, "openai_base_url");
   insertDocumentLine(document, installedBaseUrl.index!, MANAGED_ROUTE_COMMENT);
@@ -311,6 +344,10 @@ export function verifyInstalledRoute(text: string, journal: ManagedRouteJournal)
       );
     }
   }
+  const installedCatalog = installedModelCatalogPath(journal);
+  if (installedCatalog && current.model_catalog_json.value !== installedCatalog) {
+    throw new Error("Codex model_catalog_json changed after setup; refusing to overwrite the user's newer value");
+  }
   if (journal.version !== 7 && journal.version !== 8 && journal.version !== 9 && journal.version !== 10) {
     if (current.model_provider.present || current.model_catalog_json.present) {
       throw new Error("Codex model_provider or model_catalog_json changed after setup; refusing to overwrite the user's newer value");
@@ -342,6 +379,10 @@ export function verifyRestoredRoute(
     if (!previousAssignmentMatches(current[key], journal.previous[key])) {
       throw new Error(`Codex ${key} changed while the bridge was disconnected; refusing to overwrite the user's newer value`);
     }
+  }
+  if (installedModelCatalogPath(journal)
+    && !previousAssignmentMatches(current.model_catalog_json, journal.previous.model_catalog_json)) {
+    throw new Error("Codex model_catalog_json changed while the bridge was disconnected; refusing to overwrite the user's newer value");
   }
   if (lines.includes(MANAGED_COMMENT) || lines.includes(MANAGED_ROUTE_COMMENT)) {
     throw new Error("Managed Codex route marker is present while the bridge is disconnected");
@@ -458,6 +499,7 @@ export function restoreManagedRoute(text: string, journal: ManagedRouteJournal):
       removeDocumentLine(document, currentRealtime.index);
     }
   }
+  restoreModelCatalogAssignment(document, journal);
   if (journal.version !== 7 && journal.version !== 8 && journal.version !== 9 && journal.version !== 10) {
     const removedAssignments = (["model_provider", "model_catalog_json"] as const)
       .map(key => ({ key, previous: journal.previous[key] }))
