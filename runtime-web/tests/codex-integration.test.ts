@@ -698,9 +698,14 @@ describe("reversible native Codex route integration", () => {
       "chatgpt-web/pro",
     ]);
     const medium = catalog.models.find(model => model.slug === "chatgpt-web/medium")!;
-    expect(medium.display_name).toBe("ChatGPT Web");
+    expect(medium.display_name).toBe("Web GPT-6");
     expect((medium.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
-      .toContain("max");
+      .toEqual(["low", "medium", "high", "xhigh", "pro"]);
+    expect((medium.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
+      .not.toContain("max");
+    const pro = catalog.models.find(model => model.slug === "chatgpt-web/pro")!;
+    expect(pro.display_name).toBe("Web GPT-6 Pro");
+    expect(pro.default_reasoning_level).toBe("pro");
     expect(medium.shell_type).toBe("shell_command");
 
     uninstallCodexIntegration();

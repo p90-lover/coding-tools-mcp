@@ -13,11 +13,14 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
+  CHATGPT_WEB_PICKER_REASONING_LEVELS,
+  chatgptWebPickerDefaultEffort,
   requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
   resolveChatGptWebTransportLimits,
 } from "../src/chatgpt-web-models";
 import { defaultConfig } from "../src/config";
+import { parseRequest } from "../src/responses/parser";
 import { routeChatGptWebRequest } from "../src/server";
 import type { CodexParsedRequest } from "../src/types";
 
@@ -44,11 +47,24 @@ describe("fixed ChatGPT Web model routes", () => {
       ["chatgpt-web/extra-high", "xhigh", "xhigh"],
       ["chatgpt-web/pro", "ultra", "max"],
     ]);
-    expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web Instant");
-    expect(CHATGPT_WEB_MODEL_ROUTES[1]?.displayName).toBe("ChatGPT Web");
-    expect(CHATGPT_WEB_MODEL_ROUTES[2]?.displayName).toBe("ChatGPT Web Deep");
-    expect(CHATGPT_WEB_MODEL_ROUTES[3]?.displayName).toBe("ChatGPT Web Extra");
-    expect(CHATGPT_WEB_MODEL_ROUTES[4]?.displayName).toBe("ChatGPT Web Pro");
+    expect(CHATGPT_WEB_MODEL_ROUTES.map(route => [route.slug, route.displayName])).toEqual([
+      ["chatgpt-web/light", "Web GPT-6 Instant"],
+      ["chatgpt-web/medium", "Web GPT-6"],
+      ["chatgpt-web/high", "Web GPT-6 Deep"],
+      ["chatgpt-web/extra-high", "Web GPT-6 Extra"],
+      ["chatgpt-web/pro", "Web GPT-6 Pro"],
+    ]);
+    expect(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName).join(" ")).not.toMatch(/\bMedium\b/i);
+    expect(CHATGPT_WEB_PICKER_REASONING_LEVELS.map(level => [level.effort, level.description])).toEqual([
+      ["low", "Instant"],
+      ["medium", "Medium"],
+      ["high", "High"],
+      ["xhigh", "Extra High"],
+      ["pro", "Pro"],
+    ]);
+    expect(CHATGPT_WEB_PICKER_REASONING_LEVELS.some(level => level.effort === "max")).toBe(false);
+    expect(chatgptWebPickerDefaultEffort(CHATGPT_WEB_MODEL_ROUTES[1]!)).toBe("medium");
+    expect(chatgptWebPickerDefaultEffort(CHATGPT_WEB_MODEL_ROUTES[4]!)).toBe("pro");
   });
 
   test("exposes only Plus-eligible routes without the Pro account capability", () => {
@@ -60,7 +76,7 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(availableChatGptWebModelRoutes({ solAvailable: true, proAvailable: true }))
       .toEqual(CHATGPT_WEB_MODEL_ROUTES);
     expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", plus))
-      .toThrow("ChatGPT Web Extra is not available for this account");
+      .toThrow("Web GPT-6 Extra is not available for this account");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
       .toThrow("Pro is not available for this account");
   });
@@ -300,5 +316,16 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(proRoute).toBe(CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE);
     expect(proRequest.modelId).toBe(CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL);
     expect(proRequest.options.reasoning).toBe("low");
+  });
+
+  test("maps catalog picker effort pro to adapter max like ultra", () => {
+    const body = (effort: string) => parseRequest({
+      model: "gpt-5.6-sol",
+      input: "hi",
+      reasoning: { effort },
+    });
+    expect(body("pro").options.reasoning).toBe("max");
+    expect(body("ultra").options.reasoning).toBe("max");
+    expect(body("medium").options.reasoning).toBe("medium");
   });
 });

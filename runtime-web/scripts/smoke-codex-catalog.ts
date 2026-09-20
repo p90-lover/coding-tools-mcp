@@ -70,8 +70,8 @@ try {
     const efforts = Array.isArray(model.supported_reasoning_levels)
       ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort)
       : [];
-    if (!efforts.includes("max")) {
-      throw new Error(`ChatGPT Web model ${model.slug} is missing max/Pro in the picker effort ladder: ${efforts.join(",")}`);
+    if (!efforts.includes("pro") || efforts.includes("max")) {
+      throw new Error(`ChatGPT Web model ${model.slug} must expose picker effort pro (not max): ${efforts.join(",")}`);
     }
   }
   const nativeSol = catalog.models?.find(model => model.slug === "gpt-5.6-sol");

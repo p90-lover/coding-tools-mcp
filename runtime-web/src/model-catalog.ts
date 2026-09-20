@@ -28,7 +28,10 @@ function reasoningLevel(template: JsonObject, effort: string, description: strin
   const levels = Array.isArray(template.supported_reasoning_levels)
     ? template.supported_reasoning_levels.filter(level => level && typeof level === "object" && !Array.isArray(level)) as JsonObject[]
     : [];
-  const source = levels.find(level => level.effort === effort);
+  const source = levels.find(level => level.effort === effort)
+    ?? (effort === "pro"
+      ? levels.find(level => level.effort === "max" || level.effort === "ultra")
+      : undefined);
   return { ...(source ? structuredClone(source) : {}), effort, description };
 }
 
