@@ -299,16 +299,36 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
 ];
 
 /**
- * The selected Codex model is the authoritative ChatGPT browser mode. Codex's signed desktop UI
- * always renders an Effort row, so every routed model advertises exactly one immutable protocol
- * effort. Pro uses Codex's `ultra` protocol value but binds explicitly to ChatGPT Pro (`max`) at
- * the adapter boundary.
+ * Codex Desktop always renders an Effort suffix (Low / Medium / High / Pro) next to
+ * `display_name`. Keep those words out of the visible label so "Web GPT-6" does not become
+ * "Medium Medium". The selected slug still chooses the ChatGPT browser mode; the catalog
+ * effort ladder is picker UI only. Desktop maps the top effort id `pro` to the Pro menu item;
+ * do not advertise `max` on chatgpt-web/* rows or the menu shows Maximum instead of Pro.
+ * Adapter routing still binds ChatGPT Pro as `max` (Codex protocol `ultra`).
  */
+export type ChatGptWebPickerEffort = "low" | "medium" | "high" | "xhigh" | "pro";
+
+export const CHATGPT_WEB_PICKER_REASONING_LEVELS: ReadonlyArray<{
+  effort: ChatGptWebPickerEffort;
+  description: string;
+}> = [
+  { effort: "low", description: "Instant" },
+  { effort: "medium", description: "Medium" },
+  { effort: "high", description: "High" },
+  { effort: "xhigh", description: "Extra High" },
+  { effort: "pro", description: "Pro" },
+];
+
+export function chatgptWebPickerDefaultEffort(route: ChatGptWebModelRoute): ChatGptWebPickerEffort {
+  if (route.adapterEffort === "max" || route.codexEffort === "ultra") return "pro";
+  return route.adapterEffort;
+}
+
 export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] = [
   {
     slug: "chatgpt-web/light",
-    displayName: "ChatGPT Web — Instant",
-    description: "ChatGPT Web Instant through the native Codex harness.",
+    displayName: "Web GPT-6 Instant",
+    description: "Web GPT-6 Instant through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "low",
@@ -317,8 +337,8 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/medium",
-    displayName: "ChatGPT Web — Medium",
-    description: "ChatGPT Web Medium through the native Codex harness.",
+    displayName: "Web GPT-6",
+    description: "Web GPT-6 through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "medium",
@@ -327,8 +347,8 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/high",
-    displayName: "ChatGPT Web — High",
-    description: "ChatGPT Web High through the native Codex harness.",
+    displayName: "Web GPT-6 Deep",
+    description: "Web GPT-6 Deep through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "high",
@@ -337,8 +357,8 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/extra-high",
-    displayName: "ChatGPT Web — Extra High",
-    description: "Account-gated ChatGPT Web Extra High through the native Codex harness.",
+    displayName: "Web GPT-6 Extra",
+    description: "Account-gated Web GPT-6 Extra through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "xhigh",
@@ -347,8 +367,8 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/pro",
-    displayName: "ChatGPT Web — Pro",
-    description: "Account-gated ChatGPT Pro through the native Codex harness.",
+    displayName: "Web GPT-6 Pro",
+    description: "Account-gated Web GPT-6 Pro through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "ultra",

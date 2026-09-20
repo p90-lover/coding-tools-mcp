@@ -59,6 +59,7 @@ export interface CodexIntegrationJournal {
     experimental_realtime_webrtc_call_base_url: string;
     subagent_protocol: SubagentProtocol;
     agent_max_depth?: number;
+    model_catalog_json?: string;
   };
   previous: Record<ManagedAssignmentKey, PreviousAssignment>;
   previousRealtimeWebrtcCallBaseUrl: PreviousAssignment;
@@ -227,6 +228,7 @@ export interface FileSnapshot {
 
 export interface InstallCodexIntegrationOptions {
   replaceExistingRoute?: boolean;
+  modelCatalog?: Record<string, unknown>;
 }
 
 export interface UninstallCodexIntegrationResult {
@@ -253,6 +255,10 @@ export function getCodexConfigPath(): string {
 
 export function getCodexModelsCachePath(): string {
   return join(getCodexHome(), "models_cache.json");
+}
+
+export function getCodexDesktopModelCatalogPath(): string {
+  return join(getCodexHome(), "chatgpt-web-model-catalog.json");
 }
 
 export function getCodexJournalPath(): string {
@@ -351,12 +357,14 @@ export function writeIntegrationState(
   journal: AnyCodexIntegrationJournal,
   configWrite?: { path: string; data: string },
   removals: string[] = [],
+  extraWrites: Array<{ path: string; data: string | Uint8Array }> = [],
 ): void {
   const data = serializeJournal(journal);
   // The recovery copy records intent and the primary copy records commit. If the process stops
   // between those writes, the physical config unambiguously selects the completed state.
   writeFilesWithCompensation([
     { path: getCodexJournalRecoveryPath(), data },
+    ...extraWrites,
     ...(configWrite ? [{ ...configWrite, followSymlink: true }] : []),
     { path: getCodexJournalPath(), data },
   ], removals);
