@@ -604,10 +604,10 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   if (tc !== undefined) options.toolChoice = tc;
   if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
   // Upstream codex-rs converts "ultra" to "max" at the inference boundary (core/src/client.rs
-  // `reasoning_effort_for_request`), so current clients never send it — but a catalog that
-  // advertises ultra plus an older/direct caller can. Degrade it to max like upstream instead of
-  // silently dropping reasoning altogether.
-  const requestedEffort = data.reasoning?.effort === "ultra" ? "max" : data.reasoning?.effort;
+  // `reasoning_effort_for_request`). Codex Desktop's picker uses catalog effort id `pro` for the
+  // Pro menu item; map both aliases to adapter `max` instead of silently dropping reasoning.
+  const catalogEffort = data.reasoning?.effort;
+  const requestedEffort = catalogEffort === "ultra" || catalogEffort === "pro" ? "max" : catalogEffort;
   if (requestedEffort && REASONING_EFFORTS.has(requestedEffort)) {
     options.reasoning = requestedEffort;
   }

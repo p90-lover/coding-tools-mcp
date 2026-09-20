@@ -176,7 +176,8 @@ describe("native /models augmentation", () => {
     expect(web.every(model => {
       const levels = model.supported_reasoning_levels as Array<{ effort?: string }>;
       return levels.length === CHATGPT_WEB_PICKER_REASONING_LEVELS.length
-        && levels.some(level => level.effort === "max");
+        && levels.some(level => level.effort === "pro")
+        && !levels.some(level => level.effort === "max");
     })).toBe(true);
     expect(web.map(model => ({
       contextWindow: model.context_window,
@@ -350,7 +351,7 @@ describe("native /models augmentation", () => {
     expect(web.every(model => model.shell_type === "terra-shell")).toBe(true);
   });
 
-  test("keeps native rows visible and gives ChatGPT Web picker-safe names plus a max effort ladder", () => {
+  test("keeps native rows visible and gives ChatGPT Web picker-safe names plus a pro effort ladder", () => {
     const config = defaultConfig("full");
     config.proAvailable = true;
     config.subagentProtocol = "native";
@@ -361,16 +362,18 @@ describe("native /models augmentation", () => {
     const pro = web.find(model => model.slug === "chatgpt-web/pro")!;
 
     expect(natives.map(model => model.slug)).toEqual(["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"]);
+    expect(natives.map(model => model.display_name)).toEqual(["5.5", "5.6 Sol", "5.6 Terra"]);
     expect(natives.every(model => model.shell_type === undefined || model.shell_type === "shell_command")).toBe(true);
-    expect(medium.display_name).toBe("ChatGPT Web");
+    expect(medium.display_name).toBe("Web GPT-6");
     expect(String(medium.display_name)).not.toMatch(/Medium/i);
-    expect(pro.display_name).toBe("ChatGPT Web Pro");
-    expect(pro.default_reasoning_level).toBe("max");
+    expect(pro.display_name).toBe("Web GPT-6 Pro");
+    expect(pro.default_reasoning_level).toBe("pro");
     expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
     for (const model of web) {
       const levels = model.supported_reasoning_levels as Array<{ effort: string; description: string }>;
-      expect(levels.map(level => level.effort)).toEqual(["low", "medium", "high", "xhigh", "max"]);
-      expect(levels.at(-1)).toEqual({ effort: "max", description: "Pro" });
+      expect(levels.map(level => level.effort)).toEqual(["low", "medium", "high", "xhigh", "pro"]);
+      expect(levels.map(level => level.effort)).not.toContain("max");
+      expect(levels.at(-1)).toEqual({ effort: "pro", description: "Pro" });
     }
   });
 
