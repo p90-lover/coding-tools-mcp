@@ -303,7 +303,7 @@ export async function inspectLauncherBrowserHost(
     expectedProfile?: LauncherBrowserHostProfile;
     timeoutMs?: number;
   } = {},
-): Promise<{ solAvailable?: boolean; proAvailable?: boolean; url: string }> {
+): Promise<{ solAvailable?: boolean; proAvailable?: boolean; gpt55Available?: boolean; solPinAvailable?: boolean; url: string }> {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   if (options.expectedProfile && descriptor.profile !== options.expectedProfile) {
     throw new Error(
@@ -346,6 +346,8 @@ export async function inspectLauncherBrowserHost(
       ...(options.detectCapabilities ? {
         solAvailable: body.solAvailable as boolean,
         proAvailable: body.proAvailable as boolean,
+        ...(typeof body.gpt55Available === "boolean" ? { gpt55Available: body.gpt55Available } : {}),
+        ...(typeof body.solPinAvailable === "boolean" ? { solPinAvailable: body.solPinAvailable } : {}),
       } : {}),
     };
   } catch (error) {

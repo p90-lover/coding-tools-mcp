@@ -168,6 +168,7 @@ function executionKey(parsed: CodexParsedRequest, payload: unknown): string {
   return createHash("sha256").update(JSON.stringify({
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
+    webPin: parsed._webPin,
     payload,
   })).digest("hex");
 }

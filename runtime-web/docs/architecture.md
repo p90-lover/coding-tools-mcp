@@ -21,17 +21,20 @@ launcher-owned codex-chatgpt-web daemon
 
 ### `browser-only`
 
-- Exposes Instant (`chatgpt-web/light`), Medium, High, and Extra High; each model advertises exactly one
-  immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
-  the authenticated account exposes Pro.
+- Exposes **Web Latest** (`chatgpt-web/latest`), **Web GPT-5.6 Sol** (`chatgpt-web/sol`), and
+  **Web GPT-5.5** (`chatgpt-web/gpt-5.5`) when the authenticated ChatGPT menu exposes those chips.
+  Effort is advertised on Codex's effort bar (`low`/`medium`/`high`/`xhigh`, plus picker id `pro`
+  on Latest only). Legacy Instant/Deep/Extra/Pro slugs stay request-enabled and hidden from the
+  catalog. Luna/Think remain the only rows for accounts without the Sol selector.
 - Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
 - Never starts the broker, tunnel, or MCP server.
 - Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.
 
 ### `full`
 
-- Exposes the same fixed models and attaches the turn-bound connector capability to every available
-  effort, from Luna through Pro. There are no effort-specific MCP exclusions.
+- Exposes the same pinned Web models and attaches the turn-bound connector capability to every
+  available effort on those rows, including Pro on Web Latest. There are no effort-specific MCP
+  exclusions.
 - ChatGPT uses a custom MCP connector backed by `openai/tunnel-client`.
 - Every connector call presents one outer Codex turn capability; the MCP server keeps the derived
   binding private and dispatches the requested action immediately.
@@ -185,7 +188,10 @@ ChatGPT endpoint so Voice session creation never falls through to the Responses-
 assignments are journaled and restored exactly on disconnect or uninstall; a conflicting existing
 Voice route requires explicit `--replace-codex-route` ownership. The daemon forwards the
 authenticated official model catalog and appends only the routed models owned by the
-`chatgpt-web/` namespace; no static catalog is installed. Subagent protocol selection is explicit,
+`chatgpt-web/` namespace. Install-to-Codex also writes a merged Desktop `model_catalog_json`
+projection so the picker shows one Web Latest row (effort bar Instant through Pro), Web GPT-5.6 Sol,
+and Web GPT-5.5 when supported, without duplicate Instant/Deep/Extra/Pro web titles. Native rows
+are left unchanged. Subagent protocol selection is explicit,
 and new installations default to Compatibility V1 because it is the only surface portable across
 native and routed Web backends:
 

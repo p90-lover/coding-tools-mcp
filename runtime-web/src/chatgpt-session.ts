@@ -1,5 +1,5 @@
 import type { Locator, Page } from "playwright-core";
-import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
+import type { ChatGptWebAccountCapabilities, ChatGptWebModelPin } from "./chatgpt-web-models";
 
 export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 export const CHATGPT_COMPOSER_SELECTOR = [
@@ -151,6 +151,52 @@ export function parseChatGptEffortSliderState(
   return { min, max, value };
 }
 
+/** Map a ChatGPT model-chip label onto a Coding Tools pin. Unknown labels are ignored. */
+export function matchChatGptWebModelPin(label: string): ChatGptWebModelPin | undefined {
+  const text = label.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  if (/(?:gpt[-\s]?)?5\.5\b/i.test(text) && !/5\.6/.test(text)) return "gpt-5.5";
+  if (/5\.6[^a-z0-9]{0,12}sol/i.test(text) || (/\bsol\b/i.test(text) && /5\.6/.test(text))) return "sol";
+  if (/\b(auto|latest)\b/i.test(text)) return "latest";
+  return undefined;
+}
+
+async function chatGptModelChipLabel(item: Locator): Promise<string> {
+  const [text, ariaLabel] = await Promise.all([
+    item.innerText().catch(() => ""),
+    item.getAttribute("aria-label").catch(() => null),
+  ]);
+  return [text, ariaLabel ?? ""].filter(value => value.trim().length > 0).join(" ");
+}
+
+export async function listChatGptWebModelPins(menu: Locator): Promise<ChatGptWebModelPin[]> {
+  const items = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
+  const count = await items.count();
+  const pins: ChatGptWebModelPin[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const pin = matchChatGptWebModelPin(await chatGptModelChipLabel(items.nth(index)));
+    if (pin && !pins.includes(pin)) pins.push(pin);
+  }
+  return pins;
+}
+
+export async function selectChatGptWebModelPin(
+  menu: Locator,
+  pin: ChatGptWebModelPin | undefined,
+): Promise<void> {
+  if (!pin || pin === "latest") return;
+  const items = menu.locator(CHATGPT_EFFORT_ITEM_SELECTOR);
+  const count = await items.count();
+  for (let index = 0; index < count; index += 1) {
+    const item = items.nth(index);
+    if (matchChatGptWebModelPin(await chatGptModelChipLabel(item)) !== pin) continue;
+    await item.click({ timeout: 5_000 });
+    return;
+  }
+  const wanted = pin === "sol" ? "GPT-5.6 Sol" : "GPT-5.5";
+  throw new Error(`ChatGPT model menu did not expose a ${wanted} chip`);
+}
+
 async function anyVisible(locator: Locator): Promise<boolean> {
   const count = await locator.count();
   for (let index = 0; index < count; index += 1) {
@@ -204,7 +250,7 @@ export async function detectChatGptAccountCapabilities(
     if (composerReady && formReady && documentReady) {
       absenceSince ??= Date.now();
       if (Date.now() - absenceSince >= stableAbsenceMs) {
-        return { solAvailable: false, proAvailable: false };
+        return { solAvailable: false, proAvailable: false, gpt55Available: false, solPinAvailable: false };
       }
     } else {
       absenceSince = undefined;
@@ -236,7 +282,13 @@ export async function detectChatGptAccountCapabilities(
         { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
       );
     }
-    return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 };
+    const pins = await listChatGptWebModelPins(menu);
+    return {
+      solAvailable: true,
+      proAvailable: state.max - state.min + 1 >= 5,
+      gpt55Available: pins.includes("gpt-5.5"),
+      solPinAvailable: pins.includes("sol"),
+    };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }

@@ -282,6 +282,7 @@ export class LauncherBrowserHelperClient {
             traceId: turn.traceId,
             modelId: turn.modelId,
             reasoning: turn.reasoning,
+            ...(turn.webPin ? { webPin: turn.webPin } : {}),
             capabilities: turn.capabilities,
             ...(turn.nativeConnector ? { nativeConnector: true } : {}),
             ...(turn.prepareResume ? { resumeAvailable: true } : {}),

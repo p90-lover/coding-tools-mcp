@@ -8,6 +8,11 @@ export interface CodexParsedRequest {
   /** Number of leading raw input items restored from local previous_response_id state. */
   _replayPrefixLen?: number;
   /**
+   * ChatGPT composer model pin selected by the chatgpt-web/* slug. Latest leaves ChatGPT auto
+   * behavior in place; sol and gpt-5.5 click the matching chip before the effort control.
+   */
+  _webPin?: "latest" | "sol" | "gpt-5.5";
+  /**
    * True when the input carried `{type:"compaction_trigger"}` — Codex remote compaction v2 asking
    * this turn to produce a `{type:"compaction"}` output item. Routed adapters can't natively;
    * the server runs the model as a summarizer and the bridge emits a synthetic compaction item
@@ -299,6 +304,10 @@ export interface CodexProviderConfig {
     solAvailable?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     proAvailable?: boolean;
+    /** ChatGPT model menu exposed a GPT-5.5 chip during setup/repair. */
+    gpt55Available?: boolean;
+    /** ChatGPT model menu exposed a GPT-5.6 Sol chip during setup/repair. */
+    solPinAvailable?: boolean;
     /** Authorize per-call "Allow once" confirmation clicks for this connector. */
     autoApproveToolCalls?: boolean;
     /** DEV-only experimental transport: adapt one context across one, two, or three ChatGPT messages. */

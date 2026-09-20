@@ -356,6 +356,12 @@ export function createChatGptWebAdapter(
     localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
     solAvailable: provider.chatgptWeb?.solAvailable !== false,
     proAvailable: provider.chatgptWeb?.proAvailable === true,
+    ...(provider.chatgptWeb?.gpt55Available !== undefined
+      ? { gpt55Available: provider.chatgptWeb.gpt55Available }
+      : {}),
+    ...(provider.chatgptWeb?.solPinAvailable !== undefined
+      ? { solPinAvailable: provider.chatgptWeb.solPinAvailable }
+      : {}),
   };
   const manualInteraction = provider.chatgptWeb?.browserInteractionMode === "manual";
   const executionNamespace = chatGptWebExecutionNamespace(provider);
@@ -404,7 +410,7 @@ export function createChatGptWebAdapter(
     }
     const mode = manualRequest
       ? { localTools: true }
-      : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+      : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities, parsed._webPin);
     const identity = extractChatGptTurnIdentity(parsed);
     const captureLunaCheckpoint = parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID
       && !parsed._compactionRequest
@@ -673,6 +679,7 @@ export function createChatGptWebAdapter(
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
+        webPin: parsed._webPin,
         capabilities: turnCapabilities,
         prepare: async () => ({
           ...compileChatGptWebPrompt(
@@ -743,6 +750,7 @@ export function createChatGptWebAdapter(
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
+      webPin: parsed._webPin,
       capabilities: turnCapabilities,
       prepare: () => prepareWith(checkpointInput.parsed),
       ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
@@ -819,7 +827,7 @@ export function createChatGptWebAdapter(
           : configuredCapabilities;
         const mode = manualRequest
           ? { localTools: true }
-          : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
+          : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities, parsed._webPin);
         const structuredOutputValidator = parsed._compactionRequest
           ? undefined
           : createChatGptStructuredOutputValidator(parsed.options.outputFormat);

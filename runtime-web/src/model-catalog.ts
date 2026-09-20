@@ -3,6 +3,9 @@ import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_MODEL_PREFIX,
+  chatgptWebPickerDefaultEffort,
+  chatgptWebPickerReasoningLevelsForRoute,
+  resolveChatGptWebCatalogEffort,
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -22,12 +25,111 @@ function slug(value: unknown): string | undefined {
   return typeof candidate === "string" ? candidate : undefined;
 }
 
-function reasoningLevel(template: JsonObject, effort: string, description: string): JsonObject {
-  const levels = Array.isArray(template.supported_reasoning_levels)
-    ? template.supported_reasoning_levels.filter(level => level && typeof level === "object" && !Array.isArray(level)) as JsonObject[]
+function catalogShellType(template: JsonObject): string {
+  return typeof template.shell_type === "string" && template.shell_type.length > 0
+    ? template.shell_type
+    : "shell_command";
+}
+
+function catalogReasoningLevels(model: JsonObject): unknown {
+  return Array.isArray(model.supported_reasoning_levels)
+    ? model.supported_reasoning_levels
     : [];
-  const source = levels.find(level => level.effort === effort);
-  return { ...(source ? structuredClone(source) : {}), effort, description };
+}
+
+/** Codex Desktop `model_catalog_json` working schema for chatgpt-web/* (simon live catalog). */
+export const CODEX_DESKTOP_CHATGPT_WEB_CATALOG_FIELDS = [
+  "slug",
+  "display_name",
+  "description",
+  "default_reasoning_level",
+  "supported_reasoning_levels",
+  "shell_type",
+  "visibility",
+  "supported_in_api",
+  "priority",
+  "availability_nux",
+  "upgrade",
+  "base_instructions",
+  "default_reasoning_summary",
+  "support_verbosity",
+  "default_verbosity",
+  "apply_patch_tool_type",
+  "truncation_policy",
+  "experimental_supported_tools",
+  "input_modalities",
+  "supports_parallel_tool_calls",
+  "supports_reasoning_summaries",
+] as const;
+
+const CHATGPT_WEB_DESKTOP_BASE_INSTRUCTIONS =
+  "You are a coding agent using ChatGPT Web via the Coding Tools local bridge.";
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function truncationLimit(model: JsonObject): number {
+  const policy = model.truncation_policy;
+  if (policy && typeof policy === "object" && !Array.isArray(policy)) {
+    const limit = (policy as JsonObject).limit;
+    if (typeof limit === "number" && Number.isSafeInteger(limit) && limit > 0) return limit;
+  }
+  const contextWindow = model.context_window;
+  if (typeof contextWindow === "number" && Number.isSafeInteger(contextWindow) && contextWindow > 0) {
+    return contextWindow;
+  }
+  return 100_000;
+}
+
+export function projectChatGptWebDesktopCatalogModel(model: JsonObject): JsonObject {
+  const modalities = stringArray(model.input_modalities);
+  return {
+    slug: model.slug,
+    display_name: model.display_name,
+    description: model.description,
+    default_reasoning_level: model.default_reasoning_level,
+    supported_reasoning_levels: catalogReasoningLevels(model),
+    shell_type: catalogShellType(model),
+    visibility: "list",
+    supported_in_api: true,
+    priority: typeof model.priority === "number" && Number.isSafeInteger(model.priority) ? model.priority : 1,
+    availability_nux: null,
+    upgrade: null,
+    base_instructions: CHATGPT_WEB_DESKTOP_BASE_INSTRUCTIONS,
+    default_reasoning_summary: "auto",
+    support_verbosity: false,
+    default_verbosity: null,
+    apply_patch_tool_type: null,
+    truncation_policy: { mode: "tokens", limit: truncationLimit(model) },
+    experimental_supported_tools: stringArray(model.experimental_supported_tools),
+    input_modalities: modalities.length > 0 ? modalities : ["text"],
+    supports_parallel_tool_calls: false,
+    supports_reasoning_summaries: true,
+  };
+}
+
+export function serializeCodexDesktopModelCatalog(catalog: JsonObject): string {
+  const models = Array.isArray(catalog.models)
+    ? catalog.models.map((model) => {
+      const modelSlug = slug(model);
+      if (!modelSlug?.startsWith(CHATGPT_WEB_MODEL_PREFIX)) return model;
+      return projectChatGptWebDesktopCatalogModel(object(model, `chatgpt-web ${modelSlug} catalog model`));
+    })
+    : catalog.models;
+  return `${JSON.stringify({ ...catalog, models }, null, 2)}\n`;
+}
+
+export function isMergedCodexDesktopCatalog(value: unknown): value is JsonObject {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const models = (value as JsonObject).models;
+  if (!Array.isArray(models) || models.length === 0) return false;
+  const slugs = models.map(slug).filter((candidate): candidate is string => Boolean(candidate));
+  const hasNative = slugs.some(candidate => (
+    !candidate.startsWith(CHATGPT_WEB_MODEL_PREFIX) && !candidate.startsWith("codex-router/")
+  ));
+  const hasWeb = slugs.some(candidate => candidate.startsWith(CHATGPT_WEB_MODEL_PREFIX));
+  return hasNative && hasWeb;
 }
 
 function modelPriority(template: JsonObject): number | undefined {
@@ -41,20 +143,10 @@ function modelPriority(template: JsonObject): number | undefined {
 
 function routedModelPriority(
   template: JsonObject,
-  route: ChatGptWebModelRoute,
-  config: AppConfig,
+  _route: ChatGptWebModelRoute,
+  _config: AppConfig,
 ): number | undefined {
-  const priority = modelPriority(template);
-  if (priority === undefined
-    || config.subagentProtocol !== "compatibility-v1"
-    || route.slug !== "chatgpt-web/light") return priority;
-  if (priority === Number.MAX_SAFE_INTEGER) {
-    throw new Error("Native Codex model template priority cannot reserve the Compatibility V1 roster");
-  }
-  // Codex V1 exposes at most five model overrides. Keep the native Sol row plus the four useful
-  // delegated Web efforts (Medium, High, Extra High, Pro); Instant remains a selectable root model
-  // but does not displace Pro from spawn_agent's bounded registry.
-  return priority + 1;
+  return modelPriority(template);
 }
 
 function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
@@ -104,7 +196,11 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
-  const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+  const limits = resolveChatGptWebContextLimits(
+    route.backendModel,
+    resolveChatGptWebCatalogEffort(route, config),
+    config,
+  );
   const multiAgentVersion = routedSubagentVersion(template, config);
   const priority = routedModelPriority(template, route, config);
   const model: JsonObject = {
@@ -131,8 +227,9 @@ export function buildChatGptWebModel(
     // Responses tool surface so MCP namespaces, deferred tool_search, and custom tools reach us.
     tool_mode: null,
     upgrade: null,
-    default_reasoning_level: route.codexEffort,
-    supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
+    shell_type: catalogShellType(template),
+    default_reasoning_level: chatgptWebPickerDefaultEffort(route),
+    supported_reasoning_levels: chatgptWebPickerReasoningLevelsForRoute(route, config),
     context_window: limits.contextWindow,
     max_context_window: limits.contextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,

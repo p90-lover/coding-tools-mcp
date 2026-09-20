@@ -23,7 +23,9 @@
 </p>
 
 Free 和 Go 账户会在 Codex 原生模型选择器中看到 **ChatGPT Web — Luna**。具有推理选择器的
-账户仍会按订阅权限看到 **Instant**、**Medium**、**High**、**Extra High** 和 **Pro**。
+账户会看到独立的 Web 行，而不是 Instant/Deep/Pro 标题：**Web Latest**（ChatGPT 自动：Pro
+effort 使用 GPT-6 Pro，其余 effort 回落到 GPT-5.6 Sol）、**Web GPT-5.6 Sol**（固定该模型）
+以及 ChatGPT 菜单露出该芯片时的 **Web GPT-5.5**。Effort 留在 Codex 的 effort 条上。
 桥接程序会把当前编译后的 Codex 任务上下文发送到一个全新的 ChatGPT 临时聊天，附加图片，
 并将可见的推理过程、工具活动和 Markdown 流式传回同一个 Codex 任务。
 
@@ -86,7 +88,7 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 1. 直接在启动器内置的 ChatGPT 浏览器中登录。登录页和身份提供商窗口都保留在同一个由启动器
    管理的私有浏览器配置中；会话不会在不同浏览器之间复制。
 2. 运行浏览器冒烟测试。
-3. 点击 **安装模型**，重启一次 Codex，然后选择一个 **ChatGPT Web — …** 模型。
+3. 点击 **安装模型**，重启一次 Codex，然后选择 **Web Latest**、**Web GPT-5.6 Sol** 或 **Web GPT-5.5**（Sol 账户），或 **ChatGPT Web — Luna**（Free/Go）。
 
 启动器会在设置期间检测当前账户的 ChatGPT 控件：Free/Go 账户只会显示 Luna；只有已登录账户
 支持 Pro 时，Pro 才会显示。独立的 **MCP** 页面是可选项，它会在不需要终端命令的情况下引导你
@@ -109,12 +111,15 @@ bun run app
 
 | 模式 | 模型 | 本地 Codex 工具 | 额外设置 |
 | --- | --- | --- | --- |
-| **仅浏览器** | Free/Go：Luna；Plus：Instant–High；Pro：增加 Extra High 和 Pro | 不可用；Codex 会显示警告 | 无 |
-| **完整 harness** | Free/Go：Luna；Plus：Instant–High；Pro：增加 Extra High 和 Pro | 每个列出的 effort 均支持，包括 Pro | OpenAI 隧道 + ChatGPT 连接器 |
+| **仅浏览器** | Free/Go：Luna；Plus/Pro：Web Latest、Web GPT-5.6 Sol，以及 ChatGPT 露出时的 Web GPT-5.5。Latest 的 effort 条：Plus 为 Instant–High，Pro 为 Instant–Pro。Sol 固定项不含 Pro；5.5 固定项不含 Extra High 和 Pro。 | 不可用；Codex 会显示警告 | 无 |
+| **完整 harness** | 与仅浏览器相同的 Web 行 | 每个列出的 effort 均支持，包括 Web Latest 上的 Pro | OpenAI 隧道 + ChatGPT 连接器 |
 
-模型选择器中的每一项都对应一个固定的 ChatGPT 模式。Codex 仍会显示内置的 Effort 和 Speed
-选项，但更改它们不会在后台静默切换所选的浏览器模型。在完整模式下，每一个可用 effort 都会
-获得同一个与当前回合绑定的 MCP 能力；Pro 没有单独限制，也没有缩减后的工具契约。
+Sol 账户的选择器行是 ChatGPT **模型固定项**，不是写进标题的 Instant/Deep/Pro。**Web Latest**
+保留 ChatGPT 的 auto/latest 芯片，并把 Codex effort 映射到网页 effort 控件（Pro → GPT-6 Pro；
+其余 → GPT-5.6 Sol）。**Web GPT-5.6 Sol** 和 **Web GPT-5.5** 会先点击对应的 ChatGPT 模型芯片。
+旧 slug `chatgpt-web/light` 到 `chatgpt-web/pro` 仍可请求，但会从 `/v1/models` 和 Desktop 目录中隐藏。
+原生 Codex 模型保持不变。在完整模式下，每一个可用 effort 都会获得同一个与当前回合绑定的 MCP
+能力；Pro 没有单独限制，也没有缩减后的工具契约。
 
 ## 完整 harness
 

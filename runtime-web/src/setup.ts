@@ -24,6 +24,7 @@ import {
   preflightCodexIntegration,
   readCodexSubagentProtocol,
 } from "./codex-integration";
+import { resolveMergedCodexDesktopCatalog } from "./codex-desktop-catalog";
 import { inspectLauncherBrowserHost } from "./launcher-browser-host";
 import {
   DEV_CONFIG_PURPOSE,
@@ -303,7 +304,7 @@ async function inspectLauncherCapabilities(
   existing: AppConfig | undefined,
   refreshAccountCapabilities: boolean,
   expectedProfile: "production" | "development",
-): Promise<{ solAvailable: boolean; proAvailable: boolean }> {
+): Promise<{ solAvailable: boolean; proAvailable: boolean; gpt55Available?: boolean; solPinAvailable?: boolean }> {
   const detectCapabilities = launcherCapabilityProbeRequired(
     existing,
     refreshAccountCapabilities,
@@ -316,6 +317,15 @@ async function inspectLauncherCapabilities(
   return {
     solAvailable: detectCapabilities ? inspected.solAvailable === true : existing!.solAvailable,
     proAvailable: detectCapabilities ? inspected.proAvailable === true : existing!.proAvailable,
+    ...(detectCapabilities
+      ? {
+        ...(typeof inspected.gpt55Available === "boolean" ? { gpt55Available: inspected.gpt55Available } : {}),
+        ...(typeof inspected.solPinAvailable === "boolean" ? { solPinAvailable: inspected.solPinAvailable } : {}),
+      }
+      : {
+        ...(existing?.gpt55Available !== undefined ? { gpt55Available: existing.gpt55Available } : {}),
+        ...(existing?.solPinAvailable !== undefined ? { solPinAvailable: existing.solPinAvailable } : {}),
+      }),
   };
 }
 
@@ -503,10 +513,14 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     );
     solAvailable = capabilities.solAvailable;
     proAvailable = capabilities.proAvailable;
+    if (capabilities.gpt55Available !== undefined) config.gpt55Available = capabilities.gpt55Available;
+    if (capabilities.solPinAvailable !== undefined) config.solPinAvailable = capabilities.solPinAvailable;
   } else {
     const stored = storedBrowserLoginCapabilities(config);
     solAvailable = stored.solAvailable;
     proAvailable = stored.proAvailable;
+    if (stored.gpt55Available !== undefined) config.gpt55Available = stored.gpt55Available;
+    if (stored.solPinAvailable !== undefined) config.solPinAvailable = stored.solPinAvailable;
     const loginRequired = options.forceLogin || !browserLoginStateExists(config);
     const capabilityProbeRequired = !loginRequired
       && (options.refreshAccountCapabilities === true
@@ -524,11 +538,15 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
       const login = await loginToChatGpt(config);
       solAvailable = login.solAvailable;
       proAvailable = login.proAvailable;
+      if (login.gpt55Available !== undefined) config.gpt55Available = login.gpt55Available;
+      if (login.solPinAvailable !== undefined) config.solPinAvailable = login.solPinAvailable;
       loginCreated = true;
     } else if (capabilityProbeRequired) {
       const inspected = await inspectBrowserLoginCapabilities(config);
       solAvailable = inspected.solAvailable;
       proAvailable = inspected.proAvailable;
+      if (inspected.gpt55Available !== undefined) config.gpt55Available = inspected.gpt55Available;
+      if (inspected.solPinAvailable !== undefined) config.solPinAvailable = inspected.solPinAvailable;
     }
   }
   config.solAvailable = solAvailable === true;
@@ -602,8 +620,12 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
     launcherOwned && existing && existing.browserHost !== "launcher",
   );
   if (!migratingTerminalRuntime) removeLegacyRuntimeArtifacts(config);
+  const modelCatalog = await resolveMergedCodexDesktopCatalog(config, {
+    preferLocalBridge: !launcherOwned,
+  });
   installCodexIntegration(config, {
     replaceExistingRoute: options.replaceCodexRoute,
+    ...(modelCatalog ? { modelCatalog } : {}),
   });
 
   return {
@@ -644,6 +666,8 @@ export async function setupDevProfile(options: SetupOptions): Promise<DevProfile
     );
     config.solAvailable = capabilities.solAvailable;
     config.proAvailable = capabilities.solAvailable && capabilities.proAvailable;
+    if (capabilities.gpt55Available !== undefined) config.gpt55Available = capabilities.gpt55Available;
+    if (capabilities.solPinAvailable !== undefined) config.solPinAvailable = capabilities.solPinAvailable;
   }
 
   const explicitTunnelChange = Boolean(options.tunnelId || options.runtimeKeyFile || options.runtimeKeyValue);

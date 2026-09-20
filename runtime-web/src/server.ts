@@ -24,6 +24,7 @@ import { readJsonRequestBody } from "./http-body";
 import { httpStatusFromTerminalError } from "./lib/errors";
 import { createHash } from "node:crypto";
 import { augmentNativeModelCatalog } from "./model-catalog";
+import { persistCodexDesktopModelCatalog } from "./codex-desktop-catalog";
 import {
   readCodexModelContextOverride,
   readCodexSubagentProtocol,
@@ -33,6 +34,7 @@ import {
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   isChatGptWebModelSlug,
   requireChatGptWebModelRoute,
+  resolveChatGptWebRoutedAdapterEffort,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
 import { forwardNativeCodexRequest, type NativeFetch, type NativeImageEndpoint } from "./native-passthrough";
@@ -374,11 +376,8 @@ export interface ResponseRequestOptions {
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
   const route = requireChatGptWebModelRoute(parsed.modelId, config);
   parsed.modelId = route.backendModel;
-  // Zero Risk preserves a distinct backend identity. Its immutable Codex effort is only a
-  // protocol/catalog value; the manual adapter must never reinterpret it as a ChatGPT selection.
-  parsed.options.reasoning = route.interactionMode === "automatic"
-    ? route.adapterEffort
-    : route.codexEffort;
+  parsed.options.reasoning = resolveChatGptWebRoutedAdapterEffort(route, parsed.options.reasoning, config);
+  parsed._webPin = route.interactionMode === "automatic" ? route.webPin : undefined;
   return route;
 }
 
@@ -407,6 +406,11 @@ export async function modelsRequest(
     })();
     if (routerConnection) {
       catalog = await augmentWithCodexRouterModels(catalog, config, routerConnection);
+    }
+    try {
+      persistCodexDesktopModelCatalog(catalog);
+    } catch {
+      // Refreshing ~/.codex/chatgpt-web-model-catalog.json must not fail the live /v1/models route.
     }
   } catch (error) {
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));

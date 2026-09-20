@@ -57,21 +57,34 @@ try {
     }>;
   };
   const web = catalog.models?.filter(model => model.slug?.startsWith("chatgpt-web/")) ?? [];
-  const expected = CHATGPT_WEB_MODEL_ROUTES.map(route => ({ slug: route.slug, effort: route.codexEffort }));
-  const actual = web.map(model => ({
-    slug: model.slug,
-    effort: Array.isArray(model.supported_reasoning_levels)
-      ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort).join(",")
-      : "",
-  }));
+  const natives = catalog.models?.filter(model => model.slug && !model.slug.startsWith("chatgpt-web/") && !model.slug.startsWith("codex-router/")) ?? [];
+  if (natives.length < 1) {
+    throw new Error(`Codex dropped native models from the merged catalog: ${JSON.stringify(catalog.models?.map(model => model.slug))}`);
+  }
+  const expected = CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug);
+  const actual = web.map(model => model.slug);
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`Codex did not preserve the fixed ChatGPT Web model contract: ${JSON.stringify(actual)}`);
+    throw new Error(`Codex did not preserve ChatGPT Web slugs: ${JSON.stringify(actual)}`);
+  }
+  for (const model of web) {
+    const efforts = Array.isArray(model.supported_reasoning_levels)
+      ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort)
+      : [];
+    if (efforts.includes("max")) {
+      throw new Error(`ChatGPT Web model ${model.slug} must not advertise max: ${efforts.join(",")}`);
+    }
+    if (model.slug === "chatgpt-web/latest" && !efforts.includes("pro")) {
+      throw new Error(`Web Latest must expose picker effort pro: ${efforts.join(",")}`);
+    }
+    if (model.slug !== "chatgpt-web/latest" && efforts.includes("pro")) {
+      throw new Error(`Pinned Web model ${model.slug} must not expose Pro: ${efforts.join(",")}`);
+    }
   }
   const nativeSol = catalog.models?.find(model => model.slug === "gpt-5.6-sol");
-  const webPro = catalog.models?.find(model => model.slug === "chatgpt-web/pro");
-  if (nativeSol?.multi_agent_version !== "v1" || webPro?.multi_agent_version !== "v1") {
+  const webLatest = catalog.models?.find(model => model.slug === "chatgpt-web/latest");
+  if (nativeSol?.multi_agent_version !== "v1" || webLatest?.multi_agent_version !== "v1") {
     throw new Error(
-      `Codex did not preserve Compatibility V1 catalog metadata: ${JSON.stringify({ nativeSol, webPro })}`,
+      `Codex did not preserve Compatibility V1 catalog metadata: ${JSON.stringify({ nativeSol, webLatest })}`,
     );
   }
   const features = runCodex(["features", "list"], isolatedEnv).stdout;
@@ -86,7 +99,7 @@ try {
     .map(model => model.slug);
   const expectedSpawnOverrides = [
     "gpt-5.6-sol",
-    ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+    ...CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug),
   ];
   if (JSON.stringify(spawnOverrides) !== JSON.stringify(expectedSpawnOverrides)) {
     throw new Error(`Codex did not preserve the bounded V1 subagent roster: ${JSON.stringify(spawnOverrides)}`);

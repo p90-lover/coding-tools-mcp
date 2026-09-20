@@ -7,6 +7,7 @@ import {
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
+  matchChatGptWebModelPin,
 } from "../src/chatgpt-session";
 
 test("composer and effort selectors exclude unrelated editable fields and menu buttons", () => {
@@ -177,7 +178,12 @@ test("a complete authenticated composer with no effort selector is Luna-only", a
   await expect(detectChatGptAccountCapabilities(page as never, {
     selectorTimeoutMs: 100,
     stableAbsenceMs: 0,
-  })).resolves.toEqual({ solAvailable: false, proAvailable: false });
+  })).resolves.toEqual({
+    solAvailable: false,
+    proAvailable: false,
+    gpt55Available: false,
+    solPinAvailable: false,
+  });
 });
 
 test("a transient effort control does not turn a Luna-only account into Sol", async () => {
@@ -207,7 +213,12 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   await expect(detectChatGptAccountCapabilities(page as never, {
     selectorTimeoutMs: 100,
     stableAbsenceMs: 0,
-  })).resolves.toEqual({ solAvailable: false, proAvailable: false });
+  })).resolves.toEqual({
+    solAvailable: false,
+    proAvailable: false,
+    gpt55Available: false,
+    solPinAvailable: false,
+  });
   expect(visibilityReads).toBe(2);
 });
 
@@ -244,7 +255,21 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
     getAttribute: async (name: string) => name === "aria-expanded" ? "true" : null,
   };
   const composer = { filter() { return this; }, last() { return this; }, locator: () => ({ locator: () => control }) };
-  const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
+  const chips = [
+    { label: "Auto" },
+    { label: "GPT-5.6 Sol" },
+    { label: "GPT-5.5" },
+  ];
+  const modelRows = {
+    count: async () => chips.length,
+    first() { return this; },
+    waitFor: async () => {},
+    nth: (index: number) => ({
+      innerText: async () => chips[index]?.label ?? "",
+      getAttribute: async () => null,
+      click: async () => {},
+    }),
+  };
   const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows };
   const page = {
     locator: (selector: string) => {
@@ -260,7 +285,12 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
 
 test.each([0, 50])("capabilities wait for the visible container and read its hidden semantic input (delay=%s)", async delay => {
   const fixture = reasoningPicker({ delay });
-  await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({ solAvailable: true, proAvailable: true });
+  await expect(detectChatGptAccountCapabilities(fixture.page as never)).resolves.toEqual({
+    solAvailable: true,
+    proAvailable: true,
+    gpt55Available: true,
+    solPinAvailable: true,
+  });
 });
 
 test("an absent effort slider cannot turn three model rows into a saved non-Pro capability", async () => {
@@ -269,7 +299,12 @@ test("an absent effort slider cannot turn three model rows into a saved non-Pro 
 });
 
 test("the authoritative three-step range is non-Pro; a malformed range fails closed", async () => {
-  await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "2" }).page as never)).resolves.toEqual({ solAvailable: true, proAvailable: false });
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "2" }).page as never)).resolves.toEqual({
+    solAvailable: true,
+    proAvailable: false,
+    gpt55Available: true,
+    solPinAvailable: true,
+  });
   await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "bad" }).page as never)).rejects.toThrow("model controls are unavailable");
 });
 
@@ -281,4 +316,16 @@ test("Pro selection changes the hidden slider through its visible owner, never t
   await select.call({ activeComposer: async () => fixture.composer }, fixture.page, "gpt-5.6-sol", "max", { localToolsEnabled: false, solAvailable: true, proAvailable: true });
   expect(fixture.keys).toEqual(["ArrowRight", "ArrowRight", "ArrowRight", "ArrowRight"]);
   expect(fixture.value()).toBe(4);
+});
+
+test.each([
+  ["GPT-5.5", "gpt-5.5"],
+  ["ChatGPT 5.5", "gpt-5.5"],
+  ["GPT-5.6 Sol", "sol"],
+  ["5.6 Sol", "sol"],
+  ["Auto", "latest"],
+  ["Latest", "latest"],
+  ["GPT-6 Pro", undefined],
+] as const)("maps ChatGPT model-chip label %j to pin %j", (label, pin) => {
+  expect(matchChatGptWebModelPin(label)).toBe(pin);
 });

@@ -12,7 +12,9 @@ editing Codex configuration, or opening a new issue.
    **Repair Codex setup**) are green.
 3. Fully quit Codex, including its background process, and reopen it. Signing out, closing only the
    window, or starting another task does not reload the model catalog. Keep the launcher open.
-4. Select a **ChatGPT Web — …** model from Codex's model picker.
+4. Select **Web Latest**, **Web GPT-5.6 Sol**, or **Web GPT-5.5** from Codex's model picker
+   (Free/Go: **ChatGPT Web — Luna**). Effort is the Codex effort bar, not a separate Instant/Deep/Pro
+   model row.
 5. Run **Settings → Run doctor**. If the problem remains, reproduce it once and immediately use
    **Activity → Export safe log**.
 

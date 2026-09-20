@@ -6,6 +6,7 @@ import { installCodexInterruptHook, installCodexInterruptHookCommand } from "./c
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
   getCodexConfigPath,
+  getCodexDesktopModelCatalogPath,
   getCodexJournalPath,
   getCodexJournalRecoveryPath,
   getCodexModelsCachePath,
@@ -33,9 +34,16 @@ import { assertJournalTargetsConfig, readJournal } from "./codex-integration-jou
 import {
   findTopLevelAssignment,
   installCompatibilityV1Features,
+  readCodexModelContextOverride,
   splitLines,
   textFormat,
 } from "./codex-integration-document";
+import { readNativeCatalogFromModelsCache } from "./codex-desktop-catalog";
+import {
+  augmentNativeModelCatalog,
+  isMergedCodexDesktopCatalog,
+  serializeCodexDesktopModelCatalog,
+} from "./model-catalog";
 import {
   assertPreservedPreviousAssignments,
   assertPreservedPreviousRealtimeAssignment,
@@ -57,6 +65,7 @@ function installConfiguredRoute(
   ),
   replaceExistingRoute: boolean,
   replaceExistingRealtimeRoute: boolean,
+  catalogPath?: string,
 ): {
   text: string;
   previous: CodexIntegrationJournal["previous"];
@@ -72,6 +81,7 @@ function installConfiguredRoute(
     installedUrl,
     replaceExistingRoute,
     replaceExistingRealtimeRoute,
+    catalogPath,
   );
   const configured = config.subagentProtocol === "compatibility-v1"
     ? (() => {
@@ -99,8 +109,49 @@ function journalProtocol(journal: Exclude<AnyCodexIntegrationJournal, { version:
     : "native";
 }
 
+function materializeDesktopCatalog(
+  config: AppConfig,
+  provided?: Record<string, unknown>,
+): { path: string; data: string } | undefined {
+  let catalog = provided && isMergedCodexDesktopCatalog(provided) ? provided : undefined;
+  if (!catalog) {
+    const cached = readNativeCatalogFromModelsCache();
+    if (!cached) return undefined;
+    try {
+      const augmented = augmentNativeModelCatalog(cached, config, readCodexModelContextOverride());
+      catalog = isMergedCodexDesktopCatalog(augmented) ? augmented : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (!catalog) return undefined;
+  return {
+    path: getCodexDesktopModelCatalogPath(),
+    data: serializeCodexDesktopModelCatalog(catalog),
+  };
+}
+
+function existingDesktopCatalogWrite(
+  config: AppConfig,
+  provided?: Record<string, unknown>,
+): { path: string; data: string } | undefined {
+  const built = materializeDesktopCatalog(config, provided);
+  if (built) return built;
+  const path = getCodexDesktopModelCatalogPath();
+  if (!existsSync(path)) return undefined;
+  try {
+    const data = readFileSync(path, "utf8");
+    return isMergedCodexDesktopCatalog(JSON.parse(data))
+      ? { path, data: data.endsWith("\n") ? data : `${data}\n` }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export {
   getCodexConfigPath,
+  getCodexDesktopModelCatalogPath,
   getCodexHome,
   getCodexJournalPath,
   getCodexJournalRecoveryPath,
@@ -141,6 +192,7 @@ export function setCodexSubagentProtocol(
     getConfigPath(),
     getCodexConfigPath(),
     getCodexModelsCachePath(),
+    getCodexDesktopModelCatalogPath(),
     getCodexJournalPath(),
     getCodexJournalRecoveryPath(),
   ].map(path => snapshotFile(path, { followSymlink: path === getCodexConfigPath() }));
@@ -236,6 +288,8 @@ export function installCodexIntegration(
   const currentText = configExists ? readFileSync(configPath, "utf8") : "";
   const existing = readJournal();
   const installedUrl = routeUrl(config);
+  const catalogWrite = existingDesktopCatalogWrite(config, options.modelCatalog);
+  const catalogPath = catalogWrite?.path;
   if (existing) assertJournalTargetsConfig(existing, configPath);
 
   const hasManagedJournal = Boolean(existing && existing.version !== 2);
@@ -262,6 +316,7 @@ export function installCodexIntegration(
       config,
       true,
       !preservePrevious || existing.version === 9 || existing.version === 10 || options.replaceExistingRoute === true,
+      catalogPath,
     );
     if (preservePrevious) {
       assertPreservedPreviousAssignments(patched.previous, existing.previous);
@@ -283,6 +338,7 @@ export function installCodexIntegration(
         ...(config.subagentProtocol === "compatibility-v1" ? {
           agent_max_depth: patched.installedAgentMaxDepth,
         } : {}),
+        ...(catalogPath ? { model_catalog_json: catalogPath } : {}),
       },
       previous: preservePrevious ? existing.previous : patched.previous,
       previousRealtimeWebrtcCallBaseUrl: preservePrevious && (existing.version === 9 || existing.version === 10)
@@ -296,7 +352,12 @@ export function installCodexIntegration(
       } : {}),
       ...(existing.format ? { format: existing.format } : {}),
     };
-    writeIntegrationState(updated, { path: configPath, data: patched.text }, [getCodexModelsCachePath()]);
+    writeIntegrationState(
+      updated,
+      { path: configPath, data: patched.text },
+      [getCodexModelsCachePath()],
+      catalogWrite ? [catalogWrite] : [],
+    );
     return updated;
   }
 
@@ -313,6 +374,7 @@ export function installCodexIntegration(
     config,
     options.replaceExistingRoute === true,
     options.replaceExistingRoute === true,
+    catalogPath,
   );
   const journal: CodexIntegrationJournal = {
     version: 10,
@@ -325,6 +387,7 @@ export function installCodexIntegration(
       ...(config.subagentProtocol === "compatibility-v1" ? {
         agent_max_depth: patched.installedAgentMaxDepth,
       } : {}),
+      ...(catalogPath ? { model_catalog_json: catalogPath } : {}),
     },
     previous: patched.previous,
     previousRealtimeWebrtcCallBaseUrl: patched.previousRealtimeWebrtcCallBaseUrl,
@@ -336,7 +399,12 @@ export function installCodexIntegration(
     } : {}),
     format: textFormat(baseline),
   };
-  writeIntegrationState(journal, { path: configPath, data: patched.text }, [getCodexModelsCachePath()]);
+  writeIntegrationState(
+    journal,
+    { path: configPath, data: patched.text },
+    [getCodexModelsCachePath()],
+    catalogWrite ? [catalogWrite] : [],
+  );
   if (existing?.version === 2 && existsSync(existing.catalogPath)) rmSync(existing.catalogPath);
   return journal;
 }
@@ -395,12 +463,21 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   const hookConfig = existing.version === 10
     ? { interruptHookCommand: existing.interruptHook.command }
     : { runtimeCommand: loadConfig().runtimeCommand };
+  let catalogWrite: { path: string; data: string } | undefined;
+  try {
+    catalogWrite = existingDesktopCatalogWrite(loadConfig());
+  } catch {
+    catalogWrite = undefined;
+  }
+  const catalogPath = catalogWrite?.path
+    ?? (existing.version === 10 ? existing.installed.model_catalog_json : undefined);
   const route = installConfiguredRoute(
     baseline,
     existing.installed.openai_base_url,
     { subagentProtocol: protocol, ...hookConfig },
     true,
     existing.version === 9 || existing.version === 10,
+    catalogPath,
   );
   assertPreservedPreviousAssignments(route.previous, existing.previous);
   if (existing.version === 9 || existing.version === 10) {
@@ -420,6 +497,7 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
       ...(protocol === "compatibility-v1" ? {
         agent_max_depth: route.installedAgentMaxDepth,
       } : {}),
+      ...(catalogPath ? { model_catalog_json: catalogPath } : {}),
     },
     previous: existing.previous,
     previousRealtimeWebrtcCallBaseUrl: existing.version === 9 || existing.version === 10
@@ -433,7 +511,12 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
     } : {}),
     ...(existing.format ? { format: existing.format } : {}),
   };
-  writeIntegrationState(connected, { path: existing.configPath, data: route.text }, [getCodexModelsCachePath()]);
+  writeIntegrationState(
+    connected,
+    { path: existing.configPath, data: route.text },
+    [getCodexModelsCachePath()],
+    catalogWrite ? [catalogWrite] : [],
+  );
   return { changed: true, active: true };
 }
 
@@ -456,18 +539,35 @@ export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   }
   const configSnapshot = snapshotFile(journal.configPath, { followSymlink: true });
   const catalogSnapshot = journal.version === 2 ? snapshotFile(journal.catalogPath) : undefined;
+  const managedDesktopCatalogPath = journal.version === 10 ? journal.installed.model_catalog_json : undefined;
+  const removeManagedDesktopCatalog = Boolean(
+    managedDesktopCatalogPath
+    && managedDesktopCatalogPath === getCodexDesktopModelCatalogPath()
+    && journal.previous.model_catalog_json.value !== managedDesktopCatalogPath,
+  );
+  const desktopCatalogSnapshot = removeManagedDesktopCatalog
+    ? snapshotFile(managedDesktopCatalogPath!)
+    : undefined;
   const modelsCacheSnapshot = snapshotFile(getCodexModelsCachePath());
   const journalSnapshot = snapshotFile(getCodexJournalPath());
   const recoverySnapshot = snapshotFile(getCodexJournalRecoveryPath());
   try {
     writeFileSnapshot(configSnapshot, restored);
     if (catalogSnapshot?.exists) rmSync(catalogSnapshot.path);
+    if (desktopCatalogSnapshot) rmSync(desktopCatalogSnapshot.path, { force: true });
     rmSync(modelsCacheSnapshot.path, { force: true });
     rmSync(getCodexJournalPath(), { force: true });
     rmSync(getCodexJournalRecoveryPath(), { force: true });
   } catch (error) {
     const rollbackFailures: string[] = [];
-    for (const snapshot of [recoverySnapshot, journalSnapshot, modelsCacheSnapshot, catalogSnapshot, configSnapshot]) {
+    for (const snapshot of [
+      recoverySnapshot,
+      journalSnapshot,
+      modelsCacheSnapshot,
+      desktopCatalogSnapshot,
+      catalogSnapshot,
+      configSnapshot,
+    ]) {
       if (!snapshot) continue;
       try {
         restoreFileSnapshot(snapshot);
