@@ -116,7 +116,8 @@ test("mergeAppsCatalog does not invent loopback-port MCP tools", () => {
 
 test("desktop shell and MCP catalog share the in-process apps overlay", () => {
   const main = read("electron/main.cjs");
-  const panel = read("src/features/InProcessAppsPanel.tsx");
+  const panel = read("src/features/InstantMcpToolsSurface.tsx");
+  const appsPanel = read("src/features/InProcessAppsPanel.tsx");
   const app = read("src/App.tsx");
   const i18n = read("src/i18n.ts");
   const readme = readRepo("app-handler/README.md");
@@ -125,14 +126,15 @@ test("desktop shell and MCP catalog share the in-process apps overlay", () => {
   assert.match(main, /mergeAppsCatalog/);
   assert.match(main, /appsMcp\.hasTool/);
   assert.match(main, /appsMcp\.callTool/);
-  assert.match(app, /<InProcessAppsPanel/);
+  assert.match(app, /<InstantMcpToolsSurface/);
   assert.match(app, /SidebarGroup label=\{copy\.workspace\}/);
   assert.match(app, /label="MCP"/);
   assert.doesNotMatch(app, /FiveStackLoopbackPanel/);
-  assert.match(panel, /getCodingToolsClient\(\)/);
   assert.match(panel, /client\.apps\.list/);
-  assert.match(panel, /client\.apps\.call/);
-  assert.match(panel, /client\.apps\.invoke/);
+  assert.match(panel, /<InProcessAppsPanel/);
+  assert.match(panel, /<McpLiveToolsPanel/);
+  assert.match(appsPanel, /client\.apps\.call/);
+  assert.match(appsPanel, /client\.apps\.invoke/);
   assert.match(i18n, /127\.0\.0\.1:17891/);
   assert.doesNotMatch(i18n, /:7890/);
   assert.match(readme, /apps_list/);

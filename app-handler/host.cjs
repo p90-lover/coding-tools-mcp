@@ -10,6 +10,10 @@ const MODULE_IDS = Object.freeze([
   "paseo",
   "anneal",
 ]);
+// TODO(Bot GG): register `instant-mcp-tools` here + app-handler/instant-mcp-tools/
+// when the in-process apps handler lands. Expected ops: inspect, list-tools, run-tool.
+// Transport: in-process. No dedicated listen port / Start. UI lane already hosts
+// Instant MCP Tools as a Managed App visual. apps_list and tools.call already exist.
 
 function createCodingToolsAppsHost({
   services = null,
