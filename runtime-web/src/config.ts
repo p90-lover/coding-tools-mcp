@@ -4,8 +4,10 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  CHATGPT_WEB_GPT55_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
+  chatgptWebGpt55Enabled,
 } from "./chatgpt-web-models";
 import type { CodexProviderConfig } from "./types";
 import { VERSION } from "./version";
@@ -84,6 +86,10 @@ export interface AppConfig {
   solAvailable: boolean;
   proAvailable: boolean;
   experimentalBiggerContext: boolean;
+  /** Proven ChatGPT 5.5 chip. Undefined means not yet probed; listed for Sol accounts. */
+  gpt55Available?: boolean;
+  /** Proven ChatGPT 5.6 Sol chip. Undefined means not yet probed; listed for Sol accounts. */
+  solPinAvailable?: boolean;
   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
   zeroRiskProEnabled: boolean;
   /** Optional adapter-silence budget for the Responses watchdog. */
@@ -486,6 +492,12 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (parsed.solAvailable !== undefined && typeof parsed.solAvailable !== "boolean") {
     throw new Error(`Invalid solAvailable in ${path}`);
   }
+  if (parsed.gpt55Available !== undefined && typeof parsed.gpt55Available !== "boolean") {
+    throw new Error(`Invalid gpt55Available in ${path}`);
+  }
+  if (parsed.solPinAvailable !== undefined && typeof parsed.solPinAvailable !== "boolean") {
+    throw new Error(`Invalid solPinAvailable in ${path}`);
+  }
   if (parsed.experimentalBiggerContext !== undefined
     && typeof parsed.experimentalBiggerContext !== "boolean") {
     throw new Error(`Invalid experimentalBiggerContext in ${path}`);
@@ -537,12 +549,16 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
       ...(config.zeroRiskProEnabled ? [CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL] : []),
     ]
-    : [model];
+    : [
+      model,
+      ...(!manual && chatgptWebGpt55Enabled(config) ? [CHATGPT_WEB_GPT55_BACKEND_MODEL] : []),
+    ];
   const efforts = manual
     ? ["low"]
     : config.solAvailable
     ? ["low", "medium", "high", "xhigh", ...(config.proAvailable ? ["max"] : [])]
     : ["low", "medium"];
+  const gpt55Efforts = ["low", "medium", "high"];
   return {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
@@ -551,7 +567,10 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     defaultModel: model,
     contextWindow: config.contextWindow,
     modelInputModalities: Object.fromEntries(models.map(model => [model, manual ? ["text"] : ["text", "image"]])),
-    modelReasoningEfforts: Object.fromEntries(models.map(modelId => [modelId, efforts])),
+    modelReasoningEfforts: Object.fromEntries(models.map(modelId => [
+      modelId,
+      modelId === CHATGPT_WEB_GPT55_BACKEND_MODEL ? gpt55Efforts : efforts,
+    ])),
     modelDefaultReasoningEfforts: Object.fromEntries(
       models.map(modelId => [modelId, manual ? "low" : config.solAvailable ? "high" : "low"]),
     ),
@@ -570,6 +589,8 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       localToolsEnabled: config.mode === "full",
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
+      ...(config.gpt55Available !== undefined ? { gpt55Available: manual ? false : config.gpt55Available } : {}),
+      ...(config.solPinAvailable !== undefined ? { solPinAvailable: manual ? false : config.solPinAvailable } : {}),
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: manual ? false : config.autoApproveToolCalls,

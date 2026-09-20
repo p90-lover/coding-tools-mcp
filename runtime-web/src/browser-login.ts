@@ -17,6 +17,8 @@ export interface BrowserLoginResult {
   accountSurfaceUrl: string;
   solAvailable: boolean;
   proAvailable: boolean;
+  gpt55Available?: boolean;
+  solPinAvailable?: boolean;
 }
 
 export type BrowserLoginStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
@@ -44,6 +46,8 @@ interface LoginVerificationMarker {
   verifiedAt: string;
   solAvailable?: boolean;
   proAvailable?: boolean;
+  gpt55Available?: boolean;
+  solPinAvailable?: boolean;
 }
 
 const SYSTEM_LOGIN_TIMEOUT_MS = 10 * 60_000;
@@ -181,7 +185,12 @@ export async function inspectBrowserLoginCapabilities(config: AppConfig): Promis
   if (!browserLoginStateExists(config)) throw new Error("ChatGPT login state is missing or unverified");
   const inspected = await inspectStoredState(config, config.storageStatePath);
   writeVerificationMarker(config.storageStatePath, inspected);
-  return { solAvailable: inspected.solAvailable, proAvailable: inspected.proAvailable };
+  return {
+    solAvailable: inspected.solAvailable,
+    proAvailable: inspected.proAvailable,
+    ...(typeof inspected.gpt55Available === "boolean" ? { gpt55Available: inspected.gpt55Available } : {}),
+    ...(typeof inspected.solPinAvailable === "boolean" ? { solPinAvailable: inspected.solPinAvailable } : {}),
+  };
 }
 
 export function storedBrowserLoginCapabilities(
@@ -193,6 +202,8 @@ export function storedBrowserLoginCapabilities(
     return {
       ...(typeof marker.solAvailable === "boolean" ? { solAvailable: marker.solAvailable } : {}),
       ...(typeof marker.proAvailable === "boolean" ? { proAvailable: marker.proAvailable } : {}),
+      ...(typeof marker.gpt55Available === "boolean" ? { gpt55Available: marker.gpt55Available } : {}),
+      ...(typeof marker.solPinAvailable === "boolean" ? { solPinAvailable: marker.solPinAvailable } : {}),
     };
   } catch {
     return {};
@@ -427,6 +438,8 @@ export async function loginToChatGpt(
       accountSurfaceUrl: page.url(),
       solAvailable: inspected.solAvailable,
       proAvailable: inspected.proAvailable,
+      ...(typeof inspected.gpt55Available === "boolean" ? { gpt55Available: inspected.gpt55Available } : {}),
+      ...(typeof inspected.solPinAvailable === "boolean" ? { solPinAvailable: inspected.solPinAvailable } : {}),
     };
   } finally {
     await context.close();

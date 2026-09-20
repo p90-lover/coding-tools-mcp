@@ -357,7 +357,7 @@ function usageOf(response: ResponsesEnvelope): DevChatUsage {
 
 export function defaultDevChatModel(config: AppConfig): DevChatModel {
   if (config.browserInteractionMode === "manual") return "chatgpt-web/zero-risk";
-  return config.solAvailable ? "chatgpt-web/light" : "chatgpt-web/luna";
+  return config.solAvailable ? "chatgpt-web/latest" : "chatgpt-web/luna";
 }
 
 function isLunaDevChatModel(model: DevChatModel): boolean {

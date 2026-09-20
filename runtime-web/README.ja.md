@@ -24,7 +24,9 @@
 
 Free および Go アカウントでは、Codex のネイティブモデル選択画面に
 **ChatGPT Web — Luna** が追加されます。reasoning セレクターが表示されるアカウントでは、
-サブスクリプションで利用可能な **Instant**、**Medium**、**High**、**Extra High**、**Pro** を使用できます。
+Instant/Deep/Pro をタイトルに焼き込まず、**Web Latest**（ChatGPT 自動：Pro effort は GPT-6 Pro、
+それ以外は GPT-5.6 Sol）、**Web GPT-5.6 Sol**（ピン留め）、ChatGPT メニューにチップがある場合の
+**Web GPT-5.5** を別行で表示します。Effort は Codex の effort バーに残します。
 ブリッジは、コンパイル済みの現在の Codex タスクコンテキストを新しい ChatGPT 一時チャットへ送り、
 画像を添付し、表示される reasoning、ツールアクティビティ、Markdown を同じ Codex タスクへストリーミングします。
 
@@ -91,7 +93,7 @@ irm https://github.com/miuuyy/codex-chatgpt-web/releases/latest/download/install
 1. ランチャー内蔵の ChatGPT ブラウザーで直接サインインします。ログインページと ID プロバイダーの
    ウィンドウは、同じランチャー管理の非公開ブラウザープロファイル内に保持されます。ブラウザー間でセッションをコピーしません。
 2. ブラウザーのスモークテストを実行します。
-3. **モデルをインストール**を押し、Codex を一度再起動して、**ChatGPT Web — …** モデルを選択します。
+3. **モデルをインストール**を押し、Codex を一度再起動して、**Web Latest**、**Web GPT-5.6 Sol**、または **Web GPT-5.5**（Sol アカウント）か **ChatGPT Web — Luna**（Free/Go）を選択します。
 
 セットアップ時に、ランチャーが現在のアカウントの ChatGPT コントロールを検出します。
 Free/Go アカウントでは Luna のみが表示され、Pro はサインイン中のアカウントで利用可能な場合にのみ表示されます。
@@ -115,13 +117,15 @@ bun run app
 
 | モード | モデル | ローカル Codex ツール | 追加設定 |
 | --- | --- | --- | --- |
-| **Browser-only** | Free/Go: Luna、Plus: Instant～High、Pro: Extra High と Pro を追加 | なし。Codex が警告を表示 | なし |
-| **Full harness** | Free/Go: Luna、Plus: Instant～High、Pro: Extra High と Pro を追加 | Pro を含むすべての表示 effort で使用可能 | OpenAI トンネル + ChatGPT コネクタ |
+| **Browser-only** | Free/Go: Luna。Plus/Pro: Web Latest、Web GPT-5.6 Sol、ChatGPT が露出する場合は Web GPT-5.5。Latest の effort バーは Plus で Instant～High、Pro で Instant～Pro。Sol ピンは Pro なし、5.5 ピンは Extra High と Pro なし。 | なし。Codex が警告を表示 | なし |
+| **Full harness** | Browser-only と同じ Web 行 | Web Latest の Pro を含むすべての表示 effort で使用可能 | OpenAI トンネル + ChatGPT コネクタ |
 
-モデル選択画面の各項目は、1 つの固定 ChatGPT モードに対応します。Codex には内蔵の Effort と Speed 行も表示されますが、
-それらを変更しても、選択済みのブラウザーモデルが黙って切り替わることはありません。
-Full モードでは、利用可能なすべての effort が同じターン紐付き MCP capability を受け取ります。
-Pro 専用の制限や縮小されたツール契約はありません。
+Sol アカウントのピッカー行は ChatGPT の **モデルピン** であり、Instant/Deep/Pro を表示名に含めません。
+**Web Latest** は ChatGPT の auto/latest チップを残し、Codex effort を Web の effort 操作へマップします
+（Pro → GPT-6 Pro、それ以外 → GPT-5.6 Sol）。**Web GPT-5.6 Sol** と **Web GPT-5.5** は先に対応チップをクリックします。
+旧 slug `chatgpt-web/light`〜`chatgpt-web/pro` はリクエスト可能のまま、`/v1/models` と Desktop カタログからは隠します。
+ネイティブ Codex モデルは変更しません。Full モードでは、利用可能なすべての effort が同じターン紐付き
+MCP capability を受け取ります。Pro 専用の制限や縮小されたツール契約はありません。
 
 ## Full ハーネス
 

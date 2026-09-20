@@ -66,6 +66,7 @@ test("Luna-only capability binds the default model without a UI effort selector"
     uiEffortIndex: null,
     thinkEnabled: false,
     localTools: true,
+    webPin: undefined,
   });
   expect(resolveChatGptWebModelMode(CHATGPT_WEB_LUNA_MODEL_ID, "medium", {
     localToolsEnabled: true,
@@ -78,10 +79,31 @@ test("Luna-only capability binds the default model without a UI effort selector"
     uiEffortIndex: null,
     thinkEnabled: true,
     localTools: true,
+    webPin: undefined,
   });
   expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "low", {
     localToolsEnabled: false,
     solAvailable: false,
     proAvailable: false,
   })).toThrow("Luna-only account");
+});
+
+test("pinned Sol and GPT-5.5 modes reject ChatGPT Pro and Extra High as the app picker does", () => {
+  const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+  expect(resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "high", capabilities, "sol")).toMatchObject({
+    webPin: "sol",
+    displayLabel: "High",
+    uiEffortIndex: 2,
+  });
+  expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_MODEL_ID, "max", capabilities, "sol"))
+    .toThrow("not available on the GPT-5.6 Sol pin");
+  expect(resolveChatGptWebModelMode("gpt-5.5", "medium", capabilities, "gpt-5.5")).toMatchObject({
+    modelId: "gpt-5.5",
+    webPin: "gpt-5.5",
+    displayLabel: "Medium",
+  });
+  expect(() => resolveChatGptWebModelMode("gpt-5.5", "xhigh", capabilities, "gpt-5.5"))
+    .toThrow("not available on the GPT-5.5 pin");
+  expect(() => resolveChatGptWebModelMode("gpt-5.5", "max", capabilities, "gpt-5.5"))
+    .toThrow("not available on the GPT-5.5 pin");
 });

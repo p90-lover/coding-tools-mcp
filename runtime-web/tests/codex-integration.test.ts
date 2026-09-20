@@ -691,23 +691,25 @@ describe("reversible native Codex route integration", () => {
     };
     expect(catalog.models.map(model => model.slug)).toEqual([
       "gpt-5.6-sol",
-      "chatgpt-web/light",
-      "chatgpt-web/medium",
-      "chatgpt-web/high",
-      "chatgpt-web/extra-high",
-      "chatgpt-web/pro",
+      "chatgpt-web/latest",
+      "chatgpt-web/sol",
+      "chatgpt-web/gpt-5.5",
     ]);
-    const medium = catalog.models.find(model => model.slug === "chatgpt-web/medium")!;
-    expect(medium.display_name).toBe("Web GPT-6");
-    expect((medium.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
+    const latest = catalog.models.find(model => model.slug === "chatgpt-web/latest")!;
+    expect(latest.display_name).toBe("Web Latest");
+    expect((latest.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
       .toEqual(["low", "medium", "high", "xhigh", "pro"]);
-    expect((medium.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
+    expect((latest.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
       .not.toContain("max");
-    const pro = catalog.models.find(model => model.slug === "chatgpt-web/pro")!;
-    expect(pro.display_name).toBe("Web GPT-6 Pro");
-    expect(pro.default_reasoning_level).toBe("pro");
-    expect(medium.shell_type).toBe("shell_command");
-    expect(Object.keys(medium)).toEqual([
+    const sol = catalog.models.find(model => model.slug === "chatgpt-web/sol")!;
+    expect(sol.display_name).toBe("Web GPT-5.6 Sol");
+    expect((sol.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
+      .toEqual(["low", "medium", "high", "xhigh"]);
+    const gpt55 = catalog.models.find(model => model.slug === "chatgpt-web/gpt-5.5")!;
+    expect(gpt55.display_name).toBe("Web GPT-5.5");
+    expect(gpt55.default_reasoning_level).toBe("medium");
+    expect(latest.shell_type).toBe("shell_command");
+    expect(Object.keys(latest)).toEqual([
       "slug",
       "display_name",
       "description",
@@ -730,8 +732,8 @@ describe("reversible native Codex route integration", () => {
       "supports_parallel_tool_calls",
       "supports_reasoning_summaries",
     ]);
-    expect(medium).not.toHaveProperty("context_window");
-    expect(medium).not.toHaveProperty("tool_mode");
+    expect(latest).not.toHaveProperty("context_window");
+    expect(latest).not.toHaveProperty("tool_mode");
 
     uninstallCodexIntegration();
     expect(readFileSync(configPath, "utf8")).toBe('model = "gpt-5.6-sol"\n');

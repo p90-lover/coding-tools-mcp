@@ -403,7 +403,7 @@ export function chatGptReadOnlyContextWarning(
   capabilities: ChatGptWebCapabilities,
 ): string | undefined {
   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) return undefined;
-  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities, parsed._webPin);
   if (mode.localTools) return undefined;
   const label = mode.effort === "max" ? "ChatGPT Pro" : `ChatGPT Web ${mode.displayLabel}`;
   const hasLocalEvidence = parsed.context.messages.some(message =>
@@ -428,7 +428,7 @@ export function compileChatGptWebPrompt(
   const manualControl = options?.manualControl === true;
   const mode = manualControl
     ? { localTools: true, effort: "low" as const, displayLabel: "Zero Risk" as const }
-    : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+    : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities, parsed._webPin);
   const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
   const multipartParts = options?.experimentalMultipartParts;
   const multipartEnabled = multipartParts !== undefined;

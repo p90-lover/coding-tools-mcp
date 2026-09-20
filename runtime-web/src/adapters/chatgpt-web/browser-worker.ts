@@ -22,6 +22,7 @@ import {
   type ChatGptMarkdownSegment,
 } from "./markdown";
 import {
+  CHATGPT_WEB_GPT55_MODEL_ID,
   CHATGPT_WEB_LUNA_MODEL_ID,
   CHATGPT_WEB_MODEL_ID,
   resolveChatGptWebModelMode,
@@ -58,6 +59,7 @@ import {
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
   parseChatGptEffortSliderState,
+  selectChatGptWebModelPin,
 } from "../../chatgpt-session";
 import { loginVerificationMarkerPath } from "../../browser-login";
 import {
@@ -69,9 +71,11 @@ import {
   notifyLauncherTurn,
 } from "../../launcher-browser-host";
 import {
+  isChatGptWebPaidBackendModel,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
+  type ChatGptWebModelPin,
 } from "../../chatgpt-web-models";
 import { LauncherBrowserHelperClient } from "./launcher-helper-client";
 import { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
@@ -835,7 +839,7 @@ export function assertChatGptWebInputWithinLimits(
   capabilities: ChatGptWebCapabilities,
   promptChars?: number,
 ): void {
-  if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
+  if (!isChatGptWebPaidBackendModel(modelId) && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error(`ChatGPT web context limit is not defined for model: ${modelId}`);
   }
   if (
@@ -899,7 +903,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  if (modelId !== CHATGPT_WEB_MODEL_ID) {
+  if (!isChatGptWebPaidBackendModel(modelId)) {
     throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
   }
   const { contextWindow: baseContextWindow } = resolveChatGptWebContextLimits(
@@ -971,6 +975,7 @@ export function resolveChatGptWebMultipartStagingMode(
   capabilities: ChatGptWebCapabilities,
   maxStageMessageTokens: number,
   maxStageChars: number,
+  webPin?: ChatGptWebModelPin,
 ): ChatGptWebModelMode {
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || !capabilities.solAvailable) {
     throw new ChatGptWebAdapterError(
@@ -978,14 +983,16 @@ export function resolveChatGptWebMultipartStagingMode(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  if (modelId !== CHATGPT_WEB_MODEL_ID) {
+  if (!isChatGptWebPaidBackendModel(modelId)) {
     throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
   }
-  const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable
-    ? ["low", "medium", "max"]
-    : ["low", "medium"];
+  const efforts: readonly ChatGptWebModelMode["effort"][] = modelId === CHATGPT_WEB_GPT55_MODEL_ID || webPin === "sol" || webPin === "gpt-5.5"
+    ? ["low", "medium"]
+    : capabilities.proAvailable
+      ? ["low", "medium", "max"]
+      : ["low", "medium"];
   for (const effort of efforts) {
-    const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
+    const mode = resolveChatGptWebModelMode(modelId, effort, capabilities, webPin);
     const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
     const messageTokenLimit = resolveChatGptWebMessageTokenBudget(modelId, effort, capabilities);
     const tokenFits = maxStageMessageTokens <= messageTokenLimit;
@@ -1145,6 +1152,7 @@ export interface BrowserTurn {
   traceId: string;
   modelId: string;
   reasoning?: string;
+  webPin?: ChatGptWebModelPin;
   capabilities: ChatGptWebCapabilities;
   prepare: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
   prepareResume?: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
@@ -2163,6 +2171,8 @@ export class ChatGptBrowserWorker {
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
+    gpt55Available?: boolean;
+    solPinAvailable?: boolean;
   }> {
     return this.enqueueMaintenance("session inspection", () => this.inspectSessionExclusive(detectCapabilities));
   }
@@ -2326,8 +2336,9 @@ export class ChatGptBrowserWorker {
     reasoning: string | undefined,
     capabilities: ChatGptWebCapabilities,
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
+    webPin?: ChatGptWebModelPin,
   ): Promise<ChatGptWebModelMode> {
-    const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
+    const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities, webPin);
     const composer = await this.activeComposer(page);
     const composerForm = composer.locator("xpath=ancestor::form[1]");
     const uiEffortIndex = mode.uiEffortIndex;
@@ -2395,6 +2406,10 @@ export class ChatGptBrowserWorker {
       );
     } finally {
       waitAbort.abort();
+    }
+    await selectChatGptWebModelPin(activation.menu, mode.webPin ?? webPin);
+    if (mode.webPin && mode.webPin !== "latest") {
+      await captureDiagnostic?.("model-pin-selected");
     }
     let sliderState = parseChatGptEffortSliderState(
       await effortSlider.getAttribute("aria-valuemin"),
@@ -3643,6 +3658,8 @@ export class ChatGptBrowserWorker {
     url: string;
     solAvailable?: boolean;
     proAvailable?: boolean;
+    gpt55Available?: boolean;
+    solPinAvailable?: boolean;
   }> {
     const page = await this.ensurePage();
     await this.prepareTemporaryChatSurface(page);
@@ -4292,7 +4309,12 @@ export class ChatGptBrowserWorker {
     const browserCapabilities = turn.nativeConnector
       ? { ...turn.capabilities, localToolsEnabled: true }
       : turn.capabilities;
-    const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, browserCapabilities);
+    const requestedMode = resolveChatGptWebModelMode(
+      turn.modelId,
+      turn.reasoning,
+      browserCapabilities,
+      turn.webPin,
+    );
     const prepare = reuseConversation ? turn.prepareResume : turn.prepare;
     if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
     const prepared = await prepare();
@@ -4335,6 +4357,7 @@ export class ChatGptBrowserWorker {
           browserCapabilities,
           maxStageMessageTokens!,
           maxStageChars!,
+          turn.webPin,
         )
         : requestedMode;
       if (prepared.multipart) {
@@ -4530,6 +4553,7 @@ export class ChatGptBrowserWorker {
           stagingMode.effort,
           browserCapabilities,
           checkpoint => diagnostics.capture(page, checkpoint),
+          turn.webPin,
         )
       ));
       await diagnostics.capture(page, "effort-selection-complete");
@@ -4630,6 +4654,7 @@ export class ChatGptBrowserWorker {
               requestedMode.effort,
               browserCapabilities,
               checkpoint => diagnostics.capture(page, `final-part-${checkpoint}`),
+              turn.webPin,
             ),
           );
           await diagnostics.capture(page, "final-part-effort-selected");
@@ -4688,6 +4713,7 @@ export class ChatGptBrowserWorker {
                 turn.reasoning,
                 turn.capabilities,
                 checkpoint => diagnostics.capture(page, checkpoint),
+                turn.webPin,
               );
               submissionBaseline = await this.captureSubmissionBaseline(page);
             },

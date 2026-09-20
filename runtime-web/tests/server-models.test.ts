@@ -3,7 +3,7 @@ import { defaultConfig } from "../src/config";
 import {
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
-  CHATGPT_WEB_PICKER_REASONING_LEVELS,
+  resolveChatGptWebCatalogEffort,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
 import { modelsRequest } from "../src/server";
@@ -54,11 +54,9 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
   };
   expect(body.models.map(model => model.slug)).toEqual([
     "gpt-5.6-sol",
-    "chatgpt-web/light",
-    "chatgpt-web/medium",
-    "chatgpt-web/high",
-    "chatgpt-web/extra-high",
-    "chatgpt-web/pro",
+    "chatgpt-web/latest",
+    "chatgpt-web/sol",
+    "chatgpt-web/gpt-5.5",
   ]);
   expect(body.models[0]!.context_window).toBe(300_000);
   expect(body.models[0]!.max_context_window).toBe(371_851);
@@ -66,7 +64,11 @@ test("proxies official /models auth and query, then appends the fixed ChatGPT We
   expect(body.models[0]!.multi_agent_version).toBe("v2");
   for (const [index, model] of body.models.slice(1).entries()) {
     const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
-    const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+    const limits = resolveChatGptWebContextLimits(
+      route.backendModel,
+      resolveChatGptWebCatalogEffort(route, config),
+      config,
+    );
     expect(model.context_window).toBe(limits.contextWindow);
     expect(model.max_context_window).toBe(limits.contextWindow);
     expect(model.effective_context_window_percent).toBe(limits.effectiveContextWindowPercent);
@@ -131,10 +133,10 @@ test("Zero Risk returns one generic Web row without using scanned capabilities",
     description: CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE.description,
     visibility: "list",
     supported_in_api: true,
-    supported_reasoning_levels: CHATGPT_WEB_PICKER_REASONING_LEVELS.map(level => ({
-      effort: level.effort,
-      description: level.description,
-    })),
+    supported_reasoning_levels: [{
+      effort: "low",
+      description: CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE.displayName,
+    }],
     tool_mode: null,
     upgrade: null,
     default_reasoning_level: "low",

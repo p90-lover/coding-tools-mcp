@@ -37,6 +37,7 @@ export function chatGptConversationKey(
     namespace,
     threadId: identity.threadId,
     modelId: parsed.modelId,
+    webPin: parsed._webPin ?? null,
     reasoning: parsed.options.reasoning,
     compaction: compactionEpoch(raw?.input),
   })).digest("hex");

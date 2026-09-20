@@ -41,7 +41,7 @@ export function estimateChatGptWebInputTokens(
   const manual = isChatGptWebZeroRiskBackendModel(parsed.modelId);
   const mode = manual
     ? { localTools: true }
-    : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+    : resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities, parsed._webPin);
   const identity = extractChatGptTurnIdentity(parsed);
   const compiled = compileChatGptWebPrompt(
     parsed,
@@ -73,7 +73,7 @@ export function resolveBiggerContextMultipartParts(
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
   }
-  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities);
+  const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, capabilities, parsed._webPin);
   if (parsed._compactionRequest) return CHATGPT_BIGGER_CONTEXT_PARTS;
   const { contextWindow, autoCompactTokenLimit } = resolveChatGptWebContextLimits(
     CHATGPT_WEB_BACKEND_MODEL,

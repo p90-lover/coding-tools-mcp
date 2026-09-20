@@ -56,7 +56,8 @@ response. On an exact native compaction request, the same Web agent submits the 
 a one-shot MCP control call in that chat; only then does the surface close and the next epoch open a
 new Temporary Chat. The complete named history remains owned by the existing prompt compiler. New
 chats use the cheapest account-supported browser mode:
-Instant (`light`) when Sol is available, otherwise Luna. Override it with `--model` or `/model`.
+**Web Latest** (`chatgpt-web/latest`) when Sol is available, otherwise Luna. Override it with
+`--model` or `/model`. Legacy Instant/Deep slugs remain valid.
 
 Interactive commands:
 

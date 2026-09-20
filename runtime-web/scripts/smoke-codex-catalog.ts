@@ -70,15 +70,21 @@ try {
     const efforts = Array.isArray(model.supported_reasoning_levels)
       ? (model.supported_reasoning_levels as Array<{ effort?: string }>).map(level => level.effort)
       : [];
-    if (!efforts.includes("pro") || efforts.includes("max")) {
-      throw new Error(`ChatGPT Web model ${model.slug} must expose picker effort pro (not max): ${efforts.join(",")}`);
+    if (efforts.includes("max")) {
+      throw new Error(`ChatGPT Web model ${model.slug} must not advertise max: ${efforts.join(",")}`);
+    }
+    if (model.slug === "chatgpt-web/latest" && !efforts.includes("pro")) {
+      throw new Error(`Web Latest must expose picker effort pro: ${efforts.join(",")}`);
+    }
+    if (model.slug !== "chatgpt-web/latest" && efforts.includes("pro")) {
+      throw new Error(`Pinned Web model ${model.slug} must not expose Pro: ${efforts.join(",")}`);
     }
   }
   const nativeSol = catalog.models?.find(model => model.slug === "gpt-5.6-sol");
-  const webPro = catalog.models?.find(model => model.slug === "chatgpt-web/pro");
-  if (nativeSol?.multi_agent_version !== "v1" || webPro?.multi_agent_version !== "v1") {
+  const webLatest = catalog.models?.find(model => model.slug === "chatgpt-web/latest");
+  if (nativeSol?.multi_agent_version !== "v1" || webLatest?.multi_agent_version !== "v1") {
     throw new Error(
-      `Codex did not preserve Compatibility V1 catalog metadata: ${JSON.stringify({ nativeSol, webPro })}`,
+      `Codex did not preserve Compatibility V1 catalog metadata: ${JSON.stringify({ nativeSol, webLatest })}`,
     );
   }
   const features = runCodex(["features", "list"], isolatedEnv).stdout;
@@ -93,7 +99,7 @@ try {
     .map(model => model.slug);
   const expectedSpawnOverrides = [
     "gpt-5.6-sol",
-    ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+    ...CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug),
   ];
   if (JSON.stringify(spawnOverrides) !== JSON.stringify(expectedSpawnOverrides)) {
     throw new Error(`Codex did not preserve the bounded V1 subagent roster: ${JSON.stringify(spawnOverrides)}`);

@@ -3,8 +3,9 @@ import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_MODEL_PREFIX,
-  CHATGPT_WEB_PICKER_REASONING_LEVELS,
   chatgptWebPickerDefaultEffort,
+  chatgptWebPickerReasoningLevelsForRoute,
+  resolveChatGptWebCatalogEffort,
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -30,11 +31,10 @@ function catalogShellType(template: JsonObject): string {
     : "shell_command";
 }
 
-function chatgptWebPickerReasoningLevels(): JsonObject[] {
-  return CHATGPT_WEB_PICKER_REASONING_LEVELS.map(level => ({
-    effort: level.effort,
-    description: level.description,
-  }));
+function catalogReasoningLevels(model: JsonObject): unknown {
+  return Array.isArray(model.supported_reasoning_levels)
+    ? model.supported_reasoning_levels
+    : [];
 }
 
 /** Codex Desktop `model_catalog_json` working schema for chatgpt-web/* (simon live catalog). */
@@ -89,7 +89,7 @@ export function projectChatGptWebDesktopCatalogModel(model: JsonObject): JsonObj
     display_name: model.display_name,
     description: model.description,
     default_reasoning_level: model.default_reasoning_level,
-    supported_reasoning_levels: chatgptWebPickerReasoningLevels(),
+    supported_reasoning_levels: catalogReasoningLevels(model),
     shell_type: catalogShellType(model),
     visibility: "list",
     supported_in_api: true,
@@ -143,20 +143,10 @@ function modelPriority(template: JsonObject): number | undefined {
 
 function routedModelPriority(
   template: JsonObject,
-  route: ChatGptWebModelRoute,
-  config: AppConfig,
+  _route: ChatGptWebModelRoute,
+  _config: AppConfig,
 ): number | undefined {
-  const priority = modelPriority(template);
-  if (priority === undefined
-    || config.subagentProtocol !== "compatibility-v1"
-    || route.slug !== "chatgpt-web/light") return priority;
-  if (priority === Number.MAX_SAFE_INTEGER) {
-    throw new Error("Native Codex model template priority cannot reserve the Compatibility V1 roster");
-  }
-  // Codex V1 exposes at most five model overrides. Keep the native Sol row plus the four useful
-  // delegated Web efforts (Medium, High, Extra High, Pro); Instant remains a selectable root model
-  // but does not displace Pro from spawn_agent's bounded registry.
-  return priority + 1;
+  return modelPriority(template);
 }
 
 function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
@@ -206,7 +196,11 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
-  const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+  const limits = resolveChatGptWebContextLimits(
+    route.backendModel,
+    resolveChatGptWebCatalogEffort(route, config),
+    config,
+  );
   const multiAgentVersion = routedSubagentVersion(template, config);
   const priority = routedModelPriority(template, route, config);
   const model: JsonObject = {
@@ -235,7 +229,7 @@ export function buildChatGptWebModel(
     upgrade: null,
     shell_type: catalogShellType(template),
     default_reasoning_level: chatgptWebPickerDefaultEffort(route),
-    supported_reasoning_levels: chatgptWebPickerReasoningLevels(),
+    supported_reasoning_levels: chatgptWebPickerReasoningLevelsForRoute(route, config),
     context_window: limits.contextWindow,
     max_context_window: limits.contextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,

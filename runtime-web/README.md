@@ -23,10 +23,12 @@
 </p>
 
 Free and Go accounts get **ChatGPT Web — Luna** in Codex's native model picker. Accounts that
-expose the reasoning selector keep **Instant**, **Medium**, **High**, **Extra High**, and **Pro** as
-their subscription allows. The bridge sends the current compiled Codex task context to a fresh
-ChatGPT Temporary Chat, attaches images, and streams visible reasoning, tool activity, and Markdown
-back into the same Codex task.
+expose the reasoning selector get distinct Web rows instead of Instant/Deep/Pro titles:
+**Web Latest** (ChatGPT auto: Pro effort uses GPT-6 Pro, other efforts fall back to GPT-5.6 Sol),
+**Web GPT-5.6 Sol** (pinned), and **Web GPT-5.5** when ChatGPT's model menu exposes that chip.
+Effort stays on Codex's effort bar. The bridge sends the current compiled Codex task context to a
+fresh ChatGPT Temporary Chat, attaches images, and streams visible reasoning, tool activity, and
+Markdown back into the same Codex task.
 
 <p align="center">
   <img src="assets/demo.gif" alt="A live ChatGPT Web turn using the native Codex harness" width="960">
@@ -93,11 +95,13 @@ Then complete the three checks in the app:
    windows stay inside the same launcher-owned private browser profile; no session is copied between
    browsers.
 2. Run the browser smoke test.
-3. Press **Install models**, restart Codex once, and select a **ChatGPT Web — …** model.
+3. Press **Install models**, restart Codex once, and select **Web Latest**, **Web GPT-5.6 Sol**, or
+   **Web GPT-5.5** (Sol accounts) or **ChatGPT Web — Luna** (Free/Go).
 
 The launcher detects the current account's ChatGPT controls during setup: Free/Go accounts expose
-only Luna, while Pro appears only when the signed-in account exposes it. The separate **MCP** page
-is optional and guides the full-harness setup without terminal commands.
+only Luna. Sol accounts list Web Latest plus pinned GPT-5.6 Sol, and Web GPT-5.5 when that chip is
+visible. Extra High and Pro remain on the Latest effort bar when the signed-in account exposes them.
+The separate **MCP** page is optional and guides the full-harness setup without terminal commands.
 
 The packaged launcher keeps sign-in and ChatGPT model turns in its embedded browser. It needs no
 model API key, installed Chrome/Chromium, system Node/Bun, or project-managed browser download.
@@ -116,14 +120,17 @@ This source path requires Bun 1.4.0. The command installs locked dependencies an
 
 | Mode | Models | Local Codex tools | Extra setup |
 | --- | --- | --- | --- |
-| **Browser-only** | Free/Go: Luna; Plus: Instant–High; Pro: adds Extra High and Pro | No; Codex shows a warning | None |
-| **Full harness (With Automation)** | Free/Go: Luna; Plus: Instant–High; Pro: adds Extra High and Pro | Yes for every listed effort, including Pro | OpenAI tunnel + ChatGPT connector |
+| **Browser-only** | Free/Go: Luna; Plus/Pro: Web Latest, Web GPT-5.6 Sol, and Web GPT-5.5 when ChatGPT exposes it. Latest effort bar: Instant–High (Plus) or Instant–Pro (Pro). Sol pin omits Pro; 5.5 pin omits Extra High and Pro. | No; Codex shows a warning | None |
+| **Full harness (With Automation)** | Same Web rows as browser-only | Yes for every listed effort, including Pro on Web Latest | OpenAI tunnel + ChatGPT connector |
 | **Zero Risk** | Choose the ChatGPT model and effort manually; optional Pro-sized context | Yes; the full turn-bound Codex harness remains available | Separate OpenAI tunnel + `Codex Zero Risk` connector; paste and send manually |
 
-Each automatic picker entry has one fixed ChatGPT mode. Codex still displays its built-in Effort and
-Speed rows, but changing them cannot silently change the selected browser model. In automatic Full
-mode every available effort receives the same turn-bound MCP capability. Pro has no separate
-restriction or reduced tool contract.
+Sol-account picker rows are ChatGPT **model pins**, not baked Instant/Deep/Pro titles. **Web Latest**
+leaves ChatGPT's auto/latest chip in place and maps Codex effort onto the web effort control
+(Pro → GPT-6 Pro; other efforts → GPT-5.6 Sol). **Web GPT-5.6 Sol** and **Web GPT-5.5** click the
+matching ChatGPT model chip first. Legacy slugs `chatgpt-web/light` through `chatgpt-web/pro` stay
+request-enabled but are hidden from `/v1/models` and the Desktop catalog. Native Codex models are
+unchanged. In automatic Full mode every available effort receives the same turn-bound MCP
+capability.
 
 Zero Risk keeps the local Responses bridge and full Codex harness, but never reads or changes the
 ChatGPT page and never sends a prompt for you. The launcher prepares and copies the prompt; you

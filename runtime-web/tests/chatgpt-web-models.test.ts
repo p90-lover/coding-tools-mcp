@@ -3,10 +3,14 @@ import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_BACKEND_MODEL,
+  CHATGPT_WEB_GPT55_BACKEND_MODEL,
+  CHATGPT_WEB_GPT55_MODEL_ROUTE,
+  CHATGPT_WEB_LATEST_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_MODEL_ROUTES,
   CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE,
+  CHATGPT_WEB_LEGACY_EFFORT_ROUTES,
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
@@ -14,7 +18,9 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
   CHATGPT_WEB_PICKER_REASONING_LEVELS,
+  CHATGPT_WEB_SOL_MODEL_ROUTE,
   chatgptWebPickerDefaultEffort,
+  chatgptWebPickerReasoningLevelsForRoute,
   requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
   resolveChatGptWebTransportLimits,
@@ -38,23 +44,14 @@ describe("fixed ChatGPT Web model routes", () => {
   const plus = { solAvailable: true, proAvailable: false };
   const pro = { solAvailable: true, proAvailable: true };
 
-  test("uses unique stable slugs and one explicit adapter effort per model", () => {
+  test("exposes pinned Web Latest / Sol / 5.5 rows with effort on the bar", () => {
     expect(new Set(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug)).size).toBe(CHATGPT_WEB_MODEL_ROUTES.length);
-    expect(CHATGPT_WEB_MODEL_ROUTES.map(route => [route.slug, route.codexEffort, route.adapterEffort])).toEqual([
-      ["chatgpt-web/light", "low", "low"],
-      ["chatgpt-web/medium", "medium", "medium"],
-      ["chatgpt-web/high", "high", "high"],
-      ["chatgpt-web/extra-high", "xhigh", "xhigh"],
-      ["chatgpt-web/pro", "ultra", "max"],
+    expect(CHATGPT_WEB_MODEL_ROUTES.map(route => [route.slug, route.displayName, route.webPin])).toEqual([
+      ["chatgpt-web/latest", "Web Latest", "latest"],
+      ["chatgpt-web/sol", "Web GPT-5.6 Sol", "sol"],
+      ["chatgpt-web/gpt-5.5", "Web GPT-5.5", "gpt-5.5"],
     ]);
-    expect(CHATGPT_WEB_MODEL_ROUTES.map(route => [route.slug, route.displayName])).toEqual([
-      ["chatgpt-web/light", "Web GPT-6 Instant"],
-      ["chatgpt-web/medium", "Web GPT-6"],
-      ["chatgpt-web/high", "Web GPT-6 Deep"],
-      ["chatgpt-web/extra-high", "Web GPT-6 Extra"],
-      ["chatgpt-web/pro", "Web GPT-6 Pro"],
-    ]);
-    expect(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName).join(" ")).not.toMatch(/\bMedium\b/i);
+    expect(CHATGPT_WEB_MODEL_ROUTES.every(route => !/\b(Instant|Deep|Extra|Pro)\b/.test(route.displayName))).toBe(true);
     expect(CHATGPT_WEB_PICKER_REASONING_LEVELS.map(level => [level.effort, level.description])).toEqual([
       ["low", "Instant"],
       ["medium", "Medium"],
@@ -63,22 +60,40 @@ describe("fixed ChatGPT Web model routes", () => {
       ["pro", "Pro"],
     ]);
     expect(CHATGPT_WEB_PICKER_REASONING_LEVELS.some(level => level.effort === "max")).toBe(false);
-    expect(chatgptWebPickerDefaultEffort(CHATGPT_WEB_MODEL_ROUTES[1]!)).toBe("medium");
-    expect(chatgptWebPickerDefaultEffort(CHATGPT_WEB_MODEL_ROUTES[4]!)).toBe("pro");
-  });
-
-  test("exposes only Plus-eligible routes without the Pro account capability", () => {
-    expect(availableChatGptWebModelRoutes(plus).map(route => route.slug)).toEqual([
+    expect(chatgptWebPickerDefaultEffort(CHATGPT_WEB_LATEST_MODEL_ROUTE)).toBe("high");
+    expect(chatgptWebPickerDefaultEffort(CHATGPT_WEB_SOL_MODEL_ROUTE)).toBe("medium");
+    expect(chatgptWebPickerReasoningLevelsForRoute(CHATGPT_WEB_LATEST_MODEL_ROUTE, pro).map(level => level.effort))
+      .toEqual(["low", "medium", "high", "xhigh", "pro"]);
+    expect(chatgptWebPickerReasoningLevelsForRoute(CHATGPT_WEB_SOL_MODEL_ROUTE, pro).map(level => level.effort))
+      .toEqual(["low", "medium", "high", "xhigh"]);
+    expect(chatgptWebPickerReasoningLevelsForRoute(CHATGPT_WEB_GPT55_MODEL_ROUTE, pro).map(level => level.effort))
+      .toEqual(["low", "medium", "high"]);
+    expect(CHATGPT_WEB_LEGACY_EFFORT_ROUTES.map(route => route.slug)).toEqual([
       "chatgpt-web/light",
       "chatgpt-web/medium",
       "chatgpt-web/high",
+      "chatgpt-web/extra-high",
+      "chatgpt-web/pro",
     ]);
-    expect(availableChatGptWebModelRoutes({ solAvailable: true, proAvailable: true }))
-      .toEqual(CHATGPT_WEB_MODEL_ROUTES);
+  });
+
+  test("lists pinned rows for Sol accounts and keeps legacy effort slugs request-enabled", () => {
+    expect(availableChatGptWebModelRoutes(plus).map(route => route.slug)).toEqual([
+      "chatgpt-web/latest",
+      "chatgpt-web/sol",
+      "chatgpt-web/gpt-5.5",
+    ]);
+    expect(availableChatGptWebModelRoutes({ solAvailable: true, proAvailable: true }).map(route => route.slug))
+      .toEqual(["chatgpt-web/latest", "chatgpt-web/sol", "chatgpt-web/gpt-5.5"]);
+    expect(requireChatGptWebModelRoute("chatgpt-web/gpt-5.6-sol", plus)).toBe(CHATGPT_WEB_SOL_MODEL_ROUTE);
+    expect(requireChatGptWebModelRoute("chatgpt-web/5.5", plus)).toBe(CHATGPT_WEB_GPT55_MODEL_ROUTE);
+    expect(requireChatGptWebModelRoute("chatgpt-web/light", plus).adapterEffort).toBe("low");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", plus))
-      .toThrow("Web GPT-6 Extra is not available for this account");
+      .toThrow("Web Latest is not available for this account");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
-      .toThrow("Pro is not available for this account");
+      .toThrow("Web Latest is not available for this account");
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/gpt-5.5", { ...plus, gpt55Available: false }))
+      .toThrow("did not expose a GPT-5.5 model chip");
   });
 
   test("exposes Luna and Think when the authenticated account has no Sol selector", () => {
@@ -280,6 +295,23 @@ describe("fixed ChatGPT Web model routes", () => {
       .toBe(chatGptConversationKey(normal, "provider"));
   });
 
+  test("keeps Latest and Sol pins on distinct retained conversations at the same effort", () => {
+    const config = defaultConfig("full");
+    const metadata = {
+      "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread_pin_isolation" }),
+    };
+    const latest = parsed("chatgpt-web/latest", "high");
+    const sol = parsed("chatgpt-web/sol", "high");
+    latest._rawBody = { model: "chatgpt-web/latest", reasoning: { effort: "high" }, client_metadata: metadata };
+    sol._rawBody = { model: "chatgpt-web/sol", reasoning: { effort: "high" }, client_metadata: metadata };
+    routeChatGptWebRequest(latest, config);
+    routeChatGptWebRequest(sol, config);
+    expect(latest._webPin).toBe("latest");
+    expect(sol._webPin).toBe("sol");
+    expect(chatGptConversationKey(latest, "provider"))
+      .not.toBe(chatGptConversationKey(sol, "provider"));
+  });
+
   test("binds the Luna route to Luna without a selectable effort", () => {
     const config = defaultConfig("browser-only");
     config.solAvailable = false;
@@ -316,6 +348,34 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(proRoute).toBe(CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE);
     expect(proRequest.modelId).toBe(CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL);
     expect(proRequest.options.reasoning).toBe("low");
+  });
+
+  test("pinned Web slugs honor request effort and select the ChatGPT model pin", () => {
+    const config = defaultConfig("full");
+    config.proAvailable = true;
+    const latest = parsed("chatgpt-web/latest", "low");
+    expect(routeChatGptWebRequest(latest, config)).toBe(CHATGPT_WEB_LATEST_MODEL_ROUTE);
+    expect(latest.modelId).toBe(CHATGPT_WEB_BACKEND_MODEL);
+    expect(latest.options.reasoning).toBe("low");
+    expect(latest._webPin).toBe("latest");
+
+    const latestPro = parsed("chatgpt-web/latest", "max");
+    routeChatGptWebRequest(latestPro, config);
+    expect(latestPro.options.reasoning).toBe("max");
+
+    const sol = parsed("chatgpt-web/sol", "high");
+    expect(routeChatGptWebRequest(sol, config)).toBe(CHATGPT_WEB_SOL_MODEL_ROUTE);
+    expect(sol.modelId).toBe(CHATGPT_WEB_BACKEND_MODEL);
+    expect(sol.options.reasoning).toBe("high");
+    expect(sol._webPin).toBe("sol");
+    expect(() => routeChatGptWebRequest(parsed("chatgpt-web/sol", "max"), config))
+      .toThrow("does not support max effort");
+
+    const gpt55 = parsed("chatgpt-web/gpt-5.5", "low");
+    expect(routeChatGptWebRequest(gpt55, config)).toBe(CHATGPT_WEB_GPT55_MODEL_ROUTE);
+    expect(gpt55.modelId).toBe(CHATGPT_WEB_GPT55_BACKEND_MODEL);
+    expect(gpt55.options.reasoning).toBe("low");
+    expect(gpt55._webPin).toBe("gpt-5.5");
   });
 
   test("maps catalog picker effort pro to adapter max like ultra", () => {
