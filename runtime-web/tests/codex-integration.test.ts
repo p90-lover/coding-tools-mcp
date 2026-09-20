@@ -707,6 +707,31 @@ describe("reversible native Codex route integration", () => {
     expect(pro.display_name).toBe("Web GPT-6 Pro");
     expect(pro.default_reasoning_level).toBe("pro");
     expect(medium.shell_type).toBe("shell_command");
+    expect(Object.keys(medium)).toEqual([
+      "slug",
+      "display_name",
+      "description",
+      "default_reasoning_level",
+      "supported_reasoning_levels",
+      "shell_type",
+      "visibility",
+      "supported_in_api",
+      "priority",
+      "availability_nux",
+      "upgrade",
+      "base_instructions",
+      "default_reasoning_summary",
+      "support_verbosity",
+      "default_verbosity",
+      "apply_patch_tool_type",
+      "truncation_policy",
+      "experimental_supported_tools",
+      "input_modalities",
+      "supports_parallel_tool_calls",
+      "supports_reasoning_summaries",
+    ]);
+    expect(medium).not.toHaveProperty("context_window");
+    expect(medium).not.toHaveProperty("tool_mode");
 
     uninstallCodexIntegration();
     expect(readFileSync(configPath, "utf8")).toBe('model = "gpt-5.6-sol"\n');

@@ -24,33 +24,100 @@ function slug(value: unknown): string | undefined {
   return typeof candidate === "string" ? candidate : undefined;
 }
 
-function reasoningLevel(template: JsonObject, effort: string, description: string): JsonObject {
-  const levels = Array.isArray(template.supported_reasoning_levels)
-    ? template.supported_reasoning_levels.filter(level => level && typeof level === "object" && !Array.isArray(level)) as JsonObject[]
-    : [];
-  const source = levels.find(level => level.effort === effort)
-    ?? (effort === "pro"
-      ? levels.find(level => level.effort === "max" || level.effort === "ultra")
-      : undefined);
-  return { ...(source ? structuredClone(source) : {}), effort, description };
-}
-
 function catalogShellType(template: JsonObject): string {
   return typeof template.shell_type === "string" && template.shell_type.length > 0
     ? template.shell_type
     : "shell_command";
 }
 
-function chatgptWebPickerReasoningLevels(template: JsonObject): JsonObject[] {
-  return CHATGPT_WEB_PICKER_REASONING_LEVELS.map(level => reasoningLevel(
-    template,
-    level.effort,
-    level.description,
-  ));
+function chatgptWebPickerReasoningLevels(): JsonObject[] {
+  return CHATGPT_WEB_PICKER_REASONING_LEVELS.map(level => ({
+    effort: level.effort,
+    description: level.description,
+  }));
+}
+
+/** Codex Desktop `model_catalog_json` working schema for chatgpt-web/* (simon live catalog). */
+export const CODEX_DESKTOP_CHATGPT_WEB_CATALOG_FIELDS = [
+  "slug",
+  "display_name",
+  "description",
+  "default_reasoning_level",
+  "supported_reasoning_levels",
+  "shell_type",
+  "visibility",
+  "supported_in_api",
+  "priority",
+  "availability_nux",
+  "upgrade",
+  "base_instructions",
+  "default_reasoning_summary",
+  "support_verbosity",
+  "default_verbosity",
+  "apply_patch_tool_type",
+  "truncation_policy",
+  "experimental_supported_tools",
+  "input_modalities",
+  "supports_parallel_tool_calls",
+  "supports_reasoning_summaries",
+] as const;
+
+const CHATGPT_WEB_DESKTOP_BASE_INSTRUCTIONS =
+  "You are a coding agent using ChatGPT Web via the Coding Tools local bridge.";
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function truncationLimit(model: JsonObject): number {
+  const policy = model.truncation_policy;
+  if (policy && typeof policy === "object" && !Array.isArray(policy)) {
+    const limit = (policy as JsonObject).limit;
+    if (typeof limit === "number" && Number.isSafeInteger(limit) && limit > 0) return limit;
+  }
+  const contextWindow = model.context_window;
+  if (typeof contextWindow === "number" && Number.isSafeInteger(contextWindow) && contextWindow > 0) {
+    return contextWindow;
+  }
+  return 100_000;
+}
+
+export function projectChatGptWebDesktopCatalogModel(model: JsonObject): JsonObject {
+  const modalities = stringArray(model.input_modalities);
+  return {
+    slug: model.slug,
+    display_name: model.display_name,
+    description: model.description,
+    default_reasoning_level: model.default_reasoning_level,
+    supported_reasoning_levels: chatgptWebPickerReasoningLevels(),
+    shell_type: catalogShellType(model),
+    visibility: "list",
+    supported_in_api: true,
+    priority: typeof model.priority === "number" && Number.isSafeInteger(model.priority) ? model.priority : 1,
+    availability_nux: null,
+    upgrade: null,
+    base_instructions: CHATGPT_WEB_DESKTOP_BASE_INSTRUCTIONS,
+    default_reasoning_summary: "auto",
+    support_verbosity: false,
+    default_verbosity: null,
+    apply_patch_tool_type: null,
+    truncation_policy: { mode: "tokens", limit: truncationLimit(model) },
+    experimental_supported_tools: stringArray(model.experimental_supported_tools),
+    input_modalities: modalities.length > 0 ? modalities : ["text"],
+    supports_parallel_tool_calls: false,
+    supports_reasoning_summaries: true,
+  };
 }
 
 export function serializeCodexDesktopModelCatalog(catalog: JsonObject): string {
-  return `${JSON.stringify(catalog, null, 2)}\n`;
+  const models = Array.isArray(catalog.models)
+    ? catalog.models.map((model) => {
+      const modelSlug = slug(model);
+      if (!modelSlug?.startsWith(CHATGPT_WEB_MODEL_PREFIX)) return model;
+      return projectChatGptWebDesktopCatalogModel(object(model, `chatgpt-web ${modelSlug} catalog model`));
+    })
+    : catalog.models;
+  return `${JSON.stringify({ ...catalog, models }, null, 2)}\n`;
 }
 
 export function isMergedCodexDesktopCatalog(value: unknown): value is JsonObject {
@@ -168,7 +235,7 @@ export function buildChatGptWebModel(
     upgrade: null,
     shell_type: catalogShellType(template),
     default_reasoning_level: chatgptWebPickerDefaultEffort(route),
-    supported_reasoning_levels: chatgptWebPickerReasoningLevels(template),
+    supported_reasoning_levels: chatgptWebPickerReasoningLevels(),
     context_window: limits.contextWindow,
     max_context_window: limits.contextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,

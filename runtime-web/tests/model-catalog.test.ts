@@ -11,7 +11,7 @@ import {
   chatgptWebPickerDefaultEffort,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
-import { augmentNativeModelCatalog } from "../src/model-catalog";
+import { augmentNativeModelCatalog, CODEX_DESKTOP_CHATGPT_WEB_CATALOG_FIELDS, serializeCodexDesktopModelCatalog } from "../src/model-catalog";
 
 function source(): Record<string, unknown> {
   return {
@@ -375,6 +375,68 @@ describe("native /models augmentation", () => {
       expect(levels.map(level => level.effort)).not.toContain("max");
       expect(levels.at(-1)).toEqual({ effort: "pro", description: "Pro" });
     }
+  });
+
+  test("serializes chatgpt-web rows to the Codex Desktop working catalog schema", () => {
+    const config = defaultConfig("full");
+    config.proAvailable = true;
+    config.subagentProtocol = "native";
+    const parsed = JSON.parse(serializeCodexDesktopModelCatalog(augmentNativeModelCatalog(source(), config))) as {
+      models: Array<Record<string, unknown> & { slug: string }>;
+    };
+    const natives = parsed.models.filter(model => !model.slug.startsWith("chatgpt-web/"));
+    const web = parsed.models.filter(model => model.slug.startsWith("chatgpt-web/"));
+    const expectedNames = {
+      "chatgpt-web/light": "Web GPT-6 Instant",
+      "chatgpt-web/medium": "Web GPT-6",
+      "chatgpt-web/high": "Web GPT-6 Deep",
+      "chatgpt-web/extra-high": "Web GPT-6 Extra",
+      "chatgpt-web/pro": "Web GPT-6 Pro",
+    } as const;
+    const expectedDefaults = {
+      "chatgpt-web/light": "low",
+      "chatgpt-web/medium": "medium",
+      "chatgpt-web/high": "high",
+      "chatgpt-web/extra-high": "xhigh",
+      "chatgpt-web/pro": "pro",
+    } as const;
+
+    expect(natives.map(model => model.slug)).toEqual(["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"]);
+    expect(web.map(model => model.slug)).toEqual(Object.keys(expectedNames));
+    for (const model of web) {
+      expect(Object.keys(model)).toEqual([...CODEX_DESKTOP_CHATGPT_WEB_CATALOG_FIELDS]);
+      expect(model.display_name).toBe(expectedNames[model.slug as keyof typeof expectedNames]);
+      expect(model.default_reasoning_level).toBe(expectedDefaults[model.slug as keyof typeof expectedDefaults]);
+      expect(model.supported_reasoning_levels).toEqual([
+        { effort: "low", description: "Instant" },
+        { effort: "medium", description: "Medium" },
+        { effort: "high", description: "High" },
+        { effort: "xhigh", description: "Extra High" },
+        { effort: "pro", description: "Pro" },
+      ]);
+      expect(model.shell_type).toBe("shell_command");
+      expect(model.visibility).toBe("list");
+      expect(model.supported_in_api).toBe(true);
+      expect(model.availability_nux).toBeNull();
+      expect(model.upgrade).toBeNull();
+      expect(model.base_instructions).toBe(
+        "You are a coding agent using ChatGPT Web via the Coding Tools local bridge.",
+      );
+      expect(model.default_reasoning_summary).toBe("auto");
+      expect(model.support_verbosity).toBe(false);
+      expect(model.default_verbosity).toBeNull();
+      expect(model.apply_patch_tool_type).toBeNull();
+      expect(model.truncation_policy).toEqual({
+        mode: "tokens",
+        limit: expect.any(Number),
+      });
+      expect((model.truncation_policy as { limit: number }).limit).toBeGreaterThan(0);
+      expect(model.supports_parallel_tool_calls).toBe(false);
+      expect(model.supports_reasoning_summaries).toBe(true);
+      expect(model).not.toHaveProperty("context_window");
+      expect(model).not.toHaveProperty("tool_mode");
+    }
+    expect(web.find(model => model.slug === "chatgpt-web/pro")!.default_reasoning_level).toBe("pro");
   });
 
   test("fails closed when no official model satisfies the harness contract", () => {
