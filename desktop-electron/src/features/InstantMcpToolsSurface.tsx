@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
 import {
-  INSTANT_MCP_TOOLS_EXPECTED_OPERATIONS,
+  INSTANT_MCP_TOOLS_OPERATIONS,
   INSTANT_MCP_TOOLS_MODULE_ID,
+  callInstantMcpTools,
 } from "../api/instant-mcp-tools-contract";
 import type { Copy } from "../i18n";
 import type { Language } from "../types";
@@ -51,7 +52,14 @@ export function InstantMcpToolsSurface({ copy, language, setError }: InstantMcpT
       const listed = asRecord(await client.apps.list());
       const ids = moduleIds(listed);
       setListedIds(ids);
-      setHandlerReady(ids.includes(INSTANT_MCP_TOOLS_MODULE_ID));
+      let ready = ids.includes(INSTANT_MCP_TOOLS_MODULE_ID);
+      try {
+        const inspected = await callInstantMcpTools("inspect");
+        ready = ready || inspected.status === "ready" || inspected.ok === true;
+      } catch {
+        // Handler may not be registered until Bot GG #236 lands; visual still embeds in-process.
+      }
+      setHandlerReady(ready);
       setNotice(copy.instantMcpToolsHostBody);
     } catch (cause) {
       setListedIds([]);
@@ -102,7 +110,7 @@ export function InstantMcpToolsSurface({ copy, language, setError }: InstantMcpT
           {" "}
           <code>{INSTANT_MCP_TOOLS_MODULE_ID}</code>
           {" · "}
-          {INSTANT_MCP_TOOLS_EXPECTED_OPERATIONS.join(", ")}
+          {INSTANT_MCP_TOOLS_OPERATIONS.join(", ")}
         </p>
       ) : null}
       {listedIds.length > 0 ? (

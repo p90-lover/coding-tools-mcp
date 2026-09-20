@@ -31,6 +31,7 @@ test("Instant MCP Tools is a Managed App sidebar surface with in-process embed",
   assert.match(surface, /<McpLiveToolsPanel/);
   assert.match(surface, /<InProcessAppsPanel/);
   assert.match(surface, /client\.apps\.list\(\)/);
+  assert.match(surface, /callInstantMcpTools\("inspect"\)/);
   assert.match(surface, /INSTANT_MCP_TOOLS_MODULE_ID/);
   assert.doesNotMatch(surface, /callModule\("start"\)/);
   assert.doesNotMatch(surface, /open-port/);
@@ -69,9 +70,10 @@ test("apps_list stays callable on the existing in-process host without Instant M
   assert.equal(listed.modules.some((entry) => entry.id === "instant-mcp-tools"), false);
 });
 
-test("typed Instant MCP Tools stubs name the Bot GG apps handler contract", () => {
+test("typed Instant MCP Tools stubs prefer camelCase ops and keep kebab aliases", () => {
   const contracts = read("src/api/contracts.ts");
   const stub = read("src/api/instant-mcp-tools-contract.ts");
+  const panel = read("src/features/McpLiveToolsPanel.tsx");
   const schema = read("electron/ipc-schema.cjs");
   const host = readRepo("app-handler/host.cjs");
   const readme = readRepo("app-handler/README.md");
@@ -79,15 +81,28 @@ test("typed Instant MCP Tools stubs name the Bot GG apps handler contract", () =
 
   assert.match(contracts, /AppsModuleId/);
   assert.match(contracts, /"instant-mcp-tools"/);
-  assert.match(stub, /apps_list/);
+  assert.match(stub, /apps_list|codingTools\.apps\.call/);
+  assert.match(stub, /listTools/);
+  assert.match(stub, /runTool/);
+  assert.match(stub, /listWorkspaces/);
+  assert.match(stub, /list-tools/);
   assert.match(stub, /run-tool/);
   assert.match(stub, /TODO\(Bot GG\)|Bot GG owns/);
+  assert.match(panel, /"listTools"/);
+  assert.match(panel, /"runTool"/);
+  assert.match(panel, /"listWorkspaces"/);
+  assert.doesNotMatch(panel, /client\.tools\.catalog/);
   assert.match(schema, /"instant-mcp-tools"/);
   assert.match(host, /instant-mcp-tools/);
+  assert.match(host, /listTools/);
   assert.doesNotMatch(host, /MODULE_IDS = Object\.freeze\(\[[^\]]*instant-mcp-tools/s);
   assert.match(readme, /instant-mcp-tools/);
-  assert.match(readme, /TODO\(Bot GG\)/);
+  assert.match(readme, /TODO\(Bot GG/);
+  assert.match(readme, /listTools/);
   assert.match(i18n, /instantMcpTools:/);
   assert.doesNotMatch(stub, /setupCore/);
   assert.doesNotMatch(stub, /--restart-service/);
+  assert.doesNotMatch(panel, /setupCore/);
+  assert.doesNotMatch(panel, /--restart-service/);
+  assert.equal(fs.existsSync(path.join(repoRoot, "app-handler/instant-mcp-tools")), false);
 });

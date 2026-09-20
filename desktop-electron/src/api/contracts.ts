@@ -31,7 +31,8 @@ export interface JsonObject {
  * Bot GG owns `app-handler` registration — do not invent a second IPC host.
  * Until that handler lands, `apps.list()` / `apps_list` still return the five
  * registered modules; Instant MCP Tools runs as an in-process embed with no
- * listen-port Start. Expected Bot GG operations: inspect, list-tools, run-tool.
+ * listen-port Start. Expected Bot GG operations (camelCase): inspect, listTools,
+ * runTool, listWorkspaces. Kebab aliases: list-tools, run-tool.
  */
 export type AppsModuleId =
   | "cpa"

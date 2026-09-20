@@ -31,17 +31,27 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(i18n, /product: "Coding Tools"/);
 });
 
-test("live MCP tool controls call the typed Coding Tools API", () => {
+test("live MCP tool controls call Instant MCP Tools through codingTools.apps", () => {
   const panel = read("src/features/McpLiveToolsPanel.tsx");
+  const contract = read("src/api/instant-mcp-tools-contract.ts");
   const contracts = read("src/api/contracts.ts");
   const preload = read("electron/preload.cjs");
   const main = read("electron/main.cjs");
   const schema = read("electron/ipc-schema.cjs");
 
-  assert.match(panel, /getCodingToolsClient\(\)/);
-  assert.match(panel, /client\.workspaces\.list/);
-  assert.match(panel, /client\.tools\.catalog/);
-  assert.match(panel, /tools\.call/);
+  assert.match(panel, /callInstantMcpTools/);
+  assert.match(panel, /"listWorkspaces"/);
+  assert.match(panel, /"listTools"/);
+  assert.match(panel, /"runTool"/);
+  assert.match(panel, /instant-mcp-tools/);
+  assert.doesNotMatch(panel, /client\.tools\.catalog/);
+  assert.doesNotMatch(panel, /client\.workspaces\.list/);
+  assert.match(contract, /operation: "inspect"/);
+  assert.match(contract, /operation: "listTools"/);
+  assert.match(contract, /operation: "runTool"/);
+  assert.match(contract, /list-tools/);
+  assert.match(contract, /run-tool/);
+  assert.match(contract, /client\.apps\.call/);
   const appsPanel = read("src/features/InProcessAppsPanel.tsx");
   assert.match(appsPanel, /client\.apps\.list/);
   assert.match(appsPanel, /client\.apps\.call/);
