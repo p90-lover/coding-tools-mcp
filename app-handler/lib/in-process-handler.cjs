@@ -21,6 +21,9 @@ function wrapServices(moduleId, ctx) {
     providerStatus: ctx.providerStatus,
     providerCatalog: ctx.providerCatalog,
     explainEmptyModels: ctx.explainEmptyModels,
+    listTools: ctx.listTools,
+    runTool: ctx.runTool,
+    listWorkspaces: ctx.listWorkspaces,
   };
 }
 

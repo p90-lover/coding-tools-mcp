@@ -16,6 +16,7 @@ on:
       - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
       - 'desktop-electron/tests/rc11-cc-paseo-anneal-original-ui.test.cjs'
       - 'desktop-electron/tests/modules-apps-host.test.cjs'
+      - 'desktop-electron/tests/instant-mcp-tools-in-process.test.cjs'
       - 'docs/features/paseo-anneal-commandcode-original-panels.md'
   pull_request:
     branches:
@@ -31,6 +32,7 @@ on:
       - 'desktop-electron/src/features/UpstreamToolSurface.tsx'
       - 'desktop-electron/tests/rc11-cc-paseo-anneal-original-ui.test.cjs'
       - 'desktop-electron/tests/modules-apps-host.test.cjs'
+      - 'desktop-electron/tests/instant-mcp-tools-in-process.test.cjs'
       - 'docs/features/paseo-anneal-commandcode-original-panels.md'
   workflow_dispatch:
 
@@ -70,11 +72,14 @@ jobs:
             node --check app-handler/paseo/handlers.cjs
             node --check app-handler/anneal/handler.cjs
             node --check app-handler/anneal/handlers.cjs
+            node --check app-handler/instant-mcp-tools/handler.cjs
+            node --check app-handler/instant-mcp-tools/handlers.cjs
             node --check modules/host.cjs
             node --check modules/handler-registry.cjs
             node --test \
               desktop-electron/tests/rc11-cc-paseo-anneal-original-ui.test.cjs \
-              desktop-electron/tests/modules-apps-host.test.cjs
+              desktop-electron/tests/modules-apps-host.test.cjs \
+              desktop-electron/tests/instant-mcp-tools-in-process.test.cjs
           ) 2>&1 | tee aiTemp/rc11-cc-paseo-anneal-original-ui/evidence/results.txt
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

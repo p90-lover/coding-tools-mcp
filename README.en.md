@@ -35,7 +35,7 @@ The saved tool catalog and execution permissions are different settings. This bu
 | Vision | Screenshot/window capture, image viewing/inspection/comparison and exact-agent/live previews. Screenshot pixels stay in application memory. |
 | Paseo + Anneal | Read-only adapters for existing local instances, reused attributed status/ordering logic, and an operator-driven twelve-stage delivery checklist. Not bundled autonomous agent engines. |
 
-CPA, Codex Router, CommandCode, Paseo, and Anneal live as in-process modules under `modules/`. Coding Tools is the single host: call each module through `codingTools.apps` (IPC, no extra listen ports) and embed original chrome inside the Coding Tools GUI. [Module layout and API calls](modules/README.md)
+CPA, Codex Router, CommandCode, Paseo, Anneal, and Instant MCP Tools live as in-process modules under `modules/`. Coding Tools is the single host: call each module through `codingTools.apps` (IPC, no extra listen ports) and embed original chrome inside the Coding Tools GUI. [Module layout and API calls](modules/README.md)
 
 Details: [computer use](docs/features/local-computer-use.md), [remembered control](docs/features/remembered-control.md), [vision](docs/features/local-vision.md), [Paseo/Anneal integration](docs/features/paseo-anneal-control-center.md).
 

@@ -1,0 +1,9 @@
+{
+  "id": "instant-mcp-tools",
+  "strategy": "bundled-source",
+  "entrypoint": "registry.cjs",
+  "prebuilt": true,
+  "preferLocal": true,
+  "noDownload": true,
+  "source": "package-time extraResources"
+}

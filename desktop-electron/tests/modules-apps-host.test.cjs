@@ -12,8 +12,8 @@ const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
 
-test("app-handler tree hosts CPA, Codex Router, CommandCode, Paseo, and Anneal", () => {
-  assert.deepEqual(MODULE_IDS, ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]);
+test("app-handler tree hosts CPA, Codex Router, CommandCode, Paseo, Anneal, and Instant MCP Tools", () => {
+  assert.deepEqual(MODULE_IDS, ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal", "instant-mcp-tools"]);
   assert.equal(MODULE_IDS.includes("commandcode"), false);
   assert.deepEqual(FOREIGN_SLOTS, ["cpa", "codex-router"]);
   const folderIds = fs.readdirSync(path.join(repoRoot, "app-handler"), { withFileTypes: true })
@@ -74,6 +74,10 @@ test("apps host catalogs operations and drives modules in-process without listen
   assert.ok(listed.modules.find((entry) => entry.id === "paseo").operations.includes("send"));
   assert.ok(listed.modules.find((entry) => entry.id === "anneal").operations.includes("startTask"));
   assert.ok(listed.modules.find((entry) => entry.id === "anneal").operations.includes("task-start"));
+  assert.ok(listed.modules.find((entry) => entry.id === "instant-mcp-tools").operations.includes("listTools"));
+  assert.ok(listed.modules.find((entry) => entry.id === "instant-mcp-tools").operations.includes("list-tools"));
+  assert.ok(listed.modules.find((entry) => entry.id === "instant-mcp-tools").operations.includes("runTool"));
+  assert.ok(listed.modules.find((entry) => entry.id === "instant-mcp-tools").operations.includes("run-tool"));
 
   const catalog = host.catalog();
   const cpaModels = catalog.modules.find((entry) => entry.id === "cpa")

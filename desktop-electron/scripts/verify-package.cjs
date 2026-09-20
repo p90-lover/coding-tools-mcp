@@ -76,6 +76,7 @@ const REQUIRED_ASAR_FILES = Object.freeze([
   "app-handler/commandcode-proxy/handler.cjs",
   "app-handler/paseo/handler.cjs",
   "app-handler/anneal/handler.cjs",
+  "app-handler/instant-mcp-tools/handler.cjs",
 ]);
 const REQUIRED_MODULE_FILES = Object.freeze([
   "app-handler/host.cjs",
@@ -86,6 +87,7 @@ const REQUIRED_MODULE_FILES = Object.freeze([
   "app-handler/commandcode-proxy/handler.cjs",
   "app-handler/paseo/handler.cjs",
   "app-handler/anneal/handler.cjs",
+  "app-handler/instant-mcp-tools/handler.cjs",
 ]);
 const REQUIRED_MODULE_SHIMS = Object.freeze([
   "modules/host.cjs",

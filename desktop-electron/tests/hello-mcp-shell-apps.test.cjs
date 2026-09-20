@@ -71,6 +71,7 @@ test("apps MCP tools list, call, invoke, and report ready without spawning ports
   assert.equal(listed.dedicatedListenPorts, false);
   assert.ok(listed.modules.some((entry) => entry.id === "cpa"));
   assert.ok(listed.modules.some((entry) => entry.id === "codex-router"));
+  assert.ok(listed.modules.some((entry) => entry.id === "instant-mcp-tools"));
 
   const called = await mcp.callTool("apps_call", { moduleId: "cpa", operation: "inspect" });
   assert.equal(called.via, "codingTools.apps.call");
@@ -98,9 +99,15 @@ test("apps MCP tools list, call, invoke, and report ready without spawning ports
   assert.equal(inspectCalls.some((entry) => entry[1] === "commandcode-proxy"), false);
   assert.equal(inspectCalls.some((entry) => entry[1] === "paseo"), false);
   assert.equal(inspectCalls.some((entry) => entry[1] === "anneal"), false);
+  assert.equal(inspectCalls.some((entry) => entry[1] === "instant-mcp-tools"), false);
   const commandCode = status.modules.find((entry) => entry.id === "commandcode-proxy");
   assert.equal(commandCode.ready, true);
   assert.equal(commandCode.listening, false);
+  const instant = status.modules.find((entry) => entry.id === "instant-mcp-tools");
+  assert.equal(instant.handlerRegistered, true);
+  assert.equal(instant.ready, true);
+  assert.equal(instant.listening, false);
+  assert.equal(instant.dedicatedListenPort, false);
   assert.equal(mcp.isReadOnly("apps_list"), true);
   assert.equal(mcp.isReadOnly("apps_call", { moduleId: "cpa", operation: "inspect" }), true);
   assert.equal(mcp.isReadOnly("apps_call", { moduleId: "cpa", operation: "start" }), false);
