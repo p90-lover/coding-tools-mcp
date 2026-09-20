@@ -54,7 +54,7 @@ test("Instant MCP Tools is a catalogued in-process module with listTools/runTool
   assert.equal(snapshot.transport, "in-process");
   assert.equal(snapshot.legacyLoopback, null);
   const operations = defaultRegistry.operations(MODULE_ID);
-  for (const name of ["inspect", "listTools", "tools", "runTool", "callTool", "listWorkspaces"]) {
+  for (const name of ["inspect", "listTools", "list-tools", "tools", "runTool", "run-tool", "callTool", "listWorkspaces"]) {
     assert.equal(operations.includes(name), true, name);
   }
   const listed = createCodingToolsAppsHost().list();
@@ -66,10 +66,18 @@ test("Instant MCP Tools is a catalogued in-process module with listTools/runTool
     .find((module) => module.id === MODULE_ID)
     .operations.find((operation) => operation.name === "listTools");
   assert.equal(listTools.readOnly, true);
+  const kebabList = catalog.modules
+    .find((module) => module.id === MODULE_ID)
+    .operations.find((operation) => operation.name === "list-tools");
+  assert.equal(kebabList.readOnly, true);
   const runTool = catalog.modules
     .find((module) => module.id === MODULE_ID)
     .operations.find((operation) => operation.name === "runTool");
   assert.equal(runTool.readOnly, false);
+  const kebabRun = catalog.modules
+    .find((module) => module.id === MODULE_ID)
+    .operations.find((operation) => operation.name === "run-tool");
+  assert.equal(kebabRun.readOnly, false);
 });
 
 test("inspect is ready without Start, listen ports, or TCP", async () => {
@@ -160,9 +168,27 @@ test("listTools and runTool work via apps.invoke with JSON args and soft-fail wh
   assert.equal(viaAlias.ok, true);
   assert.equal(viaAlias.result.tool, "apps_list");
 
+  const kebabListed = await host.call({
+    moduleId: MODULE_ID,
+    operation: "list-tools",
+    arguments: { workspaceId: "ws-1" },
+  });
+  assert.equal(kebabListed.ok, true);
+  assert.deepEqual(kebabListed.result.tools.map((tool) => tool.name), ["apps_list", "read_file"]);
+  assert.equal(host.isReadOnly(MODULE_ID, "list-tools"), true);
+
+  const kebabRan = await host.call({
+    moduleId: MODULE_ID,
+    operation: "run-tool",
+    arguments: { workspaceId: "ws-1", tool: "read_file", arguments: { path: "README.md" } },
+  });
+  assert.equal(kebabRan.ok, true);
+  assert.equal(kebabRan.result.tool, "read_file");
+  assert.equal(host.isReadOnly(MODULE_ID, "run-tool"), false);
+
   const workspaces = await host.call(MODULE_ID, "listWorkspaces");
   assert.equal(workspaces.result.items[0].id, "ws-1");
-  assert.deepEqual(calls.map((entry) => entry[0]), ["listTools", "runTool", "runTool"]);
+  assert.deepEqual(calls.map((entry) => entry[0]), ["listTools", "runTool", "runTool", "listTools", "runTool"]);
 });
 
 test("runTool soft-fails when no MCP runtime is available", async () => {
@@ -211,8 +237,11 @@ test("README and IPC contract document handler id and operations for LOL", () =>
   const panel = fs.readFileSync(path.join(desktopRoot, "src/features/McpLiveToolsPanel.tsx"), "utf8");
   const main = fs.readFileSync(path.join(desktopRoot, "electron/main.cjs"), "utf8");
   assert.match(readme, /moduleId: "instant-mcp-tools"/);
+  assert.match(readme, /operation: "list-tools"/);
+  assert.match(readme, /operation: "run-tool"/);
   assert.match(readme, /operation: "listTools"/);
-  assert.match(readme, /operation: "runTool"/);
+  assert.match(readme, /alias of listTools/);
+  assert.match(readme, /alias of runTool/);
   assert.match(readme, /handle: "instant-mcp-tools"/);
   assert.doesNotMatch(readme, /api_key|secret|token/i);
   assert.match(schema, /instant-mcp-tools/);

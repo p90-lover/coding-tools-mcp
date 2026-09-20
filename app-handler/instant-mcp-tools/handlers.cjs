@@ -258,7 +258,9 @@ function createModule() {
     },
   };
   extraOperations.tools = extraOperations.listTools;
+  extraOperations["list-tools"] = extraOperations.listTools;
   extraOperations.callTool = extraOperations.runTool;
+  extraOperations["run-tool"] = extraOperations.runTool;
   return defineModule({
     id: MODULE_ID,
     name: "Instant MCP Tools",

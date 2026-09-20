@@ -86,8 +86,10 @@ const EXPECTED_OPS = Object.freeze({
   "instant-mcp-tools": [
     ...LIFECYCLE,
     "listTools",
+    "list-tools",
     "tools",
     "runTool",
+    "run-tool",
     "callTool",
     "listWorkspaces",
   ],

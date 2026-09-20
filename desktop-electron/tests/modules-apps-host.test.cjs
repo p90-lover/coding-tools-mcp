@@ -75,7 +75,9 @@ test("apps host catalogs operations and drives modules in-process without listen
   assert.ok(listed.modules.find((entry) => entry.id === "anneal").operations.includes("startTask"));
   assert.ok(listed.modules.find((entry) => entry.id === "anneal").operations.includes("task-start"));
   assert.ok(listed.modules.find((entry) => entry.id === "instant-mcp-tools").operations.includes("listTools"));
+  assert.ok(listed.modules.find((entry) => entry.id === "instant-mcp-tools").operations.includes("list-tools"));
   assert.ok(listed.modules.find((entry) => entry.id === "instant-mcp-tools").operations.includes("runTool"));
+  assert.ok(listed.modules.find((entry) => entry.id === "instant-mcp-tools").operations.includes("run-tool"));
 
   const catalog = host.catalog();
   const cpaModels = catalog.modules.find((entry) => entry.id === "cpa")

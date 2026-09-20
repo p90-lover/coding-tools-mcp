@@ -16,21 +16,23 @@ Follow-up on CPA PR #234 (`cursor/cpa-in-process-panel-f630`). Instant MCP Tools
 | `operation` | Alias | JSON `arguments` |
 | --- | --- | --- |
 | `inspect` | — | `{}` |
-| `listTools` | `tools` | `{ "workspaceId"?: string }` |
-| `runTool` | `callTool` | `{ "tool": string, "arguments"?: object, "workspaceId"?: string, "requestId"?: string }` |
+| `listTools` | `list-tools`, `tools` | `{ "workspaceId"?: string }` |
+| `runTool` | `run-tool`, `callTool` | `{ "tool": string, "arguments"?: object, "workspaceId"?: string, "requestId"?: string }` |
 | `listWorkspaces` | — | `{}` |
 
 Host-level: `codingTools.apps.list()` / `.catalog()` include this module. Ready = `inspect` / `catalog`. Do not add a Start button or bind a panel port.
 
+LOL typed stub (#235) should call kebab-case `inspect` / `list-tools` / `run-tool`. CamelCase remains valid.
+
 ```js
-await codingTools.apps.invoke({
-  handle: "instant-mcp-tools",
-  operation: "listTools",
+await codingTools.apps.call({
+  moduleId: "instant-mcp-tools",
+  operation: "list-tools",
   arguments: { workspaceId: "ws-1" },
 });
-await codingTools.apps.invoke({
-  handle: "instant-mcp-tools",
-  operation: "runTool",
+await codingTools.apps.call({
+  moduleId: "instant-mcp-tools",
+  operation: "run-tool",
   arguments: { tool: "apps_list", arguments: {} },
 });
 ```
