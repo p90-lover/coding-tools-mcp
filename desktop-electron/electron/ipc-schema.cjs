@@ -317,7 +317,9 @@ const appsCallRequest = Object.freeze({
   properties: Object.freeze({
     moduleId: Object.freeze({
       type: "string",
-      enum: Object.freeze(["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]),
+      // `instant-mcp-tools` is a typed stub for the Instant MCP Tools Managed App.
+      // Bot GG owns the app-handler; the UI lane does not open a listen-port Start.
+      enum: Object.freeze(["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal", "instant-mcp-tools"]),
     }),
     operation: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
     requestId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),

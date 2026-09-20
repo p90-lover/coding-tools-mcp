@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
-import type { JsonObject } from "../api/contracts";
+import type { AppsModuleId, JsonObject } from "../api/contracts";
 import type { Copy } from "../i18n";
 import type { Language } from "../types";
 
@@ -101,12 +101,12 @@ export function InProcessAppsPanel({ copy, language, setError }: InProcessAppsPa
       const client = getCodingToolsClient();
       const response = mode === "invoke"
         ? await client.apps.invoke({
-          handle: moduleId as "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal",
+          handle: moduleId as AppsModuleId,
           operation,
           arguments: parsed,
         })
         : await client.apps.call({
-          moduleId: moduleId as "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal",
+          moduleId: moduleId as AppsModuleId,
           operation,
           arguments: parsed,
         });

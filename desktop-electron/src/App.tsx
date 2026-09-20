@@ -19,8 +19,8 @@ import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
-import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
-import { InProcessAppsPanel } from "./features/InProcessAppsPanel";
+import { InstantMcpToolsSurface } from "./features/InstantMcpToolsSurface";
+import "./features/instant-mcp-tools.css";
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -417,6 +417,7 @@ function LauncherShell({
     || surface === "codex-router"
     || surface === "paseo"
     || surface === "anneal"
+    || surface === "instant-mcp-tools"
     || surface === "network";
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
@@ -729,6 +730,12 @@ function LauncherShell({
                   onClick={() => navigateSurface("integrations")}
                 />
                 <SidebarItem
+                  active={surface === "instant-mcp-tools"}
+                  icon="mcp"
+                  label={copy.instantMcpTools}
+                  onClick={() => navigateSurface("instant-mcp-tools")}
+                />
+                <SidebarItem
                   active={surface === "cpa"}
                   icon="providers"
                   label="CPA"
@@ -838,6 +845,7 @@ function LauncherShell({
                   setMcpTargetMode(null);
                   navigateSurface("browser");
                 }}
+                openInstantMcpTools={() => navigateSurface("instant-mcp-tools")}
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
@@ -856,10 +864,14 @@ function LauncherShell({
                 openAnneal={() => navigateSurface("anneal")}
                 openCpa={() => navigateSurface("cpa")}
                 openCodexRouter={() => navigateSurface("codex-router")}
+                openInstantMcpTools={() => navigateSurface("instant-mcp-tools")}
                 openPaseo={() => navigateSurface("paseo")}
                 openProviders={() => navigateSurface("providers")}
                 setError={setError}
               />
+            ) : null}
+            {surface === "instant-mcp-tools" ? (
+              <InstantMcpToolsSurface copy={copy} language={language} setError={setError} />
             ) : null}
             {surface === "cpa" ? (
               <OriginalUiSurface language={language} setError={setError} toolId="cpa" />
@@ -1421,6 +1433,7 @@ function McpSurface({
   interactionMode,
   language,
   onDone,
+  openInstantMcpTools,
   operation,
   setError,
   snapshot,
@@ -1431,6 +1444,7 @@ function McpSurface({
   interactionMode: BrowserInteractionMode;
   language: Language;
   onDone: () => void;
+  openInstantMcpTools: () => void;
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -1718,8 +1732,12 @@ function McpSurface({
           </>
         ) : null}
       </div>
-      <InProcessAppsPanel copy={copy} language={language} setError={setError} />
-      <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
+      <section className="mcp-managed-app-link" aria-label={copy.instantMcpTools}>
+        <p>{copy.liveMcpToolsMoved}</p>
+        <SecondaryButton icon="mcp" onClick={openInstantMcpTools}>
+          {copy.openInstantMcpTools}
+        </SecondaryButton>
+      </section>
     </ContentSurface>
   );
 }

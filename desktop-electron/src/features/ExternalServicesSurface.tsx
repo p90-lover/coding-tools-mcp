@@ -19,6 +19,7 @@ interface ExternalServicesSurfaceProps {
   openCodexRouter: () => void;
   openPaseo: () => void;
   openAnneal: () => void;
+  openInstantMcpTools: () => void;
 }
 
 interface ServiceDraft {
@@ -138,6 +139,7 @@ export function ExternalServicesSurface({
   openCodexRouter,
   openPaseo,
   openAnneal,
+  openInstantMcpTools,
 }: ExternalServicesSurfaceProps) {
   const api = window.codexWebLauncher;
   const [services, setServices] = useState<ExternalServicesSnapshot>(EMPTY_SERVICES);
@@ -379,6 +381,9 @@ export function ExternalServicesSurface({
           )}</p>
         </div>
         <div className="external-services-heading-actions">
+          <button disabled={busy !== null} onClick={openInstantMcpTools} type="button">
+            {text(language, "Instant MCP Tools", "即時 MCP 工具")}
+          </button>
           <button disabled={busy !== null} onClick={() => void refresh()} type="button">
             {text(language, "Refresh all", "全部刷新")}
           </button>

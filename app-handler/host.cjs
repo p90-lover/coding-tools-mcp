@@ -10,6 +10,11 @@ const MODULE_IDS = Object.freeze([
   "paseo",
   "anneal",
 ]);
+// TODO(Bot GG / #236): register `instant-mcp-tools` here + app-handler/instant-mcp-tools/
+// when the in-process apps handler lands. Primary ops (camelCase): inspect, listTools,
+// runTool, listWorkspaces. Kebab aliases: list-tools, run-tool.
+// Transport: in-process. No dedicated listen port / Start. UI lane already hosts
+// Instant MCP Tools as a Managed App visual via codingTools.apps.call / invoke.
 
 function createCodingToolsAppsHost({
   services = null,

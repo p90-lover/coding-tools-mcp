@@ -24,6 +24,24 @@ export interface JsonObject {
   readonly [key: string]: JsonValue;
 }
 
+/**
+ * In-process Coding Tools modules on `codingTools.apps`.
+ *
+ * `instant-mcp-tools` is typed for the Instant MCP Tools Managed App visual.
+ * Bot GG owns `app-handler` registration — do not invent a second IPC host.
+ * Until that handler lands, `apps.list()` / `apps_list` still return the five
+ * registered modules; Instant MCP Tools runs as an in-process embed with no
+ * listen-port Start. Expected Bot GG operations (camelCase): inspect, listTools,
+ * runTool, listWorkspaces. Kebab aliases: list-tools, run-tool.
+ */
+export type AppsModuleId =
+  | "cpa"
+  | "codex-router"
+  | "commandcode-proxy"
+  | "paseo"
+  | "anneal"
+  | "instant-mcp-tools";
+
 export interface CodingToolsApi {
   readonly runtime: {
     status(): Promise<JsonObject>;
@@ -97,14 +115,14 @@ export interface CodingToolsApi {
     list(): Promise<JsonObject>;
     catalog(): Promise<JsonObject>;
     call(input: {
-      readonly moduleId: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly moduleId: AppsModuleId;
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;
     }): Promise<JsonObject>;
     invoke(input: {
-      readonly handle?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
-      readonly moduleId?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly handle?: AppsModuleId;
+      readonly moduleId?: AppsModuleId;
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;

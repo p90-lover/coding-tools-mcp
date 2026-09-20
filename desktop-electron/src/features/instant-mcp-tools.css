@@ -1,0 +1,109 @@
+.instant-mcp-tools-surface {
+  /* original-ui.css sizes against --titlebar-height, which is unset globally. */
+  --titlebar-height: var(--height-titlebar, 46px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--titlebar-height));
+  max-height: calc(100vh - var(--titlebar-height));
+  min-height: 0;
+  overflow: hidden;
+  color: #111827;
+  color-scheme: light;
+  --color-background-elevated: #f8fafc;
+  --color-background-control: #f3f4f6;
+  --color-background-control-hover: #e5e7eb;
+  --color-background-control-active: #d1d5db;
+  --color-background-button-secondary: #eef2ff;
+  --color-background-button-secondary-hover: #e0e7ff;
+  --color-text-primary: #111827;
+  --color-text-secondary: #374151;
+  --color-text-tertiary: #6b7280;
+  --color-text-disabled: #9ca3af;
+  --color-text-accent: #1d4ed8;
+  --color-icon-primary: #111827;
+  --color-icon-secondary: #4b5563;
+  --color-icon-tertiary: #6b7280;
+  --color-border: rgb(15 23 42 / 16%);
+  --color-border-light: rgb(15 23 42 / 10%);
+  --color-border-heavy: rgb(15 23 42 / 22%);
+}
+
+.instant-mcp-tools-transport {
+  color: #4b5563;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.instant-mcp-tools-surface .original-ui-status.status-offline {
+  border-color: rgb(15 23 42 / 16%);
+  color: #4b5563;
+}
+
+.instant-mcp-tools-listed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgb(15 23 42 / 10%);
+  color: #4b5563;
+  font-size: 12px;
+}
+
+.instant-mcp-tools-listed code {
+  padding: 1px 6px;
+  border: 1px solid rgb(15 23 42 / 12%);
+  border-radius: 4px;
+  background: #fff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.instant-mcp-tools-embed {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+  padding: 16px 20px 32px;
+}
+
+.instant-mcp-tools-surface .button-primary {
+  background: #1d4ed8;
+  color: #fff;
+}
+
+.instant-mcp-tools-surface .button-secondary {
+  border: 1px solid rgb(15 23 42 / 12%);
+  background: #fff;
+  color: #111827;
+}
+
+.instant-mcp-tools-embed .mcp-live-tools {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.instant-mcp-tools-embed .in-process-apps {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid rgb(15 23 42 / 10%);
+}
+
+.mcp-managed-app-link {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+}
+
+.mcp-managed-app-link p {
+  max-width: 590px;
+  margin: 0 0 12px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
