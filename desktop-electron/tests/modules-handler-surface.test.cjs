@@ -83,6 +83,14 @@ const EXPECTED_OPS = Object.freeze({
     "inbox_close",
     "openFromReview",
   ],
+  "instant-mcp-tools": [
+    ...LIFECYCLE,
+    "listTools",
+    "tools",
+    "runTool",
+    "callTool",
+    "listWorkspaces",
+  ],
 });
 
 const PASEO_PROTOCOL = Object.freeze(["send", "resume", "cancel", "archive", "permission", "create"]);
@@ -322,7 +330,7 @@ test("codingTools.apps list/catalog/call/invoke stay in-process and inspect does
     assert.equal(catalog.transport, "in-process");
 
     const loopbackInspect = ["cpa", "codex-router"];
-    const bundledInspect = ["commandcode-proxy", "paseo", "anneal"];
+    const bundledInspect = ["commandcode-proxy", "paseo", "anneal", "instant-mcp-tools"];
     for (const moduleId of MODULE_IDS) {
       const viaCall = await apps.call({ moduleId, operation: "inspect" });
       assert.equal(viaCall.ok, true, `${moduleId} call inspect`);

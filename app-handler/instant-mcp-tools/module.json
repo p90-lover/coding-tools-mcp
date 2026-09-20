@@ -1,0 +1,13 @@
+{
+  "id": "instant-mcp-tools",
+  "name": "Instant MCP Tools",
+  "kind": "managed-service",
+  "transport": "in-process",
+  "source": {
+    "strategy": "in-tree",
+    "path": "app-handler/instant-mcp-tools/source",
+    "entrypoint": "registry.cjs",
+    "preferLocal": true,
+    "noDownload": true
+  }
+}

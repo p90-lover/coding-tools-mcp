@@ -15,10 +15,18 @@ interface CatalogTool {
   description?: string;
 }
 
+const MODULE_ID = "instant-mcp-tools" as const;
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function invokeResult(payload: unknown): Record<string, unknown> {
+  const wrapped = asRecord(payload);
+  const result = asRecord(wrapped.result);
+  return Object.keys(result).length > 0 ? result : wrapped;
 }
 
 function toolEntries(catalog: Record<string, unknown>): CatalogTool[] {
@@ -37,6 +45,27 @@ function toolEntries(catalog: Record<string, unknown>): CatalogTool[] {
   });
 }
 
+function workspaceEntries(payload: Record<string, unknown>): WorkspaceSummary[] {
+  const raw = Array.isArray(payload.items) ? payload.items : [];
+  return raw.flatMap((entry) => {
+    const record = asRecord(entry);
+    const id = typeof record.id === "string" ? record.id : "";
+    const name = typeof record.name === "string" ? record.name : id;
+    const pathValue = typeof record.path === "string" ? record.path : "";
+    if (!id || !pathValue) return [];
+    const mcpState = record.mcpState;
+    return [{
+      id,
+      name: name || id,
+      path: pathValue,
+      mcpState: mcpState === "starting" || mcpState === "running" || mcpState === "stopping" || mcpState === "error"
+        ? mcpState
+        : "stopped",
+      policyRevision: Number.isInteger(record.policyRevision) ? Number(record.policyRevision) : 0,
+    }];
+  });
+}
+
 export function McpLiveToolsPanel({ copy, language, setError }: McpLiveToolsPanelProps) {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
@@ -50,27 +79,34 @@ export function McpLiveToolsPanel({ copy, language, setError }: McpLiveToolsPane
     [workspaceId, workspaces],
   );
 
+  const loadTools = async (nextWorkspace: string) => {
+    const client = getCodingToolsClient();
+    const catalog = invokeResult(await client.apps.invoke({
+      handle: MODULE_ID,
+      operation: "listTools",
+      arguments: nextWorkspace ? { workspaceId: nextWorkspace } : {},
+    }));
+    const nextTools = toolEntries(catalog);
+    setTools(nextTools);
+    setTool((current) => nextTools.some((item) => item.name === current) ? current : nextTools[0]?.name ?? "");
+  };
+
   const refresh = async () => {
     setBusy("refresh");
     setError(null);
     try {
       const client = getCodingToolsClient();
-      const page = await client.workspaces.list({ cursor: 0, limit: 50 });
-      const items = page.items;
+      const listed = invokeResult(await client.apps.invoke({
+        handle: MODULE_ID,
+        operation: "listWorkspaces",
+      }));
+      const items = workspaceEntries(listed);
       setWorkspaces([...items]);
       const nextWorkspace = items.some((item) => item.id === workspaceId)
         ? workspaceId
         : items[0]?.id ?? "";
       setWorkspaceId(nextWorkspace);
-      if (!nextWorkspace) {
-        setTools([]);
-        setTool("");
-        return;
-      }
-      const catalog = await client.tools.catalog({ workspaceId: nextWorkspace });
-      const nextTools = toolEntries(asRecord(catalog));
-      setTools(nextTools);
-      setTool((current) => nextTools.some((item) => item.name === current) ? current : nextTools[0]?.name ?? "");
+      await loadTools(nextWorkspace);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -85,7 +121,7 @@ export function McpLiveToolsPanel({ copy, language, setError }: McpLiveToolsPane
   }, []);
 
   const runTool = async () => {
-    if (!workspaceId || !tool || busy) return;
+    if (!tool || busy) return;
     setBusy("call");
     setError(null);
     try {
@@ -97,10 +133,14 @@ export function McpLiveToolsPanel({ copy, language, setError }: McpLiveToolsPane
         }
         parsed = value as JsonObject;
       }
-      const response = await getCodingToolsClient().tools.call({
-        workspaceId,
-        tool,
-        arguments: parsed,
+      const response = await getCodingToolsClient().apps.invoke({
+        handle: MODULE_ID,
+        operation: "runTool",
+        arguments: {
+          ...(workspaceId ? { workspaceId } : {}),
+          tool,
+          arguments: parsed,
+        },
       });
       setResult(JSON.stringify(response, null, 2));
     } catch (cause) {
@@ -119,39 +159,38 @@ export function McpLiveToolsPanel({ copy, language, setError }: McpLiveToolsPane
         </button>
       </div>
       <p>{copy.liveMcpToolsBody}</p>
-      {workspaces.length === 0 ? (
+      {workspaces.length === 0 && tools.length === 0 ? (
         <div className="surface-empty">
           <span>{copy.noWorkspaces}</span>
         </div>
       ) : (
         <div className="field-list mcp-live-fields">
-          <label className="field-row">
-            <span>{copy.selectWorkspace}</span>
-            <select
-              aria-label={copy.selectWorkspace}
-              onChange={(event) => {
-                setWorkspaceId(event.target.value);
-                void (async () => {
-                  setBusy("refresh");
-                  try {
-                    const catalog = await getCodingToolsClient().tools.catalog({ workspaceId: event.target.value });
-                    const nextTools = toolEntries(asRecord(catalog));
-                    setTools(nextTools);
-                    setTool(nextTools[0]?.name ?? "");
-                  } catch (cause) {
-                    setError(cause instanceof Error ? cause.message : String(cause));
-                  } finally {
-                    setBusy(null);
-                  }
-                })();
-              }}
-              value={workspaceId}
-            >
-              {workspaces.map((item) => (
-                <option key={item.id} value={item.id}>{item.name}</option>
-              ))}
-            </select>
-          </label>
+          {workspaces.length > 0 ? (
+            <label className="field-row">
+              <span>{copy.selectWorkspace}</span>
+              <select
+                aria-label={copy.selectWorkspace}
+                onChange={(event) => {
+                  setWorkspaceId(event.target.value);
+                  void (async () => {
+                    setBusy("refresh");
+                    try {
+                      await loadTools(event.target.value);
+                    } catch (cause) {
+                      setError(cause instanceof Error ? cause.message : String(cause));
+                    } finally {
+                      setBusy(null);
+                    }
+                  })();
+                }}
+                value={workspaceId}
+              >
+                {workspaces.map((item) => (
+                  <option key={item.id} value={item.id}>{item.name}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <label className="field-row">
             <span>{copy.selectTool}</span>
             <select aria-label={copy.selectTool} onChange={(event) => setTool(event.target.value)} value={tool}>
@@ -181,7 +220,7 @@ export function McpLiveToolsPanel({ copy, language, setError }: McpLiveToolsPane
       <div className="inline-actions">
         <button
           className="button-primary"
-          disabled={busy !== null || !workspaceId || !tool}
+          disabled={busy !== null || !tool}
           onClick={() => void runTool()}
           type="button"
         >

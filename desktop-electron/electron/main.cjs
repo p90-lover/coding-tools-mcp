@@ -48,6 +48,7 @@ const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
 const { requireAppHandler } = require("./app-handler-paths.cjs");
+const { createInstantMcpToolsServices } = require("./instant-mcp-tools-services.cjs");
 function loadCreateCodingToolsAppsHost() {
   try {
     return requireAppHandler("host.cjs").createCodingToolsAppsHost;
@@ -1696,6 +1697,11 @@ async function start() {
     },
   });
   const providerServices = createAppsProviderServices({ providerNetworkReady });
+  const instantMcpToolsServices = createInstantMcpToolsServices({
+    getHeadlessHost: () => headlessHost,
+    getFiveStack: () => getFiveStack(),
+    getAppsMcp: () => appsMcp,
+  });
   try {
     appsHost = createCodingToolsAppsHost({
     services: {
@@ -1737,6 +1743,9 @@ async function start() {
           curateCli: input.curateCli || router?.curateCli || "curate-models",
         });
       },
+      listTools: (input) => instantMcpToolsServices.listTools(input),
+      runTool: (input) => instantMcpToolsServices.runTool(input),
+      listWorkspaces: (input) => instantMcpToolsServices.listWorkspaces(input),
     },
     actUpstream,
     getFiveStack: () => getFiveStack(),

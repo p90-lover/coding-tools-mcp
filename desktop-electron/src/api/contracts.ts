@@ -24,6 +24,14 @@ export interface JsonObject {
   readonly [key: string]: JsonValue;
 }
 
+export type CodingToolsAppModuleId =
+  | "cpa"
+  | "codex-router"
+  | "commandcode-proxy"
+  | "paseo"
+  | "anneal"
+  | "instant-mcp-tools";
+
 export interface CodingToolsApi {
   readonly runtime: {
     status(): Promise<JsonObject>;
@@ -97,14 +105,14 @@ export interface CodingToolsApi {
     list(): Promise<JsonObject>;
     catalog(): Promise<JsonObject>;
     call(input: {
-      readonly moduleId: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly moduleId: CodingToolsAppModuleId;
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;
     }): Promise<JsonObject>;
     invoke(input: {
-      readonly handle?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
-      readonly moduleId?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly handle?: CodingToolsAppModuleId;
+      readonly moduleId?: CodingToolsAppModuleId;
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;

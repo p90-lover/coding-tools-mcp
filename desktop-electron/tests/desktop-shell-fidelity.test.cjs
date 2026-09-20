@@ -31,7 +31,7 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(i18n, /product: "Coding Tools"/);
 });
 
-test("live MCP tool controls call the typed Coding Tools API", () => {
+test("live MCP tool controls call Instant MCP Tools through codingTools.apps", () => {
   const panel = read("src/features/McpLiveToolsPanel.tsx");
   const contracts = read("src/api/contracts.ts");
   const preload = read("electron/preload.cjs");
@@ -39,9 +39,13 @@ test("live MCP tool controls call the typed Coding Tools API", () => {
   const schema = read("electron/ipc-schema.cjs");
 
   assert.match(panel, /getCodingToolsClient\(\)/);
-  assert.match(panel, /client\.workspaces\.list/);
-  assert.match(panel, /client\.tools\.catalog/);
-  assert.match(panel, /tools\.call/);
+  assert.match(panel, /instant-mcp-tools/);
+  assert.match(panel, /operation: "listWorkspaces"/);
+  assert.match(panel, /operation: "listTools"/);
+  assert.match(panel, /operation: "runTool"/);
+  assert.match(panel, /client\.apps\.invoke/);
+  assert.doesNotMatch(panel, /client\.tools\.catalog/);
+  assert.doesNotMatch(panel, /client\.workspaces\.list/);
   const appsPanel = read("src/features/InProcessAppsPanel.tsx");
   assert.match(appsPanel, /client\.apps\.list/);
   assert.match(appsPanel, /client\.apps\.call/);
@@ -50,6 +54,7 @@ test("live MCP tool controls call the typed Coding Tools API", () => {
   assert.match(appsPanel, /apps_invoke/);
   assert.match(contracts, /readonly tools:/);
   assert.match(contracts, /readonly apps:/);
+  assert.match(contracts, /instant-mcp-tools/);
   assert.match(preload, /"tools.catalog"/);
   assert.match(preload, /"tools.call"/);
   assert.match(preload, /"apps.call"/);
@@ -57,10 +62,12 @@ test("live MCP tool controls call the typed Coding Tools API", () => {
   assert.match(main, /coding-tools:tools:catalog/);
   assert.match(main, /coding-tools:tools:call/);
   assert.match(main, /coding-tools:apps:call/);
+  assert.match(main, /createInstantMcpToolsServices/);
   assert.match(main, /mergeAppsCatalog/);
   assert.match(main, /appsMcp\.hasTool/);
   assert.match(schema, /"tools.catalog"/);
   assert.match(schema, /"apps.call"/);
+  assert.match(schema, /instant-mcp-tools/);
 });
 
 test("the shell bridge adapts headless workspaces into the typed page contract", () => {

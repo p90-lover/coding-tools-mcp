@@ -16,7 +16,7 @@ const source = (relative) => fs.readFileSync(path.join(ROOT, relative), "utf8");
 
 test("this lane keeps CommandCode Paseo Anneal on #221's shared registry", () => {
   assert.deepEqual(FOREIGN_SLOTS, ["cpa", "codex-router"]);
-  assert.deepEqual(MODULE_IDS, ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]);
+  assert.deepEqual(MODULE_IDS, ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal", "instant-mcp-tools"]);
   assert.equal(MODULE_IDS.includes("commandcode"), false);
   assert.equal(fs.existsSync(path.join(ROOT, "app-handler/handler-registry.cjs")), true);
   assert.equal(fs.existsSync(path.join(ROOT, "app-handler/host.cjs")), true);

@@ -35,7 +35,7 @@
 | 視覺 | 螢幕／視窗擷取、圖片查看／資訊／比較，以及 GPT 所見／即時預覽；截圖像素只留在應用程式記憶體。 |
 | Paseo＋Anneal | 讀取已存在本機服務的唯讀介接器、附上游授權的狀態／排序邏輯，以及由使用者操作的十二階段交付清單；不是完整自主 Agent 引擎。 |
 
-CPA、Codex Router、CommandCode、Paseo 與 Anneal 以 `modules/` 內的行程內模組存在。Coding Tools 是唯一宿主，透過 `codingTools.apps`（IPC，不新增監聽連接埠）呼叫各模組，並把原始畫面內嵌在 Coding Tools GUI。[模組說明與呼叫方式](modules/README.md)
+CPA、Codex Router、CommandCode、Paseo、Anneal 與 Instant MCP Tools 以 `modules/` 內的行程內模組存在。Coding Tools 是唯一宿主，透過 `codingTools.apps`（IPC，不新增監聽連接埠）呼叫各模組，並把原始畫面內嵌在 Coding Tools GUI。[模組說明與呼叫方式](modules/README.md)
 
 詳細文件：[電腦操作](docs/features/local-computer-use.md)、[記住批准](docs/features/remembered-control.md)、[視覺](docs/features/local-vision.md)、[Paseo／Anneal 整合](docs/features/paseo-anneal-control-center.md)。
 

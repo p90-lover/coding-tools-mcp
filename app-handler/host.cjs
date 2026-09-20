@@ -9,6 +9,7 @@ const MODULE_IDS = Object.freeze([
   "commandcode-proxy",
   "paseo",
   "anneal",
+  "instant-mcp-tools",
 ]);
 
 function createCodingToolsAppsHost({

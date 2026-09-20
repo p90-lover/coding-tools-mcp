@@ -1,6 +1,6 @@
 # Coding Tools app-handler
 
-CPA, Codex Router, CommandCode Proxy, Paseo, and Anneal live under one tree: `app-handler/<app>/`. Coding Tools is the single host. **#224 / #228 (CommandCode / Paseo / Anneal) use this same root** via `app-handler/handler-registry.cjs`.
+CPA, Codex Router, CommandCode Proxy, Paseo, Anneal, and Instant MCP Tools live under one tree: `app-handler/<app>/`. Coding Tools is the single host. **#224 / #228 (CommandCode / Paseo / Anneal) use this same root** via `app-handler/handler-registry.cjs`.
 
 Handlers run **in-process**. The designed surface is `window.codingTools.apps` (IPC). **Do not open extra listen ports** for these modules. Existing child loopbacks (`:8317`, `:4202`, `:9090`, `:6768`, `:3000`, `:5173`) are legacy compatibility only so already-running managed children can keep their sockets; consumers must not be told to hit those ports.
 
@@ -13,6 +13,7 @@ app-handler/
   commandcode-proxy/     CommandCode handle (not app-handler/commandcode/) — shared with #224/#228
   paseo/                 shared with #224/#228
   anneal/                shared with #224/#228
+  instant-mcp-tools/     Instant MCP Tools (即時 MCP 工具) — in-process listTools / runTool
 ```
 
 Each folder has `module.json`, `handler.cjs` (`invoke`), and `handlers.cjs` (operation table). Visuals are **embedded inside the Coding Tools GUI** (iframe/webview in CT). Modules must not launch their own windows.
@@ -32,6 +33,7 @@ One tree. Do not add a second `app-handler/` root. CommandCode’s folder/handle
 | `commandcode-proxy` | [`app-handler/commandcode-proxy/`](commandcode-proxy/) | [`handler.cjs`](commandcode-proxy/handler.cjs) → [`handlers.cjs`](commandcode-proxy/handlers.cjs) | same; aliases `banner`, `registration-plan`, `registration-apply` | [`CommandCodeProxySurface`](../desktop-electron/src/features/CommandCodeProxySurface.tsx) inside Integrations (native CT chrome) |
 | `paseo` | [`app-handler/paseo/`](paseo/) | [`handler.cjs`](paseo/handler.cjs) → [`handlers.cjs`](paseo/handlers.cjs) | same; `ctx.act` / lazy `ctx.getFiveStack` | [`UpstreamToolSurface`](../desktop-electron/src/features/UpstreamToolSurface.tsx) `toolId="paseo"` + [`PaseoOrchestratorSurface`](../desktop-electron/src/features/PaseoOrchestratorSurface.tsx) |
 | `anneal` | [`app-handler/anneal/`](anneal/) | [`handler.cjs`](anneal/handler.cjs) → [`handlers.cjs`](anneal/handlers.cjs) | same; aliases `board`, `activity`, `task-start`, `inbox_decision` / `inbox_reply` / `inbox_close` | [`UpstreamToolSurface`](../desktop-electron/src/features/UpstreamToolSurface.tsx) `toolId="anneal"` + [`AnnealTasksSurface`](../desktop-electron/src/features/AnnealTasksSurface.tsx) (visual origin `:5173`) |
+| `instant-mcp-tools` | [`app-handler/instant-mcp-tools/`](instant-mcp-tools/) | [`handler.cjs`](instant-mcp-tools/handler.cjs) → [`handlers.cjs`](instant-mcp-tools/handlers.cjs) | same; aliases `tools` → `listTools`, `callTool` → `runTool` | [`McpLiveToolsPanel`](../desktop-electron/src/features/McpLiveToolsPanel.tsx) on the MCP page (no dedicated listen port) |
 
 Shared call path (in-process, no new ports):
 
@@ -88,6 +90,7 @@ Desktop MCP/shell tools map onto the same host (no loopback-port overlay):
 | `commandcode-proxy` | same | health, models, banner, plan, applyPlan, registration-plan, registration-apply |
 | `paseo` | same | send, resume, cancel, archive, permission, create, plan, run, submitResult, review |
 | `anneal` | same | listTasks/board, preview/activity, create, startTask/task-start, retry, hold, resume, archive, unarchive, inboxDecision/inbox_decision, inbox_reply, inbox_close, openFromReview |
+| `instant-mcp-tools` | inspect (+ no-op start/stop/restart/repair/install; Start is not required) | listTools/tools, runTool/callTool, listWorkspaces |
 
 ## Visuals
 
