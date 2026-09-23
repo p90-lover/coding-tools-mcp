@@ -328,9 +328,34 @@ const appsCallRequest = Object.freeze({
 
 const taskListRequest = Object.freeze({
   type: "object",
+  required: Object.freeze(["workspaceId"]),
   properties: Object.freeze({
     ...pageProperties,
+    cursor: Object.freeze({ type: "integer", minimum: 0, maximum: 256 }),
     workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+  }),
+  additionalProperties: false,
+});
+
+const taskSummary = Object.freeze({
+  type: "object",
+  required: Object.freeze(["id", "title", "description", "state"]),
+  properties: Object.freeze({
+    id: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    title: Object.freeze({ type: "string", minLength: 1, maxLength: 240 }),
+    description: Object.freeze({ type: "string", maxLength: 8192 }),
+    state: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+  }),
+  additionalProperties: false,
+});
+
+const taskListResponse = Object.freeze({
+  type: "object",
+  required: Object.freeze(["items", "nextCursor", "revision"]),
+  properties: Object.freeze({
+    items: Object.freeze({ type: "array", items: taskSummary, maxItems: 100 }),
+    nextCursor: Object.freeze({ type: "integer", minimum: 0, nullable: true }),
+    revision: Object.freeze({ type: "integer", minimum: 0 }),
   }),
   additionalProperties: false,
 });
@@ -464,7 +489,7 @@ const CONTRACTS = Object.freeze({
   "tasks.list": Object.freeze({
     channel: "coding-tools:tasks:list",
     request: taskListRequest,
-    response: genericListResponse,
+    response: taskListResponse,
   }),
   "history.search": Object.freeze({
     channel: "coding-tools:history:search",

@@ -1,5 +1,0 @@
-v0.7.0-rc.3 final exact-source release trigger
-
-The release source now includes the verified Provider Hub, multiple-account routing, Paseo/Anneal/Network control surfaces, rc.3 reachable-history credential gate, and the fail-closed encrypted-credential execution-integrity hotfix through merge commit 0e72573595022e800875de2e483dca4c7efa82d0.
-
-This retained aiTemp marker creates the final stable user-originated source commit for Windows packaging, packaged smoke verification, provenance generation, checksums, and prerelease publication. No file or branch is deleted.

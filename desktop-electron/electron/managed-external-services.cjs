@@ -1,10 +1,12 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
+const { createProviderNetworkStore, proxyUrl } = require("./provider-network.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
 const SERVICE_ENDPOINTS = Object.freeze({
@@ -20,6 +22,40 @@ const SERVICE_ENDPOINTS = Object.freeze({
     executionEndpoint: "http://127.0.0.1:3000/",
   }),
 });
+
+function resolveCpaProxyRoute(dataRoot, safeStorage) {
+  const directory = path.join(path.dirname(dataRoot), "providers");
+  const filePath = path.join(directory, "provider-network.json");
+  let saved;
+  try { saved = JSON.parse(fs.readFileSync(filePath, "utf8")); }
+  catch (error) {
+    if (error?.code === "ENOENT") return { profileId: null, url: "" };
+    throw new Error("Saved proxy settings are unavailable; CPA was not started");
+  }
+  if (!saved || saved.version !== 1 || !saved.routing || typeof saved.routing !== "object") {
+    throw new Error("Saved proxy settings are invalid; CPA was not started");
+  }
+  const store = createProviderNetworkStore({
+    filePath, keyPath: path.join(directory, "provider-network.key"), safeStorage,
+  });
+  const routing = store.snapshot().routing;
+  if (!routing.globalEnabled) return { profileId: null, url: "" };
+  const profile = store.activeProxy(routing.globalProfileId);
+  if (!profile) throw new Error("Selected global proxy is unavailable; CPA was not started");
+  if (profile.endpoint.protocol === "socks4") {
+    throw new Error("CPA needs an HTTP, HTTPS or SOCKS5 proxy profile");
+  }
+  const credentials = store.proxySecret(profile.id);
+  if (profile.hasAuthentication && !credentials?.username && !credentials?.password) {
+    throw new Error("Saved proxy authentication is unavailable; CPA was not started");
+  }
+  const url = proxyUrl(profile, credentials);
+  const parsed = new URL(url);
+  if (parsed.hostname.replace(/^\[|\]$/g, "") !== profile.endpoint.host.replace(/^\[|\]$/g, "")) {
+    throw new Error("Invalid proxy host; CPA was not started");
+  }
+  return { profileId: profile.id, url };
+}
 
 function createManagedExternalServicesController({
   dataRoot,
@@ -61,9 +97,18 @@ function createManagedExternalServicesController({
     safeStorage: options.safeStorage,
     env: options.env,
     logger: options.logger,
+    spawnProcess: options.spawnProcess,
+    terminateProcessTree: options.terminateProcessTree,
     resolveRuntimeExecutable,
     resolveCrossUseEnvironment: (componentId, context) => {
       const extra = peerEnvironmentFor(componentId, crossUseSecrets());
+      if (componentId === "cpa") {
+        const route = resolveCpaProxyRoute(dataRoot, options.safeStorage);
+        extra.HTTP_PROXY = "";
+        extra.HTTPS_PROXY = "";
+        extra.ALL_PROXY = "";
+        if (route.url) extra.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL = route.url;
+      }
       if (componentId === "codex-router" && context?.state) {
         extra.CODING_TOOLS_INAPP_PROVIDERS_FILE = path.join(context.state, "router", "in-app-providers.json");
       }
@@ -81,6 +126,20 @@ function createManagedExternalServicesController({
     },
   });
 
+  function readRouterCallerKey() {
+    // Do NOT call runtimeConfiguration here: it builds commandSpec → resolveCrossUseEnvironment →
+    // crossUseSecrets → runtimeConfiguration (infinite recursion / regex stack overflow).
+    try {
+      const secretFile = path.join(dataRoot, "state", "codex-router", "router", "caller-secret");
+      if (!fs.existsSync(secretFile)) return "";
+      let raw = fs.readFileSync(secretFile, "utf8");
+      if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
+      return String(raw).trim();
+    } catch {
+      return "";
+    }
+  }
+
   function crossUseSecrets() {
     let cpa = {};
     let commandCode = {};
@@ -88,7 +147,7 @@ function createManagedExternalServicesController({
     try { cpa = managedController.runtimeSecrets("cpa") || {}; } catch {}
     try { commandCode = managedController.runtimeSecrets("commandcode-proxy") || {}; } catch {}
     try {
-      callerKey = String(managedController.runtimeConfiguration("codex-router")?.callerKey || "").trim();
+      callerKey = readRouterCallerKey();
     } catch {}
     return {
       cpaProxyApiKey: cpa.proxyApiKey,
@@ -127,14 +186,37 @@ function createManagedExternalServicesController({
     };
   }
 
+  function cpaProxyStatus(service) {
+    try {
+      const route = resolveCpaProxyRoute(dataRoot, options.safeStorage);
+      let configured = false;
+      try {
+        const config = fs.readFileSync(path.join(dataRoot, "state", "cpa", "config.yaml"), "utf8");
+        const line = config.match(/^proxy-url:\s*(.+)$/m);
+        const written = line ? JSON.parse(line[1]) : "";
+        configured = service.status === "ready" && written === route.url;
+      } catch {}
+      return { profileId: route.profileId, configMatches: configured, error: null };
+    } catch (error) {
+      return { profileId: null, configMatches: false, error: error instanceof Error ? error.message : "CPA proxy settings unavailable" };
+    }
+  }
+
   function mergeService(service) {
     const managed = managedController.project(service.id);
     const running = managed.processes.find((entry) => entry.running) || null;
-    const configuration = managed.installState === "installed"
-      ? managedConfiguration(service.id)
-      : null;
+    let configuration = null;
+    let proxyError = null;
+    if (managed.installState === "installed") {
+      try { configuration = managedConfiguration(service.id); }
+      catch (error) {
+        if (service.id !== "cpa") throw error;
+        proxyError = error instanceof Error ? error.message : "CPA proxy settings unavailable";
+      }
+    }
     return {
       ...service,
+      ...(service.id === "cpa" ? { outboundProxy: cpaProxyStatus(service) } : {}),
       ...(configuration ? {
         home: configuration.home,
         stateDir: configuration.stateDir,
@@ -155,6 +237,8 @@ function createManagedExternalServicesController({
         pid: running.pid,
         owned: true,
       } : {}),
+      ...(managed.error ? { status: "error", error: managed.error } : {}),
+      ...(proxyError ? { status: "error", error: proxyError } : {}),
       managedInstall: {
         state: managed.installState,
         version: managed.version,
@@ -320,6 +404,37 @@ function createManagedExternalServicesController({
   }
 
   function loopbackRequest(serviceId) {
+    if (serviceId === "anneal") {
+      // Anneal's local web proxy supplies its operator token; never expose it to the renderer.
+      return { origin: `${SERVICE_ENDPOINTS.anneal.endpoint}api/`, headers: {} };
+    }
+    if (serviceId === "commandcode-proxy") {
+      let headers = {};
+      let credentialReason = null;
+      try {
+        const managed = managedController.project(serviceId);
+        if (managed.installState !== "installed") {
+          credentialReason = `Managed CommandCode Proxy is ${managed.installState}`;
+        } else if (!managed.secretConfigured) {
+          credentialReason = "CommandCode proxy API key is unavailable";
+        } else {
+          const proxyApiKey = String(managedController.runtimeSecrets("commandcode-proxy").proxyApiKey || "").trim();
+          if (proxyApiKey) headers = { Authorization: `Bearer ${proxyApiKey}` };
+          else credentialReason = "CommandCode proxy API key is unavailable";
+        }
+      } catch (error) {
+        credentialReason = error instanceof Error ? error.message : String(error);
+      }
+      return {
+        origin: SERVICE_ENDPOINTS[serviceId].endpoint,
+        headers,
+        modelsPath: "/v1/models",
+        chatPath: "/v1/chat/completions",
+        // Preserve the banner contract; root/health success is not end-to-end model proof.
+        healthPath: "/",
+        credentialReason,
+      };
+    }
     if (serviceId === "cpa") {
       const origin = SERVICE_ENDPOINTS.cpa.endpoint;
       let headers = {};
@@ -427,4 +542,5 @@ function createManagedExternalServicesController({
 
 module.exports = {
   createManagedExternalServicesController,
+  resolveCpaProxyRoute,
 };

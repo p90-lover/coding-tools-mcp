@@ -144,6 +144,7 @@ test("external-services runtimeEnvironment advertises Paseo and Anneal origins w
       clone: () => ({ json: async () => ({ data: [] }) }),
     }),
     spawnProcess: () => mockChild(),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
   const env = controller.runtimeEnvironment();
   assert.equal(env.CODING_TOOLS_CODEX_ROUTER_URL, "http://127.0.0.1:4202");
@@ -177,6 +178,7 @@ test("managed controller shares one mesh file with MCP and keeps Anneal on 5173"
       clone: () => ({ json: async () => ({ data: [] }) }),
     }),
     spawnProcess: () => mockChild(),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
   const env = controller.runtimeEnvironment();
   const mesh = controller.loopbackMesh();
@@ -256,6 +258,7 @@ test("managed Start injects peer loopbacks and does not override PROXY_PORT", as
       spawned.push({ executable, args, env: options.env });
       return mockChild(8100 + spawned.length);
     },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
     resolveRuntimeExecutable: () => process.execPath,
     peerEnvironment: (manifest) => loopbackMeshEnvironment(buildLoopbackMesh(), {
       targetId: manifest.id,

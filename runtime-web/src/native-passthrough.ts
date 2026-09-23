@@ -5,6 +5,7 @@ import {
   decodeCompactionSummary,
 } from "./responses/compaction";
 import { BRIDGE_REASONING_PREFIX } from "./responses/reasoning-envelope";
+import { fetchNativeCodex } from "./native-network";
 
 const CODEX_BACKEND = "https://chatgpt.com/backend-api/codex";
 const FIRST_PARTY_CODEX_ORIGINATORS = new Set([
@@ -207,7 +208,7 @@ function withUncleanCloseTolerance(
 export async function forwardNativeCodexRequest(
   request: Request,
   endpoint: NativeCodexEndpoint,
-  fetchUpstream: NativeFetch = fetch,
+  fetchUpstream: NativeFetch = fetchNativeCodex,
   decodedBody?: unknown,
 ): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
@@ -270,6 +271,21 @@ export async function forwardNativeCodexRequest(
     redirect: imageRequest ? "manual" : "follow",
   });
   const upstream = await fetchUpstream(upstreamRequest);
+  const cfRay = nativeDiagnosticId(upstream.headers.get("cf-ray"));
+  const cloudflareChallenge = (upstream.headers.get("cf-mitigated") ?? "")
+    .toLowerCase().split(",").some(value => value.trim() === "challenge");
+  const htmlChallenge = (upstream.headers.get("content-type") ?? "").toLowerCase().startsWith("text/html") && cfRay;
+  if (upstream.status === 403 && (cloudflareChallenge || htmlChallenge)) {
+    console.warn(`[codex-chatgpt-web] native_cloudflare_challenge ${JSON.stringify({ endpoint, model, cfRay })}`);
+    return Response.json({ error: {
+      type: "upstream_error",
+      code: "native_cloudflare_challenge",
+      message: "Cloudflare blocked the native Codex upstream request. The bridge did not retry it; check the native network route before retrying.",
+    } }, {
+      status: 403,
+      headers: { "cache-control": "no-store", ...(cfRay ? { "cf-ray": cfRay } : {}) },
+    });
+  }
   if (compactionRequest && !upstream.ok) {
     console.warn(`[codex-chatgpt-web] native_compaction_upstream_failed ${JSON.stringify({
       endpoint, model, status: upstream.status,

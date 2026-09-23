@@ -194,7 +194,7 @@ test("browser configuration rejects the retired connector identity before openin
     adapter: "chatgpt-web",
     baseUrl: "browser://chatgpt",
     chatgptWeb: { appName: "Codex Native" },
-  })).toThrow(/requires a newly created connector named "Codex Native2".*do not rename or refresh/s);
+  })).toThrow(/requires a newly created connector named "Coding Tools Native2".*do not rename or refresh/s);
 });
 
 test("connector verification reports a legacy-only ChatGPT menu as a migration error", async () => {
@@ -207,16 +207,16 @@ test("connector verification reports a legacy-only ChatGPT menu as a migration e
   }, {}, 4);
 
   expect(message).toContain('Legacy ChatGPT connector "Codex Native" was found');
-  expect(message).toContain('newly created connector named "Codex Native2"');
+  expect(message).toContain('newly created connector named "Coding Tools Native2"');
   expect(message).toContain('do not rename or refresh "Codex Native"');
   expect(message).not.toContain("Another connector");
 
   const mixedMessage = await connectorMentionFailure.call({
     config: { appName: CHATGPT_CONNECTOR_NAME },
-    connectorMentionRowTitles: async () => ["Codex Native", "Codex Native2", "Private chat title"],
+    connectorMentionRowTitles: async () => ["Codex Native", "Coding Tools Native2", "Private chat title"],
   }, {}, 4);
   expect(mixedMessage).not.toContain("Legacy ChatGPT connector");
-  expect(mixedMessage).toContain('no row named "Codex Native2"');
+  expect(mixedMessage).toContain('no row named "Coding Tools Native2"');
   expect(mixedMessage).not.toContain("Private chat title");
 });
 
@@ -1201,7 +1201,7 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     ["fill", ""],
     ["fill", ""],
     ["focus"],
-    ["pressSequentially", "@codex"],
+    ["pressSequentially", "@Codex Native2"],
     ["waitForResult"],
     ["press"],
     ["waitForSelectedConnector"],
@@ -1307,7 +1307,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     fill: async () => { calls.push("clear"); },
     focus: async (_options?: { signal?: AbortSignal }) => { calls.push("focus"); },
     pressSequentially: async (value: string) => {
-      expect(value).toBe("@codex");
+      expect(value).toBe("@Codex Native2");
       calls.push("type");
     },
     press: async (key: string) => {
@@ -1741,7 +1741,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["fill", ""],
     ["fill", ""],
     ["focus"],
-    ["type", "@codex"],
+    ["type", "@Codex Native2"],
     ["connectorMenu"],
     ["selectConnector"],
     ["selectedConnector"],

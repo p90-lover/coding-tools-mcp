@@ -659,6 +659,27 @@ code {
   height: 12px;
 }
 
+.browser-new-tab {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--color-icon-secondary);
+  -webkit-app-region: no-drag;
+}
+
+.browser-new-tab:hover:not(:disabled) {
+  background: var(--color-background-control-hover);
+  color: var(--color-icon-primary);
+}
+
+.browser-new-tab:disabled { opacity: 0.4; }
+.browser-new-tab svg { width: 14px; height: 14px; }
+
 .browser-tab-drag {
   height: 100%;
   min-width: 20px;

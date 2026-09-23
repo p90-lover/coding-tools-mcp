@@ -710,12 +710,20 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   };
 }
 
-function proxyUrl(profile) {
+function proxyUrl(profile, credentials = null) {
   if (!profile) return null;
   const host = profile.endpoint.host.includes(":")
     ? `[${profile.endpoint.host.replace(/^\[|\]$/g, "")}]`
     : profile.endpoint.host;
-  return `${profile.endpoint.protocol}://${host}:${profile.endpoint.port}`;
+  const route = `${profile.endpoint.protocol}://${host}:${profile.endpoint.port}`;
+  if (!credentials?.username && !credentials?.password) return route;
+  const parsed = new URL(route);
+  if (parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase() !== host.replace(/^\[|\]$/g, "").toLowerCase()) {
+    throw new Error("Invalid proxy host");
+  }
+  parsed.username = credentials.username || "";
+  parsed.password = credentials.password || "";
+  return parsed.toString();
 }
 
 function testTcpEndpoint(profile, timeoutMs = 7_000) {

@@ -31,6 +31,24 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(i18n, /product: "Coding Tools"/);
 });
 
+test("the MCP wizard matches the bundled upstream surface and keeps live tools separate", () => {
+  const app = read("src/App.tsx");
+  const upstream = fs.readFileSync(
+    path.resolve(root, "..", "vendor", "codex-chatgpt-web-v5.0.6", "launcher", "src", "App.tsx"),
+    "utf8",
+  );
+  const extract = (source, name, next) => {
+    const start = source.indexOf(`function ${name}(`);
+    const end = source.indexOf(`\nfunction ${next}(`, start + 1);
+    assert.ok(start >= 0 && end > start, `${name} must remain a standalone surface`);
+    return source.slice(start, end).replaceAll("\r\n", "\n");
+  };
+
+  assert.equal(extract(app, "McpSurface", "ActivitySurface"), extract(upstream, "McpSurface", "ActivitySurface"));
+  assert.match(app, /function InstantMcpToolsSurface[\s\S]*?<InProcessAppsPanel[\s\S]*?<McpLiveToolsPanel/);
+  assert.match(app, /surface === "instant-mcp"/);
+});
+
 test("live MCP tool controls call the typed Coding Tools API", () => {
   const panel = read("src/features/McpLiveToolsPanel.tsx");
   const contracts = read("src/api/contracts.ts");

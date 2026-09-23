@@ -14,11 +14,13 @@ const {
   nativeTheme,
   screen,
   safeStorage,
+  session,
   shell,
   Tray,
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
@@ -138,6 +140,9 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let automaticMcpAttemptPid = null;
+let mcpVerificationInFlight = null;
+let verifyMcpConnection = null;
 let updateController = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
@@ -180,11 +185,42 @@ function stopCatalogVerificationMonitor() {
   catalogVerificationTimer = null;
 }
 
+async function autoConnectExistingMcpIfReady({ logger, stateStore, health }) {
+  const state = stateStore.read();
+  if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
+    || state.browserInteractionMode !== "automatic" || !runtimeHost?.mcpCredentialsConfigured()) return false;
+  const config = runtimeSupervisor?.readConfig();
+  if (config?.mode !== "full") return false;
+  if (!health || health.service !== "codex-chatgpt-web" || health.status !== "ok"
+    || health.mode !== "full" || health.version !== config.releaseVersion || health.accepting_turns !== true
+    || !Number.isInteger(health.pid) || health.pid !== runtimeSupervisor.readState()?.daemonPid
+    || !(health.successful_model_catalog_requests > 0)) return true;
+  if (automaticMcpAttemptPid === health.pid) return false;
+  const browser = browserHost?.snapshot();
+  if (!verifyMcpConnection || browser?.authenticated !== true || browser.surfaceActive
+    || health.active_http_turns !== 0 || health.active_browser_turns !== 0
+    || browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) return true;
+  const contents = browserHost.view?.webContents;
+  if (!contents || contents.isDestroyed()) return true;
+  const hasDraft = await contents.executeJavaScript(`(() => {
+    const composer = document.querySelector('#prompt-textarea');
+    return !composer || Boolean((composer.innerText || composer.value || '').trim())
+      || [...document.querySelectorAll('input[type="file"]')].some(input => input.files.length > 0)
+      || [...document.querySelectorAll('button[aria-label]')].some(button => /^Remove\\b/i.test(button.getAttribute('aria-label')));
+  })()`);
+  if (hasDraft || browserHost.currentOperation() || browserHost.activeTraceId) return true;
+  automaticMcpAttemptPid = health.pid;
+  await verifyMcpConnection();
+  logger.info("mcp.automatic_verification_finished", { ready: stateStore.read().mcpSetupComplete === true });
+  return false;
+}
+
 function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
+  let reportedFailure = null;
   const check = async () => {
     const current = stateStore.read();
-    if (current.coreSetupComplete !== true || current.codexCatalogVerified === true) {
+    if (current.coreSetupComplete !== true || (current.codexCatalogVerified === true && !current.autoConnectExistingMcp)) {
       stopCatalogVerificationMonitor();
       return;
     }
@@ -194,7 +230,30 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
       const config = runtimeSupervisor.readConfig();
       const health = await runtimeSupervisor.proxyHealthPayload(config);
       if (!Number.isInteger(health?.successful_model_catalog_requests)
-        || health.successful_model_catalog_requests < 1) return;
+        || health.successful_model_catalog_requests < 1) {
+        const result = health?.last_model_catalog_result;
+        if (!result || !Number.isInteger(result.status) || result.status < 400 || result.status > 599
+          || !Number.isInteger(result.request) || result.request < 1 || lastOperation?.status === "running") return;
+        const identity = `${health.pid}:${result.request}:${result.at}`;
+        if (identity === reportedFailure) return;
+        reportedFailure = identity;
+        const reason = typeof result.failure?.code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(result.failure.code)
+          ? result.failure.code
+          : ["config", "request", "transport", "upstream", "catalog"].includes(result.failure?.stage)
+            ? result.failure.stage
+            : "catalog";
+        const state = stateStore.update({ codexRestartRequired: false });
+        send("launcher:state-changed", state);
+        logger.warn("codex.model_catalog_failed", { status: result.status, reason, request: result.request });
+        publishOperation({
+          name: "catalog-verification",
+          status: "failed",
+          message: nativeCopyFor(current.language).catalogFailure
+            .replace("{status}", String(result.status)).replace("{reason}", reason),
+        });
+        return;
+      }
+      if (!current.codexCatalogVerified) {
       const state = stateStore.update({
         codexCatalogVerified: true,
         codexRestartRequired: false,
@@ -204,6 +263,8 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         at: health.last_successful_model_catalog_request_at,
       });
       send("launcher:state-changed", state);
+      }
+      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) return;
       stopCatalogVerificationMonitor();
     } catch (error) {
       logger.debug("codex.model_catalog_verification_pending", {
@@ -259,6 +320,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Remove Codex Web GPT",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+    catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -269,6 +331,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
+    catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情；若问题持续，请导出安全日志。",
   }),
   "zh-TW": Object.freeze({
     openLauncher: "開啟 Codex Web GPT",
@@ -279,6 +342,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "從 Codex 移除 ChatGPT Web 模型並還原先前的模型路由？",
     removeDetail: "啟動器中的 ChatGPT 登入 profile 會保留。Codex 需要重新啟動一次。",
+    catalogFailure: "Codex 已連線到啟動器，但模型清單載入失敗（HTTP {status}；{reason}）。請查看「活動」了解詳情；若問題持續，請匯出安全日誌。",
   }),
   ja: Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -289,6 +353,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Codex Web GPT を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
+    catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認し、問題が続く場合は安全なログをエクスポートしてください。",
   }),
 });
 
@@ -476,7 +541,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       },
     }),
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: path.join(__dirname, "..", "build", "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -747,12 +812,12 @@ function registerIpc({ logger, stateStore }) {
       throw new Error(`Unsupported manage action ${action}`);
     },
     handoffAnnealTask: async ({ projectId, body }) => {
-      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const connection = externalServicesController?.loopbackRequest?.("anneal");
       const result = await actUpstream({
         toolId: "anneal",
         op: "create",
         projectId,
-        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+        endpoint: connection?.origin || "http://127.0.0.1:5173/api/",
         name: body?.name,
         description: body?.description,
         cwd: body?.workingDirectory,
@@ -760,12 +825,12 @@ function registerIpc({ logger, stateStore }) {
       return result.body && typeof result.body === "object" ? result.body : { id: null };
     },
     fetchAnnealTask: async ({ taskId }) => {
-      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const connection = externalServicesController?.loopbackRequest?.("anneal");
       const result = await actUpstream({
         toolId: "anneal",
         op: "preview",
         taskId,
-        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+        endpoint: connection?.origin || "http://127.0.0.1:5173/api/",
       });
       return result.body;
     },
@@ -1066,10 +1131,12 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     const toolId = String(input.toolId || "").trim();
     const config = externalServicesController.upstreamConfiguration(toolId);
+    const annealConnection = toolId === "anneal" ? externalServicesController.loopbackRequest("anneal") : null;
     return actUpstream({
       ...input,
       toolId,
-      endpoint: input.endpoint || config.executionEndpoint,
+      endpoint: annealConnection?.origin || input.endpoint || config.executionEndpoint,
+      credential: toolId === "anneal" ? "" : input.credential,
     });
   });
   handle("launcher:original-ui-snapshot", (event) => {
@@ -1149,6 +1216,10 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
   handle("launcher:browser-zoom", (_event, action) => browserHost.zoom(action));
+  handle("launcher:browser-tab-new", (event) => {
+    assertFocusedMainWindow(event, false);
+    return browserHost.createUserTab();
+  });
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
   handle("launcher:manual-prompt-copy", (_event, tabId) => browserHost.copyManualPrompt(tabId));
@@ -1190,13 +1261,13 @@ function registerIpc({ logger, stateStore }) {
     smokePassedThisSession = true;
     return result;
   });
-  handle("launcher:mcp-verify", async (event) => {
+  const performMcpVerification = async (event) => {
     const operationName = "mcp-verification";
     const activeTraceId = browserHost.activeTraceId;
     logger.info("mcp.verification_requested", {
       activeTraceId,
       launcherFocused: mainWindow?.isFocused() === true,
-      rendererFocused: event.sender.isFocused(),
+      rendererFocused: event?.sender?.isFocused?.() === true,
     });
     if (activeTraceId) {
       const report = {
@@ -1275,6 +1346,38 @@ function registerIpc({ logger, stateStore }) {
           { id: "connector", status: "error", message },
         ],
       };
+    }
+  };
+  verifyMcpConnection = (event) => {
+    if (mcpVerificationInFlight) return mcpVerificationInFlight;
+    const work = performMcpVerification(event).catch(error => {
+      const state = stateStore.update({ mcpSetupComplete: false });
+      send("launcher:state-changed", state);
+      publishOperation({ name: "mcp-verification", status: "failed", message: error instanceof Error ? error.message : String(error) });
+      return { ok: false };
+    }).finally(() => { if (mcpVerificationInFlight === work) mcpVerificationInFlight = null; });
+    mcpVerificationInFlight = work;
+    return work;
+  };
+  handle("launcher:mcp-verify", event => verifyMcpConnection(event));
+  handle("launcher:mcp-create-connector", async event => {
+    assertFocusedMainWindow(event, true);
+    if (IS_DEV_PROFILE) throw new Error("Automatic connector creation is available in the production profile only");
+    publishOperation({ name: "mcp-connector-create", status: "running", message: "Creating the ChatGPT connector" });
+    try {
+      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost });
+      const state = stateStore.update({
+        autoConnectExistingMcp: true,
+        ...(result.created ? { mcpSetupComplete: false } : {}),
+      });
+      automaticMcpAttemptPid = null;
+      send("launcher:state-changed", state);
+      startCatalogVerificationMonitor({ logger, stateStore });
+      publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
+      return result;
+    } catch (error) {
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
+      throw error;
     }
   });
 
@@ -1476,9 +1579,16 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp";
     if (!ordinary) throw new Error("Unknown preference");
-    return stateStore.update({ [key]: value === true });
+    if (key === "autoConnectExistingMcp") assertFocusedMainWindow(_event, true);
+    const state = stateStore.update({ [key]: value === true });
+    if (key === "autoConnectExistingMcp") {
+      automaticMcpAttemptPid = null;
+      send("launcher:state-changed", state);
+      if (state.autoConnectExistingMcp) startCatalogVerificationMonitor({ logger, stateStore });
+    }
+    return state;
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
@@ -1546,12 +1656,14 @@ async function requestQuit() {
     if (activeOperation) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
+    managedBootstrapController?.dispose();
+    originalUiController?.dispose();
+    externalServicesController?.dispose();
+    upstreamToolController?.dispose();
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
-    externalServicesController?.dispose();
-    upstreamToolController?.dispose();
     quitting = true;
     await browserHost?.persistSession();
     browserHost?.destroy();
@@ -1685,6 +1797,7 @@ async function start() {
     externalServices: externalServicesController,
   });
   originalUiController = createOriginalUiController({
+    resumeOnCreate: false,
     externalServices: externalServicesController,
     openExternal: openWebUrl,
     electronExecutable: process.execPath,
@@ -1748,12 +1861,6 @@ async function start() {
     });
     appsHost = null;
   }
-  app.once("before-quit", () => {
-    managedBootstrapController?.dispose();
-    originalUiController?.dispose();
-    externalServicesController?.dispose();
-    upstreamToolController?.dispose();
-  });
   headlessHost = new HeadlessHost({
     app,
     logger,
@@ -1770,26 +1877,13 @@ async function start() {
   await ensureRendererLoaded(mainWindow, logger);
   scheduleFullIpcAfterPaint(() => {
     registerIpc({ logger, stateStore });
-    const services = safeRead(
-      "external-service.autostart_snapshot",
-      () => externalServicesController?.snapshot().services ?? [],
-      [],
-      logger,
-    );
-    for (const service of services) {
-      if (!service.enabled || !service.autoStart) continue;
-      void externalServicesController.start(service.id).catch((error) => {
-        logger.warn("external-service.autostart-failed", {
-          serviceId: service.id,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }
   }, { logger });
   browserControl = await new BrowserControlServer({
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
+    resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
+    fetchNative: (url, options) => session.fromPartition(LAUNCHER_PROFILE.browserPartition).fetch(url, options),
   }).start();
   runtimeSupervisor = new RuntimeSupervisor({
     app,
@@ -2023,6 +2117,22 @@ async function start() {
         send("launcher:state-changed", state);
       }
       startCatalogVerificationMonitor({ logger, stateStore });
+      originalUiController?.resume?.();
+      const services = safeRead(
+        "external-service.autostart_snapshot",
+        () => externalServicesController?.snapshot().services ?? [],
+        [],
+        logger,
+      );
+      for (const service of services) {
+        if (!service.enabled || !service.autoStart) continue;
+        void externalServicesController.start(service.id).catch((error) => {
+          logger.warn("external-service.autostart-failed", {
+            serviceId: service.id,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
       return;
     }
     if (runtime.status === "not-configured") {

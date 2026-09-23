@@ -161,8 +161,7 @@ export function selectBinding(
   ));
   return connected.find((binding) => (
     binding.provider === providerId && (!model || binding.model === model)
-  )) ?? connected.find((binding) => binding.provider === providerId)
-    ?? connected.find((binding) => !model || binding.model === model);
+  ));
 }
 
 export function sanitizeIdentifier(value: string): string {

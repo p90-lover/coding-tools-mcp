@@ -510,16 +510,8 @@ function installWindowsNodeBinShims(sourceRoot, env = process.env, platform = pr
   const written = [];
   for (const bin of npmBinDirectories(sourceRoot)) {
     fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
-    const cmd = path.join(bin, "node.cmd");
-    fs.writeFileSync(cmd, nodeBody);
-    fs.writeFileSync(path.join(bin, "node.bat"), nodeBody);
-    written.push(cmd);
-    if (npmBody) {
-      const npmCmd = path.join(bin, "npm.cmd");
-      fs.writeFileSync(npmCmd, npmBody);
-      fs.writeFileSync(path.join(bin, "npm.bat"), npmBody);
-      written.push(npmCmd);
-    }
+    writeCmdPair(path.join(bin, "node"), nodeBody, written);
+    if (npmBody) writeCmdPair(path.join(bin, "npm"), npmBody, written);
   }
   return written;
 }
@@ -627,7 +619,7 @@ function hostNpmPrepareAllowed(manifest, platform) {
   return mode !== "wsl2";
 }
 
-function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = []) {
+function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = [], buildPaseoWebUi = false) {
   if (!fs.existsSync(path.join(sourceRoot, "package.json"))) return false;
   const nodeExecutable = resolveNodeExecutable();
   const npmExecutable = resolveNpmExecutable();
@@ -645,8 +637,18 @@ function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = [
     track(installWindowsNodeBinShims(sourceRoot));
     track(installWindowsCwdNodeCommands(sourceRoot));
     track(installWindowsCwdLifecycleFallbacks(sourceRoot));
+    if (buildPaseoWebUi) {
+      runNpm(sourceRoot, ["run", "postinstall"], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
+    }
     for (const script of extraScripts) {
       runNpm(sourceRoot, ["run", script], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
+    }
+    if (buildPaseoWebUi) {
+      runNpm(sourceRoot, ["run", "build:web", "--workspace=@getpaseo/app"], spawnSyncProcess, "FIVE_STACK_NPM_BUILD_FAILED");
+      copyTree(
+        path.join(sourceRoot, "packages", "app", "dist"),
+        path.join(sourceRoot, "packages", "server", "dist", "server", "web-ui"),
+      );
     }
     // Drop devDependencies (typescript, eslint, expo tooling) so NSIS stays
     // small enough for the Windows silent-install smoke timeout.
@@ -741,6 +743,24 @@ function writeBundledMarker(destination, manifest) {
   });
 }
 
+function prepareRouterPythonWheels(sourceRoot, spawnSyncProcess = spawnSync, workRoot = sourceRoot) {
+  const requirements = path.join(sourceRoot, "requirements", "python.txt");
+  if (!isFile(requirements)) fail("FIVE_STACK_PYTHON_LOCK_MISSING", requirements);
+  const { resolvePythonExecutable } = require("../electron/codex-router-managed.cjs");
+  const python = resolvePythonExecutable({ spawnSyncProcess });
+  const wheels = path.join(sourceRoot, "requirements", "wheels");
+  fs.mkdirSync(wheels, { recursive: true, mode: 0o700 });
+  const scratch = path.join(workRoot, "aiTemp", "python-download");
+  fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
+  const result = spawnSyncProcess(python, ["-I", "-B", "-m", "pip", "--isolated", "--disable-pip-version-check", "download", "--require-hashes", "--only-binary=:all:", "--no-cache-dir", "--dest", wheels, "-r", requirements], {
+    cwd: sourceRoot, env: { ...process.env, TEMP: scratch, TMP: scratch }, encoding: "utf8", shell: false, windowsHide: true, timeout: 30 * 60_000,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) fail("FIVE_STACK_PYTHON_DOWNLOAD_FAILED", String(result.stderr || result.stdout || "").trim());
+  if (!fs.readdirSync(wheels).some((name) => name.endsWith(".whl"))) fail("FIVE_STACK_PYTHON_WHEELS_MISSING", wheels);
+  return wheels;
+}
+
 async function materializeComponent({
   manifest,
   outputRoot,
@@ -793,9 +813,11 @@ async function materializeComponent({
       copyTree(cloneRoot, sourceDestination);
     }
     if (prepareDependencies && hostNpmPrepareAllowed(manifest, platform)) {
-      if (manifest.id === "paseo") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build:server"]);
+      if (manifest.id === "paseo") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build:server"], true);
       if (manifest.id === "anneal") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build"]);
       if (manifest.id === "codex-router") {
+        prepareRouterPythonWheels(sourceDestination, spawnSyncProcess, workRoot);
+        maybePrepareDependencies(sourceDestination, spawnSyncProcess);
         maybePrepareDependencies(path.join(sourceDestination, "apps", "control-center"), spawnSyncProcess, ["build"]);
       }
     }
@@ -895,6 +917,7 @@ module.exports = {
   installWindowsNodeBinShims,
   materializeNpmWorkspaceLinks,
   npmSpawnInvocation,
+  prepareRouterPythonWheels,
   prepareFiveStackRuntime,
   resolveNpmCliJs,
   resolveNodeExecutable,

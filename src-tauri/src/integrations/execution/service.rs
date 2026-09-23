@@ -618,6 +618,36 @@ async fn process(job: &Job) -> AppResult<()> {
     })?;
     if job.action == Action::Inspect {
         let evidence = inspect_source(job).await?;
+        let mut output = None;
+        if job.binding.engine == Engine::Paseo
+            && evidence.observation.quiescent
+            && evidence.observation.status.eq_ignore_ascii_case("idle")
+        {
+            if let Some(start_key) = job.entry.start_message_id.as_deref() {
+                let request = protocol::build(
+                    &job.entry.mission.spec,
+                    job.entry.mission.record_id.as_deref(),
+                    job.entry.mission.run_id.as_deref(),
+                    Action::Events,
+                    &uuid::Uuid::new_v4().to_string(),
+                )
+                .map_err(fail)?;
+                let response = transport::send(
+                    Engine::Paseo,
+                    &job.binding.endpoint,
+                    &job.connection.credential,
+                    &request,
+                )
+                .await
+                .map_err(|e| fail(e.to_string()))?;
+                output = super::result::parse_paseo_start_result(
+                    &response.body,
+                    spec_record(&job.entry)?,
+                    start_key,
+                )
+                .map_err(fail)?;
+            }
+        }
         DataStore::update_file(|d| {
             scope(&current, d)?;
             let row = d
@@ -628,6 +658,9 @@ async fn process(job: &Job) -> AppResult<()> {
                 return Err(fail("Newer mission state supersedes this observation"));
             }
             observation::apply(row, evidence, now()).map_err(fail)?;
+            if let Some(output) = output {
+                row.output = Some(output);
+            }
             d.execution_book.size_check().map_err(fail)
         })?;
         return Ok(());

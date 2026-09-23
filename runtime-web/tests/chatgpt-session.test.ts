@@ -14,6 +14,7 @@ test("composer and effort selectors exclude unrelated editable fields and menu b
   const document = createDocument(`<body><form>
     <div contenteditable="true" id="unrelated-editor"></div>
     <textarea placeholder="Search" id="search"></textarea>
+    <textarea name="prompt-textarea" placeholder="Temporary chat" id="composer-fallback"></textarea>
     <button aria-haspopup="menu" id="attachments"></button>
     <div data-testid="prompt-textarea" id="composer-testid"></div>
     <div id="prompt-textarea"></div>
@@ -22,7 +23,7 @@ test("composer and effort selectors exclude unrelated editable fields and menu b
     <button aria-haspopup="menu" data-testid="model-switcher-dropdown-button" id="model"></button>
   </form></body>`);
   const matches = (selector: string) => Array.from(document.querySelectorAll(selector)).map(element => element.id);
-  expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-testid", "prompt-textarea", "composer-lexical"]);
+  expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-fallback", "composer-testid", "prompt-textarea", "composer-lexical"]);
   expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model"]);
 });
 

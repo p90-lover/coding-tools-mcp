@@ -26,10 +26,12 @@ const ALLOWED_ANNEAL_POST = Object.freeze([
   "/inbox/messages/{id}/close",
 ]);
 const ALLOWED_ANNEAL_GET = Object.freeze([
+  "/projects",
   "/tasks",
   "/tasks/{id}",
   "/tasks/{id}/activity",
 ]);
+const ALLOWED_ANNEAL_PATCH = Object.freeze(["/tasks/{id}"]);
 
 function token(value, label) {
   const trimmed = typeof value === "string" ? value.trim() : "";
@@ -165,7 +167,7 @@ function annealPathForOp(op, id, req = {}) {
   switch (String(op || "").trim()) {
     case "create": {
       const projectId = token(id || req.projectId || req.project_id, "project id");
-      const name = boundedText(req.name || req.title || req.text || "Coding Tools handoff", 512, "task name");
+      const name = boundedText(req.name || req.title || req.text || "Coding Tools handoff", 200, "task name");
       const description = boundedText(
         req.description || req.text || name,
         8000,
@@ -179,12 +181,13 @@ function annealPathForOp(op, id, req = {}) {
           name,
           description,
           status: "BACKLOG",
-          workingDirectory: typeof req.cwd === "string" && req.cwd.trim() ? req.cwd.trim() : ".",
-          assigneeType: "AGENT",
+          assigneeType: req.assigneeAgentId ? "AGENT" : "HUMAN",
+          ...(req.assigneeAgentId ? { assigneeAgentId: token(req.assigneeAgentId, "agent id") } : {}),
+          ...(req.repoId ? { repoId: token(req.repoId, "repository id") } : {}),
+          ...(req.cwd ? { workingDirectory: boundedText(req.cwd, 1024, "working directory") } : {}),
           approvalGate: true,
           opensPullRequest: false,
           scheduleKind: "NOW",
-          chainIndex: 0,
         },
       };
     }
@@ -192,8 +195,21 @@ function annealPathForOp(op, id, req = {}) {
       const safeId = token(id, "task id");
       return { method: "GET", pattern: "/tasks/{id}", path: `/tasks/${safeId}`, body: null };
     }
-    case "board":
-      return { method: "GET", pattern: "/tasks", path: "/tasks", body: null };
+    case "projects":
+      return { method: "GET", pattern: "/projects", path: "/projects", body: null };
+    case "board": {
+      const query = new URLSearchParams({ view: "board", archived: "false" });
+      if (req.projectId || req.project_id) query.set("projectId", token(req.projectId || req.project_id, "project id"));
+      return { method: "GET", pattern: "/tasks", path: `/tasks?${query}`, body: null };
+    }
+    case "update": {
+      const safeId = token(id, "task id");
+      if (!["BACKLOG", "TODO", "DOING", "REVIEW", "DONE"].includes(req.status)) {
+        throw new Error("Unsupported Anneal task status");
+      }
+      // The API checks the current task's move authority transactionally.
+      return { method: "PATCH", pattern: "/tasks/{id}", path: `/tasks/${safeId}`, body: { status: req.status } };
+    }
     case "activity": {
       const safeId = token(id, "task id");
       return { method: "GET", pattern: "/tasks/{id}/activity", path: `/tasks/${safeId}/activity`, body: null };
@@ -392,9 +408,10 @@ async function annealRequest(endpoint, credential, {
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("Anneal HTTP client is unavailable");
-  const parsed = assertLoopback(endpoint, new Set(["http:", "https:"]), "Anneal execution endpoint");
-  parsed.pathname = path;
-  parsed.search = "";
+  const base = assertLoopback(endpoint, new Set(["http:", "https:"]), "Anneal execution endpoint");
+  base.pathname = `${base.pathname.replace(/\/+$/u, "")}/`;
+  const parsed = new URL(String(path).replace(/^\//u, ""), base);
+  if (parsed.origin !== base.origin) throw new Error("Anneal request must stay on its configured origin");
   parsed.hash = "";
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -454,7 +471,8 @@ async function actUpstream(input = {}, options = {}) {
         : (input.taskId || input.task_id));
     const spec = annealPathForOp(input.op, id, input);
     const method = spec.method || "POST";
-    const allowed = method === "GET" ? ALLOWED_ANNEAL_GET : ALLOWED_ANNEAL_POST;
+    const allowed = method === "GET" ? ALLOWED_ANNEAL_GET
+      : method === "PATCH" ? ALLOWED_ANNEAL_PATCH : ALLOWED_ANNEAL_POST;
     if (!allowed.includes(spec.pattern)) {
       throw new Error("Anneal operation is not in the original-function allowlist");
     }
@@ -475,6 +493,7 @@ async function actUpstream(input = {}, options = {}) {
 module.exports = {
   ACTION_TIMEOUT_MS,
   ALLOWED_ANNEAL_GET,
+  ALLOWED_ANNEAL_PATCH,
   ALLOWED_ANNEAL_POST,
   ALLOWED_PASEO,
   actUpstream,

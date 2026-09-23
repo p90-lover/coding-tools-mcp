@@ -159,6 +159,7 @@ test("Start copies the in-app payload without git clone and then launches it", a
     bundledRoot,
     dataRoot,
     safeStorage: { isEncryptionAvailable: () => false },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
     spawnProcess: (executable, args) => {
       commands.push({ executable, args: [...args] });
       const child = mockChild(9300 + children.length);
@@ -210,6 +211,7 @@ test("Anneal bundled install does not block on a missing GitHub token", async ()
     bundledRoot,
     dataRoot,
     safeStorage: { isEncryptionAvailable: () => false },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
     spawnProcess: () => {
       const child = mockChild(9400 + spawned.length);
       spawned.push(child);

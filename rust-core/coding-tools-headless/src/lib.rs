@@ -389,6 +389,7 @@ impl ServiceState {
             }
         }
         let mut context = tools::ToolContext::new(PathBuf::from(&profile.path))?;
+        context.bind_workspace_id(workspace_id);
         context.auth = profile.auth.clone();
         context.policy = tools::PolicySettings::from_runtime(&profile.runtime);
         context.tool_profile =

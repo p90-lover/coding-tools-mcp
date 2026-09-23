@@ -173,3 +173,71 @@ pub fn build(
         wire,
     })
 }
+
+pub fn build_timeline_before(
+    spec: &Spec,
+    record: &str,
+    key: &str,
+    epoch: &str,
+    seq: u64,
+) -> Result<Request, String> {
+    if spec.engine != Engine::Paseo
+        || epoch.trim().is_empty()
+        || epoch.len() > 128
+        || epoch.chars().any(char::is_control)
+        || seq == 0
+    {
+        return Err("Invalid Paseo timeline cursor".into());
+    }
+    let mut request = build(spec, Some(record), None, Action::Events, key)?;
+    let Wire::Socket { message, .. } = &mut request.wire else {
+        return Err("Paseo timeline needs a socket request".into());
+    };
+    message["direction"] = json!("before");
+    message["cursor"] = json!({"epoch":epoch,"seq":seq});
+    Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paseo_before_page_uses_the_owned_cursor() {
+        let spec = Spec {
+            engine: Engine::Paseo,
+            mission_id: "mission".into(),
+            workspace_id: "qa".into(),
+            task_id: "task".into(),
+            cwd: "C:/qa".into(),
+            provider: "codex".into(),
+            model: "gemini-3.1-pro-low".into(),
+            mode: "default".into(),
+            project_id: None,
+            repo_id: None,
+            assignee_id: None,
+            title: "Read".into(),
+            brief: "Read only".into(),
+            max_duration_min: 10,
+        };
+        let request = build_timeline_before(&spec, "agent-1", "page-1", "epoch:1", 51).unwrap();
+        assert_eq!(request.action, Action::Events);
+        match request.wire {
+            Wire::Socket { message, .. } => assert_eq!(
+                message,
+                json!({
+                    "type": "fetch_agent_timeline_request",
+                    "agentId": "agent-1",
+                    "direction": "before",
+                    "cursor": {"epoch": "epoch:1", "seq": 51},
+                    "limit": 50,
+                    "projection": "projected",
+                    "requestId": "page-1"
+                })
+            ),
+            Wire::Http { .. } => panic!("Paseo timeline must use a socket"),
+        }
+        assert!(build_timeline_before(&spec, "agent-1", "page-2", "", 51).is_err());
+        assert!(build_timeline_before(&spec, "agent-1", "page-3", "epoch:1", 0).is_err());
+    }
+}

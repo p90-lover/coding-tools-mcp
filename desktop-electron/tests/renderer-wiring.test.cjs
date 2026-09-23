@@ -5,6 +5,8 @@ const path = require("node:path");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
+const typesSource = fs.readFileSync(path.join(launcherRoot, "src", "types.ts"), "utf8");
+const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
 const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
@@ -258,5 +260,76 @@ test("completed model setup remains a repeatable capability probe", () => {
   assert.match(
     electronMain,
     /!setupState\.coreSetupComplete[\s\S]*?smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)/,
+  );
+});
+
+test("catalog verification reports a failed request instead of requesting another restart, then recovers", async () => {
+  const vm = require("node:vm");
+  const start = electronMain.indexOf("function startCatalogVerificationMonitor(");
+  const end = electronMain.indexOf("\nfunction ", start + 1);
+  const source = electronMain.slice(start, end);
+  const state = { coreSetupComplete: true, codexCatalogVerified: false, codexRestartRequired: true, language: "en" };
+  const operations = [];
+  const events = [];
+  let tick;
+  let payload = { pid: 10, successful_model_catalog_requests: 0, model_catalog_requests: 0, last_model_catalog_result: null };
+  vm.runInNewContext(source + "\nstartCatalogVerificationMonitor({ logger, stateStore });", {
+    catalogVerificationInFlight: false, catalogVerificationTimer: null, lastOperation: null,
+    stopCatalogVerificationMonitor() {},
+    runtimeSupervisor: { readConfig: () => ({}), proxyHealthPayload: async () => payload },
+    stateStore: { read: () => state, update: patch => Object.assign(state, patch) },
+    setInterval: callback => { tick = callback; return { unref() {} }; },
+    logger: { info: (...args) => events.push(args), warn: (...args) => events.push(args), debug() {} },
+    send() {}, publishOperation: op => operations.push(op),
+    nativeCopyFor: () => ({ catalogFailure: "Catalog failed (HTTP {status}; {reason})." }),
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(operations.length, 0);
+  assert.equal(state.codexRestartRequired, true);
+  payload = { ...payload, model_catalog_requests: 1, last_model_catalog_result: {
+    request: 1, at: "2026-09-16T10:00:00Z", status: 502, failure: { stage: "transport", code: "UnsupportedProxyProtocol" },
+  } };
+  await tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.codexCatalogVerified, false);
+  assert.equal(state.codexRestartRequired, false);
+  assert.equal(operations[0]?.status, "failed");
+  assert.match(operations[0].message, /502.*UnsupportedProxyProtocol/);
+  await tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(operations.length, 1, "polling must not repeat the same failure");
+  payload = { ...payload, successful_model_catalog_requests: 1, last_successful_model_catalog_request_at: "2026-09-16T10:01:00Z" };
+  await tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.codexCatalogVerified, true);
+  assert.equal(state.codexRestartRequired, false);
+  assert.ok(events.some(([event]) => event === "codex.model_catalog_verified"));
+});
+
+test("settings expose an opt-in existing MCP auto-connect without provisioning credentials", () => {
+  assert.match(typesSource, /autoConnectExistingMcp:\s*boolean/);
+  assert.match(
+    typesSource,
+    /key:\s*"keepRunningOnClose"\s*\|\s*"showBrowserDuringTurns"\s*\|\s*"autoConnectExistingMcp"/,
+  );
+  assert.match(
+    appSource,
+    /body=\{copy\.autoConnectExistingMcpBody\}[\s\S]*?label=\{copy\.autoConnectExistingMcp\}[\s\S]*?checked=\{snapshot\.state\.autoConnectExistingMcp\}/,
+  );
+  assert.match(
+    appSource,
+    /disabled=\{snapshot\.state\.browserInteractionMode !== "automatic"[\s\S]*?snapshot\.state\.mcpRuntimeInstalled !== true[\s\S]*?!snapshot\.mcpCredentialsConfigured\}/,
+  );
+  assert.match(
+    appSource,
+    /api!\.setPreference\("autoConnectExistingMcp", checked\)/,
+  );
+  assert.match(
+    i18nSource,
+    /autoConnectExistingMcp:\s*"Auto-connect existing MCP harness"/,
+  );
+  assert.match(
+    i18nSource,
+    /autoConnectExistingMcpBody:\s*"After Codex reaches the ready bridge, verify and connect the saved MCP harness\. This never creates a connector, tunnel, or key\."/,
   );
 });

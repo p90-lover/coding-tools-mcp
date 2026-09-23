@@ -1,7 +1,7 @@
 export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations" | "cpa" | "codex-router" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "instant-mcp" | "providers" | "integrations" | "cpa" | "codex-router" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -299,6 +299,11 @@ export interface ExternalServiceSnapshot {
   stale?: boolean;
   reconnectAttempts?: number;
   managedInstall: ManagedComponentInstallSnapshot;
+  outboundProxy?: {
+    profileId: string | null;
+    configMatches: boolean;
+    error: string | null;
+  };
 }
 
 export interface ExternalServicesSnapshot {
@@ -468,6 +473,7 @@ export interface LauncherState {
   githubOpened: boolean;
   xOpened: boolean;
   autoStart: boolean;
+  autoConnectExistingMcp: boolean;
   automaticUpdates: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
@@ -592,6 +598,7 @@ export interface LauncherApi {
   hideBrowser(): Promise<BrowserState>;
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
+  createBrowserTab(): Promise<BrowserState>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   copyManualPrompt(tabId: string): Promise<BrowserState>;
@@ -603,6 +610,7 @@ export interface LauncherApi {
   dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
+  createMcpConnector(): Promise<{ created: boolean; name: string; href: string }>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
@@ -623,7 +631,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;

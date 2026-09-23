@@ -62,6 +62,7 @@ function controllerFixture(overrides = {}) {
       calls.push({ executable, args, options });
       return child;
     },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
     runRuntimeCommand: async (args) => ({ stdout: args.join(" "), stderr: "" }),
     getProviderSnapshot: () => ({
       accounts: [
@@ -104,6 +105,42 @@ test("external service controller owns the five app-managed services and rejects
     /WebSocket/i,
   );
   controller.dispose();
+});
+
+test("Windows external cleanup uses owned trees and retains failed handles", { skip: process.platform !== "win32" }, async () => {
+  let blocked = true;
+  const terminated = [];
+  const { controller, child } = controllerFixture({
+    fetchImpl: async () => { throw new Error("offline"); },
+    terminateProcessTree: (owned) => {
+      if (blocked) throw new Error("tree termination refused");
+      terminated.push(owned);
+      owned.exitCode = 1;
+      queueMicrotask(() => owned.emit("exit", 1, null));
+    },
+  });
+  await controller.start("paseo");
+  child.kill = () => assert.fail("Windows cleanup must not kill only the wrapper");
+  await assert.rejects(controller.stop("paseo"), /tree termination refused/);
+  assert.equal(controller.snapshot().services.find((service) => service.id === "paseo").owned, true);
+  assert.throws(() => controller.dispose(), /tree termination refused/);
+  assert.equal(controller.snapshot().services.find((service) => service.id === "paseo").owned, true);
+  blocked = false;
+  controller.dispose();
+  assert.deepEqual(terminated, [child]);
+  assert.equal(controller.snapshot().services.find((service) => service.id === "paseo").owned, false);
+});
+
+test("external start cannot spawn after disposal while inspection is in flight", async () => {
+  let finishInspect;
+  const inspection = new Promise((resolve) => { finishInspect = resolve; });
+  const { controller, calls } = controllerFixture({ fetchImpl: () => inspection });
+  const pending = controller.start("paseo");
+  controller.dispose();
+  finishInspect({ ok: false, status: 503, headers: { get: () => "text/plain" } });
+  await assert.rejects(pending, /disposed/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(controller.start("paseo"), /disposed/);
 });
 
 test("external service settings persist while caller keys stay out of snapshots", () => {

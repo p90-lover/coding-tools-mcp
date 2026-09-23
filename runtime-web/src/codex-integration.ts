@@ -2,9 +2,20 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AppConfig } from "./config";
 import { getConfigPath, loadConfig, saveConfig } from "./config";
-import { installCodexInterruptHook, installCodexInterruptHookCommand } from "./codex-interrupt-hook";
+import {
+  installCodexInterruptHook,
+  installCodexInterruptHookCommand,
+  MANAGED_INTERRUPT_HOOK_END,
+  MANAGED_INTERRUPT_HOOK_START,
+} from "./codex-interrupt-hook";
 import {
   CODEX_REALTIME_WEBRTC_CALL_BASE_URL,
+  MANAGED_COMMENT,
+  MANAGED_MULTI_AGENT_LINE,
+  MANAGED_MULTI_AGENT_V2_LINE,
+  MANAGED_MULTI_AGENT_V2_TABLE_LINE,
+  MANAGED_REMOTE_COMPACTION_LINE,
+  MANAGED_ROUTE_COMMENT,
   getCodexConfigPath,
   getCodexJournalPath,
   getCodexJournalRecoveryPath,
@@ -14,6 +25,7 @@ import {
   sha256,
   snapshotFile,
   writeFileSnapshot,
+  writeFilesWithCompensation,
   writeIntegrationState,
 } from "./codex-integration-shared";
 import type {
@@ -33,6 +45,9 @@ import { assertJournalTargetsConfig, readJournal } from "./codex-integration-jou
 import {
   findTopLevelAssignment,
   installCompatibilityV1Features,
+  parseDocument,
+  removeDocumentLine,
+  renderDocument,
   splitLines,
   textFormat,
 } from "./codex-integration-document";
@@ -437,9 +452,110 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   return { changed: true, active: true };
 }
 
+function restoreOrphanedManagedConfig(text: string): string {
+  const document = parseDocument(text);
+  let changed = false;
+  const routeMarkers = document.lines
+    .map((line, index) => line === MANAGED_ROUTE_COMMENT || line === MANAGED_COMMENT ? index : -1)
+    .filter(index => index >= 0);
+  if (routeMarkers.length > 1) {
+    throw new Error("Codex config contains multiple orphaned integration route markers");
+  }
+  if (routeMarkers.length === 1) {
+    const owned = [routeMarkers[0]!];
+    const route = findTopLevelAssignment(document.lines, "openai_base_url");
+    if (route.index !== undefined
+      && /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):\d+\/v1\/?$/.test(route.value ?? "")) {
+      owned.push(route.index);
+      const realtime = findTopLevelAssignment(document.lines, "experimental_realtime_webrtc_call_base_url");
+      if (realtime.index !== undefined
+        && realtime.rawLine === `experimental_realtime_webrtc_call_base_url = ${JSON.stringify(CODEX_REALTIME_WEBRTC_CALL_BASE_URL)}`) {
+        owned.push(realtime.index);
+      }
+    }
+    for (const index of [...new Set(owned)].sort((left, right) => right - left)) {
+      removeDocumentLine(document, index);
+    }
+    changed = true;
+  }
+
+  const hookStarts = document.lines
+    .map((line, index) => line === MANAGED_INTERRUPT_HOOK_START ? index : -1)
+    .filter(index => index >= 0);
+  const hookEnds = document.lines
+    .map((line, index) => line === MANAGED_INTERRUPT_HOOK_END ? index : -1)
+    .filter(index => index >= 0);
+  if (hookStarts.length !== hookEnds.length || hookStarts.length > 1) {
+    throw new Error("Orphaned Codex interrupt hook markers cannot be verified safely");
+  }
+  if (hookStarts.length === 1) {
+    const start = hookStarts[0]!;
+    const end = hookEnds[0]!;
+    const block = document.lines.slice(start, end + 1);
+    const safe = end >= start && block.length === 11
+      && block[1] === "[[hooks.Interrupt]]"
+      && block[2] === ""
+      && block[3] === "[[hooks.Interrupt.hooks]]"
+      && block[4] === 'type = "command"'
+      && /^command = "(?:\\.|[^"\\])*"$/.test(block[5] ?? "")
+      && block[6] === "timeout = 3"
+      && block[7] === ""
+      && /^\[hooks\.state\."(?:\\.|[^"\\])+"\]$/.test(block[8] ?? "")
+      && /^trusted_hash = "sha256:[a-f0-9]{64}"$/.test(block[9] ?? "");
+    if (!safe) throw new Error("Orphaned Codex interrupt hook cannot be verified safely");
+    for (let index = end; index >= start; index -= 1) removeDocumentLine(document, index);
+    if (document.lines[start - 1] === "" && document.lines[start - 2] !== "") {
+      removeDocumentLine(document, start - 1);
+    }
+    changed = true;
+  }
+
+  for (let index = document.lines.length - 1; index >= 0; index -= 1) {
+    const line = document.lines[index]!;
+    if (line === MANAGED_REMOTE_COMPACTION_LINE
+      || line === MANAGED_MULTI_AGENT_LINE
+      || line === MANAGED_MULTI_AGENT_V2_LINE
+      || line === MANAGED_MULTI_AGENT_V2_TABLE_LINE
+      || /^max_depth = \d+ # Managed by codex-chatgpt-web: allows nested routed Web subagents in Compatibility V1\.$/.test(line)) {
+      removeDocumentLine(document, index);
+      changed = true;
+    }
+  }
+
+  for (const tableName of ["features", "features.multi_agent_v2", "agents"]) {
+    const header = `[${tableName}]`;
+    const index = document.lines.indexOf(header);
+    if (index < 0) continue;
+    const end = document.lines.findIndex((line, lineIndex) =>
+      lineIndex > index && /^\s*\[\[?[^\]]+\]\]?\s*(?:#.*)?$/.test(line));
+    const limit = end < 0 ? document.lines.length : end;
+    if (document.lines.slice(index + 1, limit).some(line => line.trim())) continue;
+    for (let lineIndex = limit - 1; lineIndex >= index; lineIndex -= 1) {
+      removeDocumentLine(document, lineIndex);
+    }
+    if (document.lines[index - 1] === "" && document.lines[index - 2] !== "") {
+      removeDocumentLine(document, index - 1);
+    }
+    changed = true;
+  }
+
+  return changed ? renderDocument(document) : text;
+}
+
 export function uninstallCodexIntegration(): UninstallCodexIntegrationResult {
   const journal = readJournal();
-  if (!journal) return { changed: false };
+  if (!journal) {
+    const configPath = getCodexConfigPath();
+    if (!existsSync(configPath)) return { changed: false };
+    const current = readFileSync(configPath, "utf8");
+    const restored = restoreOrphanedManagedConfig(current);
+    if (restored === current) return { changed: false };
+    writeFilesWithCompensation(
+      [{ path: configPath, data: restored, followSymlink: true }],
+      [getCodexModelsCachePath()],
+    );
+    return { changed: true };
+  }
   if (!existsSync(journal.configPath)) throw new Error(`Codex config is missing: ${journal.configPath}`);
   const current = readFileSync(journal.configPath, "utf8");
   let restored: string;

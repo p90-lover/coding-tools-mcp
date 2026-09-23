@@ -351,6 +351,7 @@ class BrowserHost {
     this.visible = false;
     this.surfaceActive = true;
     this.turnTabs = new Map();
+    this.userTabs = new Map();
     this.closedTurnOwners = new Map();
     this.userCancelledTurnOwners = new Map();
     this.manualTerminalSignals = new Map();
@@ -519,8 +520,12 @@ class BrowserHost {
     return this.turnTabs.get(this.selectedTabId) || null;
   }
 
+  selectedUserTab() {
+    return this.userTabs?.get(this.selectedTabId) || null;
+  }
+
   async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity) {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS
+    if (this.turnTabs.size + (this.userTabs?.size ?? 0) >= MAX_BROWSER_TABS
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
         `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
@@ -529,7 +534,7 @@ class BrowserHost {
     const id = randomBytes(12).toString("base64url");
     const surfaceId = randomBytes(24).toString("base64url");
     const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
-      .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
+      .find(candidate => ![...this.turnTabs.values(), ...(this.userTabs?.values() ?? [])].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     const view = new WebContentsView({
       webPreferences: {
@@ -590,8 +595,65 @@ class BrowserHost {
     return tab;
   }
 
+  createUserTab() {
+    if (this.turnTabs.size + this.userTabs.size >= MAX_BROWSER_TABS) {
+      throw new Error(`ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before opening another`);
+    }
+    if (!this.surfaceActive) throw new Error("Open the Browser before creating a tab");
+    if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
+    if (browserInteractionModeFor(this) === "automatic" && this.state.authenticated !== true) {
+      throw new Error("Sign in to ChatGPT before opening another tab");
+    }
+    const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
+      .find(candidate => ![...this.turnTabs.values(), ...this.userTabs.values()]
+        .some(tab => tab.ordinal === candidate));
+    if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: this.partition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: true,
+        backgroundThrottling: true,
+      },
+    });
+    const tab = {
+      id: randomBytes(12).toString("base64url"),
+      traceId: null,
+      ordinal,
+      label: `ChatGPT ${ordinal}`,
+      pageTitle: "ChatGPT",
+      url: TEMPORARY_CHAT_URL,
+      status: "loading",
+      loading: true,
+      message: "Opening ChatGPT",
+      view,
+    };
+    this.userTabs.set(tab.id, tab);
+    this.window.contentView.addChildView(view);
+    view.webContents.setZoomFactor(this.state.zoomFactor);
+    this.bindShellZoomShortcuts(view.webContents);
+    this.bindUserTabContents(tab);
+    this.selectedTabId = tab.id;
+    this.show();
+    void view.webContents.loadURL(TEMPORARY_CHAT_URL).catch((error) => {
+      if (this.userTabs.get(tab.id) !== tab || view.webContents.isDestroyed()
+        || isAbortedNavigationError(error)) return;
+      tab.loading = false;
+      tab.status = "error";
+      tab.message = error instanceof Error ? error.message : String(error);
+      this.logger.error("browser.user_tab_navigation_failed", {
+        tabId: tab.id, ...navigationErrorForLog(error),
+      });
+      this.publishState?.(this.snapshot());
+    });
+    this.logger.info("browser.user_tab_opened", { tabId: tab.id, ordinal });
+    return this.snapshot();
+  }
+
   createManualTurnTab(traceId, helperPid, conversationKey, prompt, manualSubmitTimeoutMs) {
-    if (this.turnTabs.size >= MAX_BROWSER_TABS
+    if (this.turnTabs.size + (this.userTabs?.size ?? 0) >= MAX_BROWSER_TABS
       && !BrowserHost.prototype.evictOldestReclaimableTurnTab.call(this)) {
       throw new Error(
         `ChatGPT Web already has ${MAX_BROWSER_TABS} browser tabs; close one before starting another turn to avoid excessive parallel traffic on the ChatGPT account`,
@@ -599,7 +661,7 @@ class BrowserHost {
     }
     const id = randomBytes(12).toString("base64url");
     const ordinal = Array.from({ length: MAX_BROWSER_TABS }, (_unused, index) => index + 1)
-      .find(candidate => ![...this.turnTabs.values()].some(tab => tab.ordinal === candidate));
+      .find(candidate => ![...this.turnTabs.values(), ...(this.userTabs?.values() ?? [])].some(tab => tab.ordinal === candidate));
     if (!ordinal) throw new Error("ChatGPT Web browser tab allocation is inconsistent");
     const view = new WebContentsView({
       webPreferences: {
@@ -866,6 +928,70 @@ class BrowserHost {
     })()`, true);
   }
 
+  bindUserTabContents(tab) {
+    const contents = tab.view.webContents;
+    const publish = () => {
+      if (this.userTabs.get(tab.id) === tab) this.publishState?.(this.snapshot());
+    };
+    contents.setWindowOpenHandler(({ url }) => {
+      if (allowedAuthUrl(url)) {
+        return { action: "allow", createWindow: options => this.createAuthView(options, url) };
+      }
+      let parsed;
+      try { parsed = new URL(url); } catch { return { action: "deny" }; }
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+        void shell.openExternal(parsed.toString()).catch((error) => {
+          this.logger.warn("browser.user_tab_external_url_failed", {
+            tabId: tab.id, errorType: error?.name || "Error",
+          });
+        });
+      }
+      return { action: "deny" };
+    });
+    contents.on("did-start-loading", () => {
+      tab.loading = true;
+      tab.status = "loading";
+      publish();
+    });
+    contents.on("did-stop-loading", () => {
+      tab.loading = false;
+      tab.url = contents.getURL();
+      if (tab.status !== "error") {
+        tab.status = "ready";
+        tab.message = "ChatGPT is ready";
+      }
+      publish();
+    });
+    contents.on("page-title-updated", (_event, title) => {
+      if (typeof title === "string" && title.trim()) tab.pageTitle = title.trim();
+      publish();
+    });
+    contents.on("did-navigate-in-page", (_event, url, mainFrame) => {
+      if (mainFrame) tab.url = url;
+      publish();
+    });
+    contents.on("did-fail-load", (_event, code, description, url, mainFrame) => {
+      if (!mainFrame || code === -3) return;
+      tab.loading = false;
+      tab.status = "error";
+      tab.url = url;
+      tab.message = description;
+      this.logger.error("browser.user_tab_navigation_failed", {
+        tabId: tab.id, errorCode: code, errorDescription: description,
+      });
+      publish();
+    });
+    contents.on("render-process-gone", (_event, details) => {
+      tab.loading = false;
+      tab.status = "error";
+      tab.message = `Browser renderer stopped: ${details.reason}`;
+      this.logger.error("browser.user_tab_renderer_gone", {
+        tabId: tab.id, reason: details.reason,
+      });
+      publish();
+    });
+  }
+
   bindManualTurnContents(tab) {
     const contents = tab.view.webContents;
     const invalidateConversation = (url, inPlace) => {
@@ -1101,6 +1227,8 @@ class BrowserHost {
       const cleanup = () => {
         clearTimeout(timeout);
         contents.off("did-start-navigation", onStarted);
+        contents.off("did-navigate", onNavigated);
+        contents.off("dom-ready", onDomReady);
         contents.off("did-stop-loading", onStopped);
         contents.off("did-finish-load", onFinished);
         contents.off("did-fail-load", onFailed);
@@ -1117,8 +1245,10 @@ class BrowserHost {
       const onStarted = (details) => {
         if (details.isMainFrame && !details.isSameDocument) mainNavigationStarted = true;
       };
+      const onNavigated = () => { mainNavigationStarted = true; };
       const onStopped = () => { if (mainNavigationStarted) finish(); };
       const onFinished = () => { if (mainNavigationStarted) finish(); };
+      const onDomReady = () => { if (mainNavigationStarted) finish(); };
       const onFailed = (_event, errorCode, errorDescription, url, mainFrame) => {
         if (!mainFrame || errorCode === -3) return;
         finish(new Error(`ChatGPT hard refresh failed: ${errorDescription} (${url})`));
@@ -1133,6 +1263,8 @@ class BrowserHost {
       }, timeoutMs);
       timeout.unref?.();
       contents.on("did-start-navigation", onStarted);
+      contents.on("did-navigate", onNavigated);
+      contents.on("dom-ready", onDomReady);
       contents.on("did-stop-loading", onStopped);
       contents.on("did-finish-load", onFinished);
       contents.on("did-fail-load", onFailed);
@@ -1235,6 +1367,7 @@ class BrowserHost {
   snapshot() {
     const contents = this.activeView()?.webContents;
     const selected = this.selectedTurnTab();
+    const selectedUser = this.selectedUserTab();
     const manualInteraction = browserInteractionModeFor(this) === "manual";
     const homeTab = {
       id: "home",
@@ -1254,6 +1387,15 @@ class BrowserHost {
           title: selected.interactionMode === "manual" ? selected.label : selected.pageTitle,
           loading: selected.loading,
         }
+      : selectedUser
+        ? {
+            ...this.state,
+            status: selectedUser.status,
+            message: selectedUser.message,
+            url: selectedUser.url,
+            title: manualInteraction ? "ChatGPT" : selectedUser.pageTitle,
+            loading: selectedUser.loading,
+          }
       : manualInteraction
         ? { ...this.state, title: "ChatGPT" }
         : this.state;
@@ -1266,10 +1408,11 @@ class BrowserHost {
         readPageTitle: !manualInteraction,
       }),
       activeTabId: this.selectedTabId,
-      tabs: this.turnTabs.size > 0
+      tabs: this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
         ? [
-            ...(this.selectedTabId === "home" ? [homeTab] : []),
+            ...(this.selectedTabId === "home" || (this.userTabs?.size ?? 0) > 0 ? [homeTab] : []),
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
+            ...[...(this.userTabs?.values() ?? [])].map((tab) => this.tabSnapshot(tab)),
           ]
         : [homeTab],
       maxTabs: MAX_BROWSER_TABS,
@@ -1406,7 +1549,7 @@ class BrowserHost {
   }
 
   activeView() {
-    return this.authView || this.selectedTurnTab()?.view || this.view;
+    return this.authView || this.selectedTurnTab()?.view || this.selectedUserTab()?.view || this.view;
   }
 
   hiddenTurnBounds() {
@@ -1492,16 +1635,22 @@ class BrowserHost {
     const visible = windowVisible
       && browserViewVisible(this.visible, this.surfaceActive, this.boundsReady);
     const selected = this.selectedTurnTab();
-    this.presentPrimaryView(visible && !this.authView && !selected);
+    const selectedUser = this.selectedUserTab();
+    this.presentPrimaryView(visible && !this.authView && !selected && !selectedUser);
     for (const tab of this.turnTabs.values()) {
       const tabVisible = visible && !this.authView && selected?.id === tab.id;
       this.presentTurnView(tab, tabVisible);
+    }
+    for (const tab of this.userTabs?.values() ?? []) {
+      const tabVisible = visible && !this.authView && selectedUser?.id === tab.id;
+      if (tabVisible) tab.view.setBounds(this.bounds);
+      tab.view.setVisible(tabVisible);
     }
     this.authView?.setVisible(visible);
   }
 
   selectTab(tabId) {
-    if (tabId !== "home" && !this.turnTabs.has(tabId)) throw new Error("Browser tab does not exist");
+    if (tabId !== "home" && !this.turnTabs.has(tabId) && !this.userTabs?.has(tabId)) throw new Error("Browser tab does not exist");
     if (this.authView) this.closeAuthView(this.authView, true);
     this.selectedTabId = tabId;
     this.syncViewVisibility();
@@ -1552,6 +1701,18 @@ class BrowserHost {
     this.writeDescriptor();
   }
 
+  removeUserTab(tab) {
+    if (this.userTabs?.get(tab.id) !== tab) return;
+    this.userTabs.delete(tab.id);
+    try { this.window.contentView.removeChildView(tab.view); } catch {}
+    if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
+    if (this.selectedTabId === tab.id) {
+      this.selectedTabId = [...this.userTabs.keys()].at(-1) || "home";
+    }
+    this.syncViewVisibility();
+    this.publishState?.(this.snapshot());
+  }
+
   rememberUserCancelledTurn(traceId, helperPid) {
     this.userCancelledTurnOwners.delete(traceId);
     this.userCancelledTurnOwners.set(traceId, helperPid);
@@ -1563,6 +1724,12 @@ class BrowserHost {
   }
 
   async closeTab(tabId) {
+    const userTab = this.userTabs?.get(tabId);
+    if (userTab) {
+      this.removeUserTab(userTab);
+      this.logger.info("browser.user_tab_closed", { tabId });
+      return this.snapshot();
+    }
     const tab = this.turnTabs.get(tabId);
     if (!tab) throw new Error("Browser tab does not exist");
     const running = tab.status === "running";
@@ -1810,7 +1977,7 @@ class BrowserHost {
   }
 
   navigate(action) {
-    if (this.activeTraceId) {
+    if (this.activeTraceId && !this.selectedUserTab()) {
       throw new Error("Browser navigation is locked while ChatGPT is running a Codex turn");
     }
     if (this.manualOperation) {
@@ -1833,7 +2000,7 @@ class BrowserHost {
       : action === "in"
         ? ZOOM_FACTORS[Math.min(currentIndex + 1, ZOOM_FACTORS.length - 1)]
         : ZOOM_FACTORS[Math.max(currentIndex - 1, 0)];
-    const contents = [this.view, ...[...this.turnTabs.values()].map((tab) => tab.view)]
+    const contents = [this.view, ...[...this.turnTabs.values()].map((tab) => tab.view), ...[...(this.userTabs?.values() ?? [])].map((tab) => tab.view)]
       .map((view) => view?.webContents)
       .filter((candidate) => candidate && !candidate.isDestroyed());
     if (contents.length === 0) throw new Error("ChatGPT browser is unavailable for zoom");
@@ -2443,7 +2610,8 @@ class BrowserHost {
     if (!(this.turnTabs instanceof Map)) throw new Error("Owned ChatGPT tab registry is unavailable");
     if (this.authView) this.closeAuthView(this.authView, true, false);
     const tabs = [...this.turnTabs.values()];
-    const contents = [this.view, ...tabs.map(tab => tab.view)]
+    const userTabs = [...(this.userTabs?.values() ?? [])];
+    const contents = [this.view, ...tabs.map(tab => tab.view), ...userTabs.map(tab => tab.view)]
       .map(view => view?.webContents)
       .filter(candidate => candidate && !candidate.isDestroyed());
     if (contents.length === 0) throw new Error("Owned ChatGPT browser session is unavailable");
@@ -2456,6 +2624,7 @@ class BrowserHost {
     browserSession.flushStorageData();
     await browserSession.cookies.flushStore();
     for (const tab of tabs) this.removeTurnTab(tab, false);
+    for (const tab of userTabs) this.removeUserTab(tab);
   }
 
   async resetFailedPasskeyLogin() {
@@ -2538,6 +2707,7 @@ class BrowserHost {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT logout verification");
     return await this.withManualOperation("ChatGPT logout", async () => {
       if (this.authView) this.closeAuthView(this.authView, true, false);
+      for (const tab of [...(this.userTabs?.values() ?? [])]) this.removeUserTab(tab);
       const contents = this.view.webContents;
       await contents.session.clearStorageData();
       this.setState({
@@ -2917,6 +3087,11 @@ class BrowserHost {
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
     }
     this.turnTabs.clear();
+    for (const tab of this.userTabs?.values() ?? []) {
+      try { this.window.contentView.removeChildView(tab.view); } catch {}
+      if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close();
+    }
+    this.userTabs?.clear();
     if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close();
   }
 }

@@ -10,7 +10,7 @@ const {
   processRunning,
   terminateOwnedProcessTree,
 } = require("./process-tree.cjs");
-const { runtimeInvocation } = require("./runtime-command.cjs");
+const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -1213,7 +1213,8 @@ class RuntimeSupervisor {
       this.clearState();
       return { status: "ready", daemonPid: null, tunnelPid: null };
     }
-    if (!tunnelOnly && config.releaseVersion !== this.app.getVersion()) {
+    const currentVersion = tunnelOnly ? this.app.getVersion() : runtimeReleaseVersion(this);
+    if (!tunnelOnly && config.releaseVersion !== currentVersion) {
       const ownershipState = this.readState();
       if ((!tunnelOnly && await this.proxyHealth(config)) || runtimeOwnershipMayBeLive(ownershipState)) {
         try {
@@ -1231,7 +1232,7 @@ class RuntimeSupervisor {
           return { status: "external", detail };
         }
       }
-      const detail = `Config requires ${config.releaseVersion}; launcher is ${this.app.getVersion()}`;
+      const detail = `Config requires bridge ${config.releaseVersion}; bundled bridge is ${currentVersion}`;
       this.writeState("needs-setup", detail);
       this.logger.warn("runtime.setup_required", { detail });
       return { status: "needs-setup", detail };
@@ -1800,6 +1801,34 @@ class RuntimeSupervisor {
     this.clearState();
     this.logger.info("runtime.stale_owner_recovered");
     return true;
+  }
+
+  async waitForIdleForSetup(operationName, timeoutMs = 600_000, pollIntervalMs = 500) {
+    const config = this.readConfig();
+    const pid = this.daemon?.pid;
+    if (!config || !Number.isInteger(pid)) return;
+    const deadline = Date.now() + timeoutMs;
+    let previousMessage = "";
+    for (;;) {
+      const health = await this.proxyHealthPayload(config);
+      if (health?.service !== "codex-chatgpt-web" || health.status !== "ok"
+        || health.pid !== pid || health.mode !== config.mode || health.version !== config.releaseVersion
+        || !Number.isInteger(health.active_http_turns) || health.active_http_turns < 0
+        || !Number.isInteger(health.active_browser_turns) || health.active_browser_turns < 0) {
+        throw new Error("Cannot verify bridge activity before setup; the running bridge was left untouched");
+      }
+      if (health.active_http_turns === 0 && health.active_browser_turns === 0) return;
+      const activity = `${health.active_http_turns} active HTTP turn(s) and ${health.active_browser_turns} active browser turn(s)`;
+      if (Date.now() >= deadline) {
+        throw new Error(`Still waiting for ${activity}. Finish the active Codex turns, then retry setup; the bridge is still running.`);
+      }
+      const message = `Waiting for ${activity} to finish before connecting MCP. Existing requests can continue.`;
+      if (message !== previousMessage) {
+        this.publishOperation?.({ name: operationName, status: "running", message });
+        previousMessage = message;
+      }
+      await sleep(Math.min(pollIntervalMs, Math.max(1, deadline - Date.now())));
+    }
   }
 
   async acquireDrain(config, timeoutMs = DRAIN_IDLE_TIMEOUT_MS) {

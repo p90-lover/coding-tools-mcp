@@ -129,7 +129,7 @@ function yamlString(value) {
   return JSON.stringify(String(value));
 }
 
-function runtimeConfiguration(state, managementKey, proxyApiKey) {
+function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
   const authDirectory = path.join(state, "auth");
   const logDirectory = path.join(state, "logs");
   fs.mkdirSync(authDirectory, { recursive: true, mode: 0o700 });
@@ -144,6 +144,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey) {
     `auth-dir: ${yamlString(authDirectory)}`,
     "api-keys:",
     `  - ${yamlString(proxyApiKey)}`,
+    ...(outboundProxyUrl ? [`proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
     "remote-management:",
     "  allow-remote: false",
     `  secret-key: ${yamlString(managementKey)}`,
@@ -176,7 +177,10 @@ function run(homeValue, stateValue) {
   const managementKey = requiredSecret("CODING_TOOLS_CPA_MANAGEMENT_KEY");
   const proxyApiKey = requiredSecret("CODING_TOOLS_CPA_PROXY_API_KEY");
   const configPath = path.join(state, "config.yaml");
-  writePrivateFileAtomic(configPath, runtimeConfiguration(state, managementKey, proxyApiKey));
+  writePrivateFileAtomic(configPath, runtimeConfiguration(
+    state, managementKey, proxyApiKey,
+    String(process.env.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL || ""),
+  ));
   if (process.platform !== "win32") fs.chmodSync(configPath, 0o600);
 
   const child = spawn(executable, ["--config", configPath, "--no-browser"], {

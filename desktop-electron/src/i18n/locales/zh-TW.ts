@@ -42,6 +42,8 @@ export default {
   browser: "瀏覽器",
   openChatgpt: "開啟 ChatGPT",
   temporaryChat: "臨時聊天",
+  newTab: "新增分頁",
+  browserTabLimit: "最多可開啟五個額外的 ChatGPT 分頁，瀏覽與 Codex 任務共用此上限。",
   back: "返回",
   forward: "前進",
   reload: "重新載入",

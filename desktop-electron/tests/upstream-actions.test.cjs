@@ -67,7 +67,10 @@ test("Anneal create posts BACKLOG to /projects/{id}/tasks and preview uses GET",
   assert.equal(spec.path, "/projects/proj-9/tasks");
   assert.equal(spec.body.status, "BACKLOG");
   assert.equal(spec.body.approvalGate, true);
+  assert.equal(spec.body.assigneeType, "HUMAN");
+  assert.equal(Object.hasOwn(spec.body, "chainIndex"), false);
   assert.equal(spec.body.opensPullRequest, false);
+  assert.throws(() => annealPathForOp("create", "proj-9", { name: "x".repeat(201) }), /task name/);
   assert.ok(ALLOWED_ANNEAL_POST.includes(spec.pattern));
   assert.ok(ALLOWED_ANNEAL_GET.includes("/tasks/{id}"));
 
@@ -127,4 +130,48 @@ test("Unknown or remote upstream actions are rejected", async () => {
     }),
     /loopback/i,
   );
+});
+
+test("Anneal module uses its private web proxy for projects, board, details and state changes", async t => {
+  const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
+  const seen = [];
+  const server = http.createServer((request, response) => {
+    let raw = "";
+    request.on("data", chunk => { raw += chunk; });
+    request.on("end", () => {
+      seen.push({ method: request.method, url: request.url, body: raw ? JSON.parse(raw) : null,
+        authorization: request.headers.authorization, origin: request.headers.origin });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify([{ id: "task-9", name: "Real task", status: "BACKLOG",
+        moveTargets: [{ status: "TODO", via: "patch" }] }]));
+    });
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const host = createCodingToolsAppsHost({
+    actUpstream,
+    services: { loopbackRequest: id => {
+      assert.equal(id, "anneal");
+      return { origin: `http://127.0.0.1:${server.address().port}/api/` };
+    } },
+  });
+  const input = { projectId: "proj-9", taskId: "task-9", endpoint: "http://127.0.0.1:1/",
+    credential: "renderer-token-must-not-be-used" };
+  for (const operation of ["projects", "board", "preview", "updateTask"]) {
+    const result = await host.call("anneal", operation, { ...input, status: "TODO" });
+    assert.equal(result.ok, true);
+    assert.equal(result.result.body[0].name, "Real task");
+    assert.deepEqual(result.result.body[0].moveTargets, [{ status: "TODO", via: "patch" }]);
+    assert.equal(host.isReadOnly("anneal", operation), operation !== "updateTask");
+  }
+  assert.deepEqual(seen.map(({ method, url }) => `${method} ${url}`), [
+    "GET /api/projects", "GET /api/tasks?view=board&archived=false&projectId=proj-9",
+    "GET /api/tasks/task-9", "PATCH /api/tasks/task-9",
+  ]);
+  assert.deepEqual(seen[3].body, { status: "TODO" });
+  assert.ok(seen.every(item => item.authorization === undefined && item.origin === undefined));
+  const refused = await host.call("anneal", "updateTask", { ...input, status: "INVENTED" });
+  assert.equal(refused.ok, false);
+  assert.match(refused.result.detail, /status/);
+  assert.equal(seen.length, 4);
 });

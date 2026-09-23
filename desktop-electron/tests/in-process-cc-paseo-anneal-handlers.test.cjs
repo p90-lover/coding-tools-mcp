@@ -2,166 +2,96 @@
 
 const assert = require("node:assert/strict");
 const http = require("node:http");
-const net = require("node:net");
 const test = require("node:test");
-
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 
-function forbidTcp(label) {
-  const originalHttp = http.request;
-  const originalHttps = require("node:https").request;
-  const originalConnect = net.Socket.prototype.connect;
-  const hits = [];
-  function record(kind, target) {
-    hits.push({ kind, target: String(target || "") });
-    throw new Error(`${label} must not open TCP (${kind}: ${target})`);
-  }
-  http.request = function patchedHttp(target, ...rest) {
-    record("http.request", target instanceof URL ? target.href : target);
-    return originalHttp.call(this, target, ...rest);
-  };
-  require("node:https").request = function patchedHttps(target, ...rest) {
-    record("https.request", target instanceof URL ? target.href : target);
-    return originalHttps.call(this, target, ...rest);
-  };
-  net.Socket.prototype.connect = function patchedConnect(options, ...rest) {
-    const target = options && typeof options === "object"
-      ? `${options.host || options.hostname || ""}:${options.port || ""}`
-      : options;
-    record("net.connect", target);
-    return originalConnect.call(this, options, ...rest);
-  };
-  return {
-    hits,
-    restore() {
-      http.request = originalHttp;
-      require("node:https").request = originalHttps;
-      net.Socket.prototype.connect = originalConnect;
-    },
-  };
-}
+const IDS = ["commandcode-proxy", "paseo", "anneal"];
 
-function createBareHost() {
-  return createCodingToolsAppsHost({
-    getFiveStack: () => ({ ok: false }),
+test("module inspection reports managed runtime state, not bundled source presence", async () => {
+  const inspected = [];
+  const host = createCodingToolsAppsHost({
+    services: { inspect: async id => {
+      inspected.push(id);
+      return { id, status: "offline", error: "daemon is not running" };
+    } },
   });
-}
-
-function assertNoLegacyPorts(payload) {
-  const serialized = JSON.stringify(payload);
-  assert.equal(/ECONNREFUSED/i.test(serialized), false, serialized);
-  assert.equal(/127\.0\.0\.1:9090/.test(serialized) && /reachable":false/.test(serialized), false, serialized);
-  assert.doesNotMatch(serialized, /Five-stack control plane is not ready/);
-}
-
-test("CommandCode health/inspect/banner succeed in-process without a :9090 listener", async () => {
-  const guard = forbidTcp("commandcode-proxy");
-  try {
-    const host = createBareHost();
-    for (const operation of ["inspect", "health", "banner"]) {
-      const positional = await host.call("commandcode-proxy", operation);
-      assert.equal(positional.ok, true, `positional ${operation}`);
-      assert.equal(positional.transport, "in-process");
-      assert.equal(positional.result.listening, false);
-      assert.equal(positional.result.ok, true);
-      assert.equal(positional.result.reachable, undefined);
-      assertNoLegacyPorts(positional);
-
-      const objectForm = await host.call({
-        moduleId: "commandcode-proxy",
-        operation,
-      });
-      assert.equal(objectForm.ok, true, `object ${operation}`);
-      assert.equal(objectForm.handle, "commandcode-proxy");
-      assert.equal(objectForm.result.status === "ready" || objectForm.result.status === "ok", true);
-    }
-    const invoked = await host.invoke({ handle: "commandcode-proxy", operation: "health" });
-    assert.equal(invoked.ok, true);
-    assert.equal(invoked.result.proxy, "commandcode-proxy");
-    assert.equal(invoked.result.source.present, true);
-    assert.equal(guard.hits.length, 0);
-  } finally {
-    guard.restore();
+  for (const id of IDS) {
+    const result = await host.call(id, "inspect");
+    assert.equal(result.result.status, "offline", id);
+    assert.equal(result.result.error, "daemon is not running");
+    assert.equal(result.transport, "in-process");
   }
+  assert.deepEqual(inspected, IDS);
 });
 
-test("Paseo inspect/plan succeed in-process when five-stack is not ready", async () => {
-  const guard = forbidTcp("paseo");
-  try {
-    const host = createBareHost();
-    const inspected = await host.call({ moduleId: "paseo", operation: "inspect" });
-    assert.equal(inspected.ok, true);
-    assert.equal(inspected.result.status, "ready");
-    assert.equal(inspected.result.listening, false);
-    assert.equal(inspected.result.source.present, true);
-    assertNoLegacyPorts(inspected);
-
-    const planned = await host.invoke({
-      handle: "paseo",
-      operation: "plan",
-      arguments: { brief: "Reproduce login", workspaceId: "ws-1" },
-    });
-    assert.equal(planned.ok, true);
-    assert.equal(planned.result.tool, "paseo_plan");
-    assert.equal(planned.result.status, "planned");
-    assert.equal(planned.result.listening, false);
-    assertNoLegacyPorts(planned);
-
-    const run = await host.call("paseo", "run", { workspaceId: "ws-1" });
-    assert.equal(run.ok, false);
-    assert.equal(run.result.softFail, true);
-    assert.equal(run.result.unavailable, true);
-    assert.equal(run.result.dependency, "paseo-runtime");
-    assert.equal(guard.hits.length, 0);
-  } finally {
-    guard.restore();
+test("CommandCode health and banner probe the managed backend", async t => {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push(req.url);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", proxy: "actual-commandcode-runtime" }));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const host = createCodingToolsAppsHost({
+    services: { loopbackRequest: id => {
+      assert.equal(id, "commandcode-proxy");
+      return { origin: `http://127.0.0.1:${server.address().port}`, healthPath: "/health" };
+    } },
+  });
+  for (const operation of ["health", "banner"]) {
+    const result = await host.call("commandcode-proxy", operation);
+    assert.equal(result.ok, true);
+    assert.equal(result.result.status, 200);
+    assert.equal(result.result.json.proxy, "actual-commandcode-runtime");
   }
+  assert.deepEqual(requests, ["/health", "/health"]);
 });
 
-test("Anneal inspect/board/listTasks succeed in-process without :3000/:5173", async () => {
-  const guard = forbidTcp("anneal");
-  try {
-    const host = createBareHost();
-    const inspected = await host.call({ handle: "anneal", operation: "inspect" });
-    assert.equal(inspected.ok, true);
-    assert.equal(inspected.result.status, "ready");
-    assert.equal(inspected.result.listening, false);
-    assertNoLegacyPorts(inspected);
-
-    const listed = await host.call("anneal", "listTasks");
-    assert.equal(listed.ok, true);
-    assert.deepEqual(listed.result.tasks, []);
-    assert.equal(listed.result.listening, false);
-
-    const board = await host.invoke({ handle: "anneal", operation: "board" });
-    assert.equal(board.ok, true);
-    assert.deepEqual(board.result.json, []);
-    assertNoLegacyPorts(board);
-    assert.equal(guard.hits.length, 0);
-  } finally {
-    guard.restore();
-  }
+test("Paseo plan requires its control plane and returns the real plan", async () => {
+  const offline = createCodingToolsAppsHost({ getFiveStack: () => ({ ok: false }) });
+  const unavailable = await offline.call("paseo", "plan", { brief: "Read-only probe" });
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.result.unavailable, true);
+  assert.equal(unavailable.result.dependency, "paseo-runtime");
+  const calls = [];
+  const online = createCodingToolsAppsHost({ getFiveStack: () => ({ ok: true, value: {
+    callTool: async (name, args) => { calls.push({ name, args }); return { ok: true, planId: "real-plan-1" }; },
+  } }) });
+  const result = await online.call("paseo", "plan", { brief: "Read-only probe", workspaceId: "ws-1" });
+  assert.equal(result.result.planId, "real-plan-1");
+  assert.equal(calls[0].name, "paseo_plan");
+  assert.equal(calls[0].args.workspaceId, "ws-1");
 });
 
-test("host.call accepts both positional and contract object forms", async () => {
-  const host = createBareHost();
-  const positional = await host.call("commandcode-proxy", "inspect");
-  const objectForm = await host.call({
-    moduleId: "commandcode-proxy",
-    operation: "inspect",
-    arguments: {},
-  });
-  const handleForm = await host.call({
-    handle: "commandcode-proxy",
-    operation: "inspect",
-  });
-  assert.equal(positional.ok, true);
-  assert.equal(objectForm.ok, true);
-  assert.equal(handleForm.ok, true);
-  assert.equal(objectForm.moduleId, "commandcode-proxy");
-  assert.equal(handleForm.handle, "commandcode-proxy");
-  await assert.rejects(
-    () => host.call({ operation: "inspect" }),
-    /Unknown Coding Tools module: missing/,
-  );
+test("Anneal task lists and activity use the actual managed API operations", async () => {
+  const calls = [];
+  const host = createCodingToolsAppsHost({ actUpstream: async input => {
+    calls.push(input);
+    return { ok: true, status: 200, json: [{ id: "task-1", state: "RUNNING", operation: input.op }] };
+  } });
+  for (const operation of ["listTasks", "board", "activity"]) {
+    const result = await host.call("anneal", operation, { taskId: "task-1" });
+    assert.equal(result.result.json[0].id, "task-1");
+    assert.equal(result.result.json[0].state, "RUNNING");
+    assert.equal(host.isReadOnly("anneal", operation), true);
+  }
+  assert.deepEqual(calls.map(call => call.op), ["board", "board", "activity"]);
+  assert.equal(calls[2].taskId, "task-1");
+});
+
+test("missing module services never produce synthetic successful runtime results", async () => {
+  const host = createCodingToolsAppsHost();
+  for (const id of IDS) assert.equal((await host.call(id, "inspect")).ok, false, id);
+  const board = await host.call("anneal", "listTasks");
+  assert.equal(board.ok, false);
+  assert.equal(board.result.unavailable, true);
+});
+
+test("host.call retains positional, moduleId and handle forms", async () => {
+  const host = createCodingToolsAppsHost({ services: { inspect: async id => ({ id, status: "ready" }) } });
+  assert.equal((await host.call("commandcode-proxy", "inspect")).ok, true);
+  assert.equal((await host.call({ moduleId: "commandcode-proxy", operation: "inspect" })).moduleId, "commandcode-proxy");
+  assert.equal((await host.call({ handle: "commandcode-proxy", operation: "inspect" })).handle, "commandcode-proxy");
+  await assert.rejects(() => host.call({ operation: "inspect" }), /Unknown Coding Tools module: missing/);
 });

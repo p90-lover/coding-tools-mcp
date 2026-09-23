@@ -18,6 +18,17 @@ export interface Page<T> {
   readonly nextCursor: number | null;
 }
 
+export interface TaskSummary {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly state: string;
+}
+
+export interface TaskPage extends Page<TaskSummary> {
+  readonly revision: number;
+}
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
 export interface JsonObject {
@@ -38,7 +49,7 @@ export interface CodingToolsApi {
     status(): Promise<JsonObject>;
   };
   readonly tasks: {
-    list(input?: PageRequest & { readonly workspaceId?: string }): Promise<Page<JsonObject>>;
+    list(input: PageRequest & { readonly workspaceId: string }): Promise<TaskPage>;
   };
   readonly history: {
     search(input: {

@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const Module = require("node:module");
 
@@ -56,6 +57,22 @@ function loadPreload(respond = () => null) {
 
   return { api: exposed.codingTools, launcher: exposed.codexWebLauncher, invocations };
 }
+
+test("the sandboxed window loads a bundled preload before every launch path", () => {
+  const root = path.resolve(__dirname, "..");
+  const main = fs.readFileSync(path.join(root, "electron", "main.cjs"), "utf8");
+  const builder = fs.readFileSync(path.join(root, "scripts", "build-preload.cjs"), "utf8");
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+
+  assert.match(main, /preload: path\.join\(__dirname, "\.\.", "build", "preload\.cjs"\)/);
+  assert.equal(pkg.scripts["build:preload"], "node scripts/build-preload.cjs");
+  for (const command of [pkg.scripts.dev, pkg.scripts.build, pkg.scripts.start]) {
+    assert.match(command, /build:preload/);
+  }
+  assert.ok(pkg.build.files.includes("build/preload.cjs"));
+  assert.match(builder, /bundle:\s*true/);
+  assert.match(builder, /external:\s*\["electron"\]/);
+});
 
 test("preload exposes only the named Coding Tools domains and no generic privileged API", () => {
   const { api, launcher } = loadPreload();

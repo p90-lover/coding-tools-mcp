@@ -7,11 +7,12 @@
   "type": "module",
   "main": "electron/main-with-provider.cjs",
   "scripts": {
-    "dev": "bun run scripts/dev.cjs",
+    "dev": "bun run build:preload && bun run scripts/dev.cjs",
     "audit": "bun audit",
     "typecheck": "tsc --noEmit",
+    "build:preload": "node scripts/build-preload.cjs",
     "build:renderer": "vite build",
-    "build": "bun run typecheck && bun run build:renderer",
+    "build": "bun run build:preload && bun run typecheck && bun run build:renderer",
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
     "build:five-stack-runtime": "node scripts/prepare-five-stack-runtime.cjs",
     "build:package-resources": "node scripts/prepare-package-resources.cjs",
@@ -21,7 +22,7 @@
     "package:linux": "bun run build && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
     "test": "node --test tests/*.test.cjs",
-    "start": "electron ."
+    "start": "bun run build:preload && electron ."
   },
   "dependencies": {
     "motion": "^12.42.2",
@@ -62,6 +63,7 @@
     "publish": null,
     "files": [
       "dist/**",
+      "build/preload.cjs",
       "electron/**",
       "vendor/upstream/**",
       "vendor/managed-components/**",

@@ -104,45 +104,63 @@ test("Paseo plans an orchestrator and assigned subagents on in-app backends", as
   assert.equal(JSON.stringify(planned).includes("must-never-leak"), false);
 });
 
-test("run → submit issues → review → Anneal task preview keeps assignment structure", async () => {
+test("Paseo refuses provider substitution for selected Web GPT and Gemini roles", async () => {
+  const base = snapshot();
+  const request = {
+    brief: "Exact routes",
+    orchestrator: { providerId: "chatgpt-web" },
+    subagents: [{ providerId: "gemini-api" }],
+  };
+  const control = (accounts) => createFiveStackControlPlane({
+    planProvider: createProviderExecutionPlan,
+    getProviderSnapshot: async () => ({ ...base, accounts }),
+  });
+
+  await assert.rejects(
+    () => control(base.accounts.filter((row) => row.providerId !== "chatgpt-web"))
+      .callTool("paseo_plan", request, { workspaceId: "ws-1" }),
+    /No connected provider account.*chatgpt-web/,
+  );
+  await assert.rejects(
+    () => control(base.accounts.filter((row) => row.providerId !== "gemini-api"))
+      .callTool("paseo_plan", request, { workspaceId: "ws-1" }),
+    /No connected provider account.*gemini-api/,
+  );
+});
+
+test("Paseo run refuses fake dispatch without a real execution service", async () => {
   const control = plane();
   const planned = await control.callTool("paseo_plan", {
-    brief: "Find the login bug",
+    brief: "Run a real worker",
     orchestrator: { providerId: "chatgpt-web" },
-    subagents: [{ role: "debugger", providerId: "gemini-api" }],
+    subagents: [{ providerId: "gemini-api" }],
   }, { workspaceId: "ws-1" });
-  const ran = await control.callTool("paseo_run", { planId: planned.id, message: "Reproduce login" }, {
-    workspaceId: "ws-1",
-  });
-  assert.equal(ran.status, "awaiting_results");
-  assert.equal(ran.liveModelCompletion, false);
-  assert.equal(ran.assignments[0].status, "dispatched");
 
-  await control.callTool("paseo_submit_result", {
-    runId: ran.id,
-    assignmentId: ran.assignments[0].id,
-    ok: false,
-    summary: "Null deref in session restore",
-    issues: [{ title: "Session restore crash", detail: "Null token on cold start" }],
-  });
-  const reviewed = await control.callTool("paseo_review", { runId: ran.id });
-  assert.equal(reviewed.status, "issues_found");
-  assert.equal(reviewed.findings.length, 1);
-
-  const task = await control.callTool("anneal_open_from_review", { reviewId: reviewed.id }, {
-    workspaceId: "ws-1",
-  });
-  assert.equal(task.state, "BACKLOG");
-  assert.equal(task.approvalGate, true);
-  assert.equal(task.opensPullRequest, false);
-  assert.equal(task.handoff.posted, false);
-  assert.equal(task.source.kind, "paseo_review");
-  assert.equal(task.assignment.orchestrator.route.providerId, "chatgpt-web");
-  assert.equal(task.assignment.subagents[0].role, "debugger");
-  const preview = await control.callTool("anneal_preview", { taskId: task.id }, { workspaceId: "ws-1" });
-  assert.equal(preview.id, task.id);
+  await assert.rejects(
+    () => control.callTool("paseo_run", { planId: planned.id }, { workspaceId: "ws-1" }),
+    /execution service is unavailable/i,
+  );
   const status = await control.callTool("five_stack_status", {}, { workspaceId: "ws-1" });
-  assert.equal(status.annealTasks.length, 1);
+  assert.equal(status.runs.length, 0);
+});
+
+test("manual results cannot fabricate a Paseo review or Anneal task", async () => {
+  const control = plane();
+  await assert.rejects(
+    () => control.callTool("paseo_submit_result", { runId: "run-fake", assignmentId: "sub-fake" }),
+    /Paseo run was not found/,
+  );
+  await assert.rejects(
+    () => control.callTool("paseo_review", { runId: "run-fake" }),
+    /Paseo run was not found/,
+  );
+  await assert.rejects(
+    () => control.callTool("anneal_open_from_review", { reviewId: "review-fake" }),
+    /Paseo review was not found/,
+  );
+  const status = await control.callTool("five_stack_status", {}, { workspaceId: "ws-1" });
+  assert.equal(status.reviews.length, 0);
+  assert.equal(status.annealTasks.length, 0);
 });
 
 test("Paseo uses CPA 8317 and Router 4202 only when those services are available", async () => {
@@ -211,25 +229,11 @@ test("Paseo uses CPA 8317 and Router 4202 only when those services are available
   }, { workspaceId: "ws-1" });
   assert.equal(planned.orchestrator.backendKind, "router");
   assert.equal(planned.subagents[0].backendKind, "cpa");
-  const ran = await control.callTool("paseo_run", { planId: planned.id, message: "Go" }, { workspaceId: "ws-1" });
-  await control.callTool("paseo_submit_result", {
-    runId: ran.id,
-    assignmentId: ran.assignments[0].id,
-    ok: false,
-    issues: [{ title: "Need a task", detail: "Open Anneal" }],
-  });
-  const reviewed = await control.callTool("paseo_review", { runId: ran.id });
-  const task = await control.callTool("anneal_open_from_review", {
-    reviewId: reviewed.id,
-    projectId: "proj-1",
-  }, { workspaceId: "ws-1" });
-  assert.equal(task.state, "BACKLOG");
-  assert.equal(task.handoff.posted, true);
-  assert.equal(task.id, "remote-task-1");
-  assert.equal(posted[0].path, "/projects/proj-1/tasks");
-  assert.equal(posted[0].body.status, "BACKLOG");
-  assert.equal(posted[0].body.approvalGate, true);
-  assert.equal(posted[0].body.opensPullRequest, false);
+  await assert.rejects(
+    () => control.callTool("paseo_run", { planId: planned.id, message: "Go" }, { workspaceId: "ws-1" }),
+    /execution service is unavailable/i,
+  );
+  assert.equal(posted.length, 0);
 });
 
 test("MCP catalog overlay keeps headless tools and exposes five-stack resources", () => {

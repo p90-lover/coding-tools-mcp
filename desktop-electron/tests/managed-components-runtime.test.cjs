@@ -9,8 +9,10 @@ const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const {
   assertSafeManifest,
+  copyBundledTree,
   createManagedComponentController,
 } = require("../electron/managed-components.cjs");
+const { createManagedExternalServicesController } = require("../electron/managed-external-services.cjs");
 
 const COMPONENT_IDS = ["codex-router", "commandcode-proxy", "cpa", "paseo", "anneal"];
 
@@ -93,7 +95,7 @@ function mockChild(pid = 8100) {
   return child;
 }
 
-function controllerFixture({ fetchImpl, allowNetworkInstall = true } = {}) {
+function controllerFixture({ fetchImpl, allowNetworkInstall = true, ...overrides } = {}) {
   const payload = Buffer.from("managed-component-fixture-v1", "utf8");
   const manifestRoot = manifestFixture(payload);
   const dataRoot = temporaryDirectory("coding-tools-managed-data");
@@ -112,11 +114,13 @@ function controllerFixture({ fetchImpl, allowNetworkInstall = true } = {}) {
       children.push(child);
       return child;
     },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
     resolveRuntimeExecutable: () => process.execPath,
     now: (() => {
       let tick = 0;
       return () => `2026-09-18T03:00:${String(tick++).padStart(2, "0")}.000Z`;
     })(),
+    ...overrides,
   });
   return { controller, dataRoot, payload, children };
 }
@@ -242,6 +246,7 @@ test("peer environment reentry through runtimeConfiguration does not overflow", 
       headers: { "content-length": String(payload.length) },
     }),
     spawnProcess: () => mockChild(9100),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
     resolveRuntimeExecutable: () => process.execPath,
     peerEnvironment: (manifest) => {
       entries += 1;
@@ -364,6 +369,7 @@ test("bundled-source unpacks from app resources without git clone or network fet
       children.push(child);
       return child;
     },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
 
   const started = await controller.startComponent("commandcode-proxy");
@@ -374,6 +380,87 @@ test("bundled-source unpacks from app resources without git clone or network fet
     "export const bundled = true;\n",
   );
   controller.dispose();
+});
+
+test("Windows WSL Anneal stages Linux dependencies without leaking credentials in arguments", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const manifestRoot = temporaryDirectory("coding-tools-anneal-wsl-manifests");
+  const bundleRoot = temporaryDirectory("coding-tools-anneal-wsl-bundle");
+  const dataRoot = temporaryDirectory("coding-tools-anneal-wsl-data");
+  for (const id of COMPONENT_IDS) {
+    const manifest = id === "anneal" ? bundledSourceManifest(id) : releaseManifest(id, payload);
+    if (id === "anneal") {
+      manifest.platformModes = { win32: "wsl2" };
+      manifest.credentials = { githubReadToken: { required: false, minimumLength: 20, secret: true } };
+      manifest.install.steps.splice(1, 0, {
+        id: "install-dependencies",
+        kind: "command",
+        executable: "{npm}",
+        arguments: ["ci"],
+        skipIfFile: "node_modules",
+        skipIfExists: "node_modules",
+        execution: "managed-mode",
+      });
+      manifest.install.steps.splice(2, 0, {
+        id: "restore-or-create-config",
+        kind: "command",
+        executable: "bash",
+        arguments: ["-lc", "true"],
+        environment: { GITHUB_READ_TOKEN: "{secret:githubReadToken}" },
+        execution: "managed-mode",
+      });
+    }
+    writeJson(path.join(manifestRoot, id + ".json"), manifest);
+  }
+  const bundled = path.join(bundleRoot, "anneal", "source");
+  writeJson(path.join(bundled, "package.json"), { name: "anneal-fixture" });
+  fs.mkdirSync(path.join(bundled, "node_modules", "win32-only"), { recursive: true });
+  fs.writeFileSync(path.join(bundled, "node_modules", "win32-only", "index.js"), "windows");
+  const spawned = [];
+  const controller = createManagedComponentController({
+    manifestRoot,
+    bundleRoot,
+    dataRoot,
+    platform: "win32",
+    env: { ...process.env, WSLENV: "KEEP_ME/p:GITHUB_READ_TOKEN/w" },
+    safeStorage: { isEncryptionAvailable: () => false },
+    spawnSyncProcess: () => ({ status: 0, stdout: "/mnt/c/anneal-fixture\n", stderr: "" }),
+    spawnProcess: (executable, args, options) => {
+      spawned.push({ executable, args, env: options.env });
+      const child = mockChild(9400 + spawned.length);
+      queueMicrotask(() => { child.exitCode = 0; child.emit("exit", 0, null); });
+      return child;
+    },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+  });
+  const fixtureToken = "fixture-" + "x".repeat(32);
+  controller.setComponentCredential("anneal", "githubReadToken", fixtureToken);
+  try {
+    const installed = await controller.installComponent("anneal");
+    assert.equal(installed.installState, "installed");
+    assert.equal(fs.existsSync(path.join(installed.managedHome, "node_modules", "win32-only")), false);
+    assert.equal(spawned.length, 2);
+    assert.equal(spawned[0].executable, "wsl.exe");
+    assert.match(spawned[0].args.join(" "), /npm.*ci/);
+    assert.equal(spawned.some((entry) => entry.args.join(" ").includes(fixtureToken)), false);
+    assert.equal(spawned[1].env.GITHUB_READ_TOKEN, fixtureToken);
+    assert.match(spawned[1].env.WSLENV, /(?:^|:)KEEP_ME\/p(?:$|:)/);
+    assert.match(spawned[1].env.WSLENV, /(?:^|:)GITHUB_READ_TOKEN\/u(?:$|:)/);
+    assert.doesNotMatch(spawned[1].env.WSLENV, /GITHUB_READ_TOKEN\/w/);
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("in-app bundled copy can omit Windows dependencies for WSL staging", () => {
+  const source = temporaryDirectory("coding-tools-anneal-in-app-source");
+  const destination = temporaryDirectory("coding-tools-anneal-in-app-destination");
+  writeJson(path.join(source, "package.json"), { name: "anneal-fixture" });
+  fs.mkdirSync(path.join(source, "node_modules", "win32-only"), { recursive: true });
+  fs.writeFileSync(path.join(source, "node_modules", "win32-only", "index.js"), "windows");
+  copyBundledTree(source, destination, { skipNodeModules: true });
+  assert.equal(fs.existsSync(path.join(destination, "package.json")), true);
+  assert.equal(fs.existsSync(path.join(destination, "node_modules")), false);
 });
 
 test("release-binary copies a bundled archive instead of downloading it", async () => {
@@ -395,6 +482,7 @@ test("release-binary copies a bundled archive instead of downloading it", async 
       throw new Error("network fetch must not run when the CPA archive is bundled");
     },
     spawnProcess: () => mockChild(9200),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
 
   const installed = await controller.installComponent("cpa");
@@ -431,10 +519,229 @@ test("bundled-source Start fails closed when app resources are missing", async (
       throw new Error("network fetch must not run when the bundled runtime is missing");
     },
     spawnProcess: () => mockChild(9300),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
   await assert.rejects(
     () => controller.startComponent("paseo"),
     /bundled runtime is missing|bundled inside Coding Tools Desktop/i,
   );
   controller.dispose();
+});
+
+test("Windows managed cleanup terminates owned trees and retains failed handles", { skip: process.platform !== "win32" }, async () => {
+  const terminated = [];
+  let blocked = false;
+  const { controller, children } = controllerFixture({
+    terminateProcessTree: (child) => {
+      if (blocked) throw new Error("tree termination refused");
+      terminated.push(child);
+      queueMicrotask(() => {
+        child.exitCode = 1;
+        child.emit("exit", 1, null);
+      });
+    },
+  });
+  await controller.startComponent("cpa");
+  children[0].kill = () => assert.fail("Windows cleanup must not kill only the adapter");
+  await controller.stopComponent("cpa");
+  assert.deepEqual(terminated, [children[0]]);
+  assert.equal(controller.project("cpa").installState, "installed");
+
+  await controller.startComponent("cpa");
+  blocked = true;
+  await assert.rejects(controller.stopComponent("cpa"), /tree termination refused/);
+  assert.equal(controller.project("cpa").processes[0].running, true);
+  assert.throws(() => controller.dispose(), /tree termination refused/);
+  assert.equal(controller.project("cpa").processes[0].running, true);
+  blocked = false;
+  controller.dispose();
+  assert.deepEqual(terminated, children);
+  assert.deepEqual(controller.project("cpa").processes, []);
+});
+
+test("managed start cannot spawn after disposal while installation is in flight", async () => {
+  let finishDownload;
+  const download = new Promise((resolve) => { finishDownload = resolve; });
+  const { controller, payload, children } = controllerFixture({ fetchImpl: () => download });
+  const pending = controller.startComponent("cpa");
+  controller.dispose();
+  finishDownload(new Response(payload, { status: 200 }));
+  await assert.rejects(pending, /disposed/);
+  assert.deepEqual(children, []);
+  await assert.rejects(controller.startComponent("cpa"), /disposed/);
+});
+
+test("Windows disposal owns an in-flight managed preparation command", { skip: process.platform !== "win32" }, async () => {
+  const payload = Buffer.from("managed-preparation-fixture");
+  const manifestRoot = manifestFixture(payload);
+  const manifest = releaseManifest("cpa", payload);
+  manifest.install.steps.push({ id: "prepare", kind: "command", executable: "{runtime}", arguments: [] });
+  writeJson(path.join(manifestRoot, "cpa.json"), manifest);
+  const child = mockChild(8300);
+  let prepared;
+  const spawned = new Promise((resolve) => { prepared = resolve; });
+  const terminated = [];
+  const controller = createManagedComponentController({
+    manifestRoot,
+    dataRoot: temporaryDirectory("coding-tools-preparation-dispose"),
+    allowNetworkInstall: true,
+    safeStorage: { isEncryptionAvailable: () => false },
+    fetchImpl: async () => new Response(payload, { status: 200 }),
+    spawnProcess: () => { prepared(); return child; },
+    terminateProcessTree: (owned, signal) => { terminated.push(owned); owned.kill(signal); },
+  });
+  const pending = controller.startComponent("cpa");
+  await spawned;
+  controller.dispose();
+  assert.deepEqual(terminated, [child]);
+  await assert.rejects(pending, /disposed/);
+  assert.deepEqual(controller.project("cpa").processes, []);
+});
+
+test("Router runtime exit preserves completed install state and generated dependencies", async () => {
+  const { controller, children } = controllerFixture();
+  try {
+    const started = await controller.startComponent("codex-router");
+    const dependency = path.join(started.managedHome, ".venv", "retained-dependency.txt");
+    fs.mkdirSync(path.dirname(dependency), { recursive: true });
+    fs.writeFileSync(dependency, "retained");
+    children[0].exitCode = 7;
+    children[0].emit("exit", 7, null);
+    const failed = controller.project("codex-router");
+    assert.equal(failed.installState, "installed");
+    assert.match(failed.error, /service exited \(7\)/);
+    const restarted = await controller.startComponent("codex-router");
+    assert.equal(restarted.installedAt, started.installedAt);
+    assert.equal(fs.readFileSync(dependency, "utf8"), "retained");
+    assert.equal(children.length, 2);
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("Router composite caller key resolves without recursive launch expansion", async (t) => {
+  const manifestRoot = temporaryDirectory("coding-tools-router-composite-manifests");
+  const dataRoot = temporaryDirectory("coding-tools-router-composite-data");
+  for (const id of COMPONENT_IDS) writeJson(path.join(manifestRoot, `${id}.json`), bundledSourceManifest(id));
+  const manifest = bundledSourceManifest("codex-router");
+  const home = path.join(dataRoot, "components", "codex-router", manifest.version);
+  writeJson(path.join(home, "package.json"), { name: "router-fixture" });
+  writeJson(path.join(home, ".coding-tools-managed-component.json"), {
+    schemaVersion: 1,
+    id: manifest.id,
+    version: manifest.version,
+    strategy: manifest.strategy,
+    repository: manifest.repository,
+    commit: manifest.commit,
+    installedAt: new Date().toISOString(),
+  });
+  const state = path.join(dataRoot, "state", "codex-router", "router");
+  fs.mkdirSync(state, { recursive: true });
+  const callerKey = "router-composite-fixture-key-1234567890";
+  fs.writeFileSync(path.join(state, "caller-secret"), callerKey);
+  const spawned = [];
+  const controller = createManagedExternalServicesController({
+    manifestRoot,
+    dataRoot,
+    filePath: path.join(dataRoot, "external-services.json"),
+    keyPath: path.join(dataRoot, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    resolveRuntimeExecutable: () => process.execPath,
+    fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => "application/json" }, clone: () => ({ json: async () => ({ data: [] }) }) }),
+    spawnProcess: () => {
+      const child = mockChild(8700 + spawned.length);
+      spawned.push(child);
+      return child;
+    },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+  });
+  try {
+    const startedAt = performance.now();
+    controller.snapshot();
+    const connection = controller.loopbackRequest("codex-router");
+    const started = await controller.start("codex-router");
+    const environment = controller.runtimeEnvironment();
+    const elapsedMs = performance.now() - startedAt;
+    t.diagnostic(`Router snapshot + loopback + Start + environment: ${elapsedMs.toFixed(1)} ms`);
+    assert.equal(connection.modelsPath, `/_codex-router/${callerKey}/v1/models`);
+    assert.equal(environment.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY, callerKey);
+    assert.equal(started.managedInstall.state, "installed");
+    assert.equal(spawned.length, 1);
+    assert.ok(elapsedMs < 5000, "caller-key lookup must not recurse through environment expansion");
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("runtime failure restarts in place while missing package files and invalid markers repair", async () => {
+  const componentId = "codex-router";
+  const manifestRoot = temporaryDirectory("coding-tools-restart-manifests");
+  const bundleRoot = temporaryDirectory("coding-tools-restart-bundle");
+  const dataRoot = temporaryDirectory("coding-tools-restart-data");
+  for (const id of COMPONENT_IDS) writeJson(path.join(manifestRoot, `${id}.json`), bundledSourceManifest(id));
+  const source = path.join(bundleRoot, componentId, "source");
+  writeJson(path.join(source, "package.json"), { name: "router-fixture", revision: 1 });
+  const routerState = path.join(dataRoot, "state", componentId, "router");
+  fs.mkdirSync(routerState, { recursive: true });
+  fs.writeFileSync(path.join(routerState, "caller-secret"), "router-restart-fixture-key-1234567890");
+  const children = [];
+  const controller = createManagedExternalServicesController({
+    manifestRoot,
+    bundleRoot,
+    dataRoot,
+    filePath: path.join(dataRoot, "external-services.json"),
+    keyPath: path.join(dataRoot, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    resolveRuntimeExecutable: () => process.execPath,
+    fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => "application/json" }, clone: () => ({ json: async () => ({ data: [] }) }) }),
+    spawnProcess: () => {
+      const child = mockChild(8500 + children.length);
+      children.push(child);
+      return child;
+    },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+  });
+  try {
+    const first = await controller.start(componentId);
+    const home = first.managedInstall.home;
+    const dependency = path.join(home, ".venv", "retained-dependency.txt");
+    fs.mkdirSync(path.dirname(dependency), { recursive: true });
+    fs.writeFileSync(dependency, "verified runtime dependency");
+    const markerPath = path.join(home, ".coding-tools-managed-component.json");
+    const marker = fs.readFileSync(markerPath, "utf8");
+    const installs = path.join(dataRoot, "aiTemp", "managed-components");
+    const originalInstallCount = fs.readdirSync(installs).length;
+    writeJson(path.join(source, "package.json"), { name: "router-fixture", revision: 2 });
+
+    children[0].exitCode = 7;
+    children[0].emit("exit", 7, null);
+    const failed = controller.snapshot().services.find((entry) => entry.id === componentId);
+    const restarted = await controller.start(componentId);
+    assert.equal(fs.existsSync(dependency), true, "runtime failure must not replace the installed home");
+    assert.equal(fs.readFileSync(dependency, "utf8"), "verified runtime dependency");
+    assert.equal(fs.readFileSync(markerPath, "utf8"), marker);
+    assert.equal(fs.readdirSync(installs).length, originalInstallCount);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(home, "package.json"), "utf8")).revision, 1);
+    assert.equal(failed.managedInstall.state, "installed");
+    assert.equal(failed.status, "error");
+    assert.match(failed.error, /service exited \(7\)/);
+    assert.equal(restarted.managedInstall.state, "installed");
+    assert.equal(restarted.error, null);
+
+    await controller.stop(componentId);
+    fs.renameSync(path.join(home, "package.json"), path.join(dataRoot, "Trash", "missing-package.json"));
+    assert.equal(controller.snapshot().services.find((entry) => entry.id === componentId).managedInstall.state, "repair-required");
+    await controller.start(componentId);
+    assert.equal(fs.readdirSync(installs).length, originalInstallCount + 1);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(home, "package.json"), "utf8")).revision, 2);
+
+    await controller.stop(componentId);
+    writeJson(markerPath, { schemaVersion: 1, id: "wrong-component" });
+    assert.equal(controller.snapshot().services.find((entry) => entry.id === componentId).managedInstall.state, "repair-required");
+    await controller.start(componentId);
+    assert.equal(fs.readdirSync(installs).length, originalInstallCount + 2);
+    assert.equal(controller.snapshot().services.find((entry) => entry.id === componentId).managedInstall.state, "installed");
+  } finally {
+    controller.dispose();
+  }
 });

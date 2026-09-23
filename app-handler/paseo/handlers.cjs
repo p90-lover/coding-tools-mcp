@@ -1,7 +1,7 @@
 "use strict";
 
 const { defineModule } = require("../lib/define-module.cjs");
-const { inspectResult, moduleSnapshot, runtimeUnavailable } = require("../lib/in-process-runtime.cjs");
+const { runtimeUnavailable } = require("../lib/in-process-runtime.cjs");
 const { sanitizePublic } = require("../lib/sanitize.cjs");
 
 const LOOPBACK = Object.freeze({
@@ -46,41 +46,8 @@ async function fiveStack(name, args, context) {
   }));
 }
 
-async function inProcessPlan(args, context) {
-  const plane = typeof context.getFiveStack === "function" ? context.getFiveStack() : null;
-  if (plane?.ok && typeof plane.value?.callTool === "function") {
-    return sanitizePublic(await plane.value.callTool("paseo_plan", args, {
-      workspaceId: args.workspaceId,
-      requestId: args.requestId,
-    }));
-  }
-  const snapshot = moduleSnapshot("paseo");
-  if (!snapshot.present) {
-    return runtimeUnavailable("paseo", "paseo-source", "Paseo bundled source is missing");
-  }
-  return sanitizePublic({
-    ok: true,
-    tool: "paseo_plan",
-    status: "planned",
-    brief: typeof args.brief === "string" ? args.brief : "",
-    workspaceId: args.workspaceId || "",
-    subagents: Array.isArray(args.subagents) ? args.subagents : [],
-    listening: false,
-    runtimeStarted: false,
-    transport: "in-process",
-    source: snapshot.source,
-    vendor: snapshot.vendor,
-  });
-}
-
 function createModule() {
-  const extraOperations = {
-    inspect: {
-      readOnly: true,
-      description: "Inspect the in-process Paseo handler and bundled source. Does not probe :6768.",
-      run: () => inspectResult("paseo"),
-    },
-  };
+  const extraOperations = {};
   for (const op of PROTOCOL_OPS) {
     extraOperations[op] = {
       readOnly: false,
@@ -92,9 +59,7 @@ function createModule() {
     extraOperations[operation] = {
       readOnly: operation === "review",
       description: `Coding Tools five-stack ${tool}.`,
-      run: (args, context) => (
-        operation === "plan" ? inProcessPlan(args, context) : fiveStack(tool, args, context)
-      ),
+      run: (args, context) => fiveStack(tool, args, context),
     };
   }
   return defineModule({

@@ -1,6 +1,6 @@
 //! Bounded durable metadata embedded in AppData. Credentials never enter this
 //! structure. The service must persist a successful reservation before IO.
-use super::{model::*, protocol::endpoint};
+use super::{model::*, protocol::endpoint, result::PaseoStartResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -79,6 +79,10 @@ pub struct Entry {
     pub source_revision: Option<String>,
     pub last_error: Option<String>,
     pub observation: Value,
+    #[serde(default)]
+    pub start_message_id: Option<String>,
+    #[serde(default)]
+    pub output: Option<PaseoStartResult>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -213,6 +217,8 @@ impl Book {
             source_revision: None,
             last_error: None,
             observation: Value::Null,
+            start_message_id: None,
+            output: None,
         };
         let mut next = self.clone();
         next.revision = self.bump()?;
@@ -262,6 +268,10 @@ impl Book {
         if result.dispatch {
             row.owner_runtime = Some(runtime.into());
             row.last_error = None;
+            if matches!(action, Action::Start | Action::Resume) {
+                row.start_message_id = Some(key.into());
+                row.output = None;
+            }
         }
         next.size_check()?;
         *self = next;
@@ -392,5 +402,80 @@ impl Book {
    "automatic_replay":false,"external_runtime_sandbox_inherited":false,
    "review_identity":"coordinator attestation, not fabricated human approval"}),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paseo_start_identity_is_durable_before_transport() {
+        let mut book = Book::default();
+        book.configure(
+            Binding {
+                id: "paseo-binding".into(),
+                workspace_id: "qa".into(),
+                root: "C:/qa".into(),
+                roots_revision: "roots".into(),
+                policy_stamp: "policy".into(),
+                generation: "generation".into(),
+                engine: Engine::Paseo,
+                endpoint: "ws://127.0.0.1:6768/ws".into(),
+                provider: "codex".into(),
+                model: "gemini-3.1-pro-low".into(),
+                mode: "full-access".into(),
+                project_id: None,
+                repo_id: None,
+                assignee_id: None,
+                max_duration_min: 10,
+                allow_codex: true,
+                enabled: true,
+            },
+            0,
+        )
+        .unwrap();
+        book.prepare(
+            "qa",
+            "paseo-binding",
+            "task",
+            "mission",
+            "Title",
+            "Brief",
+            1,
+        )
+        .unwrap();
+        book.reserve("qa", "mission", 0, "create-key", "runtime", Action::Create)
+            .unwrap();
+        book.acknowledge(
+            "qa",
+            "mission",
+            "create-key",
+            Reply::Created {
+                record_id: "agent-1".into(),
+            },
+            2,
+        )
+        .unwrap();
+        let revision = book.find("qa", "mission").unwrap().mission.revision;
+        book.reserve(
+            "qa",
+            "mission",
+            revision,
+            "start-key",
+            "runtime",
+            Action::Start,
+        )
+        .unwrap();
+
+        let saved: Book = serde_json::from_value(serde_json::to_value(book).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .find("qa", "mission")
+                .unwrap()
+                .start_message_id
+                .as_deref(),
+            Some("start-key")
+        );
     }
 }

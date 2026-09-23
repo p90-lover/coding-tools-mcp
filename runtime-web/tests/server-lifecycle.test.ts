@@ -1304,3 +1304,41 @@ test("authenticated shutdown requires a verified idle drain", async () => {
     await server.stop(true);
   }
 });
+
+test("model catalog health distinguishes no request, transport failure, upstream denial, and recovery without secrets", async () => {
+  let outcome: "transport" | "denied" | "invalid" | "ready" = "transport";
+  const server = startServer({ ...defaultConfig("browser-only"), port: 0 }, {
+    fetchUpstream: async () => {
+      if (outcome === "transport") throw Object.assign(new Error("private proxy credentials and host"), { code: "UnsupportedProxyProtocol" });
+      if (outcome === "denied") return new Response("private upstream account detail", { status: 403 });
+      if (outcome === "invalid") return Response.json({ models: [] });
+      return Response.json({ models: [{ slug: "native", visibility: "list", supported_reasoning_levels: [] }] });
+    },
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const health = async () => await (await fetch(`${base}/healthz`)).json() as Record<string, any>;
+  try {
+    expect(await health()).toMatchObject({ model_catalog_requests: 0, last_model_catalog_result: null });
+    const unauthenticated = await fetch(`${base}/v1/models`);
+    expect(unauthenticated.status).toBe(502);
+    await unauthenticated.text();
+    expect((await health()).last_model_catalog_result.failure.stage).toBe("request");
+    for (const [next, status, stage] of [
+      ["transport", 502, "transport"], ["denied", 403, "upstream"], ["invalid", 502, "catalog"], ["ready", 200, undefined],
+    ] as const) {
+      outcome = next;
+      const response = await fetch(`${base}/v1/models`, { headers: { authorization: "Bearer private-session-token" } });
+      expect(response.status).toBe(status);
+      await response.text();
+      const snapshot = await health();
+      expect(snapshot.last_model_catalog_result).toMatchObject({ status });
+      expect(snapshot.last_model_catalog_result.failure?.stage).toBe(stage);
+      if (next === "transport") expect(snapshot.last_model_catalog_result.failure.code).toBe("UnsupportedProxyProtocol");
+      expect(JSON.stringify(snapshot)).not.toContain("private");
+      expect(snapshot.successful_model_catalog_requests).toBe(next === "ready" ? 1 : 0);
+    }
+    expect((await health()).model_catalog_requests).toBe(5);
+  } finally {
+    await server.stop(true);
+  }
+});

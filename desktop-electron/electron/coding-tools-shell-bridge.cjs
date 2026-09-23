@@ -1,5 +1,7 @@
 "use strict";
 
+const { randomUUID } = require("node:crypto");
+
 const MCP_STATES = new Set(["stopped", "starting", "running", "stopping", "error"]);
 
 function emptyPage() {
@@ -114,9 +116,41 @@ function createCodingToolsShellBridge({
       };
     },
 
-    async listTasks(event) {
+    async listTasks(event, input) {
       assertFocusedMainWindow(event, false);
-      return emptyPage();
+      const workspaceId = text(input.workspaceId);
+      if (!workspaceId) throw new Error("Workspace is required");
+      const offset = Number.isInteger(input.cursor) && input.cursor > 0 ? input.cursor : 0;
+      const limit = Number.isInteger(input.limit) && input.limit > 0 ? Math.min(input.limit, 100) : 25;
+      const payload = await requestHeadless("/api/v1/tools/call", {
+        request_id: `tasks-${randomUUID()}`,
+        workspace_id: workspaceId,
+        tool: "workflow_list",
+        arguments: { offset, limit, include_archived: false },
+      }, "POST");
+      const operation = asRecord(payload?.operation);
+      const result = asRecord(operation.result);
+      if (operation.state !== "completed" || result.ok !== true) {
+        throw new Error(text(operation.error, text(result.summary, "Task list is unavailable")));
+      }
+      if (!Array.isArray(result.tasks) || !Number.isInteger(result.revision)) {
+        throw new Error("Task list returned an invalid durable workflow page");
+      }
+      return {
+        items: result.tasks.flatMap((candidate) => {
+          const row = asRecord(candidate);
+          const id = text(row.id);
+          if (!id) return [];
+          return [{
+            id,
+            title: text(row.title, id),
+            description: text(row.description),
+            state: text(row.state, "unknown"),
+          }];
+        }),
+        nextCursor: Number.isInteger(result.next_offset) ? result.next_offset : null,
+        revision: result.revision,
+      };
     },
 
     async searchHistory(event) {

@@ -29,9 +29,11 @@ src-tauri/icons/logo-design.png
 docs/history-session/
 tmp-run
 
-# Electron migration temporary material; permanent scripts/evidence under aiTemp stay explicit.
-/aiTemp/vendor-import/
-/aiTemp/upstream-manifest-test/
+# Local scratch, recovery archives, and generated builds.
+aiTemp/
+Trash/
+target/
+/desktop-electron/build/
 
 # Paseo/Anneal source trees are package-time extraResources; git keeps only BUNDLE.json.
 /desktop-electron/vendor/bundled/paseo/**

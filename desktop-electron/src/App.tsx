@@ -713,6 +713,12 @@ function LauncherShell({
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
+                <SidebarItem
+                  active={surface === "instant-mcp"}
+                  icon="mcp"
+                  label={copy.liveMcpTools}
+                  onClick={() => navigateSurface("instant-mcp")}
+                />
               </SidebarGroup>
               <details className="sidebar-more" open={extraSurfaceActive}>
                 <summary>{copy.moreTools}</summary>
@@ -846,6 +852,9 @@ function LauncherShell({
             ) : null}
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
+            ) : null}
+            {surface === "instant-mcp" ? (
+              <InstantMcpToolsSurface copy={copy} language={language} setError={setError} />
             ) : null}
             {surface === "providers" ? (
               <ProviderCenterSurface language={language} setError={setError} />
@@ -1023,6 +1032,7 @@ function BrowserSurface({
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
+  const tabLimitReached = (browser?.tabs.filter(tab => tab.id !== "home").length ?? 0) >= (browser?.maxTabs ?? 5);
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
     && operation.status === "running"
@@ -1048,6 +1058,14 @@ function BrowserSurface({
     try {
       if (visible) await api!.hideBrowser();
       else await api!.showBrowser();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const createTab = async () => {
+    setError(null);
+    try {
+      await api!.createBrowserTab();
     } catch (cause) {
       setError(messageOf(cause));
     }
@@ -1128,6 +1146,16 @@ function BrowserSurface({
             ) : null}
           </div>
         ))}
+        <button
+          aria-label={copy.newTab}
+          className="browser-new-tab"
+          disabled={!browser || tabLimitReached || (!manualInteraction && !browser.authenticated)}
+          onClick={() => void createTab()}
+          title={copy.newTab}
+          type="button"
+        >
+          <Icon name="plus" />
+        </button>
         <div className="browser-tab-drag draggable" />
       </div>
       <div className="browser-toolbar">
@@ -1451,6 +1479,7 @@ function McpSurface({
   const [localBusy, setLocalBusy] = useState(false);
   const busy = localBusy || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
+  const [connectorResult, setConnectorResult] = useState<string | null>(null);
   const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
   const manualInteraction = interactionMode === "manual";
   const steps = useMemo(() => [
@@ -1507,6 +1536,22 @@ function McpSurface({
       setLocalBusy(false);
     }
   };
+  const createConnector = async () => {
+    if (busy) return;
+    setLocalBusy(true);
+    setError(null);
+    setConnectorResult(null);
+    try {
+      const result = await api!.createMcpConnector();
+      setConnectorResult(result.created ? copy.connectorCreated : copy.connectorAlreadyExists);
+      updateState((await api!.snapshot()).state);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setLocalBusy(false);
+    }
+  };
+
   const verify = async () => {
     if (busy) return;
     setLocalBusy(true);
@@ -1674,6 +1719,14 @@ function McpSurface({
                     {copy.openConnectors}
                   </SecondaryButton>
                 </div>
+                {!devProfile && !manualInteraction && !configuringInactiveMode ? (
+                  <div className="inline-actions">
+                    <SecondaryButton disabled={busy || !credentialsConfigured} onClick={() => void createConnector()}>
+                      {copy.autoCreateConnector}
+                    </SecondaryButton>
+                  </div>
+                ) : null}
+                {connectorResult ? <NoticeRow icon="check" tone="success">{connectorResult}</NoticeRow> : null}
                 {doctor ? <DoctorSummary copy={copy} language={language} report={doctor} /> : null}
               </div>
             ) : null}
@@ -1718,8 +1771,6 @@ function McpSurface({
           </>
         ) : null}
       </div>
-      <InProcessAppsPanel copy={copy} language={language} setError={setError} />
-      <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
   );
 }
@@ -1764,6 +1815,23 @@ function ActivitySurface({
           </div>
         ))}
       </div>
+    </ContentSurface>
+  );
+}
+
+function InstantMcpToolsSurface({
+  copy,
+  language,
+  setError,
+}: {
+  copy: Copy;
+  language: Language;
+  setError: (error: string | null) => void;
+}) {
+  return (
+    <ContentSurface title={copy.liveMcpTools}>
+      <InProcessAppsPanel copy={copy} language={language} setError={setError} />
+      <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
   );
 }
@@ -1924,6 +1992,20 @@ function SettingsSurface({
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />
+        {!devProfile ? <SettingRow
+          body={copy.autoConnectExistingMcpBody}
+          label={copy.autoConnectExistingMcp}
+        >
+          <Switch
+            checked={snapshot.state.autoConnectExistingMcp}
+            disabled={snapshot.state.browserInteractionMode !== "automatic"
+              || snapshot.state.mcpRuntimeInstalled !== true
+              || !snapshot.mcpCredentialsConfigured}
+            onChange={(checked) => void api!.setPreference("autoConnectExistingMcp", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
         <SettingRow body={devProfile ? copy.devKeepRunningBody : copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
           <Switch
             checked={snapshot.state.keepRunningOnClose}

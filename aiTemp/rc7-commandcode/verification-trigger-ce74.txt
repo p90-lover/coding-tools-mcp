@@ -1,9 +1,0 @@
-rc.7 CommandCode and provider-integration verification trigger
-
-Source under verification before this retained trigger:
-ce74f476afe2eed284008f003ed9b8b705f45182
-
-Purpose:
-- trigger pull-request and branch validation after the GitHub Actions materializer committed the real CommandCode OAuth/provider-account changes;
-- preserve exact verification lineage under aiTemp;
-- delete no source, branch, release asset, or evidence.

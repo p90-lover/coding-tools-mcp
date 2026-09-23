@@ -281,7 +281,7 @@ function createOriginalUiCore({
         transport: "in-process",
       },
       unavailable: true,
-      dependency: classified?.dependency || (toolId === "anneal" ? "postgres" : null),
+      dependency: classified?.dependency || null,
       error: message,
     };
   }
@@ -292,6 +292,10 @@ function createOriginalUiCore({
     try {
       let state = await inspect(toolId);
       if (state.status !== "ready") {
+        if (state.status === "error" || ["not-installed", "repair-required", "error"].includes(state.installState)) {
+          return unavailableOpenResult(toolId, selected,
+            state.error || `${manifest.name} needs setup. Use Start or Repair; opening this page does not install it.`, state);
+        }
         await start(toolId);
         state = await waitUntilReady(toolId);
       }

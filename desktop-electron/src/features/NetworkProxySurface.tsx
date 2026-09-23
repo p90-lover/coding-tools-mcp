@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  ExternalServiceSnapshot,
   Language,
   ProviderAccountRecord,
   ProviderNetworkSnapshot,
@@ -11,6 +12,7 @@ import type {
 } from "../types";
 import { localText, messageOf } from "./execution-surface-utils";
 import "./orchestration-control.css";
+import "./network-proxy.css";
 
 const SCOPES: readonly ProxyScope[] = [
   "all",
@@ -148,6 +150,7 @@ export function NetworkProxySurface({
   setError: (error: string | null) => void;
 }) {
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot | null>(null);
+  const [cpa, setCpa] = useState<ExternalServiceSnapshot | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<ProfileDraft>(() => emptyDraft(language));
   const [busy, setBusy] = useState(false);
@@ -164,15 +167,21 @@ export function NetworkProxySurface({
     const api = window.codexWebLauncher;
     if (!api) return;
     let cancelled = false;
-    void api.providerSnapshot().then((next) => {
-      if (!cancelled) setSnapshot(next);
+    void Promise.all([api.providerSnapshot(), api.externalServicesSnapshot()]).then(([next, services]) => {
+      if (cancelled) return;
+      setSnapshot(next);
+      setCpa(services.services.find((service) => service.id === "cpa") ?? null);
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribe = api.onProviderNetworkChanged((next) => {
       if (!cancelled) setSnapshot(next);
     });
+    const unsubscribeServices = api.onExternalServicesChanged((next) => {
+      if (!cancelled) setCpa(next.services.find((service) => service.id === "cpa") ?? null);
+    });
     return () => {
       cancelled = true;
       unsubscribe();
+      unsubscribeServices();
     };
   }, [setError]);
 
@@ -185,6 +194,8 @@ export function NetworkProxySurface({
     setError(null);
     try {
       setSnapshot(await operation());
+      const services = await window.codexWebLauncher?.externalServicesSnapshot().catch(() => null);
+      if (services) setCpa(services.services.find((service) => service.id === "cpa") ?? null);
       setNotice(success);
     } catch (cause) {
       setError(messageOf(cause));
@@ -273,6 +284,29 @@ export function NetworkProxySurface({
     );
   };
 
+  const applyToCpa = async () => {
+    const api = window.codexWebLauncher;
+    if (!api) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await api.restartExternalService("cpa");
+      setCpa(next);
+      if (next.status !== "ready" || next.outboundProxy?.configMatches !== true) {
+        throw new Error(next.outboundProxy?.error || next.error || "CPA did not apply the selected proxy route");
+      }
+      setNotice(localText(language,
+        "CPA restarted with the selected route. Test a model request to verify outbound traffic.",
+        "CPA 已用所選路由重新啟動。請測試模型請求以驗證外連。",
+        "CPA 已使用所选路由重启。请测试模型请求以验证外连。",
+        "CPA を選択した経路で再起動しました。モデル要求で送信経路を確認してください。"));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const setProviderPolicy = async (providerId: string, mode: ProxyPolicyMode, profileId?: string) => {
     const api = window.codexWebLauncher;
     if (!api) return;
@@ -324,19 +358,24 @@ export function NetworkProxySurface({
   };
 
   const globalProfileId = snapshot?.routing.globalProfileId ?? "";
+  const globalProfile = profiles.find((profile) => profile.id === globalProfileId);
+  const globalEnabled = snapshot?.routing.globalEnabled === true;
+  const cpaConfigured = cpa?.status === "ready" && cpa.outboundProxy?.configMatches === true;
+  const customRuleCount = (snapshot?.routing.providers.filter((rule) => rule.profileId || rule.inheritGlobal === false).length ?? 0)
+    + (snapshot?.routing.accounts.filter((rule) => rule.profileId || rule.inheritGlobal === false || rule.inheritProvider === false).length ?? 0);
 
   return (
-    <section className="control-surface">
+    <section className="control-surface network-proxy-surface">
       <header className="control-heading">
         <div>
           <span className="surface-kicker">{localText(language, "NETWORK", "網路", "网络", "ネットワーク")}</span>
           <h1>{localText(language, "Network Proxy", "網路代理", "网络代理", "ネットワークプロキシ")}</h1>
           <p>{localText(
             language,
-            "Route application, provider, OAuth, MCP, WebSocket and HTTP traffic through saved HTTP, HTTPS or SOCKS proxies. Local ProxyBridge listens on http://127.0.0.1:17891; do not seed Clash :7890 unless that port is listening. Claude and Anthropic stay on the proxy/SOCKS path, never Direct.",
-            "將應用程式、供應商、OAuth、MCP、WebSocket 及 HTTP 流量路由至已儲存代理。本機 ProxyBridge 監聽 http://127.0.0.1:17891；除非 :7890 真係喺聽，否則唔好用 Clash 埠。Claude / Anthropic 必須走代理／SOCKS，不可 Direct。",
-            "将应用、供应商、OAuth、MCP、WebSocket 及 HTTP 流量路由至已保存代理。本地 ProxyBridge 监听 http://127.0.0.1:17891；不要使用未在监听的 Clash :7890。Claude / Anthropic 必须走代理／SOCKS，不可 Direct。",
-            "アプリ・プロバイダー・OAuth・MCP・WebSocket・HTTP を保存済みプロキシへルーティングします。ローカル ProxyBridge は http://127.0.0.1:17891 で待ち受けます。未起動の Clash :7890 は使わないでください。Claude / Anthropic は Direct ではなくプロキシ/SOCKS 経路です。",
+            "Manage the browser route and CPA outbound proxy from one place. Saved provider and account rules remain available below.",
+            "喺同一頁管理瀏覽器同 CPA 嘅外連代理。供應商及帳戶規則喺下方。",
+            "在同一页管理浏览器和 CPA 的出站代理。供应商和账户规则在下方。",
+            "ブラウザーと CPA の送信プロキシをまとめて管理します。プロバイダーとアカウントの規則は下にあります。",
           )}</p>
         </div>
         <button className="secondary-button" disabled={busy} onClick={() => setDraft(emptyDraft(language))} type="button">
@@ -352,9 +391,10 @@ export function NetworkProxySurface({
             onChange={(event) => void setGlobal(event.target.checked)}
             type="checkbox"
           />
-          <span>{localText(language, "Route all application traffic", "路由所有應用程式流量", "路由所有应用程序流量", "すべての通信をルーティング")}</span>
+          <span>{localText(language, "Use the global proxy profile", "使用全域代理設定檔", "使用全局代理配置", "グローバルプロキシを使用")}</span>
         </label>
         <select
+          aria-label={localText(language, "Global proxy profile", "全域代理設定檔", "全局代理配置", "グローバルプロキシ設定")}
           disabled={busy || profiles.length === 0}
           value={globalProfileId}
           onChange={(event) => void setGlobal(snapshot?.routing.globalEnabled === true, event.target.value)}
@@ -364,11 +404,46 @@ export function NetworkProxySurface({
         </select>
         <small>{localText(
           language,
-          "Loopback control traffic remains direct: localhost, 127.0.0.1 and ::1. In-app session routing is not an OS-wide proxy; ProxyBridge/WFP covers other apps.",
-          "Loopback 控制流量保持直接連線：localhost、127.0.0.1 及 ::1。呢度只係應用程式內路由，唔等於系統全域代理；其他程式要靠 ProxyBridge／WFP。",
-          "Loopback 控制流量保持直接连接：localhost、127.0.0.1 和 ::1。此处只是应用内路由，不是系统全局代理；其他程序需 ProxyBridge／WFP。",
-          "ループバック制御通信は直接接続のままです。これはアプリ内ルーティングであり、OS 全体のプロキシではありません。",
+          "Browser routing updates immediately. Restart CPA below to apply its outbound route. Local control connections stay on loopback.",
+          "瀏覽器路由即時更新。喺下方重新啟動 CPA 以套用外連路由。本機控制連線維持喺 loopback。",
+          "浏览器路由立即更新。在下方重启 CPA 以应用出站路由。本地控制连接保持 loopback。",
+          "ブラウザー経路はすぐに更新されます。CPA の送信経路は下で再起動して適用します。ローカル制御はループバックのままです。",
         )}</small>
+      </section>
+
+      <section className="proxy-route-overview" aria-labelledby="proxy-route-heading">
+        <div className="proxy-route-header">
+          <div>
+            <span className="surface-kicker">{localText(language, "CURRENT ROUTE", "目前路由", "当前路由", "現在の経路")}</span>
+            <h2 id="proxy-route-heading">{localText(language, "Where requests go", "請求去向", "请求去向", "要求の送信先")}</h2>
+          </div>
+          <span className={`proxy-route-badge${cpaConfigured ? " is-ready" : ""}`}>
+            {!cpa
+              ? localText(language, "Checking CPA", "檢查 CPA", "检查 CPA", "CPA を確認中")
+              : cpaConfigured
+                ? localText(language, "CPA configured", "CPA 已設定", "CPA 已配置", "CPA 設定済み")
+                : localText(language, "CPA needs attention", "CPA 需要處理", "CPA 需要处理", "CPA の確認が必要")}
+          </span>
+        </div>
+        <dl className="proxy-route-list">
+          <div><dt>{localText(language, "Browser", "瀏覽器", "浏览器", "ブラウザー")}</dt><dd>{globalEnabled ? globalProfile?.name ?? "—" : policyModeLabel(language, "direct")}</dd></div>
+          <div><dt>CPA</dt><dd>{cpa?.outboundProxy?.error
+            || (cpa?.managedInstall.state !== "installed"
+              ? localText(language, "Install CPA first", "請先安裝 CPA", "请先安装 CPA", "先に CPA をインストール")
+              : cpaConfigured
+                ? (globalEnabled ? globalProfile?.name ?? "—" : policyModeLabel(language, "direct"))
+                : localText(language, "Restart to apply the saved route", "重新啟動以套用已儲存路由", "重启以应用已保存路由", "再起動して保存済みの経路を適用"))}</dd></div>
+        </dl>
+        <div className="proxy-route-actions">
+          <button className="primary-button compact" disabled={busy || cpa?.managedInstall.state !== "installed"} onClick={() => void applyToCpa()} type="button">
+            {localText(language, "Apply route to CPA", "套用路由至 CPA", "应用路由到 CPA", "CPA に経路を適用")}
+          </button>
+          <small>{localText(language,
+            "This restarts CPA and interrupts active CPA model requests. A reachable proxy alone does not prove a model can answer.",
+            "呢個動作會重新啟動 CPA，並中斷進行中嘅 CPA 模型請求。代理可連線唔代表模型一定會回應。",
+            "此操作会重启 CPA，并中断正在进行的 CPA 模型请求。代理可连接不代表模型一定能回答。",
+            "CPA を再起動し、進行中のモデル要求を中断します。プロキシへの接続だけではモデルの応答は確認できません。")}</small>
+        </div>
       </section>
 
       <div className="control-grid proxy-grid">
@@ -399,9 +474,22 @@ export function NetworkProxySurface({
             <label className="full-row"><span>{localText(language, "Bypass", "略過位址", "绕过地址", "除外アドレス")}</span><input value={draft.bypass} onChange={(event) => setDraft({ ...draft, bypass: event.target.value })} /></label>
             <label className="check-row"><input checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} type="checkbox" /><span>{localText(language, "Enabled", "已啟用", "已启用", "有効")}</span></label>
           </div>
-          <div className="scope-grid">
-            {SCOPES.map((scope) => <label className="check-row" key={scope}><input checked={draft.scopes.includes(scope)} onChange={() => toggleScope(scope)} type="checkbox" /><span>{scopeLabel(language, scope)}</span></label>)}
-          </div>
+          <p className="proxy-secret-help">{localText(language,
+            "Leave username and password blank to keep saved credentials.",
+            "使用者名稱同密碼留空會保留已儲存憑證。",
+            "用户名和密码留空会保留已保存凭据。",
+            "ユーザー名とパスワードを空欄にすると保存済みの認証情報を維持します。")}</p>
+          <details className="proxy-detail-group">
+            <summary>{localText(language, "Traffic categories for this profile", "此設定檔嘅流量類別", "此配置的流量类别", "このプロキシの通信区分")} <span>{draft.scopes.length}</span></summary>
+            <p className="proxy-secret-help">{localText(language,
+              "These categories limit planned provider work. The global browser and CPA route use the selected profile regardless of category.",
+              "呢啲類別限制供應商任務路由。全域瀏覽器同 CPA 路由仍會使用所選設定檔。",
+              "这些类别限制供应商任务路由。全局浏览器和 CPA 路由仍使用所选配置。",
+              "この区分はプロバイダーの作業経路を制限します。ブラウザーと CPA のグローバル経路は選択した設定を使用します。")}</p>
+            <div className="scope-grid">
+              {SCOPES.map((scope) => <label className="check-row" key={scope}><input checked={draft.scopes.includes(scope)} onChange={() => toggleScope(scope)} type="checkbox" /><span>{scopeLabel(language, scope)}</span></label>)}
+            </div>
+          </details>
           <div className="control-actions">
             <button className="secondary-button" disabled={busy || !selectedId} onClick={() => void testProfile()} type="button">
               {localText(language, "Test connection", "測試連線", "测试连接", "接続テスト")}
@@ -413,6 +501,10 @@ export function NetworkProxySurface({
         </section>
       </div>
 
+      <details className="proxy-detail-group proxy-advanced">
+        <summary>{localText(language, "Provider and account routing", "供應商同帳戶路由", "供应商和账户路由", "プロバイダーとアカウントの経路")}
+          <span>{customRuleCount}</span>
+        </summary>
       <div className="control-grid two-column policy-grid">
         <section className="control-panel">
           <h2>{localText(language, "Provider routing", "供應商路由", "供应商路由", "プロバイダールーティング")}</h2>
@@ -431,6 +523,7 @@ export function NetworkProxySurface({
           })}
         </section>
       </div>
+      </details>
       {notice ? <p className="control-notice">{notice}</p> : null}
     </section>
   );

@@ -7,7 +7,6 @@ import type {
 } from "../types";
 import type { JsonObject } from "../api/contracts";
 import {
-  boardRevision,
   messageOf,
   missionRevision,
   missionViews,
@@ -103,6 +102,7 @@ export function AnnealTasksSurface({
   const [workspaceId, setWorkspaceId] = useState("");
   const [tasks, setTasks] = useState<TaskOption[]>([]);
   const [taskId, setTaskId] = useState("");
+  const [taskRevision, setTaskRevision] = useState(0);
   const [network, setNetwork] = useState<ProviderNetworkSnapshot | null>(null);
   const [providerId, setProviderId] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -210,20 +210,22 @@ export function AnnealTasksSurface({
     };
   }, [taskId, workspaceId]);
 
-  const refresh = async () => {
+  const refresh = async (refreshSource = false) => {
     const api = window.codingTools;
     if (!api || !workspaceId) return;
     setBusy(true);
     try {
+      if (refreshSource && missionId) {
+        await api.execution.read({ workspaceId, missionId, refreshSource: true });
+      }
       const [page, view] = await Promise.all([
-        api.tasks.list({ workspaceId, limit: 200 }),
+        api.tasks.list({ workspaceId, limit: 100 }),
         api.execution.read({ workspaceId, missionId: null, refreshSource: false }),
       ]);
       const nextTasks = taskOptions(page).filter((item) => item.state !== "archived");
       const nextMissions = missionViews(view).filter((mission) => (
         mission.engine === "anneal" || mission.engine === "paseo"
       ));
-      let controlTasks: TaskOption[] = [];
       let reviews: JsonObject[] = [];
       try {
         const status = await api.tools.call({
@@ -232,23 +234,18 @@ export function AnnealTasksSurface({
           arguments: {},
         });
         const root = object(status) ?? {};
-        controlTasks = taskOptions({ items: root.annealTasks }).filter((item) => item.state !== "archived");
         reviews = (Array.isArray(root.reviews) ? root.reviews : []).flatMap((entry) => {
           const row = object(entry);
           return row ? [row as JsonObject] : [];
         });
       } catch {
-        controlTasks = [];
         reviews = [];
       }
-      const mergedTasks = [
-        ...nextTasks,
-        ...controlTasks.filter((item) => !nextTasks.some((existing) => existing.id === item.id)),
-      ];
-      setTasks(mergedTasks);
+      setTaskRevision(page.revision);
+      setTasks(nextTasks);
       setPaseoReviews(reviews);
       setTaskId((current) => (
-        mergedTasks.some((item) => item.id === current) ? current : ""
+        nextTasks.some((item) => item.id === current) ? current : ""
       ));
       setMissions(nextMissions);
       setMissionId((current) => (
@@ -315,7 +312,7 @@ export function AnnealTasksSurface({
       const id = sanitizeIdentifier(`${engine}-${taskId}-${crypto.randomUUID().slice(0, 8)}`);
       await api.execution.update({
         workspaceId,
-        expectedRevision: boardRevision(view),
+        expectedRevision: taskRevision,
         change: {
           operation: "agent_prepare",
           binding_id: binding.id,
@@ -362,11 +359,9 @@ export function AnnealTasksSurface({
         arguments: { reviewId },
       });
       const preview = asJson(created);
-      const id = typeof preview?.id === "string" ? preview.id : "";
       setAssignmentPreview(preview);
       setNotice(copy.annealFromPaseoReview);
       await refresh();
-      if (id) setTaskId(id);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -430,7 +425,7 @@ export function AnnealTasksSurface({
           <button
             className="secondary-button"
             disabled={busy || !workspaceId}
-            onClick={() => void refresh()}
+            onClick={() => void refresh(true)}
             type="button"
           >
             {busy ? copy.refreshing : copy.refresh}
@@ -655,7 +650,10 @@ export function AnnealTasksSurface({
                   >
                     <div>
                       <strong>{mission.title}</strong>
-                      <small>{mission.engine} · {mission.provider}</small>
+                      <small>
+                        {mission.engine} · {mission.provider}
+                        {mission.lastStatus ? ` · ${mission.lastStatus}` : ""}
+                      </small>
                     </div>
                     <span className={`anneal-phase-label ${phaseTone(mission.phase)}`}>
                       {phaseLabel(copy, mission.phase)}

@@ -1,4 +1,6 @@
 const { createServer } = require("node:http");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
 
@@ -38,10 +40,12 @@ function writeJson(response, status, body) {
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, fetchNative }) {
     this.logger = logger;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
+    this.resolveProxy = resolveProxy;
+    this.fetchNative = fetchNative;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
     this.server = createServer((request, response) => {
@@ -98,6 +102,8 @@ class BrowserControlServer {
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
+    const isProxyResolution = request.url === "/v1/network/resolve-proxy";
+    const isNativeFetch = request.url === "/v1/network/native-fetch";
     const manualAction = new Map([
       ["/v1/manual/start", "start"],
       ["/v1/manual/wait-sent", "wait-sent"],
@@ -106,15 +112,32 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isNativeFetch && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
     try {
+      if (isNativeFetch) {
+        await this.forwardNativeFetch(request, response);
+        return;
+      }
       const body = await readJson(
         request,
         manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : MAX_BODY_BYTES,
       );
+      if (isProxyResolution) {
+        const url = new URL(body?.url);
+        if (url.origin !== "https://chatgpt.com" || url.username || url.password
+          || !url.pathname.startsWith("/backend-api/codex/")) {
+          throw new Error("Proxy resolution is restricted to native Codex requests");
+        }
+        if (!this.resolveProxy) throw new Error("Native proxy resolver is unavailable");
+        let proxy;
+        try { proxy = await this.resolveProxy(url.href); }
+        catch { throw new Error("System proxy resolution failed"); }
+        writeJson(response, 200, { proxy });
+        return;
+      }
       const preferences = this.getPreferences();
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
@@ -334,6 +357,79 @@ class BrowserControlServer {
         },
       );
     }
+  }
+
+  async forwardNativeFetch(request, response) {
+    let url;
+    try { url = new URL(request.headers["x-native-url"]); }
+    catch { throw new Error("Native Codex URL is invalid"); }
+    const paths = [
+      "/backend-api/codex/models",
+      "/backend-api/codex/responses",
+      "/backend-api/codex/responses/compact",
+      "/backend-api/codex/alpha/search",
+      "/backend-api/codex/images/generations",
+      "/backend-api/codex/images/edits",
+    ];
+    if (url.origin !== "https://chatgpt.com" || url.username || url.password || url.hash
+      || !paths.includes(url.pathname)) throw new Error("Native fetch is restricted to Codex backend endpoints");
+    const method = request.headers["x-native-method"];
+    if (method !== (url.pathname.endsWith("/models") ? "GET" : "POST")) {
+      throw new Error("Native Codex method is invalid");
+    }
+    const authorization = request.headers["x-native-authorization"];
+    if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")
+      || authorization.length <= 7) throw new Error("Native Codex authorization is invalid");
+    if (!this.fetchNative) throw new Error("Native fetch relay is unavailable");
+
+    const headers = new Headers();
+    const excluded = new Set([
+      "authorization", "cookie", "set-cookie", "host", "connection", "content-length",
+      "transfer-encoding", "keep-alive", "te", "trailer", "upgrade",
+      "proxy-authenticate", "proxy-authorization", "accept-encoding",
+    ]);
+    for (const [name, value] of Object.entries(request.headers)) {
+      if (typeof value === "string" && !excluded.has(name) && !name.startsWith("x-native-")) {
+        headers.set(name, value);
+      }
+    }
+    headers.set("authorization", authorization);
+
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of request) {
+      bytes += chunk.length;
+      if (bytes > 64 * 1024 * 1024) throw new Error("Native Codex request body is too large");
+      chunks.push(chunk);
+    }
+    const abort = new AbortController();
+    response.on("close", () => { if (!response.writableEnded) abort.abort(); });
+    let upstream;
+    try {
+      upstream = await this.fetchNative(url.href, {
+        method, headers,
+        ...(method === "POST" ? { body: Buffer.concat(chunks) } : {}),
+        credentials: "omit", redirect: "manual", signal: abort.signal,
+      });
+    } catch (error) {
+      if (response.destroyed) return;
+      this.logger.warn("browser.native_fetch_failed", {
+        code: typeof error?.code === "string" ? error.code : "network_error",
+      });
+      writeJson(response, 502, { error: "Native Codex network request failed", code: "native_network_error" });
+      return;
+    }
+    const outgoing = {};
+    const excludedResponse = new Set([
+      "content-length", "content-encoding", "set-cookie", "connection", "transfer-encoding",
+      "keep-alive", "te", "trailer", "upgrade", "proxy-authenticate", "proxy-authorization",
+    ]);
+    for (const [name, value] of upstream.headers) {
+      if (!excludedResponse.has(name)) outgoing[name] = value;
+    }
+    response.writeHead(upstream.status, outgoing);
+    if (upstream.body) await pipeline(Readable.fromWeb(upstream.body), response);
+    else response.end();
   }
 
   async close() {

@@ -122,6 +122,10 @@ impl ToolContext {
         self.workspace.root_display()
     }
 
+    pub fn bind_workspace_id(&mut self, workspace_id: impl Into<String>) {
+        self.workspace_id = Some(workspace_id.into());
+    }
+
     pub fn default_cwd_display(&self) -> String {
         let cwd = self.default_cwd.lock().expect("cwd lock");
         self.workspace.display_path(&cwd)

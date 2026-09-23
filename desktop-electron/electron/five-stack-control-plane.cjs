@@ -449,7 +449,7 @@ function createFiveStackControlPlane({
       providerId: text(orchestratorInput.providerId) || undefined,
       accountId: text(orchestratorInput.accountId) || undefined,
       model: text(orchestratorInput.model) || undefined,
-      allowFallback: orchestratorInput.allowFallback !== false,
+      allowFallback: false,
     });
     const requested = asList(input.subagents).slice(0, MAX_SUBAGENTS);
     if (requested.length === 0) {
@@ -462,7 +462,7 @@ function createFiveStackControlPlane({
         providerId: text(row.providerId) || undefined,
         accountId: text(row.accountId) || undefined,
         model: text(row.model) || undefined,
-        allowFallback: row.allowFallback !== false,
+        allowFallback: false,
       });
       const summarized = routeSummary(route);
       const selected = attachBackend(summarized.providerId, availability);
@@ -520,30 +520,7 @@ function createFiveStackControlPlane({
     if (workspaceId && selected.workspaceId && selected.workspaceId !== workspaceId) {
       throw new Error("Plan does not belong to this workspace");
     }
-    const message = boundedText(input.message ?? selected.brief, MAX_BRIEF, "message");
-    const assignments = selected.subagents.map((subagent) => Object.freeze({
-      id: subagent.id,
-      role: subagent.role,
-      route: subagent.route,
-      backend: subagent.backend,
-      status: "dispatched",
-      summary: "",
-      issues: Object.freeze([]),
-    }));
-    const record = Object.freeze({
-      id: nextId("run"),
-      planId: selected.id,
-      workspaceId: selected.workspaceId || text(workspaceId),
-      message,
-      createdAt: nowIso(clock),
-      orchestrator: selected.orchestrator,
-      assignments,
-      backends: selected.backends,
-      status: "awaiting_results",
-      liveModelCompletion: false,
-    });
-    boundedSet(runs, record.id, record);
-    return record;
+    throw new Error("Paseo execution service is unavailable; no subagent was dispatched");
   }
 
   function submitResult(input = {}) {
