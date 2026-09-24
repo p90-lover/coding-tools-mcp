@@ -210,6 +210,26 @@ test("packaged runtime rejects same-count content corruption", () => {
   }
 });
 
+test("packaged runtime rejects an unmanifested backup leftover", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-bak-"));
+  const resourcesPath = runtimeFixture(root);
+  const coreHome = path.join(root, "core-home");
+  fs.writeFileSync(path.join(resourcesPath, "runtime", "app", "cli.js.bak-pre-ws"), "old-cli");
+  try {
+    assert.throws(
+      () => ensurePackagedRuntime({
+        app: { isPackaged: true, getVersion: () => "0.2.0" },
+        coreHome,
+        resourcesPath,
+      }),
+      /Runtime bundle contains an unmanifested file/,
+    );
+    assert.equal(fs.existsSync(coreHome), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("packaged runtime source wait accepts a delayed final dependency within its bound", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-delayed-"));
   const resourcesPath = runtimeFixture(root);

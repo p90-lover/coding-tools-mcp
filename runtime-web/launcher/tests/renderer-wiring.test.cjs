@@ -75,8 +75,18 @@ test("normal shutdown persists the ChatGPT session before closing browser views"
     electronMain,
     /runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/,
   );
+  const restoreBridgeRoute = electronMain.indexOf("await runtimeHost?.restoreBridgeRoute()");
+  const runtimeShutdown = electronMain.indexOf("runtimeSupervisor?.shutdown", restoreBridgeRoute);
   const persist = electronMain.indexOf("await browserHost?.persistSession()");
   const destroy = electronMain.indexOf("browserHost?.destroy()", persist);
+  assert.ok(restoreBridgeRoute >= 0, "shutdown must restore the previous Codex route");
+  assert.ok(runtimeShutdown > restoreBridgeRoute, "the Codex route must be restored before runtime shutdown");
+  assert.match(electronMain, /Codex route could not be restored/);
+  assert.match(electronMain, /buttons: \["Cancel", "Quit anyway"\]/);
+  assert.match(electronMain, /if \(decision\.response !== 1\) throw error/);
+  assert.match(electronMain, /runtimeStartupInFlight = \(async \(\) => \{/);
+  assert.match(electronMain, /Promise\.allSettled\([\s\S]*?runtimeStartupInFlight[\s\S]*?codexBridgeConnectInFlight/);
+  assert.match(electronMain, /if \(quitting \|\| shutdownInProgress\)[\s\S]*?reason: "shutting-down"/);
   assert.ok(persist >= 0, "shutdown must persist the ChatGPT session");
   assert.ok(destroy > persist, "browser views must close only after session persistence completes");
 });
@@ -102,7 +112,7 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
 
 test("DEV launcher exposes its profile and supervises only its Full-mode MCP runtime", () => {
   assert.match(electronMain, /profile:\s*LAUNCHER_PROFILE\.kind/);
-  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void \(async \(\) => \{/);
+  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else runtimeStartupInFlight = \(async \(\) => \{/);
   assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
   assert.match(electronMain, /packaged:\s*app\.isPackaged && !IS_DEV_PROFILE/);
   assert.match(electronMain, /IS_DEV_PROFILE && !stateStore\.read\(\)\.onboardingComplete/);
@@ -238,17 +248,32 @@ test("MCP verification proves runtime health before checking the connector", () 
   assert.match(appSource, /operation\?\.name === "mcp-verification"/);
 });
 
-test("saved ChatGPT authentication is refreshed before setup is presented", () => {
+test("saved ChatGPT authentication gates route activation without delaying runtime startup", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
+  assert.match(electronMain, /handle\("launcher:browser-refresh-auth"/);
   const productionStartup = electronMain.indexOf("} else void (async () => {");
-  const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
-  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
-  assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
-  assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
+  const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", runtimeStart);
+  const browserGate = electronMain.indexOf("browser?.authenticated !== true", refreshBarrier);
+  const deferredResult = electronMain.indexOf("bridgeDeferred: true", browserGate);
+  const deferredHandler = electronMain.indexOf("if (runtime.bridgeDeferred)", deferredResult);
+  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", browserGate);
+  assert.ok(upgrade > productionStartup, "production startup must begin with the managed-runtime upgrade");
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
-  assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
+  assert.ok(refreshBarrier > runtimeStart, "saved-session refresh must not delay runtime startup");
+  assert.ok(browserGate > refreshBarrier, "route activation must check authentication after refresh settles");
+  assert.ok(deferredResult > browserGate, "unauthenticated startup must defer without failing setup");
+  assert.ok(deferredHandler > deferredResult, "deferred startup must preserve configured runtime state");
+  assert.ok(routeConnect > browserGate, "Codex route must connect only after the authentication gate");
+  const deferredBlock = electronMain.slice(
+    deferredHandler,
+    electronMain.indexOf('if (runtime.status === "ready")', deferredHandler),
+  );
+  assert.match(deferredBlock, /config\.mode === "browser-only"[\s\S]*?mcpSetupComplete: false[\s\S]*?mcpGuideStep: 0/);
+  assert.match(electronMain, /scheduleCodexBridgeAutoConnect\(\{ logger, stateStore, reason: "browser-login" \}\)/);
+  assert.match(electronMain, /scheduleCodexBridgeAutoConnect\(\{ logger, stateStore, reason: "browser-refresh-auth" \}\)/);
+  assert.match(electronMain, /scheduleCodexBridgeAutoConnect\(\{ logger, stateStore, reason: "browser-passkey-login" \}\)/);
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
 });
 

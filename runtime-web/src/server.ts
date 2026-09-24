@@ -17,6 +17,10 @@ import {
 } from "./adapters/chatgpt-web/environment";
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
+import {
+  createResponsesWebsocketHandlers,
+  upgradeResponsesWebsocket,
+} from "./responses-websocket";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
 import { AsyncEventQueue } from "./event-queue";
@@ -30,9 +34,11 @@ import {
   type CodexModelContextOverride,
 } from "./codex-integration";
 import {
+  CHATGPT_WEB_LATEST_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   isChatGptWebModelSlug,
   requireChatGptWebModelRoute,
+  resolveChatGptWebLatestAdapterEffort,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
 import { forwardNativeCodexRequest, type NativeFetch, type NativeImageEndpoint } from "./native-passthrough";
@@ -374,6 +380,10 @@ export interface ResponseRequestOptions {
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
   const route = requireChatGptWebModelRoute(parsed.modelId, config);
   parsed.modelId = route.backendModel;
+  if (route.slug === CHATGPT_WEB_LATEST_MODEL_ROUTE.slug) {
+    parsed.options.reasoning = resolveChatGptWebLatestAdapterEffort(parsed.options.reasoning, config);
+    return route;
+  }
   // Zero Risk preserves a distinct backend identity. Its immutable Codex effort is only a
   // protocol/catalog value; the manual adapter must never reinterpret it as a ChatGPT selection.
   parsed.options.reasoning = route.interactionMode === "automatic"
@@ -852,7 +862,21 @@ export function startServer(
     hostname: config.host,
     port: config.port,
     idleTimeout: 0,
-    async fetch(req) {
+    websocket: createResponsesWebsocketHandlers({
+      isDraining: () => draining,
+      createResponse: request => httpTurns.track(
+        (signal, bindIdentity) => responseRequest(
+          new Request(request, { signal }),
+          config,
+          dependencies.adapterFactory,
+          { onTurnIdentity: bindIdentity },
+        ),
+        request.signal,
+        process.platform,
+        "responses",
+      ),
+    }),
+    async fetch(req, bunServer) {
       const url = new URL(req.url);
       if (req.method === "GET" && url.pathname === "/healthz") {
         return Response.json({
@@ -1070,10 +1094,7 @@ export function startServer(
         }, req.signal, process.platform, "models");
       }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
-        return new Response("Responses WebSocket transport is not enabled on this local route", {
-          status: 426,
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        });
+        return upgradeResponsesWebsocket(req, bunServer, draining);
       }
       if (req.method === "POST" && url.pathname === "/v1/responses") {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");

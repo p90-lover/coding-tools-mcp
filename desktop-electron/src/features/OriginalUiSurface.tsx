@@ -5,6 +5,7 @@ import "./original-ui.css";
 
 interface OriginalUiSurfaceProps {
   toolId: OriginalUiId;
+  initialSection?: string;
   language: Language;
   setError: (error: string | null) => void;
 }
@@ -52,7 +53,7 @@ function emptyCopy(language: Language, toolId: OriginalUiId, ready: boolean): { 
   };
 }
 
-export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurfaceProps) {
+export function OriginalUiSurface({ toolId, initialSection, language, setError }: OriginalUiSurfaceProps) {
   const api = window.codexWebLauncher;
   const [snapshot, setSnapshot] = useState<OriginalUiCatalog | null>(null);
   const [selectedSection, setSelectedSection] = useState("");
@@ -61,6 +62,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   const [notice, setNotice] = useState("");
   const [localError, setLocalError] = useState("");
   const [dependency, setDependency] = useState<"postgres" | null>(null);
+  const [chromeOpen, setChromeOpen] = useState(false);
   const autoOpened = useRef(false);
   const lastStatus = useRef("");
   const lastGeneration = useRef(0);
@@ -71,7 +73,9 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     const next = await api.originalUiSnapshot();
     setSnapshot(next);
     const current = toolFrom(next, toolId);
-    if (current) setSelectedSection((value) => value || current.sections[0] || "");
+    if (current) setSelectedSection((value) => value || (
+      initialSection && current.sections.includes(initialSection) ? initialSection : current.sections[0] || ""
+    ));
     return current;
   };
 
@@ -84,7 +88,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     setLocalError("");
     setDependency(null);
     setSelectedSection("");
-  }, [toolId]);
+  }, [toolId, initialSection]);
 
   const callModule = async (operation: string, args: JsonObject = {}) => {
     const apps = window.codingTools?.apps;
@@ -142,13 +146,18 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
         if (cancelled) return;
         setSnapshot(next);
         const current = toolFrom(next, toolId);
-        const section = current?.sections[0] || "";
+        const section = initialSection && current?.sections.includes(initialSection)
+          ? initialSection
+          : current?.sections[0] || "";
         if (current) setSelectedSection(section);
-        if (current?.status === "ready" || current?.status === "offline" || current?.status === "starting") {
+        try {
           const opened = await openSection(section);
           if (!cancelled && opened) autoOpened.current = true;
-        } else {
-          autoOpened.current = true;
+        } catch (cause) {
+          if (!cancelled) {
+            autoOpened.current = true;
+            setLocalError(messageOf(cause));
+          }
         }
       } catch (cause) {
         if (!cancelled) setLocalError(messageOf(cause));
@@ -165,7 +174,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       cancelled = true;
       unsubscribe?.();
     };
-  }, [api, language, toolId]);
+  }, [api, initialSection, language, toolId]);
 
   const run = async (name: string, action: () => Promise<unknown>) => {
     setBusy(name);
@@ -200,13 +209,19 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     return (
       <section className="original-ui-surface" data-tool={toolId} data-original-chrome="true" data-transport="in-process">
         <div className="original-ui-frame-empty">
-          <strong>{localize(language, "Loading Coding Tools module…", "正在載入 Coding Tools 模組…")}</strong>
+          <strong>{localError || localize(language, "Loading Coding Tools module…", "正在載入 Coding Tools 模組…")}</strong>
+          {localError ? (
+            <button disabled={busy !== null} onClick={() => void run("refresh", refresh)} type="button">
+              {localize(language, "Retry", "重試")}
+            </button>
+          ) : null}
         </div>
       </section>
     );
   }
 
   const ready = tool.status === "ready";
+  const immersive = Boolean(frameUrl);
   const statusText = ready
     ? localize(language, "Connected", "已連線")
     : tool.status === "starting"
@@ -217,11 +232,23 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
   const copy = emptyCopy(language, toolId, ready);
 
   return (
-    <section className="original-ui-surface" data-tool={toolId} data-original-chrome="true" data-transport="in-process">
+    <section
+      className={`original-ui-surface${immersive ? " is-immersive" : ""}${immersive && chromeOpen ? " chrome-open" : ""}`}
+      data-tool={toolId}
+      data-original-chrome="true"
+      data-transport="in-process"
+    >
       <header className="original-ui-hostbar">
         <strong>{tool.name}</strong>
         <span className={`original-ui-status status-${tool.status}`}>{statusText}</span>
         <div className="original-ui-hostbar-actions">
+          {immersive ? (
+            <button onClick={() => setChromeOpen((value) => !value)} type="button">
+              {chromeOpen
+                ? localize(language, "Hide chrome", "隱藏工具列")
+                : localize(language, "Show chrome", "顯示工具列")}
+            </button>
+          ) : null}
           <button className="primary" disabled={busy !== null} onClick={() => void run(ready ? "open" : "start", async () => {
             if (!ready) await callModule("start");
             await openSection();
@@ -258,6 +285,21 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
           </button>
         </div>
       </header>
+
+      {tool.sections.length > 1 ? (
+        <nav className="original-ui-sections" aria-label={`${tool.name} sections`}>
+          {tool.sections.map((section) => (
+            <button
+              className={section === selectedSection ? "is-active" : ""}
+              key={section}
+              onClick={() => void run("open", () => openSection(section))}
+              type="button"
+            >
+              {section.replaceAll("-", " ")}
+            </button>
+          ))}
+        </nav>
+      ) : null}
 
       {dependency === "postgres" ? (
         <p className="original-ui-note" data-dependency="postgres">

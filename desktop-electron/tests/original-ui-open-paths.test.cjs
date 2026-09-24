@@ -53,7 +53,7 @@ function controllerFor(services, extra = {}) {
 
 test("original UI covers CPA, Codex Router, Paseo, and Anneal loopback manifests", () => {
   assert.deepEqual(TOOL_IDS, ["cpa", "codex-router", "paseo", "anneal"]);
-  assert.deepEqual(IFRAME_TOOL_IDS, ["cpa", "paseo", "anneal"]);
+  assert.deepEqual(IFRAME_TOOL_IDS, ["cpa", "codex-router", "paseo", "anneal"]);
   const paseo = loadManifest("paseo");
   const anneal = loadManifest("anneal");
   assert.equal(
@@ -215,10 +215,15 @@ test("desktop screens inspect modules through Coding Tools APIs without auto-ope
   assert.doesNotMatch(upstream, /startUpstreamTool/);
   assert.match(app, /toolId="cpa"/);
   assert.match(app, /toolId="codex-router"/);
-  assert.match(app, /<UpstreamToolSurface/);
+  assert.match(app, /CommandCodeHostSurface/);
+  assert.match(app, /navigateSurface\("commandcode-proxy"\)/);
+  assert.match(app, /<IntegratedModuleSurface[\s\S]*?toolId="anneal"/);
   assert.match(app, /PaseoOrchestratorSurface/);
   assert.match(app, /AnnealTasksSurface/);
   assert.match(types, /OriginalUiId = "cpa" \| "codex-router" \| "paseo" \| "anneal"/);
+  assert.match(types, /"commandcode-proxy"/);
+  assert.match(original, /original-ui-sections/);
+  assert.match(original, /is-immersive/);
   assert.match(main, /createCodingToolsAppsHost/);
   assert.match(main, /coding-tools:apps:call/);
   assert.match(main, /createLazyFactory\(\(\) => createFiveStackControlPlane/);

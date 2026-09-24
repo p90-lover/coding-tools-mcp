@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config";
 import {
+  CHATGPT_WEB_LATEST_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_MODEL_ROUTES,
   CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
   CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
-  CHATGPT_WEB_MODEL_ROUTES,
+  CHATGPT_WEB_WEB_EFFORT_LABEL,
   resolveChatGptWebContextLimits,
 } from "../src/chatgpt-web-models";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
@@ -46,7 +47,7 @@ function source(): Record<string, unknown> {
 }
 
 describe("native /models augmentation", () => {
-  test("preserves every native model in order and appends one fixed model per ChatGPT Web mode", () => {
+  test("preserves native Codex models and appends one Latest web row with web effort labels", () => {
     const native = source();
     const nativeSnapshot = structuredClone(native);
     const config = defaultConfig("full");
@@ -58,44 +59,64 @@ describe("native /models augmentation", () => {
 
     expect(native).toEqual(nativeSnapshot);
     expect(models.slice(0, 3)).toEqual(originalModels);
+    expect(models[0]).toMatchObject({
+      slug: "gpt-5.5",
+      display_name: "5.5",
+    });
+    expect(models[1]).toMatchObject({
+      slug: "gpt-5.6-sol",
+      supported_reasoning_levels: [
+        { effort: "low", description: "Low" },
+        { effort: "medium", description: "Medium native" },
+        { effort: "high", description: "High native" },
+        { effort: "xhigh", description: "Extra high native" },
+      ],
+    });
     const web = models.slice(3);
-    expect(web.map(model => model.slug)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
-    expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
-    for (const [index, model] of web.entries()) {
-      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
-      const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
-      expect(model).toMatchObject({
-        slug: route.slug,
-        display_name: route.displayName,
-        tool_mode: null,
-        default_reasoning_level: route.codexEffort,
-        supported_reasoning_levels: [{ effort: route.codexEffort, description: route.displayName }],
-        multi_agent_version: "v2",
-        supported_in_api: true,
-        priority: 2,
-        context_window: limits.contextWindow,
-        max_context_window: limits.contextWindow,
-        effective_context_window_percent: limits.effectiveContextWindowPercent,
-        auto_compact_token_limit: limits.autoCompactTokenLimit,
-        additional_speed_tiers: [],
-        service_tiers: [],
-        default_service_tier: null,
-      });
-      expect(model).not.toHaveProperty("comp_hash");
-    }
+    expect(web.map(model => model.slug)).toEqual([CHATGPT_WEB_LATEST_MODEL_ROUTE.slug]);
+    const latest = web[0]!;
+    const limits = resolveChatGptWebContextLimits(
+      CHATGPT_WEB_LATEST_MODEL_ROUTE.backendModel,
+      CHATGPT_WEB_LATEST_MODEL_ROUTE.adapterEffort,
+      config,
+    );
+    expect(latest).toMatchObject({
+      slug: CHATGPT_WEB_LATEST_MODEL_ROUTE.slug,
+      display_name: "🌐 Latest",
+      tool_mode: null,
+      default_reasoning_level: "high",
+      supported_reasoning_levels: [
+        { effort: "low", description: CHATGPT_WEB_WEB_EFFORT_LABEL.low },
+        { effort: "medium", description: CHATGPT_WEB_WEB_EFFORT_LABEL.medium },
+        { effort: "high", description: CHATGPT_WEB_WEB_EFFORT_LABEL.high },
+        { effort: "xhigh", description: CHATGPT_WEB_WEB_EFFORT_LABEL.xhigh },
+        { effort: "ultra", description: CHATGPT_WEB_WEB_EFFORT_LABEL.max },
+      ],
+      multi_agent_version: "v2",
+      supported_in_api: true,
+      priority: 2,
+      context_window: limits.contextWindow,
+      max_context_window: limits.contextWindow,
+      effective_context_window_percent: limits.effectiveContextWindowPercent,
+      auto_compact_token_limit: limits.autoCompactTokenLimit,
+      additional_speed_tiers: [],
+      service_tiers: [],
+      default_service_tier: null,
+    });
+    expect(latest).not.toHaveProperty("comp_hash");
   });
 
-  test("publishes Bigger Context limits in the Codex model catalog", () => {
+  test("publishes Bigger Context limits on the Latest web row", () => {
     const config = defaultConfig("full");
     config.proAvailable = true;
     config.experimentalBiggerContext = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
-    const pro = models.find(model => model.slug === "chatgpt-web/pro")!;
-    expect(pro.context_window).toBe(336_579);
-    expect(pro.auto_compact_token_limit).toBe(285_000);
+    const latest = models.find(model => model.slug === "chatgpt-web/latest")!;
+    expect(latest.context_window).toBe(333_579);
+    expect(latest.auto_compact_token_limit).toBe(285_000);
   });
 
-  test("keeps native Sol selectable in the bounded Compatibility V1 registry", () => {
+  test("keeps native Sol and 5.5 selectable in the bounded Compatibility V1 registry", () => {
     const config = defaultConfig("full");
     config.subagentProtocol = "compatibility-v1";
     config.proAvailable = true;
@@ -103,8 +124,6 @@ describe("native /models augmentation", () => {
     const parent = models.find(model => model.slug === "gpt-5.6-sol")!;
     expect(parent.multi_agent_version).toBe("v1");
 
-    // Bundled Codex 0.147.0-alpha.6.5 accepts only exact-v2 rows from a V2 parent. A V1 parent
-    // accepts the readable catalog, then sorts by priority and exposes at most five overrides.
     const parentSurface = parent.multi_agent_version;
     const spawnOverrides = models
       .filter(model => model.supported_in_api === true && model.visibility === "list")
@@ -113,11 +132,9 @@ describe("native /models augmentation", () => {
       .slice(0, 5)
       .map(model => model.slug);
 
-    expect(spawnOverrides).toEqual([
-      "gpt-5.6-sol",
-      ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
-    ]);
-    expect(models.find(model => model.slug === "chatgpt-web/light")?.priority).toBe(3);
+    expect(spawnOverrides).toContain("gpt-5.6-sol");
+    expect(spawnOverrides).toContain("chatgpt-web/latest");
+    expect(models.find(model => model.slug === "gpt-5.5")?.supported_reasoning_levels).toBeUndefined();
   });
 
   test("Compatibility V1 preserves an explicit native delegation disable while pinning supported rows", () => {
@@ -163,19 +180,22 @@ describe("native /models augmentation", () => {
     const second = augmentNativeModelCatalog(first, config);
     const models = second.models as Array<Record<string, unknown>>;
     const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    expect(web.map(model => model.slug)).toEqual(
-      CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro).map(route => route.slug),
-    );
+    expect(web.map(model => model.slug)).toEqual(["chatgpt-web/latest"]);
     expect(web.every(model => model.tool_mode === null)).toBe(true);
     expect(web.every(model => model.multi_agent_version === "v2")).toBe(true);
-    expect(web.every(model => (model.supported_reasoning_levels as unknown[]).length === 1)).toBe(true);
+    expect(web[0]).toMatchObject({
+      display_name: "🌐 Latest",
+      supported_reasoning_levels: [
+        { effort: "low", description: "Light" },
+        { effort: "medium", description: "Medium" },
+        { effort: "high", description: "High" },
+      ],
+    });
     expect(web.map(model => ({
       contextWindow: model.context_window,
       effectiveContextWindowPercent: model.effective_context_window_percent,
       autoCompactTokenLimit: model.auto_compact_token_limit,
     }))).toEqual([
-      { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
-      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
       { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
     ]);
   });
@@ -252,18 +272,16 @@ describe("native /models augmentation", () => {
     ]);
     expect(models[1]!.context_window).toBe(300_000);
     expect(models[1]!.auto_compact_token_limit).toBe(270_000);
-    for (const [index, model] of models.slice(3).entries()) {
-      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
-      const limits = resolveChatGptWebContextLimits(
-        route.backendModel,
-        route.adapterEffort,
-        config,
-      );
-      expect(model.context_window).toBe(limits.contextWindow);
-      expect(model.max_context_window).toBe(limits.contextWindow);
-      expect(model.effective_context_window_percent).toBe(limits.effectiveContextWindowPercent);
-      expect(model.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
-    }
+    const latest = models.find(model => model.slug === "chatgpt-web/latest")!;
+    const limits = resolveChatGptWebContextLimits(
+      CHATGPT_WEB_LATEST_MODEL_ROUTE.backendModel,
+      CHATGPT_WEB_LATEST_MODEL_ROUTE.adapterEffort,
+      config,
+    );
+    expect(latest.context_window).toBe(limits.contextWindow);
+    expect(latest.max_context_window).toBe(limits.contextWindow);
+    expect(latest.effective_context_window_percent).toBe(limits.effectiveContextWindowPercent);
+    expect(latest.auto_compact_token_limit).toBe(limits.autoCompactTokenLimit);
   });
 
   test("never lowers a native window that already exceeds the Codex context override", () => {
@@ -295,7 +313,7 @@ describe("native /models augmentation", () => {
     const result = augmentNativeModelCatalog(native, defaultConfig("full"));
     const web = (result.models as Array<Record<string, unknown>>)
       .filter(model => String(model.slug).startsWith("chatgpt-web/"));
-    expect(web.length).toBe(3);
+    expect(web.length).toBe(1);
     expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
     expect(web.every(model => model.tool_mode === null)).toBe(true);
   });
@@ -311,7 +329,7 @@ describe("native /models augmentation", () => {
     const web = (result.models as Array<Record<string, unknown>>)
       .filter(model => String(model.slug).startsWith("chatgpt-web/"));
 
-    expect(web).toHaveLength(3);
+    expect(web).toHaveLength(1);
     expect(web.every(model => model.supported_in_api === true)).toBe(true);
     expect((result.models as Array<Record<string, unknown>>).slice(0, models.length))
       .toEqual(models);

@@ -1960,3 +1960,103 @@ server.listen(config.port, config.host);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("launcher supervisor recovers an identity-matched daemon when the marker pid is missing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-stale-marker-null-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const statePath = path.join(root, "runtime", "launcher-supervisor.json");
+  const configPath = path.join(root, "config.json");
+  const serverPath = path.join(root, "fake-runtime.cjs");
+  const port = await freePort();
+  fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
+  fs.writeFileSync(descriptorPath, "{}\n");
+  fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath, {
+    port,
+    controlToken: "stale-marker-null-control-token-0123456789",
+  }))}\n`);
+  fs.writeFileSync(serverPath, `
+const fs = require("node:fs");
+const http = require("node:http");
+const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+let draining = false;
+const server = http.createServer((request, response) => {
+  response.setHeader("content-type", "application/json");
+  response.setHeader("connection", "close");
+  if (request.url === "/healthz") {
+    response.end(JSON.stringify({
+      status: "ok",
+      service: "codex-chatgpt-web",
+      mode: config.mode,
+      version: config.releaseVersion,
+      pid: process.pid,
+      accepting_turns: !draining,
+    }));
+    return;
+  }
+  if (request.headers.authorization !== "Bearer " + config.controlToken) {
+    response.statusCode = 401;
+    response.end("{}");
+    return;
+  }
+  if (request.method === "POST" && request.url === "/admin/drain") draining = true;
+  else if (request.method === "POST" && request.url === "/admin/resume") draining = false;
+  else if (request.method === "POST" && request.url === "/admin/shutdown" && draining) {
+    response.end(JSON.stringify({ status: "ok", accepting_turns: false, active_http_turns: 0, active_browser_turns: 0 }));
+    server.close(() => process.exit(0));
+    return;
+  } else {
+    response.statusCode = 404;
+    response.end("{}");
+    return;
+  }
+  response.end(JSON.stringify({ status: "ok", accepting_turns: !draining, active_http_turns: 0, active_browser_turns: 0 }));
+});
+server.listen(config.port, config.host);
+`);
+  const stale = spawn(process.execPath, [serverPath, configPath], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  const logger = { info() {}, warn() {}, error() {} };
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger,
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+    runtimeInvocationFactory: () => ({
+      executable: process.execPath,
+      args: [serverPath, configPath],
+      cwd: root,
+    }),
+  });
+
+  try {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try {
+        if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).ok, true);
+    fs.writeFileSync(statePath, `${JSON.stringify({
+      version: 1,
+      ownerPid: 999_999_999,
+      daemonPid: null,
+      tunnelPid: null,
+      status: "failed",
+      detail: "The process on the Responses port does not match the stale launcher marker",
+      updatedAt: new Date().toISOString(),
+    })}\n`);
+
+    const started = await supervisor.startIfConfigured();
+    assert.equal(started.status, "ready");
+    assert.notEqual(started.daemonPid, stale.pid);
+    assert.equal(stale.exitCode !== null || stale.killed, true);
+  } finally {
+    await supervisor.stopForSetup().catch(() => {});
+    if (stale.exitCode === null) stale.kill("SIGTERM");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

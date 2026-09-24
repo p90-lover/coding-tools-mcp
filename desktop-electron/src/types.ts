@@ -1,7 +1,7 @@
 export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations" | "cpa" | "codex-router" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations" | "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal" | "network" | "activity" | "runtime-orchestrator" | "runtime-oauth" | "runtime-api" | "runtime-tasks" | "runtime-tools" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -36,6 +36,10 @@ export interface ProviderAccountRecord {
   loginAdapterId?: string;
   credentialSource?: ProviderCredentialSource;
   proxyProfileId?: string;
+  chatPath?: string;
+  modelsPath?: string;
+  authHeaderName?: string;
+  extraHeaders?: string;
   createdAt: string;
   updatedAt: string;
   lastUsedAt?: string;
@@ -57,6 +61,10 @@ export interface ProviderAccountInput {
   loginAdapterId?: string;
   credentialSource?: ProviderCredentialSource;
   proxyProfileId?: string;
+  chatPath?: string;
+  modelsPath?: string;
+  authHeaderName?: string;
+  extraHeaders?: string;
   secret?: Record<string, string>;
   error?: string;
 }
@@ -244,6 +252,54 @@ export interface ManagedBootstrapSnapshot {
   startedAt: string | null;
   completedAt: string | null;
   components: ManagedBootstrapComponentSnapshot[];
+}
+
+export type AppsLaunchStatus = "idle" | "waiting" | "running" | "ready" | "partial" | "blocked" | "error" | "skipped";
+export type AppsLaunchModuleStatus = "pending" | "waiting" | "launching" | "ready" | "blocked" | "error" | "skipped";
+export type AppsLaunchAction = "install" | "repair" | "start" | "inspect" | "skip";
+export type AppsLaunchStartupPolicy = "auto" | "installed-only" | "manual";
+
+export interface AppsLaunchModuleSnapshot {
+  id: ExternalServiceId;
+  name: string;
+  order: number;
+  dependsOn: ExternalServiceId[];
+  startupPolicy: AppsLaunchStartupPolicy;
+  autoStart: boolean;
+  autoStartDefault: boolean;
+  enabled: boolean;
+  readyTimeoutMs: number | null;
+  embed: "iframe" | "file" | "none";
+  installState: ManagedComponentInstallState | null;
+  bundledRuntime: boolean;
+  serviceStatus: UpstreamToolStatus | null;
+  planned: boolean;
+  action: AppsLaunchAction;
+  skipReason: string | null;
+  status: AppsLaunchModuleStatus;
+  message: string | null;
+  bootstrapAction?: string | null;
+  missingCredentials?: string[];
+  lastLaunch: {
+    at: string | null;
+    reason: string | null;
+    status: string | null;
+    message: string | null;
+    version: string | null;
+    installState: string | null;
+  } | null;
+}
+
+export interface AppsLaunchSnapshot {
+  version: 1;
+  status: AppsLaunchStatus;
+  reason: string | null;
+  startedAt: string | null;
+  coreReadyAt: string | null;
+  completedAt: string | null;
+  waitedMs: number | null;
+  order: ExternalServiceId[];
+  modules: AppsLaunchModuleSnapshot[];
 }
 
 export interface CommandCodeProxyHealth {
@@ -436,6 +492,19 @@ export interface OriginalUiSnapshot {
   sourceConfigured: boolean;
   installState: ManagedComponentInstallState;
   originalChrome: boolean;
+  launch?: {
+    order: number;
+    autoStart: boolean;
+    startupPolicy: AppsLaunchStartupPolicy;
+    dependsOn: string[];
+    readyTimeoutMs: number;
+  } | null;
+  visual?: {
+    embed: "iframe" | "file" | "none";
+    endpoint: string;
+    initialSection: string;
+    controls: string[];
+  } | null;
   longRun?: OriginalUiLongRun;
 }
 
@@ -597,6 +666,7 @@ export interface LauncherApi {
   copyManualPrompt(tabId: string): Promise<BrowserState>;
   confirmManualSent(tabId: string): Promise<BrowserState>;
   openLogin(): Promise<BrowserState>;
+  refreshAuthentication(): Promise<BrowserState>;
   openPasskeyLogin(): Promise<BrowserState>;
   continuePasskeyLogin(): Promise<boolean>;
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
@@ -652,6 +722,9 @@ export interface LauncherApi {
     routerCli?: string;
     curateCli?: string;
   }): Promise<CommandCodeProxyApplyResult>;
+  appsLaunchSnapshot(): Promise<AppsLaunchSnapshot>;
+  runAppsLaunch(input?: { reason?: string; moduleIds?: ExternalServiceId[] }): Promise<AppsLaunchSnapshot>;
+  configureAppLaunch(moduleId: ExternalServiceId, input: { autoStart?: boolean; enabled?: boolean }): Promise<AppsLaunchSnapshot>;
   managedBootstrapSnapshot(): Promise<ManagedBootstrapSnapshot>;
   reconcileManagedBootstrap(input?: {
     reason?: string;
@@ -726,6 +799,7 @@ export interface LauncherApi {
   onUpdateState(listener: (state: UpdateState) => void): () => void;
   onExternalServicesChanged(listener: (state: ExternalServicesSnapshot) => void): () => void;
   onManagedBootstrapChanged(listener: (state: ManagedBootstrapSnapshot) => void): () => void;
+  onAppsLaunchChanged(listener: (state: AppsLaunchSnapshot) => void): () => void;
   onProviderNetworkChanged(listener: (state: ProviderNetworkSnapshot) => void): () => void;
 }
 

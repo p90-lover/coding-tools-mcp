@@ -1,7 +1,10 @@
 .provider-surface.provider-console {
-  height: calc(100vh - var(--titlebar-height));
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   overflow: auto;
-  padding: 28px clamp(20px, 3vw, 42px) 56px;
+  padding: calc(var(--height-titlebar) + 28px) clamp(20px, 3vw, 42px) 56px;
   background:
     radial-gradient(circle at 82% -10%, rgb(73 116 255 / 10%), transparent 34%),
     var(--color-bg-primary);
@@ -888,4 +891,244 @@
   line-height: 1.45;
   margin: 12px 0 0;
   padding: 10px 12px;
+}
+
+/* Connection clause — SaaS provider card, same visual language as the CPA console. */
+.provider-connection-card {
+  display: grid;
+  gap: 12px;
+  margin: 14px 16px 0;
+  padding: 14px 16px 12px;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgb(73 112 226 / 9%), transparent 60%),
+    rgb(255 255 255 / 1.6%);
+}
+
+.provider-connection-card[data-status="connected"] {
+  border-color: rgb(64 206 138 / 32%);
+  background:
+    linear-gradient(135deg, rgb(64 206 138 / 10%), transparent 60%),
+    rgb(255 255 255 / 1.6%);
+}
+
+.provider-connection-card[data-status="error"],
+.provider-connection-card[data-status="expired"] {
+  border-color: rgb(239 98 98 / 32%);
+  background:
+    linear-gradient(135deg, rgb(239 98 98 / 9%), transparent 60%),
+    rgb(255 255 255 / 1.6%);
+}
+
+.provider-connection-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.provider-connection-title {
+  display: grid;
+  gap: 3px;
+}
+
+.provider-connection-eyebrow {
+  color: #8cacff;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+}
+
+.provider-connection-title strong {
+  font-size: 13px;
+}
+
+.provider-connection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 4%);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.provider-connection-pill i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #667080;
+}
+
+.provider-connection-pill.is-connected {
+  border-color: rgb(64 206 138 / 40%);
+  background: rgb(64 206 138 / 10%);
+  color: #6fe3ad;
+}
+
+.provider-connection-pill.is-connected i {
+  background: #40ce8a;
+  box-shadow: 0 0 0 3px rgb(64 206 138 / 18%);
+}
+
+.provider-connection-pill.is-pending i {
+  background: #f0b64a;
+}
+
+.provider-connection-pill.is-expired,
+.provider-connection-pill.is-error {
+  border-color: rgb(239 98 98 / 40%);
+  background: rgb(239 98 98 / 10%);
+  color: #ff9c9c;
+}
+
+.provider-connection-pill.is-expired i,
+.provider-connection-pill.is-error i {
+  background: #ef6262;
+}
+
+.provider-connection-pill.is-disabled {
+  opacity: 0.7;
+}
+
+.provider-connection-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.provider-connection-endpoint {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.provider-connection-endpoint > span,
+.provider-connection-facts dt {
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.provider-connection-endpoint small {
+  color: var(--color-text-tertiary);
+  font-size: 9px;
+}
+
+.provider-connection-endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.provider-connection-endpoint-row input {
+  min-width: 0;
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.provider-connection-chip {
+  flex-shrink: 0;
+  padding: 4px 7px;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 999px;
+  color: var(--color-text-tertiary);
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.provider-connection-chip.is-local {
+  border-color: rgb(112 151 255 / 45%);
+  color: #a7c0ff;
+}
+
+.provider-connection-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.provider-connection-facts > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.provider-connection-facts dd {
+  margin: 0;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.provider-connection-facts dd small {
+  color: var(--color-text-tertiary);
+  font-size: 9px;
+}
+
+.provider-connection-facts dd.is-ok {
+  color: #6fe3ad;
+}
+
+.provider-connection-facts dd.is-missing {
+  color: #f0b64a;
+}
+
+.provider-connection-error {
+  margin: 0;
+  color: #ffb3b9;
+  font-size: 11px;
+}
+
+.provider-connection-actions {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgb(255 255 255 / 6%);
+}
+
+.provider-connection-actions > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.provider-connection-override {
+  display: grid;
+  gap: 4px;
+  min-width: 140px;
+}
+
+.provider-connection-override span {
+  color: var(--color-text-tertiary);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.provider-connection-override select {
+  min-height: 32px;
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .provider-connection-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .provider-connection-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }

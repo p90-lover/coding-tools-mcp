@@ -10,6 +10,22 @@
     "commit": "c123a3ebe017415ef45e619600a1110198dea7f8",
     "repository": "zahidhussaina2l/commandcode-proxy"
   },
+  "launch": {
+    "order": 30,
+    "autoStart": true,
+    "startupPolicy": "auto",
+    "installOnStartup": true,
+    "dependsOn": ["codex-router"],
+    "requires": ["core-runtime"],
+    "readyTimeoutMs": 60000
+  },
+  "visual": {
+    "embed": "none",
+    "endpoint": "http://127.0.0.1:9090/",
+    "controls": ["module-lifecycle", "commandcode-host"],
+    "icon": "globe",
+    "navGroup": "more"
+  },
   "legacyLoopback": {
     "note": "Temporary compatibility only. Product surface is the in-process handler, not a listen port.",
     "url": "http://127.0.0.1:9090/"

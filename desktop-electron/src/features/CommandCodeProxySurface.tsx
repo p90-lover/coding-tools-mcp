@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { ExternalServiceSnapshot, Language } from "../types";
 import "./commandcode-proxy.css";
 
@@ -32,6 +33,10 @@ async function copyText(value: string): Promise<void> {
     return;
   }
   throw new Error("Clipboard is unavailable");
+}
+
+function messageOf(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
 }
 
 export function CommandCodeProxySurface({
@@ -157,6 +162,130 @@ export function CommandCodeProxySurface({
           {text(language, "Open CommandCode accounts", "開啟 CommandCode 帳戶")}
         </button>
       </div>
+    </section>
+  );
+}
+
+export function CommandCodeHostSurface({
+  language,
+  setError,
+  openProviders,
+}: {
+  language: Language;
+  setError: (error: string | null) => void;
+  openProviders: () => void;
+}) {
+  const api = window.codexWebLauncher;
+  const [service, setService] = useState<ExternalServiceSnapshot | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
+  const [planText, setPlanText] = useState("");
+
+  const refresh = async () => {
+    if (!api) throw new Error("Launcher IPC is unavailable");
+    const snapshot = await api.externalServicesSnapshot();
+    const next = snapshot.services.find((entry) => entry.id === "commandcode-proxy") ?? null;
+    setService(next);
+    return next;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!api) return;
+    void (async () => {
+      try {
+        const current = await refresh();
+        if (cancelled || !current) return;
+        try {
+          await api.inspectExternalService("commandcode-proxy");
+        } catch {
+          if (current.status !== "ready") await api.startExternalService("commandcode-proxy");
+        }
+        if (!cancelled) await refresh();
+      } catch (cause) {
+        if (!cancelled) setError(messageOf(cause));
+      }
+    })();
+    const unsubscribe = api.onExternalServicesChanged?.((next) => {
+      const current = next.services.find((entry) => entry.id === "commandcode-proxy") ?? null;
+      if (!cancelled) setService(current);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [api, setError]);
+
+  const run = async (name: string, action: () => Promise<unknown>) => {
+    if (!api || busy) return;
+    setBusy(name);
+    setError(null);
+    setNotice("");
+    try {
+      await action();
+      await refresh();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="commandcode-host-surface" data-tool="commandcode-proxy" data-original-chrome="true">
+      <header className="commandcode-hostbar">
+        <strong>CommandCode Proxy</strong>
+        <span className={`commandcode-host-status status-${service?.status || "offline"}`}>
+          {service?.status === "ready"
+            ? text(language, "Connected", "已連線")
+            : service?.status === "starting"
+              ? text(language, "Starting", "正在啟動")
+              : service?.status === "error"
+                ? text(language, "Error", "錯誤")
+                : text(language, "Offline", "離線")}
+        </span>
+      </header>
+      {notice ? <p className="commandcode-scope">{notice}</p> : null}
+      {planText ? <pre className="commandcode-banner">{planText}</pre> : null}
+      {service ? (
+        <CommandCodeProxySurface
+          busy={busy}
+          language={language}
+          onApplyNonSecret={() => void run("apply-plan", async () => {
+            const result = await api!.applyCommandCodeProxyPlan({
+              baseUrl: service.endpoint,
+              routerCli: service.routerCli ?? "model-router",
+              curateCli: service.curateCli ?? "curate-models",
+            });
+            setPlanText(result.planText || planText);
+            setNotice(text(
+              language,
+              "Credential set was not executed. Paste the user_* key only in Codex Router’s hidden prompt.",
+              "未執行 credential set。user_* 金鑰只能在 Codex Router 隱藏提示中輸入。",
+            ));
+          })}
+          onCheck={() => void run("inspect", () => api!.inspectExternalService("commandcode-proxy"))}
+          onCopyPlan={() => void run("copy-plan", async () => {
+            const plan = await api!.commandCodeProxyPlan({
+              baseUrl: service.endpoint,
+              routerCli: service.routerCli ?? "model-router",
+              curateCli: service.curateCli ?? "curate-models",
+            });
+            setPlanText(plan.text);
+            await navigator.clipboard.writeText(plan.text);
+            setNotice(text(language, "Registration plan copied.", "已複製註冊計劃。"));
+          })}
+          onOpenProviders={openProviders}
+          onRestart={() => void run("restart", () => api!.restartExternalService("commandcode-proxy"))}
+          onStart={() => void run("start", () => api!.startExternalService("commandcode-proxy"))}
+          onStop={() => void run("stop", () => api!.stopExternalService("commandcode-proxy"))}
+          service={service}
+        />
+      ) : (
+        <div className="commandcode-proxy-surface">
+          <strong>{text(language, "Loading CommandCode Proxy…", "正在載入 CommandCode 代理…")}</strong>
+        </div>
+      )}
     </section>
   );
 }

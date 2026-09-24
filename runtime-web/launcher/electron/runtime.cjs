@@ -875,7 +875,11 @@ class RuntimeHost {
     try {
       const current = await this.bridgeStatus(name);
       if (!current.installed) throw new Error("Install the Codex integration before connecting the bridge route");
-      if (current.active) return current;
+      const config = this.supervisor.readConfig();
+      const expected = config?.host && Number.isInteger(config.port)
+        ? `http://${config.host}:${config.port}/v1`
+        : "";
+      if (current.active && (!expected || !current.routeUrl || current.routeUrl === expected)) return current;
       try {
         const connected = await this.run(name, ["route", "connect"], {
           embedded: true,
@@ -960,7 +964,7 @@ class RuntimeHost {
         );
       }
       try {
-        const result = await this.run(name, ["uninstall", "--yes", "--launcher-control"], {
+        const result = await this.run(name, ["uninstall", "--yes", "--keep-data", "--launcher-control"], {
           embedded: true,
           env: this.launcherControlEnvironment(),
           message: "Restoring the previous Codex route",
@@ -973,6 +977,8 @@ class RuntimeHost {
         }
         return result;
       } catch (error) {
+        const verified = await this.bridgeStatus(name).catch(() => null);
+        if (verified && !verified.installed && !verified.active) throw error;
         try {
           await this.restoreBridgeRouteWithinOperation(name);
         } catch (routeError) {

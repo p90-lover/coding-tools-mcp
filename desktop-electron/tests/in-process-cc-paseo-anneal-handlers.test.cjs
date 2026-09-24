@@ -118,7 +118,7 @@ test("Paseo inspect/plan succeed in-process when five-stack is not ready", async
   }
 });
 
-test("Anneal inspect/board/listTasks succeed in-process without :3000/:5173", async () => {
+test("Anneal inspection is local but task listing requires an actual runtime", async () => {
   const guard = forbidTcp("anneal");
   try {
     const host = createBareHost();
@@ -129,18 +129,42 @@ test("Anneal inspect/board/listTasks succeed in-process without :3000/:5173", as
     assertNoLegacyPorts(inspected);
 
     const listed = await host.call("anneal", "listTasks");
-    assert.equal(listed.ok, true);
-    assert.deepEqual(listed.result.tasks, []);
+    assert.equal(listed.ok, false);
+    assert.equal(listed.result.unavailable, true);
+    assert.equal(listed.result.dependency, "anneal-runtime");
     assert.equal(listed.result.listening, false);
 
     const board = await host.invoke({ handle: "anneal", operation: "board" });
-    assert.equal(board.ok, true);
-    assert.deepEqual(board.result.json, []);
+    assert.equal(board.ok, false);
+    assert.equal(board.result.unavailable, true);
     assertNoLegacyPorts(board);
     assert.equal(guard.hits.length, 0);
   } finally {
     guard.restore();
   }
+});
+
+test("Anneal returns real managed tasks and calls the distinct activity endpoint", async () => {
+  const calls = [];
+  const host = createCodingToolsAppsHost({
+    actUpstream: async (input) => {
+      calls.push(input);
+      return { ok: true, body: input.op === "board" ? [{ id: "remote-1", name: "Real task", status: "IN_PROGRESS" }] : [] };
+    },
+  });
+  const board = await host.call("anneal", "board");
+  assert.equal(board.ok, true);
+  assert.equal(board.result.tasks[0].id, "remote-1");
+  assert.equal(board.result.source, "managed-anneal-api");
+  await host.call("anneal", "activity", { taskId: "remote-1" });
+  assert.deepEqual(calls.map((call) => call.op), ["board", "activity"]);
+
+  const unavailable = createCodingToolsAppsHost({ actUpstream: async () => {
+    throw new Error("database connection refused 127.0.0.1:5432");
+  } });
+  const failed = await unavailable.call("anneal", "board");
+  assert.equal(failed.ok, false);
+  assert.equal(failed.result.dependency, "postgres");
 });
 
 test("host.call accepts both positional and contract object forms", async () => {

@@ -3,6 +3,24 @@
   "name": "Codex Router",
   "kind": "managed-service",
   "transport": "in-process",
+  "launch": {
+    "order": 20,
+    "autoStart": true,
+    "startupPolicy": "auto",
+    "installOnStartup": true,
+    "dependsOn": ["cpa"],
+    "requires": ["core-runtime"],
+    "readyTimeoutMs": 300000
+  },
+  "visual": {
+    "embed": "file",
+    "endpoint": "http://127.0.0.1:4202/",
+    "manifest": "vendor/upstream/codex-router.json",
+    "initialSection": "",
+    "controls": ["module-lifecycle"],
+    "icon": "orchestrator",
+    "navGroup": "more"
+  },
   "legacyLoopback": {
     "note": "Temporary compatibility only. Product surface is the in-process handler, not a listen port.",
     "url": "http://127.0.0.1:4202/"

@@ -90,6 +90,8 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let codexBridgeConnectInFlight = null;
+let runtimeStartupInFlight = null;
 let updateController = null;
 
 function findFreePort() {
@@ -178,6 +180,82 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
     logger.error("bridge.route_restore_after_runtime_failure_failed", { message });
     return { restored: false, error: message };
   }
+}
+
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitForRuntimeHostIdle(timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (runtimeHost?.currentOperation()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Codex bridge connect waited for ${runtimeHost.currentOperation()}`);
+    }
+    await sleep(50);
+  }
+}
+
+function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged = false }) {
+  const config = runtimeSupervisor.readConfig();
+  const current = stateStore.read();
+  const patch = {
+    coreSetupComplete: true,
+    mcpRuntimeInstalled: config.mode === "full",
+    experimentalBiggerContext: config.experimentalBiggerContext === true,
+    zeroRiskProEnabled: config.zeroRiskProEnabled === true,
+    ...(bridgeRouteChanged ? {
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+    } : {}),
+    ...(config.mode === "browser-only" ? {
+      mcpSetupComplete: false,
+      mcpGuideStep: 0,
+    } : {}),
+  };
+  if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
+    const state = stateStore.update(patch);
+    send("launcher:state-changed", state);
+  }
+  startCatalogVerificationMonitor({ logger, stateStore });
+}
+
+async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reason }) {
+  if (quitting || shutdownInProgress) {
+    return { skipped: true, reason: "shutting-down" };
+  }
+  if (IS_DEV_PROFILE || !runtimeHost || !runtimeSupervisor) {
+    return { skipped: true, reason: "unavailable" };
+  }
+  if (!runtimeHost.runtimeConfigSnapshot().configured) {
+    return { skipped: true, reason: "not-configured" };
+  }
+  if (codexBridgeConnectInFlight) return codexBridgeConnectInFlight;
+  const work = (async () => {
+    await waitForRuntimeHostIdle();
+    const runtime = await runtimeSupervisor.startIfConfigured();
+    if (runtime.status !== "ready") return { skipped: true, reason: runtime.status };
+    const route = await runtimeHost.connectBridgeRoute();
+    applyReadyRuntimeAfterBridge({
+      logger,
+      stateStore,
+      bridgeRouteChanged: route.changed === true,
+    });
+    logger.info("bridge.auto_connected", { reason, changed: route.changed === true });
+    return { connected: true, changed: route.changed === true };
+  })();
+  codexBridgeConnectInFlight = work;
+  try {
+    return await work;
+  } finally {
+    if (codexBridgeConnectInFlight === work) codexBridgeConnectInFlight = null;
+  }
+}
+
+function scheduleCodexBridgeAutoConnect({ logger, stateStore, reason }) {
+  void connectCodexBridgeAfterAuthentication({ logger, stateStore, reason }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn("bridge.auto_connect_failed", { reason, message });
+    publishOperation({ name: "bridge-connect", status: "failed", message });
+  });
 }
 
 function trayImage() {
@@ -502,6 +580,19 @@ function registerIpc({ logger, stateStore }) {
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-login" });
+    }
+    return browser;
+  });
+  handle("launcher:browser-refresh-auth", async () => {
+    if (stateStore.read().browserInteractionMode === "manual") {
+      return browserHost.snapshot();
+    }
+    const browser = await browserHost.refreshAuthentication();
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-refresh-auth" });
     }
     return browser;
   });
@@ -510,6 +601,7 @@ function registerIpc({ logger, stateStore }) {
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-passkey-login" });
     }
     return browser;
   });
@@ -871,9 +963,37 @@ async function requestQuit() {
   }
   shutdownInProgress = true;
   try {
-    const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
-    if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+    const browserOperation = browserHost?.currentOperation();
+    if (browserOperation) {
+      throw new Error(`Wait for ${browserOperation} to finish before quitting Codex Web GPT`);
+    }
+    quitting = true;
+    await Promise.allSettled(
+      [runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean),
+    );
+    const runtimeOperation = runtimeHost?.currentOperation();
+    if (runtimeOperation) {
+      throw new Error(`Wait for ${runtimeOperation} to finish before quitting Codex Web GPT`);
+    }
+    try {
+      await runtimeHost?.restoreBridgeRoute();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const decision = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        buttons: ["Cancel", "Quit anyway"],
+        defaultId: 0,
+        cancelId: 0,
+        title: "Codex route could not be restored",
+        message: "Codex Web GPT could not restore the previous Codex model route.",
+        detail: `${message}\n\nQuitting anyway may leave Codex pointed at an unavailable local bridge.`,
+      });
+      if (decision.response !== 1) throw error;
+      publishOperation({
+        name: "launcher-quit",
+        status: "warning",
+        message: `Quitting after route restoration failed: ${message}`,
+      });
     }
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     stopCatalogVerificationMonitor();
@@ -1038,12 +1158,13 @@ async function start() {
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
-  let startupAuthenticationRefresh = Promise.resolve();
+  let startupAuthenticationRefresh = Promise.resolve(browserHost.snapshot());
   if (!launcherSmokeTest && stateStore.read().browserInteractionMode === "automatic") {
     startupAuthenticationRefresh = browserHost.refreshAuthentication().catch((error) => {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
+      return browserHost.snapshot();
     });
   }
   await loadRenderer(mainWindow);
@@ -1113,15 +1234,14 @@ async function start() {
       userData: launcherUserData,
     });
     if (config?.mode === "full") {
-      void startupAuthenticationRefresh.then(() => runtimeSupervisor.startIfConfigured()).catch((error) => {
+      void runtimeSupervisor.startIfConfigured().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         logger.error("dev_profile.runtime_start_failed", { message });
         const failed = stateStore.update({ mcpSetupComplete: false });
         send("launcher:state-changed", failed);
       });
     }
-  } else void (async () => {
-    await startupAuthenticationRefresh;
+  } else runtimeStartupInFlight = (async () => {
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
       const state = stateStore.update({
@@ -1161,9 +1281,35 @@ async function start() {
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
+    const browser = await startupAuthenticationRefresh;
+    if (stateStore.read().browserInteractionMode === "automatic" && browser?.authenticated !== true) {
+      logger.warn("bridge.connect_deferred_until_chatgpt_ready");
+      return { ...runtime, bridgeDeferred: true };
+    }
     const route = await runtimeHost.connectBridgeRoute();
     return { ...runtime, bridgeRouteChanged: route.changed === true };
   })().then(async (runtime) => {
+    if (runtime.bridgeDeferred) {
+      const config = runtimeSupervisor.readConfig();
+      const current = stateStore.read();
+      const patch = {
+        coreSetupComplete: true,
+        codexCatalogVerified: false,
+        codexRestartRequired: true,
+        mcpRuntimeInstalled: config.mode === "full",
+        experimentalBiggerContext: config.experimentalBiggerContext === true,
+        zeroRiskProEnabled: config.zeroRiskProEnabled === true,
+        ...(config.mode === "browser-only" ? {
+          mcpSetupComplete: false,
+          mcpGuideStep: 0,
+        } : {}),
+      };
+      if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
+        const state = stateStore.update(patch);
+        send("launcher:state-changed", state);
+      }
+      return;
+    }
     if (runtime.status === "ready") {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();

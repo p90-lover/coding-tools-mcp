@@ -1,8 +1,11 @@
 import type { AppConfig } from "./config";
 import type { CodexModelContextOverride } from "./codex-integration";
 import {
+  availableChatGptWebLatestEfforts,
   availableChatGptWebModelRoutes,
+  CHATGPT_WEB_LATEST_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_PREFIX,
+  CHATGPT_WEB_WEB_EFFORT_LABEL,
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -39,22 +42,8 @@ function modelPriority(template: JsonObject): number | undefined {
   return value;
 }
 
-function routedModelPriority(
-  template: JsonObject,
-  route: ChatGptWebModelRoute,
-  config: AppConfig,
-): number | undefined {
-  const priority = modelPriority(template);
-  if (priority === undefined
-    || config.subagentProtocol !== "compatibility-v1"
-    || route.slug !== "chatgpt-web/light") return priority;
-  if (priority === Number.MAX_SAFE_INTEGER) {
-    throw new Error("Native Codex model template priority cannot reserve the Compatibility V1 roster");
-  }
-  // Codex V1 exposes at most five model overrides. Keep the native Sol row plus the four useful
-  // delegated Web efforts (Medium, High, Extra High, Pro); Instant remains a selectable root model
-  // but does not displace Pro from spawn_agent's bounded registry.
-  return priority + 1;
+function routedModelPriority(template: JsonObject): number | undefined {
+  return modelPriority(template);
 }
 
 function nativeTemplateCandidate(value: unknown, requireTools: boolean): value is JsonObject {
@@ -106,7 +95,8 @@ export function buildChatGptWebModel(
   }
   const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
   const multiAgentVersion = routedSubagentVersion(template, config);
-  const priority = routedModelPriority(template, route, config);
+  const priority = routedModelPriority(template);
+  const latest = route.slug === CHATGPT_WEB_LATEST_MODEL_ROUTE.slug;
   const model: JsonObject = {
     ...structuredClone(template),
     slug: route.slug,
@@ -132,7 +122,13 @@ export function buildChatGptWebModel(
     tool_mode: null,
     upgrade: null,
     default_reasoning_level: route.codexEffort,
-    supported_reasoning_levels: [reasoningLevel(template, route.codexEffort, route.displayName)],
+    supported_reasoning_levels: latest
+      ? availableChatGptWebLatestEfforts(config).map(effortRoute => reasoningLevel(
+        template,
+        effortRoute.codexEffort,
+        CHATGPT_WEB_WEB_EFFORT_LABEL[effortRoute.adapterEffort],
+      ))
+      : [reasoningLevel(template, route.codexEffort, route.displayName)],
     context_window: limits.contextWindow,
     max_context_window: limits.contextWindow,
     effective_context_window_percent: limits.effectiveContextWindowPercent,
@@ -148,6 +144,30 @@ export function buildChatGptWebModel(
   delete model.comp_hash;
   delete model.availability_nux;
   return model;
+}
+
+const NATIVE_CODEX_PICKER_MODELS = [
+  { slug: "gpt-5.6-sol", display_name: "5.6 Sol" },
+  { slug: "gpt-5.5", display_name: "5.5" },
+] as const;
+
+function ensureNativeCodexPickerModels(nativeModels: unknown[], template: JsonObject): void {
+  for (const wanted of NATIVE_CODEX_PICKER_MODELS) {
+    const existing = nativeModels.find(model => slug(model) === wanted.slug);
+    if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+      const model = existing as JsonObject;
+      if (typeof model.visibility === "string" && model.visibility !== "list") {
+        model.visibility = "list";
+      }
+      continue;
+    }
+    nativeModels.push({
+      ...structuredClone(template),
+      slug: wanted.slug,
+      display_name: wanted.display_name,
+      visibility: "list",
+    });
+  }
 }
 
 export function augmentNativeModelCatalog(
@@ -170,6 +190,7 @@ export function augmentNativeModelCatalog(
     }
   }
   const template = selectNativeTemplate(nativeModels, config);
+  ensureNativeCodexPickerModels(nativeModels, template);
   if (contextOverride) {
     // model_context_window is a single top-level Codex setting, not a per-model one. Apply its
     // advertised maximum to every native row so switching native models cannot silently clamp the

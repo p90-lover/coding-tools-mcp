@@ -117,6 +117,35 @@ test.each([
   });
 });
 
+test("launcher setup can provide a product-specific automatic connector identity", () => {
+  expect(resolveInteractionConnectorIdentities(
+    "automatic",
+    "production",
+    "Coding Tools Native2",
+  )).toEqual({
+    appName: "Coding Tools Native2",
+    automaticAppName: "Coding Tools Native2",
+    manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+  });
+  expect(resolveInteractionConnectorIdentities(
+    "manual",
+    "production",
+    "Coding Tools Native2",
+  )).toEqual({
+    appName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+    automaticAppName: "Coding Tools Native2",
+    manualAppName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+  });
+  expect(() => resolveInteractionConnectorIdentities("automatic", "production", " ")).toThrow(
+    "Automatic connector name must contain between 1 and 80 characters",
+  );
+  expect(() => resolveInteractionConnectorIdentities(
+    "automatic",
+    "production",
+    ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+  )).toThrow("Automatic and Zero Risk connector names must differ");
+});
+
 test("setup repairs a legacy automatic connector name that collides with Zero Risk", () => {
   const root = join(tmpdir(), `codex-chatgpt-web-connector-collision-${process.pid}-${Date.now()}`);
   roots.push(root);

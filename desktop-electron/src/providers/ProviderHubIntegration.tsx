@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useState,
@@ -6,12 +7,12 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { PROVIDER_CATALOG, type ProviderDefinition } from "./provider-types";
+import { PROVIDER_CATALOG } from "./provider-types";
+import { ProviderCenterSurface } from "../features/ProviderHubSaasSurface";
+import { Icon } from "../icons";
 import type {
   Language,
-  ProviderAccountInput,
   ProviderAccountRecord,
-  ProviderAuth,
   ProviderNetworkSnapshot,
   ProxyPolicyMode,
   ProxyProfileInput,
@@ -24,7 +25,7 @@ import "./provider-manager.css";
 const api = window.codexWebLauncher;
 
 type ProviderLocale = "en" | "zh-TW";
-type ManagerView = "accounts" | "proxies";
+type ManagerView = "console" | "routing" | "proxies";
 
 function providerLocale(language: Language | null): ProviderLocale {
   return language === "zh-TW" || language === "zh-CN" ? "zh-TW" : "en";
@@ -34,10 +35,16 @@ const COPY = {
   en: {
     navigationGroup: "Connections",
     navigationLabel: "Providers",
-    title: "Provider Hub",
-    subtitle: "CPA-style multi-account login, routing, health, and fallback management.",
+    title: "Providers",
+    subtitle: "Connect provider accounts, verify each connection, and decide how their traffic is routed — one console, no separate server.",
+    console: "Connections",
+    consoleBody: "Accounts, credentials and connection health per provider.",
+    routing: "Routing",
+    routingBody: "Per-provider and per-account proxy routes, defaults and archive.",
     accounts: "Provider accounts",
-    proxies: "Proxy manager",
+    proxies: "Proxies",
+    connectedCount: "connected",
+    inAppManaged: "Managed inside Coding Tools",
     addAccount: "Add account",
     addProxy: "Add proxy",
     edit: "Edit",
@@ -130,10 +137,16 @@ const COPY = {
   "zh-TW": {
     navigationGroup: "連線管理",
     navigationLabel: "供應商",
-    title: "供應商中心",
-    subtitle: "以 CPA 式介面管理多帳戶登入、路由、健康狀態及後備切換。",
+    title: "供應商",
+    subtitle: "在同一個主控台連接供應商帳戶、驗證每條連線並決定流量路由——無需另外啟動伺服器。",
+    console: "連線",
+    consoleBody: "每個供應商的帳戶、憑證與連線健康狀態。",
+    routing: "路由",
+    routingBody: "供應商及帳戶層級的代理路由、預設與封存。",
     accounts: "供應商帳戶",
-    proxies: "代理伺服器管理",
+    proxies: "代理",
+    connectedCount: "已連線",
+    inAppManaged: "由 Coding Tools 內部管理",
     addAccount: "新增帳戶",
     addProxy: "新增代理",
     edit: "編輯",
@@ -239,17 +252,6 @@ const TRAFFIC_SCOPES: ProxyScope[] = [
   "update",
 ];
 
-interface AccountDraft {
-  id?: string;
-  providerId: string;
-  label: string;
-  identity: string;
-  auth: ProviderAuth;
-  apiKey: string;
-  baseUrl: string;
-  models: string;
-}
-
 interface ProxyDraft {
   id?: string;
   name: string;
@@ -260,18 +262,6 @@ interface ProxyDraft {
   password: string;
   bypass: string;
   scopes: ProxyScope[];
-}
-
-function defaultAccountDraft(provider: ProviderDefinition = PROVIDER_CATALOG[0]): AccountDraft {
-  return {
-    providerId: provider.id,
-    label: provider.name,
-    identity: "",
-    auth: provider.auth,
-    apiKey: "",
-    baseUrl: provider.baseUrl ?? "",
-    models: provider.models.join(", "),
-  };
 }
 
 function defaultProxyDraft(): ProxyDraft {
@@ -320,8 +310,14 @@ export function ProviderHubIntegration({ children }: { children: ReactNode }) {
   const [workspaceHost, setWorkspaceHost] = useState<HTMLElement | null>(null);
   const [open, setOpen] = useState(false);
   const [accountCount, setAccountCount] = useState(0);
+  const [connectedCount, setConnectedCount] = useState(0);
   const [locale, setLocale] = useState<ProviderLocale>("en");
   const copy = COPY[locale];
+
+  const handleAccountCount = useCallback((total: number, connected: number) => {
+    setAccountCount(total);
+    setConnectedCount(connected);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -378,18 +374,24 @@ export function ProviderHubIntegration({ children }: { children: ReactNode }) {
       {navigationHost ? createPortal(
         <section className="sidebar-group provider-sidebar-group">
           <h2>{copy.navigationGroup}</h2>
-          <div>
-            <button
-              aria-current={open ? "page" : undefined}
-              className={`sidebar-item provider-sidebar-item${open ? " is-active" : ""}`}
-              onClick={() => setOpen(true)}
-              type="button"
-            >
-              <span aria-hidden="true" className="provider-nav-icon"><i /><i /><i /></span>
-              <span>{copy.navigationLabel}</span>
-              {accountCount > 0 ? <em className="provider-nav-count">{accountCount}</em> : null}
-            </button>
-          </div>
+          <button
+            aria-current={open ? "page" : undefined}
+            className={`sidebar-item provider-sidebar-item${open ? " is-active" : ""}`}
+            onClick={() => setOpen(true)}
+            title={accountCount > 0 ? `${connectedCount}/${accountCount} ${copy.connectedCount}` : undefined}
+            type="button"
+          >
+            <Icon name="providers" />
+            <span>{copy.navigationLabel}</span>
+            {accountCount > 0 ? (
+              <i className="sidebar-item-badge">
+                <i
+                  aria-hidden="true"
+                  className={`action-dot ${connectedCount > 0 ? "is-success" : "is-optional"}`}
+                />
+              </i>
+            ) : null}
+          </button>
         </section>,
         navigationHost,
       ) : null}
@@ -398,7 +400,7 @@ export function ProviderHubIntegration({ children }: { children: ReactNode }) {
           <ProviderManagerSurface
             copy={copy}
             locale={locale}
-            onAccountCount={setAccountCount}
+            onAccountCount={handleAccountCount}
             onClose={() => setOpen(false)}
             onToggleLocale={changeLocale}
           />
@@ -418,13 +420,12 @@ export function ProviderManagerSurface({
 }: {
   copy: typeof COPY[ProviderLocale];
   locale: ProviderLocale;
-  onAccountCount: (count: number) => void;
+  onAccountCount: (count: number, connected: number) => void;
   onClose: () => void;
   onToggleLocale: () => void;
 }) {
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot | null>(null);
-  const [view, setView] = useState<ManagerView>("accounts");
-  const [accountDraft, setAccountDraft] = useState<AccountDraft | null>(null);
+  const [view, setView] = useState<ManagerView>("console");
   const [proxyDraft, setProxyDraft] = useState<ProxyDraft | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -454,7 +455,15 @@ export function ProviderManagerSurface({
     [snapshot],
   );
 
-  useEffect(() => onAccountCount(activeAccounts.length), [activeAccounts.length, onAccountCount]);
+  const connectedAccounts = useMemo(
+    () => activeAccounts.filter((account) => account.enabled && account.status === "connected").length,
+    [activeAccounts],
+  );
+
+  useEffect(
+    () => onAccountCount(activeAccounts.length, connectedAccounts),
+    [activeAccounts.length, connectedAccounts, onAccountCount],
+  );
 
   const run = async <T,>(key: string, task: () => Promise<T>, success?: string) => {
     setBusy(key);
@@ -475,79 +484,8 @@ export function ProviderManagerSurface({
     }
   };
 
-  const openNewAccount = (provider: ProviderDefinition) => {
-    setAccountDraft(defaultAccountDraft(provider));
-    setError(null);
-    setNotice(null);
-  };
-
-  const openAccountEdit = (account: ProviderAccountRecord) => {
-    setAccountDraft({
-      id: account.id,
-      providerId: account.providerId,
-      label: account.label,
-      identity: account.identity ?? "",
-      auth: account.auth,
-      apiKey: "",
-      baseUrl: "",
-      models: account.models.join(", "),
-    });
-  };
-
-  const submitAccount = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!api || !accountDraft) return;
-    const secret = Object.fromEntries(Object.entries({
-      apiKey: accountDraft.apiKey.trim(),
-      baseUrl: accountDraft.baseUrl.trim(),
-    }).filter(([, value]) => value));
-    const input: ProviderAccountInput = {
-      id: accountDraft.id,
-      providerId: accountDraft.providerId,
-      label: accountDraft.label,
-      identity: accountDraft.identity,
-      auth: accountDraft.auth,
-      models: accountDraft.models.split(",").map((model) => model.trim()).filter(Boolean),
-      ...(Object.keys(secret).length > 0 ? { secret } : {}),
-    };
-    const result = await run("account-save", () => api.saveProviderAccount(input), copy.accountSaved);
-    if (result) setAccountDraft(null);
-  };
-
-  const connectAccount = async (account: ProviderAccountRecord) => {
-    if (!api) return;
-    setBusy(`login:${account.id}`);
-    setError(null);
-    setNotice(null);
-    try {
-      if (account.providerId === "codex-oauth" || account.providerId === "chatgpt-web") {
-        const browser = await api.openLogin();
-        if (browser.authenticated) {
-          setSnapshot(await api.saveProviderAccount({ ...account, status: "connected" }));
-          setNotice(copy.accountSaved);
-        } else {
-          setNotice(copy.loginOpened);
-        }
-      } else {
-        await api.beginProviderLogin(account.id);
-        setNotice(copy.loginOpened);
-      }
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const confirmConnected = (account: ProviderAccountRecord) => {
-    if (!api) return;
-    void run(
-      `confirm:${account.id}`,
-      () => api.saveProviderAccount({ ...account, status: "connected" }),
-      copy.accountSaved,
-    );
-  };
-
+  // Account creation, credentials, login and connection tests live in the SaaS
+  // console (ProviderCenterSurface). This surface only keeps the routing layer.
   const archiveAccount = (account: ProviderAccountRecord) => {
     if (!api || !window.confirm(copy.archiveAccountConfirm)) return;
     void run(
@@ -643,12 +581,20 @@ export function ProviderManagerSurface({
   }
 
   return (
-    <section className="provider-manager" data-locale={locale}>
-      <header className="provider-manager-header">
-        <div>
-          <span className="provider-manager-kicker">CONNECTION CONTROL</span>
+    <section className="provider-manager" data-locale={locale} data-view={view}>
+      <header className="provider-manager-header is-compact">
+        <div className="provider-manager-heading">
+          <span className="provider-manager-kicker">{copy.navigationGroup.toUpperCase()}</span>
           <h1>{copy.title}</h1>
           <p>{copy.subtitle}</p>
+        </div>
+        <div className="provider-manager-summary" aria-live="polite">
+          <span className={`provider-summary-pill${connectedAccounts > 0 ? " is-success" : ""}`}>
+            <i aria-hidden="true" />
+            {connectedAccounts}/{activeAccounts.length} {copy.connectedCount}
+          </span>
+          <span className="provider-summary-pill">{activeProfiles.length} {copy.proxies}</span>
+          <span className="provider-summary-pill is-muted">{copy.inAppManaged}</span>
         </div>
         <div className="provider-manager-header-actions">
           <button className="provider-language-button" onClick={onToggleLocale} type="button">
@@ -659,24 +605,23 @@ export function ProviderManagerSurface({
       </header>
 
       <div className="provider-manager-tabs" role="tablist">
-        <button
-          aria-selected={view === "accounts"}
-          className={view === "accounts" ? "is-active" : ""}
-          onClick={() => setView("accounts")}
-          role="tab"
-          type="button"
-        >
-          {copy.accounts}<em>{activeAccounts.length}</em>
-        </button>
-        <button
-          aria-selected={view === "proxies"}
-          className={view === "proxies" ? "is-active" : ""}
-          onClick={() => setView("proxies")}
-          role="tab"
-          type="button"
-        >
-          {copy.proxies}<em>{activeProfiles.length}</em>
-        </button>
+        {([
+          ["console", copy.console, copy.consoleBody, activeAccounts.length],
+          ["routing", copy.routing, copy.routingBody, PROVIDER_CATALOG.length],
+          ["proxies", copy.proxies, copy.globalRouting, activeProfiles.length],
+        ] as Array<[ManagerView, string, string, number]>).map(([id, label, body, count]) => (
+          <button
+            aria-selected={view === id}
+            className={view === id ? "is-active" : ""}
+            key={id}
+            onClick={() => setView(id)}
+            role="tab"
+            title={body}
+            type="button"
+          >
+            {label}<em>{count}</em>
+          </button>
+        ))}
       </div>
 
       {error || notice ? (
@@ -685,28 +630,35 @@ export function ProviderManagerSurface({
         </div>
       ) : null}
 
-      <div className="provider-manager-body">
-        {view === "accounts" ? (
+      <div className={`provider-manager-body${view === "console" ? " is-console" : ""}`}>
+        {view === "console" ? (
+          <ProviderCenterSurface
+            language={locale === "zh-TW" ? "zh-TW" : "en"}
+            setError={setError}
+          />
+        ) : null}
+        {view === "routing" ? (
           <div className="provider-grid">
             {PROVIDER_CATALOG.map((provider) => {
               const accounts = activeAccounts.filter((account) => account.providerId === provider.id);
               const providerPolicy = snapshot.routing.providers.find((item) => item.providerId === provider.id);
+              const connected = accounts.filter((account) => account.enabled && account.status === "connected").length;
               return (
-                <article className="provider-card" key={provider.id}>
+                <article className="provider-card" data-connected={connected > 0} key={provider.id}>
                   <header className="provider-card-header">
                     <div className="provider-brand-mark" aria-hidden="true">
                       {provider.name.slice(0, 2).toUpperCase()}
                     </div>
                     <div>
                       <h2>{provider.name}</h2>
-                      <p>{provider.category.replaceAll("_", " ")} · {accounts.length} {copy.accountCount}</p>
+                      <p>{provider.category.replaceAll("_", " ")} · {accounts.length} {copy.accountCount} · {connected} {copy.connectedCount}</p>
                     </div>
                     <button
                       className="provider-add-account"
-                      onClick={() => openNewAccount(provider)}
+                      onClick={() => setView("console")}
                       type="button"
                     >
-                      + {copy.addAccount}
+                      {copy.console} →
                     </button>
                   </header>
 
@@ -729,7 +681,7 @@ export function ProviderManagerSurface({
 
                   <div className="provider-account-list">
                     {accounts.length === 0 ? (
-                      <button className="provider-empty-account" onClick={() => openNewAccount(provider)} type="button">
+                      <button className="provider-empty-account" onClick={() => setView("console")} type="button">
                         <strong>{copy.noAccounts}</strong>
                         <span>+ {copy.addFirstAccount}</span>
                       </button>
@@ -774,25 +726,7 @@ export function ProviderManagerSurface({
                           </label>
 
                           <div className="provider-account-actions">
-                            <button onClick={() => openAccountEdit(account)} type="button">{copy.edit}</button>
-                            {(account.auth === "oauth" || account.auth === "browser_session") ? (
-                              <button
-                                disabled={busy === `login:${account.id}`}
-                                onClick={() => void connectAccount(account)}
-                                type="button"
-                              >
-                                {copy.connect}
-                              </button>
-                            ) : null}
-                            {account.status !== "connected" ? (
-                              <button
-                                disabled={busy === `confirm:${account.id}`}
-                                onClick={() => confirmConnected(account)}
-                                type="button"
-                              >
-                                {copy.confirmConnected}
-                              </button>
-                            ) : null}
+                            <button onClick={() => setView("console")} type="button">{copy.edit}</button>
                             {!account.isDefault && account.status === "connected" && account.enabled ? (
                               <button
                                 disabled={busy === `default:${account.id}`}
@@ -826,7 +760,8 @@ export function ProviderManagerSurface({
               );
             })}
           </div>
-        ) : (
+        ) : null}
+        {view === "proxies" ? (
           <div className="proxy-manager-panel">
             <section className="global-proxy-card">
               <div>
@@ -914,97 +849,8 @@ export function ProviderManagerSurface({
               </button>
             </div>
           </div>
-        )}
+        ) : null}
       </div>
-
-      {accountDraft ? (
-        <div className="provider-dialog-backdrop" role="presentation">
-          <form className="provider-dialog" onSubmit={(event) => void submitAccount(event)}>
-            <header>
-              <h2>{accountDraft.id ? copy.updateAccount : copy.addAccount}</h2>
-              <button onClick={() => setAccountDraft(null)} type="button">×</button>
-            </header>
-            <label>
-              <span>{copy.provider}</span>
-              <select
-                disabled={Boolean(accountDraft.id)}
-                onChange={(event) => {
-                  const provider = PROVIDER_CATALOG.find((item) => item.id === event.target.value) ?? PROVIDER_CATALOG[0];
-                  setAccountDraft(defaultAccountDraft(provider));
-                }}
-                value={accountDraft.providerId}
-              >
-                {PROVIDER_CATALOG.map((provider) => (
-                  <option key={provider.id} value={provider.id}>{provider.name}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>{copy.accountLabel}</span>
-              <input
-                maxLength={160}
-                onChange={(event) => setAccountDraft({ ...accountDraft, label: event.target.value })}
-                required
-                value={accountDraft.label}
-              />
-            </label>
-            <label>
-              <span>{copy.accountIdentity}</span>
-              <input
-                maxLength={320}
-                onChange={(event) => setAccountDraft({ ...accountDraft, identity: event.target.value })}
-                value={accountDraft.identity}
-              />
-            </label>
-            <label>
-              <span>{copy.authentication}</span>
-              <select
-                onChange={(event) => setAccountDraft({ ...accountDraft, auth: event.target.value as ProviderAuth })}
-                value={accountDraft.auth}
-              >
-                <option value="oauth">{copy.oauth}</option>
-                <option value="api_key">{copy.api_key}</option>
-                <option value="browser_session">{copy.browser_session}</option>
-                <option value="local_proxy">{copy.local_proxy}</option>
-              </select>
-            </label>
-            {(accountDraft.auth === "api_key" || accountDraft.auth === "local_proxy") ? (
-              <>
-                <label>
-                  <span>{copy.apiKey}</span>
-                  <input
-                    autoComplete="off"
-                    onChange={(event) => setAccountDraft({ ...accountDraft, apiKey: event.target.value })}
-                    type="password"
-                    value={accountDraft.apiKey}
-                  />
-                </label>
-                <label>
-                  <span>{copy.baseUrl}</span>
-                  <input
-                    onChange={(event) => setAccountDraft({ ...accountDraft, baseUrl: event.target.value })}
-                    value={accountDraft.baseUrl}
-                  />
-                </label>
-              </>
-            ) : null}
-            <label>
-              <span>{copy.modelList}</span>
-              <input
-                onChange={(event) => setAccountDraft({ ...accountDraft, models: event.target.value })}
-                value={accountDraft.models}
-              />
-            </label>
-            <p className="provider-secret-notice">{copy.secretNotice}</p>
-            <footer>
-              <button onClick={() => setAccountDraft(null)} type="button">{copy.cancel}</button>
-              <button className="is-primary" disabled={busy === "account-save"} type="submit">
-                {accountDraft.id ? copy.updateAccount : copy.saveAccount}
-              </button>
-            </footer>
-          </form>
-        </div>
-      ) : null}
 
       {proxyDraft ? (
         <div className="provider-dialog-backdrop" role="presentation">

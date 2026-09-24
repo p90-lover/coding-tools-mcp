@@ -66,13 +66,19 @@ function createCodingToolsAppsHost({
       version: 1,
       host: "coding-tools-apps",
       transport: "in-process",
+      launchOrder: typeof registry.launchOrder === "function"
+        ? registry.launchOrder().filter((id) => MODULE_IDS.includes(id))
+        : MODULE_IDS.filter((id) => registry.has(id)),
       modules: MODULE_IDS.filter((id) => registry.has(id)).map((id) => {
         const snap = registry.snapshot(id);
         return {
           id,
           name: snap?.name || id,
+          kind: snap?.kind || "managed-service",
           transport: snap?.transport || "in-process",
           legacyLoopback: snap?.legacyLoopback || null,
+          launch: snap?.launch || null,
+          visual: snap?.visual || null,
           operations: registry.operations(id),
         };
       }),

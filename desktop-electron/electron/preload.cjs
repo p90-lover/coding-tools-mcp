@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   copyManualPrompt: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-copy", tabId),
   confirmManualSent: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-sent", tabId),
   openLogin: () => ipcRenderer.invoke("launcher:browser-login"),
+  refreshAuthentication: () => ipcRenderer.invoke("launcher:browser-refresh-auth"),
   openPasskeyLogin: () => ipcRenderer.invoke("launcher:browser-passkey-login"),
   continuePasskeyLogin: () => ipcRenderer.invoke("launcher:browser-passkey-login-continue"),
   logoutChatGpt: () => ipcRenderer.invoke("launcher:browser-logout"),
@@ -79,6 +80,9 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   syncCodexRouter: () => ipcRenderer.invoke("launcher:codex-router-sync"),
   commandCodeProxyPlan: (input) => ipcRenderer.invoke("launcher:commandcode-proxy-plan", input),
   applyCommandCodeProxyPlan: (input) => ipcRenderer.invoke("launcher:commandcode-proxy-apply", input),
+  appsLaunchSnapshot: () => ipcRenderer.invoke("launcher:apps-launch-snapshot"),
+  runAppsLaunch: (input) => ipcRenderer.invoke("launcher:apps-launch-run", input),
+  configureAppLaunch: (moduleId, input) => ipcRenderer.invoke("launcher:apps-launch-configure", moduleId, input),
   managedBootstrapSnapshot: () => ipcRenderer.invoke("launcher:managed-bootstrap-snapshot"),
   reconcileManagedBootstrap: (input) => ipcRenderer.invoke("launcher:managed-bootstrap-reconcile", input),
   upstreamToolsSnapshot: () => ipcRenderer.invoke("launcher:upstream-tools-snapshot"),
@@ -155,6 +159,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onUpdateState: (listener) => subscription("launcher:update-state", listener),
   onExternalServicesChanged: (listener) => subscription("launcher:external-services-changed", listener),
   onManagedBootstrapChanged: (listener) => subscription("launcher:managed-bootstrap-changed", listener),
+  onAppsLaunchChanged: (listener) => subscription("launcher:apps-launch-changed", listener),
   onProviderNetworkChanged: (listener) => subscription("launcher:provider-network-changed", listener),
 });
 

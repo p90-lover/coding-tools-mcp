@@ -92,3 +92,49 @@
   cursor: not-allowed;
   opacity: 0.45;
 }
+
+.commandcode-host-surface {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding-top: var(--height-titlebar);
+  overflow: hidden;
+  background: #07110c;
+}
+
+.commandcode-hostbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgb(86 255 160 / 16%);
+  color: #e8fff1;
+}
+
+.commandcode-hostbar strong {
+  font-size: 13px;
+}
+
+.commandcode-host-status {
+  padding: 3px 8px;
+  border: 1px solid rgb(86 255 160 / 22%);
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.commandcode-host-status.status-ready {
+  color: #62e4a4;
+}
+
+.commandcode-host-surface .commandcode-proxy-surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: 0;
+  border-radius: 0;
+}

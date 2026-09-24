@@ -94,7 +94,7 @@ const PASEO_FIVE_STACK = Object.freeze({
 });
 const ANNEAL_ACT = Object.freeze({
   preview: "preview",
-  activity: "preview",
+  activity: "activity",
   create: "create",
   startTask: "start",
   "task-start": "start",
@@ -179,7 +179,7 @@ function createFixtureHost(overrides = {}) {
     },
     actUpstream: overrides.actUpstream || (async (input) => {
       calls.push(["act", input.toolId, input.op]);
-      return { ok: true, toolId: input.toolId, op: input.op, echoed: input };
+      return { ok: true, toolId: input.toolId, op: input.op, echoed: input, body: input.op === "board" ? [{ id: "task-1" }] : null };
     }),
     getFiveStack: overrides.getFiveStack || (() => ({
       ok: true,

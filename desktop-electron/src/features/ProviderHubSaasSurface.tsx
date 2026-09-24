@@ -14,12 +14,17 @@ import type {
   ProviderExecutionWorkload,
   ProviderNetworkSnapshot,
 } from "../types";
+import { ProviderConnectionCard } from "./ProviderConnectionCard";
 import "./provider-hub-saas.css";
 
 interface SurfaceProps {
   language: Language;
   setError: (error: string | null) => void;
+  focus?: "oauth" | "api";
 }
+
+const RUNTIME_OAUTH_IDS = new Set(["gemini-oauth", "claude-oauth", "chatgpt-web"]);
+const RUNTIME_API_CATEGORIES = new Set(["api_key", "custom"]);
 
 interface WorkspaceOption {
   id: string;
@@ -49,6 +54,10 @@ interface AccountDraft {
   isDefault: boolean;
   modelsText: string;
   loginAdapterId: string;
+  chatPath: string;
+  modelsPath: string;
+  authHeaderName: string;
+  extraHeadersText: string;
 }
 
 interface ProviderPresentation {
@@ -201,9 +210,16 @@ const PROVIDER_PRESENTATION: Readonly<Record<string, ProviderPresentation>> = {
   "custom-openai-compatible": {
     english: "Custom OpenAI Compatible",
     traditionalChinese: "自訂 OpenAI-Compatible",
-    descriptionEnglish: "Register another OpenAI-compatible endpoint as a managed provider.",
-    descriptionTraditionalChinese: "將其他 OpenAI-compatible endpoint 註冊為受管理供應商。",
+    descriptionEnglish: "Register another OpenAI-compatible endpoint as a managed provider. Default chat path is /chat/completions.",
+    descriptionTraditionalChinese: "將其他 OpenAI-compatible endpoint 註冊為受管理供應商。預設 chat path 為 /chat/completions。",
     aliases: ["custom endpoint", "openai compatible", "custom api"],
+  },
+  "custom-anthropic-compatible": {
+    english: "Custom Anthropic Compatible",
+    traditionalChinese: "自訂 Anthropic-Compatible",
+    descriptionEnglish: "Register a Claude Messages-format endpoint. Default path is /v1/messages with x-api-key and anthropic-version.",
+    descriptionTraditionalChinese: "註冊 Claude Messages 格式端點。預設路徑為 /v1/messages，並使用 x-api-key 與 anthropic-version。",
+    aliases: ["custom anthropic", "claude compatible", "messages api"],
   },
 };
 
@@ -344,8 +360,20 @@ function capabilityLabel(language: Language, capability: ProviderDefinition["cap
   return text(language, english, traditionalChinese);
 }
 
+function formatDefaults(provider: ProviderDefinition) {
+  const extra = provider.requestDefaults?.extraHeaders;
+  return {
+    chatPath: provider.requestDefaults?.chatPath ?? "",
+    modelsPath: provider.requestDefaults?.modelsPath ?? provider.modelsEndpoint ?? "",
+    authHeaderName: provider.requestDefaults?.authHeaderName
+      ?? (provider.protocol === "anthropic_messages" ? "x-api-key" : "Authorization"),
+    extraHeadersText: extra ? JSON.stringify(extra, null, 2) : "",
+  };
+}
+
 function emptyDraft(providerId = PROVIDER_CATALOG[0].id): AccountDraft {
   const provider = providerDefinition(providerId);
+  const format = formatDefaults(provider);
   return {
     providerId: provider.id,
     label: provider.name,
@@ -357,24 +385,31 @@ function emptyDraft(providerId = PROVIDER_CATALOG[0].id): AccountDraft {
     isDefault: false,
     modelsText: provider.models.join("\n"),
     loginAdapterId: provider.loginAdapters?.[0]?.id ?? "",
+    ...format,
   };
 }
 
 function accountDraft(account: ProviderAccountRecord): AccountDraft {
+  const provider = providerDefinition(account.providerId);
+  const format = formatDefaults(provider);
   return {
     id: account.id,
     providerId: account.providerId,
     label: account.label,
     identity: account.identity ?? "",
-    endpoint: account.endpoint ?? providerDefinition(account.providerId).baseUrl ?? "",
+    endpoint: account.endpoint ?? provider.baseUrl ?? "",
     auth: account.auth,
     status: account.status,
     enabled: account.enabled,
     isDefault: account.isDefault,
     modelsText: account.models.join("\n"),
     loginAdapterId: account.loginAdapterId
-      ?? providerDefinition(account.providerId).loginAdapters?.[0]?.id
+      ?? provider.loginAdapters?.[0]?.id
       ?? "",
+    chatPath: account.chatPath ?? format.chatPath,
+    modelsPath: account.modelsPath ?? format.modelsPath,
+    authHeaderName: account.authHeaderName ?? format.authHeaderName,
+    extraHeadersText: account.extraHeaders ?? format.extraHeadersText,
   };
 }
 
@@ -436,14 +471,18 @@ function normalizeSearch(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
-export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
+export function ProviderCenterSurface({ language, setError, focus }: SurfaceProps) {
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot>(EMPTY_SNAPSHOT);
   const [externalServices, setExternalServices] = useState<ExternalServicesSnapshot>(EMPTY_EXTERNAL_SERVICES);
   const [providerSearch, setProviderSearch] = useState("");
   const [providerCategory, setProviderCategory] = useState<ProviderCategoryFilter>("all");
-  const [selectedProviderId, setSelectedProviderId] = useState(PROVIDER_CATALOG[0].id);
+  const [selectedProviderId, setSelectedProviderId] = useState(
+    focus === "oauth" ? "claude-oauth" : focus === "api" ? "custom-openai-compatible" : PROVIDER_CATALOG[0].id,
+  );
   const [selectedAccountId, setSelectedAccountId] = useState("");
-  const [draft, setDraft] = useState<AccountDraft>(() => emptyDraft());
+  const [draft, setDraft] = useState<AccountDraft>(() => (
+    emptyDraft(focus === "oauth" ? "claude-oauth" : focus === "api" ? "custom-openai-compatible" : PROVIDER_CATALOG[0].id)
+  ));
   const [secret, setSecret] = useState("");
   const [controlCredential, setControlCredential] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
@@ -504,8 +543,18 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         return text(language, "Provider endpoint is invalid.", "供應商端點無效。");
       }
     }
+    if (draft.extraHeadersText.trim()) {
+      try {
+        const parsed = JSON.parse(draft.extraHeadersText);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return text(language, "Extra headers must be a JSON object.", "額外標頭必須是 JSON 物件。");
+        }
+      } catch {
+        return text(language, "Extra headers JSON is invalid.", "額外標頭 JSON 無效。");
+      }
+    }
     return "";
-  }, [draft.endpoint, draft.label, draft.providerId, language]);
+  }, [draft.endpoint, draft.extraHeadersText, draft.label, draft.providerId, language]);
 
   const routingRequirements = useMemo(() => {
     if (!selectedAccount) return text(language, "Save an account before configuring task routing.", "請先儲存帳戶，再設定任務路由。");
@@ -529,7 +578,9 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const filteredProviders = useMemo(() => {
     const query = normalizeSearch(providerSearch);
     return PROVIDER_CATALOG.filter((provider) => {
-      if (providerCategory !== "all" && provider.category !== providerCategory) return false;
+      if (focus === "oauth" && !RUNTIME_OAUTH_IDS.has(provider.id)) return false;
+      if (focus === "api" && !RUNTIME_API_CATEGORIES.has(provider.category)) return false;
+      if (!focus && providerCategory !== "all" && provider.category !== providerCategory) return false;
       if (!query) return true;
       const providerAccounts = activeAccounts.filter((account) => account.providerId === provider.id);
       const info = presentation(provider);
@@ -554,14 +605,19 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       if (left.priority !== right.priority) return right.priority - left.priority;
       return providerName(language, left).localeCompare(providerName(language, right));
     });
-  }, [activeAccounts, language, providerCategory, providerSearch]);
+  }, [activeAccounts, focus, language, providerCategory, providerSearch]);
 
   const adoptSnapshot = useCallback((next: ProviderNetworkSnapshot, preferredId?: string) => {
     setSnapshot(next);
+    const allowed = (account: ProviderAccountRecord) => {
+      if (focus === "oauth") return RUNTIME_OAUTH_IDS.has(account.providerId);
+      if (focus === "api") return RUNTIME_API_CATEGORIES.has(providerDefinition(account.providerId).category);
+      return true;
+    };
     const currentId = preferredId ?? selectedAccountId;
-    const selected = next.accounts.find((account) => account.id === currentId && !account.archivedAt)
-      ?? next.accounts.find((account) => account.isDefault && !account.archivedAt)
-      ?? next.accounts.find((account) => !account.archivedAt);
+    const selected = next.accounts.find((account) => account.id === currentId && !account.archivedAt && allowed(account))
+      ?? next.accounts.find((account) => account.isDefault && !account.archivedAt && allowed(account))
+      ?? next.accounts.find((account) => !account.archivedAt && allowed(account));
     if (selected) {
       setSelectedProviderId(selected.providerId);
       setSelectedAccountId(selected.id);
@@ -570,11 +626,17 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       setSecret("");
       return;
     }
+    const fallbackId = focus === "oauth"
+      ? "claude-oauth"
+      : focus === "api"
+        ? "custom-openai-compatible"
+        : selectedProviderId;
     setSelectedAccountId("");
-    setDraft(emptyDraft(selectedProviderId));
+    setSelectedProviderId(fallbackId);
+    setDraft(emptyDraft(fallbackId));
     setSelectedModel("");
     setSecret("");
-  }, [selectedAccountId, selectedProviderId]);
+  }, [focus, selectedAccountId, selectedProviderId]);
 
   const refreshProviderHub = useCallback(async () => {
     const api = window.codexWebLauncher;
@@ -629,6 +691,19 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       unsubscribeServices();
     };
   }, [adoptSnapshot, language, setError]);
+
+  useEffect(() => {
+    if (focus === "oauth") {
+      setProviderCategory("oauth");
+      setSelectedProviderId((current) => (RUNTIME_OAUTH_IDS.has(current) ? current : "claude-oauth"));
+    } else if (focus === "api") {
+      setProviderCategory("custom");
+      setSelectedProviderId((current) => {
+        const category = providerDefinition(current).category;
+        return RUNTIME_API_CATEGORIES.has(category) ? current : "custom-openai-compatible";
+      });
+    }
+  }, [focus]);
 
   useEffect(() => {
     const api = window.codingTools;
@@ -725,6 +800,10 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       isDefault: draft.isDefault,
       models,
       loginAdapterId: adapter?.id,
+      chatPath: draft.chatPath.trim() || undefined,
+      modelsPath: draft.modelsPath.trim() || undefined,
+      authHeaderName: draft.authHeaderName.trim() || undefined,
+      extraHeaders: draft.extraHeadersText.trim() || undefined,
       ...(secret.trim()
         ? {
             secret: adapter?.kind === "commandcode_oauth"
@@ -975,12 +1054,28 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       <header className="provider-console-header">
         <div className="provider-console-title">
           <span className="provider-console-kicker">{text(language, "CONNECTION CONTROL", "連線控制")}</span>
-          <h1>{text(language, "Provider Hub", "供應商樞紐")}</h1>
-          <p>{text(
-            language,
-            "Search every provider, manage multiple accounts, then route one approved account into Paseo or Anneal.",
-            "搜尋所有供應商、管理多個帳戶，再將一個已批准帳戶路由至 Paseo 或 Anneal。",
-          )}</p>
+          <h1>{focus === "oauth"
+            ? text(language, "Runtime OAuth", "執行環境 OAuth")
+            : focus === "api"
+              ? text(language, "Runtime API models", "執行環境 API 模型")
+              : text(language, "Provider Hub", "供應商樞紐")}</h1>
+          <p>{focus === "oauth"
+            ? text(
+              language,
+              "Sign in with Gemini, Claude, or ChatGPT. Multiple accounts stay on this runtime tab, using the same CPA-style login adapters.",
+              "使用 Gemini、Claude 或 ChatGPT 登入。多個帳戶會留在這個執行環境分頁，並沿用 CPA 風格的登入來源。",
+            )
+            : focus === "api"
+              ? text(
+                language,
+                "Add multiple API accounts. Custom OpenAI and Anthropic formats include default base URLs, chat paths, model lists, and headers you can override.",
+                "新增多個 API 帳戶。自訂 OpenAI 與 Anthropic 格式包含可覆寫的預設 base URL、chat path、模型清單與標頭。",
+              )
+              : text(
+                language,
+                "Search every provider, manage multiple accounts, then route one approved account into Paseo or Anneal.",
+                "搜尋所有供應商、管理多個帳戶，再將一個已批准帳戶路由至 Paseo 或 Anneal。",
+              )}</p>
         </div>
         <div className="provider-console-metrics" aria-label={text(language, "Provider Hub summary", "供應商樞紐摘要")}>
           <article><strong>{PROVIDER_CATALOG.length}</strong><span>{text(language, "Providers", "供應商")}</span></article>
@@ -1040,6 +1135,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
             />
           </label>
 
+          {focus ? null : (
           <div className="provider-filter-chips" role="tablist" aria-label={text(language, "Provider categories", "供應商分類")}>
             {PROVIDER_FILTERS.map((filter) => (
               <button
@@ -1054,6 +1150,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
               </button>
             ))}
           </div>
+          )}
 
           <div className="provider-directory-list">
             {filteredProviders.map((provider) => {
@@ -1185,6 +1282,53 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                 </button>
               </header>
 
+              <ProviderConnectionCard
+                account={selectedAccount ?? null}
+                authText={authLabel(language, draft.auth)}
+                busy={busy}
+                canLogin={supportsProviderLogin(selectedProvider) && !accountValidation}
+                canTest={Boolean(selectedAccount && (
+                  selectedAccount.loginAdapterId?.startsWith("cpa-")
+                  || selectedAccount.loginAdapterId === "commandcode-oauth"
+                ))}
+                credentialSource={selectedAccount?.credentialSource ?? null}
+                enabled={draft.enabled}
+                endpoint={draft.endpoint}
+                endpointEditable
+                endpointPlaceholder={selectedProvider.baseUrl ?? "https://…"}
+                hasCredential={Boolean(selectedAccount?.hasCredential) || secret.trim().length > 0}
+                language={language}
+                loginLabel={selectedLoginAdapter?.kind === "commandcode_oauth"
+                  ? text(language, "Login with CommandCode", "使用 CommandCode 登入")
+                  : selectedLoginAdapter?.kind === "cpa_auth_file"
+                    ? text(language, "Import CPA account", "匯入 CPA 帳戶")
+                    : selectedLoginAdapter?.kind === "cpa_oauth"
+                      ? (selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
+                          ? text(language, "Refresh session", "更新工作階段")
+                          : text(language, "Login with CPA", "使用 CPA 登入"))
+                      : selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
+                        ? text(language, "Refresh browser session", "更新瀏覽器工作階段")
+                        : text(language, "Login account", "登入帳戶")}
+                loginSourceText={selectedLoginAdapter ? loginAdapterLabel(language, selectedLoginAdapter) : null}
+                managedByCodingTools={selectedLoginAdapter?.kind === "cpa_oauth"
+                  || selectedLoginAdapter?.kind === "cpa_auth_file"
+                  || selectedLoginAdapter?.kind === "commandcode_oauth"
+                  || selectedProvider.auth === "local_proxy"}
+                modelCount={parseModels(draft.modelsText).length}
+                onEndpointChange={(value) => setDraft((current) => ({ ...current, endpoint: value }))}
+                onLogin={() => void openLogin()}
+                onStatusChange={(value) => setDraft((current) => ({ ...current, status: value }))}
+                onTest={() => void testProviderConnection()}
+                protocolText={selectedProvider.protocol === "anthropic_messages"
+                  ? "Anthropic Messages"
+                  : selectedProvider.protocol === "gemini_native"
+                    ? "Gemini generateContent"
+                    : text(language, "OpenAI compatible", "OpenAI compatible")}
+                status={draft.status}
+                statusOptions={ACCOUNT_STATUSES.map((value) => ({ value, label: statusLabel(language, value) }))}
+                statusText={statusLabel(language, draft.enabled ? draft.status : "disabled")}
+              />
+
               <div className="provider-editor-grid">
                 <label>
                   <span>{text(language, "Provider", "供應商")}</span>
@@ -1201,12 +1345,13 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                         endpoint: provider.baseUrl ?? "",
                         modelsText: provider.models.join("\n"),
                         loginAdapterId: provider.loginAdapters?.[0]?.id ?? "",
+                        ...formatDefaults(provider),
                       }));
                       setSelectedModel(provider.models[0] ?? "");
                     }}
                     value={draft.providerId}
                   >
-                    {PROVIDER_CATALOG.map((provider) => (
+                    {filteredProviders.map((provider) => (
                       <option key={provider.id} value={provider.id}>{providerName(language, provider)}</option>
                     ))}
                   </select>
@@ -1253,15 +1398,6 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   </label>
                 ) : null}
                 <label>
-                  <span>{text(language, "Connection status", "連線狀態")}</span>
-                  <select value={draft.status} onChange={(event) => setDraft((current) => ({
-                    ...current,
-                    status: event.target.value as ProviderAccountStatus,
-                  }))}>
-                    {ACCOUNT_STATUSES.map((status) => <option key={status} value={status}>{statusLabel(language, status)}</option>)}
-                  </select>
-                </label>
-                <label>
                   <span>{text(language, "Task model", "任務模型")}</span>
                   <input
                     list="provider-hub-models"
@@ -1280,14 +1416,43 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                     onChange={(event) => setDraft((current) => ({ ...current, modelsText: event.target.value }))}
                   />
                 </label>
-                <label className="provider-full-row">
-                  <span>{text(language, "Provider / management endpoint", "供應商／管理端點")}</span>
-                  <input
-                    placeholder={selectedProvider.baseUrl ?? "https://…"}
-                    value={draft.endpoint}
-                    onChange={(event) => setDraft((current) => ({ ...current, endpoint: event.target.value }))}
-                  />
-                </label>
+                {selectedProvider.category === "api_key" || selectedProvider.category === "custom" ? (
+                  <>
+                    <label>
+                      <span>{text(language, "Auth header", "驗證標頭")}</span>
+                      <input
+                        placeholder="Authorization"
+                        value={draft.authHeaderName}
+                        onChange={(event) => setDraft((current) => ({ ...current, authHeaderName: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      <span>{text(language, "Chat path", "Chat 路徑")}</span>
+                      <input
+                        placeholder="/chat/completions"
+                        value={draft.chatPath}
+                        onChange={(event) => setDraft((current) => ({ ...current, chatPath: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      <span>{text(language, "Models path", "模型路徑")}</span>
+                      <input
+                        placeholder="/models"
+                        value={draft.modelsPath}
+                        onChange={(event) => setDraft((current) => ({ ...current, modelsPath: event.target.value }))}
+                      />
+                    </label>
+                    <label className="provider-full-row">
+                      <span>{text(language, "Extra headers (JSON object)", "額外標頭（JSON 物件）")}</span>
+                      <textarea
+                        placeholder='{"anthropic-version":"2023-06-01"}'
+                        rows={3}
+                        value={draft.extraHeadersText}
+                        onChange={(event) => setDraft((current) => ({ ...current, extraHeadersText: event.target.value }))}
+                      />
+                    </label>
+                  </>
+                ) : null}
                 <label className="provider-full-row">
                   <span>{selectedLoginAdapter?.kind === "cpa_oauth" || selectedLoginAdapter?.kind === "cpa_auth_file"
                     ? text(language, "CPA / CLIProxyAPI management key (encrypted)", "CPA／CLIProxyAPI 管理金鑰（已加密）")
@@ -1343,36 +1508,11 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   ) : null}
                 </div>
                 <div>
-                  {selectedAccount && (
-                    selectedAccount.loginAdapterId?.startsWith("cpa-")
-                    || selectedAccount.loginAdapterId === "commandcode-oauth"
-                  ) ? (
-                    <button className="provider-secondary-button" disabled={busy !== null} onClick={() => void testProviderConnection()} type="button">
-                      {busy === "provider-probe" ? "…" : text(language, "Test connection", "測試連線")}
-                    </button>
-                  ) : null}
                   {selectedProvider.loginMode === "commandcode_oauth" ? (
                     <button className="provider-secondary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void importCommandCodeSession()} type="button">
                       {busy === "provider-import"
                         ? "…"
                         : text(language, "Import CommandCode CLI session", "匯入 CommandCode CLI 工作階段")}
-                    </button>
-                  ) : null}
-                  {supportsProviderLogin(selectedProvider) ? (
-                    <button className="provider-secondary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void openLogin()} type="button">
-                      {busy === "provider-login"
-                        ? "…"
-                        : selectedLoginAdapter?.kind === "commandcode_oauth"
-                          ? text(language, "Login with CommandCode", "使用 CommandCode 登入")
-                          : selectedLoginAdapter?.kind === "cpa_auth_file"
-                            ? text(language, "Import CPA account", "匯入 CPA 帳戶")
-                            : selectedLoginAdapter?.kind === "cpa_oauth"
-                              ? (selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
-                                  ? text(language, "Refresh session", "更新工作階段")
-                                  : text(language, "Login with CPA", "使用 CPA 登入"))
-                              : selectedAccount?.status === "connected" || selectedAccount?.status === "expired"
-                                ? text(language, "Refresh browser session", "更新瀏覽器工作階段")
-                                : text(language, "Login account", "登入帳戶")}
                     </button>
                   ) : null}
                   <button className="provider-primary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void saveAccount()} type="button">

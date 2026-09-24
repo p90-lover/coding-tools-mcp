@@ -435,6 +435,75 @@ function withAbsoluteNpmCommand(script, npmExecutable) {
   return String(script).replace(/(^|[\s|&;])npm(?:\.cmd)?(?=\s|$)/gi, `$1${exe}`);
 }
 
+function rewritePackageScriptsToLocalNpm(sourceRoot) {
+  const npmPattern = /(?:[A-Za-z]:)?(?:\\|\/)+hostedtoolcache(?:\\|\/)+windows(?:\\|\/)+node(?:\\|\/)\S+?npm\.cmd/gi;
+  const nodePattern = /(?:[A-Za-z]:)?(?:\\|\/)+hostedtoolcache(?:\\|\/)+windows(?:\\|\/)+node(?:\\|\/)\S+?node\.exe/gi;
+  let rewritten = 0;
+  const visit = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.name === "node_modules") {
+        let children;
+        try {
+          children = fs.readdirSync(full, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const child of children) {
+          if (!child.isDirectory() || child.name === ".bin") continue;
+          const nested = path.join(full, child.name);
+          if (child.name.startsWith("@")) {
+            let scoped;
+            try {
+              scoped = fs.readdirSync(nested, { withFileTypes: true });
+            } catch {
+              continue;
+            }
+            for (const pkg of scoped) {
+              if (pkg.isDirectory()) visit(path.join(nested, pkg.name));
+            }
+            continue;
+          }
+          visit(nested);
+        }
+        continue;
+      }
+      if (entry.isDirectory()) {
+        visit(full);
+        continue;
+      }
+      if (entry.name !== "package.json") continue;
+      let pkg;
+      try {
+        pkg = JSON.parse(fs.readFileSync(full, "utf8"));
+      } catch {
+        continue;
+      }
+      if (!pkg || typeof pkg.scripts !== "object" || pkg.scripts === null) continue;
+      let changed = false;
+      for (const [name, value] of Object.entries(pkg.scripts)) {
+        if (typeof value !== "string") continue;
+        const next = value.replace(npmPattern, "npm").replace(nodePattern, "node");
+        if (next === value) continue;
+        pkg.scripts[name] = next;
+        changed = true;
+      }
+      if (!changed) continue;
+      fs.writeFileSync(full, `${JSON.stringify(pkg, null, 2)}\n`);
+      rewritten += 1;
+    }
+  };
+  visit(sourceRoot);
+  return rewritten;
+}
+
 function rewritePackageScriptsToAbsoluteNode(sourceRoot, nodeExecutable, npmExecutable) {
   if (!nodeExecutable || !isFile(nodeExecutable)) return 0;
   let rewritten = 0;
@@ -651,6 +720,7 @@ function maybePrepareDependencies(sourceRoot, spawnSyncProcess, extraScripts = [
     // Drop devDependencies (typescript, eslint, expo tooling) so NSIS stays
     // small enough for the Windows silent-install smoke timeout.
     runNpm(sourceRoot, ["prune", "--omit=dev", "--ignore-scripts"], spawnSyncProcess, "FIVE_STACK_NPM_PRUNE_FAILED");
+    rewritePackageScriptsToLocalNpm(sourceRoot);
     // Do not materialize workspace links into node_modules. NSIS 7-Zip failed on
     // a 4GB Paseo tree (react-native, expo, workerd) after that copy.
   } finally {
@@ -899,6 +969,7 @@ module.exports = {
   resolveNpmCliJs,
   resolveNodeExecutable,
   rewritePackageScriptsToAbsoluteNode,
+  rewritePackageScriptsToLocalNpm,
   withAbsoluteNodeCommand,
   withAbsoluteNpmCommand,
 };

@@ -1,18 +1,23 @@
 .upstream-tool-surface {
   box-sizing: border-box;
-  height: calc(100vh - var(--titlebar-height));
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   overflow: auto;
-  padding: 30px clamp(18px, 3.5vw, 48px) 60px;
+  padding: var(--height-titlebar) clamp(18px, 3.5vw, 48px) 60px;
   background:
     radial-gradient(circle at 85% -10%, rgb(78 129 255 / 13%), transparent 34%),
     var(--color-bg-primary);
 }
 
 .upstream-tool-surface.is-immersive {
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 0;
+  padding: var(--height-titlebar) 0 0;
+  height: 100%;
+  min-height: 0;
 }
 
 .upstream-tool-surface.is-immersive .upstream-tool-heading {
@@ -29,6 +34,7 @@
 .upstream-tool-surface.is-immersive .upstream-tool-toolbar.is-collapsed,
 .upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-section-tabs,
 .upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-native-control,
+.upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-original-function,
 .upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-tool-hint,
 .upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-tool-error {
   display: none;
@@ -47,8 +53,13 @@
   padding: 0 10px;
 }
 
-.upstream-tool-surface.is-immersive .upstream-tool-frame-shell {
+.upstream-tool-surface.is-immersive .upstream-tool-frame-shell,
+.upstream-tool-surface.is-immersive .upstream-tool-frame-empty {
+  position: relative;
   flex: 1 1 auto;
+  width: 100%;
+  height: auto;
+  min-width: 0;
   min-height: 0;
   border: 0;
   border-radius: 0;
@@ -56,6 +67,9 @@
 }
 
 .upstream-tool-surface.is-immersive .upstream-tool-frame-shell iframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
   height: 100%;
   min-height: 0;
 }
@@ -286,9 +300,6 @@
 
 .upstream-original-actions input {
   min-width: 140px;
-}
-  color: var(--color-text-primary);
-  font-size: 17px;
 }
 
 .upstream-native-control {

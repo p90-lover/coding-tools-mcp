@@ -2,9 +2,12 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const ts = require("typescript");
+
+const providerNetwork = require("../electron/provider-network.cjs");
 
 function loadTypeScriptModule(relativePath) {
   const filename = path.join(__dirname, "..", relativePath);
@@ -55,6 +58,48 @@ function profile(id, host, protocol = "http") {
     scopes: ["all"],
     bypass: ["localhost", "127.0.0.1", "::1"],
   };
+}
+
+function globalRoutingFixture(reachability, {
+  profileId = "global-proxy",
+  setProxyImpl = async () => undefined,
+} = {}) {
+  const proxyCalls = [];
+  const createSession = (name) => ({
+    async setProxy(configuration) {
+      proxyCalls.push({ name, configuration });
+      await setProxyImpl(name, configuration);
+    },
+  });
+  const defaultSession = createSession("default");
+  const browserSession = createSession("browser");
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-global-proxy-"));
+  const controller = providerNetwork.createProviderNetworkController({
+    app: {},
+    browserPartition: "persist:global-proxy-test",
+    getBrowserHost: () => null,
+    logger: { info() {}, warn() {} },
+    safeStorage: { isEncryptionAvailable: () => false },
+    session: {
+      defaultSession,
+      fromPartition: () => browserSession,
+    },
+    shell: { async openExternal() {} },
+    userData,
+    testTcpEndpointImpl: typeof reachability === "function"
+      ? reachability
+      : async () => reachability,
+  });
+  controller.store.saveProxyProfile({
+    id: profileId,
+    name: "Global proxy",
+    enabled: true,
+    endpoint: { protocol: "http", host: "127.0.0.1", port: 17891 },
+    scopes: ["all", "browser"],
+    bypass: ["localhost", "127.0.0.1", "::1"],
+  });
+  controller.store.setGlobalRouting({ enabled: true, profileId });
+  return { browserSession, controller, defaultSession, proxyCalls, userData };
 }
 
 test("provider accounts support multiple logins, one default, fallback, and archive without deletion", () => {
@@ -119,6 +164,240 @@ test("proxy routing resolves account then provider then global saved profiles", 
     proxy.shouldProxyUrl("http://127.0.0.1:43110/mcp", "local-control", profile("local", "proxy.test")),
     false,
   );
+});
+
+test("reachable global proxy is applied only to the ChatGPT session", async (context) => {
+  const previousEnvironment = Object.fromEntries(
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].map((name) => [name, process.env[name]]),
+  );
+  for (const name of Object.keys(previousEnvironment)) delete process.env[name];
+  const fixture = globalRoutingFixture({ reachable: true, latencyMs: 12 });
+  context.after(async () => {
+    fixture.controller.store.setGlobalRouting({ enabled: false, profileId: null });
+    await fixture.controller.applyGlobalRouting();
+    fs.rmSync(fixture.userData, { recursive: true, force: true });
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  const snapshot = await fixture.controller.applyGlobalRouting();
+
+  assert.deepEqual(fixture.proxyCalls.slice(0, 2), [
+    {
+      name: "default",
+      configuration: { mode: "direct" },
+    },
+    {
+      name: "browser",
+      configuration: {
+        mode: "fixed_servers",
+        proxyRules: "http://127.0.0.1:17891",
+        proxyBypassRules: "localhost,127.0.0.1,::1",
+      },
+    },
+  ]);
+  for (const name of Object.keys(previousEnvironment)) {
+    assert.equal(process.env[name], undefined, `${name} must not leak to local runtime children`);
+  }
+  const savedProfile = snapshot.proxyProfiles.find((candidate) => candidate.id === "global-proxy");
+  assert.equal(savedProfile.latencyMs, 12);
+  assert.equal(savedProfile.lastError, undefined);
+});
+
+test("obsolete unreachable ProxyBridge seed is disabled instead of breaking ChatGPT", async (context) => {
+  const fixture = globalRoutingFixture(
+    { reachable: false, error: "connect ECONNREFUSED 127.0.0.1:17891" },
+    { profileId: "proxybridge-local-17891" },
+  );
+  context.after(() => fs.rmSync(fixture.userData, { recursive: true, force: true }));
+
+  const snapshot = await fixture.controller.applyGlobalRouting();
+
+  assert.deepEqual(fixture.proxyCalls.slice(-2), [
+    { name: "default", configuration: { mode: "direct" } },
+    { name: "browser", configuration: { mode: "direct" } },
+  ]);
+  assert.deepEqual(fixture.proxyCalls.slice(0, 2), [
+    { name: "default", configuration: { mode: "direct" } },
+    {
+      name: "browser",
+      configuration: {
+        mode: "fixed_servers",
+        proxyRules: "http://127.0.0.1:17891",
+        proxyBypassRules: "localhost,127.0.0.1,::1",
+      },
+    },
+  ]);
+  assert.equal(snapshot.routing.globalEnabled, false);
+  assert.equal(snapshot.routing.globalProfileId, null);
+  const savedProfile = snapshot.proxyProfiles.find((candidate) => candidate.id === "proxybridge-local-17891");
+  assert.match(savedProfile.lastError, /ECONNREFUSED/);
+  assert.equal(savedProfile.latencyMs, undefined);
+});
+
+test("unreachable user proxy fails closed instead of silently bypassing it", async (context) => {
+  const previousEnvironment = Object.fromEntries(
+    ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].map((name) => [name, process.env[name]]),
+  );
+  const fixture = globalRoutingFixture({ reachable: false, error: "connect ECONNREFUSED proxy.test" });
+  context.after(async () => {
+    fixture.controller.store.setGlobalRouting({ enabled: false, profileId: null });
+    await fixture.controller.applyGlobalRouting();
+    fs.rmSync(fixture.userData, { recursive: true, force: true });
+    for (const [name, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  await assert.rejects(
+    fixture.controller.applyGlobalRouting(),
+    (error) => error?.code === "proxy_unreachable" && /direct fallback is disabled/.test(error.message),
+  );
+
+  assert.equal(fixture.proxyCalls.length, 2);
+  assert.deepEqual(fixture.proxyCalls, [
+    { name: "default", configuration: { mode: "direct" } },
+    {
+      name: "browser",
+      configuration: {
+        mode: "fixed_servers",
+        proxyRules: "http://127.0.0.1:17891",
+        proxyBypassRules: "localhost,127.0.0.1,::1",
+      },
+    },
+  ]);
+  assert.equal(fixture.controller.store.snapshot().routing.globalEnabled, true);
+});
+
+test("proxy setup waits for every target before verified direct rollback", async (context) => {
+  const events = [];
+  const fixture = globalRoutingFixture(
+    { reachable: true, latencyMs: 5 },
+    {
+      setProxyImpl: async (name, configuration) => {
+        if (configuration.mode === "direct") {
+          events.push(`${name}:direct`);
+          return;
+        }
+        events.push(`${name}:fixed-start`);
+        if (name !== "browser") throw new Error("only the ChatGPT session may receive fixed proxy routing");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        events.push(`${name}:fixed-finished`);
+        throw new Error("ChatGPT session rejected proxy");
+      },
+    },
+  );
+  context.after(() => fs.rmSync(fixture.userData, { recursive: true, force: true }));
+
+  await assert.rejects(
+    fixture.controller.applyGlobalRouting(),
+    (error) => error?.code === "proxy_configuration_rejected",
+  );
+
+  const fixedFinished = events.indexOf("browser:fixed-finished");
+  const rollbackDefault = events.lastIndexOf("default:direct");
+  const rollbackBrowser = events.lastIndexOf("browser:direct");
+  assert.ok(fixedFinished >= 0, "the slower fixed-proxy operation must finish");
+  assert.ok(rollbackDefault > fixedFinished, "direct rollback must wait for every fixed-proxy attempt");
+  assert.ok(rollbackBrowser > fixedFinished, "browser rollback must wait for every fixed-proxy attempt");
+});
+
+test("serialized proxy applications leave the latest routing decision effective", async (context) => {
+  let finishFirstProbe;
+  let markFirstProbeStarted;
+  const firstProbeStarted = new Promise((resolve) => { markFirstProbeStarted = resolve; });
+  const firstProbeFinished = new Promise((resolve) => { finishFirstProbe = resolve; });
+  let probeCount = 0;
+  const fixture = globalRoutingFixture(async () => {
+    probeCount += 1;
+    if (probeCount === 1) {
+      markFirstProbeStarted();
+      await firstProbeFinished;
+    }
+    return { reachable: true, latencyMs: 1 };
+  });
+  context.after(() => fs.rmSync(fixture.userData, { recursive: true, force: true }));
+
+  const enableOperation = fixture.controller.applyGlobalRouting();
+  await firstProbeStarted;
+  fixture.controller.store.setGlobalRouting({ enabled: false, profileId: null });
+  const disableOperation = fixture.controller.applyGlobalRouting();
+  finishFirstProbe();
+  await Promise.all([enableOperation, disableOperation]);
+
+  assert.deepEqual(fixture.proxyCalls.slice(-2), [
+    { name: "default", configuration: { mode: "direct" } },
+    { name: "browser", configuration: { mode: "direct" } },
+  ]);
+  assert.equal(fixture.controller.store.snapshot().routing.globalEnabled, false);
+});
+
+test("proxy enforcement is installed before reachability probing begins", async (context) => {
+  let fixture;
+  let proxyWasAppliedBeforeProbe = false;
+  fixture = globalRoutingFixture(async () => {
+    proxyWasAppliedBeforeProbe = fixture.proxyCalls.length === 2
+      && fixture.proxyCalls[0].configuration.mode === "direct"
+      && fixture.proxyCalls[1].configuration.mode === "fixed_servers";
+    return { reachable: true, latencyMs: 1 };
+  });
+  context.after(async () => {
+    fixture.controller.store.setGlobalRouting({ enabled: false, profileId: null });
+    await fixture.controller.applyGlobalRouting();
+    fs.rmSync(fixture.userData, { recursive: true, force: true });
+  });
+
+  await fixture.controller.applyGlobalRouting();
+
+  assert.equal(proxyWasAppliedBeforeProbe, true);
+});
+
+test("proxy credentials are disclosed only to the selected endpoint and owned sessions", (context) => {
+  const fixture = globalRoutingFixture({ reachable: true, latencyMs: 1 });
+  context.after(() => fs.rmSync(fixture.userData, { recursive: true, force: true }));
+  fixture.controller.store.saveProxyProfile({
+    id: "global-proxy",
+    name: "Authenticated proxy",
+    enabled: true,
+    endpoint: { protocol: "http", host: "127.0.0.1", port: 17891 },
+    scopes: ["all"],
+    bypass: ["localhost"],
+    username: "proxy-user",
+    password: "proxy-password",
+  });
+  const event = { prevented: false, preventDefault() { this.prevented = true; } };
+  const receivedCredentials = [];
+  const callback = (username, password) => receivedCredentials.push({ username, password });
+
+  assert.equal(fixture.controller.handleProxyLogin(
+    event,
+    null,
+    { isProxy: true, host: "127.0.0.1", port: 17891 },
+    callback,
+  ), false);
+  assert.equal(fixture.controller.handleProxyLogin(
+    event,
+    { session: fixture.browserSession },
+    { isProxy: true, host: "other.proxy.test", port: 17891 },
+    callback,
+  ), false);
+  assert.equal(fixture.controller.handleProxyLogin(
+    event,
+    { session: {} },
+    { isProxy: true, host: "127.0.0.1", port: 17891 },
+    callback,
+  ), false);
+  assert.equal(fixture.controller.handleProxyLogin(
+    event,
+    { session: fixture.browserSession },
+    { isProxy: true, host: "127.0.0.1", port: 17891 },
+    callback,
+  ), true);
+  assert.equal(event.prevented, true);
+  assert.deepEqual(receivedCredentials, [{ username: "proxy-user", password: "proxy-password" }]);
 });
 
 test("renderer and Electron IPC expose the Provider Hub and global proxy controls", () => {

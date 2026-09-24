@@ -543,7 +543,7 @@ test("mutating launcher operations are serialized before lifecycle changes begin
   assert.equal(fixture.invocation(), undefined);
 });
 
-function bridgeFixture({ active }) {
+function bridgeFixture({ active, routeUrl }) {
   const calls = [];
   let routeActive = active;
   const supervisor = {
@@ -569,7 +569,14 @@ function bridgeFixture({ active }) {
     const action = args.join(" ");
     calls.push(action);
     if (action === "route status") {
-      return { stdout: JSON.stringify({ installed: true, active: routeActive, errors: [] }) };
+      return {
+        stdout: JSON.stringify({
+          installed: true,
+          active: routeActive,
+          ...(routeUrl ? { routeUrl } : {}),
+          errors: [],
+        }),
+      };
     }
     if (action === "route connect") {
       routeActive = true;
@@ -596,6 +603,14 @@ test("launcher leaves an already connected route unchanged", async () => {
   const result = await fixture.host.connectBridgeRoute();
   assert.equal(result.active, true);
   assert.deepEqual(fixture.calls, ["route status"]);
+});
+
+test("launcher reconnects when Coding Tools is up but Codex points at another host", async () => {
+  const fixture = bridgeFixture({ active: true, routeUrl: "http://192.168.1.144:17841/v1" });
+  fixture.supervisor.readConfig = () => ({ mode: "full", host: "127.0.0.1", port: 17841 });
+  const result = await fixture.host.connectBridgeRoute();
+  assert.equal(result.active, true);
+  assert.deepEqual(fixture.calls, ["route status", "route connect", "route status"]);
 });
 
 test("bridge connection rejects a route command that did not reach the requested state", async () => {
@@ -675,7 +690,7 @@ test("integration removal is accepted only after a new status process observes i
   host.run = async (_name, args) => {
     const action = args.join(" ");
     calls.push(action);
-    if (action === "uninstall --yes --launcher-control") {
+    if (action === "uninstall --yes --keep-data --launcher-control") {
       return { stdout: "uninstalled\n" };
     }
     if (action === "route status") {
@@ -687,7 +702,7 @@ test("integration removal is accepted only after a new status process observes i
   await host.uninstallIntegration();
   assert.deepEqual(calls, [
     "runtime:stop",
-    "uninstall --yes --launcher-control",
+    "uninstall --yes --keep-data --launcher-control",
     "route status",
   ]);
 });
@@ -710,7 +725,7 @@ test("integration removal rejects a command that leaves an inactive journal behi
   host.run = async (_name, args) => {
     const action = args.join(" ");
     calls.push(action);
-    if (action === "uninstall --yes --launcher-control") {
+    if (action === "uninstall --yes --keep-data --launcher-control") {
       return { stdout: "uninstalled\n" };
     }
     if (action === "route status") {
@@ -725,7 +740,8 @@ test("integration removal rejects a command that leaves an inactive journal behi
   );
   assert.deepEqual(calls, [
     "runtime:stop",
-    "uninstall --yes --launcher-control",
+    "uninstall --yes --keep-data --launcher-control",
+    "route status",
     "route status",
     "route status",
   ]);

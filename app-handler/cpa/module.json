@@ -3,6 +3,24 @@
   "name": "CPA / CLIProxyAPI",
   "kind": "managed-service",
   "transport": "in-process",
+  "launch": {
+    "order": 10,
+    "autoStart": true,
+    "startupPolicy": "auto",
+    "installOnStartup": true,
+    "dependsOn": [],
+    "requires": ["core-runtime"],
+    "readyTimeoutMs": 45000
+  },
+  "visual": {
+    "embed": "iframe",
+    "endpoint": "http://127.0.0.1:8317/",
+    "manifest": "vendor/upstream/cpa.json",
+    "initialSection": "dashboard",
+    "controls": ["module-lifecycle", "provider-oauth"],
+    "icon": "providers",
+    "navGroup": "more"
+  },
   "legacyLoopback": {
     "note": "Temporary compatibility only. Product surface is the in-process handler, not a listen port.",
     "url": "http://127.0.0.1:8317/"

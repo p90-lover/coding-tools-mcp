@@ -265,10 +265,10 @@ export function NetworkProxySurface({
       () => api.setGlobalProxyRouting({ enabled, profileId: enabled ? profileId ?? null : null }),
       localText(
         language,
-        enabled ? "App-wide proxy enabled." : "App-wide proxy disabled.",
-        enabled ? "已啟用全應用程式代理。" : "已停用全應用程式代理。",
-        enabled ? "已启用全应用程序代理。" : "已停用全应用程序代理。",
-        enabled ? "アプリ全体のプロキシを有効にしました。" : "アプリ全体のプロキシを無効にしました。",
+        enabled ? "ChatGPT browser proxy enabled." : "ChatGPT browser proxy disabled.",
+        enabled ? "已啟用 ChatGPT 瀏覽器代理。" : "已停用 ChatGPT 瀏覽器代理。",
+        enabled ? "已启用 ChatGPT 浏览器代理。" : "已停用 ChatGPT 浏览器代理。",
+        enabled ? "ChatGPT ブラウザのプロキシを有効にしました。" : "ChatGPT ブラウザのプロキシを無効にしました。",
       ),
     );
   };
@@ -333,10 +333,10 @@ export function NetworkProxySurface({
           <h1>{localText(language, "Network Proxy", "網路代理", "网络代理", "ネットワークプロキシ")}</h1>
           <p>{localText(
             language,
-            "Route application, provider, OAuth, MCP, WebSocket and HTTP traffic through saved HTTP, HTTPS or SOCKS proxies. Local ProxyBridge listens on http://127.0.0.1:17891; do not seed Clash :7890 unless that port is listening. Claude and Anthropic stay on the proxy/SOCKS path, never Direct.",
-            "將應用程式、供應商、OAuth、MCP、WebSocket 及 HTTP 流量路由至已儲存代理。本機 ProxyBridge 監聽 http://127.0.0.1:17891；除非 :7890 真係喺聽，否則唔好用 Clash 埠。Claude / Anthropic 必須走代理／SOCKS，不可 Direct。",
-            "将应用、供应商、OAuth、MCP、WebSocket 及 HTTP 流量路由至已保存代理。本地 ProxyBridge 监听 http://127.0.0.1:17891；不要使用未在监听的 Clash :7890。Claude / Anthropic 必须走代理／SOCKS，不可 Direct。",
-            "アプリ・プロバイダー・OAuth・MCP・WebSocket・HTTP を保存済みプロキシへルーティングします。ローカル ProxyBridge は http://127.0.0.1:17891 で待ち受けます。未起動の Clash :7890 は使わないでください。Claude / Anthropic は Direct ではなくプロキシ/SOCKS 経路です。",
+            "Route the embedded ChatGPT browser through saved HTTP, HTTPS or SOCKS proxies. The local Responses runtime and loopback traffic stay direct so proxy authentication cannot interrupt Codex requests.",
+            "將內嵌 ChatGPT 瀏覽器路由至已儲存 HTTP、HTTPS 或 SOCKS 代理。本機 Responses 執行階段及 loopback 流量保持直接連線，避免代理驗證中斷 Codex 請求。",
+            "将内嵌 ChatGPT 浏览器路由至已保存 HTTP、HTTPS 或 SOCKS 代理。本地 Responses 运行时及 loopback 流量保持直接连接，避免代理验证中断 Codex 请求。",
+            "埋め込み ChatGPT ブラウザを保存済みの HTTP、HTTPS、SOCKS プロキシ経由で接続します。ローカル Responses ランタイムとループバック通信は直接接続のままにし、プロキシ認証が Codex リクエストを中断しないようにします。",
           )}</p>
         </div>
         <button className="secondary-button" disabled={busy} onClick={() => setDraft(emptyDraft(language))} type="button">
@@ -352,7 +352,7 @@ export function NetworkProxySurface({
             onChange={(event) => void setGlobal(event.target.checked)}
             type="checkbox"
           />
-          <span>{localText(language, "Route all application traffic", "路由所有應用程式流量", "路由所有应用程序流量", "すべての通信をルーティング")}</span>
+          <span>{localText(language, "Route embedded ChatGPT browser", "路由內嵌 ChatGPT 瀏覽器", "路由内嵌 ChatGPT 浏览器", "埋め込み ChatGPT ブラウザをルーティング")}</span>
         </label>
         <select
           disabled={busy || profiles.length === 0}
@@ -364,10 +364,10 @@ export function NetworkProxySurface({
         </select>
         <small>{localText(
           language,
-          "Loopback control traffic remains direct: localhost, 127.0.0.1 and ::1. In-app session routing is not an OS-wide proxy; ProxyBridge/WFP covers other apps.",
-          "Loopback 控制流量保持直接連線：localhost、127.0.0.1 及 ::1。呢度只係應用程式內路由，唔等於系統全域代理；其他程式要靠 ProxyBridge／WFP。",
-          "Loopback 控制流量保持直接连接：localhost、127.0.0.1 和 ::1。此处只是应用内路由，不是系统全局代理；其他程序需 ProxyBridge／WFP。",
-          "ループバック制御通信は直接接続のままです。これはアプリ内ルーティングであり、OS 全体のプロキシではありません。",
+          "The embedded browser uses the selected profile. Launcher services, local Responses requests and loopback traffic remain direct; use ProxyBridge/WFP for other applications.",
+          "內嵌瀏覽器使用所選設定檔。啟動器服務、本機 Responses 請求及 loopback 流量保持直接連線；其他應用程式請使用 ProxyBridge／WFP。",
+          "内嵌浏览器使用所选配置。启动器服务、本地 Responses 请求及 loopback 流量保持直接连接；其他应用程序请使用 ProxyBridge／WFP。",
+          "埋め込みブラウザは選択したプロファイルを使用します。ランチャーサービス、ローカル Responses リクエスト、ループバック通信は直接接続のままです。ほかのアプリには ProxyBridge/WFP を使用してください。",
         )}</small>
       </section>
 

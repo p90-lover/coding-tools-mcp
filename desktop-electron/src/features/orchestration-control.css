@@ -1,8 +1,48 @@
 .control-surface {
+  --text-primary: var(--color-text-primary);
+  --text-secondary: var(--color-text-secondary);
+  --panel-bg: var(--color-background-elevated);
+  --input-bg: var(--color-background-surface);
+  --border-subtle: var(--color-border-heavy);
+  --accent: var(--color-text-accent);
   box-sizing: border-box;
+  width: 100%;
   height: 100%;
+  min-height: 0;
   overflow: auto;
-  padding: 28px 30px 54px;
+  padding: calc(var(--height-titlebar) + 28px) 30px 54px;
+}
+
+.control-surface .secondary-button,
+.control-surface .primary-button {
+  min-height: 34px;
+  padding: 7px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-button-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.control-surface .primary-button {
+  background: var(--color-text-primary);
+  color: var(--color-background-surface);
+}
+
+.control-surface input:not([type="checkbox"]),
+.control-surface select,
+.control-surface textarea {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.control-surface textarea {
+  resize: vertical;
 }
 
 .control-heading {
@@ -549,7 +589,7 @@
   display: flex;
   flex: 1;
   flex-direction: column;
-  justify-content: center;
+  justify-content: safe center;
   min-height: 0;
   overflow: auto;
   padding: 28px clamp(18px, 5vw, 70px);
@@ -605,10 +645,9 @@
 }
 
 .paseo-meta-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
   margin-bottom: 10px;
   max-width: 780px;
   width: 100%;
@@ -619,7 +658,7 @@
   align-items: center;
   background: rgb(255 255 255 / 3%);
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: 8px;
   display: flex;
   gap: 7px;
   min-width: 0;
@@ -629,7 +668,7 @@
 .paseo-meta-chip > span,
 .paseo-fallback-chip > span {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -637,13 +676,21 @@
 .paseo-meta-chip input {
   border: 0;
   border-radius: 999px;
-  max-width: 165px;
+  width: 100%;
+  max-width: none;
   min-height: 28px;
   padding: 4px 7px;
 }
 
 .paseo-fallback-chip {
+  grid-column: 1 / -1;
   padding-right: 11px;
+}
+
+.paseo-meta-chip {
+  align-items: stretch;
+  flex-direction: column;
+  padding: 10px;
 }
 
 .paseo-composer {
@@ -1391,6 +1438,10 @@
 }
 
 @media (max-width: 720px) {
+  .paseo-meta-row {
+    grid-template-columns: 1fr;
+  }
+
   .control-surface.paseo-studio {
     display: flex;
     flex-direction: column;
@@ -1465,4 +1516,28 @@
   .control-fields .full-row {
     grid-column: auto;
   }
+}
+
+.runtime-worker-fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid rgb(148 163 184 / 18%);
+  border-radius: 12px;
+}
+
+.runtime-worker-fieldset legend {
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.runtime-task-surface pre {
+  overflow: auto;
+  max-height: 420px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgb(15 23 42 / 6%);
+  white-space: pre-wrap;
 }

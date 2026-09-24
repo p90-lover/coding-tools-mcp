@@ -46,6 +46,7 @@ const COMMANDCODE_LOGIN_URL = "https://commandcode.ai/studio/auth/cli";
 const DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_OAUTH_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_OAUTH_TIMEOUT_MS = 5 * 60_000;
+const LEGACY_PROXYBRIDGE_PROFILE_ID = "proxybridge-local-17891";
 
 function defaultState() {
   return {
@@ -145,6 +146,10 @@ function normalizeAccount(account) {
       loginAdapterId: optionalText(account.loginAdapterId, 160),
       credentialSource: optionalText(account.credentialSource, 64),
       proxyProfileId: optionalText(account.proxyProfileId, 160),
+      chatPath: optionalText(account.chatPath, 512),
+      modelsPath: optionalText(account.modelsPath, 512),
+      authHeaderName: optionalText(account.authHeaderName, 160),
+      extraHeaders: optionalText(account.extraHeaders, 4_096),
       createdAt: timestamp(account.createdAt),
       updatedAt: timestamp(account.updatedAt),
       lastUsedAt: account.lastUsedAt ? timestamp(account.lastUsedAt, undefined) : undefined,
@@ -431,6 +436,10 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       loginAdapterId: input.loginAdapterId ?? previous?.loginAdapterId,
       credentialSource: input.credentialSource ?? previous?.credentialSource,
       proxyProfileId: input.proxyProfileId ?? previous?.proxyProfileId,
+      chatPath: input.chatPath ?? previous?.chatPath,
+      modelsPath: input.modelsPath ?? previous?.modelsPath,
+      authHeaderName: input.authHeaderName ?? previous?.authHeaderName,
+      extraHeaders: input.extraHeaders ?? previous?.extraHeaders,
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
       lastUsedAt: previous?.lastUsedAt,
@@ -878,6 +887,7 @@ function createProviderNetworkController({
   userData,
   homeDirectory = os.homedir(),
   fetchImpl = globalThis.fetch,
+  testTcpEndpointImpl = testTcpEndpoint,
   sleepImpl = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   oauthPollIntervalMs = DEFAULT_OAUTH_POLL_INTERVAL_MS,
   oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,
@@ -889,45 +899,115 @@ function createProviderNetworkController({
     keyPath: path.join(directory, "provider-network.key"),
     safeStorage,
   });
-  const ownedEnvironment = new Set();
+  let globalRoutingOperation = Promise.resolve();
   if (typeof fetchImpl !== "function") throw new Error("Provider network fetch implementation is unavailable");
-
-  function clearOwnedEnvironment() {
-    for (const name of ownedEnvironment) delete process.env[name];
-    ownedEnvironment.clear();
+  if (typeof testTcpEndpointImpl !== "function") {
+    throw new Error("Provider proxy endpoint probe is unavailable");
   }
 
-  function setOwnedEnvironment(name, value) {
-    process.env[name] = value;
-    ownedEnvironment.add(name);
-  }
-
-  async function applyGlobalRouting() {
+  async function applyGlobalRoutingExclusive() {
     const snapshot = store.snapshot();
     const profile = snapshot.routing.globalEnabled
       ? store.activeProxy(snapshot.routing.globalProfileId)
       : null;
-    const targets = [session.defaultSession, session.fromPartition(browserPartition)]
+    const browserTargets = [session.fromPartition(browserPartition)]
       .filter((value, index, list) => value && list.indexOf(value) === index);
-    clearOwnedEnvironment();
+    const directTargets = [session.defaultSession]
+      .filter((value, index, list) => value && list.indexOf(value) === index && !browserTargets.includes(value));
+    const targets = [...directTargets, ...browserTargets];
+
+    const setDirectRouting = async () => {
+      const results = await Promise.allSettled(
+        targets.map((target) => target.setProxy({ mode: "direct" })),
+      );
+      const failures = results
+        .filter((result) => result.status === "rejected")
+        .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+      if (failures.length > 0) {
+        const error = new Error(`Failed to restore direct application routing: ${failures.join("; ")}`);
+        error.code = "proxy_rollback_failed";
+        throw error;
+      }
+    };
 
     if (!profile) {
-      await Promise.all(targets.map((target) => target.setProxy({ mode: "direct" })));
+      await setDirectRouting();
       logger.info("proxy.global_routing_disabled", {});
       return snapshot;
     }
 
     const route = proxyUrl(profile);
     const bypass = profile.bypass.join(",");
-    await Promise.all(targets.map((target) => target.setProxy({
-      mode: "fixed_servers",
-      proxyRules: route,
-      proxyBypassRules: bypass,
-    })));
-    setOwnedEnvironment("HTTP_PROXY", route);
-    setOwnedEnvironment("HTTPS_PROXY", route);
-    setOwnedEnvironment("ALL_PROXY", route);
-    setOwnedEnvironment("NO_PROXY", profile.bypass.join(","));
+    const routingResults = await Promise.allSettled([
+      ...directTargets.map((target) => target.setProxy({ mode: "direct" })),
+      ...browserTargets.map((target) => target.setProxy({
+        mode: "fixed_servers",
+        proxyRules: route,
+        proxyBypassRules: bypass,
+      })),
+    ]);
+    const routingFailures = routingResults
+      .filter((result) => result.status === "rejected")
+      .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+    if (routingFailures.length > 0) {
+      try {
+        await setDirectRouting();
+      } catch (rollbackError) {
+        const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        store.recordProxyHealth(profile.id, {
+          reachable: false,
+          error: `Proxy setup and rollback failed: ${routingFailures.join("; ")}; ${rollbackMessage}`,
+        });
+        throw rollbackError;
+      }
+      const message = routingFailures.join("; ");
+      store.recordProxyHealth(profile.id, {
+        reachable: false,
+        error: `Electron rejected the proxy configuration: ${message}`,
+      });
+      logger.warn("proxy.global_routing_rejected", {
+        profileId: profile.id,
+        errors: routingFailures,
+        rollback: "direct",
+      });
+      const error = new Error(
+        `Global proxy configuration was rejected before application traffic started: ${message}`,
+      );
+      error.code = "proxy_configuration_rejected";
+      throw error;
+    }
+    const reachability = await testTcpEndpointImpl(profile, 2_000);
+    const routedSnapshot = store.recordProxyHealth(profile.id, reachability);
+    if (!reachability.reachable) {
+      const legacyProxyBridge = profile.id === LEGACY_PROXYBRIDGE_PROFILE_ID
+        && profile.endpoint.protocol === "http"
+        && profile.endpoint.host === "127.0.0.1"
+        && profile.endpoint.port === 17891;
+      if (legacyProxyBridge) {
+        store.setGlobalRouting({ enabled: false, profileId: null });
+        await setDirectRouting();
+        logger.warn("proxy.legacy_global_routing_disabled", {
+          profileId: profile.id,
+          host: profile.endpoint.host,
+          port: profile.endpoint.port,
+          error: reachability.error,
+          migration: "disabled-obsolete-proxybridge-route",
+        });
+        return store.snapshot();
+      }
+      logger.warn("proxy.global_routing_unavailable", {
+        profileId: profile.id,
+        host: profile.endpoint.host,
+        port: profile.endpoint.port,
+        error: reachability.error,
+        fallback: "blocked-by-configured-proxy",
+      });
+      const error = new Error(
+        `Global proxy ${profile.endpoint.host}:${profile.endpoint.port} is unreachable; direct fallback is disabled`,
+      );
+      error.code = "proxy_unreachable";
+      throw error;
+    }
     logger.info("proxy.global_routing_applied", {
       profileId: profile.id,
       protocol: profile.endpoint.protocol,
@@ -935,7 +1015,13 @@ function createProviderNetworkController({
       port: profile.endpoint.port,
       scopes: profile.scopes,
     });
-    return snapshot;
+    return routedSnapshot;
+  }
+
+  function applyGlobalRouting() {
+    const operation = globalRoutingOperation.then(() => applyGlobalRoutingExclusive());
+    globalRoutingOperation = operation.catch(() => undefined);
+    return operation;
   }
 
   function accountRecord(accountId) {
@@ -1621,11 +1707,19 @@ function createProviderNetworkController({
     return { ...result, snapshot };
   }
 
-  function handleProxyLogin(event, authInfo, callback) {
+  function handleProxyLogin(event, webContents, authInfo, callback) {
     if (!authInfo?.isProxy) return false;
     const snapshot = store.snapshot();
     if (!snapshot.routing.globalEnabled || !snapshot.routing.globalProfileId) return false;
-    const secret = store.proxySecret(snapshot.routing.globalProfileId);
+    const profile = store.activeProxy(snapshot.routing.globalProfileId);
+    if (!profile) return false;
+    const challengeHost = String(authInfo.host || "").replace(/^\[|\]$/g, "").toLowerCase();
+    const profileHost = profile.endpoint.host.replace(/^\[|\]$/g, "").toLowerCase();
+    if (challengeHost !== profileHost || Number(authInfo.port) !== profile.endpoint.port) return false;
+    const allowedSessions = [session.defaultSession, session.fromPartition(browserPartition)]
+      .filter((value, index, values) => value && values.indexOf(value) === index);
+    if (!webContents?.session || !allowedSessions.includes(webContents.session)) return false;
+    const secret = store.proxySecret(profile.id);
     if (!secret || (!secret.username && !secret.password)) return false;
     event.preventDefault();
     callback(secret.username || "", secret.password || "");

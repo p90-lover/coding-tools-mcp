@@ -274,10 +274,10 @@ function createUpstreamToolController({
       const latest = await inspect(toolId).catch(() => project(toolId));
       const classified = classifyOriginalUiUnavailable(toolId, error)
         || classifyOriginalUiUnavailable(toolId, latest.error);
-      if (toolId === "anneal") {
+      if (toolId === "anneal" || toolId === "paseo") {
         const message = error instanceof Error
           ? error.message
-          : String(error || latest.error || "Anneal is unavailable");
+          : String(error || latest.error || `${latest.name || toolId} is unavailable`);
         return {
           tool: {
             ...latest,
@@ -294,7 +294,7 @@ function createUpstreamToolController({
             transport: "in-process",
           },
           unavailable: true,
-          dependency: classified?.dependency || "postgres",
+          dependency: classified?.dependency || (toolId === "anneal" ? "postgres" : null),
           error: message,
         };
       }

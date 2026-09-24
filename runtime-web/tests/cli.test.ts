@@ -51,6 +51,35 @@ test("production and DEV setup reject the removed connector-name option before c
   }
 });
 
+test("production and DEV setup validate the explicit automatic connector identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-product-connector-"));
+  try {
+    const env = {
+      ...process.env,
+      CODEX_HOME: join(root, "codex"),
+      CODEX_CHATGPT_WEB_HOME: join(root, "app"),
+      CODING_TOOLS_DEV_HOME: join(root, "dev"),
+    };
+    const invalidName = "x".repeat(81);
+    for (const command of [["setup"], ["dev", "setup"]]) {
+      const result = await runCli([
+        ...command,
+        "--browser-only",
+        "--automatic-connector-name",
+        invalidName,
+        "--acknowledge-unofficial",
+      ], env);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Automatic connector name must contain between 1 and 80 characters");
+      expect(result.stderr).not.toContain("Unknown");
+    }
+    const help = await runCli(["--help"], env);
+    expect(help.stdout).toContain("--automatic-connector-name");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("setup validates the port before performing runtime work", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-"));
   try {
@@ -587,8 +616,9 @@ test("authorized launcher uninstall does not re-probe an already stopped full ru
       CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: token,
     });
     expect({ exitCode: result.exitCode, stderr: result.stderr }).toEqual({ exitCode: 0, stderr: "" });
-    expect(result.stdout).toContain("Uninstalled and removed private application data");
-    expect(existsSync(appHome)).toBe(false);
+    expect(result.stdout).toContain("Uninstalled; private application data was preserved");
+    expect(existsSync(join(appHome, "config.json"))).toBe(true);
+    expect(existsSync(appHome)).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

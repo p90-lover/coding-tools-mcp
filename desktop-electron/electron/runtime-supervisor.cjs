@@ -11,6 +11,7 @@ const {
   terminateOwnedProcessTree,
 } = require("./process-tree.cjs");
 const { runtimeInvocation } = require("./runtime-command.cjs");
+const { runtimeCliVersion } = require("./smoke-exit.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -25,6 +26,16 @@ const TUNNEL_MONITOR_FAILURE_THRESHOLD = 3;
 const TUNNEL_MCP_FAILURE_RECENCY_MS = 2 * 60_000;
 const BOOT_TIME_CLOCK_TOLERANCE_MS = 5_000;
 const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
+const PROXY_ENVIRONMENT_VARIABLES = Object.freeze([
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+]);
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -62,6 +73,16 @@ function loopbackHealthBaseURL(value) {
   } catch {
     return null;
   }
+}
+
+function runtimeChildEnvironment(parentEnvironment, runtimeEnvironment, browserDescriptorPath) {
+  const childEnvironment = {
+    ...parentEnvironment,
+    ...runtimeEnvironment,
+    CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: browserDescriptorPath,
+  };
+  for (const variableName of PROXY_ENVIRONMENT_VARIABLES) delete childEnvironment[variableName];
+  return childEnvironment;
 }
 
 function readJson(pathname) {
@@ -494,11 +515,11 @@ class RuntimeSupervisor {
     const child = spawn(invocation.executable, invocation.args, {
       cwd: invocation.cwd,
       detached: DETACH_OWNED_CHILD,
-      env: {
-        ...process.env,
-        ...runtimeEnvironment,
-        CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
-      },
+      env: runtimeChildEnvironment(
+        process.env,
+        runtimeEnvironment,
+        this.browserDescriptorPath,
+      ),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -559,6 +580,12 @@ class RuntimeSupervisor {
       installedRuntimeRoot: this.installedRuntimeRoot,
       args,
     });
+  }
+
+  runtimeReleaseVersion() {
+    if (!this.app.isPackaged) return this.app.getVersion();
+    if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();
+    return runtimeCliVersion(this.installedRuntimeRoot);
   }
 
   assertTunnelClientReady(config) {
@@ -1213,7 +1240,8 @@ class RuntimeSupervisor {
       this.clearState();
       return { status: "ready", daemonPid: null, tunnelPid: null };
     }
-    if (!tunnelOnly && config.releaseVersion !== this.app.getVersion()) {
+    const runtimeReleaseVersion = tunnelOnly ? config.releaseVersion : this.runtimeReleaseVersion();
+    if (!tunnelOnly && config.releaseVersion !== runtimeReleaseVersion) {
       const ownershipState = this.readState();
       if ((!tunnelOnly && await this.proxyHealth(config)) || runtimeOwnershipMayBeLive(ownershipState)) {
         try {
@@ -1231,7 +1259,7 @@ class RuntimeSupervisor {
           return { status: "external", detail };
         }
       }
-      const detail = `Config requires ${config.releaseVersion}; launcher is ${this.app.getVersion()}`;
+      const detail = `Config requires runtime ${config.releaseVersion}; installed runtime is ${runtimeReleaseVersion}`;
       this.writeState("needs-setup", detail);
       this.logger.warn("runtime.setup_required", { detail });
       return { status: "needs-setup", detail };
@@ -1725,10 +1753,12 @@ class RuntimeSupervisor {
       throw new Error("DEV launcher ownership unexpectedly contains a Responses daemon");
     }
     const health = tunnelOnly ? null : await this.proxyHealthPayload(config);
+    const healthPid = Number.isInteger(health?.pid) ? health.pid : null;
     const daemonRunning = health?.service === "codex-chatgpt-web"
       && health?.mode === config.mode
-      && health?.version === config.releaseVersion;
-    if (daemonRunning && health.pid !== state.daemonPid) {
+      && health?.version === config.releaseVersion
+      && healthPid !== null;
+    if (daemonRunning && healthPid !== state.daemonPid && processRunning(state.daemonPid)) {
       throw new Error("The process on the Responses port does not match the stale launcher marker");
     }
     if (!daemonRunning && processRunning(state.daemonPid)) {
@@ -1768,7 +1798,7 @@ class RuntimeSupervisor {
 
     this.logger.warn("runtime.stale_owner_recovery_started", {
       ownerPid: state.ownerPid,
-      daemonPid: daemonRunning ? state.daemonPid : null,
+      daemonPid: daemonRunning ? healthPid : null,
       tunnelPid: managedTunnelRunning ? state.tunnelPid : null,
     });
     if (daemonRunning) {
@@ -1777,7 +1807,7 @@ class RuntimeSupervisor {
         drained = await this.acquireDrain(config);
         const shutdown = await this.control(config, "shutdown");
         if (shutdown.status !== "ok") throw new Error("stale daemon did not acknowledge graceful shutdown");
-        await this.waitForProcessExit("stale daemon", state.daemonPid);
+        await this.waitForProcessExit("stale daemon", healthPid);
         await this.waitForPortRelease(config);
       } catch (error) {
         if (drained) {
@@ -2110,5 +2140,6 @@ module.exports = {
   TUNNEL_START_TIMEOUT_MS,
   RuntimeSupervisor,
   managedTunnelConnectArgs,
+  runtimeChildEnvironment,
   validateConfig,
 };

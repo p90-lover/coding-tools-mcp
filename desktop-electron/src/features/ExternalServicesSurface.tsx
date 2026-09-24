@@ -17,6 +17,7 @@ interface ExternalServicesSurfaceProps {
   openProviders: () => void;
   openCpa: () => void;
   openCodexRouter: () => void;
+  openCommandCode: () => void;
   openPaseo: () => void;
   openAnneal: () => void;
 }
@@ -136,6 +137,7 @@ export function ExternalServicesSurface({
   openProviders,
   openCpa,
   openCodexRouter,
+  openCommandCode,
   openPaseo,
   openAnneal,
 }: ExternalServicesSurfaceProps) {
@@ -361,6 +363,7 @@ export function ExternalServicesSurface({
     if (!selected) return;
     if (selected.id === "cpa") openCpa();
     else if (selected.id === "codex-router") openCodexRouter();
+    else if (selected.id === "commandcode-proxy") openCommandCode();
     else if (selected.id === "paseo") openPaseo();
     else if (selected.id === "anneal") openAnneal();
     else openProviders();
@@ -374,8 +377,8 @@ export function ExternalServicesSurface({
           <h1>{text(language, "Integrations Control Plane", "整合服務控制台")}</h1>
           <p>{text(
             language,
-            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime. CommandCode Proxy, Paseo and Anneal are bundled inside this app — Start them without a separate download. They share in-app loopbacks (CPA :8317, Router :4202, CommandCode :9090, Paseo :6768, Anneal :5173/:3000) so cross-use does not need a separate install. Open CPA and Codex Router original interfaces from their dedicated pages.",
-            "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CommandCode Proxy、Paseo 與 Anneal 已內建於本 App，Start 不必另外下載。五棧共用 App 內 loopback（CPA :8317、Router :4202、CommandCode :9090、Paseo :6768、Anneal :5173/:3000），交叉使用唔使另外安裝。CPA 與 Codex Router 原始介面由專用頁面開啟。",
+            "Start CPA / CLIProxyAPI, Codex Router, CommandCode Proxy, Paseo and Anneal from the bundled Coding Tools runtime. CommandCode Proxy, Paseo and Anneal are bundled inside this app — Start them without a separate download. They share in-app loopbacks (CPA :8317, Router :4202, CommandCode :9090, Paseo :6768, Anneal :5173/:3000) so cross-use does not need a separate install. Open each original interface from its dedicated page.",
+            "直接由 Coding Tools 內建執行環境啟動 CPA／CLIProxyAPI、Codex Router、CommandCode Proxy、Paseo 與 Anneal。CommandCode Proxy、Paseo 與 Anneal 已內建於本 App，Start 不必另外下載。五棧共用 App 內 loopback（CPA :8317、Router :4202、CommandCode :9090、Paseo :6768、Anneal :5173/:3000），交叉使用唔使另外安裝。每個原始介面由專用頁面開啟。",
           )}</p>
         </div>
         <div className="external-services-heading-actions">
@@ -595,7 +598,9 @@ export function ExternalServicesSurface({
             <button onClick={openSelected} type="button">
               {selected.id === "cpa" || selected.id === "codex-router"
                 ? text(language, "Open module APIs", "開啟模組 API")
-                : text(language, "Open related controls", "開啟相關控制")}
+                : selected.id === "commandcode-proxy" || selected.id === "paseo" || selected.id === "anneal"
+                  ? text(language, "Open original UI", "開啟原始介面")
+                  : text(language, "Open related controls", "開啟相關控制")}
             </button>
           </div>
         </div>

@@ -126,8 +126,13 @@ test("desktop shell and MCP catalog share the in-process apps overlay", () => {
   assert.match(main, /appsMcp\.hasTool/);
   assert.match(main, /appsMcp\.callTool/);
   assert.match(app, /<InProcessAppsPanel/);
+  assert.match(app, /surface === "runtime-tools"/);
   assert.match(app, /SidebarGroup label=\{copy\.workspace\}/);
   assert.match(app, /label="MCP"/);
+  assert.doesNotMatch(
+    app,
+    /wizard-footer[\s\S]{0,250}<InProcessAppsPanel/,
+  );
   assert.doesNotMatch(app, /FiveStackLoopbackPanel/);
   assert.match(panel, /getCodingToolsClient\(\)/);
   assert.match(panel, /client\.apps\.list/);

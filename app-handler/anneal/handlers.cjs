@@ -1,7 +1,7 @@
 "use strict";
 
 const { defineModule } = require("../lib/define-module.cjs");
-const { inspectResult, moduleSnapshot, runtimeUnavailable } = require("../lib/in-process-runtime.cjs");
+const { inspectResult, runtimeUnavailable } = require("../lib/in-process-runtime.cjs");
 const { classifyAnnealUnavailable, errorMessage, sanitizePublic } = require("../lib/sanitize.cjs");
 
 const LOOPBACK = Object.freeze({
@@ -42,31 +42,23 @@ async function act(op, args, context) {
   }
 }
 
-function inProcessBoard() {
-  const snapshot = moduleSnapshot("anneal");
-  if (!snapshot.present) {
+async function inProcessBoard(args, context) {
+  const result = await act("board", args, context);
+  if (result.ok === false) return result;
+  const payload = result.body;
+  const tasks = Array.isArray(payload) ? payload : payload?.tasks ?? payload?.items;
+  if (!Array.isArray(tasks)) {
     return {
       ok: false,
-      softFail: true,
-      unavailable: true,
-      detail: "Anneal bundled source is missing",
-      listening: false,
-      runtimeStarted: false,
-      source: snapshot.source,
-      vendor: snapshot.vendor,
+      detail: "Anneal returned an invalid task listing",
     };
   }
   return sanitizePublic({
     ok: true,
-    status: 200,
-    tasks: [],
-    json: [],
-    listening: false,
-    runtimeStarted: false,
+    tasks,
+    json: tasks,
     transport: "in-process",
-    source: snapshot.source,
-    vendor: snapshot.vendor,
-    legacyLoopback: snapshot.legacyLoopback,
+    source: "managed-anneal-api",
   });
 }
 
@@ -79,8 +71,8 @@ function createModule() {
       },
       listTasks: {
         readOnly: true,
-        description: "List Anneal tasks in-process from bundled module state. Does not require :3000.",
-        run: () => inProcessBoard(),
+        description: "List real tasks through the managed Anneal API. Reports unavailable if its runtime or database is down.",
+        run: (args, context) => inProcessBoard(args, context),
       },
       preview: {
         readOnly: true,
@@ -158,7 +150,11 @@ function createModule() {
       },
   };
   extraOperations.board = extraOperations.listTasks;
-  extraOperations.activity = extraOperations.preview;
+  extraOperations.activity = {
+    readOnly: true,
+    description: "Read activity for one task from the managed Anneal API.",
+    run: (args, context) => act("activity", args, context),
+  };
   extraOperations["task-start"] = extraOperations.startTask;
   extraOperations.inbox_decision = extraOperations.inboxDecision;
   extraOperations.inbox_reply = {

@@ -97,7 +97,9 @@ test("the app contains pinned, licensed full upstream Paseo and Anneal integrati
   assert.match(host, /127\.0\.0\.1/);
   assert.match(surface, /UpstreamToolSurface/);
   assert.match(surface, /codingTools\?\.apps/);
-  assert.match(app, /UpstreamToolSurface/);
+  // Upstream visuals are hosted through the integrated module surface in App.
+  assert.match(app, /IntegratedModuleSurface/);
+  assert.match(app, /toolId="anneal"/);
 });
 
 test("architecture B exposes one GUI control plane for Provider Hub and external services", () => {

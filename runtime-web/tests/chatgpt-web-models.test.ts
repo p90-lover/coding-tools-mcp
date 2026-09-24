@@ -3,6 +3,7 @@ import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_BACKEND_MODEL,
+  CHATGPT_WEB_LATEST_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_MODEL_ROUTE,
   CHATGPT_WEB_LUNA_MODEL_ROUTES,
@@ -44,21 +45,16 @@ describe("fixed ChatGPT Web model routes", () => {
       ["chatgpt-web/extra-high", "xhigh", "xhigh"],
       ["chatgpt-web/pro", "ultra", "max"],
     ]);
-    expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web — Instant");
-  });
-
-  test("exposes only Plus-eligible routes without the Pro account capability", () => {
+    expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("🌐 Light");
     expect(availableChatGptWebModelRoutes(plus).map(route => route.slug)).toEqual([
-      "chatgpt-web/light",
-      "chatgpt-web/medium",
-      "chatgpt-web/high",
+      "chatgpt-web/latest",
     ]);
     expect(availableChatGptWebModelRoutes({ solAvailable: true, proAvailable: true }))
-      .toEqual(CHATGPT_WEB_MODEL_ROUTES);
+      .toEqual([CHATGPT_WEB_LATEST_MODEL_ROUTE]);
     expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", plus))
-      .toThrow("Extra High is not available for this account");
+      .toThrow("not available for this account");
     expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
-      .toThrow("Pro is not available for this account");
+      .toThrow("not available for this account");
   });
 
   test("exposes Luna and Think when the authenticated account has no Sol selector", () => {
@@ -213,6 +209,21 @@ describe("fixed ChatGPT Web model routes", () => {
       effectiveContextWindowPercent: 100,
       autoCompactTokenLimit: 1_050_000,
     });
+  });
+
+  test("Latest follows the request's ChatGPT web effort instead of freezing one catalog row", () => {
+    const config = defaultConfig("full");
+    config.proAvailable = true;
+    const request = parsed("chatgpt-web/latest", "low");
+    const route = routeChatGptWebRequest(request, config);
+
+    expect(route).toBe(CHATGPT_WEB_LATEST_MODEL_ROUTE);
+    expect(request.modelId).toBe(CHATGPT_WEB_BACKEND_MODEL);
+    expect(request.options.reasoning).toBe("low");
+
+    const max = parsed("chatgpt-web/latest", "ultra");
+    routeChatGptWebRequest(max, config);
+    expect(max.options.reasoning).toBe("max");
   });
 
   test("binds the selected model authoritatively and ignores a conflicting request effort", () => {

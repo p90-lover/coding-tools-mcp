@@ -10,12 +10,30 @@
     "commit": "e43b72b10ad389f090a0be18eea5d2bcef468f5e",
     "repository": "mosonlab/anneal"
   },
+  "launch": {
+    "order": 50,
+    "autoStart": true,
+    "startupPolicy": "auto",
+    "installOnStartup": true,
+    "dependsOn": ["paseo"],
+    "requires": ["core-runtime"],
+    "readyTimeoutMs": 120000
+  },
+  "visual": {
+    "embed": "iframe",
+    "endpoint": "http://127.0.0.1:5173/",
+    "manifest": "vendor/upstream/anneal.json",
+    "initialSection": "tasks",
+    "controls": ["module-lifecycle", "anneal-tasks"],
+    "icon": "activity",
+    "navGroup": "more"
+  },
   "legacyLoopback": {
     "note": "Temporary compatibility only. Product surface is the in-process handler, not a listen port.",
     "url": "http://127.0.0.1:3000/"
   },
   "notes": {
     "postgres": "Legacy API :3000 may need Postgres. Soft-fail if unavailable; do not freeze Coding Tools.",
-    "visual": "Embedded Coding Tools visual uses http://127.0.0.1:5173/ when the managed child already bound it."
+    "visual": "Embedded Coding Tools visual uses visual.endpoint (http://127.0.0.1:5173/) once the managed child has bound it."
   }
 }

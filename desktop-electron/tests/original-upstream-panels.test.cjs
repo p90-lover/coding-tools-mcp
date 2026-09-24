@@ -51,6 +51,15 @@ test("UpstreamToolSurface inspects managed modules through Coding Tools APIs wit
   assert.doesNotMatch(surface, /configure its pinned source directory/);
   assert.doesNotMatch(surface, /Opening the original embedded interface/);
   assert.match(styles, /\.upstream-tool-surface\.is-immersive/);
+  assert.match(styles, /padding: var\(--height-titlebar\) 0 0/);
+  assert.match(read("src/styles.css"), /\.surface-transition \{\s*position: absolute;\s*inset: 0;/);
+  assert.match(styles, /\.upstream-original-function/);
+  assert.match(surface, /nativeControl && chromeOpen/);
+  assert.match(surface, /setError\(messageOf\(cause\)\)/);
+  const originalCss = read("src/features/original-ui.css");
+  assert.match(originalCss, /height: 100%/);
+  assert.match(originalCss, /--height-titlebar/);
+  assert.doesNotMatch(originalCss, /--titlebar-height/);
 });
 
 test("CommandCode Proxy panel reproduces the original banner and uses real lifecycle actions", () => {
@@ -64,6 +73,12 @@ test("CommandCode Proxy panel reproduces the original banner and uses real lifec
   assert.match(panel, /app-managed \(not shown\)/);
   assert.match(integrations, /CommandCodeProxySurface/);
   assert.match(integrations, /onCheck=\{\(\) => void inspect\(\)\}/);
+  assert.match(integrations, /openCommandCode/);
+  assert.match(panel, /CommandCodeHostSurface/);
+  assert.match(panel, /commandcode-host-surface/);
+  const app = read("src/App.tsx");
+  assert.match(app, /CommandCodeHostSurface/);
+  assert.match(app, /navigateSurface\("commandcode-proxy"\)/);
 });
 
 test("commandcode inspect projects the original GET / health banner without exposing secrets", async () => {

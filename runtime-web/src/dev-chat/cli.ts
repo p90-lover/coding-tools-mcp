@@ -343,6 +343,7 @@ export async function runDevCommand(args: string[]): Promise<void> {
     const tunnelId = takeOption(args, "--tunnel-id");
     const runtimeKeyFile = takeOption(args, "--runtime-key-file");
     const descriptorPath = takeOption(args, "--browser-host-descriptor") ?? paths.descriptorPath;
+    const automaticConnectorName = takeOption(args, "--automatic-connector-name");
     const acknowledgedUnofficial = takeFlag(args, "--acknowledge-unofficial");
     const refreshAccountCapabilities = takeFlag(args, "--refresh-account-capabilities");
     const automaticBrowserInteraction = takeFlag(args, "--automatic-browser-interaction");
@@ -361,6 +362,7 @@ export async function runDevCommand(args: string[]): Promise<void> {
       browserHostDescriptorPath: descriptorPath,
       refreshAccountCapabilities,
       acknowledgedUnofficial,
+      ...(automaticConnectorName ? { automaticConnectorName } : {}),
       ...(automaticBrowserInteraction || manualBrowserInteraction
         ? { browserInteractionMode: manualBrowserInteraction ? "manual" : "automatic" }
         : {}),

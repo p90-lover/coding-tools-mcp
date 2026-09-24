@@ -75,8 +75,18 @@ test("normal shutdown persists the ChatGPT session before closing browser views"
     electronMain,
     /runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/,
   );
+  const restoreBridgeRoute = electronMain.indexOf("await runtimeHost?.restoreBridgeRoute()");
+  const runtimeShutdown = electronMain.indexOf("runtimeSupervisor?.shutdown", restoreBridgeRoute);
   const persist = electronMain.indexOf("await browserHost?.persistSession()");
   const destroy = electronMain.indexOf("browserHost?.destroy()", persist);
+  assert.ok(restoreBridgeRoute >= 0, "shutdown must restore the previous Codex route");
+  assert.ok(runtimeShutdown > restoreBridgeRoute, "the Codex route must be restored before runtime shutdown");
+  assert.match(electronMain, /Codex route could not be restored/);
+  assert.match(electronMain, /buttons: \["Cancel", "Quit anyway"\]/);
+  assert.match(electronMain, /if \(decision\.response !== 1\) throw error/);
+  assert.match(electronMain, /runtimeStartupInFlight = \(async \(\) => \{/);
+  assert.match(electronMain, /Promise\.allSettled\([\s\S]*?runtimeStartupInFlight[\s\S]*?codexBridgeConnectInFlight/);
+  assert.match(electronMain, /if \(quitting \|\| shutdownInProgress\)[\s\S]*?reason: "shutting-down"/);
   assert.ok(persist >= 0, "shutdown must persist the ChatGPT session");
   assert.ok(destroy > persist, "browser views must close only after session persistence completes");
 });
@@ -86,6 +96,7 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
   const runtimeValidation = electronMain.indexOf("installedRuntimeRoot = runtimeRootProvider();", start);
   const cdpPortAllocation = electronMain.indexOf("cdpPort = await findFreePort();", start);
   const windowCreation = electronMain.indexOf("mainWindow = createWindow({", start);
+  const providerNetworkStartup = electronMain.indexOf("await providerNetworkReady();", windowCreation);
   const controlServerStart = electronMain.indexOf("browserControl = await new BrowserControlServer({", start);
   const browserReady = electronMain.indexOf("await browserHost.ready();", start);
 
@@ -98,11 +109,13 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
   ]) {
     assert.ok(position > runtimeValidation, `${surface} must start only after runtime verification`);
   }
+  assert.ok(providerNetworkStartup > windowCreation, "provider networking must start after window creation");
+  assert.ok(controlServerStart > providerNetworkStartup, "browser control must wait for provider networking startup");
 });
 
 test("DEV launcher exposes its profile and supervises only its Full-mode MCP runtime", () => {
   assert.match(electronMain, /profile:\s*LAUNCHER_PROFILE\.kind/);
-  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void \(async \(\) => \{/);
+  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else runtimeStartupInFlight = \(async \(\) => \{/);
   assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
   assert.match(electronMain, /packaged:\s*app\.isPackaged && !IS_DEV_PROFILE/);
   assert.match(electronMain, /IS_DEV_PROFILE && !stateStore\.read\(\)\.onboardingComplete/);
@@ -183,12 +196,18 @@ test("Zero Risk setup commits state after the runtime transaction and preserves 
 
 });
 
-test("MCP connection remains unavailable until the model catalog is verified", () => {
+test("MCP still warns when the catalog is unverified, but Connect stays clickable", () => {
   assert.match(
     appSource,
     /manualInteraction \|\| configuringInactiveMode \|\| snapshot\.state\.codexCatalogVerified[\s\S]*?copy\.mcpStepTwoHint[\s\S]*?copy\.mcpCatalogRequired/,
   );
   assert.match(appSource, /!manualInteraction && !configuringInactiveMode && !snapshot\.state\.codexCatalogVerified/);
+  const setupSurface = appSource.slice(
+    appSource.indexOf("function SetupSurface("),
+    appSource.indexOf("function McpSurface("),
+  );
+  assert.doesNotMatch(setupSurface, /disabled=\{[^}]*codexCatalogVerified[^}]*\}/);
+  assert.doesNotMatch(setupSurface, /className="next-surface-row"[\s\S]*?disabled=/);
 });
 
 test("MCP navigation remains locked while an operation is active", () => {
@@ -238,17 +257,45 @@ test("MCP verification proves runtime health before checking the connector", () 
   assert.match(appSource, /operation\?\.name === "mcp-verification"/);
 });
 
-test("saved ChatGPT authentication is refreshed before setup is presented", () => {
+test("saved ChatGPT authentication gates route activation without delaying runtime startup", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
+  assert.match(
+    electronMain,
+    /handle\("launcher:browser-refresh-auth"[\s\S]*?browserHost\.refreshAuthentication\(\)/,
+  );
+  assert.match(preloadSource, /refreshAuthentication:[\s\S]*?launcher:browser-refresh-auth/);
+  assert.match(appSource, /api\.refreshAuthentication\(\)/);
+  assert.match(
+    appSource,
+    /complete=\{snapshot\.state\.coreSetupComplete === true \|\| snapshot\.state\.codexCatalogVerified === true\}/,
+  );
   const productionStartup = electronMain.indexOf("} else void (async () => {");
-  const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
-  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
-  assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
-  assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
+  const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", runtimeStart);
+  const browserGate = electronMain.indexOf("browser?.authenticated !== true", refreshBarrier);
+  const deferredResult = electronMain.indexOf("bridgeDeferred: true", browserGate);
+  const deferredHandler = electronMain.indexOf("if (runtime.bridgeDeferred)", deferredResult);
+  const routeConnect = electronMain.indexOf("connectCodexBridgeAfterAuthentication", browserGate);
+  assert.ok(upgrade > productionStartup, "production startup must begin with the managed-runtime upgrade");
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
-  assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
+  assert.ok(refreshBarrier > runtimeStart, "saved-session refresh must not delay runtime startup");
+  assert.ok(browserGate > refreshBarrier, "route activation must check authentication after refresh settles");
+  assert.ok(deferredResult > browserGate, "unauthenticated startup must defer without failing setup");
+  assert.ok(deferredHandler > deferredResult, "deferred startup must preserve configured runtime state");
+  assert.ok(routeConnect > browserGate, "Codex route must connect only after the authentication gate");
+  const deferredBlock = electronMain.slice(
+    deferredHandler,
+    electronMain.indexOf('if (runtime.status === "ready")', deferredHandler),
+  );
+  assert.match(deferredBlock, /config\.mode === "browser-only"[\s\S]*?mcpSetupComplete: false[\s\S]*?mcpGuideStep: 0/);
+  assert.match(electronMain, /bridge\.connect_deferred_until_chatgpt_ready/);
+  assert.match(electronMain, /scheduleCodexBridgeAutoConnect\(\{ logger, stateStore, reason: "browser-login" \}\)/);
+  assert.match(electronMain, /scheduleCodexBridgeAutoConnect\(\{ logger, stateStore, reason: "browser-refresh-auth" \}\)/);
+  assert.match(electronMain, /scheduleCodexBridgeAutoConnect\(\{ logger, stateStore, reason: "browser-passkey-login" \}\)/);
+  assert.match(browserHostSource, /if \(this\.loginOperation\) return this\.loginOperation;/);
+  assert.match(browserHostSource, /extendWhileInteractive: true/);
+  assert.match(appSource, /already busy with/i);
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
 });
 
@@ -256,7 +303,9 @@ test("completed model setup remains a repeatable capability probe", () => {
   assert.match(appSource, /<SetupRow[\s\S]*?onAction=\{install\}[\s\S]*?repeatable/);
   assert.match(appSource, /complete && !repeatable/);
   assert.match(
-    electronMain,
-    /!setupState\.coreSetupComplete[\s\S]*?smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)/,
+    appSource,
+    /<SetupRow[\s\S]*?disabled=\{setupBusy\}[\s\S]*?index=\{manualInteraction \? 1 : 3\}[\s\S]*?onAction=\{install\}[\s\S]*?repeatable/,
   );
+  assert.doesNotMatch(appSource, /disabled=\{busy \|\| !snapshot\.smokePassed\}/);
+  assert.doesNotMatch(electronMain, /Run the browser smoke test before installing the Codex integration/);
 });

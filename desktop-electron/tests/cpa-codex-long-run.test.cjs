@@ -99,6 +99,8 @@ test("CPA managed config keeps the original panel and turns on long-run keep-ali
   assert.match(yaml, /request-retry: 5/);
   assert.match(yaml, new RegExp(`logs-max-total-size-mb: ${CPA_LOGS_MAX_TOTAL_SIZE_MB}`));
   assert.match(yaml, /request-log: false/);
+  assert.match(yaml, /plugins:\n {2}enabled: true/);
+  assert.match(yaml, /antigravity-coding-filter:\n {6}enabled: true\n {6}priority: 1\n {6}mode: rewrite/);
   assert.equal(cpaLongRunYamlLines().includes("debug: false"), false);
 });
 

@@ -1,8 +1,17 @@
 # Anneal module
 
-Coding Tools owns Anneal as an **in-process handler**. `inspect` / `board` / `listTasks` read bundled module state and do **not** probe `:3000` or `:5173`. Drive it through `codingTools.apps`. The original board is not the integration path.
+Coding Tools owns Anneal through an **in-process handler**. `inspect` describes
+the bundled source; it is not a running-service health check. `board` and
+`listTasks` call the managed Anneal API and return real tasks, not a hardcoded
+empty list. Drive these operations through `codingTools.apps`. The Runtime
+Tasks tab hosts the original Anneal board, with separate Coding Tools controls.
 
-Anneal mutations may require Postgres. If the database is down, handlers return `{ ok: false, softFail: true, unavailable: true, dependency: "postgres" }` instead of crashing the Coding Tools shell.
+Anneal reads and mutations require its running backend and may require
+Postgres. If the database is down, handlers return
+`{ ok: false, softFail: true, unavailable: true, dependency: "postgres" }`
+instead of crashing the Coding Tools shell. If no runtime adapter is installed,
+the dependency is `anneal-runtime`. `activity` reads `/tasks/{id}/activity`,
+not the task preview endpoint.
 
 ## Call
 

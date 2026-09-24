@@ -363,6 +363,37 @@ test("production and DEV setup entrypoints reject the opposite launcher profile"
   await assert.rejects(devHostFor(null).host.setupCore(), /unavailable in the isolated DEV launcher profile/);
 });
 
+test("setup transactions pass the product connector identity to preflight and setup", async () => {
+  const fixture = hostFor({
+    mode: "browser-only",
+    browserHost: "launcher",
+    appName: "Codex Native2",
+    releaseVersion: "5.0.6",
+  });
+  const calls = [];
+  fixture.host.captureSetupCheckpoint = () => [];
+  fixture.host.run = async (_name, args) => {
+    calls.push(args);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  await RuntimeHost.prototype.runSetup.call(
+    fixture.host,
+    "connector-identity-test",
+    ["setup", "--browser-only"],
+    {},
+  );
+
+  assert.equal(calls.length, 2);
+  for (const args of calls) {
+    const connectorOption = args.indexOf("--automatic-connector-name");
+    assert.ok(connectorOption >= 0);
+    assert.equal(args[connectorOption + 1], CURRENT_CONNECTOR_NAME);
+  }
+  assert.equal(calls[0].includes("--preflight-only"), true);
+  assert.equal(calls[1].includes("--preflight-only"), false);
+});
+
 test("launcher update transaction upgrades its owned full runtime with saved configuration", async () => {
   const fixture = hostFor({
     mode: "full",
@@ -394,6 +425,44 @@ test("launcher update transaction upgrades its owned full runtime with saved con
     connectorMigrated: false,
     stdout: "",
   });
+});
+
+test("packaged runtime upgrade compares config against the bridge CLI version", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-runtime-host-version-"));
+  const installedRuntimeRoot = path.join(root, "versions", "0.7.0-rc.13-win32-x64");
+  fs.mkdirSync(path.join(installedRuntimeRoot, "app"), { recursive: true });
+  fs.writeFileSync(
+    path.join(installedRuntimeRoot, "app", "package.json"),
+    `${JSON.stringify({ name: "codex-chatgpt-web", version: "5.0.6" }, null, 2)}\n`,
+  );
+  const existingConfig = {
+    mode: "browser-only",
+    browserHost: "launcher",
+    releaseVersion: "5.0.6",
+  };
+  const host = new RuntimeHost({
+    app: {
+      getPath: () => root,
+      getVersion: () => "0.7.0-rc.13",
+      isPackaged: true,
+    },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    installedRuntimeRoot,
+    runtimeRootProvider: () => installedRuntimeRoot,
+    browserDescriptorPath: path.join(root, "runtime", "launcher-browser.json"),
+    supervisor: {
+      readConfig: () => existingConfig,
+      readSetupConfig: () => existingConfig,
+      stopForSetup: async () => ({ status: "stopped" }),
+      startIfConfigured: async () => ({ status: "ready" }),
+    },
+  });
+  try {
+    assert.deepEqual(await host.upgradeManagedRuntime(), { updated: false });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("launcher migrates the legacy connector identity even when the release version is unchanged", async () => {
@@ -543,7 +612,7 @@ test("mutating launcher operations are serialized before lifecycle changes begin
   assert.equal(fixture.invocation(), undefined);
 });
 
-function bridgeFixture({ active }) {
+function bridgeFixture({ active, routeUrl }) {
   const calls = [];
   let routeActive = active;
   const supervisor = {
@@ -569,7 +638,14 @@ function bridgeFixture({ active }) {
     const action = args.join(" ");
     calls.push(action);
     if (action === "route status") {
-      return { stdout: JSON.stringify({ installed: true, active: routeActive, errors: [] }) };
+      return {
+        stdout: JSON.stringify({
+          installed: true,
+          active: routeActive,
+          ...(routeUrl ? { routeUrl } : {}),
+          errors: [],
+        }),
+      };
     }
     if (action === "route connect") {
       routeActive = true;
@@ -596,6 +672,14 @@ test("launcher leaves an already connected route unchanged", async () => {
   const result = await fixture.host.connectBridgeRoute();
   assert.equal(result.active, true);
   assert.deepEqual(fixture.calls, ["route status"]);
+});
+
+test("launcher reconnects when Coding Tools is up but Codex points at another host", async () => {
+  const fixture = bridgeFixture({ active: true, routeUrl: "http://192.168.1.144:17841/v1" });
+  fixture.supervisor.readConfig = () => ({ mode: "full", host: "127.0.0.1", port: 17841 });
+  const result = await fixture.host.connectBridgeRoute();
+  assert.equal(result.active, true);
+  assert.deepEqual(fixture.calls, ["route status", "route connect", "route status"]);
 });
 
 test("bridge connection rejects a route command that did not reach the requested state", async () => {
@@ -675,7 +759,7 @@ test("integration removal is accepted only after a new status process observes i
   host.run = async (_name, args) => {
     const action = args.join(" ");
     calls.push(action);
-    if (action === "uninstall --yes --launcher-control") {
+    if (action === "uninstall --yes --keep-data --launcher-control") {
       return { stdout: "uninstalled\n" };
     }
     if (action === "route status") {
@@ -687,7 +771,45 @@ test("integration removal is accepted only after a new status process observes i
   await host.uninstallIntegration();
   assert.deepEqual(calls, [
     "runtime:stop",
-    "uninstall --yes --launcher-control",
+    "uninstall --yes --keep-data --launcher-control",
+    "route status",
+  ]);
+});
+
+test("data-directory cleanup failure after a successful uninstall does not reconnect Codex", async () => {
+  const calls = [];
+  const config = { mode: "browser-only", browserHost: "launcher", releaseVersion: "2.1.8" };
+  const host = new RuntimeHost({
+    app: { getPath: () => path.join(os.tmpdir(), "codex-web-gpt-uninstall-eperm") },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor: {
+      readConfig: () => config,
+      readSetupConfig: () => config,
+      stopForSetup: async () => { calls.push("runtime:stop"); },
+    },
+  });
+  host.launcherControlEnvironment = () => ({ CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN: "test-token" });
+  host.run = async (_name, args) => {
+    const action = args.join(" ");
+    calls.push(action);
+    if (action === "uninstall --yes --keep-data --launcher-control") {
+      throw new Error("EPERM: operation not permitted, rm 'C:\\Users\\simon\\.coding-tools'");
+    }
+    if (action === "route status") {
+      return { stdout: JSON.stringify({ installed: false, active: false, errors: [] }) };
+    }
+    throw new Error(`Unexpected command: ${action}`);
+  };
+
+  await assert.rejects(
+    host.uninstallIntegration(),
+    /EPERM: operation not permitted/,
+  );
+  assert.deepEqual(calls, [
+    "runtime:stop",
+    "uninstall --yes --keep-data --launcher-control",
     "route status",
   ]);
 });
@@ -710,7 +832,7 @@ test("integration removal rejects a command that leaves an inactive journal behi
   host.run = async (_name, args) => {
     const action = args.join(" ");
     calls.push(action);
-    if (action === "uninstall --yes --launcher-control") {
+    if (action === "uninstall --yes --keep-data --launcher-control") {
       return { stdout: "uninstalled\n" };
     }
     if (action === "route status") {
@@ -725,7 +847,8 @@ test("integration removal rejects a command that leaves an inactive journal behi
   );
   assert.deepEqual(calls, [
     "runtime:stop",
-    "uninstall --yes --launcher-control",
+    "uninstall --yes --keep-data --launcher-control",
+    "route status",
     "route status",
     "route status",
   ]);
@@ -829,8 +952,8 @@ test("failed first-time setup removes its route before restoring the unconfigure
       /synthetic setup failure; incomplete first-time setup was rolled back/,
     );
     assert.deepEqual(calls.map((args) => args.join(" ")), [
-      "setup --browser-only --preflight-only",
-      "setup --browser-only",
+      "setup --browser-only --automatic-connector-name Coding Tools Native2 --preflight-only",
+      "setup --browser-only --automatic-connector-name Coding Tools Native2",
     ]);
     assert.equal(fs.existsSync(configPath), false);
     assert.equal(fs.existsSync(journalPath), false);
@@ -994,8 +1117,8 @@ test("failed terminal migration verifies the unchanged previous runtime instead 
     /synthetic migration failure$/,
   );
   assert.deepEqual(calls, [
-    "setup --browser-only --preflight-only",
-    "setup --browser-only",
+    "setup --browser-only --automatic-connector-name Coding Tools Native2 --preflight-only",
+    "setup --browser-only --automatic-connector-name Coding Tools Native2",
     "doctor --json",
   ]);
 });
@@ -1169,8 +1292,8 @@ test("failed terminal migration restores removed launchd ownership before verify
     assert.equal(fs.readFileSync(daemonPlist, "utf8"), "old daemon plist\n");
     assert.equal(fs.readFileSync(tunnelPlist, "utf8"), "old tunnel plist\n");
     assert.deepEqual(calls, [
-      "setup --full --preflight-only",
-      "setup --full",
+      "setup --full --automatic-connector-name Coding Tools Native2 --preflight-only",
+      "setup --full --automatic-connector-name Coding Tools Native2",
       "service install",
       "tunnel start",
       "doctor --json",

@@ -13,7 +13,7 @@ const {
   skipFiveStackPackageEntry,
 } = require("../scripts/prepare-package-resources.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.12";
+const PRODUCT_VERSION = "0.7.0-rc.13";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
@@ -121,19 +121,49 @@ function createFixture(label, overrides = {}) {
     [spdxName, "{\"spdxVersion\":\"SPDX-2.3\"}\n"],
   ]);
 
-  writeFile(path.join(runtimeRoot, "manifest.json"), `${JSON.stringify({
-    schemaVersion: 2,
-    appVersion: PRODUCT_VERSION,
-    platform: "win32",
-    arch: "x64",
-  }, null, 2)}\n`);
   writeFile(
     path.join(runtimeRoot, "THIRD_PARTY_NOTICES.txt"),
     "codex-chatgpt-web dependencies include MIT and Apache-2.0 components.\n",
   );
   writeFile(path.join(runtimeRoot, "LICENSE"), "MIT License\n");
   writeFile(path.join(runtimeRoot, "LICENSES", "fixture.txt"), "Apache-2.0\n");
+  writeFile(path.join(runtimeRoot, "runtime", "bun.exe"), "fixture bun runtime");
   writeFile(path.join(runtimeRoot, "app", "cli.js"), "console.log('fixture runtime');\n");
+  writeFile(path.join(runtimeRoot, "app", "browser-helper.cjs"), "module.exports = {};\n");
+  writeFile(path.join(runtimeRoot, "bin", "codex-chatgpt-web.cmd"), "@echo off\r\n");
+  const runtimeFiles = [
+    "LICENSE",
+    "LICENSES/fixture.txt",
+    "THIRD_PARTY_NOTICES.txt",
+    "app/browser-helper.cjs",
+    "app/cli.js",
+    "bin/codex-chatgpt-web.cmd",
+    "runtime/bun.exe",
+  ].map((relativePath) => {
+    const bytes = fs.readFileSync(path.join(runtimeRoot, ...relativePath.split("/")));
+    return { path: relativePath, size: bytes.length, sha256: sha256(bytes) };
+  });
+  const bundleIdHash = crypto.createHash("sha256");
+  for (const file of runtimeFiles) {
+    bundleIdHash.update(file.path);
+    bundleIdHash.update("\0");
+    bundleIdHash.update(String(file.size));
+    bundleIdHash.update("\0");
+    bundleIdHash.update(file.sha256);
+    bundleIdHash.update("\0");
+  }
+  writeFile(path.join(runtimeRoot, "manifest.json"), `${JSON.stringify({
+    schemaVersion: 2,
+    appVersion: PRODUCT_VERSION,
+    bundleId: bundleIdHash.digest("hex"),
+    bunVersion: "1.4.0",
+    platform: "win32",
+    arch: "x64",
+    launcher: "bin/codex-chatgpt-web.cmd",
+    entrypoint: "app/cli.js",
+    playwright: "1.62.0",
+    files: runtimeFiles,
+  }, null, 2)}\n`);
   writeFile(headlessBinary, Buffer.from("MZfixture-headless"));
   writeFile(tunnelArchive, archiveBytes);
   writeFile(noticesPath, [
@@ -290,6 +320,18 @@ test("composes the exact Windows payload from the official seven-member client a
     fs.readFileSync(path.join(options.outputRoot, "five-stack-runtime", "commandcode-proxy", "source", "proxy.mjs"), "utf8"),
     "export {}\n",
   );
+});
+
+test("rejects a runtime entry whose size differs from its manifest before replacing prior output", () => {
+  const options = createFixture("runtime-size-mismatch");
+  writeFile(path.join(options.outputRoot, "old-resource.txt"), "still active\n");
+  fs.appendFileSync(path.join(options.runtimeRoot, "app", "cli.js"), "// changed after manifest generation\n");
+
+  assert.throws(
+    () => preparePackageResources(options),
+    /PACKAGE_RESOURCE_RUNTIME_INTEGRITY_INVALID.*Runtime bundle file size mismatch/,
+  );
+  assert.equal(fs.readFileSync(path.join(options.outputRoot, "old-resource.txt"), "utf8"), "still active\n");
 });
 
 test("five-stack package copy keeps production node_modules and omits expo, Paseo app, fastlane, and file-named directories", () => {

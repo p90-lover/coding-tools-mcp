@@ -370,6 +370,16 @@ export function deactivateCodexIntegration(): SetCodexIntegrationActiveResult {
   return { changed: true, active: false };
 }
 
+function listeningRouteUrl(): string | undefined {
+  try {
+    return routeUrl(loadConfig());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.startsWith("Configuration is missing:")) return undefined;
+    throw error;
+  }
+}
+
 export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   const existing = readJournal();
   if (!existing) throw new Error("Codex integration is not installed");
@@ -381,7 +391,23 @@ export function activateCodexIntegration(): SetCodexIntegrationActiveResult {
   const current = readFileSync(existing.configPath, "utf8");
   if (existing.version === 10 && existing.active) {
     verifyInstalledRoute(current, existing);
-    return { changed: false, active: true };
+    const expectedUrl = listeningRouteUrl();
+    if (!expectedUrl || existing.installed.openai_base_url === expectedUrl) {
+      return { changed: false, active: true };
+    }
+    const fromLine = `openai_base_url = ${JSON.stringify(existing.installed.openai_base_url)}`;
+    if (!current.includes(fromLine)) {
+      throw new Error("Codex openai_base_url changed after setup; refusing to overwrite the user's newer value");
+    }
+    const updated: CodexIntegrationJournal = {
+      ...existing,
+      installed: { ...existing.installed, openai_base_url: expectedUrl },
+    };
+    writeIntegrationState(updated, {
+      path: existing.configPath,
+      data: current.replace(fromLine, `openai_base_url = ${JSON.stringify(expectedUrl)}`),
+    });
+    return { changed: true, active: true };
   }
   let baseline: string;
   if ((existing.version === 4 || existing.version === 5 || existing.version === 6 || existing.version === 7 || existing.version === 8 || existing.version === 9 || existing.version === 10) && !existing.active) {

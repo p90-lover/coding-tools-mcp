@@ -12,6 +12,7 @@ const {
   MAX_RESTARTS_PER_WINDOW,
   RuntimeSupervisor,
   managedTunnelConnectArgs,
+  runtimeChildEnvironment,
   validateConfig,
 } = require("../electron/runtime-supervisor.cjs");
 
@@ -76,6 +77,46 @@ test("packaged runtime paths are native on Windows and Unix", () => {
   const linux = packagedRuntimePaths("/opt/codex/resources", "linux");
   assert.equal(path.basename(linux.executable), "bun");
   assert.equal(path.basename(linux.entrypoint), "cli.js");
+});
+
+test("runtime child environment removes inherited proxy variables", () => {
+  const environment = runtimeChildEnvironment(
+    {
+      PATH: "C:\\Windows\\System32",
+      HTTP_PROXY: "http://parent.proxy.test:8080",
+      HTTPS_PROXY: "http://parent.proxy.test:8080",
+      ALL_PROXY: "http://parent.proxy.test:8080",
+      NO_PROXY: "127.0.0.1",
+      http_proxy: "http://parent.proxy.test:8080",
+      https_proxy: "http://parent.proxy.test:8080",
+      all_proxy: "http://parent.proxy.test:8080",
+      no_proxy: "127.0.0.1",
+    },
+    {
+      HTTP_PROXY: "http://runtime.proxy.test:8080",
+      CODING_TOOLS_RUNTIME_MODE: "full",
+    },
+    "C:\\Users\\example\\.coding-tools\\runtime\\launcher-browser.json",
+  );
+
+  assert.equal(environment.PATH, "C:\\Windows\\System32");
+  assert.equal(environment.CODING_TOOLS_RUNTIME_MODE, "full");
+  assert.equal(
+    environment.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR,
+    "C:\\Users\\example\\.coding-tools\\runtime\\launcher-browser.json",
+  );
+  for (const name of [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+  ]) {
+    assert.equal(environment[name], undefined, `${name} must not reach the local runtime child`);
+  }
 });
 
 test("Linux autostart launches the durable AppImage invisibly", () => {
@@ -214,6 +255,44 @@ test("DEV runtime supervision ignores launcher version mismatch and starts only 
     assert.equal(state.tunnelPid, 123_456_789);
   } finally {
     supervisor.tunnel = null;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("packaged runtime supervision compares config against the bridge CLI version", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-runtime-version-gate-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const installedRuntimeRoot = path.join(root, "versions", "0.7.0-rc.13-win32-x64");
+  fs.mkdirSync(path.join(installedRuntimeRoot, "app"), { recursive: true });
+  fs.writeFileSync(
+    path.join(installedRuntimeRoot, "app", "package.json"),
+    `${JSON.stringify({ name: "codex-chatgpt-web", version: "5.0.6" }, null, 2)}\n`,
+  );
+  fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
+  fs.writeFileSync(path.join(root, "config.json"), `${JSON.stringify(launcherConfig(descriptorPath, {
+    releaseVersion: "5.0.6",
+  }))}\n`);
+
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.7.0-rc.13", isPackaged: true },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    installedRuntimeRoot,
+    runtimeRootProvider: () => installedRuntimeRoot,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+  });
+  supervisor.proxyHealth = async () => false;
+  supervisor.startTunnel = async () => {};
+  supervisor.startDaemon = async () => {
+    supervisor.daemon = { pid: 123_456_789, exitCode: null, signalCode: null };
+  };
+  try {
+    const runtime = await supervisor.startConfigured();
+    assert.equal(runtime.status, "ready");
+    assert.equal(runtime.daemonPid, 123_456_789);
+  } finally {
+    supervisor.daemon = null;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1947,6 +2026,106 @@ server.listen(config.port, config.host);
       daemonPid: stale.pid,
       tunnelPid: null,
       status: "ready",
+      updatedAt: new Date().toISOString(),
+    })}\n`);
+
+    const started = await supervisor.startIfConfigured();
+    assert.equal(started.status, "ready");
+    assert.notEqual(started.daemonPid, stale.pid);
+    assert.equal(stale.exitCode !== null || stale.killed, true);
+  } finally {
+    await supervisor.stopForSetup().catch(() => {});
+    if (stale.exitCode === null) stale.kill("SIGTERM");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launcher supervisor recovers an identity-matched daemon when the marker pid is missing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-stale-marker-null-"));
+  const descriptorPath = path.join(root, "runtime", "launcher-browser.json");
+  const statePath = path.join(root, "runtime", "launcher-supervisor.json");
+  const configPath = path.join(root, "config.json");
+  const serverPath = path.join(root, "fake-runtime.cjs");
+  const port = await freePort();
+  fs.mkdirSync(path.dirname(descriptorPath), { recursive: true });
+  fs.writeFileSync(descriptorPath, "{}\n");
+  fs.writeFileSync(configPath, `${JSON.stringify(launcherConfig(descriptorPath, {
+    port,
+    controlToken: "stale-marker-null-control-token-0123456789",
+  }))}\n`);
+  fs.writeFileSync(serverPath, `
+const fs = require("node:fs");
+const http = require("node:http");
+const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+let draining = false;
+const server = http.createServer((request, response) => {
+  response.setHeader("content-type", "application/json");
+  response.setHeader("connection", "close");
+  if (request.url === "/healthz") {
+    response.end(JSON.stringify({
+      status: "ok",
+      service: "codex-chatgpt-web",
+      mode: config.mode,
+      version: config.releaseVersion,
+      pid: process.pid,
+      accepting_turns: !draining,
+    }));
+    return;
+  }
+  if (request.headers.authorization !== "Bearer " + config.controlToken) {
+    response.statusCode = 401;
+    response.end("{}");
+    return;
+  }
+  if (request.method === "POST" && request.url === "/admin/drain") draining = true;
+  else if (request.method === "POST" && request.url === "/admin/resume") draining = false;
+  else if (request.method === "POST" && request.url === "/admin/shutdown" && draining) {
+    response.end(JSON.stringify({ status: "ok", accepting_turns: false, active_http_turns: 0, active_browser_turns: 0 }));
+    server.close(() => process.exit(0));
+    return;
+  } else {
+    response.statusCode = 404;
+    response.end("{}");
+    return;
+  }
+  response.end(JSON.stringify({ status: "ok", accepting_turns: !draining, active_http_turns: 0, active_browser_turns: 0 }));
+});
+server.listen(config.port, config.host);
+`);
+  const stale = spawn(process.execPath, [serverPath, configPath], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  const logger = { info() {}, warn() {}, error() {} };
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger,
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: descriptorPath,
+    runtimeInvocationFactory: () => ({
+      executable: process.execPath,
+      args: [serverPath, configPath],
+      cwd: root,
+    }),
+  });
+
+  try {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try {
+        if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).ok, true);
+    fs.writeFileSync(statePath, `${JSON.stringify({
+      version: 1,
+      ownerPid: 999_999_999,
+      daemonPid: null,
+      tunnelPid: null,
+      status: "failed",
+      detail: "The process on the Responses port does not match the stale launcher marker",
       updatedAt: new Date().toISOString(),
     })}\n`);
 

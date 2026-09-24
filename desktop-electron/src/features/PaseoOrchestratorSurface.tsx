@@ -77,11 +77,19 @@ function phaseTone(phase: string): string {
 export function PaseoOrchestratorSurface({
   language,
   setError,
+  variant = "paseo",
 }: {
   language: Language;
   setError: (error: string | null) => void;
+  variant?: "paseo" | "runtime";
 }) {
   const copy = orchestrationCopy(language);
+  const orchestratorLabel = variant === "runtime"
+    ? (language === "zh-TW" || language === "zh-CN" ? "協調器" : language === "ja" ? "オーケストレーター" : "Orchestrator")
+    : copy.paseoOrchestrator;
+  const workersLabel = variant === "runtime"
+    ? (language === "zh-TW" || language === "zh-CN" ? "工作代理" : language === "ja" ? "ワーカー" : "Workers")
+    : copy.paseoSubagents;
   const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [taskId, setTaskId] = useState("");
@@ -89,7 +97,7 @@ export function PaseoOrchestratorSurface({
   const [providerId, setProviderId] = useState("");
   const [accountId, setAccountId] = useState("");
   const [model, setModel] = useState("");
-  const [allowFallback, setAllowFallback] = useState(true);
+  const [allowFallback, setAllowFallback] = useState(false);
   const [route, setRoute] = useState<ProviderExecutionPlan | null>(null);
   const [missions, setMissions] = useState<MissionView[]>([]);
   const [missionId, setMissionId] = useState("");
@@ -103,7 +111,7 @@ export function PaseoOrchestratorSurface({
 
   const accounts = useMemo(() => usable(network), [network]);
   const providers = useMemo(
-    () => [...new Set(accounts.map((account) => account.providerId))],
+    () => [...new Set([WEB_GPT_PROVIDER_ID, ...accounts.map((account) => account.providerId)])],
     [accounts],
   );
   const matchingAccounts = useMemo(
@@ -170,10 +178,10 @@ export function PaseoOrchestratorSurface({
         providerId: fallback?.providerId ?? "",
         accountId: fallback?.id ?? "",
         model: fallback?.models[0] ?? "",
-        role: "implementer",
+        role: variant === "runtime" ? "worker" : "implementer",
       }];
     });
-  }, [accounts, providerId]);
+  }, [accounts, providerId, variant]);
 
   useEffect(() => {
     if (workspaceId) void refresh();
@@ -197,7 +205,10 @@ export function PaseoOrchestratorSurface({
           : next[0]?.id ?? ""
       ));
     } catch (cause) {
-      setError(messageOf(cause));
+      const message = messageOf(cause);
+      if (!/IPC_TRANSPORT_FAILED|Workspace-bound listener/i.test(message)) {
+        setError(message);
+      }
     } finally {
       setBusy(false);
     }
@@ -287,7 +298,7 @@ export function PaseoOrchestratorSurface({
       });
       setAssignmentRun(next);
       setInspectorTab("plan");
-      setNotice(copy.paseoRunningSubagents);
+      setNotice(stringValue(next.reason, copy.paseoRunningSubagents));
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -304,7 +315,9 @@ export function PaseoOrchestratorSurface({
       const next = await callPlane("paseo_review", { runId });
       setAssignmentReview(next);
       setInspectorTab("plan");
-      setNotice(copy.paseoReviewReady);
+      setNotice(next.requiresOrchestratorReview === true
+        ? "Worker findings collected. The orchestrator still needs to perform the final review."
+        : copy.paseoReviewReady);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -605,13 +618,26 @@ export function PaseoOrchestratorSurface({
           <div className="paseo-empty-workspace">
             <div className="paseo-composer-heading">
               <span className="paseo-orbit-mark" aria-hidden="true"><i /><i /><i /></span>
-              <h2>{copy.paseoComposerTitle}</h2>
-              <p>{copy.paseoSubtitle}</p>
+              <h2>{variant === "runtime"
+                ? orchestratorLabel
+                : copy.paseoComposerTitle}</h2>
+              <p>{variant === "runtime"
+                ? (language === "zh-TW" || language === "zh-CN"
+                  ? "指定一個協調器帳戶與一或多個工作代理。Web GPT 可透過 runtime_open_task 開啟任務，並在工作代理回傳後把結果交還 ChatGPT Web。"
+                  : "Choose one orchestrator account and one or more workers. Web GPT can open a task with runtime_open_task, then receive worker responses back into the ChatGPT Web model.")
+                : copy.paseoSubtitle}</p>
+              {providerId === WEB_GPT_PROVIDER_ID && !matchingAccounts.length ? (
+                <p role="status" className="control-notice">
+                  {language === "zh-TW" || language === "zh-CN"
+                    ? "請先在瀏覽器登入 ChatGPT，並在供應商中連結 ChatGPT Web 帳戶。未連結前不會改用其他供應商。"
+                    : "Sign in to ChatGPT in Browser, then link a ChatGPT Web account in Providers. No other provider will be substituted unless you enable fallback."}
+                </p>
+              ) : null}
             </div>
 
             <div className="paseo-meta-row">
               <label className="paseo-meta-chip">
-                <span>{copy.paseoOrchestrator}</span>
+                <span>{orchestratorLabel}</span>
                 <select value={providerId} onChange={(event) => setProviderId(event.target.value)}>
                   <option value="">{copy.automatic}</option>
                   {providers.map((id) => (
@@ -652,7 +678,7 @@ export function PaseoOrchestratorSurface({
 
             <section className="paseo-subagent-board">
               <header>
-                <h3>{copy.paseoSubagents}</h3>
+                <h3>{workersLabel}</h3>
                 <button
                   className="secondary-button"
                   disabled={busy || !accounts.length || subagents.length >= 8}
@@ -667,7 +693,7 @@ export function PaseoOrchestratorSurface({
                         providerId: fallback?.providerId ?? "",
                         accountId: fallback?.id ?? "",
                         model: fallback?.models[0] ?? "",
-                        role: `subagent-${current.length + 1}`,
+                        role: variant === "runtime" ? `worker-${current.length + 1}` : `subagent-${current.length + 1}`,
                       },
                     ]);
                   }}

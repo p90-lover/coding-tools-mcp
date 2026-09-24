@@ -53,6 +53,12 @@ export interface ProviderDefinition {
   proxyMode: ProxyMode;
   baseUrl?: string;
   modelsEndpoint?: string;
+  requestDefaults?: {
+    chatPath?: string;
+    modelsPath?: string;
+    authHeaderName?: string;
+    extraHeaders?: Record<string, string>;
+  };
   loginMode?: ProviderLoginMode;
   loginAdapters?: ProviderLoginAdapterDefinition[];
   subagentEnabled: boolean;
@@ -67,7 +73,7 @@ export interface ProviderRoute {
   proxyPolicyId?: string;
 }
 
-export const DEFAULT_PROVIDERS = [
+export const DEFAULT_PROVIDERS: ProviderDefinition[] = [
   {
     id: "codex-oauth",
     name: "Codex OAuth",
@@ -224,7 +230,7 @@ export const DEFAULT_PROVIDERS = [
   },
 ] satisfies ProviderDefinition[];
 
-export const ADDITIONAL_PROVIDERS = [
+export const ADDITIONAL_PROVIDERS: ProviderDefinition[] = [
   {
     id: "openai-api",
     name: "OpenAI API",
@@ -232,8 +238,15 @@ export const ADDITIONAL_PROVIDERS = [
     auth: "api_key",
     protocol: "openai_responses",
     capabilities: ["text", "reasoning", "tools", "vision", "image_generation"],
-    models: [],
+    models: ["gpt-4.1", "gpt-4o", "o3"],
     proxyMode: "inherit",
+    baseUrl: "https://api.openai.com/v1",
+    modelsEndpoint: "/models",
+    requestDefaults: {
+      chatPath: "/chat/completions",
+      modelsPath: "/models",
+      authHeaderName: "Authorization",
+    },
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
@@ -246,8 +259,16 @@ export const ADDITIONAL_PROVIDERS = [
     auth: "api_key",
     protocol: "anthropic_messages",
     capabilities: ["text", "reasoning", "tools", "vision"],
-    models: [],
+    models: ["claude-sonnet-4-5", "claude-opus-4-1"],
     proxyMode: "inherit",
+    baseUrl: "https://api.anthropic.com",
+    modelsEndpoint: "/v1/models",
+    requestDefaults: {
+      chatPath: "/v1/messages",
+      modelsPath: "/v1/models",
+      authHeaderName: "x-api-key",
+      extraHeaders: { "anthropic-version": "2023-06-01" },
+    },
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
@@ -260,8 +281,15 @@ export const ADDITIONAL_PROVIDERS = [
     auth: "api_key",
     protocol: "gemini_native",
     capabilities: ["text", "reasoning", "tools", "vision", "image_generation"],
-    models: [],
+    models: ["gemini-2.5-pro", "gemini-2.5-flash"],
     proxyMode: "inherit",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    modelsEndpoint: "/models",
+    requestDefaults: {
+      chatPath: "/models/{model}:generateContent",
+      modelsPath: "/models",
+      authHeaderName: "x-goog-api-key",
+    },
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
@@ -277,6 +305,13 @@ export const ADDITIONAL_PROVIDERS = [
     models: [],
     proxyMode: "inherit",
     baseUrl: "https://openrouter.ai/api/v1",
+    modelsEndpoint: "/models",
+    requestDefaults: {
+      chatPath: "/chat/completions",
+      modelsPath: "/models",
+      authHeaderName: "Authorization",
+      extraHeaders: { "HTTP-Referer": "https://coding-tools.local", "X-Title": "Coding Tools" },
+    },
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
@@ -292,6 +327,12 @@ export const ADDITIONAL_PROVIDERS = [
     models: [],
     proxyMode: "direct",
     baseUrl: "http://127.0.0.1:11434/v1",
+    modelsEndpoint: "/models",
+    requestDefaults: {
+      chatPath: "/chat/completions",
+      modelsPath: "/models",
+      authHeaderName: "Authorization",
+    },
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
@@ -304,12 +345,41 @@ export const ADDITIONAL_PROVIDERS = [
     auth: "api_key",
     protocol: "openai_chat",
     capabilities: ["text", "reasoning", "tools", "vision", "image_generation"],
-    models: [],
+    models: ["gpt-4.1", "gpt-4o"],
     proxyMode: "inherit",
+    baseUrl: "https://api.openai.com/v1",
+    modelsEndpoint: "/models",
+    requestDefaults: {
+      chatPath: "/chat/completions",
+      modelsPath: "/models",
+      authHeaderName: "Authorization",
+    },
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
     priority: 10,
+  },
+  {
+    id: "custom-anthropic-compatible",
+    name: "Custom Anthropic Compatible",
+    category: "custom",
+    auth: "api_key",
+    protocol: "anthropic_messages",
+    capabilities: ["text", "reasoning", "tools", "vision"],
+    models: ["claude-sonnet-4-5", "claude-opus-4-1"],
+    proxyMode: "inherit",
+    baseUrl: "https://api.anthropic.com",
+    modelsEndpoint: "/v1/models",
+    requestDefaults: {
+      chatPath: "/v1/messages",
+      modelsPath: "/v1/models",
+      authHeaderName: "x-api-key",
+      extraHeaders: { "anthropic-version": "2023-06-01" },
+    },
+    subagentEnabled: true,
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 9,
   },
 ] satisfies ProviderDefinition[];
 
