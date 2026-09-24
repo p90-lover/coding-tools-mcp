@@ -10,6 +10,24 @@
     "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96",
     "repository": "getpaseo/paseo"
   },
+  "launch": {
+    "order": 40,
+    "autoStart": true,
+    "startupPolicy": "auto",
+    "installOnStartup": true,
+    "dependsOn": ["cpa"],
+    "requires": ["core-runtime"],
+    "readyTimeoutMs": 90000
+  },
+  "visual": {
+    "embed": "iframe",
+    "endpoint": "http://127.0.0.1:6768/",
+    "manifest": "vendor/upstream/paseo.json",
+    "initialSection": "",
+    "controls": ["module-lifecycle", "paseo-orchestrator"],
+    "icon": "orchestrator",
+    "navGroup": "more"
+  },
   "legacyLoopback": {
     "note": "Temporary compatibility only. Product surface is the in-process handler, not a listen port.",
     "url": "http://127.0.0.1:6768/"

@@ -19,7 +19,7 @@
     "steps": [
       { "id": "unpack-bundled-source", "kind": "unpack-bundle" },
       { "id": "npm-ci", "kind": "command", "executable": "{npm}", "arguments": ["ci"], "skipIfFile": "node_modules", "skipIfExists": "node_modules" },
-      { "id": "build-server", "kind": "command", "executable": "{npm}", "arguments": ["run", "build:server"], "skipIfFile": "dist" },
+      { "id": "build-server", "kind": "command", "executable": "{npm}", "arguments": ["run", "build:server"], "skipIfFile": "packages/server/dist" },
       { "id": "activate", "kind": "activate" }
     ]
   },

@@ -12,6 +12,8 @@ const {
   copyBundledTree,
   createManagedComponentController,
   loadManagedManifest,
+  rewriteHostedToolcacheScript,
+  rewriteHostedToolcacheScripts,
 } = require("../electron/managed-components.cjs");
 
 const root = path.resolve(__dirname, "..");
@@ -104,6 +106,42 @@ test("Start copies bundled production node_modules so Paseo does not fetch npm p
   assert.equal(fs.existsSync(path.join(destination, ".git")), false);
 });
 
+test("hostedtoolcache npm/node paths in bundled package scripts rewrite to portable commands", () => {
+  const directory = temporaryDirectory("coding-tools-hostedtoolcache-scripts");
+  const packageFile = path.join(directory, "package.json");
+  writeJson(packageFile, {
+    name: "paseo",
+    scripts: {
+      start: "C:\\\\hostedtoolcache\\\\windows\\\\node\\\\22.23.2\\\\x64\\\\npm.cmd run start --workspace=@getpaseo/server",
+      bin: "C:\\\\hostedtoolcache\\\\windows\\\\node\\\\22.23.2\\\\x64\\\\node.exe dist/scripts/supervisor-entrypoint.js",
+      keep: "npm run typecheck",
+    },
+  });
+  assert.match(
+    rewriteHostedToolcacheScript("C:\\hostedtoolcache\\windows\\node\\22.23.2\\x64\\npm.cmd run start"),
+    /^npm run start$/,
+  );
+  assert.equal(rewriteHostedToolcacheScripts(directory), 1);
+  const scripts = JSON.parse(fs.readFileSync(packageFile, "utf8")).scripts;
+  assert.equal(scripts.start, "npm run start --workspace=@getpaseo/server");
+  assert.equal(scripts.bin, "node dist/scripts/supervisor-entrypoint.js");
+  assert.equal(scripts.keep, "npm run typecheck");
+
+  const workspace = path.join(directory, "node_modules", "@getpaseo", "server", "package.json");
+  fs.mkdirSync(path.dirname(workspace), { recursive: true });
+  writeJson(workspace, {
+    name: "@getpaseo/server",
+    scripts: {
+      start: "C:\\\\hostedtoolcache\\\\windows\\\\node\\\\22.23.2\\\\x64\\\\node.exe dist/scripts/supervisor-entrypoint.js",
+    },
+  });
+  assert.equal(rewriteHostedToolcacheScripts(directory), 1);
+  assert.equal(
+    JSON.parse(fs.readFileSync(workspace, "utf8")).scripts.start,
+    "node dist/scripts/supervisor-entrypoint.js",
+  );
+});
+
 test("real CommandCode, Paseo and Anneal manifests are bundled-source inside Desktop", () => {
   assert.deepEqual([...BUNDLED_COMPONENT_IDS], ["commandcode-proxy", "paseo", "anneal"]);
   const commandcode = loadManagedManifest("commandcode-proxy", path.join(root, "vendor", "managed-components"));
@@ -118,6 +156,8 @@ test("real CommandCode, Paseo and Anneal manifests are bundled-source inside Des
   assert.equal(commandcode.bundle.entrypoint, "proxy.mjs");
   assert.equal(anneal.credentials.githubReadToken.required, false);
   assert.equal(fs.existsSync(path.join(root, "vendor/bundled/commandcode-proxy/proxy.mjs")), true);
+  const buildServer = paseo.install.steps.find((step) => step.id === "build-server");
+  assert.equal(buildServer.skipIfFile, "packages/server/dist");
   assert.match(router.health.endpoint, /127\.0\.0\.1:4202|_codex-router/);
   assert.match(cpa.health.endpoint, /127\.0\.0\.1:8317/);
 });

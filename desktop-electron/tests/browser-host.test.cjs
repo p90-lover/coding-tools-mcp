@@ -766,6 +766,34 @@ test("guest and incomplete server sessions do not prove launcher authentication"
   assert.equal(result.status, "signed-out");
 });
 
+test("a ChatGPT server session is enough to mark the launcher signed in", async () => {
+  const fixture = {
+    state: { authenticated: false },
+    activeTraceId: null,
+    manualOperation: null,
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        getURL: () => "https://chatgpt.com/",
+        executeJavaScript: async () => ({
+          composer: false,
+          temporary: false,
+          sessionAuthenticated: true,
+          readyState: "complete",
+          url: "https://chatgpt.com/",
+        }),
+      },
+    },
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+    snapshot() { return { ...this.state }; },
+    logger: { info() {} },
+  };
+
+  const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
+  assert.equal(result.authenticated, true);
+  assert.equal(result.status, "ready");
+});
+
 test("launcher authentication requires the Temporary Chat composer and complete server session", async () => {
   const fixture = {
     state: { authenticated: false },
@@ -875,6 +903,55 @@ test("explicit login waits for an in-flight saved-session refresh before taking 
   finishRefresh();
   await login;
   assert.deepEqual(calls, ["ChatGPT login", "probe", "inspect"]);
+});
+
+test("saved-session refresh joins an in-flight ChatGPT login instead of taking the browser lock", async () => {
+  const loginOperation = Promise.resolve({ authenticated: true, via: "login" });
+  const fixture = {
+    loginOperation,
+    sessionRefreshOperation: null,
+    state: { authenticated: false },
+  };
+  const result = BrowserHost.prototype.refreshAuthentication.call(fixture);
+  assert.equal(result, loginOperation);
+  assert.deepEqual(await result, { authenticated: true, via: "login" });
+});
+
+test("explicit login keeps waiting while the ChatGPT sign-in surface is visible", async () => {
+  let probes = 0;
+  const fixture = {
+    visible: true,
+    authNavigationError: null,
+    view: { webContents: { getURL: () => "https://chatgpt.com/auth/login", isDestroyed: () => false } },
+    authView: null,
+    probeAuthentication: async () => {
+      probes += 1;
+      if (probes < 3) return { authenticated: false };
+      return { authenticated: true };
+    },
+  };
+  const result = await BrowserHost.prototype.waitForAuthenticated.call(fixture, 20, {
+    extendWhileInteractive: true,
+    maxMs: 5_000,
+  });
+  assert.equal(result.authenticated, true);
+  assert.ok(probes >= 3);
+});
+
+test("login wait times out when the ChatGPT surface is no longer visible", async () => {
+  const fixture = {
+    visible: false,
+    authNavigationError: null,
+    view: { webContents: { getURL: () => "https://chatgpt.com/?temporary-chat=true", isDestroyed: () => false } },
+    probeAuthentication: async () => ({ authenticated: false }),
+  };
+  await assert.rejects(
+    BrowserHost.prototype.waitForAuthenticated.call(fixture, 20, {
+      extendWhileInteractive: true,
+      maxMs: 800,
+    }),
+    /ChatGPT login was not completed before the timeout/,
+  );
 });
 
 test("passkey login imports only validated state and re-proves the Launcher session", async () => {
@@ -1016,10 +1093,12 @@ test("failed private-transfer cleanup also discards an otherwise imported passke
 
 test("launcher quit remains gated through an active embedded-browser operation", () => {
   const source = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
-  assert.match(
-    source,
-    /runtimeHost\?\.currentOperation\(\) \|\| browserHost\?\.currentOperation\(\)/,
-  );
+  const browserGate = source.indexOf("const browserOperation = browserHost?.currentOperation()");
+  const internalDrain = source.indexOf("await Promise.allSettled(", browserGate);
+  const runtimeGate = source.indexOf("const runtimeOperation = runtimeHost?.currentOperation()", internalDrain);
+  assert.ok(browserGate >= 0, "quit must reject an active user-facing browser operation");
+  assert.ok(internalDrain > browserGate, "quit must drain tracked startup and auto-connect work");
+  assert.ok(runtimeGate > internalDrain, "quit must reject any unrelated runtime operation after the drain");
 });
 
 test("logout clears only the owned ChatGPT session and returns to the sign-in surface", async () => {

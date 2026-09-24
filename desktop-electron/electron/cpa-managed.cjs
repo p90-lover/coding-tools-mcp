@@ -132,11 +132,14 @@ function yamlString(value) {
 function runtimeConfiguration(state, managementKey, proxyApiKey) {
   const authDirectory = path.join(state, "auth");
   const logDirectory = path.join(state, "logs");
+  const pluginDirectory = path.join(state, "plugins");
   fs.mkdirSync(authDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(logDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(pluginDirectory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") {
     fs.chmodSync(authDirectory, 0o700);
     fs.chmodSync(logDirectory, 0o700);
+    fs.chmodSync(pluginDirectory, 0o700);
   }
   return [
     "host: \"127.0.0.1\"",
@@ -154,6 +157,16 @@ function runtimeConfiguration(state, managementKey, proxyApiKey) {
     "logging-to-file: true",
     "usage-statistics-enabled: true",
     ...cpaLongRunYamlLines(),
+    "plugins:",
+    "  enabled: true",
+    `  dir: ${yamlString(pluginDirectory)}`,
+    "  configs:",
+    "    antigravity-coding-filter:",
+    "      enabled: true",
+    "      priority: 1",
+    "      mode: rewrite",
+    "      use_default_keywords: true",
+    "      custom_mappings: {}",
     "",
   ].join("\n");
 }

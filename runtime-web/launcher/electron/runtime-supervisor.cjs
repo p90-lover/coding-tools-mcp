@@ -1711,10 +1711,12 @@ class RuntimeSupervisor {
       throw new Error("DEV launcher ownership unexpectedly contains a Responses daemon");
     }
     const health = tunnelOnly ? null : await this.proxyHealthPayload(config);
+    const healthPid = Number.isInteger(health?.pid) ? health.pid : null;
     const daemonRunning = health?.service === "codex-chatgpt-web"
       && health?.mode === config.mode
-      && health?.version === config.releaseVersion;
-    if (daemonRunning && health.pid !== state.daemonPid) {
+      && health?.version === config.releaseVersion
+      && healthPid !== null;
+    if (daemonRunning && healthPid !== state.daemonPid && processRunning(state.daemonPid)) {
       throw new Error("The process on the Responses port does not match the stale launcher marker");
     }
     if (!daemonRunning && processRunning(state.daemonPid)) {
@@ -1754,7 +1756,7 @@ class RuntimeSupervisor {
 
     this.logger.warn("runtime.stale_owner_recovery_started", {
       ownerPid: state.ownerPid,
-      daemonPid: daemonRunning ? state.daemonPid : null,
+      daemonPid: daemonRunning ? healthPid : null,
       tunnelPid: managedTunnelRunning ? state.tunnelPid : null,
     });
     if (daemonRunning) {
@@ -1763,7 +1765,7 @@ class RuntimeSupervisor {
         drained = await this.acquireDrain(config);
         const shutdown = await this.control(config, "shutdown");
         if (shutdown.status !== "ok") throw new Error("stale daemon did not acknowledge graceful shutdown");
-        await this.waitForProcessExit("stale daemon", state.daemonPid);
+        await this.waitForProcessExit("stale daemon", healthPid);
         await this.waitForPortRelease(config);
       } catch (error) {
         if (drained) {

@@ -17,6 +17,7 @@ const {
   shell,
   Tray,
   powerSaveBlocker,
+  webFrameMain,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
@@ -47,6 +48,7 @@ const { createManagedExternalServicesController } = require("./managed-external-
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
+const { installCpaPanelSession } = require("./cpa-panel-session.cjs");
 const { requireAppHandler } = require("./app-handler-paths.cjs");
 function loadCreateCodingToolsAppsHost() {
   try {
@@ -59,6 +61,15 @@ function loadCreateCodingToolsAppsHost() {
   }
 }
 const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost();
+function loadAppHandlerRegistry() {
+  try {
+    return requireAppHandler("handler-registry.cjs").defaultRegistry;
+  } catch {
+    return null;
+  }
+}
+const appHandlerRegistry = loadAppHandlerRegistry();
+const { createAppsLaunchCoordinator } = require("./apps-launch.cjs");
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
 const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {
@@ -138,9 +149,12 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let codexBridgeConnectInFlight = null;
+let runtimeStartupInFlight = null;
 let updateController = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
+let appsLaunchCoordinator = null;
 let upstreamToolController = null;
 let originalUiController = null;
 let appsHost = null;
@@ -237,6 +251,89 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
     logger.error("bridge.route_restore_after_runtime_failure_failed", { message });
     return { restored: false, error: message };
   }
+}
+
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitForRuntimeHostIdle(timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (runtimeHost?.currentOperation()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Codex bridge connect waited for ${runtimeHost.currentOperation()}`);
+    }
+    await sleep(50);
+  }
+}
+
+function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged = false }) {
+  const config = runtimeSupervisor.readConfig();
+  const current = stateStore.read();
+  const patch = {
+    coreSetupComplete: true,
+    mcpRuntimeInstalled: config.mode === "full",
+    experimentalBiggerContext: config.experimentalBiggerContext === true,
+    zeroRiskProEnabled: config.zeroRiskProEnabled === true,
+    ...(bridgeRouteChanged ? {
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+    } : {}),
+    ...(config.mode === "browser-only" ? {
+      mcpSetupComplete: false,
+      mcpGuideStep: 0,
+    } : {}),
+  };
+  if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
+    const state = stateStore.update(patch);
+    send("launcher:state-changed", state);
+  }
+  startCatalogVerificationMonitor({ logger, stateStore });
+}
+
+async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reason = "auth" }) {
+  if (quitting || shutdownInProgress) {
+    return { skipped: true, reason: "shutting-down" };
+  }
+  if (IS_DEV_PROFILE || !runtimeHost || !runtimeSupervisor) {
+    return { skipped: true, reason: "unavailable" };
+  }
+  if (stateStore.read().browserInteractionMode === "automatic") {
+    const browser = typeof browserHost?.snapshot === "function" ? browserHost.snapshot() : null;
+    if (browser?.authenticated !== true) return { skipped: true, reason: "unauthenticated" };
+  }
+  if (!runtimeHost.runtimeConfigSnapshot().configured) {
+    return { skipped: true, reason: "not-configured" };
+  }
+  if (codexBridgeConnectInFlight) return codexBridgeConnectInFlight;
+  const work = (async () => {
+    await waitForRuntimeHostIdle();
+    const runtime = await runtimeSupervisor.startIfConfigured();
+    if (runtime.status !== "ready") return { skipped: true, reason: runtime.status, runtime };
+    const route = await runtimeHost.connectBridgeRoute();
+    applyReadyRuntimeAfterBridge({
+      logger,
+      stateStore,
+      bridgeRouteChanged: route.changed === true,
+    });
+    logger.info("bridge.auto_connected", {
+      reason,
+      changed: route.changed === true,
+    });
+    return { connected: true, changed: route.changed === true, runtime };
+  })();
+  codexBridgeConnectInFlight = work;
+  try {
+    return await work;
+  } finally {
+    if (codexBridgeConnectInFlight === work) codexBridgeConnectInFlight = null;
+  }
+}
+
+function scheduleCodexBridgeAutoConnect({ logger, stateStore, reason }) {
+  void connectCodexBridgeAfterAuthentication({ logger, stateStore, reason }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn("bridge.auto_connect_failed", { reason, message });
+    publishOperation({ name: "bridge-connect", status: "failed", message });
+  });
 }
 
 function trayImage() {
@@ -485,6 +582,12 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     },
   });
   window.setMenuBarVisibility(false);
+  installCpaPanelSession({
+    webContents: window.webContents,
+    webFrameMain,
+    getConnection: () => externalServicesController?.cpaConnection(),
+    logger,
+  });
   const guardRendererNavigation = (event, url) => {
     if (rendererNavigationAllowed(url)) return;
     event.preventDefault();
@@ -821,12 +924,27 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:execution:read", async (event, input) => {
     assertFocusedMainWindow(event, false);
-    if (!headlessHost) throw new Error("Local execution service is unavailable");
-    return headlessHost.request("/api/v1/execution/read", {
-      workspace_id: input.workspaceId,
-      mission_id: input.missionId ?? null,
-      refresh_source: input.refreshSource === true,
-    });
+    if (!headlessHost) {
+      return { workspaceId: input.workspaceId, missions: [], unavailable: true };
+    }
+    try {
+      return await headlessHost.request("/api/v1/execution/read", {
+        workspace_id: input.workspaceId,
+        mission_id: input.missionId ?? null,
+        refresh_source: input.refreshSource === true,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/workspace-bound listener required/i.test(message)) {
+        return {
+          workspaceId: input.workspaceId,
+          missions: [],
+          unavailable: true,
+          error: message,
+        };
+      }
+      throw error;
+    }
   });
   handle("coding-tools:execution:provider", async (event, input) => {
     assertFocusedMainWindow(event, true);
@@ -1020,6 +1138,28 @@ function registerIpc({ logger, stateStore }) {
       componentIds: Array.isArray(input?.componentIds) ? input.componentIds : null,
     });
   });
+  handle("launcher:apps-launch-snapshot", (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!appsLaunchCoordinator) throw new Error("Apps launch coordinator is unavailable");
+    return appsLaunchCoordinator.getSnapshot();
+  });
+  handle("launcher:apps-launch-run", (event, input = {}) => {
+    assertFocusedMainWindow(event, true);
+    if (!appsLaunchCoordinator) throw new Error("Apps launch coordinator is unavailable");
+    return appsLaunchCoordinator.run({
+      reason: typeof input?.reason === "string" && input.reason.trim() ? input.reason.trim() : "manual",
+      ids: Array.isArray(input?.moduleIds) ? input.moduleIds : null,
+      version: app.getVersion(),
+    });
+  });
+  handle("launcher:apps-launch-configure", (event, moduleId, input = {}) => {
+    assertFocusedMainWindow(event, true);
+    if (!appsLaunchCoordinator) throw new Error("Apps launch coordinator is unavailable");
+    return appsLaunchCoordinator.configure(moduleId, {
+      ...(input?.autoStart !== undefined ? { autoStart: input.autoStart === true } : {}),
+      ...(input?.enabled !== undefined ? { enabled: input.enabled === true } : {}),
+    });
+  });
 
   handle("launcher:upstream-tools-snapshot", (event) => {
     assertFocusedMainWindow(event, false);
@@ -1158,6 +1298,19 @@ function registerIpc({ logger, stateStore }) {
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-login" });
+    }
+    return browser;
+  });
+  handle("launcher:browser-refresh-auth", async () => {
+    if (stateStore.read().browserInteractionMode === "manual") {
+      return browserHost.snapshot();
+    }
+    const browser = await browserHost.refreshAuthentication();
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-refresh-auth" });
     }
     return browser;
   });
@@ -1166,6 +1319,7 @@ function registerIpc({ logger, stateStore }) {
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-passkey-login" });
     }
     return browser;
   });
@@ -1328,15 +1482,6 @@ function registerIpc({ logger, stateStore }) {
             : "Sign in to ChatGPT before installing the Codex integration",
         );
       }
-    }
-    if (setupState.browserInteractionMode === "automatic"
-      && !setupState.coreSetupComplete
-      && !(smokePassedThisSession || smokePassedForCurrentVersion(setupState))) {
-      throw new Error(
-        IS_DEV_PROFILE
-          ? "Run the browser smoke test before configuring the DEV harness"
-          : "Run the browser smoke test before installing the Codex integration",
-      );
     }
     const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
     stateStore.update({
@@ -1542,9 +1687,37 @@ async function requestQuit() {
   }
   shutdownInProgress = true;
   try {
-    const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
-    if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+    const browserOperation = browserHost?.currentOperation();
+    if (browserOperation) {
+      throw new Error(`Wait for ${browserOperation} to finish before quitting Codex Web GPT`);
+    }
+    quitting = true;
+    await Promise.allSettled(
+      [runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean),
+    );
+    const runtimeOperation = runtimeHost?.currentOperation();
+    if (runtimeOperation) {
+      throw new Error(`Wait for ${runtimeOperation} to finish before quitting Codex Web GPT`);
+    }
+    try {
+      await runtimeHost?.restoreBridgeRoute();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const decision = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        buttons: ["Cancel", "Quit anyway"],
+        defaultId: 0,
+        cancelId: 0,
+        title: "Codex route could not be restored",
+        message: "Coding Tools could not restore the previous Codex model route.",
+        detail: `${message}\n\nQuitting anyway may leave Codex pointed at an unavailable local bridge.`,
+      });
+      if (decision.response !== 1) throw error;
+      publishOperation({
+        name: "launcher-quit",
+        status: "warning",
+        message: `Quitting after route restoration failed: ${message}`,
+      });
     }
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     await headlessHost?.shutdown("launcher-quit");
@@ -1619,9 +1792,8 @@ async function start() {
   const persistedState = stateStore.read();
   if (persistedState.coreSetupComplete === true && persistedState.codexCatalogVerified === undefined) {
     stateStore.update({
-      coreSetupComplete: false,
       codexCatalogVerified: false,
-      codexRestartRequired: false,
+      codexRestartRequired: true,
     });
   }
   const autostart = IS_DEV_PROFILE ? { supported: false, enabled: false } : getAutostart(app);
@@ -1669,7 +1841,16 @@ async function start() {
     },
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
+  const manifestLaunchOrder = safeRead(
+    "apps-launch.manifest_order",
+    () => appHandlerRegistry?.launchOrder() ?? null,
+    null,
+    logger,
+  );
   managedBootstrapController = createManagedBootstrap({
+    ...(Array.isArray(manifestLaunchOrder) && manifestLaunchOrder.length > 0
+      ? { componentIds: manifestLaunchOrder }
+      : {}),
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
     repair: (serviceId) => externalServicesController.repairManagedComponent(serviceId),
@@ -1678,6 +1859,25 @@ async function start() {
     logger,
     publish: (value) => send("launcher:managed-bootstrap-changed", value),
   });
+  if (appHandlerRegistry) {
+    try {
+      appsLaunchCoordinator = createAppsLaunchCoordinator({
+        registry: appHandlerRegistry,
+        configPath: path.join(app.getPath("userData"), "apps-config.json"),
+        snapshot: () => externalServicesController.snapshot(),
+        reconcile: (input) => managedBootstrapController.reconcile(input),
+        publish: (value) => send("launcher:apps-launch-changed", value),
+        logger,
+      });
+    } catch (error) {
+      logger.warn("apps-launch.coordinator_unavailable", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      appsLaunchCoordinator = null;
+    }
+  } else {
+    logger.warn("apps-launch.registry_unavailable", { softFail: true });
+  }
   upstreamToolController = createUpstreamToolController({
     env: process.env,
     logger,
@@ -1749,6 +1949,7 @@ async function start() {
     appsHost = null;
   }
   app.once("before-quit", () => {
+    appsLaunchCoordinator?.dispose();
     managedBootstrapController?.dispose();
     originalUiController?.dispose();
     externalServicesController?.dispose();
@@ -1768,24 +1969,13 @@ async function start() {
   });
   registerIpc({ logger, stateStore });
   await ensureRendererLoaded(mainWindow, logger);
+  // Integrated app modules (CPA, Codex Router, CommandCode, Paseo, Anneal) are
+  // NOT started here. They launch through `appsLaunchCoordinator` once the core
+  // runtime, browser and provider network are ready; see `launchIntegratedApps`.
   scheduleFullIpcAfterPaint(() => {
     registerIpc({ logger, stateStore });
-    const services = safeRead(
-      "external-service.autostart_snapshot",
-      () => externalServicesController?.snapshot().services ?? [],
-      [],
-      logger,
-    );
-    for (const service of services) {
-      if (!service.enabled || !service.autoStart) continue;
-      void externalServicesController.start(service.id).catch((error) => {
-        logger.warn("external-service.autostart-failed", {
-          serviceId: service.id,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }
   }, { logger });
+  await providerNetworkReady();
   browserControl = await new BrowserControlServer({
     logger,
     getBrowserHost: () => browserHost,
@@ -1862,7 +2052,8 @@ async function start() {
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = LAUNCHER_SMOKE_TEST;
-  let startupAuthenticationRefresh = Promise.resolve();
+  let startupAuthenticationRefresh = Promise.resolve(browserHost.snapshot());
+  let devRuntimeStartup = null;
   await ensureRendererLoaded(mainWindow, logger);
   try {
     await browserHost.ready();
@@ -1882,6 +2073,7 @@ async function start() {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
+      return browserHost.snapshot();
     });
   }
   if (!launcherSmokeTest) {
@@ -1950,15 +2142,14 @@ async function start() {
       userData: launcherUserData,
     });
     if (config?.mode === "full") {
-      void startupAuthenticationRefresh.then(() => runtimeSupervisor.startIfConfigured()).catch((error) => {
+      devRuntimeStartup = runtimeSupervisor.startIfConfigured().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         logger.error("dev_profile.runtime_start_failed", { message });
         const failed = stateStore.update({ mcpSetupComplete: false });
         send("launcher:state-changed", failed);
       });
     }
-  } else void (async () => {
-    await startupAuthenticationRefresh;
+  } else runtimeStartupInFlight = (async () => {
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
       const state = stateStore.update({
@@ -1990,29 +2181,44 @@ async function start() {
       const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
       const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
       const saved = stateStore.read();
-      if (saved.experimentalBiggerContext !== enabled
-        || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, zeroRiskProEnabled });
+      const patch = {
+        coreSetupComplete: true,
+        experimentalBiggerContext: enabled,
+        zeroRiskProEnabled,
+      };
+      if (Object.entries(patch).some(([key, value]) => saved[key] !== value)) {
+        const state = stateStore.update(patch);
         send("launcher:state-changed", state);
       }
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
-    const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    const browser = await startupAuthenticationRefresh;
+    if (stateStore.read().browserInteractionMode === "automatic" && browser?.authenticated !== true) {
+      logger.warn("bridge.connect_deferred_until_chatgpt_ready");
+      return { ...runtime, bridgeDeferred: true };
+    }
+    const connected = await connectCodexBridgeAfterAuthentication({
+      logger,
+      stateStore,
+      reason: "startup",
+    });
+    return {
+      ...runtime,
+      bridgeRouteChanged: connected.changed === true,
+      bridgeConnected: connected.connected === true,
+    };
   })().then(async (runtime) => {
-    if (runtime.status === "ready") {
+    if (runtime.bridgeDeferred) {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();
       const patch = {
         coreSetupComplete: true,
+        codexCatalogVerified: false,
+        codexRestartRequired: true,
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,
-        ...(runtime.bridgeRouteChanged ? {
-          codexCatalogVerified: false,
-          codexRestartRequired: true,
-        } : {}),
         ...(config.mode === "browser-only" ? {
           mcpSetupComplete: false,
           mcpGuideStep: 0,
@@ -2022,7 +2228,16 @@ async function start() {
         const state = stateStore.update(patch);
         send("launcher:state-changed", state);
       }
-      startCatalogVerificationMonitor({ logger, stateStore });
+      return;
+    }
+    if (runtime.status === "ready") {
+      if (!runtime.bridgeConnected) {
+        applyReadyRuntimeAfterBridge({
+          logger,
+          stateStore,
+          bridgeRouteChanged: runtime.bridgeRouteChanged === true,
+        });
+      }
       return;
     }
     if (runtime.status === "not-configured") {
@@ -2048,8 +2263,12 @@ async function start() {
       return;
     }
     const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
-    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
+    const stillConfigured = runtimeHost.runtimeConfigSnapshot().configured === true;
+    const state = stateStore.update(stillConfigured
+      ? { coreSetupComplete: true, codexRestartRequired: true }
+      : { coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);
+    if (stillConfigured) startCatalogVerificationMonitor({ logger, stateStore });
     if (runtime.status === "external" || runtime.status === "needs-setup") {
       const detail = runtime.detail || (
         runtime.status === "external"
@@ -2075,10 +2294,29 @@ async function start() {
         ? `${primary}; the previous Codex route was restored, restart Codex once`
         : primary;
     logger.error("runtime.startup_failed", { message });
-    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
+    const stillConfigured = runtimeHost.runtimeConfigSnapshot().configured === true;
+    const state = stateStore.update(stillConfigured
+      ? { coreSetupComplete: true, codexRestartRequired: true }
+      : { coreSetupComplete: false, codexCatalogVerified: false });
     send("launcher:state-changed", state);
+    if (stillConfigured) startCatalogVerificationMonitor({ logger, stateStore });
     publishOperation({ name: "runtime-start", status: "failed", message });
   });
+
+  // Integrated apps launch last: only after the runtime supervisor, browser
+  // host and provider network have settled, in manifest order (CPA → Router →
+  // CommandCode → Paseo → Anneal). Never before first paint, never in parallel
+  // with the core runtime start.
+  if (appsLaunchCoordinator) {
+    void appsLaunchCoordinator.runAfterCoreReady(
+      [runtimeStartupInFlight, devRuntimeStartup, startupAuthenticationRefresh],
+      { reason: "startup", version: app.getVersion() },
+    ).catch((error) => {
+      logger.warn("apps-launch.startup_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
 
   app.on("activate", () => showMainWindow());
   app.on("before-quit", (event) => {

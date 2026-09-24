@@ -1304,3 +1304,61 @@ test("authenticated shutdown requires a verified idle drain", async () => {
     await server.stop(true);
   }
 });
+
+test("GET /v1/responses without Upgrade still negotiates HTTP 426", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  try {
+    const first = await fetch(`http://127.0.0.1:${server.port}/v1/responses`);
+    const second = await fetch(`http://127.0.0.1:${server.port}/v1/responses`);
+    expect(first.status).toBe(426);
+    expect(second.status).toBe(426);
+    expect(await first.text()).toContain("WebSocket");
+    expect(await second.text()).toContain("WebSocket");
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("Responses WebSocket accepts Codex generate=false prewarm", async () => {
+  const config = { ...defaultConfig("browser-only"), port: 0 };
+  const server = startServer(config);
+  const events: Array<{ type?: string; response?: { id?: string; status?: string } }> = [];
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/v1/responses`);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("prewarm timed out")), 2_000);
+      ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({
+          type: "response.create",
+          generate: false,
+          model: "chatgpt-web/medium",
+          store: false,
+          input: [],
+        }));
+      });
+      ws.addEventListener("message", event => {
+        const payload = JSON.parse(String(event.data)) as typeof events[number];
+        events.push(payload);
+        if (payload.type === "response.completed") {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      ws.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("websocket error"));
+      });
+    });
+    ws.close();
+    expect(events.map(event => event.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.completed",
+    ]);
+    expect(events[2]?.response?.id).toMatch(/^resp_/);
+    expect(events[2]?.response?.status).toBe("completed");
+  } finally {
+    await server.stop(true);
+  }
+});

@@ -4,10 +4,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
+const { requireAppHandler } = require("./app-handler-paths.cjs");
 
 const TOOL_IDS = Object.freeze(["cpa", "codex-router", "paseo", "anneal"]);
-const IFRAME_TOOL_IDS = Object.freeze(["cpa", "paseo", "anneal"]);
+const IFRAME_TOOL_IDS = Object.freeze(["cpa", "codex-router", "paseo", "anneal"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+// Fallbacks only. The shipped values live in app-handler/<id>/module.json
+// (`launch.readyTimeoutMs`, `visual.endpoint`) and win whenever the registry loads.
 const READY_WAIT_MS = {
   cpa: 45_000,
   "codex-router": 5 * 60_000,
@@ -15,6 +18,35 @@ const READY_WAIT_MS = {
   anneal: 2 * 60_000,
 };
 const READY_POLL_MS = 250;
+
+function loadDefaultModuleRegistry() {
+  try {
+    return requireAppHandler("handler-registry.cjs").defaultRegistry;
+  } catch {
+    return null;
+  }
+}
+
+function moduleLaunch(registry, toolId) {
+  try {
+    return registry?.launch?.(toolId) || null;
+  } catch {
+    return null;
+  }
+}
+
+function moduleVisual(registry, toolId) {
+  try {
+    return registry?.visual?.(toolId) || null;
+  } catch {
+    return null;
+  }
+}
+
+function readyWaitMs(registry, toolId) {
+  const declared = moduleLaunch(registry, toolId)?.readyTimeoutMs;
+  return Number.isFinite(declared) && declared > 0 ? declared : (READY_WAIT_MS[toolId] || 45_000);
+}
 
 function errorMessage(value) {
   return value instanceof Error ? value.message : String(value || "");
@@ -100,11 +132,11 @@ function sectionUrl(manifest, endpoint, section) {
   return target.toString();
 }
 
-function annealVisualEndpoint() {
-  return "http://127.0.0.1:5173/";
+function annealVisualEndpoint(registry = null) {
+  return moduleVisual(registry, "anneal")?.endpoint || "http://127.0.0.1:5173/";
 }
 
-function embeddedVisualUrl(toolId, manifest, state, section) {
+function embeddedVisualUrl(toolId, manifest, state, section, registry = null) {
   if (toolId === "codex-router") {
     const home = state?.home;
     if (!home) return "";
@@ -120,9 +152,10 @@ function embeddedVisualUrl(toolId, manifest, state, section) {
     }
   }
   if (toolId === "anneal") {
-    return sectionUrl(manifest, annealVisualEndpoint(), section);
+    return sectionUrl(manifest, annealVisualEndpoint(registry), section);
   }
-  return sectionUrl(manifest, state.endpoint, section);
+  const visual = moduleVisual(registry, toolId);
+  return sectionUrl(manifest, state.endpoint || visual?.endpoint || manifest.defaultEndpoint, section);
 }
 
 function createOriginalUiCore({
@@ -132,6 +165,7 @@ function createOriginalUiCore({
   electronExecutable = process.execPath,
   npm = "npm",
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  registry = loadDefaultModuleRegistry(),
 } = {}) {
   const manifests = new Map(TOOL_IDS.map((toolId) => [toolId, loadManifest(toolId)]));
   let controlCenterChild = null;
@@ -149,6 +183,8 @@ function createOriginalUiCore({
   function project(toolId) {
     const manifest = requireTool(toolId);
     const current = service(toolId);
+    const launch = moduleLaunch(registry, toolId);
+    const visual = moduleVisual(registry, toolId);
     return {
       id: manifest.id,
       name: manifest.name,
@@ -157,7 +193,24 @@ function createOriginalUiCore({
       version: manifest.version || null,
       license: manifest.license || "",
       sections: [...manifest.sections],
-      endpoint: current?.endpoint || manifest.defaultEndpoint,
+      launch: launch
+        ? {
+            order: launch.order,
+            autoStart: launch.autoStart,
+            startupPolicy: launch.startupPolicy,
+            dependsOn: [...launch.dependsOn],
+            readyTimeoutMs: launch.readyTimeoutMs,
+          }
+        : null,
+      visual: visual
+        ? {
+            embed: visual.embed,
+            endpoint: visual.endpoint,
+            initialSection: visual.initialSection,
+            controls: [...visual.controls],
+          }
+        : null,
+      endpoint: current?.endpoint || visual?.endpoint || manifest.defaultEndpoint,
       status: current?.status || "unknown",
       pid: current?.pid ?? null,
       error: current?.error || null,
@@ -218,7 +271,7 @@ function createOriginalUiCore({
         error.dependency = unavailable.dependency;
         throw error;
       }
-      if (Date.now() - started >= (READY_WAIT_MS[toolId] || 45_000)) {
+      if (Date.now() - started >= readyWaitMs(registry, toolId)) {
         throw new Error(state.error || `${requireTool(toolId).name} is not ready`);
       }
       await sleep(READY_POLL_MS);
@@ -295,7 +348,7 @@ function createOriginalUiCore({
         await start(toolId);
         state = await waitUntilReady(toolId);
       }
-      const visual = embeddedVisualUrl(toolId, manifest, state, selected);
+      const visual = embeddedVisualUrl(toolId, manifest, state, selected, registry);
       return {
         tool: state,
         section: selected,
@@ -310,7 +363,7 @@ function createOriginalUiCore({
         },
       };
     } catch (error) {
-      if (toolId === "anneal") {
+      if (toolId === "anneal" || toolId === "paseo") {
         const latest = await inspect(toolId).catch(() => project(toolId));
         return unavailableOpenResult(toolId, selected, error, latest);
       }

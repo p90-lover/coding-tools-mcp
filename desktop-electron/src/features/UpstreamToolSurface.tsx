@@ -117,8 +117,12 @@ export function UpstreamToolSurface({
           setFrameUrl(opened.url);
           setUnavailable(opened.unavailable === true);
           setDependency(opened.dependency ?? null);
-        } catch {
-          setFrameUrl("");
+          if (opened.error && !opened.url && opened.unavailable !== true) setError(opened.error);
+        } catch (cause) {
+          if (!cancelled) {
+            setFrameUrl("");
+            setError(messageOf(cause));
+          }
         }
       } catch (cause) {
         if (!cancelled) setError(messageOf(cause));
@@ -350,6 +354,7 @@ export function UpstreamToolSurface({
         )}
       </div>
 
+      {(!immersive || chromeOpen) ? (
       <section className="upstream-original-function" aria-label="Original function">
         <h2>{localize(language, "Original function", "原版功能")}</h2>
         {toolId === "paseo" ? (
@@ -421,8 +426,9 @@ export function UpstreamToolSurface({
         )}
         {actDetail ? <p className="upstream-tool-hint">{actDetail}</p> : null}
       </section>
+      ) : null}
 
-      {nativeControl ? (
+      {nativeControl && chromeOpen ? (
         <details className="upstream-native-control" open>
           <summary>{localize(language, "Coding Tools managed connection controls", "Coding Tools 受管連線控制")}</summary>
           <div>{nativeControl}</div>

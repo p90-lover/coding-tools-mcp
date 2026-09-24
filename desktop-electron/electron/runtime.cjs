@@ -16,6 +16,7 @@ const {
 const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { runtimeCliVersion } = require("./smoke-exit.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
@@ -389,6 +390,12 @@ class RuntimeHost {
       installedRuntimeRoot: this.installedRuntimeRoot,
       args,
     });
+  }
+
+  runtimeReleaseVersion() {
+    if (!this.app.isPackaged) return this.app.getVersion();
+    if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();
+    return runtimeCliVersion(this.installedRuntimeRoot);
   }
 
   launcherControlEnvironment() {
@@ -875,7 +882,11 @@ class RuntimeHost {
     try {
       const current = await this.bridgeStatus(name);
       if (!current.installed) throw new Error("Install the Codex integration before connecting the bridge route");
-      if (current.active) return current;
+      const config = this.supervisor.readConfig();
+      const expected = config?.host && Number.isInteger(config.port)
+        ? `http://${config.host}:${config.port}/v1`
+        : "";
+      if (current.active && (!expected || !current.routeUrl || current.routeUrl === expected)) return current;
       try {
         const connected = await this.run(name, ["route", "connect"], {
           embedded: true,
@@ -960,7 +971,7 @@ class RuntimeHost {
         );
       }
       try {
-        const result = await this.run(name, ["uninstall", "--yes", "--launcher-control"], {
+        const result = await this.run(name, ["uninstall", "--yes", "--keep-data", "--launcher-control"], {
           embedded: true,
           env: this.launcherControlEnvironment(),
           message: "Restoring the previous Codex route",
@@ -973,6 +984,8 @@ class RuntimeHost {
         }
         return result;
       } catch (error) {
+        const verified = await this.bridgeStatus(name).catch(() => null);
+        if (verified && !verified.installed && !verified.active) throw error;
         try {
           await this.restoreBridgeRouteWithinOperation(name);
         } catch (routeError) {
@@ -1134,7 +1147,7 @@ class RuntimeHost {
     this.assertProductionProfile("Managed Codex runtime upgrade");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const existing = this.runtimeConfigSnapshot();
-    const currentVersion = this.app.getVersion();
+    const currentVersion = this.runtimeReleaseVersion();
     const connectorMigrationRequired = existing.mode === "full"
       && isLegacyConnectorName(validateConnectorName(existing.config?.appName));
     const interactionMode = existing.config?.browserInteractionMode ?? "automatic";
@@ -1339,12 +1352,15 @@ class RuntimeHost {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const previousRuntime = this.runtimeConfigSnapshot();
     const checkpoint = this.captureSetupCheckpoint(previousRuntime);
+    const connectorAwareArgs = args.includes("--automatic-connector-name")
+      ? [...args]
+      : [...args, "--automatic-connector-name", this.setupConnectorName()];
     this.lifecycleOperation = name;
     let setupCommandStarted = false;
     let runtimeTransitionStarted = false;
     try {
       if (this.launcherProfile === "production") {
-        await this.run(name, [...args, "--preflight-only"], {
+        await this.run(name, [...connectorAwareArgs, "--preflight-only"], {
           ...options,
           message: "Validating Codex configuration before changing the runtime",
           successMessage: "Codex configuration is ready for setup",
@@ -1355,7 +1371,7 @@ class RuntimeHost {
       if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
-      const result = await this.run(name, args, options);
+      const result = await this.run(name, connectorAwareArgs, options);
       const runtime = await this.supervisor.startIfConfigured();
       if (runtime.status !== "ready") {
         throw new Error(`Setup completed, but the launcher-owned runtime is ${runtime.status}: ${runtime.detail || "not ready"}`);

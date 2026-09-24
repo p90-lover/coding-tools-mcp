@@ -70,6 +70,8 @@ Setup options:
   --chrome PATH                Google Chrome/Chromium executable used for account login
   --browser-host-descriptor PATH
                                Use the embedded launcher browser described by this owner-only file
+  --automatic-connector-name NAME
+                               Connector identity selected during automatic browser turns
   --refresh-account-capabilities
                                Re-read the authenticated account's available Web models
   --tunnel-id ID               Existing OpenAI tunnel id (full mode)
@@ -292,8 +294,10 @@ async function setupCommand(args: string[]): Promise<void> {
   const runtimeKeyFile = takeOption(args, "--runtime-key-file");
   const chrome = takeOption(args, "--chrome");
   const browserHostDescriptorPath = takeOption(args, "--browser-host-descriptor");
+  const automaticConnectorName = takeOption(args, "--automatic-connector-name");
   if (chrome) options.chromeExecutablePath = chrome;
   if (browserHostDescriptorPath) options.browserHostDescriptorPath = browserHostDescriptorPath;
+  if (automaticConnectorName) options.automaticConnectorName = automaticConnectorName;
   options.refreshAccountCapabilities = takeFlag(args, "--refresh-account-capabilities");
   if (tunnelId) options.tunnelId = tunnelId;
   if (runtimeKeyFile) options.runtimeKeyFile = runtimeKeyFile;
@@ -534,8 +538,13 @@ async function uninstallCommand(args: string[]): Promise<void> {
   }
   if (config && process.platform === "darwin" && !launcherRuntimeStopped) await uninstallService(config);
   uninstallCodexIntegration();
-  if (!keepData) rmSync(getConfigDir(), { recursive: true, force: true });
-  stdout.write(keepData ? "Uninstalled; private application data was preserved.\n" : "Uninstalled and removed private application data.\n");
+  // Launcher-controlled uninstall runs inside the still-open Coding Tools process, which holds
+  // files under this home. Deleting the directory on Windows fails with EPERM and then the
+  // launcher fail-safe reconnects the Codex route, so the integration appears to uninstall.
+  if (!keepData && !launcherControl) rmSync(getConfigDir(), { recursive: true, force: true });
+  stdout.write(keepData || launcherControl
+    ? "Uninstalled; private application data was preserved.\n"
+    : "Uninstalled and removed private application data.\n");
 }
 
 async function main(): Promise<void> {

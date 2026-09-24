@@ -6,8 +6,9 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
+const { validateRuntimeBundle } = require("../electron/runtime-install.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.12";
+const PRODUCT_VERSION = "0.7.0-rc.13";
 const PRODUCT_NAME = "Coding Tools";
 const APP_ID = "dev.codingtools.fullharness";
 const SOURCE_REPOSITORY = "p90-lover/coding-tools-mcp";
@@ -572,6 +573,18 @@ function validateRuntime(runtimeRoot, platform, arch) {
       platform: manifest?.platform,
       arch: manifest?.arch,
     }));
+  }
+  try {
+    validateRuntimeBundle(root, {
+      version: PRODUCT_VERSION,
+      platform,
+      arch,
+    });
+  } catch (error) {
+    fail(
+      "PACKAGE_RESOURCE_RUNTIME_INTEGRITY_INVALID",
+      error instanceof Error ? error.message : String(error),
+    );
   }
   for (const required of ["THIRD_PARTY_NOTICES.txt", "LICENSE", "LICENSES"]) {
     const target = path.join(root, required);

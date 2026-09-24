@@ -44,8 +44,18 @@ export interface InteractionConnectorIdentities {
 export function resolveInteractionConnectorIdentities(
   interactionMode: BrowserInteractionMode,
   profile: "production" | "development" = "production",
+  automaticConnectorName?: string,
 ): InteractionConnectorIdentities {
-  const automaticAppName = profile === "development" ? DEV_CHATGPT_CONNECTOR_NAME : CHATGPT_CONNECTOR_NAME;
+  const requestedConnectorName = automaticConnectorName?.trim();
+  if (automaticConnectorName !== undefined
+    && (!requestedConnectorName || requestedConnectorName.length > 80)) {
+    throw new Error("Automatic connector name must contain between 1 and 80 characters");
+  }
+  const automaticAppName = requestedConnectorName
+    ?? (profile === "development" ? DEV_CHATGPT_CONNECTOR_NAME : CHATGPT_CONNECTOR_NAME);
+  if (automaticAppName === ZERO_RISK_CHATGPT_CONNECTOR_NAME) {
+    throw new Error("Automatic and Zero Risk connector names must differ");
+  }
   return {
     appName: interactionMode === "manual" ? ZERO_RISK_CHATGPT_CONNECTOR_NAME : automaticAppName,
     automaticAppName,

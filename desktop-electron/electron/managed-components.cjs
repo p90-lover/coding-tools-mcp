@@ -18,6 +18,95 @@ const COMPONENT_IDS = Object.freeze([
   "anneal",
 ]);
 const COMPONENT_ID_SET = new Set(COMPONENT_IDS);
+const HOSTED_TOOLCACHE_NPM = /(?:[A-Za-z]:)?(?:\\|\/)+hostedtoolcache(?:\\|\/)+windows(?:\\|\/)+node(?:\\|\/)\S+?npm\.cmd/gi;
+const HOSTED_TOOLCACHE_NODE = /(?:[A-Za-z]:)?(?:\\|\/)+hostedtoolcache(?:\\|\/)+windows(?:\\|\/)+node(?:\\|\/)\S+?node\.exe/gi;
+
+function rewriteHostedToolcacheScript(value) {
+  return String(value)
+    .replace(HOSTED_TOOLCACHE_NPM, "npm")
+    .replace(HOSTED_TOOLCACHE_NODE, "node");
+}
+
+function rewriteHostedToolcachePackageFile(filePath) {
+  let pkg;
+  try {
+    pkg = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return false;
+  }
+  if (!pkg || typeof pkg.scripts !== "object" || pkg.scripts === null) return false;
+  let changed = false;
+  for (const [name, value] of Object.entries(pkg.scripts)) {
+    if (typeof value !== "string") continue;
+    const next = rewriteHostedToolcacheScript(value);
+    if (next === value) continue;
+    pkg.scripts[name] = next;
+    changed = true;
+  }
+  if (!changed) return false;
+  fs.writeFileSync(filePath, `${JSON.stringify(pkg, null, 2)}\n`);
+  return true;
+}
+
+function rewriteHostedToolcacheWorkspacePackages(nodeModules) {
+  let rewritten = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(nodeModules, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === ".bin") continue;
+    const full = path.join(nodeModules, entry.name);
+    if (entry.name.startsWith("@")) {
+      let scoped;
+      try {
+        scoped = fs.readdirSync(full, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const child of scoped) {
+        if (!child.isDirectory()) continue;
+        const packageFile = path.join(full, child.name, "package.json");
+        if (fs.existsSync(packageFile) && rewriteHostedToolcachePackageFile(packageFile)) rewritten += 1;
+      }
+      continue;
+    }
+    const packageFile = path.join(full, "package.json");
+    if (fs.existsSync(packageFile) && rewriteHostedToolcachePackageFile(packageFile)) rewritten += 1;
+  }
+  return rewritten;
+}
+
+function rewriteHostedToolcacheScripts(root) {
+  if (!root || !fs.existsSync(root)) return 0;
+  let rewritten = 0;
+  const visit = (directory) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git") continue;
+      const full = path.join(directory, entry.name);
+      if (entry.name === "node_modules") {
+        rewritten += rewriteHostedToolcacheWorkspacePackages(full);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        visit(full);
+        continue;
+      }
+      if (entry.name !== "package.json") continue;
+      if (rewriteHostedToolcachePackageFile(full)) rewritten += 1;
+    }
+  };
+  visit(root);
+  return rewritten;
+}
 const INSTALL_STATES = Object.freeze([
   "not-installed",
   "installing",
@@ -1091,6 +1180,7 @@ function createManagedComponentController({
     fs.mkdirSync(stagingHome, { recursive: true, mode: 0o700 });
     if (inApp) copyBundledTree(source, stagingHome);
     else copyBundleTree(source, stagingHome);
+    rewriteHostedToolcacheScripts(stagingHome);
     writeBundledMarker(stagingHome, manifest);
     return { artifact: "" };
   }
@@ -1100,6 +1190,7 @@ function createManagedComponentController({
     if (bundled) {
       setOperation(manifest.id, { state: "installing", step: "unpack-bundled-source", error: null });
       copyBundleTree(bundled, stagingHome);
+      rewriteHostedToolcacheScripts(stagingHome);
       writeBundledMarker(stagingHome, manifest);
       return { artifact: "" };
     }
@@ -1322,6 +1413,7 @@ function createManagedComponentController({
       await installComponent(id, { repair: source.state === "repair-required" || source.state === "error" });
     }
     const context = launchContext(manifest);
+    rewriteHostedToolcacheScripts(context.home);
     if (id === "codex-router") {
       writeInAppProvidersFile(path.join(context.state, "router"));
     }
@@ -1507,5 +1599,8 @@ module.exports = {
   createManagedComponentController,
   defaultBundledRoots,
   loadManagedManifest,
+  rewriteHostedToolcacheScript,
+  rewriteHostedToolcacheScripts,
+  rewriteHostedToolcachePackageFile,
   verifySha256,
 };

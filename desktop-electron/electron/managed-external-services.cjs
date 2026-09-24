@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
@@ -81,15 +82,26 @@ function createManagedExternalServicesController({
     },
   });
 
+  function readRouterCallerKey() {
+    // runtimeConfiguration builds this same cross-use environment, so reading it here would recurse.
+    try {
+      const secretFile = path.join(dataRoot, "state", "codex-router", "router", "caller-secret");
+      if (!fs.existsSync(secretFile)) return "";
+      let callerKey = fs.readFileSync(secretFile, "utf8");
+      if (callerKey.charCodeAt(0) === 0xFEFF) callerKey = callerKey.slice(1);
+      return callerKey.trim();
+    } catch {
+      return "";
+    }
+  }
+
   function crossUseSecrets() {
     let cpa = {};
     let commandCode = {};
     let callerKey = "";
     try { cpa = managedController.runtimeSecrets("cpa") || {}; } catch {}
     try { commandCode = managedController.runtimeSecrets("commandcode-proxy") || {}; } catch {}
-    try {
-      callerKey = String(managedController.runtimeConfiguration("codex-router")?.callerKey || "").trim();
-    } catch {}
+    callerKey = readRouterCallerKey();
     return {
       cpaProxyApiKey: cpa.proxyApiKey,
       commandCodeProxyApiKey: commandCode.proxyApiKey,

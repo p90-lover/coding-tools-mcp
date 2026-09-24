@@ -8,6 +8,7 @@ export const DEV_CHAT_MODELS = [
   "chatgpt-web/zero-risk",
   "chatgpt-web/luna",
   "chatgpt-web/think",
+  "chatgpt-web/latest",
   "chatgpt-web/light",
   "chatgpt-web/medium",
   "chatgpt-web/high",

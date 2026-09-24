@@ -73,7 +73,10 @@ test("The application exposes one active Provider destination and imports the Sa
   const providerDestinations = app.match(/active=\{surface === "providers"\}/g) ?? [];
   const providerSurfaceMounts = app.match(/<ProviderCenterSurface\b/g) ?? [];
   assert.equal(providerDestinations.length, 1);
-  assert.equal(providerSurfaceMounts.length, 1);
+  // Providers page, Runtime → OAuth, Runtime → API models, and the CPA module's OAuth controls tab.
+  assert.equal(providerSurfaceMounts.length, 4);
+  assert.match(app, /focus="oauth"/);
+  assert.match(app, /focus="api"/);
   assert.match(app, /ProviderHubSaasSurface/);
   assert.doesNotMatch(app, /from "\.\/features\/ProviderHubSurface"/);
 });

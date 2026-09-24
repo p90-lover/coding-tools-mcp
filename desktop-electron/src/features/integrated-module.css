@@ -1,0 +1,107 @@
+.integrated-module {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  padding-top: var(--height-titlebar);
+  background: var(--color-background-surface);
+}
+
+.integrated-module-toolbar {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.integrated-module-toolbar h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.integrated-module-toolbar nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.integrated-module-toolbar button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.integrated-module-toolbar button[aria-pressed="true"] {
+  border-color: var(--color-border);
+  background: var(--color-background-control);
+  color: var(--color-text-primary);
+}
+
+.integrated-module-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.integrated-module-panel {
+  --height-titlebar: 0px;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.integrated-module-panel[hidden] {
+  display: none;
+}
+
+.integrated-module-panel.is-controls {
+  overflow: auto;
+}
+
+.integrated-module-panel.is-controls > * + * {
+  border-top: 1px solid var(--color-border);
+}
+
+.integrated-module-panel.is-controls .module-controls {
+  height: auto;
+  overflow: visible;
+}
+
+/* CommandCode has no upstream visual: stack its Coding Tools controls above the host panel. */
+.module-stack {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  padding-top: var(--height-titlebar);
+  overflow: auto;
+  background: var(--color-background-surface);
+}
+
+.module-stack .module-controls {
+  height: auto;
+  overflow: visible;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.module-stack > :not(.module-controls) {
+  --height-titlebar: 0px;
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 760px) {
+  .integrated-module-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+}

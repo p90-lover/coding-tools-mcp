@@ -83,9 +83,9 @@ export function taskOptions(value: unknown): TaskOption[] {
     if (!id) return [];
     return [{
       id,
-      title: typeof row?.title === "string" ? row.title : id,
+      title: typeof row?.title === "string" ? row.title : typeof row?.name === "string" ? row.name : id,
       description: typeof row?.description === "string" ? row.description : "",
-      state: typeof row?.state === "string" ? row.state : "unknown",
+      state: typeof row?.state === "string" ? row.state : typeof row?.status === "string" ? row.status : "unknown",
     }];
   });
 }
@@ -161,8 +161,7 @@ export function selectBinding(
   ));
   return connected.find((binding) => (
     binding.provider === providerId && (!model || binding.model === model)
-  )) ?? connected.find((binding) => binding.provider === providerId)
-    ?? connected.find((binding) => !model || binding.model === model);
+  ));
 }
 
 export function sanitizeIdentifier(value: string): string {

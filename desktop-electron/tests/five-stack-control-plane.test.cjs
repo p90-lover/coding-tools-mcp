@@ -104,6 +104,25 @@ test("Paseo plans an orchestrator and assigned subagents on in-app backends", as
   assert.equal(JSON.stringify(planned).includes("must-never-leak"), false);
 });
 
+test("runtime_open_task assigns an orchestrator and workers then returns results to Web GPT", async () => {
+  const control = plane();
+  const opened = await control.callTool("runtime_open_task", {
+    brief: "Ship the five-stack glue",
+    orchestrator: { providerId: "chatgpt-web" },
+    workers: [{ role: "implementer", providerId: "gemini-api" }],
+    results: [{ summary: "PR opened on glue", ok: true }],
+  }, { workspaceId: "ws-1" });
+
+  assert.equal(opened.ok, true);
+  assert.equal(opened.awaitingWorkers, false);
+  assert.equal(opened.status, "returned");
+  assert.equal(opened.orchestrator.route.providerId, "chatgpt-web");
+  assert.equal(opened.workers[0].role, "implementer");
+  assert.equal(opened.workers[0].status, "returned");
+  assert.match(opened.response, /PR opened on glue/);
+  assert.ok(FIVE_STACK_CONTROL_PLANE_TOOLS.includes("runtime_open_task"));
+});
+
 test("run → submit issues → review → Anneal task preview keeps assignment structure", async () => {
   const control = plane();
   const planned = await control.callTool("paseo_plan", {
@@ -114,9 +133,10 @@ test("run → submit issues → review → Anneal task preview keeps assignment 
   const ran = await control.callTool("paseo_run", { planId: planned.id, message: "Reproduce login" }, {
     workspaceId: "ws-1",
   });
-  assert.equal(ran.status, "awaiting_results");
+  assert.equal(ran.status, "awaiting_dispatch");
   assert.equal(ran.liveModelCompletion, false);
-  assert.equal(ran.assignments[0].status, "dispatched");
+  assert.equal(ran.assignments[0].status, "awaiting_dispatch");
+  assert.equal(ran.dispatchRequired, true);
 
   await control.callTool("paseo_submit_result", {
     runId: ran.id,
@@ -142,7 +162,8 @@ test("run → submit issues → review → Anneal task preview keeps assignment 
   const preview = await control.callTool("anneal_preview", { taskId: task.id }, { workspaceId: "ws-1" });
   assert.equal(preview.id, task.id);
   const status = await control.callTool("five_stack_status", {}, { workspaceId: "ws-1" });
-  assert.equal(status.annealTasks.length, 1);
+  assert.equal(status.annealTasks.length, 2);
+  assert.equal(status.annealTasks.find((item) => item.id === ran.id).state, "REVIEW");
 });
 
 test("Paseo uses CPA 8317 and Router 4202 only when those services are available", async () => {
@@ -246,6 +267,47 @@ test("MCP catalog overlay keeps headless tools and exposes five-stack resources"
   assert.equal(catalog.tools.filter((tool) => (tool.name || tool) === "five_stack_status").length, 1);
   assert.ok(catalog.resources.some((resource) => resource.uri === "coding-tools://five-stack/api-map"));
   assert.ok(catalog.resources.some((resource) => resource.uri === "coding-tools://workspace/one"));
+});
+
+test("queued runtime tasks are visible and cannot be mutated from a different workspace", async () => {
+  const control = plane();
+  const opened = await control.callTool("runtime_open_task", {
+    brief: "Investigate a failure",
+    orchestrator: { providerId: "chatgpt-web" },
+    workers: [{ providerId: "gemini-api", role: "debugger" }],
+  }, { workspaceId: "owner" });
+  assert.equal(opened.status, "awaiting_dispatch");
+  assert.equal(opened.dispatchRequired, true);
+  assert.equal(opened.awaitingWorkers, true);
+  const status = await control.callTool("five_stack_status", {}, { workspaceId: "owner" });
+  assert.equal(status.annealTasks[0].id, opened.taskId);
+  assert.equal(status.annealTasks[0].state, "BACKLOG");
+  const results = { runId: opened.runId, assignmentId: opened.workers[0].id, ok: false, summary: "Command failed" };
+  await assert.rejects(control.callTool("paseo_submit_result", results, { workspaceId: "other" }), /workspace/);
+  await assert.rejects(control.callTool("paseo_review", { runId: opened.runId }, { workspaceId: "other" }), /workspace/);
+  const submitted = await control.callTool("paseo_submit_result", results, { workspaceId: "owner" });
+  assert.equal(submitted.status, "issues_found");
+  const review = await control.callTool("paseo_review", { runId: opened.runId }, { workspaceId: "owner" });
+  assert.equal(review.findings.length, 1);
+  assert.equal(review.requiresOrchestratorReview, true);
+  assert.equal(review.liveModelCompletion, false);
+  await assert.rejects(control.callTool("anneal_open_from_review", { reviewId: review.id }, { workspaceId: "other" }), /workspace/);
+});
+
+test("Anneal handoff without acknowledgement is not reported as posted", async () => {
+  const control = createFiveStackControlPlane({
+    getProviderSnapshot: async () => snapshot(),
+    handoffAnnealTask: async () => ({ ok: false, error: "database unavailable" }),
+  });
+  const opened = await control.callTool("runtime_open_task", {
+    brief: "Fix failing task",
+    workers: [{ providerId: "gemini-api" }],
+    results: [{ ok: false, summary: "Failed to run" }],
+  });
+  const task = await control.callTool("anneal_open_from_review", { reviewId: opened.reviewId });
+  assert.equal(task.handoff.posted, false);
+  assert.equal(task.handoff.remoteId, null);
+  assert.match(task.handoff.error, /acknowledge/);
 });
 
 test("Desktop and MCP share the control-plane tools.call path", () => {

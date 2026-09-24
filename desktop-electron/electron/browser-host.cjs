@@ -139,6 +139,21 @@ function allowedAuthUrl(value) {
   return AUTH_PROVIDER_HOSTS.has(parsed.hostname);
 }
 
+function liveBrowserUrl(contents) {
+  if (!contents || (typeof contents.isDestroyed === "function" && contents.isDestroyed())) return "";
+  try {
+    return typeof contents.getURL === "function" ? contents.getURL() || "" : "";
+  } catch {
+    return "";
+  }
+}
+
+function interactiveLoginSurfaceActive(host) {
+  if (host?.visible !== true) return false;
+  return [liveBrowserUrl(host.view?.webContents), liveBrowserUrl(host.authView?.webContents)]
+    .some((url) => url.startsWith(CHATGPT_ORIGIN) || allowedAuthUrl(url));
+}
+
 function navigationOriginForLog(value) {
   try {
     const parsed = new URL(value);
@@ -2390,7 +2405,7 @@ class BrowserHost {
           await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
         }
         await this.probeAuthentication();
-        const authenticated = await this.waitForAuthenticated();
+        const authenticated = await this.waitForAuthenticated(180_000, { extendWhileInteractive: true });
         await this.runSessionInspection(false);
         return authenticated;
       });
@@ -2560,6 +2575,7 @@ class BrowserHost {
 
   refreshAuthentication() {
     requireAutomaticBrowserInspection(this, "ChatGPT authentication refresh");
+    if (this.loginOperation) return this.loginOperation;
     if (this.sessionRefreshOperation) return this.sessionRefreshOperation;
     const operation = this.withManualOperation("session refresh", async () => {
       this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
@@ -2674,18 +2690,22 @@ class BrowserHost {
       url = this.view.webContents.getURL();
       result = await probe(this.view.webContents);
     }
-    if (result.composer && result.temporary && result.sessionAuthenticated) {
+    if (result.sessionAuthenticated) {
       if (this.authView && !this.authView.webContents.isDestroyed()) {
         this.closeAuthView(this.authView, true, false);
       }
       const wasAuthenticated = this.state.authenticated;
+      const automationReady = result.composer === true && result.temporary === true;
       const availability = this.activeTraceId
         ? { status: "running", message: "ChatGPT is working" }
         : this.manualOperation
           ? {}
-          : { status: "ready", message: "ChatGPT is ready" };
-      this.setState({ ...availability, authenticated: true, url: result.url });
-      if (!wasAuthenticated) this.logger.info("browser.authenticated", { url: result.url });
+          : {
+              status: "ready",
+              message: automationReady ? "ChatGPT is ready" : "ChatGPT is signed in",
+            };
+      this.setState({ ...availability, authenticated: true, url: result.url || url });
+      if (!wasAuthenticated) this.logger.info("browser.authenticated", { url: result.url || url });
     } else {
       const loaded = result.readyState === "complete";
       this.setState({
@@ -2698,9 +2718,15 @@ class BrowserHost {
     return this.snapshot();
   }
 
-  async waitForAuthenticated(timeoutMs = 180_000) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  async waitForAuthenticated(timeoutMs = 180_000, options = {}) {
+    const idleTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 180_000;
+    const extendWhileInteractive = options.extendWhileInteractive === true;
+    const maxMs = Number.isFinite(options.maxMs) && options.maxMs > 0
+      ? options.maxMs
+      : (extendWhileInteractive ? 30 * 60_000 : idleTimeoutMs);
+    const hardDeadline = Date.now() + maxMs;
+    let idleDeadline = Date.now() + idleTimeoutMs;
+    while (Date.now() < hardDeadline) {
       if (this.authNavigationError) {
         const error = this.authNavigationError;
         this.authNavigationError = null;
@@ -2708,6 +2734,13 @@ class BrowserHost {
       }
       const state = await this.probeAuthentication();
       if (state.authenticated) return state;
+      if (Date.now() >= idleDeadline) {
+        if (extendWhileInteractive && interactiveLoginSurfaceActive(this)) {
+          idleDeadline = Date.now() + idleTimeoutMs;
+        } else {
+          break;
+        }
+      }
       await sleep(750);
     }
     throw new Error("ChatGPT login was not completed before the timeout");

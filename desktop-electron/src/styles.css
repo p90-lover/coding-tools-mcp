@@ -14,7 +14,9 @@ body,
 
 body,
 button,
-input {
+input,
+select,
+textarea {
   font-family: var(--font-ui);
 }
 
@@ -28,7 +30,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   color: inherit;
   font: inherit;
   -webkit-app-region: no-drag;
@@ -44,7 +48,9 @@ input {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   box-shadow: 0 0 0 1px var(--color-border-focus);
 }
 
@@ -498,8 +504,21 @@ code {
 }
 
 .surface-transition {
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.surface-transition > * {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
 }
 
 .state-dot {
@@ -1477,6 +1496,36 @@ code {
 
 /* MCP guide */
 
+.content-scroll.is-fit:has(.mcp-stage) {
+  width: min(960px, calc(100% - 48px));
+  padding-top: 20px;
+}
+
+.content-scroll.is-fit:has(.mcp-stage) .surface-header {
+  display: block;
+  margin-bottom: 20px;
+}
+
+.content-scroll.is-fit:has(.mcp-stage) .surface-header h1 {
+  font-size: 28px;
+}
+
+.content-scroll.is-fit:has(.mcp-stage) .surface-header p {
+  display: block;
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.content-scroll.is-fit:has(.mcp-stage) .mcp-stage {
+  flex: 0 0 auto;
+}
+
+.content-scroll.is-fit:has(.mcp-stage) .wizard-content {
+  overflow: visible;
+  padding-bottom: 24px;
+}
+
 .wizard-stepper {
   display: grid;
   flex: none;
@@ -1801,6 +1850,12 @@ code {
   margin-top: 22px;
   padding-top: 16px;
   border-top: 1px solid var(--color-border);
+}
+
+.content-scroll > .mcp-live-tools:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
 }
 
 .mcp-live-tools > p {

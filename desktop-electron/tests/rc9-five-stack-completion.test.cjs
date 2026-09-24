@@ -72,7 +72,8 @@ test("CPA is a managed original UI while runtimes expose app-managed install and
   const provider = read("electron/provider-network.cjs");
   assert.match(surface, /CPA \/ CLIProxyAPI/);
   assert.match(surface, /Open module APIs/);
-  assert.match(app, /<OriginalUiSurface language=\{language\} setError=\{setError\} toolId="cpa" \/>/);
+  assert.match(app, /title="CPA"\s+toolId="cpa"/);
+  assert.match(app, /<ModuleControlsPanel language=\{language\} moduleId="cpa" setError=\{setError\} \/>/);
   assert.match(surface, /Save credential/);
   assert.match(main, /launcher:managed-component-credential/);
   assert.match(preload, /setManagedComponentCredential/);

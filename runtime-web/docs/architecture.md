@@ -207,9 +207,11 @@ when a task starts, and its global `multi_agent_v2` override wins over per-model
 protocol therefore requires restarting Codex and starting a new task. Model choice, effort,
 context, and service tiers are otherwise unchanged.
 
-The built-in provider attempts a Responses WebSocket prewarm. The local route explicitly returns
-HTTP `426`, which is Codex's native capability-negotiation signal for an immediate, session-sticky
-switch to its HTTP/SSE transport. No model or provider fallback occurs.
+The built-in provider attempts a Responses WebSocket prewarm. The local `/v1/responses`
+route accepts that upgrade and completes `response.create` with `generate=false` so Codex
+stays on the original `openai_base_url` install. Real turns reuse the HTTP Responses path
+and are forwarded as WebSocket events. A GET without `Upgrade: websocket` still returns
+HTTP `426`, which remains Codex's capability-negotiation signal for HTTP/SSE.
 
 Setup never restarts an already loaded daemon implicitly. A requested stop, restart, replacement,
 or uninstall first calls a private authenticated drain endpoint. The daemon rejects new turns and

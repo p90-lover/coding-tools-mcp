@@ -293,7 +293,9 @@ test("provider management URLs reject unsafe remote HTTP and unsafe OAuth redire
 });
 
 test("renderer, preload, types, and IPC expose automatic Antigravity login and health controls", () => {
-  const surface = fs.readFileSync(path.join(root, "src/features/ProviderHubSaasSurface.tsx"), "utf8");
+  // The connection clause (Test connection / Refresh session) is rendered by ProviderConnectionCard.
+  const surface = fs.readFileSync(path.join(root, "src/features/ProviderHubSaasSurface.tsx"), "utf8")
+    + fs.readFileSync(path.join(root, "src/features/ProviderConnectionCard.tsx"), "utf8");
   const catalog = fs.readFileSync(path.join(root, "src/providers/provider-types.ts"), "utf8");
   const preload = fs.readFileSync(path.join(root, "electron/preload.cjs"), "utf8");
   const types = fs.readFileSync(path.join(root, "src/types.ts"), "utf8");

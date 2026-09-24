@@ -80,10 +80,14 @@ function installProviderNetwork({
 
     const snapshot = controller.store.snapshot();
     if (snapshot.routing.globalEnabled && snapshot.routing.globalProfileId) {
-      void controller.applyGlobalRouting().catch((error) => {
+      await controller.applyGlobalRouting().catch((error) => {
         logger.warn("proxy.global_routing_failed", {
           error: error instanceof Error ? error.message : String(error),
         });
+        publish(controller.store.snapshot());
+        if (error?.code === "proxy_configuration_rejected" || error?.code === "proxy_rollback_failed") {
+          throw error;
+        }
       });
     }
     try {
@@ -97,8 +101,8 @@ function installProviderNetwork({
   });
   const controllerPromise = providerNetworkControllerPromise;
 
-  app.on("login", (event, _webContents, _authenticationDetails, authInfo, callback) => {
-    controller?.handleProxyLogin(event, authInfo, callback);
+  app.on("login", (event, webContents, _authenticationDetails, authInfo, callback) => {
+    controller?.handleProxyLogin(event, webContents, authInfo, callback);
   });
 
   function handle(channel, callback) {

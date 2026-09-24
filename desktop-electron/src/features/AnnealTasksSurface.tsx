@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Language,
   ProviderAccountRecord,
@@ -116,6 +116,7 @@ export function AnnealTasksSurface({
   const [notice, setNotice] = useState("");
   const [assignmentPreview, setAssignmentPreview] = useState<JsonObject | null>(null);
   const [paseoReviews, setPaseoReviews] = useState<JsonObject[]>([]);
+  const refreshGeneration = useRef(0);
 
   const accounts = useMemo(() => usable(network), [network]);
   const providers = useMemo(
@@ -187,7 +188,13 @@ export function AnnealTasksSurface({
   }, [account]);
 
   useEffect(() => {
+    setTasks([]);
+    setMissions([]);
+    setPaseoReviews([]);
+    setTaskId("");
+    setMissionId("");
     if (workspaceId) void refresh();
+    return () => { refreshGeneration.current += 1; };
   }, [workspaceId]);
 
   useEffect(() => {
@@ -213,34 +220,31 @@ export function AnnealTasksSurface({
   const refresh = async () => {
     const api = window.codingTools;
     if (!api || !workspaceId) return;
+    const generation = ++refreshGeneration.current;
     setBusy(true);
     try {
-      const [page, view] = await Promise.all([
+      const [page, view, control] = await Promise.allSettled([
         api.tasks.list({ workspaceId, limit: 200 }),
         api.execution.read({ workspaceId, missionId: null, refreshSource: false }),
+        api.tools.call({ workspaceId, tool: "five_stack_status", arguments: {} }),
       ]);
-      const nextTasks = taskOptions(page).filter((item) => item.state !== "archived");
-      const nextMissions = missionViews(view).filter((mission) => (
+      if (generation !== refreshGeneration.current) return;
+      const nextTasks = taskOptions(page.status === "fulfilled" ? page.value : null)
+        .filter((item) => item.state.toLowerCase() !== "archived");
+      const nextMissions = missionViews(view.status === "fulfilled" ? view.value : null).filter((mission) => (
         mission.engine === "anneal" || mission.engine === "paseo"
       ));
-      let controlTasks: TaskOption[] = [];
-      let reviews: JsonObject[] = [];
-      try {
-        const status = await api.tools.call({
-          workspaceId,
-          tool: "five_stack_status",
-          arguments: {},
-        });
-        const root = object(status) ?? {};
-        controlTasks = taskOptions({ items: root.annealTasks }).filter((item) => item.state !== "archived");
-        reviews = (Array.isArray(root.reviews) ? root.reviews : []).flatMap((entry) => {
-          const row = object(entry);
-          return row ? [row as JsonObject] : [];
-        });
-      } catch {
-        controlTasks = [];
-        reviews = [];
-      }
+      const root = object(control.status === "fulfilled" ? control.value : null) ?? {};
+      const controlTasks = taskOptions({ items: root.annealTasks })
+        .filter((item) => item.state.toLowerCase() !== "archived");
+      const reviews = (Array.isArray(root.reviews) ? root.reviews : []).flatMap((entry) => {
+        const row = object(entry);
+        return row ? [row as JsonObject] : [];
+      });
+      const failures = [page, view, control].flatMap((result) => (
+        result.status === "rejected" ? [messageOf(result.reason)] : []
+      ));
+      setNotice(failures.length ? `Some task sources are unavailable: ${failures.join("; ")}` : "");
       const mergedTasks = [
         ...nextTasks,
         ...controlTasks.filter((item) => !nextTasks.some((existing) => existing.id === item.id)),
@@ -257,9 +261,13 @@ export function AnnealTasksSurface({
           : nextMissions[0]?.id ?? ""
       ));
     } catch (cause) {
-      setError(messageOf(cause));
+      if (generation !== refreshGeneration.current) return;
+      const message = messageOf(cause);
+      if (!/IPC_TRANSPORT_FAILED|Workspace-bound listener/i.test(message)) {
+        setError(message);
+      }
     } finally {
-      setBusy(false);
+      if (generation === refreshGeneration.current) setBusy(false);
     }
   };
 

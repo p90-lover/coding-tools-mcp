@@ -56,5 +56,7 @@ test('legacy upstream environment and connector names cannot collapse the new pr
   assert.equal(development.coreHome, path.join(HOME, 'coding-tools-development'));
   assert.ok(LEGACY_CONNECTOR_NAMES.includes('Codex Native'));
   assert.ok(LEGACY_CONNECTOR_NAMES.includes('Codex Native2'));
+  assert.equal(LEGACY_CONNECTOR_NAMES.includes('Coding Tools Native2'), false);
+  assert.equal(requireCurrentRuntimeConnectorName('Coding Tools Native2'), 'Coding Tools Native2');
   assert.throws(() => requireCurrentRuntimeConnectorName('Codex Native2'), /Coding Tools Native2/);
 });

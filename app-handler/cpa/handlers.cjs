@@ -4,6 +4,7 @@ const { defineModule } = require("../lib/define-module.cjs");
 const { openaiOperations, publicError, resolveLoopback } = require("../lib/openai.cjs");
 const { requestJson } = require("../lib/loopback.cjs");
 const { sanitizePublic } = require("../lib/sanitize.cjs");
+const { managementOperations } = require("./management.cjs");
 
 const LOOPBACK = Object.freeze({
   origin: "http://127.0.0.1:8317/",
@@ -66,6 +67,12 @@ async function callProvider(context, name, args, label) {
 function createModule() {
   const extraOperations = {
     ...openaiOperations(getOrigin),
+    ...managementOperations(getOrigin),
+    authFiles: {
+      readOnly: true,
+      description: "List CPA account identities and status without exposing auth-file credentials.",
+      run: (_args, context) => listAuthFiles(context),
+    },
     managementHealth: {
       readOnly: true,
       description: "Probe the CPA management panel and auth-file listing over loopback HTTP. Does not open a browser window.",

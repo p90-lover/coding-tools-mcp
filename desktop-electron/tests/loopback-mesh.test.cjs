@@ -189,6 +189,52 @@ test("managed controller shares one mesh file with MCP and keeps Anneal on 5173"
   controller.dispose();
 });
 
+test("installed Codex Router caller key does not recurse through environment construction", () => {
+  const directory = temporaryDirectory("coding-tools-managed-router-key");
+  const dataRoot = path.join(directory, "integrations");
+  const routerManifest = JSON.parse(
+    fs.readFileSync(path.join(root, "vendor", "managed-components", "codex-router.json"), "utf8"),
+  );
+  const routerHome = path.join(dataRoot, "components", "codex-router", routerManifest.version);
+  const routerState = path.join(dataRoot, "state", "codex-router", "router");
+  fs.mkdirSync(routerHome, { recursive: true });
+  fs.mkdirSync(routerState, { recursive: true });
+  fs.writeFileSync(path.join(routerHome, ".coding-tools-managed-component.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    id: routerManifest.id,
+    version: routerManifest.version,
+    strategy: routerManifest.strategy,
+    repository: routerManifest.repository,
+    commit: routerManifest.commit,
+    installedAt: "2026-09-22T00:00:00.000Z",
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(routerState, "caller-secret"), "\uFEFFrouter-caller-key\n", "utf8");
+
+  const warnings = [];
+  const controller = createManagedExternalServicesController({
+    dataRoot,
+    filePath: path.join(directory, "external-services.json"),
+    keyPath: path.join(directory, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => "application/json" },
+      clone: () => ({ json: async () => ({ data: [] }) }),
+    }),
+    logger: {
+      warn(event, detail) {
+        warnings.push({ event, detail });
+      },
+    },
+  });
+
+  const environment = controller.runtimeEnvironment();
+  assert.equal(environment.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY, "router-caller-key");
+  assert.equal(warnings.some(({ event }) => event === "managed-component.peer-environment-failed"), false);
+  controller.dispose();
+});
+
 test("managed Start injects peer loopbacks and does not override PROXY_PORT", async () => {
   const manifestRoot = temporaryDirectory("coding-tools-peer-manifests");
   const dataRoot = temporaryDirectory("coding-tools-peer-data");

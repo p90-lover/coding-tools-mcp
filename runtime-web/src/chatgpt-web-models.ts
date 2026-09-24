@@ -249,7 +249,7 @@ export interface ChatGptWebAccountCapabilities {
 
 export const CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute = {
   slug: "chatgpt-web/zero-risk",
-  displayName: "ChatGPT Web — Zero Risk",
+  displayName: "🌐 Zero Risk",
   description: "Zero Risk keeps model selection and prompt submission under your control while preserving the native Codex harness.",
   interactionMode: "manual",
   backendModel: CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
@@ -260,7 +260,7 @@ export const CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute = {
 
 export const CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute = {
   slug: "chatgpt-web/zero-risk-pro",
-  displayName: "ChatGPT Web — Zero Risk Pro",
+  displayName: "🌐 Zero Risk Pro",
   description: "Explicit Pro-sized Zero Risk context; select ChatGPT Pro manually for every turn.",
   interactionMode: "manual",
   backendModel: CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
@@ -271,8 +271,8 @@ export const CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE: ChatGptWebZeroRiskModelRoute
 
 export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
   slug: "chatgpt-web/luna",
-  displayName: "ChatGPT Web — Luna",
-  description: "ChatGPT Web Luna for accounts without the Sol model selector.",
+  displayName: "🌐 Luna",
+  description: "ChatGPT web Luna for accounts without the Sol model selector.",
   interactionMode: "automatic",
   backendModel: CHATGPT_WEB_LUNA_BACKEND_MODEL,
   codexEffort: "low",
@@ -282,8 +282,8 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
 
 export const CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE: ChatGptWebModelRoute = {
   slug: "chatgpt-web/think",
-  displayName: "ChatGPT Web — Think",
-  description: "ChatGPT Web Think for Luna-only accounts.",
+  displayName: "🌐 Think",
+  description: "ChatGPT web Think for Luna-only accounts.",
   interactionMode: "automatic",
   backendModel: CHATGPT_WEB_LUNA_BACKEND_MODEL,
   codexEffort: "low",
@@ -298,17 +298,24 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
   CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE,
 ];
 
+/** ChatGPT web Work labels for the Light–Max slider. */
+export const CHATGPT_WEB_WEB_EFFORT_LABEL: Record<ChatGptWebAdapterEffort, string> = {
+  low: "Light",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
+};
+
 /**
- * The selected Codex model is the authoritative ChatGPT browser mode. Codex's signed desktop UI
- * always renders an Effort row, so every routed model advertises exactly one immutable protocol
- * effort. Pro uses Codex's `ultra` protocol value but binds explicitly to ChatGPT Pro (`max`) at
- * the adapter boundary.
+ * Effort-specific slugs stay routable for older threads. The picker publishes one Latest row
+ * whose slider uses these ChatGPT web efforts instead of Codex Low/Medium/High labels.
  */
 export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] = [
   {
     slug: "chatgpt-web/light",
-    displayName: "ChatGPT Web — Instant",
-    description: "ChatGPT Web Instant through the native Codex harness.",
+    displayName: "🌐 Light",
+    description: "ChatGPT web Light through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "low",
@@ -317,8 +324,8 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/medium",
-    displayName: "ChatGPT Web — Medium",
-    description: "ChatGPT Web Medium through the native Codex harness.",
+    displayName: "🌐 Medium",
+    description: "ChatGPT web Medium through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "medium",
@@ -327,8 +334,8 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/high",
-    displayName: "ChatGPT Web — High",
-    description: "ChatGPT Web High through the native Codex harness.",
+    displayName: "🌐 High",
+    description: "ChatGPT web High through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "high",
@@ -337,8 +344,8 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/extra-high",
-    displayName: "ChatGPT Web — Extra High",
-    description: "Account-gated ChatGPT Web Extra High through the native Codex harness.",
+    displayName: "🌐 Extra High",
+    description: "Account-gated ChatGPT web Extra High through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "xhigh",
@@ -347,8 +354,8 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
   {
     slug: "chatgpt-web/pro",
-    displayName: "ChatGPT Web — Pro",
-    description: "Account-gated ChatGPT Pro through the native Codex harness.",
+    displayName: "🌐 Max",
+    description: "Account-gated ChatGPT web Max through the native Codex harness.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "ultra",
@@ -357,11 +364,23 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
 ];
 
+export const CHATGPT_WEB_LATEST_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
+  slug: "chatgpt-web/latest",
+  displayName: "🌐 Latest",
+  description: "ChatGPT web Latest. Effort follows the ChatGPT web Light–Max slider.",
+  interactionMode: "automatic",
+  backendModel: CHATGPT_WEB_BACKEND_MODEL,
+  codexEffort: "high",
+  adapterEffort: "high",
+  requiresPro: false,
+};
+
 const routesBySlug = new Map(
   [
     CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
     CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
     ...CHATGPT_WEB_LUNA_MODEL_ROUTES,
+    CHATGPT_WEB_LATEST_MODEL_ROUTE,
     ...CHATGPT_WEB_MODEL_ROUTES,
   ]
     .map(route => [route.slug, route]),
@@ -383,9 +402,33 @@ export function availableChatGptWebModelRoutes(
       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
   }
   if (!capabilities.solAvailable) return CHATGPT_WEB_LUNA_MODEL_ROUTES;
+  return [CHATGPT_WEB_LATEST_MODEL_ROUTE];
+}
+
+export function availableChatGptWebLatestEfforts(
+  capabilities: ChatGptWebAccountCapabilities,
+): readonly ChatGptWebAutomaticModelRoute[] {
   return capabilities.proAvailable
     ? CHATGPT_WEB_MODEL_ROUTES
     : CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
+}
+
+/** Map a Codex request effort onto the ChatGPT web Light–Max slider. */
+export function resolveChatGptWebLatestAdapterEffort(
+  reasoning: string | undefined,
+  capabilities: ChatGptWebAccountCapabilities,
+): ChatGptWebAdapterEffort {
+  const requested = reasoning ?? "high";
+  const route = CHATGPT_WEB_MODEL_ROUTES.find(candidate => (
+    candidate.adapterEffort === requested
+    || candidate.codexEffort === requested
+    || (requested === "ultra" && candidate.adapterEffort === "max")
+  ));
+  if (!route) throw new Error(`ChatGPT web effort is not supported: ${requested}`);
+  if (route.requiresPro && !capabilities.proAvailable) {
+    throw new Error(`${CHATGPT_WEB_WEB_EFFORT_LABEL[route.adapterEffort]} is not available for this account`);
+  }
+  return route.adapterEffort;
 }
 
 export function requireChatGptWebModelRoute(

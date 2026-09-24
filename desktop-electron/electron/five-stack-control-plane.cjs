@@ -33,6 +33,7 @@ const TOOL_NAMES = Object.freeze([
   "paseo_review",
   "anneal_open_from_review",
   "anneal_preview",
+  "runtime_open_task",
 ]);
 
 const READ_ONLY_TOOLS = new Set([
@@ -236,7 +237,7 @@ function apiMap(endpoints) {
   const backends = inAppBackends(endpoints);
   return Object.freeze({
     control_plane: "coding-tools-five-stack",
-    loop: "paseo_plan → paseo_run → paseo_submit_result → paseo_review → anneal_open_from_review → anneal_preview",
+    loop: "runtime_open_task → paseo_plan → paseo_run → paseo_submit_result → paseo_review → anneal_open_from_review → anneal_preview",
     stacks: Object.freeze({
       cpa: Object.freeze({
         id: "cpa",
@@ -327,7 +328,7 @@ function mcpTools() {
     }),
     Object.freeze({
       name: "paseo_run",
-      description: "Dispatch the orchestrator message onto each assigned subagent route.",
+      description: "Queue assignments for an external worker executor. This API records assignments; it does not itself execute a coding agent.",
       readOnly: false,
     }),
     Object.freeze({
@@ -337,7 +338,7 @@ function mcpTools() {
     }),
     Object.freeze({
       name: "paseo_review",
-      description: "Read the orchestrator review of subagent results.",
+      description: "Collect submitted worker findings for the orchestrator to review. This is not a model-generated final verdict.",
       readOnly: false,
     }),
     Object.freeze({
@@ -349,6 +350,11 @@ function mcpTools() {
       name: "anneal_preview",
       description: "Preview an Anneal task and its orchestrator→subagent assignment structure.",
       readOnly: true,
+    }),
+    Object.freeze({
+      name: "runtime_open_task",
+      description: "Queue a visible Coding Tools task and worker assignments for Web GPT. Requires an external executor to run workers; supplied results are collected for a separate orchestrator review.",
+      readOnly: false,
     }),
   ]);
 }
@@ -451,9 +457,10 @@ function createFiveStackControlPlane({
       model: text(orchestratorInput.model) || undefined,
       allowFallback: orchestratorInput.allowFallback !== false,
     });
-    const requested = asList(input.subagents).slice(0, MAX_SUBAGENTS);
+    const requested = (asList(input.workers).length ? asList(input.workers) : asList(input.subagents))
+      .slice(0, MAX_SUBAGENTS);
     if (requested.length === 0) {
-      throw new Error("Assign at least one subagent");
+      throw new Error("Assign at least one worker");
     }
     const subagents = requested.map((entry, index) => {
       const row = asRecord(entry);
@@ -515,6 +522,12 @@ function createFiveStackControlPlane({
     return record;
   }
 
+  function assertWorkspace(record, workspaceId) {
+    if (workspaceId && record.workspaceId && record.workspaceId !== workspaceId) {
+      throw new Error("Record does not belong to this workspace");
+    }
+  }
+
   function run(input = {}, workspaceId = "") {
     const selected = requirePlan(input.planId);
     if (workspaceId && selected.workspaceId && selected.workspaceId !== workspaceId) {
@@ -526,7 +539,7 @@ function createFiveStackControlPlane({
       role: subagent.role,
       route: subagent.route,
       backend: subagent.backend,
-      status: "dispatched",
+      status: "awaiting_dispatch",
       summary: "",
       issues: Object.freeze([]),
     }));
@@ -539,15 +552,29 @@ function createFiveStackControlPlane({
       orchestrator: selected.orchestrator,
       assignments,
       backends: selected.backends,
-      status: "awaiting_results",
+      status: "awaiting_dispatch",
+      dispatchRequired: true,
+      reason: "Assignments are queued; an external worker executor must run them and submit results.",
       liveModelCompletion: false,
     });
     boundedSet(runs, record.id, record);
+    boundedSet(tasks, record.id, Object.freeze({
+      id: record.id,
+      workspaceId: record.workspaceId,
+      title: selected.brief.slice(0, MAX_FINDING_TITLE),
+      description: message,
+      state: "BACKLOG",
+      createdAt: record.createdAt,
+      source: { kind: "paseo_run", planId: selected.id, runId: record.id },
+      assignment: { orchestrator: selected.orchestrator, subagents: selected.subagents },
+      handoff: { attempted: false, posted: false, remoteId: null },
+    }));
     return record;
   }
 
-  function submitResult(input = {}) {
+  function submitResult(input = {}, workspaceId = "") {
     const selected = requireRun(input.runId);
+    assertWorkspace(selected, workspaceId);
     const assignmentId = text(input.assignmentId);
     const assignment = selected.assignments.find((item) => item.id === assignmentId);
     if (!assignment) throw new Error("Subagent assignment was not found");
@@ -559,6 +586,14 @@ function createFiveStackControlPlane({
         detail: optionalText(row.detail, MAX_FINDING_DETAIL, "finding detail"),
       });
     });
+    if (input.ok === false && !issues.length) {
+      issues.push(Object.freeze({
+        id: nextId("find"),
+        title: `${assignment.role} failed`.slice(0, MAX_FINDING_TITLE),
+        detail: optionalText(input.summary, MAX_SUMMARY, "summary").slice(0, MAX_FINDING_DETAIL)
+          || "Worker reported failure without findings.",
+      }));
+    }
     const nextAssignment = Object.freeze({
       ...assignment,
       status: issues.length ? "issues_found" : "returned",
@@ -570,19 +605,24 @@ function createFiveStackControlPlane({
     const assignments = selected.assignments.map((item) => (
       item.id === assignmentId ? nextAssignment : item
     ));
-    const remaining = assignments.some((item) => item.status === "dispatched");
+    const remaining = assignments.some((item) => item.status === "awaiting_dispatch");
     const hasIssues = assignments.some((item) => item.issues.length > 0 || item.status === "issues_found");
     const next = Object.freeze({
       ...selected,
       assignments: Object.freeze(assignments),
       status: remaining ? "awaiting_results" : hasIssues ? "issues_found" : "returned",
+      dispatchRequired: remaining,
+      reason: remaining ? selected.reason : null,
     });
     runs.set(next.id, next);
+    const task = tasks.get(next.id);
+    if (task) tasks.set(task.id, Object.freeze({ ...task, state: remaining ? "BACKLOG" : "REVIEW" }));
     return next;
   }
 
-  function review(input = {}) {
+  function review(input = {}, workspaceId = "") {
     const selected = requireRun(input.runId);
+    assertWorkspace(selected, workspaceId);
     const findings = selected.assignments.flatMap((assignment) => (
       assignment.issues.map((issue) => Object.freeze({
         ...issue,
@@ -600,14 +640,65 @@ function createFiveStackControlPlane({
       assignments: selected.assignments,
       findings,
       status: findings.length ? "issues_found" : selected.status,
+      source: "submitted_worker_results",
+      requiresOrchestratorReview: true,
       liveModelCompletion: selected.liveModelCompletion === true,
     });
     boundedSet(reviews, record.id, record);
     return record;
   }
 
+  async function openRuntimeTask(input = {}, workspaceId = "") {
+    const brief = input.brief || input.title || input.task;
+    const planned = await plan({
+      brief,
+      orchestrator: input.orchestrator,
+      workers: input.workers,
+      subagents: input.subagents,
+    }, workspaceId);
+    let current = run({
+      planId: planned.id,
+      message: brief || planned.brief,
+    }, workspaceId);
+    const supplied = asList(input.results);
+    supplied.forEach((entry, index) => {
+      const assignment = current.assignments[index];
+      if (!assignment) return;
+      const row = asRecord(entry);
+      current = submitResult({
+        runId: current.id,
+        assignmentId: assignment.id,
+        ok: row.ok,
+        summary: row.summary || row.response || row.content,
+        issues: row.issues,
+      });
+    });
+    const awaitingWorkers = current.assignments.some((item) => item.status === "awaiting_dispatch");
+    const reviewed = awaitingWorkers ? null : review({ runId: current.id }, workspaceId);
+    const workerLines = current.assignments
+      .filter((item) => item.status !== "awaiting_dispatch")
+      .map((item) => `${item.role}: ${item.summary || item.status}`);
+    return Object.freeze({
+      ok: true,
+      taskId: current.id,
+      runId: current.id,
+      reviewId: reviewed?.id,
+      workspaceId: planned.workspaceId,
+      status: current.status,
+      orchestrator: planned.orchestrator,
+      workers: current.assignments,
+      review: reviewed,
+      awaitingWorkers,
+      dispatchRequired: current.dispatchRequired,
+      reason: current.reason,
+      requiresOrchestratorReview: true,
+      response: workerLines.join("\n"),
+    });
+  }
+
   async function openAnnealFromReview(input = {}, workspaceId = "") {
     const selected = requireReview(input.reviewId);
+    assertWorkspace(selected, workspaceId);
     if (!selected.findings.length) {
       throw new Error("Anneal tasks open from review findings; this review has none");
     }
@@ -638,8 +729,11 @@ function createFiveStackControlPlane({
           path: `/projects/${projectId}/tasks`,
           body,
         });
-        posted = true;
         remoteId = text(asRecord(remote).id) || text(asRecord(remote).taskId) || null;
+        if (asRecord(remote).ok === false || !remoteId) {
+          throw new Error("Anneal did not acknowledge task creation with a task ID");
+        }
+        posted = true;
       } catch (error) {
         handoffError = error instanceof Error ? error.message : String(error);
       }
@@ -777,10 +871,11 @@ function createFiveStackControlPlane({
     if (tool === "five_stack_manage") return manageStack(input);
     if (tool === "paseo_plan") return plan(input, workspaceId);
     if (tool === "paseo_run") return run(input, workspaceId);
-    if (tool === "paseo_submit_result") return submitResult(input);
-    if (tool === "paseo_review") return review(input);
+    if (tool === "paseo_submit_result") return submitResult(input, workspaceId);
+    if (tool === "paseo_review") return review(input, workspaceId);
     if (tool === "anneal_open_from_review") return openAnnealFromReview(input, workspaceId);
     if (tool === "anneal_preview") return previewAnneal(input, workspaceId);
+    if (tool === "runtime_open_task") return openRuntimeTask(input, workspaceId);
     throw new Error(`Unknown five-stack tool ${name}`);
   }
 

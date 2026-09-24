@@ -1,0 +1,231 @@
+.module-controls {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px 24px;
+  overflow: auto;
+  color: var(--color-text-primary);
+}
+
+.module-controls-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.module-controls-header h2 {
+  margin: 4px 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.module-controls-header p {
+  max-width: 62ch;
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.module-controls-eyebrow {
+  color: #8cacff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+}
+
+.module-controls-status {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 4%);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.module-controls-status.is-ready {
+  border-color: rgb(64 206 138 / 40%);
+  background: rgb(64 206 138 / 10%);
+  color: #6fe3ad;
+}
+
+.module-controls-status.is-error {
+  border-color: rgb(239 98 98 / 40%);
+  background: rgb(239 98 98 / 10%);
+  color: #ff9c9c;
+}
+
+.module-controls-status.is-busy {
+  border-color: rgb(112 151 255 / 50%);
+  background: rgb(80 133 255 / 12%);
+  color: #a7c0ff;
+}
+
+.module-controls-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.module-controls-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 12px;
+  background: rgb(255 255 255 / 2%);
+}
+
+.module-controls-card h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.module-controls-card dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.module-controls-card dl > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 11px;
+}
+
+.module-controls-card dt {
+  color: var(--color-text-tertiary);
+}
+
+.module-controls-card dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.module-controls-note,
+.module-controls-muted {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.module-controls-note.is-error,
+.module-controls-error {
+  color: #ff9c9c;
+}
+
+.module-controls-error {
+  margin: 0;
+  font-size: 12px;
+}
+
+.module-controls-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.module-controls-actions.wrap {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.module-controls-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.module-controls-toggle input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.module-controls-button,
+.module-controls-op {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 4%);
+  color: var(--color-text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.module-controls-button.primary {
+  border-color: rgb(80 133 255 / 72%);
+  background: linear-gradient(180deg, #4d83f2, #3264d1);
+  color: white;
+}
+
+.module-controls-button:disabled,
+.module-controls-op:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.module-controls-api ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.module-controls-api li {
+  display: grid;
+  gap: 3px;
+}
+
+.module-controls-op {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+}
+
+.module-controls-op code {
+  font-size: 11px;
+}
+
+.module-controls-op em {
+  color: var(--color-text-tertiary);
+  font-size: 9px;
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.module-controls-api small {
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+}
+
+.module-controls-result {
+  max-height: 260px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 10px;
+  background: rgb(0 0 0 / 30%);
+  font-size: 11px;
+  overflow: auto;
+}

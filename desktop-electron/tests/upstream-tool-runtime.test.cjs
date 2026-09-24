@@ -55,7 +55,7 @@ test("main, preload, and types retain diagnostic restart while the renderer dele
     /restartUpstreamTool:\s*\(toolId\)\s*=>\s*ipcRenderer\.invoke\("launcher:upstream-tool-restart", toolId\)/,
   );
   assert.match(types, /restartUpstreamTool\(toolId: UpstreamToolId\)/);
-  assert.match(app, /<UpstreamToolSurface/);
+  assert.match(app, /<IntegratedModuleSurface[\s\S]*?toolId="anneal"/);
   assert.match(surface, /nativeControl/);
   assert.match(surface, /Coding Tools managed connection controls/);
   assert.doesNotMatch(surface, /restartUpstreamTool/);

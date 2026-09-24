@@ -2,6 +2,11 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  normalizeLaunchManifest,
+  normalizeVisualManifest,
+  orderModules,
+} = require("./lib/launch-manifest.cjs");
 
 const MODULES_ROOT = __dirname;
 const FOREIGN_SLOTS = Object.freeze(["cpa", "codex-router"]);
@@ -52,6 +57,8 @@ function loadModules() {
       root: path.posix.join("app-handler", id),
       moduleJson: Object.freeze(moduleJson),
       operations: Object.freeze(operations),
+      launch: normalizeLaunchManifest(moduleJson),
+      visual: normalizeVisualManifest(moduleJson),
       handler,
       foreign: FOREIGN_SLOTS.includes(id),
     });
@@ -78,6 +85,17 @@ function createHandlerRegistry(loaded = loadModules()) {
     ownsOperation(id, operation) {
       return Boolean(loaded[id]?.operations.includes(operation));
     },
+    launch(id) {
+      return loaded[id]?.launch || null;
+    },
+    visual(id) {
+      return loaded[id]?.visual || null;
+    },
+    launchOrder() {
+      const byId = Object.create(null);
+      for (const id of Object.keys(loaded)) byId[id] = loaded[id].launch;
+      return orderModules(byId);
+    },
     snapshot(id) {
       const current = loaded[id];
       if (!current) return null;
@@ -85,10 +103,13 @@ function createHandlerRegistry(loaded = loadModules()) {
         id: current.id,
         root: current.root,
         name: current.moduleJson.name || current.id,
+        kind: current.moduleJson.kind || "managed-service",
         functions: [...current.operations],
         transport: current.moduleJson.transport || "in-process",
         legacyLoopback: current.moduleJson.legacyLoopback || null,
         source: current.moduleJson.source || null,
+        launch: { ...current.launch, dependsOn: [...current.launch.dependsOn], requires: [...current.launch.requires] },
+        visual: { ...current.visual, controls: [...current.visual.controls] },
       });
     },
     async invoke(id, operation, args, ctx) {

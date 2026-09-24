@@ -54,6 +54,7 @@ export interface SetupOptions {
   autoApproveToolCalls?: boolean;
   experimentalBiggerContext?: boolean;
   zeroRiskProEnabled?: boolean;
+  automaticConnectorName?: string;
   replaceCodexRoute?: boolean;
   restartService?: boolean;
   acknowledgedUnofficial?: boolean;
@@ -246,6 +247,7 @@ function baseConfig(
   Object.assign(config, resolveInteractionConnectorIdentities(
     config.browserInteractionMode,
     profile,
+    options.automaticConnectorName,
   ));
   if (options.subagentProtocol) config.subagentProtocol = options.subagentProtocol;
   config.releaseVersion = VERSION;

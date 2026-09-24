@@ -15,14 +15,18 @@ import { Icon, type IconName } from "./icons";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
 import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
+import { IntegratedModuleSurface } from "./features/IntegratedModuleSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
-import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
-import { OriginalUiSurface } from "./features/OriginalUiSurface";
+import { CommandCodeHostSurface } from "./features/CommandCodeProxySurface";
 import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
 import { InProcessAppsPanel } from "./features/InProcessAppsPanel";
+import { ModuleControlsPanel } from "./features/ModuleControlsPanel";
 import type {
+  AppsLaunchModuleSnapshot,
+  AppsLaunchSnapshot,
   BrowserInteractionMode,
+  ExternalServiceId,
   BrowserState,
   DoctorReport,
   Language,
@@ -415,6 +419,7 @@ function LauncherShell({
     || surface === "integrations"
     || surface === "cpa"
     || surface === "codex-router"
+    || surface === "commandcode-proxy"
     || surface === "paseo"
     || surface === "anneal"
     || surface === "network";
@@ -423,6 +428,7 @@ function LauncherShell({
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
+  const [appsLaunch, setAppsLaunch] = useState<AppsLaunchSnapshot | null>(null);
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
     snapshot.state.browserInteractionMode === "automatic"
       && snapshot.state.coreSetupComplete === true
@@ -449,6 +455,28 @@ function LauncherShell({
       setBiggerContextRecommendationOpen(false);
     }
   }, [snapshot.state.browserInteractionMode]);
+
+  useEffect(() => {
+    if (!api?.appsLaunchSnapshot) return undefined;
+    let cancelled = false;
+    void api.appsLaunchSnapshot().then((next) => {
+      if (!cancelled) setAppsLaunch(next);
+    }).catch(() => {
+      // The coordinator is optional; the More entries still render without badges.
+    });
+    const unsubscribe = api.onAppsLaunchChanged?.((next) => {
+      if (!cancelled) setAppsLaunch(next);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, []);
+
+  const launchBadge = (moduleId: ExternalServiceId): ReactNode => {
+    const module = appsLaunch?.modules.find((entry) => entry.id === moduleId) ?? null;
+    return moduleLaunchBadge(module, appsLaunch);
+  };
 
   useEffect(() => {
     if (!selectedManualTab) return;
@@ -713,6 +741,36 @@ function LauncherShell({
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
+                <SidebarItem
+                  active={surface === "runtime-orchestrator"}
+                  icon="orchestrator"
+                  label={copy.runtimeOrchestrator}
+                  onClick={() => navigateSurface("runtime-orchestrator")}
+                />
+                <SidebarItem
+                  active={surface === "runtime-oauth"}
+                  icon="providers"
+                  label={copy.runtimeOauth}
+                  onClick={() => navigateSurface("runtime-oauth")}
+                />
+                <SidebarItem
+                  active={surface === "runtime-api"}
+                  icon="providers"
+                  label={copy.runtimeApi}
+                  onClick={() => navigateSurface("runtime-api")}
+                />
+                <SidebarItem
+                  active={surface === "runtime-tasks"}
+                  icon="activity"
+                  label={copy.runtimeTasks}
+                  onClick={() => navigateSurface("runtime-tasks")}
+                />
+                <SidebarItem
+                  active={surface === "runtime-tools"}
+                  icon="mcp"
+                  label={copy.runtimeTools}
+                  onClick={() => navigateSurface("runtime-tools")}
+                />
               </SidebarGroup>
               <details className="sidebar-more" open={extraSurfaceActive}>
                 <summary>{copy.moreTools}</summary>
@@ -730,24 +788,35 @@ function LauncherShell({
                 />
                 <SidebarItem
                   active={surface === "cpa"}
+                  badge={launchBadge("cpa")}
                   icon="providers"
                   label="CPA"
                   onClick={() => navigateSurface("cpa")}
                 />
                 <SidebarItem
                   active={surface === "codex-router"}
+                  badge={launchBadge("codex-router")}
                   icon="orchestrator"
                   label="Codex Router"
                   onClick={() => navigateSurface("codex-router")}
                 />
                 <SidebarItem
+                  active={surface === "commandcode-proxy"}
+                  badge={launchBadge("commandcode-proxy")}
+                  icon="globe"
+                  label="CommandCode"
+                  onClick={() => navigateSurface("commandcode-proxy")}
+                />
+                <SidebarItem
                   active={surface === "paseo"}
+                  badge={launchBadge("paseo")}
                   icon="orchestrator"
-                  label={language === "zh-TW" ? "Paseo 協調器" : copy.paseoOrchestrator}
+                  label={copy.paseoOrchestrator}
                   onClick={() => navigateSurface("paseo")}
                 />
                 <SidebarItem
                   active={surface === "anneal"}
+                  badge={launchBadge("anneal")}
                   icon="activity"
                   label={language === "zh-TW" ? "Anneal 任務" : copy.annealTasks}
                   onClick={() => navigateSurface("anneal")}
@@ -847,6 +916,41 @@ function LauncherShell({
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
             ) : null}
+            {surface === "runtime-orchestrator" ? (
+              <IntegratedModuleSurface
+                controls={<PaseoOrchestratorSurface language={language} setError={setError} variant="runtime" />}
+                language={language}
+                setError={setError}
+                title={copy.runtimeOrchestrator}
+                toolId="paseo"
+              />
+            ) : null}
+            {surface === "runtime-oauth" ? (
+              <IntegratedModuleSurface
+                controls={<ProviderCenterSurface focus="oauth" language={language} setError={setError} />}
+                initialSection="oauth"
+                language={language}
+                setError={setError}
+                title="OAuth"
+                toolId="cpa"
+              />
+            ) : null}
+            {surface === "runtime-api" ? (
+              <ProviderCenterSurface focus="api" language={language} setError={setError} />
+            ) : null}
+            {surface === "runtime-tasks" ? (
+              <IntegratedModuleSurface
+                controls={<AnnealTasksSurface language={language} setError={setError} />}
+                initialSection="tasks"
+                language={language}
+                setError={setError}
+                title={copy.runtimeTasks}
+                toolId="anneal"
+              />
+            ) : null}
+            {surface === "runtime-tools" ? (
+              <RuntimeToolsSurface copy={copy} language={language} setError={setError} />
+            ) : null}
             {surface === "providers" ? (
               <ProviderCenterSurface language={language} setError={setError} />
             ) : null}
@@ -854,6 +958,7 @@ function LauncherShell({
               <ExternalServicesSurface
                 language={language}
                 openAnneal={() => navigateSurface("anneal")}
+                openCommandCode={() => navigateSurface("commandcode-proxy")}
                 openCpa={() => navigateSurface("cpa")}
                 openCodexRouter={() => navigateSurface("codex-router")}
                 openPaseo={() => navigateSurface("paseo")}
@@ -862,24 +967,64 @@ function LauncherShell({
               />
             ) : null}
             {surface === "cpa" ? (
-              <OriginalUiSurface language={language} setError={setError} toolId="cpa" />
+              <IntegratedModuleSurface
+                controls={(
+                  <>
+                    <ModuleControlsPanel language={language} moduleId="cpa" setError={setError} />
+                    <ProviderCenterSurface focus="oauth" language={language} setError={setError} />
+                  </>
+                )}
+                language={language}
+                setError={setError}
+                title="CPA"
+                toolId="cpa"
+              />
             ) : null}
             {surface === "codex-router" ? (
-              <OriginalUiSurface language={language} setError={setError} toolId="codex-router" />
+              <IntegratedModuleSurface
+                controls={<ModuleControlsPanel language={language} moduleId="codex-router" setError={setError} />}
+                language={language}
+                setError={setError}
+                title="Codex Router"
+                toolId="codex-router"
+              />
+            ) : null}
+            {surface === "commandcode-proxy" ? (
+              <div className="module-stack">
+                <ModuleControlsPanel language={language} moduleId="commandcode-proxy" setError={setError} />
+                <CommandCodeHostSurface
+                  language={language}
+                  openProviders={() => navigateSurface("providers")}
+                  setError={setError}
+                />
+              </div>
             ) : null}
             {surface === "paseo" ? (
-              <UpstreamToolSurface
+              <IntegratedModuleSurface
+                controls={(
+                  <>
+                    <ModuleControlsPanel language={language} moduleId="paseo" setError={setError} />
+                    <PaseoOrchestratorSurface language={language} setError={setError} />
+                  </>
+                )}
                 language={language}
-                nativeControl={<PaseoOrchestratorSurface language={language} setError={setError} />}
                 setError={setError}
+                title={copy.paseoOrchestrator}
                 toolId="paseo"
               />
             ) : null}
             {surface === "anneal" ? (
-              <UpstreamToolSurface
+              <IntegratedModuleSurface
+                controls={(
+                  <>
+                    <ModuleControlsPanel language={language} moduleId="anneal" setError={setError} />
+                    <AnnealTasksSurface language={language} setError={setError} />
+                  </>
+                )}
+                initialSection="tasks"
                 language={language}
-                nativeControl={<AnnealTasksSurface language={language} setError={setError} />}
                 setError={setError}
+                title={language === "zh-TW" ? "Anneal 任務" : copy.annealTasks}
                 toolId="anneal"
               />
             ) : null}
@@ -1299,15 +1444,30 @@ function SetupSurface({
 }) {
   const [localBusy, setLocalBusy] = useState(false);
   const manualInteraction = snapshot.state.browserInteractionMode === "manual";
-  const busy = localBusy
-    || operation?.status === "running"
-    || (!manualInteraction && (
-      browser?.status === "loading"
-      || browser?.status === "testing"
-      || browser?.status === "running"
-    ));
-  const run = async (action: () => Promise<void>) => {
-    if (busy) return;
+  const setupBusy = localBusy || operation?.status === "running";
+  const browserBusy = !manualInteraction && (
+    browser?.status === "loading"
+    || browser?.status === "testing"
+    || browser?.status === "running"
+  );
+  const busy = setupBusy || browserBusy;
+  useEffect(() => {
+    if (manualInteraction || !api || browser?.authenticated === true) return undefined;
+    if (browser?.status === "loading" || browser?.status === "testing" || browser?.status === "running") {
+      return undefined;
+    }
+    let cancelled = false;
+    void api.refreshAuthentication().catch((cause) => {
+      const message = messageOf(cause);
+      if (!cancelled && !/already busy with/i.test(message)) setError(message);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [browser?.authenticated, browser?.status, manualInteraction, setError]);
+  const run = async (action: () => Promise<void>, options?: { allowWhileBrowserBusy?: boolean }) => {
+    if (setupBusy) return;
+    if (!options?.allowWhileBrowserBusy && busy) return;
     setLocalBusy(true);
     setError(null);
     try {
@@ -1331,7 +1491,7 @@ function SetupSurface({
   const install = () => run(async () => {
     await api!.setupCore();
     updateState((await api!.snapshot()).state);
-  });
+  }, { allowWhileBrowserBusy: true });
   const setZeroRiskPro = (enabled: boolean) => run(async () => {
     updateState(await api!.setZeroRiskPro(enabled));
   });
@@ -1372,9 +1532,9 @@ function SetupSurface({
           action={snapshot.state.coreSetupComplete
             ? devProfile ? copy.devReinstall : copy.reinstall
             : devProfile ? copy.devInstall : copy.install}
-          complete={snapshot.state.codexCatalogVerified === true}
+          complete={snapshot.state.coreSetupComplete === true || snapshot.state.codexCatalogVerified === true}
           description={devProfile ? copy.devStepInstallBody : copy.stepInstallBody}
-          disabled={busy || (!snapshot.smokePassed && snapshot.state.coreSetupComplete !== true)}
+          disabled={setupBusy}
           index={manualInteraction ? 1 : 3}
           onAction={install}
           repeatable
@@ -1399,7 +1559,6 @@ function SetupSurface({
       <SectionHeading label="MCP" meta={manualInteraction ? copy.required : copy.optional} spaced />
       <button
         className="next-surface-row"
-        disabled={!manualInteraction && !snapshot.state.codexCatalogVerified}
         onClick={showMcp}
         type="button"
       >
@@ -1690,7 +1849,6 @@ function McpSurface({
           <PrimaryButton
             disabled={
               busy
-              || (!manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified)
               || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
             }
             onClick={() => void install()}
@@ -1718,6 +1876,25 @@ function McpSurface({
           </>
         ) : null}
       </div>
+    </ContentSurface>
+  );
+}
+
+function RuntimeToolsSurface({
+  copy,
+  language,
+  setError,
+}: {
+  copy: Copy;
+  language: Language;
+  setError: (error: string | null) => void;
+}) {
+  return (
+    <ContentSurface
+      fit
+      subtitle={copy.inProcessAppsBody}
+      title={copy.runtimeTools}
+    >
       <InProcessAppsPanel copy={copy} language={language} setError={setError} />
       <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
@@ -2599,6 +2776,16 @@ function StateDot({ state }: { state: "idle" | "ready" | "busy" | "error" }) {
 
 function ActionDot({ pulse = false, tone }: { pulse?: boolean; tone: "required" | "optional" | "success" | "error" }) {
   return <i aria-hidden="true" className={`action-dot is-${tone}${pulse ? " is-pulse" : ""}`} />;
+}
+
+function moduleLaunchBadge(module: AppsLaunchModuleSnapshot | null, launch: AppsLaunchSnapshot | null): ReactNode {
+  if (!module) return null;
+  if (module.status === "ready" || module.serviceStatus === "ready") return <ActionDot tone="success" />;
+  if (module.status === "error" || module.status === "blocked") return <ActionDot tone="error" />;
+  if (module.status === "launching" || (module.planned && launch?.status === "waiting")) {
+    return <ActionDot pulse tone="optional" />;
+  }
+  return null;
 }
 
 function BrandMark({ small = false }: { small?: boolean }) {

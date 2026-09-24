@@ -18,7 +18,8 @@ describe("restricted Coding Tools Web router ingress", () => {
     expect(catalog.object).toBe("list");
     expect(Array.isArray(catalog.data)).toBe(true);
     const ids = catalog.data.map(model => model.id);
-    expect(ids.length).toBeGreaterThan(1);
+    // Sol-capable accounts publish one Latest route; effort comes from the ChatGPT web slider.
+    expect(ids).toEqual(["chatgpt-web/latest"]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids.every(id => id.startsWith("chatgpt-web/"))).toBe(true);
     expect(ids.some(id => id.startsWith("codex-router/"))).toBe(false);

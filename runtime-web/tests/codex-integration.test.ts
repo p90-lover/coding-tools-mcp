@@ -854,6 +854,40 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(configPath, "utf8")).toBe(original);
   });
 
+  test("reconnects an active route onto the bridge that is already listening", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = 'model = "gpt-5.6-sol"\n';
+    writeFileSync(configPath, original);
+    const config = nativeConfig("browser-only");
+    saveConfig(config);
+    installCodexIntegration(config, { replaceExistingRoute: true });
+
+    const drifted = readFileSync(configPath, "utf8").replace(
+      'openai_base_url = "http://127.0.0.1:17841/v1"',
+      'openai_base_url = "http://192.168.1.144:17841/v1"',
+    );
+    writeFileSync(configPath, drifted);
+    const journal = JSON.parse(readFileSync(getCodexJournalPath(), "utf8"));
+    const previous = journal.previous;
+    journal.installed.openai_base_url = "http://192.168.1.144:17841/v1";
+    const driftedJournal = `${JSON.stringify(journal, null, 2)}\n`;
+    writeFileSync(getCodexJournalPath(), driftedJournal);
+    writeFileSync(getCodexJournalRecoveryPath(), driftedJournal);
+
+    expect(activateCodexIntegration()).toEqual({ changed: true, active: true });
+    expect(readFileSync(configPath, "utf8")).toContain('openai_base_url = "http://127.0.0.1:17841/v1"');
+    expect(readFileSync(configPath, "utf8")).not.toContain("192.168.1.144");
+    const repaired = JSON.parse(readFileSync(getCodexJournalPath(), "utf8"));
+    expect(repaired.installed.openai_base_url).toBe("http://127.0.0.1:17841/v1");
+    expect(repaired.previous).toEqual(previous);
+    expect(inspectCodexIntegration().errors).toEqual([]);
+    expect(activateCodexIntegration()).toEqual({ changed: false, active: true });
+
+    uninstallCodexIntegration();
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
+
   test("Compatibility V1 reconnect ignores unrelated keys added to a previously absent agents table", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");

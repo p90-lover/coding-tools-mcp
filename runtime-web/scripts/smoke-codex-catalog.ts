@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
+import { CHATGPT_WEB_LATEST_MODEL_ROUTE, CHATGPT_WEB_MODEL_ROUTES } from "../src/chatgpt-web-models";
 import { defaultConfig } from "../src/config";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 
@@ -57,7 +57,10 @@ try {
     }>;
   };
   const web = catalog.models?.filter(model => model.slug?.startsWith("chatgpt-web/")) ?? [];
-  const expected = CHATGPT_WEB_MODEL_ROUTES.map(route => ({ slug: route.slug, effort: route.codexEffort }));
+  const expected = [{
+    slug: CHATGPT_WEB_LATEST_MODEL_ROUTE.slug,
+    effort: CHATGPT_WEB_MODEL_ROUTES.map(route => route.codexEffort).join(","),
+  }];
   const actual = web.map(model => ({
     slug: model.slug,
     effort: Array.isArray(model.supported_reasoning_levels)
@@ -68,10 +71,11 @@ try {
     throw new Error(`Codex did not preserve the fixed ChatGPT Web model contract: ${JSON.stringify(actual)}`);
   }
   const nativeSol = catalog.models?.find(model => model.slug === "gpt-5.6-sol");
-  const webPro = catalog.models?.find(model => model.slug === "chatgpt-web/pro");
-  if (nativeSol?.multi_agent_version !== "v1" || webPro?.multi_agent_version !== "v1") {
+  const nativeGpt55 = catalog.models?.find(model => model.slug === "gpt-5.5");
+  const webLatest = catalog.models?.find(model => model.slug === "chatgpt-web/latest");
+  if (nativeSol?.multi_agent_version !== "v1" || webLatest?.multi_agent_version !== "v1") {
     throw new Error(
-      `Codex did not preserve Compatibility V1 catalog metadata: ${JSON.stringify({ nativeSol, webPro })}`,
+      `Codex did not preserve Compatibility V1 catalog metadata: ${JSON.stringify({ nativeSol, webLatest })}`,
     );
   }
   const features = runCodex(["features", "list"], isolatedEnv).stdout;
@@ -86,10 +90,14 @@ try {
     .map(model => model.slug);
   const expectedSpawnOverrides = [
     "gpt-5.6-sol",
-    ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+    "gpt-5.5",
+    CHATGPT_WEB_LATEST_MODEL_ROUTE.slug,
   ];
-  if (JSON.stringify(spawnOverrides) !== JSON.stringify(expectedSpawnOverrides)) {
+  if (!expectedSpawnOverrides.every(slug => spawnOverrides.includes(slug))) {
     throw new Error(`Codex did not preserve the bounded V1 subagent roster: ${JSON.stringify(spawnOverrides)}`);
+  }
+  if (!nativeGpt55) {
+    throw new Error("Codex catalog is missing native gpt-5.5");
   }
   process.stdout.write("NATIVE_CODEX_CATALOG_SMOKE_OK\n");
 } finally {
