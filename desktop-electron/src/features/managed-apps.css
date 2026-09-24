@@ -1,0 +1,189 @@
+.managed-apps-surface {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--surface, #111214);
+}
+
+.managed-apps-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 26px 30px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.managed-apps-header > div {
+  min-width: 0;
+}
+
+.managed-apps-header span {
+  display: block;
+  margin-bottom: 7px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.managed-apps-header h1 {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: clamp(22px, 2.2vw, 30px);
+  line-height: 1.2;
+}
+
+.managed-apps-header p {
+  max-width: 760px;
+  margin: 9px 0 0;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.managed-app-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  padding: 0 22px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(15, 16, 18, 0.96);
+  scrollbar-width: thin;
+}
+
+.managed-app-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.58);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.managed-app-tab:hover {
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.managed-app-tab:focus-visible {
+  outline: 2px solid rgba(66, 153, 225, 0.9);
+  outline-offset: -3px;
+}
+
+.managed-app-tab.is-active {
+  color: #fff;
+  border-bottom-color: #2f9dff;
+  background: rgba(47, 157, 255, 0.08);
+}
+
+.managed-app-status {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.04);
+}
+
+.managed-app-status.is-ready {
+  background: #34c759;
+}
+
+.managed-app-status.is-starting {
+  background: #f5a524;
+  animation: managed-app-status-pulse 1.4s ease-in-out infinite;
+}
+
+.managed-app-status.is-error,
+.managed-app-status.is-action-required {
+  background: #ff5b57;
+}
+
+.managed-app-status.is-offline,
+.managed-app-status.is-disabled,
+.managed-app-status.is-unknown {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.managed-app-panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.managed-app-panel > * {
+  min-height: 100%;
+}
+
+.managed-app-composite {
+  display: grid;
+  grid-template-columns: minmax(420px, 0.95fr) minmax(520px, 1.05fr);
+  align-items: stretch;
+  min-width: 0;
+  min-height: 100%;
+}
+
+.managed-app-composite > * {
+  min-width: 0;
+  min-height: 640px;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.managed-app-composite > *:last-child {
+  border-right: 0;
+}
+
+@keyframes managed-app-status-pulse {
+  0%, 100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 1180px) {
+  .managed-app-composite {
+    grid-template-columns: 1fr;
+  }
+
+  .managed-app-composite > * {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+}
+
+@media (max-width: 820px) {
+  .managed-apps-header {
+    padding: 20px 18px 14px;
+  }
+
+  .managed-app-tabs {
+    padding: 0 8px;
+  }
+
+  .managed-app-tab {
+    min-height: 44px;
+    padding: 0 12px;
+  }
+}

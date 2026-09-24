@@ -1,0 +1,94 @@
+name: Materialize rc.11 managed apps shell
+
+on:
+  push:
+    branches:
+      - feature/rc11-managed-apps-shell-current
+    paths:
+      - .github/workflows/materialize-rc11-managed-apps-shell.yml
+      - aiTemp/rc11-managed-apps/materialize-current-shell.mjs
+      - desktop-electron/src/features/ManagedAppsSurface.tsx
+      - desktop-electron/src/features/managed-apps.css
+      - desktop-electron/tests/rc11-managed-apps-shell.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-rc11-managed-apps-shell-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Apply the current-main shell materializer
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-managed-apps/evidence
+          node aiTemp/rc11-managed-apps/materialize-current-shell.mjs \
+            2>&1 | tee aiTemp/rc11-managed-apps/evidence/materialize.txt
+          grep -F RC11_MANAGED_APPS_SHELL_MATERIALIZED \
+            aiTemp/rc11-managed-apps/evidence/materialize.txt
+
+      - name: Run focused RED-to-GREEN contracts
+        run: |
+          set -euo pipefail
+          (
+            node --check desktop-electron/electron/state.cjs
+            node --check desktop-electron/electron/main.cjs
+            node --check desktop-electron/electron/preload.cjs
+            node --test \
+              desktop-electron/tests/rc11-managed-apps-shell.test.cjs \
+              desktop-electron/tests/state.test.cjs
+          ) 2>&1 | tee aiTemp/rc11-managed-apps/evidence/materialized-tests.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-apps/evidence/materialized-tests.txt
+
+      - name: Enforce no-delete and clean patch contracts
+        run: |
+          set -euo pipefail
+          git fetch origin main --no-tags
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only origin/main...HEAD)"
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit verified materialized source
+        run: |
+          set -euo pipefail
+          git add \
+            desktop-electron/electron/main.cjs \
+            desktop-electron/electron/preload.cjs \
+            desktop-electron/electron/state.cjs \
+            desktop-electron/src/App.tsx \
+            desktop-electron/src/types.ts \
+            desktop-electron/src/features/ExternalServicesSurface.tsx \
+            desktop-electron/tests/state.test.cjs
+          if git diff --cached --quiet; then
+            echo 'managed apps shell is already materialized'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(rc11): materialize current managed apps shell'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: materialize-rc11-managed-apps-${{ github.sha }}
+          path: aiTemp/rc11-managed-apps/evidence/
+          if-no-files-found: error
+          retention-days: 14

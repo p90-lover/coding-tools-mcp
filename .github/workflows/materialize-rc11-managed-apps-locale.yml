@@ -1,0 +1,77 @@
+name: Materialize rc.11 Managed Apps locale parity
+
+on:
+  push:
+    branches:
+      - fix/rc11-managed-apps-locale-parity
+    paths:
+      - .github/workflows/materialize-rc11-managed-apps-locale.yml
+      - aiTemp/rc11-managed-apps/locale/materialize-sidebar-label.mjs
+      - desktop-electron/tests/rc11-managed-apps-shell.test.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-rc11-managed-apps-locale-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          clean: false
+          persist-credentials: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Apply guarded sidebar locale materializer
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/rc11-managed-apps/locale/evidence
+          node aiTemp/rc11-managed-apps/locale/materialize-sidebar-label.mjs \
+            2>&1 | tee aiTemp/rc11-managed-apps/locale/evidence/materialize.txt
+          grep -E 'RC11_MANAGED_APPS_LOCALE_(MATERIALIZED|ALREADY_MATERIALIZED)' \
+            aiTemp/rc11-managed-apps/locale/evidence/materialize.txt
+
+      - name: Run focused locale contract
+        run: |
+          set -euo pipefail
+          node --test desktop-electron/tests/rc11-managed-apps-shell.test.cjs \
+            2>&1 | tee aiTemp/rc11-managed-apps/locale/evidence/tests.txt
+          grep -F '# fail 0' aiTemp/rc11-managed-apps/locale/evidence/tests.txt
+
+      - name: Enforce preservation
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -z "$(git diff --diff-filter=D --name-only)"
+
+      - name: Commit verified production copy
+        run: |
+          set -euo pipefail
+          git add desktop-electron/src/App.tsx
+          if git diff --cached --quiet; then
+            echo 'locale-specific sidebar copy already materialized'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(managed-apps): localize sidebar destination for every locale'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: materialize-rc11-managed-apps-locale-${{ github.sha }}
+          path: aiTemp/rc11-managed-apps/locale/evidence/
+          if-no-files-found: error
+          retention-days: 14

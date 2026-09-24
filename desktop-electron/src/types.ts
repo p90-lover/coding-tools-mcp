@@ -1,7 +1,8 @@
 export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations" | "cpa" | "codex-router" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "apps" | "providers" | "integrations" | "cpa" | "codex-router" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type ManagedAppTabId = "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -476,6 +477,7 @@ export interface LauncherState {
   zeroRiskProEnabled: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
+  managedAppTab: ManagedAppTabId;
   browserSmokePassed?: boolean;
   browserSmokeVersion?: string | null;
   coreSetupComplete?: boolean;
@@ -627,6 +629,7 @@ export interface LauncherApi {
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
+  setManagedAppTab(tab: ManagedAppTabId): Promise<LauncherState>;
   externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
   managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;
   installManagedComponent(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;

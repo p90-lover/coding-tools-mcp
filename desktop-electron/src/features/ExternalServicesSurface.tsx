@@ -19,6 +19,7 @@ interface ExternalServicesSurfaceProps {
   openCodexRouter: () => void;
   openPaseo: () => void;
   openAnneal: () => void;
+  preferredServiceId?: ExternalServiceId;
 }
 
 interface ServiceDraft {
@@ -138,11 +139,13 @@ export function ExternalServicesSurface({
   openCodexRouter,
   openPaseo,
   openAnneal,
+  preferredServiceId,
 }: ExternalServicesSurfaceProps) {
   const api = window.codexWebLauncher;
   const [services, setServices] = useState<ExternalServicesSnapshot>(EMPTY_SERVICES);
   const [providers, setProviders] = useState<ProviderNetworkSnapshot>(EMPTY_PROVIDERS);
-  const [selectedId, setSelectedId] = useState<ExternalServiceId>("codex-router");
+  const [selectedId, setSelectedId] = useState<ExternalServiceId>(preferredServiceId ?? "codex-router");
+  const effectiveSelectedId = preferredServiceId ?? selectedId;
   const [draft, setDraft] = useState<ServiceDraft | null>(null);
   const [callerKey, setCallerKey] = useState("");
   const [managedCredential, setManagedCredential] = useState("");
@@ -151,7 +154,7 @@ export function ExternalServicesSurface({
   const [planText, setPlanText] = useState("");
   const [bootstrap, setBootstrap] = useState<ManagedBootstrapSnapshot | null>(null);
 
-  const selected = services.services.find((service) => service.id === selectedId) ?? null;
+  const selected = services.services.find((service) => service.id === effectiveSelectedId) ?? null;
   const activeAccounts = providers.accounts.filter((account) => !account.archivedAt);
   const connectedAccounts = activeAccounts.filter((account) => account.enabled && account.status === "connected");
   const providerCount = new Set(activeAccounts.map((account) => account.providerId)).size;
@@ -169,6 +172,10 @@ export function ExternalServicesSurface({
       : service
   )), [services, commandCodeAccounts, commandCodeModels]);
 
+  useEffect(() => {
+    if (preferredServiceId) setSelectedId(preferredServiceId);
+  }, [preferredServiceId]);
+
   const refresh = async () => {
     if (!api) throw new Error("Launcher IPC is unavailable");
     const [serviceSnapshot, providerSnapshot, bootstrapSnapshot] = await Promise.all([
@@ -179,7 +186,7 @@ export function ExternalServicesSurface({
     setServices(serviceSnapshot);
     setProviders(providerSnapshot);
     setBootstrap(bootstrapSnapshot);
-    const current = serviceSnapshot.services.find((service) => service.id === selectedId)
+    const current = serviceSnapshot.services.find((service) => service.id === effectiveSelectedId)
       ?? serviceSnapshot.services[0];
     if (current) {
       setSelectedId(current.id);
@@ -199,7 +206,7 @@ export function ExternalServicesSurface({
       setServices(nextServices);
       setProviders(nextProviders);
       setBootstrap(nextBootstrap);
-      const current = nextServices.services.find((service) => service.id === selectedId)
+      const current = nextServices.services.find((service) => service.id === effectiveSelectedId)
         ?? nextServices.services[0];
       if (current) {
         setSelectedId(current.id);
@@ -208,7 +215,7 @@ export function ExternalServicesSurface({
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribeServices = api.onExternalServicesChanged((next) => {
       setServices(next);
-      const current = next.services.find((service) => service.id === selectedId);
+      const current = next.services.find((service) => service.id === effectiveSelectedId);
       if (current) setDraft(draftFrom(current));
     });
     const unsubscribeBootstrap = api.onManagedBootstrapChanged(setBootstrap);
@@ -219,7 +226,7 @@ export function ExternalServicesSurface({
       unsubscribeBootstrap();
       unsubscribeProviders();
     };
-  }, [api, selectedId, setError]);
+  }, [api, effectiveSelectedId, preferredServiceId, selectedId, setError]);
 
   useEffect(() => {
     if (selected) {
@@ -229,7 +236,7 @@ export function ExternalServicesSurface({
       setNotice("");
       setPlanText("");
     }
-  }, [selectedId]);
+  }, [effectiveSelectedId]);
 
   const run = async (name: string, action: () => Promise<unknown>) => {
     if (!api || busy) return;

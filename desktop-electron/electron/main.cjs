@@ -79,6 +79,7 @@ const { actUpstream } = require("./upstream-actions.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
+  validateManagedAppTab,
   validateSidebarState,
 } = require("./state.cjs");
 const {
@@ -1481,6 +1482,12 @@ function registerIpc({ logger, stateStore }) {
     return stateStore.update({ [key]: value === true });
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
+  handle("launcher:managed-app-tab", (event, tab) => {
+    assertFocusedMainWindow(event, true);
+    const state = stateStore.update({ managedAppTab: validateManagedAppTab(tab) });
+    send("launcher:state-changed", state);
+    return state;
+  });
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
   handle("launcher:export-logs", async () => {
     const date = new Date().toISOString().slice(0, 10);
