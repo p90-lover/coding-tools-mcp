@@ -3,7 +3,6 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
 const { createRequire } = require("node:module");
@@ -15,6 +14,7 @@ const {
   installWindowsNodeBinShims,
   materializeNpmWorkspaceLinks,
   npmSpawnInvocation,
+  patchPaseoCodexAppServerAgentSource,
   prepareRouterPythonWheels,
   prepareFiveStackRuntime,
   rewritePackageScriptsToAbsoluteNode,
@@ -22,13 +22,25 @@ const {
   withAbsoluteNodeCommand,
   withAbsoluteNpmCommand,
 } = require("../scripts/prepare-five-stack-runtime.cjs");
-const { prepare, environment, resolvePythonExecutable } = require("../electron/codex-router-managed.cjs");
+const { prepare, environment, resolvePythonExecutable, applyRouterLocalProxyPolicy } = require("../electron/codex-router-managed.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
 
+function writePinnedPaseoAgent(sourceRoot) {
+  const agent = path.join(sourceRoot, "packages", "server", "src", "server", "agent", "providers", "codex-app-server-agent.ts");
+  fs.mkdirSync(path.dirname(agent), { recursive: true });
+  fs.writeFileSync(agent, `  if (runtimeSettings?.env?.OPENAI_API_KEY?.trim()) {
+    providerConfig.env_key = "OPENAI_API_KEY";
+    providerConfig.requires_openai_auth = false;
+  }`);
+  return agent;
+}
+
 function temporaryDirectory(name) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
+  const scratchRoot = path.join(__dirname, "..", "..", "aiTemp");
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  return fs.mkdtempSync(path.join(scratchRoot, `${name}-`));
 }
 
 function writeJson(filePath, value) {
@@ -61,6 +73,27 @@ function bundledManifest(id, extra = {}) {
   };
 }
 
+test("Paseo 0.8.0 materialization accepts a host-private OpenAI key without embedding it", () => {
+  const pinnedSource = `  if (runtimeSettings?.env?.OPENAI_API_KEY?.trim()) {
+    providerConfig.env_key = "OPENAI_API_KEY";
+    providerConfig.requires_openai_auth = false;
+  }`;
+
+  const patched = patchPaseoCodexAppServerAgentSource(pinnedSource);
+
+  assert.equal(patched, `  if (
+    runtimeSettings?.env?.OPENAI_API_KEY?.trim() ||
+    process.env.OPENAI_API_KEY?.trim()
+  ) {
+    providerConfig.env_key = "OPENAI_API_KEY";
+    providerConfig.requires_openai_auth = false;
+  }`);
+  assert.throws(
+    () => patchPaseoCodexAppServerAgentSource(pinnedSource.replace("if (", "if  (")),
+    /FIVE_STACK_PASEO_PATCH_SOURCE_DRIFT/,
+  );
+});
+
 test("Desktop panels never tell the user to download or install a separate app", () => {
   const surface = read("src/features/ExternalServicesSurface.tsx");
   const original = read("src/features/OriginalUiSurface.tsx");
@@ -92,10 +125,12 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
   const digest = sha256(payload);
 
   for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
-    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id));
+    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
+      ? JSON.parse(read("vendor/managed-components/paseo.json")) : bundledManifest(id));
     const source = path.join(cacheRoot, id, "source");
     fs.mkdirSync(source, { recursive: true });
     fs.writeFileSync(path.join(source, `${id}.txt`), `${id} bundled\n`);
+    if (id === "paseo") writePinnedPaseoAgent(source);
   }
   writeJson(path.join(manifestRoot, "cpa.json"), bundledManifest("cpa", {
     strategy: "release-binary",
@@ -114,7 +149,7 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
   fs.writeFileSync(path.join(cacheRoot, "cpa", "cpa.bin"), payload);
 
   let fetched = 0;
-  const result = await prepareFiveStackRuntime({
+  const options = {
     repositoryRoot,
     desktopRoot: desktopDir,
     manifestRoot,
@@ -128,11 +163,30 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
       throw new Error("prepare-five-stack-runtime must not git clone when a cache is present");
     },
     now: () => "2026-09-18T12:00:00.000Z",
-    nonce: () => "fixture",
-  });
+    nonce: () => crypto.randomUUID(),
+  };
+  const result = await prepareFiveStackRuntime(options);
 
   assert.equal(fetched, 0);
   assert.equal(result.outputRoot, outputRoot);
+  const paseoBundle = JSON.parse(fs.readFileSync(path.join(outputRoot, "paseo", "BUNDLE.json"), "utf8"));
+  assert.equal(paseoBundle.version, "0.8.0");
+  assert.equal(paseoBundle.commit, "1e4ba65c6d75a6b061a1d54141f2f105b5908a96");
+  assert.equal(paseoBundle.patchRevision, "codex-cpa-host-env-v1");
+  assert.match(fs.readFileSync(path.join(outputRoot, "paseo", "source", "packages", "server", "src", "server", "agent", "providers", "codex-app-server-agent.ts"), "utf8"), /process\.env\.OPENAI_API_KEY/);
+
+  const paseoManifestPath = path.join(manifestRoot, "paseo.json");
+  const pinnedPaseo = JSON.parse(fs.readFileSync(paseoManifestPath, "utf8"));
+  writeJson(paseoManifestPath, { ...pinnedPaseo, commit: "b".repeat(40) });
+  await assert.rejects(() => prepareFiveStackRuntime(options), /FIVE_STACK_PASEO_PATCH_PIN_MISMATCH/);
+  writeJson(paseoManifestPath, pinnedPaseo);
+
+  const agent = path.join(cacheRoot, "paseo", "source", "packages", "server", "src", "server", "agent", "providers", "codex-app-server-agent.ts");
+  const missingSource = path.join(repositoryRoot, "Trash", "codex-app-server-agent.ts");
+  fs.mkdirSync(path.dirname(missingSource), { recursive: true });
+  fs.renameSync(agent, missingSource);
+  await assert.rejects(() => prepareFiveStackRuntime(options), /FIVE_STACK_PASEO_PATCH_SOURCE_DRIFT/);
+  fs.renameSync(missingSource, agent);
   assert.equal(fs.readFileSync(path.join(outputRoot, "commandcode-proxy", "source", "commandcode-proxy.txt"), "utf8"), "commandcode-proxy bundled\n");
   assert.deepEqual(fs.readFileSync(path.join(outputRoot, "cpa", "cpa.bin")), payload);
   assert.equal(
@@ -145,7 +199,7 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
   );
   const manifest = JSON.parse(fs.readFileSync(path.join(outputRoot, "MANIFEST.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 1);
-  assert.equal(manifest.productVersion, "0.7.0-rc.12");
+  assert.equal(manifest.productVersion, "0.7.0-rc.14");
   assert.deepEqual(manifest.components.map((component) => component.id), [
     "codex-router",
     "commandcode-proxy",
@@ -277,6 +331,43 @@ test("Codex Router offline Python survives component repair and feeds run plus w
   assert.equal(calls.some((call) => call.args.some((arg) => /install\.ps1|bin\/install/.test(arg))), false);
 });
 
+test("managed Router patches public egress and disables its separate tunnel", () => {
+  const home = temporaryDirectory("coding-tools-router-network-home");
+  const state = temporaryDirectory("coding-tools-router-network-state");
+  const source = path.join(home, "src");
+  fs.mkdirSync(source, { recursive: true });
+  fs.writeFileSync(path.join(source, "foreground-start.mjs"), 'await import("./start.mjs");\n');
+  fs.writeFileSync(path.join(source, "start.mjs"), 'const cursorTunnelSpec = cursorEdge ? cursorTunnelRunSpec() : undefined;\n');
+  fs.writeFileSync(path.join(source, "generic-providers.mjs"), [
+    'import { Agent, fetch as undiciFetch } from "undici";',
+    'function createDestinationDispatcher(endpoint, provider, timeoutMs) {',
+    '  const lookup = () => {};',
+    '  return new Agent({',
+    '    connect: { lookup },',
+    '  });',
+    '}',
+    'async function cleanup(dispatcher) {',
+    '  try {',
+    '    throw new Error();',
+    '  } catch (error) {',
+    '    await dispatcher?.close().catch(() => undefined);',
+    '  } finally {',
+    '    await dispatcher?.close().catch(() => undefined);',
+    '  }',
+    '}',
+    '',
+  ].join("\n"));
+  assert.equal(applyRouterLocalProxyPolicy(home, state), true);
+  assert.equal(applyRouterLocalProxyPolicy(home, state), false);
+  assert.match(fs.readFileSync(path.join(source, "start.mjs"), "utf8"), /CODING_TOOLS_LOCAL_ONLY/);
+  const generic = fs.readFileSync(path.join(source, "generic-providers.mjs"), "utf8");
+  assert.match(generic, /EnvHttpProxyAgent/);
+  assert.match(generic, /environmentHttpProxyConfigured/);
+  assert.match(generic, /typeof dispatcher\?\.close === "function"/);
+  assert.match(generic, /useProxy \? \{\} : \{ connect: \{ lookup \} \}/);
+  assert.equal(fs.readdirSync(path.join(state, "Trash", "router-network-policy")).length, 2);
+});
+
 test("Router offline preparation reports its Python prerequisite without installing globally", () => {
   const calls = [];
   assert.throws(() => resolvePythonExecutable({
@@ -341,8 +432,7 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.deepEqual(windows.args.slice(0, 3), ["/d", "/s", "/c"]);
   assert.equal(windows.args.length, 4);
   assert.match(String(windows.args[3]), /set "PATH=/);
-  assert.match(String(windows.args[3]), /call /);
-  assert.match(String(windows.args[3]).toLowerCase(), /npm\.cmd/);
+  assert.match(String(windows.args[3]), /(?:call .*npm\.cmd|node\.exe.*npm-cli\.js)/i);
   assert.match(String(windows.args[3]), /\bci\b/);
   assert.equal(windows.options.shell, false);
   assert.equal(windows.options.windowsVerbatimArguments, true);
@@ -373,6 +463,7 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
 
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
+    CODING_TOOLS_NODE_EXE: path.join(nodeDir, "node.exe"),
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
@@ -406,6 +497,7 @@ test("Windows five-stack npm prepare merges Path and PATH when bun splits them",
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     PATH: bunShimDir,
     Path: `${nodeDir};C:\\Windows\\system32`,
+    CODING_TOOLS_NODE_EXE: path.join(nodeDir, "node.exe"),
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
@@ -457,6 +549,7 @@ test("Windows five-stack npm prepare runs npm-cli.js through node.exe when prese
 
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
+    CODING_TOOLS_NODE_EXE: nodeExe,
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
@@ -611,10 +704,12 @@ test("prepare-five-stack-runtime installs router dependencies, builds Paseo web 
   });
 
   for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
-    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id));
+    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
+      ? JSON.parse(read("vendor/managed-components/paseo.json")) : bundledManifest(id));
     const sourceRoot = path.join(cacheRoot, id, "source");
     fs.mkdirSync(sourceRoot, { recursive: true });
     fs.writeFileSync(path.join(sourceRoot, `${id}.txt`), `${id} bundled\n`);
+    if (id === "paseo") writePinnedPaseoAgent(sourceRoot);
     if (id === "paseo") {
       writeJson(path.join(sourceRoot, "package.json"), { name: "paseo", private: true });
     }
@@ -729,6 +824,37 @@ test("prepare-five-stack-runtime installs router dependencies, builds Paseo web 
   }
 });
 
+test("Windows five-stack npm keeps nested Paseo commands below cmd's limit", () => {
+  const root = temporaryDirectory("coding-tools-short-npm-path");
+  const sourceRoot = path.join(root, "paseo");
+  const nodeDir = path.join(root, "nodejs");
+  const gitDir = path.join(root, "git");
+  const pythonDir = path.join(root, "python");
+  const systemDir = path.join(root, "system32");
+  for (const dir of [nodeDir, gitDir, pythonDir, systemDir]) fs.mkdirSync(dir, { recursive: true });
+  for (const [dir, name] of [
+    [nodeDir, "node.exe"], [nodeDir, "npm.cmd"], [gitDir, "git.exe"],
+    [pythonDir, "python.exe"], [systemDir, "cmd.exe"],
+  ]) fs.writeFileSync(path.join(dir, name), "");
+  for (const name of ["server", "client", "app", "protocol", "sdk", "desktop", "tools", "shared"]) {
+    fs.mkdirSync(path.join(sourceRoot, "packages", name), { recursive: true });
+  }
+  const unrelated = Array.from({ length: 20 }, (_, i) => path.join(root, "unrelated", `long-unused-path-${i}`));
+  const invocation = npmSpawnInvocation(["run", "build:server"], "win32", {
+    Path: [...unrelated, systemDir, gitDir, pythonDir, nodeDir].join(";"),
+    CODING_TOOLS_NODE_EXE: path.join(nodeDir, "node.exe"),
+    TEMP: root,
+    ComSpec: path.join(systemDir, "cmd.exe"),
+  }, sourceRoot);
+  const npmPath = invocation.options.env.PATH;
+  for (const dir of [nodeDir, gitDir, pythonDir, systemDir, path.join(sourceRoot, "node_modules", ".bin")]) {
+    assert.ok(npmPath.split(";").includes(dir), `missing ${dir}`);
+  }
+  assert.ok(!npmPath.includes("long-unused-path"));
+  assert.ok(!npmPath.includes(path.join(sourceRoot, "packages", "server", "node_modules", ".bin")));
+  assert.ok(invocation.args[3].length < 2500, `cmd.exe argument length ${invocation.args[3].length}`);
+});
+
 test("Paseo manifest enables the embedded web UI and isolates its home", () => {
   const manifest = JSON.parse(read("vendor/managed-components/paseo.json"));
   assert.deepEqual(manifest.health.acceptStatus, [200], "missing UI and authorization errors must not report the module ready");
@@ -740,7 +866,7 @@ test("Paseo manifest enables the embedded web UI and isolates its home", () => {
   });
 });
 
-test("Windows five-stack npm prepare rejects bun node.exe in favor of hostedtoolcache", () => {
+test("Windows five-stack npm prepare rejects bun node.exe in favor of a real Node", () => {
   const root = temporaryDirectory("coding-tools-windows-toolcache-node");
   const bunShimDir = path.join(root, "bun");
   const toolcache = path.join(root, "hostedtoolcache");
@@ -753,15 +879,14 @@ test("Windows five-stack npm prepare rejects bun node.exe in favor of hostedtool
   fs.writeFileSync(path.join(nodeDir, "node.exe"), "");
   fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo real-npm\r\n");
 
-  assert.equal(
-    resolveNodeExecutable({
+  const resolved = resolveNodeExecutable({
       PATH: bunShimDir,
       CODING_TOOLS_NODE_EXE: bunNode,
       npm_node_execpath: bunNode,
       RUNNER_TOOL_CACHE: toolcache,
-    }, "win32"),
-    path.join(nodeDir, "node.exe"),
-  );
+    }, "win32");
+  assert.notEqual(resolved, bunNode);
+  assert.ok([process.execPath, path.join(nodeDir, "node.exe")].includes(resolved), resolved);
 });
 
 test("five-stack prepare replaces npm workspace links with real copies before publish", () => {
@@ -808,12 +933,14 @@ test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal",
   const digest = sha256(payload);
 
   for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
-    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id, id === "anneal"
+    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
+      ? JSON.parse(read("vendor/managed-components/paseo.json")) : bundledManifest(id, id === "anneal"
       ? { platformModes: { win32: "wsl2", linux: "native", darwin: "native" } }
       : {}));
     const sourceRoot = path.join(cacheRoot, id, "source");
     fs.mkdirSync(sourceRoot, { recursive: true });
     fs.writeFileSync(path.join(sourceRoot, `${id}.txt`), `${id} bundled\n`);
+    if (id === "paseo") writePinnedPaseoAgent(sourceRoot);
     if (id === "paseo" || id === "anneal") {
       writeJson(path.join(sourceRoot, "package.json"), { name: id, private: true });
     }

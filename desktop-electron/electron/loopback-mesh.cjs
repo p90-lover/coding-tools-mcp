@@ -159,7 +159,7 @@ function loopbackMeshEnvironment(mesh, {
     CODING_TOOLS_ANNEAL_EXECUTION_URL: anneal?.executionUrl || "",
     ...(meshPath ? { CODING_TOOLS_LOOPBACK_MESH: meshPath } : {}),
   };
-  if ((targetId === "paseo" || targetId === "anneal") && commandcode?.openaiBaseUrl) {
+  if (targetId === "anneal" && commandcode?.openaiBaseUrl) {
     env.OPENAI_BASE_URL = commandcode.openaiBaseUrl;
     env.ANTHROPIC_BASE_URL = commandcode.anthropicBaseUrl || commandcode.openaiBaseUrl;
     if (typeof commandCodeApiKey === "string" && commandCodeApiKey) {

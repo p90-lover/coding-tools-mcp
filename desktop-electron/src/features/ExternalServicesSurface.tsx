@@ -142,7 +142,7 @@ export function ExternalServicesSurface({
   const api = window.codexWebLauncher;
   const [services, setServices] = useState<ExternalServicesSnapshot>(EMPTY_SERVICES);
   const [providers, setProviders] = useState<ProviderNetworkSnapshot>(EMPTY_PROVIDERS);
-  const [selectedId, setSelectedId] = useState<ExternalServiceId>("codex-router");
+  const [selectedId, setSelectedId] = useState<ExternalServiceId>("cpa");
   const [draft, setDraft] = useState<ServiceDraft | null>(null);
   const [callerKey, setCallerKey] = useState("");
   const [managedCredential, setManagedCredential] = useState("");
@@ -158,7 +158,7 @@ export function ExternalServicesSurface({
   const commandCodeAccounts = activeAccounts.filter((account) => account.providerId === "commandcode-proxy");
   const commandCodeModels = new Set(commandCodeAccounts.flatMap((account) => account.models)).size;
 
-  const serviceRows = useMemo(() => services.services.map((service) => (
+  const serviceRows = useMemo(() => services.services.filter((service) => service.id !== "codex-router").map((service) => (
     service.id === "commandcode-proxy"
       ? {
           ...service,

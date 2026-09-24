@@ -72,6 +72,9 @@ test("provider API and OAuth secrets stay vault-only while control-plane auth st
   assert.ok(handler, "execution provider handler is missing");
   assert.match(handler[1], /createProviderExecutionPlan/);
   assert.match(handler[1], /providerNetworkReady/);
+  assert.match(handler[1], /allowFallback:\s*false/);
+  assert.match(handler[1], /executionSettingsPayload\(settings, selectedPlan\)/);
+  assert.match(handler[1], /Select an exact provider account/);
   assert.doesNotMatch(handler[1], /accountSecret/);
   assert.doesNotMatch(handler[1], /storedProviderCredential/);
   assert.match(handler[1], /controlCredential/);

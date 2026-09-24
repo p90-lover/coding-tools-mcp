@@ -37,6 +37,10 @@ pub struct Spec {
     pub cwd: String,
     pub provider: String,
     pub model: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub route_id: Option<String>,
     pub mode: String,
     pub project_id: Option<String>,
     pub repo_id: Option<String>,
@@ -73,7 +77,13 @@ impl Spec {
         for s in [&self.mission_id, &self.workspace_id, &self.task_id] {
             identifier(s)?;
         }
-        for s in [&self.project_id, &self.repo_id, &self.assignee_id]
+        for s in [
+            &self.account_id,
+            &self.route_id,
+            &self.project_id,
+            &self.repo_id,
+            &self.assignee_id,
+        ]
             .into_iter()
             .flatten()
         {
@@ -87,6 +97,16 @@ impl Spec {
         bounded(&self.brief, 32768, true)?;
         for s in [&self.provider, &self.model, &self.mode] {
             bounded(s, 128, true)?;
+        }
+        if self.engine == Engine::Paseo
+            && matches!(
+                (self.provider.as_str(), self.model.as_str()),
+                ("chatgpt-web", "chatgpt-web/high")
+                    | ("cliproxyapi-antigravity", "gemini-3.8-flash-high")
+            )
+            && !matches!(self.mode.as_str(), "auto" | "auto-review" | "full-access")
+        {
+            return Err("Coding Tools Paseo mode must be auto, auto-review or full-access".into());
         }
         if !(1..=1440).contains(&self.max_duration_min) {
             return Err("Duration must be 1..1440 minutes".into());
@@ -499,5 +519,53 @@ impl Mission {
         };
         self.revision = next;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(provider: &str, model: &str, mode: &str) -> Spec {
+        Spec {
+            engine: Engine::Paseo,
+            mission_id: "mission".into(),
+            workspace_id: "qa".into(),
+            task_id: "task".into(),
+            cwd: "C:/qa".into(),
+            provider: provider.into(),
+            model: model.into(),
+            account_id: None,
+            route_id: None,
+            mode: mode.into(),
+            project_id: None,
+            repo_id: None,
+            assignee_id: None,
+            title: "Smoke".into(),
+            brief: "No tools".into(),
+            max_duration_min: 10,
+        }
+    }
+
+    #[test]
+    fn coding_tools_paseo_mode_requires_explicit_supported_choice() {
+        for (provider, model) in [
+            ("chatgpt-web", "chatgpt-web/high"),
+            ("cliproxyapi-antigravity", "gemini-3.8-flash-high"),
+        ] {
+            assert!(spec(provider, model, "default").validate().is_err());
+            assert!(spec(provider, model, "invented").validate().is_err());
+            for mode in ["auto", "auto-review", "full-access"] {
+                assert!(spec(provider, model, mode).validate().is_ok());
+            }
+        }
+        assert!(spec("codex", "gpt-5.4", "default").validate().is_ok());
+
+        let mut anneal = spec("chatgpt-web", "chatgpt-web/high", "default");
+        anneal.engine = Engine::Anneal;
+        anneal.project_id = Some("project".into());
+        anneal.repo_id = Some("repo".into());
+        anneal.assignee_id = Some("agent".into());
+        assert!(anneal.validate().is_ok());
     }
 }

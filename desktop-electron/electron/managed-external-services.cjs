@@ -9,6 +9,15 @@ const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
 const { createProviderNetworkStore, proxyUrl } = require("./provider-network.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
+const MANAGED_PROXY_COMPONENTS = new Set(["cpa", "paseo", "codex-router", "anneal"]);
+const LOCAL_PROXY_BYPASS = [
+  "localhost", "*.localhost", "127.0.0.1", "::1",
+  "10.0.0.0/8", "10.0.0.0-10.255.255.255",
+  "172.16.0.0/12", "172.16.0.0-172.31.255.255",
+  "192.168.0.0/16", "192.168.0.0-192.168.255.255",
+  "169.254.0.0/16", "169.254.0.0-169.254.255.255",
+].join(",");
+
 const SERVICE_ENDPOINTS = Object.freeze({
   "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
   "commandcode-proxy": Object.freeze({ endpoint: "http://127.0.0.1:9090/" }),
@@ -57,6 +66,39 @@ function resolveCpaProxyRoute(dataRoot, safeStorage) {
   return { profileId: profile.id, url };
 }
 
+function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage) {
+  if (!MANAGED_PROXY_COMPONENTS.has(componentId)) return {};
+  const route = resolveCpaProxyRoute(dataRoot, safeStorage);
+  if (!route.url) throw new Error(`Select a global network proxy before starting ${componentId}`);
+  const protocol = new URL(route.url).protocol;
+  if (componentId !== "cpa" && protocol !== "http:" && protocol !== "https:") {
+    throw new Error(`${componentId} needs an HTTP or HTTPS global proxy`);
+  }
+  const standardProxy = componentId === "cpa" && protocol === "socks5:" ? "" : route.url;
+  const environment = {
+    HTTP_PROXY: standardProxy, HTTPS_PROXY: standardProxy, ALL_PROXY: standardProxy,
+    http_proxy: standardProxy, https_proxy: standardProxy, all_proxy: standardProxy,
+    NO_PROXY: LOCAL_PROXY_BYPASS, no_proxy: LOCAL_PROXY_BYPASS,
+    NODE_USE_ENV_PROXY: "1",
+  };
+  if (componentId === "cpa") environment.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL = route.url;
+  if (componentId === "paseo") {
+    environment.PASEO_RELAY_ENABLED = "false";
+    environment.PASEO_SERVICE_PROXY_ENABLED = "false";
+  }
+  if (componentId === "codex-router") {
+    environment.CODEX_ROUTER_HOST = "127.0.0.1";
+    environment.KIMI_ROUTER_HOST = "127.0.0.1";
+    environment.CODING_TOOLS_LOCAL_ONLY = "1";
+  }
+  if (componentId === "anneal") {
+    environment.RUNNER_HTTP_PROXY = route.url;
+    environment.RUNNER_HTTPS_PROXY = route.url;
+    environment.RUNNER_NO_PROXY = LOCAL_PROXY_BYPASS;
+  }
+  return environment;
+}
+
 function createManagedExternalServicesController({
   dataRoot,
   manifestRoot = path.join(__dirname, "..", "vendor", "managed-components"),
@@ -102,13 +144,7 @@ function createManagedExternalServicesController({
     resolveRuntimeExecutable,
     resolveCrossUseEnvironment: (componentId, context) => {
       const extra = peerEnvironmentFor(componentId, crossUseSecrets());
-      if (componentId === "cpa") {
-        const route = resolveCpaProxyRoute(dataRoot, options.safeStorage);
-        extra.HTTP_PROXY = "";
-        extra.HTTPS_PROXY = "";
-        extra.ALL_PROXY = "";
-        if (route.url) extra.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL = route.url;
-      }
+      Object.assign(extra, resolveManagedProxyEnvironment(componentId, dataRoot, options.safeStorage));
       if (componentId === "codex-router" && context?.state) {
         extra.CODING_TOOLS_INAPP_PROVIDERS_FILE = path.join(context.state, "router", "in-app-providers.json");
       }
@@ -210,8 +246,7 @@ function createManagedExternalServicesController({
     if (managed.installState === "installed") {
       try { configuration = managedConfiguration(service.id); }
       catch (error) {
-        if (service.id !== "cpa") throw error;
-        proxyError = error instanceof Error ? error.message : "CPA proxy settings unavailable";
+        proxyError = error instanceof Error ? error.message : "Managed proxy settings unavailable";
       }
     }
     return {
@@ -543,4 +578,5 @@ function createManagedExternalServicesController({
 module.exports = {
   createManagedExternalServicesController,
   resolveCpaProxyRoute,
+  resolveManagedProxyEnvironment,
 };

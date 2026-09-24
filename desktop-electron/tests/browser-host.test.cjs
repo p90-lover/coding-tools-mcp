@@ -24,6 +24,7 @@ const {
   navigationErrorForLog,
   navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
+const { BrowserHost: StandaloneBrowserHost } = require("../../runtime-web/launcher/electron/browser-host.cjs");
 
 test("manual prompt handoff keeps ordinary turns at thirty seconds and compaction at two minutes", () => {
   assert.equal(MANUAL_SUBMIT_TIMEOUT_MS, 30_000);
@@ -2378,6 +2379,41 @@ test("user browser tab visibility never hides a running Codex turn", () => {
     ["user-bounds", host.bounds],
     ["user-visible", true],
   ]);
+});
+
+test("a later browser load restores descriptor and readiness in both launcher builds", async () => {
+  for (const Host of [BrowserHost, StandaloneBrowserHost]) {
+    const events = [];
+    const contents = new EventEmitter();
+    contents.setWindowOpenHandler = () => {};
+    contents.getURL = () => IDLE_BROWSER_URL;
+    const host = Object.assign(Object.create(Host.prototype), {
+      view: { webContents: contents },
+      manualOperation: null,
+      interactionModeOverride: null,
+      getBrowserInteractionMode: () => "automatic",
+      clearHomeNavigationTimeout() {},
+      setState() {},
+      applyViewportCss: async () => {},
+      markOwnedSurface: async () => { events.push("owned"); },
+      writeDescriptor: () => { events.push("descriptor"); },
+      probeAuthentication: async () => { events.push("probe"); },
+      logger: { info() {}, error() {}, warn() {} },
+    });
+    const failed = Promise.reject(new Error("idle timeout"));
+    failed.catch(() => {});
+    host.initializationReady = failed;
+    host.initializationFailed = true;
+    await assert.rejects(host.ready(), /idle timeout/);
+
+    Host.prototype.bindWebContents.call(host);
+    contents.emit("did-finish-load");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(events, ["owned", "descriptor", "probe"]);
+    await host.ready();
+    assert.equal(host.initializationFailed, false);
+  }
 });
 
 test("closing a user browser tab preserves a running Codex turn", async () => {

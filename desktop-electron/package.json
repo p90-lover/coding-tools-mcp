@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.7.0-rc.12",
+  "version": "0.7.0-rc.14",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -54,6 +54,7 @@
       "electron/codex-router-managed.cjs",
       "electron/codex-router-original-ui.cjs",
       "electron/cpa-managed.cjs",
+      "vendor/bundled/cpa-plugins/**",
       "electron/cpa-codex-long-run.cjs",
       "electron/atomic-file.cjs"
     ],

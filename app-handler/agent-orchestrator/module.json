@@ -1,0 +1,14 @@
+{
+  "id": "agent-orchestrator",
+  "name": "Agent Orchestrator",
+  "kind": "source-integrated",
+  "transport": "in-process",
+  "source": {
+    "strategy": "adapted-source",
+    "repository": "Untrivial-ai/agent-orchestrator",
+    "commit": "213dae6e09abf3464e5e3e01eb8f7a85aeba1a2e",
+    "license": "Apache-2.0",
+    "path": "app-handler/agent-orchestrator"
+  },
+  "note": "Uses the existing Coding Tools plan board and managed CPA model route. No AO executable is bundled or launched."
+}

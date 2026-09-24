@@ -10,6 +10,7 @@ const {
   dialog,
   ipcMain,
   Menu,
+  net: electronNet,
   nativeImage,
   nativeTheme,
   screen,
@@ -17,11 +18,12 @@ const {
   session,
   shell,
   Tray,
+  webFrameMain,
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
-const { BrowserControlServer } = require("./control-server.cjs");
+const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
@@ -44,11 +46,15 @@ const {
   setProviderCpaConnection,
 } = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
+const { executionSettingsPayload } = require("./execution-settings.cjs");
 const { createFiveStackControlPlane } = require("./five-stack-control-plane.cjs");
+const { createOrchestrationHeadlessBridge } = require("./orchestration-headless.cjs");
+const { FIVE_STACK_ENDPOINTS } = require("./five-stack-cross-use.cjs");
 const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
+const { installCpaPanelSession } = require("./cpa-panel-session.cjs");
 const { requireAppHandler } = require("./app-handler-paths.cjs");
 function loadCreateCodingToolsAppsHost() {
   try {
@@ -62,6 +68,7 @@ function loadCreateCodingToolsAppsHost() {
 }
 const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost();
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
+const { createAgentOrchestratorWorkflow } = require("./agent-orchestrator-workflow.cjs");
 const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {
   KEEP_UI_RESPONSIVE_SKIP_REASON,
@@ -77,7 +84,7 @@ const {
   commandCodeProxyRegistrationPlan,
   renderCommandCodeProxyPlan,
 } = require("./commandcode-proxy-plan.cjs");
-const { actUpstream } = require("./upstream-actions.cjs");
+const { actUpstream, registerFixedPaseoProviders } = require("./upstream-actions.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -135,6 +142,8 @@ let tray = null;
 let quitting = false;
 let shutdownInProgress = false;
 let exitCommitted = false;
+let codexBridgeConnectInFlight = null;
+let runtimeStartupInFlight = null;
 let smokePassedThisSession = false;
 let cdpPort = 0;
 let lastOperation = null;
@@ -298,6 +307,74 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
     logger.error("bridge.route_restore_after_runtime_failure_failed", { message });
     return { restored: false, error: message };
   }
+}
+
+async function waitForRuntimeHostIdle(timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (runtimeHost?.currentOperation()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Codex bridge connect waited for ${runtimeHost.currentOperation()}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged = false }) {
+  const config = runtimeSupervisor.readConfig();
+  const current = stateStore.read();
+  const patch = {
+    coreSetupComplete: true,
+    mcpRuntimeInstalled: config.mode === "full",
+    experimentalBiggerContext: config.experimentalBiggerContext === true,
+    zeroRiskProEnabled: config.zeroRiskProEnabled === true,
+    ...(bridgeRouteChanged ? {
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+    } : {}),
+    ...(config.mode === "browser-only" ? {
+      mcpSetupComplete: false,
+      mcpGuideStep: 0,
+    } : {}),
+  };
+  if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
+    const state = stateStore.update(patch);
+    send("launcher:state-changed", state);
+  }
+  startCatalogVerificationMonitor({ logger, stateStore });
+}
+
+async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reason = "auth" }) {
+  if (quitting || shutdownInProgress) return { skipped: true, reason: "shutting-down" };
+  if (IS_DEV_PROFILE || !runtimeHost || !runtimeSupervisor) return { skipped: true, reason: "unavailable" };
+  if (stateStore.read().browserInteractionMode === "automatic"
+    && browserHost?.snapshot()?.authenticated !== true) {
+    return { skipped: true, reason: "unauthenticated" };
+  }
+  if (!runtimeHost.runtimeConfigSnapshot().configured) return { skipped: true, reason: "not-configured" };
+  if (codexBridgeConnectInFlight) return codexBridgeConnectInFlight;
+  const work = (async () => {
+    await waitForRuntimeHostIdle();
+    const runtime = await runtimeSupervisor.startIfConfigured();
+    if (runtime.status !== "ready") return { skipped: true, reason: runtime.status, runtime };
+    const route = await runtimeHost.connectBridgeRoute();
+    applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
+    logger.info("bridge.auto_connected", { reason, changed: route.changed === true });
+    return { connected: true, changed: route.changed === true, runtime };
+  })();
+  codexBridgeConnectInFlight = work;
+  try {
+    return await work;
+  } finally {
+    if (codexBridgeConnectInFlight === work) codexBridgeConnectInFlight = null;
+  }
+}
+
+function scheduleCodexBridgeAutoConnect({ logger, stateStore, reason }) {
+  void connectCodexBridgeAfterAuthentication({ logger, stateStore, reason }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn("bridge.auto_connect_failed", { reason, message });
+    publishOperation({ name: "bridge-connect", status: "failed", message });
+  });
 }
 
 function trayImage() {
@@ -550,6 +627,12 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     },
   });
   window.setMenuBarVisibility(false);
+  installCpaPanelSession({
+    webContents: window.webContents,
+    webFrameMain,
+    getConnection: () => externalServicesController?.cpaConnection(),
+    logger,
+  });
   const guardRendererNavigation = (event, url) => {
     if (rendererNavigationAllowed(url)) return;
     event.preventDefault();
@@ -683,24 +766,6 @@ function assertFocusedMainWindow(event, write = false) {
   }
 }
 
-function executionSettingsPayload(settings) {
-  if (!settings) return null;
-  return {
-    id: settings.id ?? null,
-    engine: settings.engine,
-    endpoint: settings.endpoint,
-    provider: settings.provider,
-    model: settings.model,
-    mode: settings.mode,
-    project_id: settings.projectId ?? null,
-    repo_id: settings.repoId ?? null,
-    assignee_id: settings.assigneeId ?? null,
-    max_duration_min: settings.maxDurationMin,
-    allow_codex: settings.allowCodex,
-    confirm_external_execution: settings.confirmExternalExecution,
-  };
-}
-
 function launcherSnapshotPayload(stateStore, logger) {
   return {
     profile: LAUNCHER_PROFILE.kind,
@@ -784,8 +849,33 @@ function registerIpc({ logger, stateStore }) {
     getHeadlessHost: () => headlessHost,
     getUpdateController: () => updateController,
   });
+  const orchestration = createOrchestrationHeadlessBridge({
+    request: (route, body) => {
+      if (!headlessHost) throw new Error("Local execution service is unavailable");
+      return headlessHost.request(route, body);
+    },
+    registerPaseoProviders: async () => {
+      const paseo = externalServicesController?.snapshot()?.services?.find((service) => service.id === "paseo");
+      if (paseo?.status !== "ready") throw new Error("Managed Paseo is not ready");
+      return registerFixedPaseoProviders(paseo.executionEndpoint || FIVE_STACK_ENDPOINTS.paseo.ws, "");
+    },
+  });
   const fiveStackControlPlane = createLazyFactory(() => createFiveStackControlPlane({
+    ...orchestration,
     planProvider: createProviderExecutionPlan,
+    getWebBridgeStatus: async () => {
+      if (!runtimeHost || browserHost?.snapshot()?.authenticated !== true) return false;
+      try {
+        const route = await runtimeHost.bridgeStatus("paseo-web-route-check");
+        if (!route.installed || !route.active) return false;
+        const health = await fetch(`${FIVE_STACK_ENDPOINTS.web.origin}/healthz`, {
+          signal: AbortSignal.timeout(3_000),
+        });
+        return health.ok;
+      } catch {
+        return false;
+      }
+    },
     getProviderSnapshot: async () => {
       const providerNetwork = await providerNetworkReady();
       return providerNetwork.store.snapshot();
@@ -838,11 +928,236 @@ function registerIpc({ logger, stateStore }) {
   getFiveStack = () => fiveStackControlPlane.tryGet();
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
+  handle("coding-tools:workspaces:auth-update", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    const workspace = Array.isArray(catalog.workspaces)
+      ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+      : null;
+    if (!workspace) throw new Error("Workspace was not found");
+    const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+    const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Coding Tools",
+      message: "Save workspace authentication settings?",
+      detail: `${name}\n${location}\n${input.service}: ${input.authType}\nA running listener must be restarted to apply this change.`,
+      buttons: ["Cancel", "Save settings"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    return headlessHost.request("/api/v1/workspaces/auth", {
+      workspace_id: input.workspaceId,
+      service: input.service,
+      auth_type: input.authType,
+      oauth_client_id: input.oauthClientId,
+      oauth_redirect_uris: input.oauthRedirectUris,
+      oauth_scopes: input.oauthScopes,
+      use_shared_secrets: input.useSharedSecrets,
+      confirm: true,
+    });
+  });
+  handle("coding-tools:workspaces:policy-update", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    const workspace = Array.isArray(catalog.workspaces)
+      ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+      : null;
+    if (!workspace) throw new Error("Workspace was not found");
+    const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+    const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Coding Tools",
+      message: "Save workspace MCP permissions?",
+      detail: `${name}\n${location}\n${input.permissionMode}, ${input.approvalMode}, ${input.toolProfile}\nScreen capture: ${input.screenCaptureEnabled ? "enabled" : "disabled"}\nRestart the MCP listener to apply this change.`,
+      buttons: ["Cancel", "Save permissions"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    return headlessHost.request("/api/v1/workspaces/policy", {
+      workspace_id: input.workspaceId,
+      permission_mode: input.permissionMode,
+      approval_mode: input.approvalMode,
+      tool_profile: input.toolProfile,
+      screen_capture_enabled: input.screenCaptureEnabled,
+      confirm: true,
+    });
+  });
+  handle("coding-tools:workspaces:service", async (event, input) => {
+    const changing = input.operation !== "status";
+    assertFocusedMainWindow(event, changing);
+    if (changing) {
+      const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+      const workspace = Array.isArray(catalog.workspaces)
+        ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+        : null;
+      if (!workspace) throw new Error("Workspace was not found");
+      const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+      const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+      const action = String(input.operation).replace(/[\r\n]/g, " ");
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "Coding Tools",
+        message: `${action} the ${input.service} listener?`,
+        detail: `${name}\n${location}\nThis changes the local listener only; the tunnel configuration stays as saved.`,
+        buttons: ["Cancel", "Continue"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      if (response !== 1) return { ok: false, cancelled: true };
+    }
+    return headlessHost.request("/api/v1/workspaces/service", {
+      workspace_id: input.workspaceId,
+      service: input.service,
+      operation: input.operation,
+      confirm: changing,
+    });
+  });
+  handle("coding-tools:workspaces:copy-secret", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    const workspace = Array.isArray(catalog.workspaces)
+      ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+      : null;
+    if (!workspace) throw new Error("Workspace was not found");
+    const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+    const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Coding Tools",
+      message: "Copy this workspace credential?",
+      detail: `${name}\n${location}\n${input.key}\nIf it is missing, Coding Tools will generate it locally.`,
+      buttons: ["Cancel", "Copy credential"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    const credential = await headlessHost.request("/api/v1/workspaces/secret", {
+      workspace_id: input.workspaceId,
+      key: input.key,
+      confirm: true,
+    });
+    if (credential.ok !== true || typeof credential.value !== "string" || !credential.value) {
+      throw new Error("Workspace credential is unavailable");
+    }
+    clipboard.writeText(credential.value);
+    return { ok: true, copied: true, key: input.key };
+  });
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
   handle("coding-tools:computer:status", (event) => codingTools.computerStatus(event));
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
-  handle("coding-tools:native-codex:status", (event) => codingTools.nativeCodexStatus(event));
+  let nativeApprovalPromptInFlight = false;
+  handle("coding-tools:native-codex:status", async (event, input) => {
+    const snapshot = await codingTools.nativeCodexStatus(event, input);
+    if (!input.workspaceId || !mainWindow?.isFocused() || nativeApprovalPromptInFlight
+      || !Array.isArray(snapshot.pending_approvals)) return snapshot;
+    const pending = snapshot.pending_approvals.find((item) => item
+      && typeof item.approval_id === "string" && typeof item.path === "string");
+    if (!pending) return snapshot;
+    nativeApprovalPromptInFlight = true;
+    try {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "Coding Tools",
+        message: "Allow native Codex to edit this outside file for the current turn?",
+        detail: [
+          pending.path,
+          String(pending.reason || "").replace(/[\r\n]/g, " ").slice(0, 500),
+          "The grant covers this exact existing file for this turn only.",
+        ].join("\n"),
+        buttons: ["Deny", "Allow this file once"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      await headlessHost.request("/api/v1/native-codex/approval", {
+        workspace_id: input.workspaceId,
+        approval_id: pending.approval_id,
+        allow: response === 1,
+      }, { localConfirmation: true });
+      return codingTools.nativeCodexStatus(event, input);
+    } finally {
+      nativeApprovalPromptInFlight = false;
+    }
+  });
+  handle("coding-tools:native-codex:connect", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!path.isAbsolute(input.executable) || !path.isAbsolute(input.codexHome)) {
+      throw new Error("Select absolute native Codex executable and home paths");
+    }
+    const executable = await fs.promises.realpath(input.executable);
+    const metadata = await fs.promises.stat(executable);
+    if (!metadata.isFile() || metadata.size > 512 * 1024 * 1024 || !executable.toLowerCase().endsWith(".exe")) {
+      throw new Error("Select a native codex.exe within the 512 MiB inspection limit");
+    }
+    const hash = require("node:crypto").createHash("sha256");
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(executable);
+      stream.on("data", (chunk) => hash.update(chunk));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    const digest = hash.digest("hex");
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    const workspace = Array.isArray(catalog.workspaces)
+      ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+      : null;
+    if (!workspace) throw new Error("Workspace was not found");
+    const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+    const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+    const home = String(input.codexHome).replace(/[\r\n]/g, " ");
+    const model = String(input.model).replace(/[\r\n]/g, " ");
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Coding Tools",
+      message: "Connect this native Codex App Server?",
+      detail: [
+        name, location, "Executable: " + executable, "SHA-256: " + digest,
+        "Dedicated home: " + home, "Model: " + model,
+        "Permission profile: " + input.permissionProfile,
+        "Model use: " + (input.allowModelUsage ? "allowed" : "off")
+          + "; standalone commands: " + (input.allowCommandExecution ? "allowed" : "off"),
+        "Limit: " + (input.requestLimit || "unbounded") + " requests; duration: "
+          + (input.lifetimeSeconds || "until stopped") + " seconds.",
+        "All authenticated clients of this workspace MCP listener share this grant.",
+        "An exact existing outside-file write can be approved in the Native Codex panel for the current turn. Other extra requests are declined; no unsandboxed fallback is used.",
+      ].join("\n"),
+      buttons: ["Cancel", "Connect"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    return headlessHost.request("/api/v1/native-codex/connect", {
+      workspace_id: input.workspaceId,
+      connection: {
+        executable,
+        expected_sha256: digest,
+        codex_home: input.codexHome,
+        allow_model_usage: input.allowModelUsage,
+        allow_command_execution: input.allowCommandExecution,
+        permission_profile: input.permissionProfile,
+        model: input.model,
+        request_limit: input.requestLimit,
+        lifetime_seconds: input.lifetimeSeconds,
+      },
+      confirm: true,
+    }, { localConfirmation: true });
+  });
+  handle("coding-tools:native-codex:disconnect", async (event, input) => {
+    assertFocusedMainWindow(event, false);
+    return headlessHost.request("/api/v1/native-codex/disconnect", {
+      workspace_id: input.workspaceId,
+    });
+  });
   handle("coding-tools:integrations:snapshot", async (event) => {
     const snapshot = await codingTools.integrationsSnapshot(event);
     const plane = fiveStackControlPlane.tryGet();
@@ -898,6 +1213,7 @@ function registerIpc({ logger, stateStore }) {
     if (!headlessHost) throw new Error("Local execution service is unavailable");
 
     let settings = input.settings;
+    let selectedPlan = null;
     const controlCredential = typeof input.controlCredential === "string"
       ? input.controlCredential.trim()
       : "";
@@ -905,14 +1221,18 @@ function registerIpc({ logger, stateStore }) {
       && settings
       && (settings.engine === "paseo" || settings.engine === "anneal");
     if (plannedWorkload) {
+      if (!input.providerAccountId?.trim()) {
+        throw new Error("Select an exact provider account before execution");
+      }
       const providerNetwork = await providerNetworkReady();
       const plan = createProviderExecutionPlan(providerNetwork.store.snapshot(), {
         workload: settings.engine,
         providerId: settings.provider,
         accountId: input.providerAccountId ?? undefined,
         model: settings.model,
-        allowFallback: input.allowProviderFallback !== false,
+        allowFallback: false,
       });
+      selectedPlan = plan;
       settings = {
         ...settings,
         provider: plan.provider.id,
@@ -935,7 +1255,7 @@ function registerIpc({ logger, stateStore }) {
       operation: input.operation,
       expected_revision: input.expectedRevision ?? null,
       binding_id: input.bindingId ?? null,
-      settings: executionSettingsPayload(settings),
+      settings: executionSettingsPayload(settings, selectedPlan),
       credential: controlCredential,
       confirm: input.confirm === true,
     });
@@ -1229,6 +1549,17 @@ function registerIpc({ logger, stateStore }) {
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-login" });
+    }
+    return browser;
+  });
+  handle("launcher:browser-refresh-auth", async () => {
+    if (stateStore.read().browserInteractionMode === "manual") return browserHost.snapshot();
+    const browser = await browserHost.refreshAuthentication();
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-refresh-auth" });
     }
     return browser;
   });
@@ -1237,6 +1568,7 @@ function registerIpc({ logger, stateStore }) {
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-passkey-login" });
     }
     return browser;
   });
@@ -1652,9 +1984,35 @@ async function requestQuit() {
   }
   shutdownInProgress = true;
   try {
-    const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
-    if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+    const browserOperation = browserHost?.currentOperation();
+    if (browserOperation) {
+      throw new Error(`Wait for ${browserOperation} to finish before quitting Codex Web GPT`);
+    }
+    quitting = true;
+    await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
+    const runtimeOperation = runtimeHost?.currentOperation();
+    if (runtimeOperation) {
+      throw new Error(`Wait for ${runtimeOperation} to finish before quitting Codex Web GPT`);
+    }
+    try {
+      await runtimeHost?.restoreBridgeRoute();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const decision = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        buttons: ["Cancel", "Quit anyway"],
+        defaultId: 0,
+        cancelId: 0,
+        title: "Codex route could not be restored",
+        message: "Coding Tools could not restore the previous Codex model route.",
+        detail: `${message}\n\nQuitting anyway may leave Codex pointed at an unavailable local bridge.`,
+      });
+      if (decision.response !== 1) throw error;
+      publishOperation({
+        name: "launcher-quit",
+        status: "warning",
+        message: `Quitting after route restoration failed: ${message}`,
+      });
     }
     managedBootstrapController?.dispose();
     originalUiController?.dispose();
@@ -1664,7 +2022,6 @@ async function requestQuit() {
     await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
-    quitting = true;
     await browserHost?.persistSession();
     browserHost?.destroy();
     await browserControl?.close();
@@ -1809,10 +2166,34 @@ async function start() {
     },
   });
   const providerServices = createAppsProviderServices({ providerNetworkReady });
+  const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
+    requestHeadless: (endpoint, body) => {
+      if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
+      return headlessHost.request(endpoint, body);
+    },
+    cpaConnection: () => externalServicesController.cpaConnection(),
+    confirm: async ({ message, detail }) => {
+      if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+        throw new Error("Use the focused Coding Tools window to approve workflow changes");
+      }
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "Coding Tools · Agent Orchestrator",
+        message: String(message).slice(0, 200),
+        detail: String(detail).slice(0, 1200),
+        buttons: ["Cancel", "Continue"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      return answer.response === 1;
+    },
+  });
   try {
     appsHost = createCodingToolsAppsHost({
     services: {
       inspect: (id) => externalServicesController.inspect(id),
+      agentOrchestrator: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       start: (id) => externalServicesController.start(id),
       stop: (id) => externalServicesController.stop(id),
       restart: (id) => externalServicesController.restart(id),
@@ -1877,13 +2258,50 @@ async function start() {
   await ensureRendererLoaded(mainWindow, logger);
   scheduleFullIpcAfterPaint(() => {
     registerIpc({ logger, stateStore });
+    if (LAUNCHER_SMOKE_TEST) return;
+    originalUiController?.resume?.();
+    const services = safeRead(
+      "external-service.autostart_snapshot",
+      () => externalServicesController?.snapshot().services ?? [],
+      [],
+      logger,
+    );
+    for (const service of services) {
+      const startManagedCpa = service.id === "cpa" && service.managedInstall?.state === "installed";
+      if (!service.enabled || (!service.autoStart && !startManagedCpa)) continue;
+      void externalServicesController.start(service.id).catch((error) => {
+        logger.warn("external-service.autostart-failed", {
+          serviceId: service.id,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
   }, { logger });
   browserControl = await new BrowserControlServer({
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
-    fetchNative: (url, options) => session.fromPartition(LAUNCHER_PROFILE.browserPartition).fetch(url, options),
+    fetchNative: async (url, options) => {
+      const network = await providerNetworkReady();
+      const routing = network.store.snapshot().routing;
+      const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
+      const credentials = profile ? network.store.proxySecret(profile.id) : null;
+      return fetchNativeWithProxyAuth({
+        electronNet, browserSession: session.fromPartition(LAUNCHER_PROFILE.browserPartition),
+        url, options,
+        getProxyCredentials: (authInfo) => (
+          profile && authInfo.port === profile.endpoint.port
+          && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
+            === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
+            ? credentials : null
+        ),
+      });
+    },
+    getCodingToolsWorkspaces: () => headlessHost.request("/api/v1/workspaces", null, { method: "GET" }),
+    callReadOnlyAppTool: (tool) => appsMcp.callTool(tool, {}),
+    callNativeCodexTool: (body) => headlessHost.request("/api/v1/tools/call", body, { timeout: 80_000 }),
+    callAgentOrchestrator: (operation, args) => appsHost.call("agent-orchestrator", operation, args),
   }).start();
   runtimeSupervisor = new RuntimeSupervisor({
     app,
@@ -1916,6 +2334,7 @@ async function start() {
     && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
     stateStore.update({ browserInteractionMode: configuredInteractionMode });
   }
+  let lastPublishedBrowserAuth = false;
   browserHost = new BrowserHost({
     window: mainWindow,
     descriptorPath: BROWSER_DESCRIPTOR_PATH,
@@ -1928,7 +2347,16 @@ async function start() {
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
-    publishState: (state) => send("launcher:browser-state", state),
+    publishState: (state) => {
+      send("launcher:browser-state", state);
+      const authenticated = state.authenticated === true;
+      if (authenticated && !lastPublishedBrowserAuth && stateStore.read().codexRestartRequired === true) {
+        queueMicrotask(() => scheduleCodexBridgeAutoConnect({
+          logger, stateStore, reason: "browser-authenticated",
+        }));
+      }
+      lastPublishedBrowserAuth = authenticated;
+    },
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
@@ -1956,7 +2384,7 @@ async function start() {
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = LAUNCHER_SMOKE_TEST;
-  let startupAuthenticationRefresh = Promise.resolve();
+  let startupAuthenticationRefresh = Promise.resolve(browserHost.snapshot());
   await ensureRendererLoaded(mainWindow, logger);
   try {
     await browserHost.ready();
@@ -1976,6 +2404,7 @@ async function start() {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
+      return browserHost.snapshot();
     });
   }
   if (!launcherSmokeTest) {
@@ -2051,7 +2480,7 @@ async function start() {
         send("launcher:state-changed", failed);
       });
     }
-  } else void (async () => {
+  } else runtimeStartupInFlight = (async () => {
     await startupAuthenticationRefresh;
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
@@ -2092,46 +2521,35 @@ async function start() {
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
-    const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    const browser = await startupAuthenticationRefresh;
+    if (stateStore.read().browserInteractionMode === "automatic" && browser?.authenticated !== true) {
+      logger.warn("bridge.connect_deferred_until_chatgpt_ready");
+      return { ...runtime, bridgeDeferred: true };
+    }
+    const connected = await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
+    return { ...runtime, bridgeRouteChanged: connected.changed === true, bridgeConnected: connected.connected === true };
   })().then(async (runtime) => {
-    if (runtime.status === "ready") {
+    if (runtime.bridgeDeferred) {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();
       const patch = {
         coreSetupComplete: true,
+        codexCatalogVerified: false,
+        codexRestartRequired: true,
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,
-        ...(runtime.bridgeRouteChanged ? {
-          codexCatalogVerified: false,
-          codexRestartRequired: true,
-        } : {}),
-        ...(config.mode === "browser-only" ? {
-          mcpSetupComplete: false,
-          mcpGuideStep: 0,
-        } : {}),
+        ...(config.mode === "browser-only" ? { mcpSetupComplete: false, mcpGuideStep: 0 } : {}),
       };
       if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
         const state = stateStore.update(patch);
         send("launcher:state-changed", state);
       }
-      startCatalogVerificationMonitor({ logger, stateStore });
-      originalUiController?.resume?.();
-      const services = safeRead(
-        "external-service.autostart_snapshot",
-        () => externalServicesController?.snapshot().services ?? [],
-        [],
-        logger,
-      );
-      for (const service of services) {
-        if (!service.enabled || !service.autoStart) continue;
-        void externalServicesController.start(service.id).catch((error) => {
-          logger.warn("external-service.autostart-failed", {
-            serviceId: service.id,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        });
+      return;
+    }
+    if (runtime.status === "ready") {
+      if (!runtime.bridgeConnected) {
+        applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: runtime.bridgeRouteChanged === true });
       }
       return;
     }

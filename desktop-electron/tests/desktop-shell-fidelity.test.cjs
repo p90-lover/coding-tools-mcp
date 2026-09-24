@@ -22,8 +22,8 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(app, /copy\.networkProxy/);
   assert.match(app, /setSidebarState\(\{ open, width \}\)/);
   assert.match(app, /className="sidebar-resize"/);
-  assert.match(app, /<McpLiveToolsPanel/);
-  assert.match(app, /<InProcessAppsPanel/);
+  assert.match(app, /<WorkspacePanel/);
+
   assert.match(app, /label="MCP"/);
   assert.doesNotMatch(app, /FiveStackLoopbackPanel/);
   assert.match(styles, /\.content-scroll\.is-fit\s*\{[^}]*overflow-y:\s*auto;/s);
@@ -45,7 +45,7 @@ test("the MCP wizard matches the bundled upstream surface and keeps live tools s
   };
 
   assert.equal(extract(app, "McpSurface", "ActivitySurface"), extract(upstream, "McpSurface", "ActivitySurface"));
-  assert.match(app, /function InstantMcpToolsSurface[\s\S]*?<InProcessAppsPanel[\s\S]*?<McpLiveToolsPanel/);
+  assert.match(app, /function InstantMcpToolsSurface[\s\S]*?<WorkspacePanel/);
   assert.match(app, /surface === "instant-mcp"/);
 });
 
@@ -92,14 +92,46 @@ test("the shell bridge adapts headless workspaces into the typed page contract",
     id: "ws-1",
     name: "Demo",
     path: "/tmp/demo",
+    linked_projects: [{ alias: "side", name: "Side", path: "/tmp/side", mode: "read-only" }],
     mcp_state: "running",
     policy_revision: 4,
+    permission_mode: "workspace-write",
+    approval_mode: "on-request",
+    tool_profile: "advanced",
+    mcp_auth_type: "oauth",
+    actions_auth_type: "api_key",
+    mcp_local_port: 28766,
+    actions_local_port: 8787,
+    screen_capture_enabled: true,
+    mcp_oauth_client_id: "client-1",
+    mcp_oauth_redirect_uris: ["https://chatgpt.com/connector_platform/oauth/callback"],
+    mcp_use_shared_secrets: false,
+    actions_oauth_client_id: "actions-1",
+    actions_oauth_redirect_uris: ["https://chatgpt.com/connector_platform/oauth/callback"],
+    actions_oauth_scopes: "read",
+    actions_use_shared_secrets: true,
   }), {
     id: "ws-1",
     name: "Demo",
     path: "/tmp/demo",
+    linkedProjects: [{ alias: "side", name: "Side", path: "/tmp/side", mode: "read-only" }],
     mcpState: "running",
     policyRevision: 4,
+    permissionMode: "workspace-write",
+    approvalMode: "on-request",
+    toolProfile: "advanced",
+    mcpAuthType: "oauth",
+    actionsAuthType: "api_key",
+    mcpLocalPort: 28766,
+    actionsLocalPort: 8787,
+    screenCaptureEnabled: true,
+    mcpOAuthClientId: "client-1",
+    mcpOAuthRedirectUris: ["https://chatgpt.com/connector_platform/oauth/callback"],
+    mcpUseSharedSecrets: false,
+    actionsOAuthClientId: "actions-1",
+    actionsOAuthRedirectUris: ["https://chatgpt.com/connector_platform/oauth/callback"],
+    actionsOAuthScopes: "read",
+    actionsUseSharedSecrets: true,
   });
 
   const page = pageWorkspaces([

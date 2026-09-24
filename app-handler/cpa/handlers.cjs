@@ -97,7 +97,7 @@ function createModule() {
           status: panel.status,
           authFileCount: auth.count || 0,
           authFiles: auth.files || [],
-          reason,
+          ...(reason ? { reason } : {}),
         });
       },
     },

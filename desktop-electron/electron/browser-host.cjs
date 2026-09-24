@@ -415,7 +415,9 @@ class BrowserHost {
     this.bindShellZoomShortcuts(this.view.webContents);
     this.bindChatGptBackendRecovery();
     this.bindWebContents();
+    this.initializationFailed = false;
     this.initializationReady = this.initializePrimaryView().catch((error) => {
+      this.initializationFailed = true;
       this.logger.error("browser.initialization_failed", {
         message: error instanceof Error ? error.message : String(error),
       });
@@ -1137,7 +1139,15 @@ class BrowserHost {
       this.setState({ url, loading: false });
       void this.applyViewportCss();
       void this.markOwnedSurface()
-        .then(() => this.probeAuthentication())
+        .then(() => {
+          if (this.initializationFailed) {
+            this.writeDescriptor();
+            this.initializationFailed = false;
+            this.initializationReady = Promise.resolve();
+            this.logger.info("browser.initialization_recovered");
+          }
+          return this.probeAuthentication();
+        })
         .catch((error) => {
           this.logger.error("browser.surface_mark_failed", {
             message: error instanceof Error ? error.message : String(error),

@@ -118,6 +118,41 @@ impl ToolContext {
         ))
     }
 
+    pub fn connect_native_codex(&self, connection: Value) -> Result<Value, String> {
+        let connection = serde_json::from_value::<crate::codex_bridge::Connection>(connection)
+            .map_err(|_| "Invalid native Codex connection fields")?;
+        let snapshot = self.for_request().map_err(|error| error.message())?;
+        if !matches!(snapshot.auth.auth_type.as_str(), "bearer" | "oauth") {
+            return Err("Enable Bearer or OAuth MCP authentication first".into());
+        }
+        if connection.permission_profile == ":workspace"
+            && snapshot.policy.canonical_permission_mode() != "workspace-write"
+        {
+            return Err("Set this Coding Tools workspace to workspace-write before connecting a writable native session".into());
+        }
+        {
+            let _fence = snapshot
+                .policy_execution_guard()
+                .map_err(|error| error.message())?;
+            snapshot
+                .codex_bridge
+                .connect(snapshot.workspace.root(), connection)?;
+        }
+        snapshot.codex_bridge.initialize()
+    }
+
+    pub fn native_codex_status(&self) -> Result<Value, String> {
+        self.codex_bridge.status()
+    }
+
+    pub fn resolve_native_codex_approval(&self, id: &str, allow: bool) -> Result<Value, String> {
+        self.codex_bridge.resolve_approval(id, allow)
+    }
+
+    pub fn disconnect_native_codex(&self) {
+        self.codex_bridge.disconnect();
+    }
+
     pub fn workspace_path(&self) -> String {
         self.workspace.root_display()
     }

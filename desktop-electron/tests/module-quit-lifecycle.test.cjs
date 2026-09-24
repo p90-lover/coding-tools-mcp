@@ -18,29 +18,36 @@ function visit(node) {
 }
 visit(file);
 
-function fixture({ active = null, failCleanup = false } = {}) {
+function fixture({ active = null, failCleanup = false, restoreFails = false, quitAnyway = false } = {}) {
   const disposed = [];
   const nativeStops = [];
   const quits = [];
+  const order = [];
   const controller = name => ({ dispose() {
     disposed.push(name);
     if (failCleanup && name === "external") throw new Error("Owned process cleanup failed");
   } });
   const context = vm.createContext({
     shutdownInProgress: false, exitCommitted: false, quitting: false,
-    runtimeHost: { currentOperation: () => active },
+    runtimeStartupInFlight: null, codexBridgeConnectInFlight: null,
+    runtimeHost: { currentOperation: () => active, restoreBridgeRoute: async () => {
+      order.push("restore-route");
+      if (restoreFails) throw new Error("Route restore failed");
+    } },
     browserHost: { currentOperation: () => null, persistSession: async () => {}, destroy() {} },
-    runtimeSupervisor: { shutdown: async () => { nativeStops.push("runtime"); } },
+    runtimeSupervisor: { shutdown: async () => { order.push("stop-runtime"); nativeStops.push("runtime"); } },
     headlessHost: { shutdown: async () => {} }, browserControl: { close: async () => {} },
     stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} },
     managedBootstrapController: controller("bootstrap"), originalUiController: controller("visuals"),
     externalServicesController: controller("external"), upstreamToolController: controller("upstream"),
     showMainWindow() {}, publishOperation() {}, app: { quit: () => quits.push(true) },
+    dialog: { showMessageBox: async () => ({ response: quitAnyway ? 1 : 0 }) },
+    mainWindow: {},
   });
   const quit = vm.runInContext(`(${quitSource})`, context);
   let result;
   context.requestQuit = () => (result = quit());
-  return { disposed, nativeStops, quits, quit, async beforeQuit() {
+  return { disposed, nativeStops, quits, order, quit, async beforeQuit() {
     let prevented = 0;
     for (const listener of listeners) vm.runInContext(`(${listener})`, context)({ preventDefault: () => { prevented += 1; } });
     assert.equal(prevented, 1);
@@ -63,6 +70,19 @@ test("accepted app quit disposes each integration controller once", async () => 
   assert.equal(result.ok, true);
   assert.deepEqual(f.disposed, ["bootstrap", "visuals", "external", "upstream"]);
   assert.equal(f.quits.length, 1);
+  assert.deepEqual(f.order, ["restore-route", "stop-runtime"]);
+});
+
+test("route restoration failure cancels quit unless the user chooses Quit anyway", async () => {
+  const cancelled = fixture({ restoreFails: true });
+  assert.equal((await cancelled.quit()).ok, false);
+  assert.deepEqual(cancelled.order, ["restore-route"]);
+  assert.deepEqual(cancelled.quits, []);
+
+  const accepted = fixture({ restoreFails: true, quitAnyway: true });
+  assert.equal((await accepted.quit()).ok, true);
+  assert.deepEqual(accepted.order, ["restore-route", "stop-runtime"]);
+  assert.equal(accepted.quits.length, 1);
 });
 
 test("module cleanup failure leaves the native bridge running and refuses exit", async () => {

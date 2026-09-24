@@ -41,6 +41,7 @@ test("native relay restricts the backend and streams without cookies", async () 
     fetchNative: async (url, init) => {
       calls.push({ url, method: init.method, credentials: init.credentials,
         authorization: init.headers.get("authorization"), cookie: init.headers.get("cookie"),
+        secFetchMode: init.headers.get("sec-fetch-mode"),
         body: await new Response(init.body).text() });
       return new Response("data: NATIVE_RELAY_OK\n\ndata: [DONE]\n\n", {
         headers: { "content-type": "text/event-stream" },
@@ -52,7 +53,7 @@ test("native relay restricts the backend and streams without cookies", async () 
     method: "POST",
     headers: { authorization: `Bearer ${controlToken}`, "x-native-url": url,
       "x-native-authorization": "Bearer native-test-token", "x-native-method": "POST",
-      "content-type": "application/json", cookie: "DO_NOT_FORWARD" },
+      "content-type": "application/json", cookie: "DO_NOT_FORWARD", "sec-fetch-mode": "cors" },
     body: '{"model":"gpt-5.6-sol"}',
   });
   try {
@@ -64,7 +65,8 @@ test("native relay restricts the backend and streams without cookies", async () 
     assert.equal(response.headers.get("content-type"), "text/event-stream");
     assert.equal(await response.text(), "data: NATIVE_RELAY_OK\n\ndata: [DONE]\n\n");
     assert.deepEqual(calls, [{ url, method: "POST", credentials: "omit",
-      authorization: "Bearer native-test-token", cookie: null, body: '{"model":"gpt-5.6-sol"}' }]);
+      authorization: "Bearer native-test-token", cookie: null, secFetchMode: null,
+      body: '{"model":"gpt-5.6-sol"}' }]);
   } finally { await server.close(); }
 });
 

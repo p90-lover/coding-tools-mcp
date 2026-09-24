@@ -4,8 +4,24 @@ export interface WorkspaceSummary {
   readonly id: string;
   readonly name: string;
   readonly path: string;
+  readonly linkedProjects: readonly { readonly alias: string; readonly name: string; readonly path: string; readonly mode: string }[];
   readonly mcpState: WorkspaceMcpState;
   readonly policyRevision: number;
+  readonly permissionMode: string;
+  readonly approvalMode: string;
+  readonly toolProfile: string;
+  readonly mcpAuthType: string;
+  readonly actionsAuthType: string;
+  readonly mcpLocalPort: number | null;
+  readonly actionsLocalPort: number | null;
+  readonly screenCaptureEnabled: boolean | null;
+  readonly mcpOAuthClientId: string;
+  readonly mcpOAuthRedirectUris: readonly string[];
+  readonly mcpUseSharedSecrets: boolean | null;
+  readonly actionsOAuthClientId: string;
+  readonly actionsOAuthRedirectUris: readonly string[];
+  readonly actionsOAuthScopes: string;
+  readonly actionsUseSharedSecrets: boolean | null;
 }
 
 export interface PageRequest {
@@ -41,6 +57,31 @@ export interface CodingToolsApi {
   };
   readonly workspaces: {
     list(input?: PageRequest): Promise<Page<WorkspaceSummary>>;
+    updatePolicy(input: {
+      readonly workspaceId: string;
+      readonly permissionMode: "read-only" | "workspace-write";
+      readonly approvalMode: "ask" | "on-request" | "never";
+      readonly toolProfile: "read-only" | "core" | "advanced" | "compat-readonly-all";
+      readonly screenCaptureEnabled: boolean;
+    }): Promise<JsonObject>;
+    updateAuth(input: {
+      readonly workspaceId: string;
+      readonly service: "mcp" | "actions";
+      readonly authType: string;
+      readonly oauthClientId: string;
+      readonly oauthRedirectUris: readonly string[];
+      readonly oauthScopes: string;
+      readonly useSharedSecrets: boolean;
+    }): Promise<JsonObject>;
+    service(input: {
+      readonly workspaceId: string;
+      readonly service: "mcp" | "actions";
+      readonly operation: "status" | "start" | "stop" | "restart";
+    }): Promise<JsonObject>;
+    copySecret(input: {
+      readonly workspaceId: string;
+      readonly key: "bearer_token" | "oauth_password" | "actions_api_key" | "actions_oauth_client_secret" | "actions_oauth_password";
+    }): Promise<JsonObject>;
   };
   readonly permissions: {
     snapshot(input: { readonly workspaceId: string }): Promise<JsonObject>;
@@ -60,7 +101,19 @@ export interface CodingToolsApi {
     }): Promise<Page<JsonObject>>;
   };
   readonly nativeCodex: {
-    status(): Promise<JsonObject>;
+    status(input?: { readonly workspaceId?: string }): Promise<JsonObject>;
+    connect(input: {
+      readonly workspaceId: string;
+      readonly executable: string;
+      readonly codexHome: string;
+      readonly model: string;
+      readonly allowModelUsage: boolean;
+      readonly allowCommandExecution: boolean;
+      readonly permissionProfile: ":read-only" | ":workspace";
+      readonly requestLimit: number;
+      readonly lifetimeSeconds: number;
+    }): Promise<JsonObject>;
+    disconnect(input: { readonly workspaceId: string }): Promise<JsonObject>;
   };
   readonly integrations: {
     snapshot(): Promise<JsonObject>;
@@ -108,14 +161,14 @@ export interface CodingToolsApi {
     list(): Promise<JsonObject>;
     catalog(): Promise<JsonObject>;
     call(input: {
-      readonly moduleId: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly moduleId: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal" | "agent-orchestrator";
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;
     }): Promise<JsonObject>;
     invoke(input: {
-      readonly handle?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
-      readonly moduleId?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal";
+      readonly handle?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal" | "agent-orchestrator";
+      readonly moduleId?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal" | "agent-orchestrator";
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;

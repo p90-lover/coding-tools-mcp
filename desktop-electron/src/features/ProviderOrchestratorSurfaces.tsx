@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Language } from "../types";
+import type {
+  Language,
+  ProviderAccountRecord,
+  ProviderNetworkSnapshot,
+} from "../types";
 import {
   DEFAULT_PROVIDERS,
   type ProviderDefinition,
@@ -53,6 +57,29 @@ const PROVIDER_DEFINITIONS: readonly ProviderDefinition[] = DEFAULT_PROVIDERS;
 
 function text(language: Language, english: string, traditionalChinese: string): string {
   return language === "zh-TW" || language === "zh-CN" ? traditionalChinese : english;
+}
+
+export function selectConnectedProviderAccount(
+  accounts: ProviderAccountRecord[],
+  providerId: string,
+  accountId: string,
+  model: string,
+): ProviderAccountRecord | undefined {
+  return accounts.find((account) => (
+    account.id === accountId
+    && account.providerId === providerId
+    && account.models.includes(model)
+    && account.enabled
+    && account.status === "connected"
+    && !account.archivedAt
+  ));
+}
+
+export function modelAfterProviderAccountChange(
+  account: ProviderAccountRecord | undefined,
+  currentModel: string,
+): string {
+  return account?.models.includes(currentModel) ? currentModel : "";
 }
 
 function presetBaseUrl(providerId: string): string {
@@ -234,6 +261,8 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
   const [selectedId, setSelectedId] = useState(instances[0]?.id ?? "");
   const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
+  const [providerNetwork, setProviderNetwork] = useState<ProviderNetworkSnapshot | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState("");
   const [bindings, setBindings] = useState<ExecutionBinding[]>([]);
   const [credential, setCredential] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -241,8 +270,43 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
 
   const selected = instances.find((instance) => instance.id === selectedId) ?? instances[0];
   const selectedDefinition = selected ? providerDefinition(selected.definitionId) : undefined;
+  const connectedAccounts = useMemo(() => (providerNetwork?.accounts ?? []).filter((account) => (
+    account.providerId === selectedDefinition?.id
+    && account.enabled
+    && account.status === "connected"
+    && !account.archivedAt
+  )), [providerNetwork, selectedDefinition?.id]);
+  const chosenAccount = connectedAccounts.find((account) => account.id === selectedAccountId);
+  const selectedAccount = selectConnectedProviderAccount(
+    providerNetwork?.accounts ?? [],
+    selectedDefinition?.id ?? "",
+    selectedAccountId,
+    selected?.selectedModel.trim() ?? "",
+  );
 
   useEffect(() => saveProviderInstances(instances), [instances]);
+
+  useEffect(() => {
+    const launcher = window.codexWebLauncher;
+    if (!launcher) return;
+    let cancelled = false;
+    void launcher.providerSnapshot()
+      .then((next) => {
+        if (!cancelled) setProviderNetwork(next);
+      })
+      .catch((cause) => setError(messageOf(cause)));
+    const unsubscribe = launcher.onProviderNetworkChanged(setProviderNetwork);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [setError]);
+
+  useEffect(() => {
+    setSelectedAccountId((current) => (
+      connectedAccounts.some((account) => account.id === current) ? current : ""
+    ));
+  }, [connectedAccounts]);
 
   useEffect(() => {
     const api = window.codingTools;
@@ -309,7 +373,9 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
     if (!api) throw new Error("Coding Tools execution bridge is unavailable");
     if (!selected || !selectedDefinition) return;
     if (!workspaceId) throw new Error("Select a workspace before connecting a provider");
+    if (!selectedAccountId) throw new Error("Select a connected provider account");
     if (!selected.selectedModel.trim()) throw new Error("Select or enter a model");
+    if (!selectedAccount) throw new Error("The selected account does not expose this model");
     if (selected.engine === "anneal"
       && (!selected.projectId.trim() || !selected.repoId.trim() || !selected.assigneeId.trim())) {
       throw new Error("Anneal requires project, repository and assigned agent IDs");
@@ -327,12 +393,13 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
         operation: "configure",
         expectedRevision: executionRevision(current),
         bindingId: null,
+        providerAccountId: selectedAccount.id,
         settings: {
           id: selected.id,
           engine: selected.engine,
           endpoint: selected.engineEndpoint,
           provider: selected.definitionId,
-          model: selected.selectedModel,
+          model: selected.selectedModel.trim(),
           mode: selected.mode || "default",
           projectId: selected.engine === "anneal" ? selected.projectId : null,
           repoId: selected.engine === "anneal" ? selected.repoId : null,
@@ -341,7 +408,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
           allowCodex: selected.definitionId === "codex-oauth",
           confirmExternalExecution: true,
         },
-        allowProviderFallback: true,
+        allowProviderFallback: false,
         confirm: true,
       });
       setCredential("");
@@ -501,6 +568,25 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                 <input value={selected.engineEndpoint} onChange={(event) => updateSelected({ engineEndpoint: event.target.value })} />
               </label>
               <label>
+                <span>{text(language, "Connected account", "已連線帳戶")}</span>
+                <select value={selectedAccountId} onChange={(event) => {
+                  const account = connectedAccounts.find((candidate) => candidate.id === event.target.value);
+                  setSelectedAccountId(account?.id ?? "");
+                  updateSelected({
+                    selectedModel: modelAfterProviderAccountChange(account, selected.selectedModel),
+                  });
+                }}>
+                  <option value="">
+                    {connectedAccounts.length
+                      ? "—"
+                      : text(language, "No connected account", "沒有已連線帳戶")}
+                  </option>
+                  {connectedAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>{account.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
                 <span>{text(language, "Model", "模型")}</span>
                 <input
                   list={`models-${selected.id}`}
@@ -508,7 +594,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                   onChange={(event) => updateSelected({ selectedModel: event.target.value })}
                 />
                 <datalist id={`models-${selected.id}`}>
-                  {selected.models.map((model) => <option key={model} value={model} />)}
+                  {(chosenAccount?.models ?? selected.models).map((model) => <option key={model} value={model} />)}
                 </datalist>
               </label>
               <label>
@@ -544,7 +630,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
               </button>
               <button
                 className="primary-button compact"
-                disabled={busy !== null || !workspaceId}
+                disabled={busy !== null || !workspaceId || !selectedAccount}
                 onClick={() => void connectProvider()}
                 type="button"
               >

@@ -80,13 +80,25 @@ pub fn build(
     let wire = match spec.engine {
         Engine::Paseo => {
             let (mut message, response, status) = match action {
-                Action::Create => (
-                    json!({"type":"create_agent_request","idempotencyKey":spec.mission_id,
-      "config":{"provider":spec.provider,"cwd":spec.cwd,"modeId":spec.mode,"model":spec.model,"title":spec.title},
+                Action::Create => {
+                    let provider = match (spec.provider.as_str(), spec.model.as_str()) {
+                        ("chatgpt-web", "chatgpt-web/high") => "coding-tools-web-gpt",
+                        ("cliproxyapi-antigravity", "gemini-3.8-flash-high") => {
+                            "coding-tools-cpa-gemini"
+                        }
+                        ("chatgpt-web" | "cliproxyapi-antigravity", _) => {
+                            return Err("Unsupported Coding Tools provider/model pair".into())
+                        }
+                        _ => spec.provider.as_str(),
+                    };
+                    (
+                        json!({"type":"create_agent_request","idempotencyKey":spec.mission_id,
+      "config":{"provider":provider,"cwd":spec.cwd,"modeId":spec.mode,"model":spec.model,"title":spec.title},
       "autoArchive":false,"labels":{"coding-tools-mission":spec.mission_id,"coding-tools-workspace":spec.workspace_id,"coding-tools-task":spec.task_id}}),
-                    "status",
-                    Some("agent_created"),
-                ),
+                        "status",
+                        Some("agent_created"),
+                    )
+                }
                 Action::Start | Action::Resume => (
                     json!({"type":"send_agent_message_request","agentId":id,"text":spec.brief,"messageId":key}),
                     "send_agent_message_response",
@@ -212,6 +224,8 @@ mod tests {
             cwd: "C:/qa".into(),
             provider: "codex".into(),
             model: "gemini-3.1-pro-low".into(),
+            account_id: None,
+            route_id: None,
             mode: "default".into(),
             project_id: None,
             repo_id: None,
@@ -239,5 +253,53 @@ mod tests {
         }
         assert!(build_timeline_before(&spec, "agent-1", "page-2", "", 51).is_err());
         assert!(build_timeline_before(&spec, "agent-1", "page-3", "epoch:1", 0).is_err());
+    }
+
+    #[test]
+    fn paseo_create_maps_only_exact_coding_tools_provider_models() {
+        let mut spec = Spec {
+            engine: Engine::Paseo,
+            mission_id: "mission".into(),
+            workspace_id: "qa".into(),
+            task_id: "task".into(),
+            cwd: "C:/qa".into(),
+            provider: String::new(),
+            model: String::new(),
+            account_id: None,
+            route_id: None,
+            mode: "auto".into(),
+            project_id: None,
+            repo_id: None,
+            assignee_id: None,
+            title: "Run".into(),
+            brief: "Run task".into(),
+            max_duration_min: 10,
+        };
+
+        for (provider, model, expected) in [
+            ("chatgpt-web", "chatgpt-web/high", "coding-tools-web-gpt"),
+            (
+                "cliproxyapi-antigravity",
+                "gemini-3.8-flash-high",
+                "coding-tools-cpa-gemini",
+            ),
+            ("codex", "gpt-5.4", "codex"),
+        ] {
+            spec.provider = provider.into();
+            spec.model = model.into();
+            let request = build(&spec, None, None, Action::Create, "create").unwrap();
+            let Wire::Socket { message, .. } = request.wire else {
+                panic!("Paseo create must use a socket request");
+            };
+            assert_eq!(message["config"]["provider"], expected);
+        }
+
+        spec.provider = "chatgpt-web".into();
+        spec.model = "chatgpt-web/low".into();
+        assert!(build(&spec, None, None, Action::Create, "wrong-web").is_err());
+
+        spec.provider = "cliproxyapi-antigravity".into();
+        spec.model = "gemini-3.8-flash-low".into();
+        assert!(build(&spec, None, None, Action::Create, "wrong-gemini").is_err());
     }
 }

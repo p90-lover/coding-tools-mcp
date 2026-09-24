@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { planPaseoProviderPatch } = require("./paseo-provider-routes.cjs");
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const ACTION_TIMEOUT_MS = 12_000;
@@ -291,6 +292,7 @@ function parseWsJson(raw) {
 async function paseoRpc(endpoint, credential, message, rid, expected, {
   timeoutMs = ACTION_TIMEOUT_MS,
   webSocketImpl = globalThis.WebSocket,
+  responseMapper = null,
 } = {}) {
   if (typeof webSocketImpl !== "function") {
     throw new Error("Paseo WebSocket client is unavailable");
@@ -379,25 +381,88 @@ async function paseoRpc(endpoint, credential, message, rid, expected, {
         return;
       }
       if (sent && inner.type === "rpc_error" && inner.payload?.requestId === rid) {
-        finish(null, {
+        const result = {
           ok: false,
           op: message.type,
           detail: String(inner.payload?.message || "Paseo refused the request").slice(0, 300),
-        });
+        };
+        finish(
+          typeof responseMapper === "function"
+            ? new Error("Paseo refused the private configuration request")
+            : null,
+          result,
+        );
         return;
       }
-      if (
-        sent
-        && (
+      const matchesResponse = typeof responseMapper === "function"
+        ? inner.type === expected && inner.payload?.requestId === rid
+        : (
           inner.type === expected
           || inner.payload?.requestId === rid
           || (expected === "agent_permission_resolved" && inner.type === "agent_permission_resolved")
-        )
+        );
+      if (
+        sent
+        && matchesResponse
       ) {
-        finish(null, { ok: true, op: message.type, detail: `${expected} received` });
+        try {
+          finish(null, typeof responseMapper === "function"
+            ? responseMapper(inner)
+            : { ok: true, op: message.type, detail: `${expected} received` });
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error("Paseo returned an invalid action response"));
+        }
       }
     });
   });
+}
+
+async function paseoConfigRpc(endpoint, credential, type, config, options = {}) {
+  const rid = crypto.randomUUID();
+  return paseoRpc(
+    endpoint,
+    credential,
+    { type, requestId: rid, ...(config ? { config } : {}) },
+    rid,
+    type === "set_daemon_config_request"
+      ? "set_daemon_config_response"
+      : "get_daemon_config_response",
+    {
+      timeoutMs: options.timeoutMs,
+      webSocketImpl: options.webSocketImpl,
+      responseMapper: (response) => {
+        const value = response.payload?.config;
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          throw new Error("Paseo returned an invalid daemon configuration");
+        }
+        return value;
+      },
+    },
+  );
+}
+
+async function registerFixedPaseoProviders(endpoint, credential, options = {}) {
+  const patch = planPaseoProviderPatch(await paseoConfigRpc(
+    endpoint,
+    credential,
+    "get_daemon_config_request",
+    null,
+    options,
+  ));
+  if (!patch) return { ok: true, changed: false, providers: [] };
+
+  await paseoConfigRpc(endpoint, credential, "set_daemon_config_request", patch, options);
+  const readback = await paseoConfigRpc(
+    endpoint,
+    credential,
+    "get_daemon_config_request",
+    null,
+    options,
+  );
+  if (planPaseoProviderPatch(readback)) {
+    throw new Error("Paseo did not persist the fixed provider configuration");
+  }
+  return { ok: true, changed: true, providers: Object.keys(patch.providers) };
 }
 
 async function annealRequest(endpoint, credential, {
@@ -501,4 +566,5 @@ module.exports = {
   annealPost,
   annealRequest,
   buildPaseoMessage,
+  registerFixedPaseoProviders,
 };

@@ -33,7 +33,19 @@ pub struct Task {
     pub step: usize,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(default)]
+    pub clauses: Vec<Clause>,
     pub evidence: Vec<Evidence>,
+}
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Clause {
+    pub id: String,
+    pub title: String,
+    pub detail: String,
+    pub state: String,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +146,7 @@ pub fn apply(b: &mut Board, revision: u64, change: Change) -> AppResult<()> {
                 step: 0,
                 created_at: stamp,
                 updated_at: stamp,
+                clauses: vec![],
                 evidence: vec![],
             });
         }

@@ -778,6 +778,109 @@
   margin-top: 16px;
 }
 
+.paseo-session-item.is-mission:not(.is-selected) {
+  opacity: 0.64;
+}
+
+.paseo-workflow-board {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px clamp(16px, 3vw, 34px);
+}
+
+.paseo-workflow-heading {
+  align-items: center;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  margin: 0 auto 16px;
+  max-width: 860px;
+}
+
+.paseo-workflow-heading h3 {
+  font-size: 18px;
+  margin: 9px 0 3px;
+}
+
+.paseo-workflow-heading code {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.paseo-workflow-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0 auto;
+  max-width: 860px;
+}
+
+.paseo-workflow-step {
+  align-items: start;
+  background: rgb(255 255 255 / 2.5%);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  padding: 12px;
+}
+
+.paseo-workflow-step.is-current {
+  background: rgb(109 141 255 / 7%);
+  border-color: rgb(109 141 255 / 35%);
+}
+
+.paseo-workflow-step.is-review {
+  background: rgb(224 173 87 / 6%);
+  border-color: rgb(224 173 87 / 28%);
+}
+
+.paseo-workflow-step.is-finished,
+.paseo-workflow-step.is-held {
+  opacity: 0.58;
+}
+
+.paseo-workflow-step > div {
+  min-width: 0;
+}
+
+.paseo-workflow-step header {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.paseo-workflow-step header em,
+.paseo-workflow-step small {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.paseo-workflow-step header em {
+  text-transform: uppercase;
+}
+
+.paseo-workflow-step pre {
+  background: rgb(0 0 0 / 18%);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font: 11px/1.5 var(--font-mono, monospace);
+  margin: 9px 0 0;
+  max-height: 210px;
+  overflow: auto;
+  padding: 9px 10px;
+  white-space: pre-wrap;
+}
+
+.paseo-workflow-step p[role="alert"] {
+  color: #f09595;
+  font-size: 11px;
+  margin: 8px 0 0;
+}
+
 .anneal-assignment-preview {
   display: grid;
   gap: 10px;
@@ -1423,10 +1526,20 @@
   }
 
   .paseo-composer footer,
+  .paseo-workflow-heading,
   .control-heading.anneal-heading,
   .anneal-heading-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .paseo-workflow-step {
+    grid-template-columns: 8px minmax(0, 1fr);
+  }
+
+  .paseo-workflow-step > button {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .paseo-composer footer > div {

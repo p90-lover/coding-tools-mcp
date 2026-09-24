@@ -27,10 +27,9 @@ export function nativeProxyFromPac(value: unknown): string | undefined {
 /** Native Codex keeps its own bearer auth while Chromium supplies the launcher's proxy session. */
 export async function fetchNativeCodex(request: Request): Promise<Response> {
   const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
-  // Standalone CLI and explicitly configured proxy environments retain Bun's existing semantics,
-  // including NO_PROXY. No proxy variables or machine-wide settings are rewritten.
-  if (!descriptorPath || ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
-    .some(key => process.env[key]?.trim())) return fetch(request);
+  // The launcher owns proxy authentication; its exported proxy environment has no credentials.
+  // Standalone CLI requests still use Bun's proxy settings when there is no launcher.
+  if (!descriptorPath) return fetch(request);
 
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const headers = new Headers(request.headers);

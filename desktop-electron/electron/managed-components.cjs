@@ -482,6 +482,7 @@ function createManagedComponentController({
       strategy: manifest.strategy,
       repository: manifest.repository,
       commit: manifest.commit || null,
+      ...(manifest.patchRevision ? { patchRevision: manifest.patchRevision } : {}),
     };
   }
 
@@ -492,7 +493,8 @@ function createManagedComponentController({
       && marker.version === expected.version
       && marker.strategy === expected.strategy
       && marker.repository === expected.repository
-      && (marker.commit || null) === expected.commit;
+      && (marker.commit || null) === expected.commit
+      && (marker.patchRevision || null) === (expected.patchRevision || null);
   }
 
   function readMarker(manifest) {
@@ -1114,6 +1116,14 @@ function createManagedComponentController({
     const extraResources = explicitHome ? null : bundledSourceRoot(manifest);
     const inApp = explicitHome || (extraResources ? null : bundledSourceHome(manifest, null, env));
     const source = explicitHome || extraResources || inApp;
+    if (manifest.id === "paseo" && manifest.patchRevision && source) {
+      const bundle = readJson(path.join(path.dirname(source), "BUNDLE.json"))
+        || readJson(path.join(source, "CODING_TOOLS_BUNDLED.json"));
+      if (bundle?.id !== manifest.id || bundle.version !== manifest.version
+        || bundle.patchRevision !== manifest.patchRevision || bundle.commit !== manifest.commit) {
+        throw new Error("Paseo bundled patch revision does not match its managed manifest");
+      }
+    }
     if (!source) {
       throw new Error(`${manifest.name} bundled runtime is missing from this Coding Tools build`);
     }

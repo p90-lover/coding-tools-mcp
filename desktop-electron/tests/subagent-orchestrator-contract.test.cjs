@@ -70,6 +70,7 @@ test("execution bindings never substitute another provider or selected model", (
   };
   const view = (...bindings) => ({ execution: { bindings } });
   assert.equal(selectBinding(view(ready), "paseo", ready.provider, ready.model).id, "web");
+  assert.equal(selectBinding(view(ready), "paseo", ready.provider, null), undefined);
   assert.equal(selectBinding(view({ ...ready, model: "native-only" }), "paseo", ready.provider, ready.model), undefined);
   assert.equal(selectBinding(view({ ...ready, provider: "codex-oauth" }), "paseo", ready.provider, ready.model), undefined);
   assert.equal(selectBinding(view({ ...ready, connected: false }), "paseo", ready.provider, ready.model), undefined);

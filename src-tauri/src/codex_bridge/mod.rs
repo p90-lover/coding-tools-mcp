@@ -37,6 +37,8 @@ pub struct Connection {
     pub allow_model_usage: bool,
     #[serde(default)]
     pub allow_command_execution: bool,
+    #[serde(default = "default_permission_profile")]
+    pub permission_profile: String,
     pub model: String,
     pub request_limit: u32,
     pub lifetime_seconds: u64,
@@ -59,6 +61,15 @@ struct ThreadState {
     notice: Option<String>,
     #[serde(skip)]
     item_id: String,
+}
+struct NativeApproval {
+    rpc_id: Value,
+    path: PathBuf,
+    canonical: PathBuf,
+    thread_id: String,
+    turn_id: String,
+    reason: String,
+    expires_at: Instant,
 }
 struct LedgerEntry {
     fingerprint: String,
@@ -94,6 +105,7 @@ struct Bridge {
     process: Mutex<OwnedProcess>,
     outgoing: SyncSender<Value>,
     pending: Mutex<BTreeMap<u64, SyncSender<Result<Value>>>>,
+    approvals: Arc<Mutex<BTreeMap<String, NativeApproval>>>,
     memory: Mutex<Memory>,
     operation: Mutex<()>,
 }
@@ -146,11 +158,19 @@ fn validate_control(request: &Control) -> Result<bool> {
     }
     Ok(uses_model)
 }
+fn default_permission_profile() -> String {
+    ":read-only".into()
+}
+
 fn checked_options(root: &Path, mut options: Connection) -> Result<Connection> {
     if !options.executable.is_absolute()
         || !options.codex_home.is_absolute()
         || options.request_limit > 20
         || (options.lifetime_seconds != 0 && !(30..=900).contains(&options.lifetime_seconds))
+        || !matches!(
+            options.permission_profile.as_str(),
+            ":read-only" | ":workspace"
+        )
         || !token(&options.model)
         || options.expected_sha256.len() != 64
         || !options
@@ -159,7 +179,7 @@ fn checked_options(root: &Path, mut options: Connection) -> Result<Connection> {
             .all(|c| c.is_ascii_hexdigit())
     {
         return Err(
-            "Use absolute native paths, a SHA-256 and model ID; request_limit accepts 0 or 1–20, lifetime_seconds accepts 0 or 30–900"
+            "Use absolute native paths, SHA-256, model ID and :read-only/:workspace profile; request_limit accepts 0 or 1–20, lifetime_seconds accepts 0 or 30–900"
                 .into(),
         );
     }
@@ -334,6 +354,10 @@ impl Hub {
         let temp = options.codex_home.join("aiTemp");
         std::fs::create_dir_all(&temp).map_err(|_| "Cannot prepare dedicated aiTemp directory")?;
         let mut command = Command::new(&options.executable);
+        #[cfg(windows)]
+        if options.permission_profile == ":workspace" {
+            command.arg("-c").arg("windows.sandbox=elevated");
+        }
         command
             .arg("app-server")
             .current_dir(&options.codex_home)
@@ -384,6 +408,7 @@ impl Hub {
             process: Mutex::new(process),
             outgoing: tx,
             pending: Mutex::new(BTreeMap::new()),
+            approvals: Arc::new(Mutex::new(BTreeMap::new())),
             memory: Mutex::new(Memory::default()),
             operation: Mutex::new(()),
         });
@@ -494,10 +519,11 @@ impl Hub {
         let Some(bridge) = current.as_ref() else {
             return Ok(
                 json!({"connected":false,"model_usage_enabled":false,"command_execution_enabled":false,"command_runtime_sha256":native_command::COMMAND_RUNTIME_SHA256,"implementation":"native_app_server_opt_in",
-                "protocol_source":PROTOCOL_SOURCE,"native_sandbox_verified":false}),
+                "protocol_source":PROTOCOL_SOURCE,"native_sandbox_verified":false,"pending_approvals":[]}),
             );
         };
         let memory = lock(&bridge.memory)?;
+        let approvals = lock(&bridge.approvals)?;
         Ok(
             json!({"connected":bridge.live.load(Ordering::SeqCst)&&bridge.ready.load(Ordering::SeqCst),
             "model_usage_enabled":bridge.live.load(Ordering::SeqCst)&&bridge.options.allow_model_usage,
@@ -512,10 +538,42 @@ impl Hub {
             "lifetime_unbounded":bridge.options.lifetime_seconds==0,
             "replay_retention_seconds":LEDGER_RETENTION.as_secs(),"replay_capacity":MAX_LEDGER,
             "stop_reason":memory.stop_reason,"threads":memory.threads.values().map(|t|json!({"id":t.id,"status":t.status,"turn_id":t.turn_id})).collect::<Vec<_>>(),
-            "requested_sandbox":"read-only","native_sandbox_verified":false,"protocol_source":PROTOCOL_SOURCE,
+            "requested_sandbox":if bridge.options.permission_profile==":workspace" {"workspace-write"} else {"read-only"},
+            "permission_profile":bridge.options.permission_profile,
+            "pending_approvals":approvals.iter().filter(|(_, request)| request.expires_at > Instant::now()).map(|(id, request)| json!({"approval_id":id,"path":request.path,"reason":request.reason,"thread_id":request.thread_id,"turn_id":request.turn_id,"seconds_remaining":request.expires_at.saturating_duration_since(Instant::now()).as_secs()})).collect::<Vec<_>>(),
+            "native_sandbox_verified":false,"protocol_source":PROTOCOL_SOURCE,
             "storage":"bounded_bridge_memory; native runtime and provider retention are separate",
             "limits_note":"Zero request/lifetime limits mean no app-side ceiling until disconnect; provider quotas still apply. Completed replay receipts are bounded RAM with 90-minute age expiry and oldest-first pressure eviction; pending outcomes are never evicted."}),
         )
+    }
+    pub fn resolve_approval(&self, id: &str, allow: bool) -> Result<Value> {
+        let bridge = self.bridge()?;
+        let request = lock(&bridge.approvals)?
+            .remove(id)
+            .ok_or("Native approval expired or was already answered")?;
+        let active = lock(&bridge.memory)?
+            .threads
+            .get(&request.thread_id)
+            .is_some_and(|thread| {
+                thread.turn_id.as_deref() == Some(&request.turn_id) && thread.status == "inProgress"
+            });
+        let same_file = std::fs::symlink_metadata(&request.path)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            && request.path.canonicalize().ok().as_ref() == Some(&request.canonical);
+        let approved = allow
+            && bridge.live.load(Ordering::SeqCst)
+            && request.expires_at > Instant::now()
+            && active
+            && same_file;
+        let reply = if approved {
+            json!({"id":request.rpc_id,"result":{"permissions":{"fileSystem":{"entries":[{
+                "access":"write","path":{"type":"path","path":request.path}
+            }]}},"scope":"turn"}})
+        } else {
+            json!({"id":request.rpc_id,"error":{"code":-32601,"message":"Local approval was denied or expired"}})
+        };
+        bridge.enqueue(reply)?;
+        Ok(json!({"ok":true,"approved":approved,"scope":if approved {"turn"} else {"none"}}))
     }
     pub fn read(&self, id: &str) -> Result<Value> {
         let bridge = self.bridge()?;
@@ -594,6 +652,43 @@ impl Ticket {
         Ok(stored)
     }
 }
+fn exact_external_write(root: &Path, permissions: &Value) -> Option<PathBuf> {
+    let permissions = permissions.as_object()?;
+    if permissions.len() != 1 {
+        return None;
+    }
+    let file_system = permissions.get("fileSystem")?.as_object()?;
+    if file_system.len() != 1 {
+        return None;
+    }
+    let entries = file_system.get("entries")?.as_array()?;
+    if entries.len() != 1 {
+        return None;
+    }
+    let entry = entries[0].as_object()?;
+    if entry.len() != 2 || entry.get("access")? != "write" {
+        return None;
+    }
+    let path_value = entry.get("path")?.as_object()?;
+    if path_value.len() != 2 || path_value.get("type")? != "path" {
+        return None;
+    }
+    let path_text = path_value.get("path")?.as_str()?;
+    if path_text.is_empty() || path_text.len() > 4096 {
+        return None;
+    }
+    let path = PathBuf::from(path_text);
+    if !path.is_absolute() {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    (!canonical.starts_with(root)).then_some(canonical)
+}
+
 impl Bridge {
     fn enqueue(&self, value: Value) -> Result<()> {
         if self.options.lifetime_seconds != 0
@@ -655,9 +750,83 @@ impl Bridge {
                 ));
             }
         }
+        if let Ok(mut approvals) = self.approvals.lock() {
+            approvals.clear();
+        }
         if let Ok(mut process) = self.process.lock() {
             process.stop();
         }
+    }
+    fn queue_file_approval(&self, value: &Value) -> bool {
+        if self.options.permission_profile != ":workspace" || !self.live.load(Ordering::SeqCst) {
+            return false;
+        }
+        let rpc_id = &value["id"];
+        if !rpc_id.as_u64().is_some_and(|id| id > 0) && !rpc_id.as_str().is_some_and(token) {
+            return false;
+        }
+        let params = &value["params"];
+        let Some(thread_id) = params["threadId"].as_str().filter(|id| token(id)) else {
+            return false;
+        };
+        let Some(turn_id) = params["turnId"].as_str().filter(|id| token(id)) else {
+            return false;
+        };
+        if params["cwd"]
+            .as_str()
+            .and_then(|cwd| Path::new(cwd).canonicalize().ok())
+            != Some(self.root.clone())
+        {
+            return false;
+        }
+        let Some(path) = exact_external_write(&self.root, &params["permissions"]) else {
+            return false;
+        };
+        let active = self.memory.lock().ok().and_then(|memory| {
+            memory.threads.get(thread_id).map(|thread| {
+                thread.turn_id.as_deref() == Some(turn_id) && thread.status == "inProgress"
+            })
+        }) == Some(true);
+        if !active {
+            return false;
+        }
+        let canonical = path.clone();
+        let approval_id = uuid::Uuid::new_v4().to_string();
+        let request = NativeApproval {
+            rpc_id: rpc_id.clone(),
+            path,
+            canonical,
+            thread_id: thread_id.into(),
+            turn_id: turn_id.into(),
+            reason: bounded(params["reason"].as_str().unwrap_or(""), 500),
+            expires_at: Instant::now() + Duration::from_secs(120),
+        };
+        let Ok(mut approvals) = self.approvals.lock() else {
+            return false;
+        };
+        if approvals.len() >= 4 {
+            return false;
+        }
+        approvals.insert(approval_id.clone(), request);
+        drop(approvals);
+        if let Ok(mut memory) = self.memory.lock() {
+            if let Some(thread) = memory.threads.get_mut(thread_id) {
+                thread.notice = Some("Native Codex requested one outside-workspace file write. Open the local Native Codex panel to review it within two minutes.".into());
+            }
+        }
+        let approvals = self.approvals.clone();
+        let outgoing = self.outgoing.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(120));
+            let expired = approvals
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&approval_id));
+            if let Some(request) = expired {
+                let _ = outgoing.send(json!({"id":request.rpc_id,"error":{"code":-32601,"message":"Local file approval timed out"}}));
+            }
+        });
+        true
     }
     fn receive(&self, value: Value) {
         if let Some(method) = value["method"].as_str() {
@@ -673,8 +842,11 @@ impl Bridge {
                     bounded(&value.to_string(), 4096)
                 );
             }
+            if method == "permissions/requestApproval" && self.queue_file_approval(&value) {
+                return;
+            }
             if value.get("id").is_some() {
-                // No server-supplied command or permission request becomes a local approval.
+                // Unsupported native requests are declined without an unsandboxed fallback.
                 let reply = if matches!(
                     method,
                     "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
@@ -726,16 +898,15 @@ impl Bridge {
             return Err("Native consent was revoked before submission".into());
         }
         let id = if request.operation == "start" {
-            // The built-in read-only profile is supported by native Windows and macOS.
-            // Split filesystem read restrictions are not supported by the unelevated
-            // Windows sandbox. Never substitute an unsandboxed permission profile.
-            const PROFILE: &str = ":read-only";
+            // Select only a locally approved built-in profile and require exact confirmation.
+            // Never substitute an unsandboxed permission profile on native failure.
+            let profile = self.options.permission_profile.as_str();
             let value = self.rpc("thread/start", json!({"cwd":self.root,"model":self.options.model,
-                "permissions":PROFILE,"approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,
+                "permissions":profile,"approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,
                 "developerInstructions":"Work only on the explicitly requested task. Never delete files; use Trash for unwanted files and aiTemp for temporary files. Do not change permissions or use unsandboxed fallbacks. Explain evidence and uncertainty. Do not launch extra agents unless explicitly requested."}))?;
-            if value["activePermissionProfile"]["id"].as_str() != Some(PROFILE) {
+            if value["activePermissionProfile"]["id"].as_str() != Some(profile) {
                 self.stop("native_permission_profile_mismatch");
-                return Err("Native runtime did not confirm the built-in read-only profile; no turn submitted".into());
+                return Err("Native runtime did not confirm the locally selected permission profile; no turn submitted".into());
             }
             let id = value["thread"]["id"]
                 .as_str()
@@ -846,7 +1017,7 @@ impl Bridge {
                 "turn/start",
                 json!({"threadId":id,"input":[{"type":"text","text":request.text}],
                 // Reassert the same supported boundary on every turn, including send.
-                "permissions":":read-only","approvalsReviewer":"user",
+                "permissions":self.options.permission_profile,"approvalsReviewer":"user",
                 "cwd":self.root,"model":self.options.model,"approvalPolicy":"on-request"}),
             ),
         };
@@ -1017,6 +1188,35 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
 mod tests {
     use super::*;
     #[test]
+    fn exact_external_write_requires_one_existing_file() {
+        let file = std::env::current_exe().expect("test binary path");
+        let outside_root = file.parent().unwrap().join("unrelated-workspace");
+        let request = json!({"fileSystem":{"entries":[{
+            "access":"write","path":{"type":"path","path":file}
+        }]}});
+        assert_eq!(
+            exact_external_write(&outside_root, &request),
+            file.canonicalize().ok()
+        );
+        assert!(exact_external_write(file.parent().unwrap(), &request).is_none());
+        let mut network = request.clone();
+        network["network"] = json!({"enabled":true});
+        let mut read = request.clone();
+        read["fileSystem"]["entries"][0]["access"] = json!("read");
+        let mut glob = request.clone();
+        glob["fileSystem"]["entries"][0]["path"] = json!({"type":"glob_pattern","pattern":"**"});
+        let mut folder = request.clone();
+        folder["fileSystem"]["entries"][0]["path"]["path"] = json!(file.parent().unwrap());
+        let mut multiple = request.clone();
+        multiple["fileSystem"]["entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(request["fileSystem"]["entries"][0].clone());
+        for denied in [network, read, glob, folder, multiple] {
+            assert!(exact_external_write(&outside_root, &denied).is_none());
+        }
+    }
+    #[test]
     fn native_bridge_control_scope_and_limits() {
         let good = Control {
             operation: "start".into(),
@@ -1052,6 +1252,7 @@ mod tests {
             codex_home: PathBuf::new(),
             allow_model_usage: false,
             allow_command_execution: false,
+            permission_profile: default_permission_profile(),
             model: "fixture".into(),
             request_limit: 1,
             lifetime_seconds: 30,
@@ -1088,6 +1289,7 @@ mod tests {
             codex_home: PathBuf::new(),
             allow_model_usage: true,
             allow_command_execution: false,
+            permission_profile: default_permission_profile(),
             model: "fixture".into(),
             request_limit: 0,
             lifetime_seconds: 0,
@@ -1242,6 +1444,7 @@ mod tests {
                 codex_home: home,
                 allow_model_usage: false,
                 allow_command_execution: false,
+                permission_profile: default_permission_profile(),
                 model: "no-model-request".into(),
                 request_limit: 1,
                 lifetime_seconds: 30,

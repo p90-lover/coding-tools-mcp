@@ -168,6 +168,10 @@ const codingToolsApi = Object.freeze({
   }),
   workspaces: Object.freeze({
     list: (input = {}) => invokeContract(ipcRenderer, "workspaces.list", input),
+    updatePolicy: (input) => invokeContract(ipcRenderer, "workspaces.updatePolicy", input),
+    updateAuth: (input) => invokeContract(ipcRenderer, "workspaces.updateAuth", input),
+    service: (input) => invokeContract(ipcRenderer, "workspaces.service", input),
+    copySecret: (input) => invokeContract(ipcRenderer, "workspaces.copySecret", input),
   }),
   permissions: Object.freeze({
     snapshot: (input) => invokeContract(ipcRenderer, "permissions.snapshot", input),
@@ -182,7 +186,9 @@ const codingToolsApi = Object.freeze({
     search: (input) => invokeContract(ipcRenderer, "history.search", input),
   }),
   nativeCodex: Object.freeze({
-    status: () => invokeContract(ipcRenderer, "nativeCodex.status"),
+    status: (input = {}) => invokeContract(ipcRenderer, "nativeCodex.status", input),
+    connect: (input) => invokeContract(ipcRenderer, "nativeCodex.connect", input),
+    disconnect: (input) => invokeContract(ipcRenderer, "nativeCodex.disconnect", input),
   }),
   integrations: Object.freeze({
     snapshot: () => invokeContract(ipcRenderer, "integrations.snapshot"),

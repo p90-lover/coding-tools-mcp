@@ -16,6 +16,10 @@ function text(value, fallback = "") {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
+function strings(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+
 function boundedMcpState(value) {
   return MCP_STATES.has(value) ? value : "stopped";
 }
@@ -26,16 +30,44 @@ function toWorkspaceSummary(workspace, index = 0) {
   const name = text(record.name, id);
   const pathValue = text(record.path, text(record.workspace_path));
   if (!id || !name || !pathValue) return null;
+  const linked = record.linkedProjects ?? record.linked_projects;
+  const linkedProjects = Array.isArray(linked) ? linked.flatMap((candidate) => {
+    const project = asRecord(candidate);
+    const alias = text(project.alias);
+    const path = text(project.path);
+    return alias && path ? [{ alias, name: text(project.name, alias), path, mode: text(project.mode, "read-only") }] : [];
+  }) : [];
   return {
     id,
     name,
     path: pathValue,
+    linkedProjects,
     mcpState: boundedMcpState(record.mcpState || record.mcp_state),
     policyRevision: Number.isInteger(record.policyRevision)
       ? record.policyRevision
       : Number.isInteger(record.policy_revision)
         ? record.policy_revision
         : index,
+    permissionMode: text(record.permissionMode, text(record.permission_mode, "unknown")),
+    approvalMode: text(record.approvalMode, text(record.approval_mode, "unknown")),
+    toolProfile: text(record.toolProfile, text(record.tool_profile, "unknown")),
+    mcpAuthType: text(record.mcpAuthType, text(record.mcp_auth_type, "unknown")),
+    actionsAuthType: text(record.actionsAuthType, text(record.actions_auth_type, "unknown")),
+    mcpLocalPort: Number.isInteger(record.mcpLocalPort) ? record.mcpLocalPort
+      : Number.isInteger(record.mcp_local_port) ? record.mcp_local_port : null,
+    actionsLocalPort: Number.isInteger(record.actionsLocalPort) ? record.actionsLocalPort
+      : Number.isInteger(record.actions_local_port) ? record.actions_local_port : null,
+    screenCaptureEnabled: typeof record.screenCaptureEnabled === "boolean" ? record.screenCaptureEnabled
+      : typeof record.screen_capture_enabled === "boolean" ? record.screen_capture_enabled : null,
+    mcpOAuthClientId: text(record.mcpOAuthClientId, text(record.mcp_oauth_client_id)),
+    mcpOAuthRedirectUris: strings(record.mcpOAuthRedirectUris ?? record.mcp_oauth_redirect_uris),
+    mcpUseSharedSecrets: typeof record.mcpUseSharedSecrets === "boolean" ? record.mcpUseSharedSecrets
+      : typeof record.mcp_use_shared_secrets === "boolean" ? record.mcp_use_shared_secrets : null,
+    actionsOAuthClientId: text(record.actionsOAuthClientId, text(record.actions_oauth_client_id)),
+    actionsOAuthRedirectUris: strings(record.actionsOAuthRedirectUris ?? record.actions_oauth_redirect_uris),
+    actionsOAuthScopes: text(record.actionsOAuthScopes, text(record.actions_oauth_scopes)),
+    actionsUseSharedSecrets: typeof record.actionsUseSharedSecrets === "boolean" ? record.actionsUseSharedSecrets
+      : typeof record.actions_use_shared_secrets === "boolean" ? record.actions_use_shared_secrets : null,
   };
 }
 
@@ -158,8 +190,12 @@ function createCodingToolsShellBridge({
       return emptyPage();
     },
 
-    async nativeCodexStatus(event) {
+    async nativeCodexStatus(event, input = {}) {
       assertFocusedMainWindow(event, false);
+      const workspaceId = text(input.workspaceId);
+      if (workspaceId) {
+        return requestHeadless("/api/v1/native-codex/status", { workspace_id: workspaceId }, "POST");
+      }
       const runtime = await this.runtimeStatus(event);
       return {
         available: runtime.ready === true,

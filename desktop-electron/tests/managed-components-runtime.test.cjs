@@ -13,6 +13,7 @@ const {
   createManagedComponentController,
 } = require("../electron/managed-components.cjs");
 const { createManagedExternalServicesController } = require("../electron/managed-external-services.cjs");
+const { createProviderNetworkStore } = require("../electron/provider-network.cjs");
 
 const COMPONENT_IDS = ["codex-router", "commandcode-proxy", "cpa", "paseo", "anneal"];
 
@@ -23,6 +24,21 @@ function temporaryDirectory(name) {
 function writeJson(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function configureTestProxy(dataRoot) {
+  const directory = path.join(path.dirname(dataRoot), "providers");
+  const store = createProviderNetworkStore({
+    filePath: path.join(directory, "provider-network.json"),
+    keyPath: path.join(directory, "provider-network.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+  });
+  store.saveProxyProfile({
+    id: "test", name: "Test proxy", enabled: true,
+    endpoint: { protocol: "http", host: "proxy.example.test", port: 8080 },
+    scopes: ["all"],
+  });
+  store.setGlobalRouting({ enabled: true, profileId: "test" });
 }
 
 function releaseManifest(id, payload) {
@@ -124,6 +140,61 @@ function controllerFixture({ fetchImpl, allowNetworkInstall = true, ...overrides
   });
   return { controller, dataRoot, payload, children };
 }
+
+test("Paseo patch revision repairs an old marker and preserves state", async () => {
+  const manifestRoot = path.join(__dirname, "..", "vendor", "managed-components");
+  const paseo = JSON.parse(fs.readFileSync(path.join(manifestRoot, "paseo.json"), "utf8"));
+  const anneal = JSON.parse(fs.readFileSync(path.join(manifestRoot, "anneal.json"), "utf8"));
+  assert.equal(paseo.patchRevision, "codex-cpa-host-env-v1");
+  const scratchRoot = path.join(__dirname, "..", "..", "aiTemp");
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  const dataRoot = fs.mkdtempSync(path.join(scratchRoot, "paseo-patch-marker-"));
+  const bundleRoot = path.join(dataRoot, "bundled");
+  const bundleSource = path.join(bundleRoot, "paseo", "source");
+  writeJson(path.join(bundleRoot, "paseo", "BUNDLE.json"), {
+    id: "paseo", version: paseo.version, commit: paseo.commit, patchRevision: "old-patch",
+  });
+  writeJson(path.join(bundleSource, "package.json"), {});
+  fs.mkdirSync(path.join(bundleSource, "node_modules"), { recursive: true });
+  fs.mkdirSync(path.join(bundleSource, "dist"), { recursive: true });
+  const stateFile = path.join(dataRoot, "state", "paseo", "keep.txt");
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, "retained");
+  const controller = createManagedComponentController({ manifestRoot, dataRoot, bundleRoot });
+  try {
+    for (const manifest of [paseo, anneal]) {
+      const home = path.join(dataRoot, "components", manifest.id, manifest.version);
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(path.join(home, manifest.bundle.entrypoint), "{}");
+      writeJson(path.join(home, ".coding-tools-managed-component.json"), {
+        schemaVersion: 1, id: manifest.id, version: manifest.version,
+        strategy: manifest.strategy, repository: manifest.repository, commit: manifest.commit,
+      });
+    }
+    assert.equal(controller.project("paseo").installState, "repair-required");
+    assert.equal(controller.project("anneal").installState, "installed");
+
+    await assert.rejects(() => controller.repairComponent("paseo"), /patch revision does not match/);
+    writeJson(path.join(bundleRoot, "paseo", "BUNDLE.json"), {
+      id: "paseo", version: paseo.version, commit: paseo.commit, patchRevision: paseo.patchRevision,
+    });
+    await controller.repairComponent("paseo");
+    assert.equal(controller.project("paseo").installState, "installed");
+    assert.equal(controller.project("anneal").installState, "installed");
+    assert.equal(fs.readFileSync(stateFile, "utf8"), "retained");
+    const trashEntries = fs.readdirSync(path.join(dataRoot, "Trash", "managed-components", "paseo"));
+    assert.equal(trashEntries.length, 1);
+    const oldMarker = JSON.parse(fs.readFileSync(path.join(dataRoot, "Trash", "managed-components", "paseo", trashEntries[0], ".coding-tools-managed-component.json"), "utf8"));
+    assert.equal(oldMarker.patchRevision, undefined);
+
+    const markerPath = path.join(dataRoot, "components", "paseo", paseo.version, ".coding-tools-managed-component.json");
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    assert.equal(marker.patchRevision, paseo.patchRevision);
+    assert.equal(controller.project("paseo").installState, "installed");
+  } finally {
+    controller.dispose();
+  }
+});
 
 test("manifest validation rejects remote listeners, unpinned sources, path escape and destructive commands", () => {
   const payload = Buffer.from("fixture");
@@ -423,6 +494,7 @@ test("Windows WSL Anneal stages Linux dependencies without leaking credentials i
     dataRoot,
     platform: "win32",
     env: { ...process.env, WSLENV: "KEEP_ME/p:GITHUB_READ_TOKEN/w" },
+    resolveCrossUseEnvironment: (id) => id === "anneal" ? { HTTPS_PROXY: "http://proxy.example.test:8080", NO_PROXY: "127.0.0.1" } : {},
     safeStorage: { isEncryptionAvailable: () => false },
     spawnSyncProcess: () => ({ status: 0, stdout: "/mnt/c/anneal-fixture\n", stderr: "" }),
     spawnProcess: (executable, args, options) => {
@@ -444,6 +516,9 @@ test("Windows WSL Anneal stages Linux dependencies without leaking credentials i
     assert.match(spawned[0].args.join(" "), /npm.*ci/);
     assert.equal(spawned.some((entry) => entry.args.join(" ").includes(fixtureToken)), false);
     assert.equal(spawned[1].env.GITHUB_READ_TOKEN, fixtureToken);
+    assert.equal(spawned[1].env.HTTPS_PROXY, "http://proxy.example.test:8080");
+    assert.match(spawned[1].env.WSLENV, /(?:^|:)HTTPS_PROXY\/u(?:$|:)/);
+    assert.match(spawned[1].env.WSLENV, /(?:^|:)NO_PROXY\/u(?:$|:)/);
     assert.match(spawned[1].env.WSLENV, /(?:^|:)KEEP_ME\/p(?:$|:)/);
     assert.match(spawned[1].env.WSLENV, /(?:^|:)GITHUB_READ_TOKEN\/u(?:$|:)/);
     assert.doesNotMatch(spawned[1].env.WSLENV, /GITHUB_READ_TOKEN\/w/);
@@ -621,7 +696,8 @@ test("Router runtime exit preserves completed install state and generated depend
 
 test("Router composite caller key resolves without recursive launch expansion", async (t) => {
   const manifestRoot = temporaryDirectory("coding-tools-router-composite-manifests");
-  const dataRoot = temporaryDirectory("coding-tools-router-composite-data");
+  const dataRoot = path.join(temporaryDirectory("coding-tools-router-composite-data"), "integrations");
+  configureTestProxy(dataRoot);
   for (const id of COMPONENT_IDS) writeJson(path.join(manifestRoot, `${id}.json`), bundledSourceManifest(id));
   const manifest = bundledSourceManifest("codex-router");
   const home = path.join(dataRoot, "components", "codex-router", manifest.version);
@@ -677,7 +753,8 @@ test("runtime failure restarts in place while missing package files and invalid 
   const componentId = "codex-router";
   const manifestRoot = temporaryDirectory("coding-tools-restart-manifests");
   const bundleRoot = temporaryDirectory("coding-tools-restart-bundle");
-  const dataRoot = temporaryDirectory("coding-tools-restart-data");
+  const dataRoot = path.join(temporaryDirectory("coding-tools-restart-data"), "integrations");
+  configureTestProxy(dataRoot);
   for (const id of COMPONENT_IDS) writeJson(path.join(manifestRoot, `${id}.json`), bundledSourceManifest(id));
   const source = path.join(bundleRoot, componentId, "source");
   writeJson(path.join(source, "package.json"), { name: "router-fixture", revision: 1 });

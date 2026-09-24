@@ -1,5 +1,6 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -129,14 +130,47 @@ function yamlString(value) {
   return JSON.stringify(String(value));
 }
 
+const COMMANDCODE_PLUGIN_FILE = "commandcode-go-v1.0.0-codingtools.1.dll";
+const COMMANDCODE_PLUGIN_SHA256 = "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c";
+
+function installBundledCommandCodePlugin(state) {
+  if (process.platform !== "win32" || process.arch !== "x64") return null;
+  const source = path.join(__dirname, "..", "vendor", "bundled", "cpa-plugins", "windows", "amd64", COMMANDCODE_PLUGIN_FILE);
+  const digest = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  if (digest(source) !== COMMANDCODE_PLUGIN_SHA256) throw new Error("Bundled CommandCode CPA plugin hash mismatch");
+
+  const directory = path.join(state, "plugins", "windows", "amd64");
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const target = path.join(directory, COMMANDCODE_PLUGIN_FILE);
+  const current = fs.existsSync(target) && digest(target) === COMMANDCODE_PLUGIN_SHA256;
+  const old = fs.readdirSync(directory).filter((name) => (
+    /^commandcode-go(?:-v[0-9][0-9A-Za-z.+-]*)?\.dll$/i.test(name)
+    && (name !== COMMANDCODE_PLUGIN_FILE || !current)
+  ));
+  if (old.length) {
+    const archive = path.join(state, "Trash", "plugins", new Date().toISOString().replace(/[:.]/g, "-"));
+    fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
+    for (const name of old) {
+      const previous = path.join(directory, name);
+      if (!fs.lstatSync(previous).isFile()) throw new Error("CommandCode CPA plugin path is not a regular file");
+      fs.renameSync(previous, path.join(archive, name));
+    }
+  }
+  if (!current) fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+  return target;
+}
+
 function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
   const authDirectory = path.join(state, "auth");
   const logDirectory = path.join(state, "logs");
+  const pluginDirectory = path.resolve(state, "plugins");
+  fs.mkdirSync(pluginDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(authDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(logDirectory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") {
     fs.chmodSync(authDirectory, 0o700);
     fs.chmodSync(logDirectory, 0o700);
+    fs.chmodSync(pluginDirectory, 0o700);
   }
   return [
     "host: \"127.0.0.1\"",
@@ -150,6 +184,12 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     `  secret-key: ${yamlString(managementKey)}`,
     "  disable-control-panel: false",
     "  disable-auto-update-panel: true",
+    "plugins:",
+    "  enabled: true",
+    `  dir: ${yamlString(pluginDirectory)}`,
+    "  configs:",
+    "    commandcode-go:",
+    "      enabled: true",
     "debug: false",
     "request-log: false",
     "logging-to-file: true",
@@ -174,6 +214,7 @@ function run(homeValue, stateValue) {
 
   fs.mkdirSync(state, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(state, 0o700);
+  installBundledCommandCodePlugin(state);
   const managementKey = requiredSecret("CODING_TOOLS_CPA_MANAGEMENT_KEY");
   const proxyApiKey = requiredSecret("CODING_TOOLS_CPA_PROXY_API_KEY");
   const configPath = path.join(state, "config.yaml");
@@ -222,4 +263,5 @@ module.exports = {
   prepare,
   run,
   runtimeConfiguration,
+  installBundledCommandCodePlugin,
 };

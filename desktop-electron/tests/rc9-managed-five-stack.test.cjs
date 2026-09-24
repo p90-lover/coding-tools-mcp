@@ -125,6 +125,9 @@ test("Anneal uses its pinned setup validator and preserves database guards", () 
   const configCommand = steps.get("restore-or-create-config").arguments.join(" ");
   assert.match(configCommand, /npm run setup:local -- --directory/);
   assert.match(configCommand, /config\/\.env/);
+  assert.match(configCommand, /readlink \.env/);
+  assert.match(configCommand, /\[ -L \.env \]/);
+  assert.match(configCommand, /\[ -e \.env \]/);
   assert.doesNotMatch(configCommand, /\.env\.example|cp \.env|mv \.env|ln -sfn/);
   assert.equal(
     steps.get("restore-or-create-config").environment.GITHUB_READ_TOKEN,

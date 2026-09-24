@@ -193,10 +193,66 @@ function ensureCallerSecret(state) {
   return callerSecret;
 }
 
+function applyRouterLocalProxyPolicy(home, state) {
+  const foreground = fs.readFileSync(requiredFile(home, "src/foreground-start.mjs"), "utf8");
+  if (!foreground.includes('import("./start.mjs")')) return false;
+  const patches = [
+    ["src/start.mjs", [[
+      "const cursorTunnelSpec = cursorEdge ? cursorTunnelRunSpec() : undefined;",
+      'const cursorTunnelSpec = process.env.CODING_TOOLS_LOCAL_ONLY === "1" ? undefined : cursorEdge ? cursorTunnelRunSpec() : undefined;',
+    ]]],
+    ["src/generic-providers.mjs", [
+      [
+        'import { Agent, fetch as undiciFetch } from "undici";',
+        'import { Agent, EnvHttpProxyAgent, fetch as undiciFetch } from "undici";\nimport { environmentHttpProxyConfigured } from "./proxy-environment.mjs";',
+      ],
+      [
+        "  return new Agent({",
+        "  const useProxy = environmentHttpProxyConfigured() && !isPrivateGenericProviderHostname(endpoint.hostname);\n  return new (useProxy ? EnvHttpProxyAgent : Agent)({",
+      ],
+      [
+        "    connect: { lookup },",
+        "    ...(useProxy ? {} : { connect: { lookup } }),",
+      ],
+      [
+        "    await dispatcher?.close().catch(() => undefined);",
+        '    if (typeof dispatcher?.close === "function") await dispatcher.close().catch(() => undefined);',
+        2,
+      ],
+    ]],
+  ];
+  const updates = [];
+  for (const [relative, replacements] of patches) {
+    const filePath = requiredFile(home, relative);
+    const original = fs.readFileSync(filePath, "utf8");
+    let next = original;
+    for (const [before, after, expected = 1] of replacements) {
+      const beforeCount = next.split(before).length - 1;
+      const afterCount = next.split(after).length - 1;
+      if (beforeCount === 0 && afterCount === expected) continue;
+      if (beforeCount !== expected || afterCount !== 0) {
+        throw new Error(`Codex Router network policy cannot patch ${relative}; source changed`);
+      }
+      next = next.replaceAll(before, after);
+    }
+    if (next !== original) updates.push({ filePath, original, next });
+  }
+  for (const { filePath, original, next } of updates) {
+    const backupDir = path.join(state, "Trash", "router-network-policy");
+    fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+    const hash = crypto.createHash("sha256").update(original).digest("hex").slice(0, 12);
+    const backupPath = path.join(backupDir, `${path.basename(filePath)}.${hash}.bak`);
+    if (!fs.existsSync(backupPath)) fs.copyFileSync(filePath, backupPath);
+    fs.writeFileSync(filePath, next);
+  }
+  return updates.length > 0;
+}
+
 function finishPrepare(home, state) {
   const env = environment(home, state);
   wrappers(home, state, env);
   applyLongRunLiteLlmTimeout(home);
+  applyRouterLocalProxyPolicy(home, state);
   const { ensureOriginalControlCenter } = require("./codex-router-original-ui.cjs");
   try {
     ensureOriginalControlCenter(home);
@@ -277,6 +333,7 @@ function prepare(home, state, options = {}) {
 }
 
 function run(home, state) {
+  applyRouterLocalProxyPolicy(home, state);
   applyLongRunLiteLlmTimeout(home);
   const env = ensureBinWrappers(home, state);
   const child = spawn(process.execPath, [requiredFile(home, "src/foreground-start.mjs")], {
@@ -309,6 +366,7 @@ if (require.main === module) {
 
 module.exports = {
   MANAGED_PYTHON_VERSION,
+  applyRouterLocalProxyPolicy,
   ensureBinWrappers,
   wrappers,
   bundledSkipNetworkPrepare,

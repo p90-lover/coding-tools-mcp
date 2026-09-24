@@ -8,6 +8,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
+const { invokeContract } = require("../electron/ipc-schema.cjs");
 const { createAppsProviderServices } = require("../electron/apps-provider-services.cjs");
 const { createProviderNetworkStore } = require("../electron/provider-network.cjs");
 const { createManagedExternalServicesController } = require("../electron/managed-external-services.cjs");
@@ -643,6 +644,14 @@ test("CPA managementHealth uses a bounded range GET and requires a working panel
     assert.equal(management.result.status, 206);
     assert.equal(management.result.authFileCount, 1);
     assert.deepEqual(panelRequests, [{ method: "GET", range: "bytes=0-0" }]);
+    const viaIpc = await invokeContract({
+      invoke: (channel, payload) => {
+        assert.equal(channel, "coding-tools:apps:call");
+        return host.call(payload.moduleId, payload.operation, payload.arguments || {});
+      },
+    }, "apps.call", { moduleId: "cpa", operation: "managementHealth" });
+    assert.equal(viaIpc.result.ok, true);
+    assert.equal(Object.hasOwn(viaIpc.result, "reason"), false);
 
     panelStatus = 404;
     const missing = await host.call("cpa", "managementHealth");
