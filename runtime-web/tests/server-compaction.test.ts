@@ -473,9 +473,10 @@ test("Luna rejects a remote-v2 compaction trigger before opening another browser
 });
 
 test("rejects Pro-only routed models before opening a browser when the account has no Pro access", async () => {
+  // Labels follow the ChatGPT web Light–Max slider (the Pro route is published as "Max").
   for (const [routedModel, label] of [
     ["chatgpt-web/extra-high", "Extra High"],
-    ["chatgpt-web/pro", "Pro"],
+    ["chatgpt-web/pro", "Max"],
   ] as const) {
     const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
       method: "POST",
