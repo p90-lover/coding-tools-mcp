@@ -25,6 +25,7 @@ test("browser Agent Orchestrator only relays allowlisted operations in the selec
     const body = { workspace_id: "chosen", operation: "board", arguments: { workspaceId: "other" } };
     assert.equal((await send(body, "Bearer wrong")).status, 401);
     assert.equal((await send({ ...body, operation: "delete" })).status, 400);
+    assert.equal((await send({ ...body, operation: "plan" })).status, 400);
     assert.equal((await send({ ...body, unexpected: true })).status, 400);
     const response = await send(body);
     assert.equal(response.status, 200);

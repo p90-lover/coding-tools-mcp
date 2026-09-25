@@ -5,9 +5,11 @@ const { presentTask } = require("./kanban.cjs");
 const SPECS = Object.freeze({
   inspect: { readOnly: true, description: "Inspect the in-process source-integrated Agent Orchestrator module." },
   board: { readOnly: true, description: "Read the old Coding Tools plan board with nested clauses." },
-  models: { readOnly: true, description: "List live managed CPA models for planning." },
+  models: { readOnly: true, description: "List CPA models available to eligible worker harnesses." },
+  runs: { readOnly: true, description: "Read durable AO mission graphs in one workspace." },
+  update_run: { readOnly: false, description: "Create, edit, or cancel a revisioned AO run after focused local confirmation." },
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },
-  plan: { readOnly: false, description: "Use one selected CPA model to draft clauses. Requires local confirmation; saves nothing." },
+
   create: { readOnly: false, description: "Create a task in the old Coding Tools plan board after local confirmation." },
   append: { readOnly: false, description: "Append reviewed clauses to the old plan board with its expected revision." },
   move_task: { readOnly: false, description: "Move one plan task after local confirmation." },

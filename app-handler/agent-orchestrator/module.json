@@ -10,5 +10,5 @@
     "license": "Apache-2.0",
     "path": "app-handler/agent-orchestrator"
   },
-  "note": "Uses the existing Coding Tools plan board and managed CPA model route. No AO executable is bundled or launched."
+  "note": "Uses the existing Coding Tools plan board; WebGPT-on-Codex will plan and review, while CPA supplies models only to selected workers. No AO executable is bundled or launched."
 }

@@ -19,6 +19,8 @@ pub struct OAuthRefreshTokenRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppData {
     #[serde(default)]
+    pub ao_runs: Vec<crate::integrations::ao::Run>,
+    #[serde(default)]
     pub execution_book: crate::integrations::execution::book::Book,
     #[serde(default)]
     pub control_board: crate::integrations::board::Board,

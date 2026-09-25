@@ -7,7 +7,7 @@ const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
 const MAX_BODY_BYTES = 16 * 1024;
 const APP_READ_TOOLS = new Set(["apps_list", "apps_catalog", "apps_status"]);
 const NATIVE_CODEX_TOOLS = new Set(["codex_runtime_status", "codex_agent_control", "codex_agent_read", "codex_command_exec"]);
-const AGENT_ORCHESTRATOR_OPERATIONS = new Set(["inspect", "board", "models", "next", "plan", "create", "append", "move_task", "move_clause"]);
+const AGENT_ORCHESTRATOR_OPERATIONS = new Set(["inspect", "board", "models", "runs", "update_run", "next", "create", "append", "move_task", "move_clause"]);
 const MAX_MANUAL_START_BODY_BYTES = 3 * 1024 * 1024;
 const MANUAL_SENT_OBSERVER_TIMEOUT_MS = 35_000;
 

@@ -12,45 +12,50 @@ type PlanTask = {
 };
 type Board = { revision: number; steps: string[]; tasks: PlanTask[]; task?: PlanTask };
 type Draft = { taskId: string; expectedRevision: number; clauses: { title: string; detail: string }[] };
+type AoMission = { id: string; revision: number; cancelled: boolean; nodes: { id: string; role: string; state: string; route: { harness_id: string; model: string } }[] };
 
 const lanes = ["building", "validating", "needs_review", "ready"] as const;
 const words = {
-  en: { title: "Agent Orchestrator", intro: "Your existing Coding Tools plan drives this board. Clauses show the smaller work inside each mission; CPA drafts are reviewed before saving.",
-    workspace: "Workspace", refresh: "Refresh", model: "CPA model", noModel: "Start managed CPA to use a model.",
+  en: { title: "Agent Orchestrator", intro: "The existing plan drives AO missions. Execution waits for exact WebGPT and worker harness routes.",
+    workspace: "Workspace", refresh: "Refresh", missions: "AO missions", noMissions: "No AO missions saved yet", cancelled: "Cancelled", nodes: "nodes",
     addTitle: "New plan task", addDescription: "What should be done?", create: "Add task",
-    draft: "Draft clauses with CPA", apply: "Add reviewed clauses", cancel: "Discard draft",
-    next: "Next clause", noTasks: "No plan tasks yet. Add one here or through workflow_update.",
+    manual: "Add clause", review: "Review clauses", apply: "Add reviewed clauses", cancel: "Discard draft",
+    clauseTitle: "Clause title", clauseDetail: "Details", remove: "Remove", addAnother: "Add another clause",
+    next: "Preview next prompt", noTasks: "No plan tasks yet. Add one here or through workflow_update.",
     building: "Building", validating: "Validating", needs_review: "Needs you", ready: "Ready",
-    clauses: "Clauses", noClauses: "No clauses yet", progress: "completed",
+    clauses: "Clauses", noClauses: "No clauses yet", progress: "clauses marked done",
     backlog: "Backlog", in_progress: "In progress", blocked: "Blocked", done: "Done",
-    copy: "Copy prompt", source: "Coding Tools plan", stage: "Plan step" },
-  "zh-CN": { title: "代理编排", intro: "此看板使用现有 Coding Tools 计划。子条款展示每项任务的细分工作；CPA 草案须审阅后才会保存。",
-    workspace: "工作区", refresh: "刷新", model: "CPA 模型", noModel: "启动托管 CPA 后可使用模型。",
+    copy: "Copy prompt", source: "Coding Tools plan", stage: "Plan step", execution: "Execution unavailable until AO harness is ready", promptOnly: "Prompt only — no execution" },
+  "zh-CN": { title: "代理编排", intro: "现有计划驱动 AO 任务；执行须等待 WebGPT 与工作代理的准确运行路线就绪。",
+    workspace: "工作区", refresh: "刷新", missions: "AO 任务", noMissions: "尚无已保存的 AO 任务", cancelled: "已取消", nodes: "节点",
     addTitle: "新计划任务", addDescription: "需要完成什么？", create: "添加任务",
-    draft: "用 CPA 起草子条款", apply: "添加已审阅子条款", cancel: "丢弃草案",
+    manual: "添加子条款", review: "审阅子条款", apply: "添加已审阅子条款", cancel: "丢弃草案",
+    clauseTitle: "子条款标题", clauseDetail: "详细说明", remove: "移除", addAnother: "再添加一条",
     next: "下一条款", noTasks: "暂无计划任务。可在这里或通过 workflow_update 添加。",
     building: "构建中", validating: "验证中", needs_review: "需要你处理", ready: "已就绪",
     clauses: "子条款", noClauses: "暂无子条款", progress: "已完成",
     backlog: "待办", in_progress: "进行中", blocked: "受阻", done: "完成",
-    copy: "复制提示", source: "Coding Tools 计划", stage: "计划步骤" },
-  "zh-TW": { title: "代理編排", intro: "此看板使用現有 Coding Tools 計劃。子條款顯示每項任務的細分工作；CPA 草案須審閱後才會儲存。",
-    workspace: "工作區", refresh: "重新整理", model: "CPA 模型", noModel: "啟動受管理 CPA 後可使用模型。",
+    copy: "复制提示", source: "Coding Tools 计划", stage: "计划步骤", execution: "AO 执行暂不可用，等待执行环境就绪", promptOnly: "仅供参考的提示词，未执行" },
+  "zh-TW": { title: "代理編排", intro: "現有計劃驅動 AO 任務；執行須等待 WebGPT 與工作代理的準確運行路線就緒。",
+    workspace: "工作區", refresh: "重新整理", missions: "AO 任務", noMissions: "尚無已儲存的 AO 任務", cancelled: "已取消", nodes: "節點",
     addTitle: "新計劃任務", addDescription: "需要完成什麼？", create: "新增任務",
-    draft: "用 CPA 草擬子條款", apply: "新增已審閱子條款", cancel: "捨棄草案",
+    manual: "新增子條款", review: "審閱子條款", apply: "新增已審閱子條款", cancel: "捨棄草案",
+    clauseTitle: "子條款標題", clauseDetail: "詳細說明", remove: "移除", addAnother: "再新增一條",
     next: "下一條款", noTasks: "目前沒有計劃任務。可在此處或透過 workflow_update 新增。",
     building: "建置中", validating: "驗證中", needs_review: "需要你處理", ready: "已就緒",
     clauses: "子條款", noClauses: "尚無子條款", progress: "已完成",
     backlog: "待辦", in_progress: "進行中", blocked: "受阻", done: "完成",
-    copy: "複製提示", source: "Coding Tools 計劃", stage: "計劃步驟" },
-  ja: { title: "エージェント編成", intro: "既存の Coding Tools プランをこのボードの基準にします。小項目は各タスクの作業を示し、CPA の草案は確認後に保存します。",
-    workspace: "ワークスペース", refresh: "更新", model: "CPA モデル", noModel: "管理対象 CPA を起動するとモデルを利用できます。",
+    copy: "複製提示", source: "Coding Tools 計劃", stage: "計劃步驟", execution: "AO 執行暫不可用，等待執行環境就緒", promptOnly: "僅供參考的提示詞，尚未執行" },
+  ja: { title: "エージェント編成", intro: "既存の計画が AO ミッションを動かします。実行には WebGPT とワーカーハーネスの正確なルートが必要です。",
+    workspace: "ワークスペース", refresh: "更新", missions: "AO ミッション", noMissions: "保存済みの AO ミッションはありません", cancelled: "キャンセル済み", nodes: "ノード",
     addTitle: "新しい計画タスク", addDescription: "何を行いますか？", create: "タスクを追加",
-    draft: "CPA で小項目を作成", apply: "確認済み小項目を追加", cancel: "草案を破棄",
+    manual: "小項目を追加", review: "小項目を確認", apply: "確認済み小項目を追加", cancel: "草案を破棄",
+    clauseTitle: "小項目の題名", clauseDetail: "詳細", remove: "削除", addAnother: "別の小項目を追加",
     next: "次の小項目", noTasks: "計画タスクがありません。ここか workflow_update から追加できます。",
     building: "作業中", validating: "検証中", needs_review: "確認が必要", ready: "準備完了",
     clauses: "小項目", noClauses: "小項目はありません", progress: "完了",
     backlog: "未着手", in_progress: "進行中", blocked: "停止中", done: "完了",
-    copy: "指示をコピー", source: "Coding Tools プラン", stage: "計画ステップ" },
+    copy: "指示をコピー", source: "Coding Tools プラン", stage: "計画ステップ", execution: "AO ハーネスの準備が整うまで実行できません", promptOnly: "プロンプトのみ — 実行されていません" },
 } satisfies Record<Language, Record<string, string>>;
 
 async function moduleCall(operation: string, args: JsonObject = {}) {
@@ -62,6 +67,7 @@ async function moduleCall(operation: string, args: JsonObject = {}) {
     throw new Error("Agent Orchestrator returned no result");
   }
   const result = value as Record<string, unknown>;
+  if (result.cancelled === true) return result;
   if (outer.ok === false || result.ok === false) {
     throw new Error(String(result.reason || result.detail || "Agent Orchestrator operation failed"));
   }
@@ -76,14 +82,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [board, setBoard] = useState<Board | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  const [model, setModel] = useState("");
-  const [modelError, setModelError] = useState("");
+  const [missions, setMissions] = useState<AoMission[]>([]);
   const [busy, setBusy] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
   const [taskDescription, setTaskDescription] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [nextPrompt, setNextPrompt] = useState("");
+
+  const loadMissions = async (id: string) => {
+    const current = await moduleCall("runs", { workspaceId: id });
+    setMissions(Array.isArray(current.runs) ? current.runs as AoMission[] : []);
+  };
 
   const loadBoard = async (id: string) => {
     const current = await moduleCall("board", { workspaceId: id }) as unknown as Board;
@@ -114,9 +123,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [setError]);
 
   useEffect(() => {
-    if (!workspaceId) { setBoard(null); return; }
+    if (!workspaceId) { setBoard(null); setMissions([]); return; }
     let live = true;
     setBoard(null);
+    setMissions([]);
     setDraft(null);
     void (async () => {
       try {
@@ -126,15 +136,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (live) setError(cause instanceof Error ? cause.message : String(cause));
       }
       try {
-        const catalog = await moduleCall("models");
-        const available = Array.isArray(catalog.models) ? catalog.models.filter((id): id is string => typeof id === "string") : [];
-        if (live) {
-          setModels(available);
-          setModel((before) => available.includes(before) ? before : available[0] ?? "");
-          setModelError("");
-        }
+        const current = await moduleCall("runs", { workspaceId });
+        if (live) setMissions(Array.isArray(current.runs) ? current.runs as AoMission[] : []);
       } catch (cause) {
-        if (live) { setModels([]); setModel(""); setModelError(cause instanceof Error ? cause.message : String(cause)); }
+        if (live) setError(cause instanceof Error ? cause.message : String(cause));
       }
     })();
     return () => { live = false; };
@@ -158,13 +163,6 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadBoard(workspaceId);
   });
 
-  const plan = (taskId: string) => void run("plan", async () => {
-    const result = await moduleCall("plan", { workspaceId, taskId, model });
-    if (result.cancelled) return;
-    setDraft({ taskId, expectedRevision: Number(result.expectedRevision),
-      clauses: result.clauses as Draft["clauses"] });
-  });
-
   const apply = () => void run("append", async () => {
     if (!draft) return;
     const result = await moduleCall("append", { workspaceId, taskId: draft.taskId,
@@ -182,6 +180,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
       if (!result.cancelled) await loadBoard(workspaceId);
     });
 
+  const editClause = (index: number, patch: Partial<Draft["clauses"][number]>) =>
+    setDraft((current) => current ? { ...current, clauses: current.clauses.map((clause, i) => i === index ? { ...clause, ...patch } : clause) } : null);
+  const remainingClauses = draft && board ? 12 - (board.tasks.find((task) => task.id === draft.taskId)?.clauses.length ?? 12) : 0;
+
   const next = () => void run("next", async () => {
     const result = await moduleCall("next", { workspaceId });
     setNextPrompt(typeof result.prompt === "string" ? result.prompt : "");
@@ -190,22 +192,24 @@ export function AgentOrchestratorSurface({ language, setError }: {
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
       <p className="ao-workflow-intro">{copy.intro}</p>
+      <p className="ao-model-note" role="status">{copy.execution}</p>
       <div className="ao-workflow-toolbar">
         <label>{copy.workspace}
           <select value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} disabled={Boolean(busy)}>
             {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
           </select>
         </label>
-        <label>{copy.model}
-          <select value={model} onChange={(event) => setModel(event.target.value)} disabled={Boolean(busy) || models.length === 0}>
-            {models.map((item) => <option key={item} value={item}>{item}</option>)}
-          </select>
-        </label>
-        <button className="button-secondary" disabled={!workspaceId || Boolean(busy)} onClick={() => void run("refresh", async () => { await loadBoard(workspaceId); })} type="button">{copy.refresh}</button>
+        <button className="button-secondary" disabled={!workspaceId || Boolean(busy)} onClick={() => void run("refresh", async () => { await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]); })} type="button">{copy.refresh}</button>
         <button className="button-secondary" disabled={!board || Boolean(busy)} onClick={next} type="button">{copy.next}</button>
       </div>
-      {modelError ? <p className="ao-model-note">{copy.noModel} {modelError}</p> : null}
-      {nextPrompt ? <div className="ao-next"><p>{nextPrompt}</p><button className="button-secondary" onClick={() => void navigator.clipboard.writeText(nextPrompt)} type="button">{copy.copy}</button></div> : null}
+      {nextPrompt ? <div className="ao-next"><strong>{copy.promptOnly}</strong><p>{nextPrompt}</p><button className="button-secondary" onClick={() => void navigator.clipboard.writeText(nextPrompt)} type="button">{copy.copy}</button></div> : null}
+      <section className="ao-missions" aria-label={copy.missions}>
+        <h2>{copy.missions}</h2>
+        {missions.length ? missions.map((mission) => <article key={mission.id}>
+          <strong>{mission.id}</strong><span>{mission.cancelled ? copy.cancelled : `${mission.nodes.length} ${copy.nodes}`}</span>
+          <ul>{mission.nodes.map((node) => <li key={node.id}>{node.role}: {node.state} · {node.route.harness_id}/{node.route.model}</li>)}</ul>
+        </article>) : <p>{copy.noMissions}</p>}
+      </section>
       <form className="ao-create" onSubmit={(event) => { event.preventDefault(); create(); }}>
         <input aria-label={copy.addTitle} maxLength={240} onChange={(event) => setTaskTitle(event.target.value)} placeholder={copy.addTitle} value={taskTitle} />
         <input aria-label={copy.addDescription} maxLength={8192} onChange={(event) => setTaskDescription(event.target.value)} placeholder={copy.addDescription} value={taskDescription} />
@@ -234,18 +238,25 @@ export function AgentOrchestratorSurface({ language, setError }: {
                       </select>
                     </li>)}
                   </ul> : <p className="ao-card-empty">{copy.noClauses}</p>}
-                  <button className="button-secondary" disabled={!model || Boolean(busy) || task.clauses.length >= 12} onClick={() => plan(task.id)} type="button">{copy.draft}</button>
+                  <div className="inline-actions">
+                    <button className="button-secondary" disabled={Boolean(busy) || Boolean(draft) || task.clauses.length >= 12} onClick={() => setDraft({ taskId: task.id, expectedRevision: board.revision, clauses: [{ title: "", detail: "" }] })} type="button">{copy.manual}</button>
+                  </div>
                 </article>
               ))}
             </section>
           ))}
         </div>
       )}
-      {draft ? <section className="ao-draft" aria-label={copy.draft}>
-        <h2>{copy.draft}</h2>
-        <ol>{draft.clauses.map((clause, index) => <li key={index}><strong>{clause.title}</strong><p>{clause.detail}</p></li>)}</ol>
+      {draft ? <section className="ao-draft" aria-label={copy.review}>
+        <h2>{copy.review}</h2>
+        <ol>{draft.clauses.map((clause, index) => <li key={index}>
+          <input aria-label={`${copy.clauseTitle} ${index + 1}`} maxLength={240} onChange={(event) => editClause(index, { title: event.target.value })} placeholder={copy.clauseTitle} value={clause.title} />
+          <textarea aria-label={`${copy.clauseDetail} ${index + 1}`} maxLength={8192} onChange={(event) => editClause(index, { detail: event.target.value })} placeholder={copy.clauseDetail} value={clause.detail} />
+          <button className="button-secondary" disabled={Boolean(busy)} onClick={() => setDraft((current) => current ? { ...current, clauses: current.clauses.filter((_, i) => i !== index) } : null)} type="button">{copy.remove}</button>
+        </li>)}</ol>
         <div className="inline-actions">
-          <button className="button-primary" disabled={Boolean(busy)} onClick={apply} type="button">{copy.apply}</button>
+          <button className="button-secondary" disabled={Boolean(busy) || draft.clauses.length >= remainingClauses} onClick={() => setDraft((current) => current ? { ...current, clauses: [...current.clauses, { title: "", detail: "" }] } : null)} type="button">{copy.addAnother}</button>
+          <button className="button-primary" disabled={Boolean(busy) || draft.clauses.length === 0 || draft.clauses.length > remainingClauses || draft.clauses.some((clause) => !clause.title.trim())} onClick={apply} type="button">{copy.apply}</button>
           <button className="button-secondary" disabled={Boolean(busy)} onClick={() => setDraft(null)} type="button">{copy.cancel}</button>
         </div>
       </section> : null}

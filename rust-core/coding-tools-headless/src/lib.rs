@@ -539,6 +539,39 @@ struct IntegrationReadRequest {
     credential: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoReadRequest {
+    workspace_id: String,
+    run_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum AoMutation {
+    Create {
+        expected_board_revision: u64,
+        run: integrations::ao::Run,
+    },
+    Graph {
+        run_id: String,
+        expected_revision: u64,
+        change: integrations::ao::GraphChange,
+    },
+    Cancel {
+        run_id: String,
+        expected_revision: u64,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoUpdateRequest {
+    workspace_id: String,
+    change: AoMutation,
+    confirm: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutionReadRequest {
@@ -1767,6 +1800,138 @@ fn execution_outcome(
     }
 }
 
+async fn ao_read(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoReadRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_read") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if body.workspace_id.is_empty() || body.workspace_id.len() > 128 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "AO_WORKSPACE_REQUIRED",
+            "Select a workspace",
+        );
+    }
+    if let Err(error) = state.context(&body.workspace_id) {
+        return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error);
+    }
+    let core = state.core.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        core.with_data(|store| {
+            store.refresh()?;
+            let data = store.data();
+            let mut scoped = data
+                .ao_runs
+                .iter()
+                .filter(|run| run.workspace_id == body.workspace_id);
+            let runs = if let Some(run_id) = body.run_id {
+                let run = scoped.find(|run| run.id == run_id).ok_or_else(|| {
+                    coding_tools_core::error::AppError::Message(
+                        "AO run not found in this workspace".into(),
+                    )
+                })?;
+                vec![run.clone()]
+            } else {
+                scoped.take(100).cloned().collect()
+            };
+            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision}))
+        })
+        .map_err(text_error)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(view)) => Json(view).into_response(),
+        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "AO_READ_FAILED", error),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AO_READ_UNKNOWN",
+            "AO read outcome unknown",
+        ),
+    }
+}
+
+async fn ao_update(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoUpdateRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_update") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm || !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm AO changes in the focused local window",
+        );
+    }
+    let context = match state.context(&body.workspace_id) {
+        Ok(context) => context,
+        Err(error) => {
+            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
+        }
+    };
+    let workspace_id = body.workspace_id;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let request = context
+            .for_request()
+            .map_err(|error| error.message().to_string())?;
+        let _guard = request
+            .policy_execution_guard()
+            .map_err(|error| error.message().to_string())?;
+        coding_tools_core::data::DataStore::update_file(|data| match body.change {
+            AoMutation::Create {
+                expected_board_revision,
+                run,
+            } => {
+                if run.workspace_id != workspace_id {
+                    return Err(coding_tools_core::error::AppError::Message(
+                        "AO run belongs to another workspace".into(),
+                    ));
+                }
+                integrations::ao::create(data, expected_board_revision, run)
+            }
+            AoMutation::Graph {
+                run_id,
+                expected_revision,
+                change,
+            } => integrations::ao::update_graph(
+                data,
+                &workspace_id,
+                &run_id,
+                expected_revision,
+                change,
+            ),
+            AoMutation::Cancel {
+                run_id,
+                expected_revision,
+            } => integrations::ao::cancel(data, &workspace_id, &run_id, expected_revision),
+        })
+        .map_err(text_error)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(run)) => Json(json!({"ok":true,"run":run})).into_response(),
+        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "AO_UPDATE_FAILED", error),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "AO_UPDATE_UNKNOWN",
+            "AO update outcome unknown; refresh before retrying",
+        ),
+    }
+}
+
 async fn execution_read(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -2196,6 +2361,8 @@ fn router(state: ServiceState) -> Router {
         .route("/api/v1/workspaces/service", post(workspace_service))
         .route("/api/v1/workspaces/secret", post(workspace_secret))
         .route("/api/v1/integrations/read", post(integration_read))
+        .route("/api/v1/ao/read", post(ao_read))
+        .route("/api/v1/ao/update", post(ao_update))
         .route("/api/v1/execution/read", post(execution_read))
         .route("/api/v1/execution/provider", post(execution_provider))
         .route("/api/v1/execution/update", post(execution_update))

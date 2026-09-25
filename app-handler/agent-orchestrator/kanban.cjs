@@ -8,9 +8,12 @@ function presentTask(task) {
   const done = clauses.filter((clause) => clause.state === "done").length;
   const blocked = task.state === "blocked" || clauses.some((clause) => clause.state === "blocked");
   const active = clauses.find((clause) => clause.state === "in_progress");
+  const needsReview = blocked || (task.state === "done"
+    ? done < clauses.length
+    : clauses.length > 0 && done === clauses.length);
   const lane = task.state === "archived" ? "archive"
-    : task.state === "done" ? "ready"
-      : blocked ? "needs_review"
+    : needsReview ? "needs_review"
+      : task.state === "done" ? "ready"
         : task.step >= 5 || done > 0 ? "validating" : "building";
   const displayStatus = lane === "archive" ? "Archived"
     : lane === "ready" ? "Done"

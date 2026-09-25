@@ -2,7 +2,7 @@
 .ao-workflow-intro, .ao-model-note, .ao-empty { color: var(--color-text-secondary); line-height: 1.5; }
 .ao-workflow-toolbar, .ao-create { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 18px 0; }
 .ao-workflow-toolbar label { display: grid; flex: 1 1 180px; min-width: 0; gap: 6px; color: var(--color-text-secondary); font-size: 12px; }
-.ao-workflow select, .ao-workflow input { min-width: 0; width: 100%; padding: 9px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 8px; background: var(--color-bg-secondary); color: var(--color-text-primary); }
+.ao-workflow select, .ao-workflow input, .ao-workflow textarea { min-width: 0; width: 100%; padding: 9px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 8px; background: var(--color-bg-secondary); color: var(--color-text-primary); }
 .ao-workflow button { flex: 0 0 auto; }
 .ao-create input { flex: 1 1 200px; width: auto; }
 .ao-board { display: grid; grid-template-columns: repeat(4, minmax(240px, 1fr)); gap: 12px; min-width: 0; overflow-x: auto; padding-bottom: 12px; }
@@ -18,8 +18,16 @@
 .ao-clauses { padding-left: 18px; }
 .ao-clauses li { margin: 8px 0; overflow-wrap: anywhere; }
 .ao-clauses li select { margin-top: 5px; }
+.ao-missions { margin: 18px 0; }
+.ao-missions h2 { font-size: 14px; }
+.ao-missions article { margin: 8px 0; padding: 12px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 10px; overflow-wrap: anywhere; }
+.ao-missions article > span { float: right; color: var(--color-text-secondary); font-size: 11px; }
+.ao-missions ul { margin: 8px 0 0; padding-left: 18px; color: var(--color-text-secondary); font-size: 11px; }
 .ao-next, .ao-draft { margin: 14px 0; padding: 14px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 10px; overflow-wrap: anywhere; }
 .ao-next p, .ao-draft p { white-space: pre-wrap; }
+.ao-draft li { display: grid; gap: 7px; margin: 12px 0; }
+.ao-draft li textarea { min-height: 70px; resize: vertical; }
+.ao-draft li button { justify-self: start; }
 @media (max-width: 760px) {
   .ao-board { grid-template-columns: minmax(0, 1fr); overflow-x: visible; }
   .ao-lane { min-width: 0; }

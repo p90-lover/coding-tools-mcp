@@ -2167,9 +2167,9 @@ async function start() {
   });
   const providerServices = createAppsProviderServices({ providerNetworkReady });
   const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
-    requestHeadless: (endpoint, body) => {
+    requestHeadless: (endpoint, body, options) => {
       if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
-      return headlessHost.request(endpoint, body);
+      return headlessHost.request(endpoint, body, options);
     },
     cpaConnection: () => externalServicesController.cpaConnection(),
     confirm: async ({ message, detail }) => {

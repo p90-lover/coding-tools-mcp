@@ -574,10 +574,10 @@ export async function runChatGptMcpServer(options: {
     "coding_tools_agent_orchestrator",
     {
       title: "Use the Coding Tools plan board",
-      description: "Read and update the existing Coding Tools plan through the source-integrated Agent Orchestrator module. Use board/models/next to inspect, plan to draft clauses with a selected managed CPA model, and create/append/move_task/move_clause to update the plan. Planning and writes require confirmation in the focused desktop window; a CPA draft is not saved until append.",
+      description: "Inspect the existing Coding Tools plan and durable AO runs. Use board/runs/next for readback, models to inspect CPA worker-provider availability, create/append/move_task/move_clause for plan edits, and update_run for a revisioned AO graph change. Writes require confirmation in the focused desktop window. AO execution remains unavailable until its WebGPT planner/reviewer and selected worker harness routes are connected.",
       inputSchema: {
         workspace_id: z.string().min(1).max(128),
-        operation: z.enum(["inspect", "board", "models", "next", "plan", "create", "append", "move_task", "move_clause"]),
+        operation: z.enum(["inspect", "board", "models", "runs", "update_run", "next", "create", "append", "move_task", "move_clause"]),
         arguments: z.record(z.string(), z.unknown()),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
