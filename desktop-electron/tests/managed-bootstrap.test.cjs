@@ -248,3 +248,21 @@ test("dispose prevents future reconciliation", () => {
     /disposed/i,
   );
 });
+
+test("dispose stops an in-flight bootstrap pass from starting the next component", async () => {
+  const entered = deferred();
+  const release = deferred();
+  const { bootstrap, calls } = bootstrapFixture([
+    managedService("cpa", "installed"),
+    managedService("paseo", "installed"),
+  ], { start: async ({ id, update }) => {
+    if (id === "cpa") { entered.resolve(); await release.promise; }
+    return update(id, { status: "starting" });
+  } });
+  const running = bootstrap.reconcile({ reason: "startup" });
+  await entered.promise;
+  bootstrap.dispose();
+  release.resolve();
+  await running;
+  assert.equal(calls.includes("start:paseo"), false);
+});

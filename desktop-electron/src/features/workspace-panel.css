@@ -1,0 +1,117 @@
+.workspace-access-list {
+  border-top: 1px solid var(--color-border-light);
+}
+
+.workspace-access-row {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.workspace-access-row header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workspace-access-row h2 {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+
+.workspace-access-path span,
+.workspace-access-grid dt,
+.workspace-access-boundary {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.workspace-access-path {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 12px;
+  margin: 12px 0 18px;
+}
+
+.workspace-access-path code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.workspace-access-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+}
+
+.workspace-access-grid dd {
+  margin: 5px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.workspace-access-boundary {
+  margin-top: 18px;
+  line-height: 1.5;
+}
+
+.workspace-policy-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+}
+
+.workspace-policy-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.workspace-policy-form select {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  background: var(--color-background-control);
+  color: var(--color-text-primary);
+}
+
+.workspace-policy-form .workspace-policy-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.workspace-policy-form .workspace-policy-check input {
+  width: 16px;
+  height: 16px;
+}
+
+.workspace-policy-form p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.workspace-policy-form button {
+  justify-self: start;
+}
+
+@media (max-width: 760px) {
+  .workspace-access-grid,
+  .workspace-policy-form {
+    grid-template-columns: 1fr;
+  }
+}

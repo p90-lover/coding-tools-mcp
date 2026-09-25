@@ -1,8 +1,8 @@
 .upstream-tool-surface {
   box-sizing: border-box;
-  height: calc(100vh - var(--titlebar-height));
+  height: 100%;
   overflow: auto;
-  padding: 30px clamp(18px, 3.5vw, 48px) 60px;
+  padding: calc(var(--height-titlebar) + 30px) clamp(18px, 3.5vw, 48px) 60px;
   background:
     radial-gradient(circle at 85% -10%, rgb(78 129 255 / 13%), transparent 34%),
     var(--color-bg-primary);
@@ -12,7 +12,19 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 0;
+  padding: var(--height-titlebar) 0 0;
+}
+
+.upstream-tool-surface.is-immersive.chrome-open {
+  overflow-y: auto;
+}
+
+.upstream-tool-surface.is-immersive.chrome-open .upstream-tool-frame-shell {
+  display: none;
+}
+
+.upstream-tool-surface.is-immersive:not(.chrome-open) .upstream-original-function {
+  display: none;
 }
 
 .upstream-tool-surface.is-immersive .upstream-tool-heading {
@@ -56,6 +68,11 @@
 }
 
 .upstream-tool-surface.is-immersive .upstream-tool-frame-shell iframe {
+  height: 100%;
+  min-height: 0;
+}
+
+.upstream-tool-surface.is-immersive .upstream-tool-frame-empty {
   height: 100%;
   min-height: 0;
 }
@@ -287,9 +304,6 @@
 .upstream-original-actions input {
   min-width: 140px;
 }
-  color: var(--color-text-primary);
-  font-size: 17px;
-}
 
 .upstream-native-control {
   margin-top: 16px;
@@ -312,7 +326,7 @@
 
 @media (max-width: 760px) {
   .upstream-tool-surface {
-    padding: 24px 14px 52px;
+    padding: calc(var(--height-titlebar) + 24px) 14px 52px;
   }
 
   .upstream-tool-heading,

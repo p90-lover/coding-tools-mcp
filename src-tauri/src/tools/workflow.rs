@@ -70,6 +70,8 @@ fn base_input_schema(name: &str) -> Value {
         {"type":"object","properties":{"operation":{"const":"move"},"id":id,"state":state,"before_id":id},"required":["operation","id","state"],"additionalProperties":false},
         {"type":"object","properties":{"operation":{"const":"edit"},"id":id,"title":{"type":"string","minLength":1,"maxLength":240},"description":{"type":"string","maxLength":8192}},"required":["operation","id","title","description"],"additionalProperties":false},
         {"type":"object","properties":{"operation":{"const":"observe"},"id":id,"note":{"type":"string","minLength":1,"maxLength":4096}},"required":["operation","id","note"],"additionalProperties":false},
+        {"type":"object","properties":{"operation":{"const":"append_clauses"},"id":id,"clauses":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"object","properties":{"title":{"type":"string","minLength":1,"maxLength":240},"detail":{"type":"string","maxLength":8192}},"required":["title"],"additionalProperties":false}}},"required":["operation","id","clauses"],"additionalProperties":false},
+        {"type":"object","properties":{"operation":{"const":"move_clause"},"id":id,"clause_id":id,"state":state},"required":["operation","id","clause_id","state"],"additionalProperties":false},
         {"type":"object","properties":{"operation":{"enum":["archive","restore"]},"id":id},"required":["operation","id"],"additionalProperties":false}
         ]}},"required":["expected_revision","change"],"additionalProperties":false})
 }

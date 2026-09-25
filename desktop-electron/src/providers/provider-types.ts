@@ -130,7 +130,7 @@ export const DEFAULT_PROVIDERS = [
     auth: "browser_session",
     protocol: "openai_responses",
     capabilities: ["text", "reasoning", "tools", "vision", "image_generation"],
-    models: ["web-gpt"],
+    models: ["chatgpt-web/high"],
     proxyMode: "inherit",
     loginAdapters: [
       { id: "native-browser", kind: "native_browser", label: "Native BrowserHost", labelTraditionalChinese: "原生 BrowserHost" },

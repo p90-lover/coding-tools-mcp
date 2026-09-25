@@ -1,2 +1,0 @@
-superseded_by=0b7d0a13ae7342c3e300c964c212ab11fc4aaa9d
-source_branch=release/codex-router-multiprovider-0.7.0-rc.6

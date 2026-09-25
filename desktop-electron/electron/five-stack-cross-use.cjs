@@ -4,6 +4,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const FIVE_STACK_ENDPOINTS = Object.freeze({
+  web: Object.freeze({
+    origin: "http://127.0.0.1:17841",
+    v1: "http://127.0.0.1:17841/v1",
+  }),
   cpa: Object.freeze({
     origin: "http://127.0.0.1:8317",
     v1: "http://127.0.0.1:8317/v1",

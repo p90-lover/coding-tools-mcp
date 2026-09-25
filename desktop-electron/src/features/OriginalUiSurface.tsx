@@ -5,6 +5,7 @@ import "./original-ui.css";
 
 interface OriginalUiSurfaceProps {
   toolId: OriginalUiId;
+  initialSection?: string;
   language: Language;
   setError: (error: string | null) => void;
 }
@@ -52,11 +53,12 @@ function emptyCopy(language: Language, toolId: OriginalUiId, ready: boolean): { 
   };
 }
 
-export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurfaceProps) {
+export function OriginalUiSurface({ toolId, initialSection, language, setError }: OriginalUiSurfaceProps) {
   const api = window.codexWebLauncher;
   const [snapshot, setSnapshot] = useState<OriginalUiCatalog | null>(null);
   const [selectedSection, setSelectedSection] = useState("");
   const [frameUrl, setFrameUrl] = useState("");
+  const [cpaFrameRevision, setCpaFrameRevision] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [localError, setLocalError] = useState("");
@@ -71,7 +73,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     const next = await api.originalUiSnapshot();
     setSnapshot(next);
     const current = toolFrom(next, toolId);
-    if (current) setSelectedSection((value) => value || current.sections[0] || "");
+    if (current) setSelectedSection((value) => value || initialSection || current.sections[0] || "");
     return current;
   };
 
@@ -100,6 +102,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
     const result = await api.openOriginalUi(toolId, section);
     setSelectedSection(result.section);
     setFrameUrl(result.url);
+    if (toolId === "cpa" && result.url) setCpaFrameRevision((revision) => revision + 1);
     setSnapshot((current) => current
       ? {
           ...current,
@@ -142,7 +145,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
         if (cancelled) return;
         setSnapshot(next);
         const current = toolFrom(next, toolId);
-        const section = current?.sections[0] || "";
+        const section = current?.sections.includes(initialSection || "") ? initialSection! : current?.sections[0] || "";
         if (current) setSelectedSection(section);
         if (current?.status === "ready" || current?.status === "offline" || current?.status === "starting") {
           const opened = await openSection(section);
@@ -165,7 +168,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       cancelled = true;
       unsubscribe?.();
     };
-  }, [api, language, toolId]);
+  }, [api, initialSection, language, toolId]);
 
   const run = async (name: string, action: () => Promise<unknown>) => {
     setBusy(name);
@@ -274,6 +277,7 @@ export function OriginalUiSurface({ toolId, language, setError }: OriginalUiSurf
       <div className="original-ui-frame-shell">
         {frameUrl ? (
           <iframe
+            key={toolId === "cpa" ? cpaFrameRevision : undefined}
             allow="clipboard-read; clipboard-write"
             referrerPolicy="no-referrer"
             sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"

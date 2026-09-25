@@ -19,6 +19,21 @@ const { createUpstreamToolController, sectionUrl: upstreamSectionUrl } = require
 const root = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 
+test("packaged renderer permits only loopback app frames", () => {
+  const html = read("index.html");
+  const csp = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)?.[1];
+  assert.ok(csp, "renderer CSP is present");
+  const frameSources = csp.split(";").map((part) => part.trim()).find((part) => part.startsWith("frame-src "));
+  assert.ok(frameSources, "local module iframes must not fall back to default-src 'self'");
+  for (const host of ["127.0.0.1", "localhost"]) {
+    for (const scheme of ["http", "https"]) {
+      assert.ok(frameSources.includes(`${scheme}://${host}:*`), `${scheme}://${host} modules can render`);
+    }
+  }
+  assert.doesNotMatch(frameSources, /(?:^|\s)(?:https?:|\*)(?:\s|$)/);
+  assert.doesNotMatch(frameSources, /\[::1\]/, "IPv6 literals are not valid CSP host sources");
+});
+
 function service(id, extra = {}) {
   const endpoints = {
     cpa: "http://127.0.0.1:8317/",
@@ -196,6 +211,17 @@ test("managed-app openEmbeddedTool starts Paseo when needed and degrades Anneal 
   anneal.dispose();
 });
 
+test("CPA and Codex Router embedded frames fill their workspaces", () => {
+  const styles = read("src/features/original-ui.css");
+  const cpa = styles.match(/\.original-ui-surface\[data-tool="cpa"\]\s*\{([^}]+)\}/)?.[1];
+  const router = styles.match(/\.original-ui-surface\[data-tool="codex-router"\]\s*\{([^}]+)\}/)?.[1];
+  assert.ok(cpa, "CPA has a scoped full-pane sizing rule");
+  assert.ok(router, "Codex Router has a scoped full-pane sizing rule");
+  assert.match(cpa, /height:\s*100%\s*;/);
+  assert.match(router, /height:\s*100%\s*;/);
+  assert.match(styles, /\.original-ui-frame-shell iframe\s*\{[^}]*width:\s*100%\s*;[^}]*height:\s*100%\s*;/);
+});
+
 test("desktop screens inspect modules through Coding Tools APIs without auto-opening standalone UIs", () => {
   const original = read("src/features/OriginalUiSurface.tsx");
   const upstream = read("src/features/UpstreamToolSurface.tsx");
@@ -214,7 +240,7 @@ test("desktop screens inspect modules through Coding Tools APIs without auto-ope
   assert.match(upstream, /openEmbeddedTool/);
   assert.doesNotMatch(upstream, /startUpstreamTool/);
   assert.match(app, /toolId="cpa"/);
-  assert.match(app, /toolId="codex-router"/);
+  assert.doesNotMatch(app, /toolId="codex-router"/);
   assert.match(app, /<UpstreamToolSurface/);
   assert.match(app, /PaseoOrchestratorSurface/);
   assert.match(app, /AnnealTasksSurface/);

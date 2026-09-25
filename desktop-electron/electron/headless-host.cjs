@@ -34,7 +34,7 @@ function safeErrorMessage(error) {
   return message.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").slice(0, 500);
 }
 
-function requestJson({ endpoint, token, pathname, method = "POST", body = null, timeout = REQUEST_TIMEOUT_MS }) {
+function requestJson({ endpoint, token, localUiToken = null, pathname, method = "POST", body = null, timeout = REQUEST_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     const url = new URL(pathname, endpoint);
     if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password) {
@@ -50,6 +50,7 @@ function requestJson({ endpoint, token, pathname, method = "POST", body = null, 
       method,
       headers: {
         authorization: `Bearer ${token}`,
+        ...(localUiToken ? { "x-coding-tools-local-ui": localUiToken } : {}),
         accept: "application/json",
         ...(payload ? {
           "content-type": "application/json",
@@ -140,6 +141,7 @@ class HeadlessHost {
     const executable = this.binaryPath();
     const appDataDir = path.join(this.app.getPath("userData"), "headless");
     const id = `${process.pid}-${crypto.randomUUID()}`;
+    const uiToken = crypto.randomBytes(32).toString("base64url");
     const descriptorPath = path.join(appDataDir, "runtime", `control-${id}.json`);
     const tokenPath = path.join(appDataDir, "aiTemp", "headless-control", `token-${id}.txt`);
     fs.mkdirSync(path.dirname(descriptorPath), { recursive: true, mode: 0o700 });
@@ -152,11 +154,20 @@ class HeadlessHost {
         CODING_TOOLS_APP_DATA_DIR: appDataDir,
         CODING_TOOLS_CONTROL_DESCRIPTOR_FILE: descriptorPath,
         CODING_TOOLS_CONTROL_TOKEN_FILE: tokenPath,
+        CODING_TOOLS_LOCAL_UI_STDIN: "1",
       },
-      stdio: "ignore",
+      stdio: ["pipe", "ignore", "ignore"],
       windowsHide: true,
     });
     this.child = child;
+    if (!child.stdin) {
+      child.kill();
+      throw new Error("Headless local UI channel unavailable");
+    }
+    child.stdin.on("error", (error) => {
+      this.logger.warn("headless.local_ui_channel_failed", { message: safeErrorMessage(error) });
+    });
+    child.stdin.end(uiToken + "\n");
     child.once("exit", (code, signal) => {
       const expected = this.stopping;
       this.control = null;
@@ -194,6 +205,7 @@ class HeadlessHost {
           this.control = Object.freeze({
             endpoint: descriptor.endpoint,
             token,
+            uiToken,
             descriptorPath,
             tokenPath,
           });
@@ -260,9 +272,11 @@ class HeadlessHost {
       return await requestJson({
         endpoint: control.endpoint,
         token: control.token,
+        localUiToken: options.localConfirmation === true ? control.uiToken : null,
         pathname,
         method,
         body,
+        timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
       });
     } catch (error) {
       throw new Error(safeErrorMessage(error));

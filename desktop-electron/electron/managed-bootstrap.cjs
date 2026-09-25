@@ -263,7 +263,10 @@ function createManagedBootstrap({
     };
     emit();
 
-    for (const id of selectedIds) await reconcileComponent(id);
+    for (const id of selectedIds) {
+      if (disposed) break;
+      await reconcileComponent(id);
+    }
 
     state = {
       ...state,

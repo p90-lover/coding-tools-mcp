@@ -9,6 +9,7 @@ const MODULE_IDS = Object.freeze([
   "commandcode-proxy",
   "paseo",
   "anneal",
+  "agent-orchestrator",
 ]);
 
 function createCodingToolsAppsHost({

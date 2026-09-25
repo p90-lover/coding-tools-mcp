@@ -13,14 +13,18 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
+import { OrchestratorSurface } from "./features/ProviderOrchestratorSurfaces";
 import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
 import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
-import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
-import { InProcessAppsPanel } from "./features/InProcessAppsPanel";
+import { WorkspacePanel } from "./features/WorkspacePanel";
+import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
+import { NativeCodexPanel } from "./features/NativeCodexPanel";
+import { AgentOrchestratorSurface } from "./features/AgentOrchestratorSurface";
+
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -414,20 +418,14 @@ function LauncherShell({
   const extraSurfaceActive = surface === "providers"
     || surface === "integrations"
     || surface === "cpa"
-    || surface === "codex-router"
-    || surface === "paseo"
-    || surface === "anneal"
+
     || surface === "network";
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
-  const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
-    snapshot.state.browserInteractionMode === "automatic"
-      && snapshot.state.coreSetupComplete === true
-      && !snapshot.state.experimentalBiggerContext,
-  );
+  const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(false);
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser"
@@ -571,7 +569,7 @@ function LauncherShell({
     if (next !== "browser") {
       void api!.setBrowserSurfaceActive(false).catch((cause) => setError(messageOf(cause)));
     }
-    setSurface(next);
+    setSurface(next === "codex-router" ? "oauth" : next === "api-models" ? "providers" : next);
     if (compactSidebar) setSidebarOpen(false);
   };
 
@@ -713,6 +711,20 @@ function LauncherShell({
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
+                <SidebarItem
+                  active={surface === "instant-mcp"}
+                  icon="mcp"
+                  label={copy.liveMcpTools}
+                  onClick={() => navigateSurface("instant-mcp")}
+                />
+                <SidebarItem active={surface === "workspace-auth"} icon="mcp" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
+                <SidebarItem active={surface === "native-codex"} icon="orchestrator" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
+                <SidebarItem active={surface === "oauth"} icon="providers" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
+
+                <SidebarItem active={surface === "orchestrator"} icon="orchestrator" label={copy.structuredOrchestrator} onClick={() => navigateSurface("orchestrator")} />
+                <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Agent Orchestrator" onClick={() => navigateSurface("agent-orchestrator")} />
+
+
               </SidebarGroup>
               <details className="sidebar-more" open={extraSurfaceActive}>
                 <summary>{copy.moreTools}</summary>
@@ -734,24 +746,7 @@ function LauncherShell({
                   label="CPA"
                   onClick={() => navigateSurface("cpa")}
                 />
-                <SidebarItem
-                  active={surface === "codex-router"}
-                  icon="orchestrator"
-                  label="Codex Router"
-                  onClick={() => navigateSurface("codex-router")}
-                />
-                <SidebarItem
-                  active={surface === "paseo"}
-                  icon="orchestrator"
-                  label={language === "zh-TW" ? "Paseo 協調器" : copy.paseoOrchestrator}
-                  onClick={() => navigateSurface("paseo")}
-                />
-                <SidebarItem
-                  active={surface === "anneal"}
-                  icon="activity"
-                  label={language === "zh-TW" ? "Anneal 任務" : copy.annealTasks}
-                  onClick={() => navigateSurface("anneal")}
-                />
+
                 <SidebarItem
                   active={surface === "network"}
                   icon="globe"
@@ -792,15 +787,7 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.div
-            animate={{ opacity: 1 }}
-            className="surface-transition"
-            exit={{ opacity: 0 }}
-            initial={{ opacity: 0 }}
-            key={surface}
-            transition={{ duration: 0.16 }}
-          >
+        <div className="surface-transition" key={surface}>
             {surface === "browser" ? (
               <BrowserSurface
                 browser={browser}
@@ -847,8 +834,26 @@ function LauncherShell({
             {surface === "activity" ? (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
             ) : null}
-            {surface === "providers" ? (
-              <ProviderCenterSurface language={language} setError={setError} />
+            {surface === "instant-mcp" ? (
+              <InstantMcpToolsSurface copy={copy} language={language} setError={setError} />
+            ) : null}
+            {surface === "workspace-auth" ? (
+              <ContentSurface title={copy.workspaceAuth}><WorkspaceAuthPanel copy={copy} language={language} setError={setError} /></ContentSurface>
+            ) : null}
+            {surface === "native-codex" ? (
+              <ContentSurface title={copy.nativeCodex}><NativeCodexPanel copy={copy} language={language} setError={setError} /></ContentSurface>
+            ) : null}
+            {surface === "oauth" ? (
+              <OriginalUiSurface initialSection="auth-files" language={language} setError={setError} toolId="cpa" />
+            ) : null}
+            {(surface === "providers" || surface === "api-models") ? (
+              <ProviderCenterSurface initialCategory={surface === "api-models" ? "api_key" : "all"} language={language} setError={setError} />
+            ) : null}
+            {surface === "orchestrator" ? (
+              <OrchestratorSurface language={language} setError={setError} />
+            ) : null}
+            {surface === "agent-orchestrator" ? (
+              <ContentSurface title="Agent Orchestrator"><AgentOrchestratorSurface language={language} setError={setError} /></ContentSurface>
             ) : null}
             {surface === "integrations" ? (
               <ExternalServicesSurface
@@ -864,9 +869,7 @@ function LauncherShell({
             {surface === "cpa" ? (
               <OriginalUiSurface language={language} setError={setError} toolId="cpa" />
             ) : null}
-            {surface === "codex-router" ? (
-              <OriginalUiSurface language={language} setError={setError} toolId="codex-router" />
-            ) : null}
+
             {surface === "paseo" ? (
               <UpstreamToolSurface
                 language={language}
@@ -900,8 +903,7 @@ function LauncherShell({
                 updateState={updateState}
               />
             ) : null}
-          </motion.div>
-        </AnimatePresence>
+        </div>
       </section>
 
       <AnimatePresence>
@@ -1023,6 +1025,7 @@ function BrowserSurface({
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
+  const tabLimitReached = (browser?.tabs.filter(tab => tab.id !== "home").length ?? 0) >= (browser?.maxTabs ?? 5);
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
     && operation.status === "running"
@@ -1048,6 +1051,14 @@ function BrowserSurface({
     try {
       if (visible) await api!.hideBrowser();
       else await api!.showBrowser();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const createTab = async () => {
+    setError(null);
+    try {
+      await api!.createBrowserTab();
     } catch (cause) {
       setError(messageOf(cause));
     }
@@ -1128,6 +1139,16 @@ function BrowserSurface({
             ) : null}
           </div>
         ))}
+        <button
+          aria-label={copy.newTab}
+          className="browser-new-tab"
+          disabled={!browser || tabLimitReached || (!manualInteraction && !browser.authenticated)}
+          onClick={() => void createTab()}
+          title={copy.newTab}
+          type="button"
+        >
+          <Icon name="plus" />
+        </button>
         <div className="browser-tab-drag draggable" />
       </div>
       <div className="browser-toolbar">
@@ -1451,6 +1472,7 @@ function McpSurface({
   const [localBusy, setLocalBusy] = useState(false);
   const busy = localBusy || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
+  const [connectorResult, setConnectorResult] = useState<string | null>(null);
   const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
   const manualInteraction = interactionMode === "manual";
   const steps = useMemo(() => [
@@ -1507,6 +1529,22 @@ function McpSurface({
       setLocalBusy(false);
     }
   };
+  const createConnector = async () => {
+    if (busy) return;
+    setLocalBusy(true);
+    setError(null);
+    setConnectorResult(null);
+    try {
+      const result = await api!.createMcpConnector();
+      setConnectorResult(result.created ? copy.connectorCreated : copy.connectorAlreadyExists);
+      updateState((await api!.snapshot()).state);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setLocalBusy(false);
+    }
+  };
+
   const verify = async () => {
     if (busy) return;
     setLocalBusy(true);
@@ -1674,6 +1712,14 @@ function McpSurface({
                     {copy.openConnectors}
                   </SecondaryButton>
                 </div>
+                {!devProfile && !manualInteraction && !configuringInactiveMode ? (
+                  <div className="inline-actions">
+                    <SecondaryButton disabled={busy || !credentialsConfigured} onClick={() => void createConnector()}>
+                      {copy.autoCreateConnector}
+                    </SecondaryButton>
+                  </div>
+                ) : null}
+                {connectorResult ? <NoticeRow icon="check" tone="success">{connectorResult}</NoticeRow> : null}
                 {doctor ? <DoctorSummary copy={copy} language={language} report={doctor} /> : null}
               </div>
             ) : null}
@@ -1718,8 +1764,6 @@ function McpSurface({
           </>
         ) : null}
       </div>
-      <InProcessAppsPanel copy={copy} language={language} setError={setError} />
-      <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
   );
 }
@@ -1764,6 +1808,22 @@ function ActivitySurface({
           </div>
         ))}
       </div>
+    </ContentSurface>
+  );
+}
+
+function InstantMcpToolsSurface({
+  copy,
+  language,
+  setError,
+}: {
+  copy: Copy;
+  language: Language;
+  setError: (error: string | null) => void;
+}) {
+  return (
+    <ContentSurface title={copy.liveMcpTools}>
+      <WorkspacePanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
   );
 }
@@ -1924,6 +1984,20 @@ function SettingsSurface({
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />
+        {!devProfile ? <SettingRow
+          body={copy.autoConnectExistingMcpBody}
+          label={copy.autoConnectExistingMcp}
+        >
+          <Switch
+            checked={snapshot.state.autoConnectExistingMcp}
+            disabled={snapshot.state.browserInteractionMode !== "automatic"
+              || snapshot.state.mcpRuntimeInstalled !== true
+              || !snapshot.mcpCredentialsConfigured}
+            onChange={(checked) => void api!.setPreference("autoConnectExistingMcp", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
         <SettingRow body={devProfile ? copy.devKeepRunningBody : copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
           <Switch
             checked={snapshot.state.keepRunningOnClose}

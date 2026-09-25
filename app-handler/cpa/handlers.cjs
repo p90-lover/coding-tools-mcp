@@ -71,28 +71,33 @@ function createModule() {
       description: "Probe the CPA management panel and auth-file listing over loopback HTTP. Does not open a browser window.",
       run: async (_args, context) => {
         const loopback = resolveLoopback(getOrigin, context);
-        let panel = { reachable: false, status: 0 };
+        let panel = { ok: false, reachable: false, status: 0 };
         try {
-          const result = await requestJson(loopback.origin, { method: "GET", pathname: "/management.html" });
-          panel = { reachable: result.status > 0, status: result.status };
+          // CPA 7.3.7 has no HEAD route; a byte range avoids downloading the full panel.
+          const result = await requestJson(loopback.origin, {
+            method: "GET", pathname: "/management.html", headers: { Range: "bytes=0-0" },
+          });
+          panel = { ok: result.ok, reachable: result.status > 0, status: result.status };
         } catch (error) {
-          panel = { reachable: false, status: 0, error: publicError(error) };
+          panel = { ok: false, reachable: false, status: 0, error: publicError(error) };
         }
         const auth = await listAuthFiles(context);
         const reason = !panel.reachable
           ? (panel.error || "CPA management panel is unreachable")
-          : !auth.ok
-            ? (auth.reason || "CPA management API is unavailable")
-            : auth.count === 0
-              ? (auth.reason || "CPA auth-dir is empty")
-              : undefined;
+          : !panel.ok
+            ? `CPA management panel returned HTTP ${panel.status}`
+            : !auth.ok
+              ? (auth.reason || "CPA management API is unavailable")
+              : auth.count === 0
+                ? (auth.reason || "CPA auth-dir is empty")
+                : undefined;
         return sanitizePublic({
-          ok: panel.reachable && auth.ok === true,
+          ok: panel.ok && auth.ok === true,
           reachable: panel.reachable,
           status: panel.status,
           authFileCount: auth.count || 0,
           authFiles: auth.files || [],
-          reason,
+          ...(reason ? { reason } : {}),
         });
       },
     },

@@ -1,5 +1,0 @@
-Exact-source verification marker
-
-Resolved source parent: 96b0bba648b50591205eac339a26232a3fba4a12
-Purpose: rerun the complete CPA + Codex Router + CommandCode Proxy + Paseo + Anneal union gate after the shared preload and type APIs were committed.
-Required evidence: 65 focused tests, TypeScript, renderer build under aiTemp, strict no-delete diff, and idempotent materialization.

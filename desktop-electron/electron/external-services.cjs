@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { terminateOwnedProcessTree } = require("./process-tree.cjs");
 const { publicUrlMap } = require("./five-stack-cross-use.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
@@ -431,6 +432,7 @@ function createExternalServicesController({
   env = process.env,
   fetchImpl = globalThis.fetch,
   spawnProcess = spawn,
+  terminateProcessTree = terminateOwnedProcessTree,
   runRuntimeCommand = null,
   getProviderSnapshot = null,
   getHealthHeaders = null,
@@ -447,6 +449,7 @@ function createExternalServicesController({
     state = initialState(env);
   }
   const processes = new Map();
+  let disposed = false;
   const runtime = new Map(SERVICE_IDS.map((id) => [id, {
     status: state.services[id].enabled ? "unknown" : "disabled",
     pid: null,
@@ -860,8 +863,10 @@ function createExternalServicesController({
   }
 
   async function start(idValue) {
+    if (disposed) throw new Error("External services controller has been disposed");
     const id = requiredServiceId(idValue);
     const current = await inspect(id);
+    if (disposed) throw new Error("External services controller has been disposed");
     if (current.status === "ready") return current;
     if (processes.has(id)) return project(id);
     const config = state.services[id];
@@ -935,16 +940,17 @@ function createExternalServicesController({
       return current;
     }
     if (child.exitCode === null && child.signalCode === null) {
-      const exited = await new Promise((resolve) => {
+      const exited = await new Promise((resolve, reject) => {
         let settled = false;
         let timer;
-        const finish = (value) => {
+        const finish = (value, error = null) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
           child.removeListener?.("exit", onExit);
           child.removeListener?.("error", onError);
-          resolve(value);
+          if (error) reject(error);
+          else resolve(value);
         };
         const onExit = () => finish(true);
         const onError = () => finish(true);
@@ -953,13 +959,15 @@ function createExternalServicesController({
         timer = setTimeout(() => finish(false), STOP_TIMEOUT_MS);
         timer.unref?.();
         try {
-          if (child.kill("SIGTERM") === false) finish(false);
-        } catch {
-          finish(false);
+          if (process.platform === "win32") terminateProcessTree(child, "SIGTERM");
+          else if (child.kill("SIGTERM") === false) finish(false);
+        } catch (error) {
+          finish(false, process.platform === "win32" ? error : null);
         }
       });
       if (!exited && child.exitCode === null && child.signalCode === null) {
-        try { child.kill("SIGKILL"); } catch {}
+        if (process.platform === "win32") terminateProcessTree(child, "SIGKILL");
+        else try { child.kill("SIGKILL"); } catch {}
       }
     }
     processes.delete(id);
@@ -1077,7 +1085,7 @@ function createExternalServicesController({
 
   function scheduleKeepAlive(id, delayMs) {
     const config = state.services[id];
-    if (!config?.keepAlive || !config.enabled) {
+    if (disposed || !config?.keepAlive || !config.enabled) {
       clearKeepAlive(id);
       return;
     }
@@ -1131,11 +1139,20 @@ function createExternalServicesController({
   }
 
   function dispose() {
+    disposed = true;
+    const failures = [];
     for (const id of SERVICE_IDS) clearKeepAlive(id);
     for (const [id, child] of processes) {
       try {
-        if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      } catch {}
+        if (child.exitCode === null && child.signalCode === null) {
+          if (process.platform === "win32") terminateProcessTree(child, "SIGTERM");
+          else if (!child.killed) child.kill("SIGTERM");
+        }
+      } catch (error) {
+        failures.push(error);
+        continue;
+      }
+      processes.delete(id);
       runtime.set(id, {
         ...runtime.get(id),
         status: "offline",
@@ -1144,7 +1161,9 @@ function createExternalServicesController({
         checkedAt: now(),
       });
     }
-    processes.clear();
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `External service cleanup failed: ${failures.map((error) => error.message).join("; ")}`);
+    }
   }
 
   startKeepAliveSupervisors();

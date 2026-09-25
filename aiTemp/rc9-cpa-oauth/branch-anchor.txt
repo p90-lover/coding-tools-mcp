@@ -1,7 +1,0 @@
-Unified CPA OAuth integration lane anchor.
-
-Base release tag: v0.7.0-rc.8
-Base release source: 5aa516e35e8f9824d3309a4016f3f309f33d956c
-Plan commit: 6bdc0d2b66183f254ddae85afe57f2405c6b0c5a
-
-This retained aiTemp marker records the non-destructive rc.9 branch point. No project file or branch is deleted.

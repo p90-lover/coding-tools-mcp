@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   hideBrowser: () => ipcRenderer.invoke("launcher:browser-hide"),
   navigateBrowser: (action) => ipcRenderer.invoke("launcher:browser-navigate", action),
   zoomBrowser: (action) => ipcRenderer.invoke("launcher:browser-zoom", action),
+  createBrowserTab: () => ipcRenderer.invoke("launcher:browser-tab-new"),
   selectBrowserTab: (tabId) => ipcRenderer.invoke("launcher:browser-tab-select", tabId),
   closeBrowserTab: (tabId) => ipcRenderer.invoke("launcher:browser-tab-close", tabId),
   copyManualPrompt: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-copy", tabId),
@@ -45,6 +46,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   dismissSessionReminder: () => ipcRenderer.invoke("launcher:session-reminder-dismiss"),
   smokeTest: () => ipcRenderer.invoke("launcher:browser-smoke"),
   verifyMcp: () => ipcRenderer.invoke("launcher:mcp-verify"),
+  createMcpConnector: () => ipcRenderer.invoke("launcher:mcp-create-connector"),
   doctor: () => ipcRenderer.invoke("launcher:doctor"),
   cancelTurns: () => ipcRenderer.invoke("launcher:cancel-turns"),
   uninstallIntegration: () => ipcRenderer.invoke("launcher:uninstall-integration"),
@@ -166,6 +168,10 @@ const codingToolsApi = Object.freeze({
   }),
   workspaces: Object.freeze({
     list: (input = {}) => invokeContract(ipcRenderer, "workspaces.list", input),
+    updatePolicy: (input) => invokeContract(ipcRenderer, "workspaces.updatePolicy", input),
+    updateAuth: (input) => invokeContract(ipcRenderer, "workspaces.updateAuth", input),
+    service: (input) => invokeContract(ipcRenderer, "workspaces.service", input),
+    copySecret: (input) => invokeContract(ipcRenderer, "workspaces.copySecret", input),
   }),
   permissions: Object.freeze({
     snapshot: (input) => invokeContract(ipcRenderer, "permissions.snapshot", input),
@@ -180,7 +186,9 @@ const codingToolsApi = Object.freeze({
     search: (input) => invokeContract(ipcRenderer, "history.search", input),
   }),
   nativeCodex: Object.freeze({
-    status: () => invokeContract(ipcRenderer, "nativeCodex.status"),
+    status: (input = {}) => invokeContract(ipcRenderer, "nativeCodex.status", input),
+    connect: (input) => invokeContract(ipcRenderer, "nativeCodex.connect", input),
+    disconnect: (input) => invokeContract(ipcRenderer, "nativeCodex.disconnect", input),
   }),
   integrations: Object.freeze({
     snapshot: () => invokeContract(ipcRenderer, "integrations.snapshot"),

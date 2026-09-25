@@ -10,16 +10,20 @@ const {
   dialog,
   ipcMain,
   Menu,
+  net: electronNet,
   nativeImage,
   nativeTheme,
   screen,
   safeStorage,
+  session,
   shell,
   Tray,
+  webFrameMain,
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
-const { BrowserControlServer } = require("./control-server.cjs");
+const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
+const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
@@ -42,11 +46,15 @@ const {
   setProviderCpaConnection,
 } = require("./provider-bootstrap.cjs");
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
+const { executionSettingsPayload } = require("./execution-settings.cjs");
 const { createFiveStackControlPlane } = require("./five-stack-control-plane.cjs");
+const { createOrchestrationHeadlessBridge } = require("./orchestration-headless.cjs");
+const { FIVE_STACK_ENDPOINTS } = require("./five-stack-cross-use.cjs");
 const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
+const { installCpaPanelSession } = require("./cpa-panel-session.cjs");
 const { requireAppHandler } = require("./app-handler-paths.cjs");
 function loadCreateCodingToolsAppsHost() {
   try {
@@ -60,6 +68,7 @@ function loadCreateCodingToolsAppsHost() {
 }
 const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost();
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
+const { createAgentOrchestratorWorkflow } = require("./agent-orchestrator-workflow.cjs");
 const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {
   KEEP_UI_RESPONSIVE_SKIP_REASON,
@@ -75,7 +84,7 @@ const {
   commandCodeProxyRegistrationPlan,
   renderCommandCodeProxyPlan,
 } = require("./commandcode-proxy-plan.cjs");
-const { actUpstream } = require("./upstream-actions.cjs");
+const { actUpstream, registerFixedPaseoProviders } = require("./upstream-actions.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -133,11 +142,16 @@ let tray = null;
 let quitting = false;
 let shutdownInProgress = false;
 let exitCommitted = false;
+let codexBridgeConnectInFlight = null;
+let runtimeStartupInFlight = null;
 let smokePassedThisSession = false;
 let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let automaticMcpAttemptPid = null;
+let mcpVerificationInFlight = null;
+let verifyMcpConnection = null;
 let updateController = null;
 let externalServicesController = null;
 let managedBootstrapController = null;
@@ -180,11 +194,42 @@ function stopCatalogVerificationMonitor() {
   catalogVerificationTimer = null;
 }
 
+async function autoConnectExistingMcpIfReady({ logger, stateStore, health }) {
+  const state = stateStore.read();
+  if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
+    || state.browserInteractionMode !== "automatic" || !runtimeHost?.mcpCredentialsConfigured()) return false;
+  const config = runtimeSupervisor?.readConfig();
+  if (config?.mode !== "full") return false;
+  if (!health || health.service !== "codex-chatgpt-web" || health.status !== "ok"
+    || health.mode !== "full" || health.version !== config.releaseVersion || health.accepting_turns !== true
+    || !Number.isInteger(health.pid) || health.pid !== runtimeSupervisor.readState()?.daemonPid
+    || !(health.successful_model_catalog_requests > 0)) return true;
+  if (automaticMcpAttemptPid === health.pid) return false;
+  const browser = browserHost?.snapshot();
+  if (!verifyMcpConnection || browser?.authenticated !== true || browser.surfaceActive
+    || health.active_http_turns !== 0 || health.active_browser_turns !== 0
+    || browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) return true;
+  const contents = browserHost.view?.webContents;
+  if (!contents || contents.isDestroyed()) return true;
+  const hasDraft = await contents.executeJavaScript(`(() => {
+    const composer = document.querySelector('#prompt-textarea');
+    return !composer || Boolean((composer.innerText || composer.value || '').trim())
+      || [...document.querySelectorAll('input[type="file"]')].some(input => input.files.length > 0)
+      || [...document.querySelectorAll('button[aria-label]')].some(button => /^Remove\\b/i.test(button.getAttribute('aria-label')));
+  })()`);
+  if (hasDraft || browserHost.currentOperation() || browserHost.activeTraceId) return true;
+  automaticMcpAttemptPid = health.pid;
+  await verifyMcpConnection();
+  logger.info("mcp.automatic_verification_finished", { ready: stateStore.read().mcpSetupComplete === true });
+  return false;
+}
+
 function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
+  let reportedFailure = null;
   const check = async () => {
     const current = stateStore.read();
-    if (current.coreSetupComplete !== true || current.codexCatalogVerified === true) {
+    if (current.coreSetupComplete !== true || (current.codexCatalogVerified === true && !current.autoConnectExistingMcp)) {
       stopCatalogVerificationMonitor();
       return;
     }
@@ -194,7 +239,30 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
       const config = runtimeSupervisor.readConfig();
       const health = await runtimeSupervisor.proxyHealthPayload(config);
       if (!Number.isInteger(health?.successful_model_catalog_requests)
-        || health.successful_model_catalog_requests < 1) return;
+        || health.successful_model_catalog_requests < 1) {
+        const result = health?.last_model_catalog_result;
+        if (!result || !Number.isInteger(result.status) || result.status < 400 || result.status > 599
+          || !Number.isInteger(result.request) || result.request < 1 || lastOperation?.status === "running") return;
+        const identity = `${health.pid}:${result.request}:${result.at}`;
+        if (identity === reportedFailure) return;
+        reportedFailure = identity;
+        const reason = typeof result.failure?.code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(result.failure.code)
+          ? result.failure.code
+          : ["config", "request", "transport", "upstream", "catalog"].includes(result.failure?.stage)
+            ? result.failure.stage
+            : "catalog";
+        const state = stateStore.update({ codexRestartRequired: false });
+        send("launcher:state-changed", state);
+        logger.warn("codex.model_catalog_failed", { status: result.status, reason, request: result.request });
+        publishOperation({
+          name: "catalog-verification",
+          status: "failed",
+          message: nativeCopyFor(current.language).catalogFailure
+            .replace("{status}", String(result.status)).replace("{reason}", reason),
+        });
+        return;
+      }
+      if (!current.codexCatalogVerified) {
       const state = stateStore.update({
         codexCatalogVerified: true,
         codexRestartRequired: false,
@@ -204,6 +272,8 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         at: health.last_successful_model_catalog_request_at,
       });
       send("launcher:state-changed", state);
+      }
+      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) return;
       stopCatalogVerificationMonitor();
     } catch (error) {
       logger.debug("codex.model_catalog_verification_pending", {
@@ -239,6 +309,74 @@ async function restoreCodexRouteAfterRuntimeFailure({ logger, stateStore }) {
   }
 }
 
+async function waitForRuntimeHostIdle(timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (runtimeHost?.currentOperation()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Codex bridge connect waited for ${runtimeHost.currentOperation()}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged = false }) {
+  const config = runtimeSupervisor.readConfig();
+  const current = stateStore.read();
+  const patch = {
+    coreSetupComplete: true,
+    mcpRuntimeInstalled: config.mode === "full",
+    experimentalBiggerContext: config.experimentalBiggerContext === true,
+    zeroRiskProEnabled: config.zeroRiskProEnabled === true,
+    ...(bridgeRouteChanged ? {
+      codexCatalogVerified: false,
+      codexRestartRequired: true,
+    } : {}),
+    ...(config.mode === "browser-only" ? {
+      mcpSetupComplete: false,
+      mcpGuideStep: 0,
+    } : {}),
+  };
+  if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
+    const state = stateStore.update(patch);
+    send("launcher:state-changed", state);
+  }
+  startCatalogVerificationMonitor({ logger, stateStore });
+}
+
+async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reason = "auth" }) {
+  if (quitting || shutdownInProgress) return { skipped: true, reason: "shutting-down" };
+  if (IS_DEV_PROFILE || !runtimeHost || !runtimeSupervisor) return { skipped: true, reason: "unavailable" };
+  if (stateStore.read().browserInteractionMode === "automatic"
+    && browserHost?.snapshot()?.authenticated !== true) {
+    return { skipped: true, reason: "unauthenticated" };
+  }
+  if (!runtimeHost.runtimeConfigSnapshot().configured) return { skipped: true, reason: "not-configured" };
+  if (codexBridgeConnectInFlight) return codexBridgeConnectInFlight;
+  const work = (async () => {
+    await waitForRuntimeHostIdle();
+    const runtime = await runtimeSupervisor.startIfConfigured();
+    if (runtime.status !== "ready") return { skipped: true, reason: runtime.status, runtime };
+    const route = await runtimeHost.connectBridgeRoute();
+    applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
+    logger.info("bridge.auto_connected", { reason, changed: route.changed === true });
+    return { connected: true, changed: route.changed === true, runtime };
+  })();
+  codexBridgeConnectInFlight = work;
+  try {
+    return await work;
+  } finally {
+    if (codexBridgeConnectInFlight === work) codexBridgeConnectInFlight = null;
+  }
+}
+
+function scheduleCodexBridgeAutoConnect({ logger, stateStore, reason }) {
+  void connectCodexBridgeAfterAuthentication({ logger, stateStore, reason }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn("bridge.auto_connect_failed", { reason, message });
+    publishOperation({ name: "bridge-connect", status: "failed", message });
+  });
+}
+
 function trayImage() {
   if (process.platform !== "darwin") {
     return nativeImage.createFromPath(APP_ICON_PATH).resize({ width: 18, height: 18 });
@@ -259,6 +397,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Remove Codex Web GPT",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
+    catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
   }),
   "zh-CN": Object.freeze({
     openLauncher: "打开 Codex Web GPT",
@@ -269,6 +408,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
     removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
+    catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情；若问题持续，请导出安全日志。",
   }),
   "zh-TW": Object.freeze({
     openLauncher: "開啟 Codex Web GPT",
@@ -279,6 +419,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "移除 Codex Web GPT",
     removeMessage: "從 Codex 移除 ChatGPT Web 模型並還原先前的模型路由？",
     removeDetail: "啟動器中的 ChatGPT 登入 profile 會保留。Codex 需要重新啟動一次。",
+    catalogFailure: "Codex 已連線到啟動器，但模型清單載入失敗（HTTP {status}；{reason}）。請查看「活動」了解詳情；若問題持續，請匯出安全日誌。",
   }),
   ja: Object.freeze({
     openLauncher: "Codex Web GPT を開く",
@@ -289,6 +430,7 @@ const NATIVE_COPY = Object.freeze({
     removeTitle: "Codex Web GPT を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
+    catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認し、問題が続く場合は安全なログをエクスポートしてください。",
   }),
 });
 
@@ -476,7 +618,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
       },
     }),
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: path.join(__dirname, "..", "build", "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -485,6 +627,12 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     },
   });
   window.setMenuBarVisibility(false);
+  installCpaPanelSession({
+    webContents: window.webContents,
+    webFrameMain,
+    getConnection: () => externalServicesController?.cpaConnection(),
+    logger,
+  });
   const guardRendererNavigation = (event, url) => {
     if (rendererNavigationAllowed(url)) return;
     event.preventDefault();
@@ -618,24 +766,6 @@ function assertFocusedMainWindow(event, write = false) {
   }
 }
 
-function executionSettingsPayload(settings) {
-  if (!settings) return null;
-  return {
-    id: settings.id ?? null,
-    engine: settings.engine,
-    endpoint: settings.endpoint,
-    provider: settings.provider,
-    model: settings.model,
-    mode: settings.mode,
-    project_id: settings.projectId ?? null,
-    repo_id: settings.repoId ?? null,
-    assignee_id: settings.assigneeId ?? null,
-    max_duration_min: settings.maxDurationMin,
-    allow_codex: settings.allowCodex,
-    confirm_external_execution: settings.confirmExternalExecution,
-  };
-}
-
 function launcherSnapshotPayload(stateStore, logger) {
   return {
     profile: LAUNCHER_PROFILE.kind,
@@ -719,8 +849,33 @@ function registerIpc({ logger, stateStore }) {
     getHeadlessHost: () => headlessHost,
     getUpdateController: () => updateController,
   });
+  const orchestration = createOrchestrationHeadlessBridge({
+    request: (route, body) => {
+      if (!headlessHost) throw new Error("Local execution service is unavailable");
+      return headlessHost.request(route, body);
+    },
+    registerPaseoProviders: async () => {
+      const paseo = externalServicesController?.snapshot()?.services?.find((service) => service.id === "paseo");
+      if (paseo?.status !== "ready") throw new Error("Managed Paseo is not ready");
+      return registerFixedPaseoProviders(paseo.executionEndpoint || FIVE_STACK_ENDPOINTS.paseo.ws, "");
+    },
+  });
   const fiveStackControlPlane = createLazyFactory(() => createFiveStackControlPlane({
+    ...orchestration,
     planProvider: createProviderExecutionPlan,
+    getWebBridgeStatus: async () => {
+      if (!runtimeHost || browserHost?.snapshot()?.authenticated !== true) return false;
+      try {
+        const route = await runtimeHost.bridgeStatus("paseo-web-route-check");
+        if (!route.installed || !route.active) return false;
+        const health = await fetch(`${FIVE_STACK_ENDPOINTS.web.origin}/healthz`, {
+          signal: AbortSignal.timeout(3_000),
+        });
+        return health.ok;
+      } catch {
+        return false;
+      }
+    },
     getProviderSnapshot: async () => {
       const providerNetwork = await providerNetworkReady();
       return providerNetwork.store.snapshot();
@@ -747,12 +902,12 @@ function registerIpc({ logger, stateStore }) {
       throw new Error(`Unsupported manage action ${action}`);
     },
     handoffAnnealTask: async ({ projectId, body }) => {
-      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const connection = externalServicesController?.loopbackRequest?.("anneal");
       const result = await actUpstream({
         toolId: "anneal",
         op: "create",
         projectId,
-        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+        endpoint: connection?.origin || "http://127.0.0.1:5173/api/",
         name: body?.name,
         description: body?.description,
         cwd: body?.workingDirectory,
@@ -760,12 +915,12 @@ function registerIpc({ logger, stateStore }) {
       return result.body && typeof result.body === "object" ? result.body : { id: null };
     },
     fetchAnnealTask: async ({ taskId }) => {
-      const config = externalServicesController?.upstreamConfiguration?.("anneal") || {};
+      const connection = externalServicesController?.loopbackRequest?.("anneal");
       const result = await actUpstream({
         toolId: "anneal",
         op: "preview",
         taskId,
-        endpoint: config.executionEndpoint || "http://127.0.0.1:3000/",
+        endpoint: connection?.origin || "http://127.0.0.1:5173/api/",
       });
       return result.body;
     },
@@ -773,11 +928,236 @@ function registerIpc({ logger, stateStore }) {
   getFiveStack = () => fiveStackControlPlane.tryGet();
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
+  handle("coding-tools:workspaces:auth-update", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    const workspace = Array.isArray(catalog.workspaces)
+      ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+      : null;
+    if (!workspace) throw new Error("Workspace was not found");
+    const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+    const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Coding Tools",
+      message: "Save workspace authentication settings?",
+      detail: `${name}\n${location}\n${input.service}: ${input.authType}\nA running listener must be restarted to apply this change.`,
+      buttons: ["Cancel", "Save settings"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    return headlessHost.request("/api/v1/workspaces/auth", {
+      workspace_id: input.workspaceId,
+      service: input.service,
+      auth_type: input.authType,
+      oauth_client_id: input.oauthClientId,
+      oauth_redirect_uris: input.oauthRedirectUris,
+      oauth_scopes: input.oauthScopes,
+      use_shared_secrets: input.useSharedSecrets,
+      confirm: true,
+    });
+  });
+  handle("coding-tools:workspaces:policy-update", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    const workspace = Array.isArray(catalog.workspaces)
+      ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+      : null;
+    if (!workspace) throw new Error("Workspace was not found");
+    const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+    const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Coding Tools",
+      message: "Save workspace MCP permissions?",
+      detail: `${name}\n${location}\n${input.permissionMode}, ${input.approvalMode}, ${input.toolProfile}\nScreen capture: ${input.screenCaptureEnabled ? "enabled" : "disabled"}\nRestart the MCP listener to apply this change.`,
+      buttons: ["Cancel", "Save permissions"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    return headlessHost.request("/api/v1/workspaces/policy", {
+      workspace_id: input.workspaceId,
+      permission_mode: input.permissionMode,
+      approval_mode: input.approvalMode,
+      tool_profile: input.toolProfile,
+      screen_capture_enabled: input.screenCaptureEnabled,
+      confirm: true,
+    });
+  });
+  handle("coding-tools:workspaces:service", async (event, input) => {
+    const changing = input.operation !== "status";
+    assertFocusedMainWindow(event, changing);
+    if (changing) {
+      const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+      const workspace = Array.isArray(catalog.workspaces)
+        ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+        : null;
+      if (!workspace) throw new Error("Workspace was not found");
+      const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+      const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+      const action = String(input.operation).replace(/[\r\n]/g, " ");
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "Coding Tools",
+        message: `${action} the ${input.service} listener?`,
+        detail: `${name}\n${location}\nThis changes the local listener only; the tunnel configuration stays as saved.`,
+        buttons: ["Cancel", "Continue"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      if (response !== 1) return { ok: false, cancelled: true };
+    }
+    return headlessHost.request("/api/v1/workspaces/service", {
+      workspace_id: input.workspaceId,
+      service: input.service,
+      operation: input.operation,
+      confirm: changing,
+    });
+  });
+  handle("coding-tools:workspaces:copy-secret", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    const workspace = Array.isArray(catalog.workspaces)
+      ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+      : null;
+    if (!workspace) throw new Error("Workspace was not found");
+    const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+    const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Coding Tools",
+      message: "Copy this workspace credential?",
+      detail: `${name}\n${location}\n${input.key}\nIf it is missing, Coding Tools will generate it locally.`,
+      buttons: ["Cancel", "Copy credential"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    const credential = await headlessHost.request("/api/v1/workspaces/secret", {
+      workspace_id: input.workspaceId,
+      key: input.key,
+      confirm: true,
+    });
+    if (credential.ok !== true || typeof credential.value !== "string" || !credential.value) {
+      throw new Error("Workspace credential is unavailable");
+    }
+    clipboard.writeText(credential.value);
+    return { ok: true, copied: true, key: input.key };
+  });
   handle("coding-tools:permissions:snapshot", (event, input) => codingTools.permissionsSnapshot(event, input));
   handle("coding-tools:computer:status", (event) => codingTools.computerStatus(event));
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
-  handle("coding-tools:native-codex:status", (event) => codingTools.nativeCodexStatus(event));
+  let nativeApprovalPromptInFlight = false;
+  handle("coding-tools:native-codex:status", async (event, input) => {
+    const snapshot = await codingTools.nativeCodexStatus(event, input);
+    if (!input.workspaceId || !mainWindow?.isFocused() || nativeApprovalPromptInFlight
+      || !Array.isArray(snapshot.pending_approvals)) return snapshot;
+    const pending = snapshot.pending_approvals.find((item) => item
+      && typeof item.approval_id === "string" && typeof item.path === "string");
+    if (!pending) return snapshot;
+    nativeApprovalPromptInFlight = true;
+    try {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "Coding Tools",
+        message: "Allow native Codex to edit this outside file for the current turn?",
+        detail: [
+          pending.path,
+          String(pending.reason || "").replace(/[\r\n]/g, " ").slice(0, 500),
+          "The grant covers this exact existing file for this turn only.",
+        ].join("\n"),
+        buttons: ["Deny", "Allow this file once"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      await headlessHost.request("/api/v1/native-codex/approval", {
+        workspace_id: input.workspaceId,
+        approval_id: pending.approval_id,
+        allow: response === 1,
+      }, { localConfirmation: true });
+      return codingTools.nativeCodexStatus(event, input);
+    } finally {
+      nativeApprovalPromptInFlight = false;
+    }
+  });
+  handle("coding-tools:native-codex:connect", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!path.isAbsolute(input.executable) || !path.isAbsolute(input.codexHome)) {
+      throw new Error("Select absolute native Codex executable and home paths");
+    }
+    const executable = await fs.promises.realpath(input.executable);
+    const metadata = await fs.promises.stat(executable);
+    if (!metadata.isFile() || metadata.size > 512 * 1024 * 1024 || !executable.toLowerCase().endsWith(".exe")) {
+      throw new Error("Select a native codex.exe within the 512 MiB inspection limit");
+    }
+    const hash = require("node:crypto").createHash("sha256");
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(executable);
+      stream.on("data", (chunk) => hash.update(chunk));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    const digest = hash.digest("hex");
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    const workspace = Array.isArray(catalog.workspaces)
+      ? catalog.workspaces.find((item) => item.id === input.workspaceId)
+      : null;
+    if (!workspace) throw new Error("Workspace was not found");
+    const name = String(workspace.name || workspace.id).replace(/[\r\n]/g, " ");
+    const location = String(workspace.path || "").replace(/[\r\n]/g, " ");
+    const home = String(input.codexHome).replace(/[\r\n]/g, " ");
+    const model = String(input.model).replace(/[\r\n]/g, " ");
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "Coding Tools",
+      message: "Connect this native Codex App Server?",
+      detail: [
+        name, location, "Executable: " + executable, "SHA-256: " + digest,
+        "Dedicated home: " + home, "Model: " + model,
+        "Permission profile: " + input.permissionProfile,
+        "Model use: " + (input.allowModelUsage ? "allowed" : "off")
+          + "; standalone commands: " + (input.allowCommandExecution ? "allowed" : "off"),
+        "Limit: " + (input.requestLimit || "unbounded") + " requests; duration: "
+          + (input.lifetimeSeconds || "until stopped") + " seconds.",
+        "All authenticated clients of this workspace MCP listener share this grant.",
+        "An exact existing outside-file write can be approved in the Native Codex panel for the current turn. Other extra requests are declined; no unsandboxed fallback is used.",
+      ].join("\n"),
+      buttons: ["Cancel", "Connect"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (response !== 1) return { ok: false, cancelled: true };
+    return headlessHost.request("/api/v1/native-codex/connect", {
+      workspace_id: input.workspaceId,
+      connection: {
+        executable,
+        expected_sha256: digest,
+        codex_home: input.codexHome,
+        allow_model_usage: input.allowModelUsage,
+        allow_command_execution: input.allowCommandExecution,
+        permission_profile: input.permissionProfile,
+        model: input.model,
+        request_limit: input.requestLimit,
+        lifetime_seconds: input.lifetimeSeconds,
+      },
+      confirm: true,
+    }, { localConfirmation: true });
+  });
+  handle("coding-tools:native-codex:disconnect", async (event, input) => {
+    assertFocusedMainWindow(event, false);
+    return headlessHost.request("/api/v1/native-codex/disconnect", {
+      workspace_id: input.workspaceId,
+    });
+  });
   handle("coding-tools:integrations:snapshot", async (event) => {
     const snapshot = await codingTools.integrationsSnapshot(event);
     const plane = fiveStackControlPlane.tryGet();
@@ -833,6 +1213,7 @@ function registerIpc({ logger, stateStore }) {
     if (!headlessHost) throw new Error("Local execution service is unavailable");
 
     let settings = input.settings;
+    let selectedPlan = null;
     const controlCredential = typeof input.controlCredential === "string"
       ? input.controlCredential.trim()
       : "";
@@ -840,14 +1221,18 @@ function registerIpc({ logger, stateStore }) {
       && settings
       && (settings.engine === "paseo" || settings.engine === "anneal");
     if (plannedWorkload) {
+      if (!input.providerAccountId?.trim()) {
+        throw new Error("Select an exact provider account before execution");
+      }
       const providerNetwork = await providerNetworkReady();
       const plan = createProviderExecutionPlan(providerNetwork.store.snapshot(), {
         workload: settings.engine,
         providerId: settings.provider,
         accountId: input.providerAccountId ?? undefined,
         model: settings.model,
-        allowFallback: input.allowProviderFallback !== false,
+        allowFallback: false,
       });
+      selectedPlan = plan;
       settings = {
         ...settings,
         provider: plan.provider.id,
@@ -870,7 +1255,7 @@ function registerIpc({ logger, stateStore }) {
       operation: input.operation,
       expected_revision: input.expectedRevision ?? null,
       binding_id: input.bindingId ?? null,
-      settings: executionSettingsPayload(settings),
+      settings: executionSettingsPayload(settings, selectedPlan),
       credential: controlCredential,
       confirm: input.confirm === true,
     });
@@ -1066,10 +1451,12 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     const toolId = String(input.toolId || "").trim();
     const config = externalServicesController.upstreamConfiguration(toolId);
+    const annealConnection = toolId === "anneal" ? externalServicesController.loopbackRequest("anneal") : null;
     return actUpstream({
       ...input,
       toolId,
-      endpoint: input.endpoint || config.executionEndpoint,
+      endpoint: annealConnection?.origin || input.endpoint || config.executionEndpoint,
+      credential: toolId === "anneal" ? "" : input.credential,
     });
   });
   handle("launcher:original-ui-snapshot", (event) => {
@@ -1149,6 +1536,10 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-hide", () => { browserHost?.hide(); return browserHost?.snapshot(); });
   handle("launcher:browser-navigate", (_event, action) => browserHost.navigate(action));
   handle("launcher:browser-zoom", (_event, action) => browserHost.zoom(action));
+  handle("launcher:browser-tab-new", (event) => {
+    assertFocusedMainWindow(event, false);
+    return browserHost.createUserTab();
+  });
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
   handle("launcher:manual-prompt-copy", (_event, tabId) => browserHost.copyManualPrompt(tabId));
@@ -1158,6 +1549,17 @@ function registerIpc({ logger, stateStore }) {
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-login" });
+    }
+    return browser;
+  });
+  handle("launcher:browser-refresh-auth", async () => {
+    if (stateStore.read().browserInteractionMode === "manual") return browserHost.snapshot();
+    const browser = await browserHost.refreshAuthentication();
+    if (browser.authenticated) {
+      const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
+      send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-refresh-auth" });
     }
     return browser;
   });
@@ -1166,6 +1568,7 @@ function registerIpc({ logger, stateStore }) {
     if (browser.authenticated) {
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
       send("launcher:state-changed", state);
+      scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "browser-passkey-login" });
     }
     return browser;
   });
@@ -1190,13 +1593,13 @@ function registerIpc({ logger, stateStore }) {
     smokePassedThisSession = true;
     return result;
   });
-  handle("launcher:mcp-verify", async (event) => {
+  const performMcpVerification = async (event) => {
     const operationName = "mcp-verification";
     const activeTraceId = browserHost.activeTraceId;
     logger.info("mcp.verification_requested", {
       activeTraceId,
       launcherFocused: mainWindow?.isFocused() === true,
-      rendererFocused: event.sender.isFocused(),
+      rendererFocused: event?.sender?.isFocused?.() === true,
     });
     if (activeTraceId) {
       const report = {
@@ -1275,6 +1678,38 @@ function registerIpc({ logger, stateStore }) {
           { id: "connector", status: "error", message },
         ],
       };
+    }
+  };
+  verifyMcpConnection = (event) => {
+    if (mcpVerificationInFlight) return mcpVerificationInFlight;
+    const work = performMcpVerification(event).catch(error => {
+      const state = stateStore.update({ mcpSetupComplete: false });
+      send("launcher:state-changed", state);
+      publishOperation({ name: "mcp-verification", status: "failed", message: error instanceof Error ? error.message : String(error) });
+      return { ok: false };
+    }).finally(() => { if (mcpVerificationInFlight === work) mcpVerificationInFlight = null; });
+    mcpVerificationInFlight = work;
+    return work;
+  };
+  handle("launcher:mcp-verify", event => verifyMcpConnection(event));
+  handle("launcher:mcp-create-connector", async event => {
+    assertFocusedMainWindow(event, true);
+    if (IS_DEV_PROFILE) throw new Error("Automatic connector creation is available in the production profile only");
+    publishOperation({ name: "mcp-connector-create", status: "running", message: "Creating the ChatGPT connector" });
+    try {
+      const result = await createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost });
+      const state = stateStore.update({
+        autoConnectExistingMcp: true,
+        ...(result.created ? { mcpSetupComplete: false } : {}),
+      });
+      automaticMcpAttemptPid = null;
+      send("launcher:state-changed", state);
+      startCatalogVerificationMonitor({ logger, stateStore });
+      publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
+      return result;
+    } catch (error) {
+      publishOperation({ name: "mcp-connector-create", status: "failed", message: error instanceof Error ? error.message : String(error) });
+      throw error;
     }
   });
 
@@ -1476,9 +1911,16 @@ function registerIpc({ logger, stateStore }) {
     return { state, credentialsRequired: false, targetMode: mode };
   });
   handle("launcher:set-preference", (_event, key, value) => {
-    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns";
+    const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp";
     if (!ordinary) throw new Error("Unknown preference");
-    return stateStore.update({ [key]: value === true });
+    if (key === "autoConnectExistingMcp") assertFocusedMainWindow(_event, true);
+    const state = stateStore.update({ [key]: value === true });
+    if (key === "autoConnectExistingMcp") {
+      automaticMcpAttemptPid = null;
+      send("launcher:state-changed", state);
+      if (state.autoConnectExistingMcp) startCatalogVerificationMonitor({ logger, stateStore });
+    }
+    return state;
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
@@ -1542,17 +1984,44 @@ async function requestQuit() {
   }
   shutdownInProgress = true;
   try {
-    const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
-    if (activeOperation) {
-      throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
+    const browserOperation = browserHost?.currentOperation();
+    if (browserOperation) {
+      throw new Error(`Wait for ${browserOperation} to finish before quitting Codex Web GPT`);
     }
+    quitting = true;
+    await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
+    const runtimeOperation = runtimeHost?.currentOperation();
+    if (runtimeOperation) {
+      throw new Error(`Wait for ${runtimeOperation} to finish before quitting Codex Web GPT`);
+    }
+    try {
+      await runtimeHost?.restoreBridgeRoute();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const decision = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        buttons: ["Cancel", "Quit anyway"],
+        defaultId: 0,
+        cancelId: 0,
+        title: "Codex route could not be restored",
+        message: "Coding Tools could not restore the previous Codex model route.",
+        detail: `${message}\n\nQuitting anyway may leave Codex pointed at an unavailable local bridge.`,
+      });
+      if (decision.response !== 1) throw error;
+      publishOperation({
+        name: "launcher-quit",
+        status: "warning",
+        message: `Quitting after route restoration failed: ${message}`,
+      });
+    }
+    managedBootstrapController?.dispose();
+    originalUiController?.dispose();
+    externalServicesController?.dispose();
+    upstreamToolController?.dispose();
     await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
     await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
-    externalServicesController?.dispose();
-    upstreamToolController?.dispose();
-    quitting = true;
     await browserHost?.persistSession();
     browserHost?.destroy();
     await browserControl?.close();
@@ -1685,6 +2154,7 @@ async function start() {
     externalServices: externalServicesController,
   });
   originalUiController = createOriginalUiController({
+    resumeOnCreate: false,
     externalServices: externalServicesController,
     openExternal: openWebUrl,
     electronExecutable: process.execPath,
@@ -1696,10 +2166,34 @@ async function start() {
     },
   });
   const providerServices = createAppsProviderServices({ providerNetworkReady });
+  const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
+    requestHeadless: (endpoint, body, options) => {
+      if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
+      return headlessHost.request(endpoint, body, options);
+    },
+    cpaConnection: () => externalServicesController.cpaConnection(),
+    confirm: async ({ message, detail }) => {
+      if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+        throw new Error("Use the focused Coding Tools window to approve workflow changes");
+      }
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        title: "Coding Tools · Agent Orchestrator",
+        message: String(message).slice(0, 200),
+        detail: String(detail).slice(0, 1200),
+        buttons: ["Cancel", "Continue"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      return answer.response === 1;
+    },
+  });
   try {
     appsHost = createCodingToolsAppsHost({
     services: {
       inspect: (id) => externalServicesController.inspect(id),
+      agentOrchestrator: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       start: (id) => externalServicesController.start(id),
       stop: (id) => externalServicesController.stop(id),
       restart: (id) => externalServicesController.restart(id),
@@ -1748,12 +2242,6 @@ async function start() {
     });
     appsHost = null;
   }
-  app.once("before-quit", () => {
-    managedBootstrapController?.dispose();
-    originalUiController?.dispose();
-    externalServicesController?.dispose();
-    upstreamToolController?.dispose();
-  });
   headlessHost = new HeadlessHost({
     app,
     logger,
@@ -1770,6 +2258,8 @@ async function start() {
   await ensureRendererLoaded(mainWindow, logger);
   scheduleFullIpcAfterPaint(() => {
     registerIpc({ logger, stateStore });
+    if (LAUNCHER_SMOKE_TEST) return;
+    originalUiController?.resume?.();
     const services = safeRead(
       "external-service.autostart_snapshot",
       () => externalServicesController?.snapshot().services ?? [],
@@ -1777,7 +2267,8 @@ async function start() {
       logger,
     );
     for (const service of services) {
-      if (!service.enabled || !service.autoStart) continue;
+      const startManagedCpa = service.id === "cpa" && service.managedInstall?.state === "installed";
+      if (!service.enabled || (!service.autoStart && !startManagedCpa)) continue;
       void externalServicesController.start(service.id).catch((error) => {
         logger.warn("external-service.autostart-failed", {
           serviceId: service.id,
@@ -1790,6 +2281,27 @@ async function start() {
     logger,
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
+    resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
+    fetchNative: async (url, options) => {
+      const network = await providerNetworkReady();
+      const routing = network.store.snapshot().routing;
+      const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
+      const credentials = profile ? network.store.proxySecret(profile.id) : null;
+      return fetchNativeWithProxyAuth({
+        electronNet, browserSession: session.fromPartition(LAUNCHER_PROFILE.browserPartition),
+        url, options,
+        getProxyCredentials: (authInfo) => (
+          profile && authInfo.port === profile.endpoint.port
+          && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
+            === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
+            ? credentials : null
+        ),
+      });
+    },
+    getCodingToolsWorkspaces: () => headlessHost.request("/api/v1/workspaces", null, { method: "GET" }),
+    callReadOnlyAppTool: (tool) => appsMcp.callTool(tool, {}),
+    callNativeCodexTool: (body) => headlessHost.request("/api/v1/tools/call", body, { timeout: 80_000 }),
+    callAgentOrchestrator: (operation, args) => appsHost.call("agent-orchestrator", operation, args),
   }).start();
   runtimeSupervisor = new RuntimeSupervisor({
     app,
@@ -1822,6 +2334,7 @@ async function start() {
     && stateStore.read().browserInteractionMode !== configuredInteractionMode) {
     stateStore.update({ browserInteractionMode: configuredInteractionMode });
   }
+  let lastPublishedBrowserAuth = false;
   browserHost = new BrowserHost({
     window: mainWindow,
     descriptorPath: BROWSER_DESCRIPTOR_PATH,
@@ -1834,7 +2347,16 @@ async function start() {
     loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
     partition: LAUNCHER_PROFILE.browserPartition,
     profile: LAUNCHER_PROFILE.kind,
-    publishState: (state) => send("launcher:browser-state", state),
+    publishState: (state) => {
+      send("launcher:browser-state", state);
+      const authenticated = state.authenticated === true;
+      if (authenticated && !lastPublishedBrowserAuth && stateStore.read().codexRestartRequired === true) {
+        queueMicrotask(() => scheduleCodexBridgeAutoConnect({
+          logger, stateStore, reason: "browser-authenticated",
+        }));
+      }
+      lastPublishedBrowserAuth = authenticated;
+    },
     showWindow: showMainWindow,
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
@@ -1862,7 +2384,7 @@ async function start() {
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
   const launcherSmokeTest = LAUNCHER_SMOKE_TEST;
-  let startupAuthenticationRefresh = Promise.resolve();
+  let startupAuthenticationRefresh = Promise.resolve(browserHost.snapshot());
   await ensureRendererLoaded(mainWindow, logger);
   try {
     await browserHost.ready();
@@ -1882,6 +2404,7 @@ async function start() {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
+      return browserHost.snapshot();
     });
   }
   if (!launcherSmokeTest) {
@@ -1957,7 +2480,7 @@ async function start() {
         send("launcher:state-changed", failed);
       });
     }
-  } else void (async () => {
+  } else runtimeStartupInFlight = (async () => {
     await startupAuthenticationRefresh;
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
@@ -1998,31 +2521,36 @@ async function start() {
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
     if (runtime.status !== "ready") return runtime;
-    const route = await runtimeHost.connectBridgeRoute();
-    return { ...runtime, bridgeRouteChanged: route.changed === true };
+    const browser = await startupAuthenticationRefresh;
+    if (stateStore.read().browserInteractionMode === "automatic" && browser?.authenticated !== true) {
+      logger.warn("bridge.connect_deferred_until_chatgpt_ready");
+      return { ...runtime, bridgeDeferred: true };
+    }
+    const connected = await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
+    return { ...runtime, bridgeRouteChanged: connected.changed === true, bridgeConnected: connected.connected === true };
   })().then(async (runtime) => {
-    if (runtime.status === "ready") {
+    if (runtime.bridgeDeferred) {
       const config = runtimeSupervisor.readConfig();
       const current = stateStore.read();
       const patch = {
         coreSetupComplete: true,
+        codexCatalogVerified: false,
+        codexRestartRequired: true,
         mcpRuntimeInstalled: config.mode === "full",
         experimentalBiggerContext: config.experimentalBiggerContext === true,
         zeroRiskProEnabled: config.zeroRiskProEnabled === true,
-        ...(runtime.bridgeRouteChanged ? {
-          codexCatalogVerified: false,
-          codexRestartRequired: true,
-        } : {}),
-        ...(config.mode === "browser-only" ? {
-          mcpSetupComplete: false,
-          mcpGuideStep: 0,
-        } : {}),
+        ...(config.mode === "browser-only" ? { mcpSetupComplete: false, mcpGuideStep: 0 } : {}),
       };
       if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
         const state = stateStore.update(patch);
         send("launcher:state-changed", state);
       }
-      startCatalogVerificationMonitor({ logger, stateStore });
+      return;
+    }
+    if (runtime.status === "ready") {
+      if (!runtime.bridgeConnected) {
+        applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: runtime.bridgeRouteChanged === true });
+      }
       return;
     }
     if (runtime.status === "not-configured") {

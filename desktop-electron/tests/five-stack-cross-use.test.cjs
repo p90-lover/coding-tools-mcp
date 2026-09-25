@@ -134,6 +134,7 @@ test("managed launch env injects in-app CPA for Router and CommandCode, never fo
       };
       return child;
     },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
     resolveCrossUseEnvironment: (componentId) => peerEnvironmentFor(componentId, {
       cpaProxyApiKey: "c".repeat(36),
       commandCodeProxyApiKey: "k".repeat(36),

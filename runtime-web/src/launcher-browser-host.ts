@@ -270,7 +270,8 @@ export async function connectLauncherBrowserHost(
   await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
   let browser: Browser;
   try {
-    browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs });
+    // Electron owns these live pages. Attaching another worker must not reset their focus or media settings.
+    browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs, noDefaults: true });
   } catch (error) {
     throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -287,6 +288,10 @@ export async function connectLauncherBrowserHost(
       surfaceId,
       abortSignal,
     );
+    // Hidden Electron tabs need focus emulation for keyboard controls. Scope it to the leased
+    // page; keep the session attached until browser.close() releases this worker's connection.
+    const ownedPageSession = await context.newCDPSession(page);
+    await ownedPageSession.send("Emulation.setFocusEmulationEnabled", { enabled: true });
     return { descriptor, browser, context, page };
   } catch (error) {
     await browser.close().catch(() => {});

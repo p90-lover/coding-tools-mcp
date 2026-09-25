@@ -165,8 +165,9 @@ test("Codex Router open path uses Coding Tools APIs and does not launch Control 
   controller.dispose();
 });
 
-test("Control Center usage section uses the original --router-destination argv", () => {
+test("Control Center usage keeps its argv and the stable managed Python environment", () => {
   const fixture = controlCenterFixture();
+  fs.writeFileSync(path.join(fixture.home, "CODING_TOOLS_BUNDLED.json"), JSON.stringify({ skipNetworkPrepare: true }));
   const fakeElectron = path.join(fixture.appRoot, "fake-electron");
   fs.writeFileSync(fakeElectron, "");
   const spawned = [];
@@ -181,6 +182,11 @@ test("Control Center usage section uses the original --router-destination argv",
     },
   });
   assert.deepEqual(spawned[0].args.slice(-2), ["--router-destination", "usage"]);
+  const litellm = path.join(fixture.state, "python", process.platform === "win32" ? "Scripts/litellm.exe" : "bin/litellm");
+  assert.equal(spawned[0].options.env.MODEL_ROUTER_LITELLM_BIN, litellm);
+  assert.equal(spawned[0].options.env.CODEX_ROUTER_LITELLM_BIN, litellm);
+  assert.equal(spawned[0].options.env.MODEL_ROUTER_SOURCE_ROOT, fixture.home);
+  assert.equal(spawned[0].options.env.CODEX_HOME, path.join(fixture.state, "codex-home"));
 });
 
 test("managed Codex Router prepare also builds the original Control Center", () => {

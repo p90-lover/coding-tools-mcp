@@ -62,6 +62,20 @@ function modelAgent(overrides = {}) {
   };
 }
 
+test("execution bindings never substitute another provider or selected model", () => {
+  const { selectBinding } = loadTypeScriptModule("src/features/execution-surface-utils.ts");
+  const ready = {
+    id: "web", engine: "paseo", provider: "chatgpt-web", model: "chatgpt-web/high",
+    endpoint: "ws://127.0.0.1:6768/ws", enabled: true, connected: true, current_scope_valid: true,
+  };
+  const view = (...bindings) => ({ execution: { bindings } });
+  assert.equal(selectBinding(view(ready), "paseo", ready.provider, ready.model).id, "web");
+  assert.equal(selectBinding(view(ready), "paseo", ready.provider, null), undefined);
+  assert.equal(selectBinding(view({ ...ready, model: "native-only" }), "paseo", ready.provider, ready.model), undefined);
+  assert.equal(selectBinding(view({ ...ready, provider: "codex-oauth" }), "paseo", ready.provider, ready.model), undefined);
+  assert.equal(selectBinding(view({ ...ready, connected: false }), "paseo", ready.provider, ready.model), undefined);
+});
+
 test("agent registry validates profiles, preserves archived agents, and rejects duplicates", () => {
   const { AgentRegistry } = loadTypeScriptModule("src/agents/agent-registry.ts");
   const registry = new AgentRegistry();

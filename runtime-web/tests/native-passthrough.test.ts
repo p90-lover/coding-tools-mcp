@@ -66,6 +66,31 @@ test("forwards native Codex compaction requests to the official compact endpoint
   expect(await response.json()).toEqual({ output: [] });
 });
 
+test("native Cloudflare HTML is reported without leaking the page or replaying the request", async () => {
+  for (const headers of [
+    { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge", "cf-ray": "ray-123-HKG" },
+    { "content-type": "text/html; charset=utf-8", "cf-ray": "ray-123-HKG" },
+  ] as Record<string, string>[]) {
+    let calls = 0;
+    const request = new Request("http://127.0.0.1:17841/v1/responses", {
+      method: "POST",
+      headers: { authorization: "Bearer local-test-token", "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+    });
+    const response = await forwardNativeCodexRequest(request, "responses", async () => {
+      calls++;
+      return new Response("<html>PRIVATE_CLOUDFLARE_PAGE</html>", { status: 403, headers });
+    });
+    expect(calls).toBe(1);
+    expect(response.status).toBe(403);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = await response.json() as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("native_cloudflare_challenge");
+    expect(body.error.message).toContain("Cloudflare");
+    expect(JSON.stringify(body)).not.toContain("PRIVATE_CLOUDFLARE_PAGE");
+  }
+});
+
 test("native compaction failures record routing evidence without exposing request content or credentials", async () => {
   const warnings = spyOn(console, "warn").mockImplementation(() => {});
   try {

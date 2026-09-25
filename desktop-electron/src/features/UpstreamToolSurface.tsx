@@ -132,7 +132,13 @@ export function UpstreamToolSurface({
     setError(null);
     try {
       await action();
-      await refresh();
+      const current = await refresh();
+      if (name === "inspect" && current?.status === "ready" && !frameUrl && api) {
+        const opened = await api.openEmbeddedTool(toolId, selectedSection || current.sections[0] || "");
+        setFrameUrl(opened.url);
+        setUnavailable(opened.unavailable === true);
+        setDependency(opened.dependency ?? null);
+      }
     } catch (cause) {
       setError(messageOf(cause));
     } finally {

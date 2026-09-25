@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Language,
   ProviderAccountRecord,
@@ -7,14 +7,12 @@ import type {
 } from "../types";
 import type { JsonObject } from "../api/contracts";
 import {
-  boardRevision,
-  executionBindings,
+  localText,
   messageOf,
   missionRevision,
   missionViews,
   object,
   sanitizeIdentifier,
-  selectBinding,
   workspaceOptions,
   type MissionView,
   type WorkspaceOption,
@@ -37,6 +35,63 @@ type SubagentDraft = {
 };
 const ACTIONS: readonly Exclude<Action, "create">[] = ["start", "hold", "resume", "cancel", "close"];
 const WEB_GPT_PROVIDER_ID = "chatgpt-web";
+const WEB_GPT_MODEL = "chatgpt-web/high";
+const GEMINI_PROVIDER_ID = "cliproxyapi-antigravity";
+const GEMINI_MODEL = "gemini-3.8-flash-high";
+type RouteDraft = Pick<SubagentDraft, "providerId" | "accountId" | "model">;
+type PaseoDurableStep = {
+  id: string;
+  recordId: string;
+  taskId: string;
+  title: string;
+  phase: string;
+  providerId: string;
+  accountId: string;
+  model: string;
+  output: string;
+  permission: string;
+  pendingWrite: boolean;
+};
+type PaseoDurableRun = {
+  id: string;
+  taskId: string;
+  status: string;
+  planner: PaseoDurableStep;
+  workers: PaseoDurableStep[];
+  reviewer: PaseoDurableStep;
+};
+type ActiveLoop = { mode: "run" | "review"; runId: string };
+const POLL_INTERVAL_MS = 1_500;
+const POLL_LIMIT = 200;
+
+export function paseoRouteSelection(
+  providerId: string,
+  accountId: string,
+  model: string,
+): RouteDraft & { allowFallback: false } {
+  return { providerId, accountId, model, allowFallback: false };
+}
+
+export function paseoRouteDefaults(accounts: ProviderAccountRecord[]): {
+  orchestrator: RouteDraft | null;
+  worker: RouteDraft | null;
+} {
+  const exact = (providerId: string, model: string): RouteDraft | null => {
+    const candidates = accounts.filter((account) => (
+      account.providerId === providerId
+      && account.models.includes(model)
+      && account.enabled
+      && account.status === "connected"
+      && !account.archivedAt
+    ));
+    const account = candidates.find((candidate) => candidate.isDefault) ?? candidates[0];
+    return account ? { providerId, accountId: account.id, model } : null;
+  };
+  return {
+    orchestrator: exact(WEB_GPT_PROVIDER_ID, WEB_GPT_MODEL),
+    worker: exact(GEMINI_PROVIDER_ID, GEMINI_MODEL),
+  };
+}
 
 function usable(snapshot: ProviderNetworkSnapshot | null): ProviderAccountRecord[] {
   return (snapshot?.accounts ?? []).filter((account) => (
@@ -66,12 +121,199 @@ function listValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+export function paseoDurableRuns(value: unknown): PaseoDurableRun[] {
+  const root = object(value) ?? {};
+  const execution = object(root.execution) ?? root;
+  const missions = listValue(execution.missions).map((entry) => object(entry) ?? {});
+  const byId = new Map(missions.flatMap((entry) => {
+    const id = stringValue(object(object(entry.mission)?.spec)?.mission_id);
+    return id ? [[id, entry] as const] : [];
+  }));
+  const step = (
+    id: string,
+    taskId: string,
+    bindingGeneration: string,
+    requestKey: string,
+  ): PaseoDurableStep => {
+    const entry = byId.get(id) ?? {};
+    const mission = object(entry.mission) ?? {};
+    const spec = object(mission.spec) ?? {};
+    const output = object(entry.output);
+    const ownedOutput = Boolean(output
+      && entry.binding_generation === bindingGeneration
+      && entry.start_message_id === requestKey
+      && output.agent_id === mission.record_id
+      && typeof output.text === "string"
+      && typeof output.turn_id === "string"
+      && typeof output.epoch === "string"
+      && Number.isInteger(output.seq_start)
+      && Number.isInteger(output.seq_end)
+      && Number(output.seq_end) >= Number(output.seq_start));
+    const permissionRow = object(entry.permission_request) ?? object(mission.permission_request);
+    const pendingKey = stringValue(mission.pending);
+    const pendingWrite = Boolean(pendingKey
+      && object(object(mission.receipts)?.[pendingKey])?.state === "reserved");
+    const pendingPermissions = listValue(entry.pending_permissions).length
+      || listValue(mission.pending_permissions).length;
+    const lastStatus = stringValue(mission.last_status);
+    const permission = stringValue(permissionRow?.summary, stringValue(permissionRow?.title))
+      || (pendingPermissions ? "Permission request pending" : "")
+      || (/permission|approval/i.test(lastStatus) ? lastStatus : "");
+    return {
+      id,
+      recordId: stringValue(mission.record_id),
+      taskId: taskId || stringValue(spec.task_id),
+      title: stringValue(spec.title, id),
+      phase: stringValue(mission.phase, "pending"),
+      providerId: stringValue(spec.provider),
+      accountId: stringValue(spec.account_id),
+      model: stringValue(spec.model),
+      output: ownedOutput ? stringValue(output?.text) : "",
+      permission,
+      pendingWrite,
+    };
+  };
+
+  return listValue(execution.orchestrations).flatMap((candidate) => {
+    const row = object(candidate) ?? {};
+    const id = stringValue(row.id);
+    if (!id) return [];
+    const workerIds = listValue(row.worker_mission_ids).map((entry) => stringValue(entry)).filter(Boolean);
+    const workerTasks = listValue(row.worker_task_ids).map((entry) => stringValue(entry));
+    const workerGenerations = listValue(row.worker_binding_generations).map((entry) => stringValue(entry));
+    const workerKeys = listValue(row.worker_request_keys).map((entry) => stringValue(entry));
+    const planner = step(
+      stringValue(row.planner_mission_id),
+      stringValue(row.planner_task_id),
+      stringValue(row.planner_binding_generation),
+      stringValue(row.planner_request_key),
+    );
+    const workers = workerIds.map((missionId, index) => step(
+      missionId,
+      workerTasks[index] ?? "",
+      workerGenerations[index] ?? "",
+      workerKeys[index] ?? "",
+    ));
+    const reviewer = step(
+      stringValue(row.reviewer_mission_id),
+      stringValue(row.reviewer_task_id),
+      stringValue(row.reviewer_binding_generation),
+      stringValue(row.reviewer_request_key),
+    );
+    const active = (candidate: PaseoDurableStep) => (
+      !["draft", "ready", "pending", "review_required", "accepted", "closed"].includes(candidate.phase)
+    );
+    const durableStatus = stringValue(row.status);
+    const status = (["passed", "needs_changes"].includes(durableStatus) ? durableStatus : "")
+      || (paseoTerminalStep({ planner, workers, reviewer }) ? "failed" : "")
+      || (reviewer.permission || workers.some((worker) => worker.permission) || planner.permission ? "held" : "")
+      || (reviewer.output ? "review_ready" : "")
+      || (active(reviewer) ? "reviewing" : "")
+      || (workers.length && workers.every((worker) => worker.output) ? "ready_for_review" : "")
+      || (workers.some((worker) => worker.output || active(worker)) ? "executing" : "")
+      || (planner.output ? "planned" : "planning");
+    return [{
+      id,
+      taskId: stringValue(row.task_id),
+      status,
+      planner,
+      workers,
+      reviewer,
+    }];
+  });
+}
+
 function phaseTone(phase: string): string {
-  if (["accepted", "closed"].includes(phase)) return "is-success";
-  if (["ready", "review_required", "changes_requested"].includes(phase)) return "is-warning";
+  if (["accepted", "closed", "passed"].includes(phase)) return "is-success";
+  if (["ready", "review_required", "changes_requested", "ready_for_review", "review_ready", "needs_changes", "planned"].includes(phase)) return "is-warning";
   if (["failed", "cancelled"].includes(phase)) return "is-error";
-  if (["running"].includes(phase)) return "is-running";
+  if (["running", "planning", "executing", "reviewing"].includes(phase)) return "is-running";
   return "is-muted";
+}
+
+function createPaseoRunId(): string {
+  return sanitizeIdentifier(`paseo-${crypto.randomUUID()}`).slice(0, 80);
+}
+
+function storedDraftRunId(workspaceId: string, replace = false): string {
+  const key = `coding-tools:paseo-draft:${workspaceId}`;
+  try {
+    const stored = replace ? "" : window.localStorage.getItem(key) ?? "";
+    if (/^[A-Za-z0-9_-]{1,80}$/.test(stored)) return stored;
+    const next = createPaseoRunId();
+    window.localStorage.setItem(key, next);
+    return next;
+  } catch {
+    return createPaseoRunId();
+  }
+}
+
+function stepFinished(step: PaseoDurableStep): boolean {
+  return Boolean(step.output);
+}
+
+export function paseoTerminalStep(
+  run: Pick<PaseoDurableRun, "planner" | "workers" | "reviewer">,
+): PaseoDurableStep | undefined {
+  return [run.planner, ...run.workers, run.reviewer].find((step) => (
+    !stepFinished(step) && ["failed", "closed", "cancelled"].includes(step.phase)
+  ));
+}
+
+export function shouldRefreshPaseoStep(
+  step: Pick<PaseoDurableStep, "phase" | "recordId" | "pendingWrite">,
+): boolean {
+  return step.phase === "running" && Boolean(step.recordId) && !step.pendingWrite;
+}
+
+export function paseoVerifiedReviewStatus(runId: string, review: JsonObject | null): string {
+  const status = stringValue(review?.status);
+  return runId && review?.runId === runId && review.liveModelCompletion === true
+    && ["passed", "needs_changes"].includes(status) ? status : "";
+}
+
+export function paseoDurableFindings(run: PaseoDurableRun): { title: string; detail: string }[] {
+  if (!["passed", "needs_changes"].includes(run.status) || !run.reviewer.output
+    || run.reviewer.output.length > 64 * 1024) return [];
+  try {
+    const output = run.reviewer.output.trim();
+    const fenced = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```$/u.exec(output);
+    const parsed = object(JSON.parse(fenced ? fenced[1].trim() : output));
+    if (!parsed || Object.keys(parsed).length !== 2
+      || parsed.verdict !== (run.status === "passed" ? "pass" : "needs_changes")
+      || !Array.isArray(parsed.findings) || parsed.findings.length > 32
+      || (run.status === "passed" && parsed.findings.length !== 0)
+      || (run.status === "needs_changes" && parsed.findings.length === 0)) return [];
+    const findings = parsed.findings.map((value) => object(value));
+    if (findings.some((value) => !value || Object.keys(value).length !== 2
+      || typeof value.title !== "string" || !value.title.trim() || value.title.length > 200
+      || typeof value.detail !== "string" || !value.detail.trim() || value.detail.length > 4_000)) return [];
+    return findings.map((value) => ({ title: String(value?.title).trim(), detail: String(value?.detail).trim() }));
+  } catch {
+    return [];
+  }
+}
+
+function currentStep(run: PaseoDurableRun, mode: ActiveLoop["mode"]): PaseoDurableStep {
+  if (mode === "review") return run.reviewer;
+  return [run.planner, ...run.workers].find((step) => !stepFinished(step)) ?? run.workers.at(-1) ?? run.planner;
+}
+
+function stepState(step: PaseoDurableStep, currentId: string, reviewer = false): string {
+  if (stepFinished(step)) return "finished";
+  if (["failed", "closed", "cancelled"].includes(step.phase)) return "failed";
+  if (["held", "scheduling_held", "hold_requested"].includes(step.phase)) return "held";
+  if (step.id === currentId) return reviewer ? "review" : "current";
+  return "pending";
+}
+
+function workflowStateLabel(language: Language, state: string): string {
+  if (state === "failed") return localText(language, "Failed", "失敗", "失败", "失敗");
+  if (state === "current") return localText(language, "Current", "目前", "当前", "進行中");
+  if (state === "review") return localText(language, "Review", "審查", "审查", "レビュー");
+  if (state === "finished") return localText(language, "Finished", "完成", "完成", "完了");
+  if (state === "held") return localText(language, "Held", "保留", "保留", "保留");
+  return localText(language, "Pending", "待處理", "待处理", "待機中");
 }
 
 export function PaseoOrchestratorSurface({
@@ -89,19 +331,23 @@ export function PaseoOrchestratorSurface({
   const [providerId, setProviderId] = useState("");
   const [accountId, setAccountId] = useState("");
   const [model, setModel] = useState("");
-  const [allowFallback, setAllowFallback] = useState(true);
   const [route, setRoute] = useState<ProviderExecutionPlan | null>(null);
   const [missions, setMissions] = useState<MissionView[]>([]);
   const [missionId, setMissionId] = useState("");
+  const [runs, setRuns] = useState<PaseoDurableRun[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [draftRunId, setDraftRunId] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [activeLoop, setActiveLoop] = useState<ActiveLoop | null>(null);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("route");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [subagents, setSubagents] = useState<SubagentDraft[]>([]);
-  const [assignmentPlan, setAssignmentPlan] = useState<JsonObject | null>(null);
-  const [assignmentRun, setAssignmentRun] = useState<JsonObject | null>(null);
   const [assignmentReview, setAssignmentReview] = useState<JsonObject | null>(null);
+  const pollGeneration = useRef(0);
 
   const accounts = useMemo(() => usable(network), [network]);
+  const defaults = useMemo(() => paseoRouteDefaults(accounts), [accounts]);
   const providers = useMemo(
     () => [...new Set(accounts.map((account) => account.providerId))],
     [accounts],
@@ -110,9 +356,19 @@ export function PaseoOrchestratorSurface({
     () => accounts.filter((account) => !providerId || account.providerId === providerId),
     [accounts, providerId],
   );
-  const account = matchingAccounts.find((candidate) => candidate.id === accountId)
-    ?? matchingAccounts[0];
+  const account = matchingAccounts.find((candidate) => candidate.id === accountId);
+  const orchestratorReady = Boolean(
+    account && account.providerId === providerId && account.models.includes(model),
+  );
+  const workersReady = subagents.length > 0 && subagents.every((item) => (
+    accounts.some((candidate) => (
+      candidate.id === item.accountId
+      && candidate.providerId === item.providerId
+      && candidate.models.includes(item.model)
+    ))
+  ));
   const selectedMission = missions.find((mission) => mission.id === missionId);
+  const selectedRun = runs.find((run) => run.id === selectedRunId);
 
   useEffect(() => {
     const launcher = window.codexWebLauncher;
@@ -136,52 +392,74 @@ export function PaseoOrchestratorSurface({
   }, [setError]);
 
   useEffect(() => {
-    if (!providers.length) return;
-    setProviderId((current) => (
-      current
-      || (providers.includes(WEB_GPT_PROVIDER_ID) ? WEB_GPT_PROVIDER_ID : providers[0] ?? "")
-    ));
-  }, [providers]);
+    setProviderId((current) => current || defaults.orchestrator?.providerId || "");
+  }, [defaults.orchestrator?.providerId]);
 
   useEffect(() => {
-    const first = matchingAccounts[0];
-    setAccountId((current) => (
-      matchingAccounts.some((candidate) => candidate.id === current)
-        ? current
-        : first?.id ?? ""
-    ));
-  }, [matchingAccounts]);
+    setAccountId((current) => {
+      if (matchingAccounts.some((candidate) => candidate.id === current)) return current;
+      return providerId === defaults.orchestrator?.providerId
+        ? defaults.orchestrator?.accountId ?? ""
+        : "";
+    });
+  }, [defaults.orchestrator, matchingAccounts, providerId]);
 
   useEffect(() => {
-    setModel((current) => (
-      current && account?.models.includes(current)
-        ? current
-        : account?.models[0] ?? ""
-    ));
-  }, [account]);
+    setModel((current) => {
+      if (current && account?.models.includes(current)) return current;
+      return account?.id === defaults.orchestrator?.accountId
+        ? defaults.orchestrator?.model ?? ""
+        : "";
+    });
+  }, [account, defaults.orchestrator]);
 
   useEffect(() => {
-    if (!accounts.length) return;
     setSubagents((current) => {
-      if (current.length) return current;
-      const fallback = accounts.find((item) => item.providerId !== providerId) ?? accounts[0];
+      if (current.length || !defaults.worker) return current;
       return [{
         key: crypto.randomUUID().slice(0, 8),
-        providerId: fallback?.providerId ?? "",
-        accountId: fallback?.id ?? "",
-        model: fallback?.models[0] ?? "",
+        ...defaults.worker,
         role: "implementer",
       }];
     });
-  }, [accounts, providerId]);
+  }, [defaults.worker]);
 
   useEffect(() => {
-    if (workspaceId) void refresh();
+    if (!workspaceId) return;
+    pollGeneration.current += 1;
+    setActiveLoop(null);
+    setDraftRunId(storedDraftRunId(workspaceId));
+    setSelectedRunId("");
+    setMissionId("");
+    setDrafting(false);
+    void refresh(true);
   }, [workspaceId]);
 
-  const refresh = async () => {
+  useEffect(() => () => {
+    pollGeneration.current += 1;
+  }, []);
+
+  const applyExecutionView = (view: JsonObject, chooseDefault = false): PaseoDurableRun[] => {
+    const nextMissions = missionViews(view).filter((mission) => mission.engine === "paseo");
+    const nextRuns = paseoDurableRuns(view);
+    setMissions(nextMissions);
+    setRuns(nextRuns);
+    setSelectedRunId((current) => (
+      nextRuns.some((run) => run.id === current)
+        ? current
+        : chooseDefault ? nextRuns[0]?.id ?? "" : ""
+    ));
+    setMissionId((current) => (
+      nextMissions.some((mission) => mission.id === current)
+        ? current
+        : chooseDefault && !nextRuns.length ? nextMissions[0]?.id ?? "" : ""
+    ));
+    return nextRuns;
+  };
+
+  const refresh = async (chooseDefault = false): Promise<PaseoDurableRun[]> => {
     const api = window.codingTools;
-    if (!api || !workspaceId) return;
+    if (!api || !workspaceId) return [];
     setBusy(true);
     try {
       const view = await api.execution.read({
@@ -189,15 +467,10 @@ export function PaseoOrchestratorSurface({
         missionId: null,
         refreshSource: false,
       });
-      const next = missionViews(view).filter((mission) => mission.engine === "paseo");
-      setMissions(next);
-      setMissionId((current) => (
-        next.some((mission) => mission.id === current)
-          ? current
-          : next[0]?.id ?? ""
-      ));
+      return applyExecutionView(view, chooseDefault);
     } catch (cause) {
       setError(messageOf(cause));
+      return [];
     } finally {
       setBusy(false);
     }
@@ -208,10 +481,7 @@ export function PaseoOrchestratorSurface({
     if (!launcher) throw new Error(copy.executionPlanningUnavailable);
     const next = await launcher.providerExecutionPlan({
       workload: "paseo",
-      ...(providerId ? { providerId } : {}),
-      ...(accountId ? { accountId } : {}),
-      ...(model ? { model } : {}),
-      allowFallback,
+      ...paseoRouteSelection(providerId, accountId, model),
     });
     setRoute(next);
     return next;
@@ -244,30 +514,27 @@ export function PaseoOrchestratorSurface({
 
   const planAssignments = async () => {
     if (!taskId.trim() || !subagents.length) return;
+    const stableRunId = draftRunId || storedDraftRunId(workspaceId);
+    setDraftRunId(stableRunId);
     setBusy(true);
     setError(null);
     try {
       const next = await callPlane("paseo_plan", {
+        runId: stableRunId,
+        taskId: taskId.trim(),
         brief: taskId.trim(),
-        orchestrator: {
-          providerId,
-          accountId,
-          model,
-          allowFallback,
-        },
+        orchestrator: paseoRouteSelection(providerId, accountId, model),
         subagents: subagents.map((item) => ({
           role: item.role,
-          providerId: item.providerId,
-          accountId: item.accountId,
-          model: item.model,
-          allowFallback,
+          ...paseoRouteSelection(item.providerId, item.accountId, item.model),
         })),
       });
-      setAssignmentPlan(next);
-      setAssignmentRun(null);
       setAssignmentReview(null);
       setInspectorTab("plan");
       setNotice(`${copy.paseoAssignmentPreview}: ${stringValue(object(next.orchestrator)?.role, "orchestrator")}`);
+      await refresh();
+      setSelectedRunId(stableRunId);
+      setDrafting(false);
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -275,44 +542,115 @@ export function PaseoOrchestratorSurface({
     }
   };
 
-  const runSubagents = async () => {
-    const planId = stringValue(assignmentPlan?.id);
-    if (!planId || !taskId.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await callPlane("paseo_run", {
-        planId,
-        message: taskId.trim(),
-      });
-      setAssignmentRun(next);
-      setInspectorTab("plan");
-      setNotice(copy.paseoRunningSubagents);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
+  const stopFollowing = () => {
+    pollGeneration.current += 1;
+    setActiveLoop(null);
+    setBusy(false);
   };
 
-  const reviewResults = async () => {
-    const runId = stringValue(assignmentRun?.id);
-    if (!runId) return;
+  const followRun = async (mode: ActiveLoop["mode"], runId: string) => {
+    const api = window.codingTools;
+    if (!api || !workspaceId || !runId) return;
+    const generation = pollGeneration.current + 1;
+    pollGeneration.current = generation;
+    setActiveLoop({ mode, runId });
     setBusy(true);
     setError(null);
     try {
-      const next = await callPlane("paseo_review", { runId });
-      setAssignmentReview(next);
-      setInspectorTab("plan");
-      setNotice(copy.paseoReviewReady);
+      for (let attempt = 0; attempt < POLL_LIMIT && pollGeneration.current === generation; attempt += 1) {
+        let view = await api.execution.read({ workspaceId, missionId: null, refreshSource: false });
+        if (pollGeneration.current !== generation) return;
+        let run = applyExecutionView(view).find((candidate) => candidate.id === runId);
+        if (!run) throw new Error(`Paseo run ${runId} is unavailable in this workspace`);
+        if (["passed", "needs_changes"].includes(run.status)) return;
+        const terminal = paseoTerminalStep(run);
+        if (terminal) throw new Error(`Paseo mission ${terminal.id} ${terminal.phase} before returning a result`);
+        const blocked = [run.planner, ...run.workers, run.reviewer].find((step) => step.permission);
+        if (blocked) {
+          setMissionId(blocked.id);
+          setInspectorTab("mission");
+          setNotice(blocked.permission);
+          return;
+        }
+
+        const active = currentStep(run, mode);
+        const waitingForState = active.id && !stepFinished(active)
+          && !["draft", "ready", "pending", "review_required"].includes(active.phase);
+        if (shouldRefreshPaseoStep(active)) {
+          await api.execution.read({ workspaceId, missionId: active.id, refreshSource: true });
+        }
+        if (waitingForState) {
+          await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
+          if (pollGeneration.current !== generation) return;
+          view = await api.execution.read({ workspaceId, missionId: null, refreshSource: false });
+          run = applyExecutionView(view).find((candidate) => candidate.id === runId);
+          if (!run) throw new Error(`Paseo run ${runId} is unavailable in this workspace`);
+          const terminal = paseoTerminalStep(run);
+          if (terminal) throw new Error(`Paseo mission ${terminal.id} ${terminal.phase} before returning a result`);
+          const pendingPermission = [run.planner, ...run.workers, run.reviewer]
+            .find((step) => step.permission);
+          if (pendingPermission) {
+            setMissionId(pendingPermission.id);
+            setInspectorTab("mission");
+            setNotice(pendingPermission.permission);
+            return;
+          }
+        }
+
+        if (mode === "run") {
+          if (run.workers.length > 0 && run.workers.every(stepFinished)) {
+            setNotice(copy.paseoReviewReady);
+            return;
+          }
+          const next = currentStep(run, mode);
+          const waiting = !stepFinished(next)
+            && !["draft", "ready", "pending", "review_required"].includes(next.phase);
+          if (waiting) continue;
+          const result = await callPlane("paseo_run", { planId: runId });
+          if (pollGeneration.current !== generation) return;
+          if (stringValue(result.status) === "ready_for_review") {
+            await refresh();
+            setNotice(copy.paseoReviewReady);
+            return;
+          }
+        } else {
+          const reviewerReady = stepFinished(run.reviewer)
+            || (["draft", "ready", "pending"].includes(run.reviewer.phase)
+              && run.workers.length > 0
+              && run.workers.every(stepFinished));
+          if (!reviewerReady) continue;
+          const result = await callPlane("paseo_review", { runId });
+          if (pollGeneration.current !== generation) return;
+          setAssignmentReview(result);
+          if (["passed", "needs_changes"].includes(stringValue(result.status))) {
+            await refresh();
+            setNotice(copy.paseoReviewReady);
+            return;
+          }
+        }
+      }
+      if (pollGeneration.current === generation) {
+        setNotice(localText(
+          language,
+          "Following paused after five minutes. Resume when ready.",
+          "追蹤已在五分鐘後暫停，準備好後再繼續。",
+          "跟踪已在五分钟后暂停，准备好后再继续。",
+          "5 分後に追跡を一時停止しました。準備ができたら再開してください。",
+        ));
+      }
     } catch (cause) {
-      setError(messageOf(cause));
+      if (pollGeneration.current === generation) setError(messageOf(cause));
     } finally {
-      setBusy(false);
+      if (pollGeneration.current === generation) {
+        setActiveLoop(null);
+        setBusy(false);
+      }
     }
   };
 
   const openAnnealTask = async () => {
+    if (!paseoVerifiedReviewStatus(selectedRunId, assignmentReview)
+      || !listValue(assignmentReview?.findings).length) return;
     const reviewId = stringValue(assignmentReview?.id);
     if (!reviewId) return;
     setBusy(true);
@@ -327,103 +665,10 @@ export function PaseoOrchestratorSurface({
     }
   };
 
-  const recordAssignment = async (assignmentId: string, withIssue: boolean) => {
-    const runId = stringValue(assignmentRun?.id);
-    if (!runId || !assignmentId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await callPlane("paseo_submit_result", {
-        runId,
-        assignmentId,
-        ok: !withIssue,
-        summary: taskId.trim() || assignmentId,
-        issues: withIssue
-          ? [{ title: (taskId.trim() || assignmentId).slice(0, 240), detail: taskId.trim() }]
-          : [],
-      });
-      setAssignmentRun(next);
-      const reviewed = await callPlane("paseo_review", { runId });
-      setAssignmentReview(reviewed);
-      setInspectorTab("plan");
-      setNotice(copy.paseoReviewReady);
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const updateSubagent = (key: string, patch: Partial<SubagentDraft>) => {
     setSubagents((current) => current.map((item) => (
       item.key === key ? { ...item, ...patch } : item
     )));
-  };
-
-  const prepare = async () => {
-    const api = window.codingTools;
-    if (!api || !workspaceId || !taskId.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const selectedRoute = await plan();
-      const view = await api.execution.read({
-        workspaceId,
-        missionId: null,
-        refreshSource: false,
-      });
-      const binding = selectBinding(
-        view,
-        "paseo",
-        selectedRoute.provider.id,
-        selectedRoute.model,
-      );
-      if (!binding) {
-        const available = executionBindings(view)
-          .filter((candidate) => candidate.engine === "paseo")
-          .map((candidate) => `${candidate.provider}/${candidate.model}`)
-          .join(", ");
-        throw new Error(available
-          ? `${copy.paseoBindingsMissing} ${copy.paseoAvailableBindings}: ${available}`
-          : copy.paseoBindingsMissing);
-      }
-      const id = sanitizeIdentifier(`paseo-${taskId}-${crypto.randomUUID().slice(0, 8)}`);
-      await api.execution.update({
-        workspaceId,
-        expectedRevision: boardRevision(view),
-        change: {
-          operation: "agent_prepare",
-          binding_id: binding.id,
-          task_id: taskId.trim(),
-          mission_id: id,
-        },
-        confirm: true,
-      });
-      const prepared = await api.execution.read({
-        workspaceId,
-        missionId: id,
-        refreshSource: false,
-      });
-      await api.execution.update({
-        workspaceId,
-        expectedRevision: missionRevision(prepared, id),
-        change: {
-          operation: "agent_control",
-          mission_id: id,
-          request_key: crypto.randomUUID(),
-          action: "create",
-        },
-        confirm: true,
-      });
-      setMissionId(id);
-      setInspectorTab("mission");
-      setNotice(copy.paseoMissionCreationSubmitted);
-      await refresh();
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
   };
 
   const control = async (action: Exclude<Action, "create">) => {
@@ -457,13 +702,14 @@ export function PaseoOrchestratorSurface({
     }
   };
 
-  const inspect = async () => {
+  const inspect = async (targetMissionId = missionId) => {
     const api = window.codingTools;
-    if (!api || !workspaceId || !missionId) return;
+    if (!api || !workspaceId || !targetMissionId) return;
     setBusy(true);
     setError(null);
     try {
-      await api.execution.read({ workspaceId, missionId, refreshSource: true });
+      setMissionId(targetMissionId);
+      await api.execution.read({ workspaceId, missionId: targetMissionId, refreshSource: true });
       await refresh();
       setInspectorTab("mission");
     } catch (cause) {
@@ -474,11 +720,14 @@ export function PaseoOrchestratorSurface({
   };
 
   const beginNewSession = () => {
+    stopFollowing();
+    const nextRunId = workspaceId ? storedDraftRunId(workspaceId, true) : createPaseoRunId();
+    setDraftRunId(nextRunId);
+    setDrafting(true);
+    setSelectedRunId("");
     setMissionId("");
     setTaskId("");
     setRoute(null);
-    setAssignmentPlan(null);
-    setAssignmentRun(null);
     setAssignmentReview(null);
     setNotice("");
     setInspectorTab("route");
@@ -487,6 +736,44 @@ export function PaseoOrchestratorSurface({
   const proxySummary = route?.proxy.mode === "profile"
     ? `${route.proxy.source} · ${route.proxy.profile?.name ?? copy.proxy}`
     : copy.direct;
+  const selectedReviewStatus = selectedRun
+    ? (["passed", "needs_changes"].includes(selectedRun.status) ? selectedRun.status : "")
+      || paseoVerifiedReviewStatus(selectedRun.id, assignmentReview) : "";
+  const selectedDisplayStatus = selectedReviewStatus || selectedRun?.status || "";
+  const selectedRunMode: ActiveLoop["mode"] = selectedRun
+    && ["ready_for_review", "review_ready", "reviewing", "passed", "needs_changes"].includes(selectedDisplayStatus)
+    ? "review"
+    : "run";
+  const selectedCurrentId = selectedRun ? currentStep(selectedRun, selectedRunMode).id : "";
+  const selectedSteps = selectedRun
+    ? [selectedRun.planner, ...selectedRun.workers, selectedRun.reviewer]
+    : [];
+  const selectedHasPermission = selectedSteps.some((step) => step.permission);
+  const selectedWorkersComplete = Boolean(
+    selectedRun?.workers.length && selectedRun.workers.every(stepFinished),
+  );
+  const selectedReviewComplete = Boolean(selectedReviewStatus);
+  const selectedFindings = selectedRun ? paseoDurableFindings(selectedRun) : [];
+  const workflowSteps = selectedRun ? [
+    {
+      key: "planner",
+      label: localText(language, "Planner", "規劃者", "规划者", "プランナー"),
+      step: selectedRun.planner,
+      reviewer: false,
+    },
+    ...selectedRun.workers.map((step, index) => ({
+      key: `worker-${index + 1}`,
+      label: localText(language, `Worker ${index + 1}`, `工作者 ${index + 1}`, `工作者 ${index + 1}`, `ワーカー ${index + 1}`),
+      step,
+      reviewer: false,
+    })),
+    {
+      key: "reviewer",
+      label: localText(language, "Reviewer", "審查者", "审查者", "レビュアー"),
+      step: selectedRun.reviewer,
+      reviewer: true,
+    },
+  ] : [];
 
   return (
     <section className="control-surface paseo-studio">
@@ -499,22 +786,50 @@ export function PaseoOrchestratorSurface({
           <button
             aria-label={copy.paseoNewSession}
             className="paseo-new-session-button"
+            disabled={busy}
             onClick={beginNewSession}
             type="button"
           >
             +
           </button>
         </header>
-        <button className="paseo-new-session-card" onClick={beginNewSession} type="button">
+        <button className="paseo-new-session-card" disabled={busy} onClick={beginNewSession} type="button">
           <span aria-hidden="true">＋</span>
           <strong>{copy.paseoNewSession}</strong>
         </button>
         <div className="paseo-session-list">
+          {runs.map((run) => {
+            const status = run.id === selectedRunId ? selectedDisplayStatus : run.status;
+            return (
+              <button
+                className={`paseo-session-item${run.id === selectedRunId ? " is-selected" : ""}`}
+                key={run.id}
+                onClick={() => {
+                  stopFollowing();
+                  setDrafting(false);
+                  setSelectedRunId(run.id);
+                  setMissionId(run.planner.id);
+                  setInspectorTab("plan");
+                }}
+                type="button"
+              >
+                <span className={`paseo-status-dot ${phaseTone(status)}`} />
+                <span className="paseo-session-copy">
+                  <strong>{run.taskId}</strong>
+                  <small>{run.id}</small>
+                </span>
+                <em>{phaseLabel(copy, status)}</em>
+              </button>
+            );
+          })}
           {missions.map((mission) => (
             <button
-              className={`paseo-session-item${mission.id === missionId ? " is-selected" : ""}`}
+              className={`paseo-session-item is-mission${!selectedRunId && !drafting && mission.id === missionId ? " is-selected" : ""}`}
               key={mission.id}
               onClick={() => {
+                stopFollowing();
+                setDrafting(false);
+                setSelectedRunId("");
                 setMissionId(mission.id);
                 setInspectorTab("mission");
               }}
@@ -528,7 +843,7 @@ export function PaseoOrchestratorSurface({
               <em>{phaseLabel(copy, mission.phase)}</em>
             </button>
           ))}
-          {!missions.length ? <p className="paseo-empty-sessions">{copy.paseoNoSessions}</p> : null}
+          {!runs.length && !missions.length ? <p className="paseo-empty-sessions">{copy.paseoNoSessions}</p> : null}
         </div>
       </aside>
 
@@ -536,11 +851,11 @@ export function PaseoOrchestratorSurface({
         <header className="paseo-workbench-toolbar">
           <div>
             <span className="surface-kicker">PASEO</span>
-            <h2>{selectedMission?.title ?? copy.paseoNewWorkspace}</h2>
+            <h2>{selectedRun?.taskId ?? selectedMission?.title ?? copy.paseoNewWorkspace}</h2>
           </div>
           <label className="paseo-workspace-picker">
             <span>{copy.workspace}</span>
-            <select value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)}>
+            <select disabled={busy} value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)}>
               <option value="">{copy.chooseWorkspace}</option>
               {workspaces.map((item) => (
                 <option key={item.id} value={item.id}>{item.label}</option>
@@ -557,7 +872,87 @@ export function PaseoOrchestratorSurface({
           </button>
         </header>
 
-        {selectedMission ? (
+        {selectedRun ? (
+          <div className="paseo-workflow-board">
+            <header className="paseo-workflow-heading">
+              <div>
+                <span className={`paseo-phase-badge ${phaseTone(selectedDisplayStatus)}`}>
+                  {phaseLabel(copy, selectedDisplayStatus)}
+                </span>
+                <h3>{selectedRun.taskId}</h3>
+                <code>{selectedRun.id}</code>
+              </div>
+              <div className="paseo-inline-controls">
+                {activeLoop?.runId === selectedRun.id ? (
+                  <button className="secondary-button" onClick={stopFollowing} type="button">
+                    {localText(language, "Pause follow", "暫停追蹤", "暂停跟踪", "追跡を停止")}
+                  </button>
+                ) : null}
+                <button
+                  className="secondary-button"
+                  disabled={busy || selectedHasPermission || selectedWorkersComplete}
+                  onClick={() => void followRun("run", selectedRun.id)}
+                  type="button"
+                >
+                  {copy.paseoRunSubagents}
+                </button>
+                <button
+                  className="primary-button compact"
+                  disabled={busy || selectedHasPermission || !selectedWorkersComplete || selectedReviewComplete}
+                  onClick={() => void followRun("review", selectedRun.id)}
+                  type="button"
+                >
+                  {copy.paseoReviewResults}
+                </button>
+              </div>
+            </header>
+
+            <div className="paseo-workflow-steps">
+              {workflowSteps.map(({ key, label, step, reviewer }) => {
+                const state = stepState(step, selectedCurrentId, reviewer);
+                return (
+                  <article className={`paseo-workflow-step is-${state}`} key={key}>
+                    <span className={`paseo-status-dot ${phaseTone(state === "failed" ? "failed" : step.phase)}`} />
+                    <div>
+                      <header>
+                        <strong>{label}</strong>
+                        <em>{workflowStateLabel(language, state)}</em>
+                      </header>
+                      <small>
+                        {phaseLabel(copy, step.phase)} · {step.providerId} · {step.accountId} · {step.model}
+                      </small>
+                      <small>{step.taskId || step.id}</small>
+                      {step.output ? <pre>{step.output}</pre> : null}
+                      {step.permission ? <p role="alert">{step.permission}</p> : null}
+                    </div>
+                    <button
+                      className="secondary-button"
+                      disabled={busy || !step.id}
+                      onClick={() => void inspect(step.id)}
+                      type="button"
+                    >
+                      {copy.inspect}
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+            {selectedFindings.length ? (
+              <div className="paseo-workflow-steps paseo-run-results">
+                <strong>{localText(language, "Review findings", "審查發現", "审核发现", "レビューの指摘")}</strong>
+                <ol className="paseo-assignment-list">
+                  {selectedFindings.map((finding, index) => (
+                    <li key={`${index}-${finding.title}`}>
+                      <strong>{finding.title}</strong>
+                      <small>{finding.detail}</small>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+            {notice ? <p className="control-notice paseo-inline-notice">{notice}</p> : null}
+          </div>
+        ) : selectedMission && !drafting ? (
           <div className="paseo-transcript">
             <section className="paseo-mission-hero">
               <div>
@@ -640,14 +1035,6 @@ export function PaseoOrchestratorSurface({
                   {(account?.models ?? []).map((name) => <option key={name} value={name} />)}
                 </datalist>
               </label>
-              <label className="paseo-fallback-chip">
-                <input
-                  checked={allowFallback}
-                  onChange={(event) => setAllowFallback(event.target.checked)}
-                  type="checkbox"
-                />
-                <span>{copy.allowHealthyFallback}</span>
-              </label>
             </div>
 
             <section className="paseo-subagent-board">
@@ -657,16 +1044,13 @@ export function PaseoOrchestratorSurface({
                   className="secondary-button"
                   disabled={busy || !accounts.length || subagents.length >= 8}
                   onClick={() => {
-                    const fallback = accounts.find((item) => (
-                      !subagents.some((agent) => agent.accountId === item.id)
-                    )) ?? accounts[0];
                     setSubagents((current) => [
                       ...current,
                       {
                         key: crypto.randomUUID().slice(0, 8),
-                        providerId: fallback?.providerId ?? "",
-                        accountId: fallback?.id ?? "",
-                        model: fallback?.models[0] ?? "",
+                        providerId: defaults.worker?.providerId ?? "",
+                        accountId: defaults.worker?.accountId ?? "",
+                        model: defaults.worker?.model ?? "",
                         role: `subagent-${current.length + 1}`,
                       },
                     ]);
@@ -680,8 +1064,7 @@ export function PaseoOrchestratorSurface({
                 const agentAccounts = accounts.filter((account) => (
                   !item.providerId || account.providerId === item.providerId
                 ));
-                const agentAccount = agentAccounts.find((account) => account.id === item.accountId)
-                  ?? agentAccounts[0];
+                const agentAccount = agentAccounts.find((account) => account.id === item.accountId);
                 return (
                   <div className="paseo-subagent-row" key={item.key}>
                     <label>
@@ -743,50 +1126,39 @@ export function PaseoOrchestratorSurface({
             <section className="paseo-composer">
               <textarea
                 aria-label={copy.taskId}
-                placeholder={copy.paseoComposerPlaceholder}
+                placeholder={copy.taskId}
                 value={taskId}
                 onChange={(event) => setTaskId(event.target.value)}
               />
               <footer>
-                <small>{copy.paseoComposerHint}</small>
+                <small>{copy.paseoComposerHint} · {draftRunId}</small>
                 <div>
                   <button
                     className="secondary-button"
-                    disabled={busy || !accounts.length}
+                    disabled={busy || !orchestratorReady}
                     onClick={() => void preview()}
                     type="button"
                   >
                     {copy.previewRoute}
                   </button>
                   <button
-                    className="secondary-button"
-                    disabled={busy || !workspaceId || !taskId.trim() || !subagents.length || !accounts.length}
+                    className="primary-button paseo-submit-button"
+                    disabled={busy || !workspaceId || !taskId.trim() || !orchestratorReady || !workersReady}
                     onClick={() => void planAssignments()}
                     type="button"
                   >
                     {busy ? copy.paseoPlanning : copy.paseoPlanAssignments}
-                  </button>
-                  <button
-                    className="secondary-button"
-                    disabled={busy || !assignmentPlan}
-                    onClick={() => void runSubagents()}
-                    type="button"
-                  >
-                    {copy.paseoRunSubagents}
-                  </button>
-                  <button
-                    className="primary-button paseo-submit-button"
-                    disabled={busy || !workspaceId || !taskId.trim() || !accounts.length}
-                    onClick={() => void prepare()}
-                    type="button"
-                  >
-                    {busy ? copy.paseoPreparing : copy.paseoCreateSession}
                     <span aria-hidden="true">↵</span>
                   </button>
                 </div>
               </footer>
             </section>
             {!accounts.length ? <p className="paseo-provider-warning">{copy.noProviderAccounts}</p> : null}
+            {accounts.length && (!orchestratorReady || !workersReady) ? (
+              <p className="paseo-provider-warning">
+                {WEB_GPT_MODEL} + {GEMINI_MODEL} unavailable; select connected routes explicitly.
+              </p>
+            ) : null}
             {notice ? <p className="control-notice paseo-inline-notice">{notice}</p> : null}
           </div>
         )}
@@ -842,73 +1214,29 @@ export function PaseoOrchestratorSurface({
             <p className="paseo-inspector-empty">{copy.routeUnavailable}</p>
           )
         ) : inspectorTab === "plan" ? (
-          assignmentPlan ? (
+          selectedRun ? (
             <div className="paseo-inspector-content">
               <span className="paseo-route-ready">{copy.paseoAssignmentPreview}</span>
               <dl className="paseo-detail-list">
-                <div>
-                  <dt>{copy.paseoOrchestrator}</dt>
-                  <dd>
-                    {stringValue(object(object(assignmentPlan.orchestrator)?.route)?.providerId)}
-                    {" · "}
-                    {stringValue(object(object(assignmentPlan.orchestrator)?.route)?.model, copy.defaultModel)}
-                  </dd>
-                </div>
+                <div><dt>{copy.taskReference}</dt><dd>{selectedRun.taskId}</dd></div>
+                <div><dt>{copy.mission}</dt><dd>{selectedRun.id}</dd></div>
+                <div><dt>{copy.phase}</dt><dd>{phaseLabel(copy, selectedDisplayStatus)}</dd></div>
               </dl>
               <ol className="paseo-assignment-list">
-                {listValue(assignmentPlan.subagents).map((entry) => {
-                  const row = object(entry) ?? {};
-                  const routeRow = object(row.route) ?? {};
-                  return (
-                    <li key={stringValue(row.id)}>
-                      <strong>{stringValue(row.role)}</strong>
-                      <small>{stringValue(routeRow.providerId)} · {stringValue(routeRow.model, copy.defaultModel)}</small>
-                      <code>{stringValue(row.backend)}</code>
-                    </li>
-                  );
-                })}
+                {workflowSteps.map(({ key, label, step }) => (
+                  <li key={key}>
+                    <strong>{label}</strong>
+                    <small>{phaseLabel(copy, step.phase)} · {step.providerId} · {step.model}</small>
+                    <code>{step.id}</code>
+                  </li>
+                ))}
               </ol>
-              {assignmentRun ? (
+              {paseoVerifiedReviewStatus(selectedRun.id, assignmentReview)
+                && listValue(assignmentReview?.findings).length > 0 ? (
                 <div className="paseo-run-results">
-                  <h3>{copy.paseoReviewResults}</h3>
-                  {listValue(assignmentRun.assignments).map((entry) => {
-                    const row = object(entry) ?? {};
-                    return (
-                      <article className="paseo-assignment-result" key={stringValue(row.id)}>
-                        <strong>{stringValue(row.role)}</strong>
-                        <small>{stringValue(row.status)}</small>
-                        <div className="paseo-inline-controls">
-                          <button
-                            className="secondary-button"
-                            disabled={busy}
-                            onClick={() => void recordAssignment(stringValue(row.id), false)}
-                            type="button"
-                          >
-                            {copy.paseoRecordReturn}
-                          </button>
-                          <button
-                            className="secondary-button"
-                            disabled={busy}
-                            onClick={() => void recordAssignment(stringValue(row.id), true)}
-                            type="button"
-                          >
-                            {copy.paseoRecordIssue}
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
-                  <button
-                    className="secondary-button"
-                    disabled={busy || !assignmentRun}
-                    onClick={() => void reviewResults()}
-                    type="button"
-                  >
-                    {copy.paseoReviewResults}
-                  </button>
                   <button
                     className="primary-button compact"
-                    disabled={busy || listValue(assignmentReview?.findings).length === 0}
+                    disabled={busy}
                     onClick={() => void openAnnealTask()}
                     type="button"
                   >

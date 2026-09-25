@@ -1,8 +1,13 @@
 const { createServer } = require("node:http");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { randomBytes, timingSafeEqual } = require("node:crypto");
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
+const APP_READ_TOOLS = new Set(["apps_list", "apps_catalog", "apps_status"]);
+const NATIVE_CODEX_TOOLS = new Set(["codex_runtime_status", "codex_agent_control", "codex_agent_read", "codex_command_exec"]);
+const AGENT_ORCHESTRATOR_OPERATIONS = new Set(["inspect", "board", "models", "runs", "update_run", "next", "create", "append", "move_task", "move_clause"]);
 const MAX_MANUAL_START_BODY_BYTES = 3 * 1024 * 1024;
 const MANUAL_SENT_OBSERVER_TIMEOUT_MS = 35_000;
 
@@ -37,11 +42,63 @@ function writeJson(response, status, body) {
   response.end(encoded);
 }
 
+function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, getProxyCredentials }) {
+  return new Promise((resolve, reject) => {
+    const headers = new Headers(options.headers);
+    headers.delete("cookie");
+    headers.delete("proxy-authorization");
+    const request = electronNet.request({
+      url, method: options.method, headers: Object.fromEntries(headers),
+      session: browserSession, credentials: "omit", useSessionCookies: false,
+      redirect: "manual",
+    });
+    const abort = () => request.abort();
+    if (options.signal?.aborted) {
+      abort();
+      reject(options.signal.reason ?? new DOMException("Native fetch aborted", "AbortError"));
+      return;
+    }
+    options.signal?.addEventListener("abort", abort, { once: true });
+    let proxyLoginAttempted = false;
+    request.on("login", (authInfo, callback) => {
+      let credentials = null;
+      if (authInfo.isProxy && !proxyLoginAttempted) {
+        proxyLoginAttempted = true;
+        try { credentials = getProxyCredentials(authInfo); } catch {}
+      }
+      if (credentials?.username && credentials?.password) callback(credentials.username, credentials.password);
+      else callback();
+    });
+    request.on("redirect", (status, _method, location, responseHeaders) => {
+      try {
+        const redirected = new Headers(responseHeaders);
+        redirected.set("location", location);
+        resolve(new Response(null, { status, headers: redirected }));
+      } catch (error) { reject(error); }
+      request.abort();
+    });
+    request.on("response", (incoming) => {
+      try {
+        const body = [204, 205, 304].includes(incoming.statusCode) ? null : Readable.toWeb(incoming);
+        resolve(new Response(body, { status: incoming.statusCode, headers: incoming.headers }));
+      } catch (error) { reject(error); }
+    });
+    request.on("error", reject);
+    request.end(options.body);
+  });
+}
+
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, fetchNative, getCodingToolsWorkspaces, callReadOnlyAppTool, callNativeCodexTool, callAgentOrchestrator }) {
     this.logger = logger;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
+    this.resolveProxy = resolveProxy;
+    this.fetchNative = fetchNative;
+    this.getCodingToolsWorkspaces = getCodingToolsWorkspaces;
+    this.callReadOnlyAppTool = callReadOnlyAppTool;
+    this.callNativeCodexTool = callNativeCodexTool;
+    this.callAgentOrchestrator = callAgentOrchestrator;
     this.token = randomBytes(32).toString("base64url");
     this.port = 0;
     this.server = createServer((request, response) => {
@@ -98,6 +155,12 @@ class BrowserControlServer {
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
+    const isProxyResolution = request.url === "/v1/network/resolve-proxy";
+    const isNativeFetch = request.url === "/v1/network/native-fetch";
+    const isWorkspaceCatalog = request.url === "/v1/coding-tools/workspaces";
+    const isAppRead = request.url === "/v1/coding-tools/apps";
+    const isNativeCodex = request.url === "/v1/coding-tools/native-codex";
+    const isAgentOrchestrator = request.url === "/v1/coding-tools/agent-orchestrator";
     const manualAction = new Map([
       ["/v1/manual/start", "start"],
       ["/v1/manual/wait-sent", "wait-sent"],
@@ -106,15 +169,78 @@ class BrowserControlServer {
       ["/v1/manual/end", "end"],
       ["/v1/manual/cancel", "cancel"],
     ]).get(request.url);
-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !manualAction)) {
+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isNativeFetch && !isWorkspaceCatalog && !isAppRead && !isNativeCodex && !isAgentOrchestrator && !manualAction)) {
       writeJson(response, 404, { error: "not_found" });
       return;
     }
     try {
+      if (isNativeFetch) {
+        await this.forwardNativeFetch(request, response);
+        return;
+      }
       const body = await readJson(
         request,
-        manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : MAX_BODY_BYTES,
+        manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : isNativeCodex ? 32 * 1024 : MAX_BODY_BYTES,
       );
+      if (isWorkspaceCatalog) {
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) {
+          throw new Error("Workspace catalog takes no arguments");
+        }
+        if (!this.getCodingToolsWorkspaces) throw new Error("Workspace catalog is unavailable");
+        writeJson(response, 200, await this.getCodingToolsWorkspaces());
+        return;
+      }
+      if (isAppRead) {
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || Object.keys(body).length !== 1 || !APP_READ_TOOLS.has(body.tool)) {
+          throw new Error("Only read-only module catalog tools are available");
+        }
+        if (!this.callReadOnlyAppTool) throw new Error("Module catalog is unavailable");
+        writeJson(response, 200, await this.callReadOnlyAppTool(body.tool));
+        return;
+      }
+      if (isAgentOrchestrator) {
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || Object.keys(body).length !== 3
+          || typeof body.workspace_id !== "string" || !body.workspace_id || body.workspace_id.length > 128
+          || !AGENT_ORCHESTRATOR_OPERATIONS.has(body.operation)
+          || !body.arguments || typeof body.arguments !== "object" || Array.isArray(body.arguments)) {
+          throw new Error("Invalid Agent Orchestrator request");
+        }
+        if (!this.callAgentOrchestrator) throw new Error("Agent Orchestrator is unavailable");
+        writeJson(response, 200, await this.callAgentOrchestrator(body.operation, {
+          ...body.arguments, workspaceId: body.workspace_id,
+        }));
+        return;
+      }
+      if (isNativeCodex) {
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || Object.keys(body).length !== 4
+          || typeof body.workspace_id !== "string" || !body.workspace_id || body.workspace_id.length > 128
+          || typeof body.request_id !== "string" || !/^[A-Za-z0-9_-]{6,128}$/.test(body.request_id)
+          || !NATIVE_CODEX_TOOLS.has(body.tool)
+          || !body.arguments || typeof body.arguments !== "object" || Array.isArray(body.arguments)
+          || (["codex_agent_control", "codex_command_exec"].includes(body.tool)
+            && body.arguments.request_id !== body.request_id)) {
+          throw new Error("Invalid native Codex tool request");
+        }
+        if (!this.callNativeCodexTool) throw new Error("Native Codex tool bridge is unavailable");
+        writeJson(response, 200, await this.callNativeCodexTool(body));
+        return;
+      }
+      if (isProxyResolution) {
+        const url = new URL(body?.url);
+        if (url.origin !== "https://chatgpt.com" || url.username || url.password
+          || !url.pathname.startsWith("/backend-api/codex/")) {
+          throw new Error("Proxy resolution is restricted to native Codex requests");
+        }
+        if (!this.resolveProxy) throw new Error("Native proxy resolver is unavailable");
+        let proxy;
+        try { proxy = await this.resolveProxy(url.href); }
+        catch { throw new Error("System proxy resolution failed"); }
+        writeJson(response, 200, { proxy });
+        return;
+      }
       const preferences = this.getPreferences();
       const host = this.getBrowserHost();
       if (!host) throw new Error("browser host is not ready");
@@ -336,6 +462,80 @@ class BrowserControlServer {
     }
   }
 
+  async forwardNativeFetch(request, response) {
+    let url;
+    try { url = new URL(request.headers["x-native-url"]); }
+    catch { throw new Error("Native Codex URL is invalid"); }
+    const paths = [
+      "/backend-api/codex/models",
+      "/backend-api/codex/responses",
+      "/backend-api/codex/responses/compact",
+      "/backend-api/codex/alpha/search",
+      "/backend-api/codex/images/generations",
+      "/backend-api/codex/images/edits",
+    ];
+    if (url.origin !== "https://chatgpt.com" || url.username || url.password || url.hash
+      || !paths.includes(url.pathname)) throw new Error("Native fetch is restricted to Codex backend endpoints");
+    const method = request.headers["x-native-method"];
+    if (method !== (url.pathname.endsWith("/models") ? "GET" : "POST")) {
+      throw new Error("Native Codex method is invalid");
+    }
+    const authorization = request.headers["x-native-authorization"];
+    if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")
+      || authorization.length <= 7) throw new Error("Native Codex authorization is invalid");
+    if (!this.fetchNative) throw new Error("Native fetch relay is unavailable");
+
+    const headers = new Headers();
+    const excluded = new Set([
+      "authorization", "cookie", "set-cookie", "host", "connection", "content-length",
+      "transfer-encoding", "keep-alive", "te", "trailer", "upgrade",
+      "proxy-authenticate", "proxy-authorization", "accept-encoding",
+    ]);
+    for (const [name, value] of Object.entries(request.headers)) {
+      if (typeof value === "string" && !excluded.has(name)
+        && !name.startsWith("x-native-") && !name.startsWith("sec-fetch-")) {
+        headers.set(name, value);
+      }
+    }
+    headers.set("authorization", authorization);
+
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of request) {
+      bytes += chunk.length;
+      if (bytes > 64 * 1024 * 1024) throw new Error("Native Codex request body is too large");
+      chunks.push(chunk);
+    }
+    const abort = new AbortController();
+    response.on("close", () => { if (!response.writableEnded) abort.abort(); });
+    let upstream;
+    try {
+      upstream = await this.fetchNative(url.href, {
+        method, headers,
+        ...(method === "POST" ? { body: Buffer.concat(chunks) } : {}),
+        credentials: "omit", redirect: "manual", signal: abort.signal,
+      });
+    } catch (error) {
+      if (response.destroyed) return;
+      this.logger.warn("browser.native_fetch_failed", {
+        code: typeof error?.code === "string" ? error.code : "network_error",
+      });
+      writeJson(response, 502, { error: "Native Codex network request failed", code: "native_network_error" });
+      return;
+    }
+    const outgoing = {};
+    const excludedResponse = new Set([
+      "content-length", "content-encoding", "set-cookie", "connection", "transfer-encoding",
+      "keep-alive", "te", "trailer", "upgrade", "proxy-authenticate", "proxy-authorization",
+    ]);
+    for (const [name, value] of upstream.headers) {
+      if (!excludedResponse.has(name)) outgoing[name] = value;
+    }
+    response.writeHead(upstream.status, outgoing);
+    if (upstream.body) await pipeline(Readable.fromWeb(upstream.body), response);
+    else response.end();
+  }
+
   async close() {
     if (!this.server.listening) return;
     await new Promise((resolve, reject) => {
@@ -344,4 +544,4 @@ class BrowserControlServer {
   }
 }
 
-module.exports = { BrowserControlServer, MAX_MANUAL_START_BODY_BYTES, MANUAL_SENT_OBSERVER_TIMEOUT_MS };
+module.exports = { BrowserControlServer, fetchNativeWithProxyAuth, MAX_MANUAL_START_BODY_BYTES, MANUAL_SENT_OBSERVER_TIMEOUT_MS };

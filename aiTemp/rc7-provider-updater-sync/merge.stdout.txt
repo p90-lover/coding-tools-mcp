@@ -1,3 +1,0 @@
-Auto-merging desktop-electron/electron/provider-network.cjs
-CONFLICT (content): Merge conflict in desktop-electron/electron/provider-network.cjs
-Automatic merge failed; fix conflicts and then commit the result.

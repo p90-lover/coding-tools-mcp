@@ -5,6 +5,7 @@ test("an already-personalized connector menu has no unconditional pre-mention de
   let menuVisible = false;
   let selected = false;
   let mentionTriggers = 0;
+  const mentionQueries: string[] = [];
   const exactLabel = { exactLabel: true };
   const selectedConnector = {
     waitFor: async () => {
@@ -41,7 +42,7 @@ test("an already-personalized connector menu has no unconditional pre-mention de
     },
     focus: async () => {},
     pressSequentially: async (value: string) => {
-      expect(value).toBe("@codex");
+      mentionQueries.push(value);
       mentionTriggers += 1;
       menuVisible = true;
     },
@@ -72,7 +73,7 @@ test("an already-personalized connector menu has no unconditional pre-mention de
   const page = {
     getByRole: personalizedRole,
     getByText: (text: string, options: { exact: boolean }) => {
-      expect(text).toBe("Codex Native2");
+      expect(text).toBe("Coding Tools Native2");
       expect(options).toEqual({ exact: true });
       return exactLabel;
     },
@@ -87,7 +88,7 @@ test("an already-personalized connector menu has no unconditional pre-mention de
 
   const startedAt = performance.now();
   const resolved = await selectConnector.call({
-    config: { appName: "Codex Native2" },
+    config: { appName: "Coding Tools Native2" },
     activeComposer: async () => selected ? selectedComposer : composer,
     connectorIsSelected: async () => selected,
     selectedConnectorControl: () => selectedConnector,
@@ -96,6 +97,7 @@ test("an already-personalized connector menu has no unconditional pre-mention de
 
   expect(resolved).toBe(selectedComposer);
   expect(mentionTriggers).toBe(1);
+  expect(mentionQueries).toEqual(["@Coding Tools Native2"]);
   expect(selected).toBeTrue();
   // The fake page performs no I/O. Crossing this bound means selection inserted a fixed wait.
   expect(elapsedMs).toBeLessThan(200);

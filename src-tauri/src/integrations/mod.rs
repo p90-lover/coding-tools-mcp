@@ -1,5 +1,6 @@
 //! Observation snapshots stay here. Original-function RPCs live in `actions`.
 pub mod actions;
+pub mod ao;
 pub mod board;
 pub mod board_sync;
 pub mod commandcode;

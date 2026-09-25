@@ -98,7 +98,7 @@ test("Paseo is bundled in-app and still builds the pinned upstream server when n
   assert.equal(manifest.executionEndpoint, "ws://127.0.0.1:6768/ws");
 });
 
-test("Anneal is bundled in-app, keeps dedicated database guards, and does not require a GitHub token to Start", () => {
+test("Anneal uses its pinned setup validator and preserves database guards", () => {
   const manifest = readJson("vendor/managed-components/anneal.json");
   assert.equal(manifest.strategy, "bundled-source");
   assert.equal(manifest.repository, "mosonlab/anneal");
@@ -123,9 +123,12 @@ test("Anneal is bundled in-app, keeps dedicated database guards, and does not re
   ]);
 
   const configCommand = steps.get("restore-or-create-config").arguments.join(" ");
-  assert.match(configCommand, /npm run setup:local/);
+  assert.match(configCommand, /npm run setup:local -- --directory/);
   assert.match(configCommand, /config\/\.env/);
-  assert.match(configCommand, /chmod 600/);
+  assert.match(configCommand, /readlink \.env/);
+  assert.match(configCommand, /\[ -L \.env \]/);
+  assert.match(configCommand, /\[ -e \.env \]/);
+  assert.doesNotMatch(configCommand, /\.env\.example|cp \.env|mv \.env|ln -sfn/);
   assert.equal(
     steps.get("restore-or-create-config").environment.GITHUB_READ_TOKEN,
     "{secret:githubReadToken}",

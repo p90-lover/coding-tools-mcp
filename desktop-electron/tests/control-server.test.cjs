@@ -3,6 +3,73 @@ const assert = require("node:assert/strict");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
 
+test("native proxy resolution requires owner auth, restricts targets, and works without browser automation", async () => {
+  const resolved = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => { throw new Error("proxy resolution must not inspect browser contents"); },
+    getPreferences: () => { throw new Error("proxy resolution must not depend on integration mode"); },
+    resolveProxy: async url => { resolved.push(url); return "PROXY 127.0.0.1:7897"; },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = (url, authorization = `Bearer ${token}`) => fetch(`${endpoint}/v1/network/resolve-proxy`, {
+    method: "POST", headers: { authorization, "content-type": "application/json" }, body: JSON.stringify({ url }),
+  });
+  try {
+    const url = "https://chatgpt.com/backend-api/codex/models?client_version=0.153.4";
+    assert.equal((await send(url, "Bearer wrong")).status, 401);
+    for (const target of ["http://chatgpt.com/backend-api/codex/models", "https://example.com/", "https://secret@chatgpt.com/backend-api/codex/models", "https://chatgpt.com/backend-api/me"]) {
+      assert.equal((await send(target)).status, 400);
+    }
+    const response = await send(url);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { proxy: "PROXY 127.0.0.1:7897" });
+    assert.deepEqual(resolved, [url]);
+    server.resolveProxy = async () => { throw new Error("private PAC address"); };
+    const failure = await send(url);
+    assert.equal(failure.status, 400);
+    assert.deepEqual(await failure.json(), { error: "System proxy resolution failed" });
+  } finally { await server.close(); }
+});
+
+test("native relay restricts the backend and streams without cookies", async () => {
+  const calls = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => { throw new Error("native relay must not inspect the browser DOM"); },
+    getPreferences: () => { throw new Error("native relay must not read preferences"); },
+    fetchNative: async (url, init) => {
+      calls.push({ url, method: init.method, credentials: init.credentials,
+        authorization: init.headers.get("authorization"), cookie: init.headers.get("cookie"),
+        secFetchMode: init.headers.get("sec-fetch-mode"),
+        body: await new Response(init.body).text() });
+      return new Response("data: NATIVE_RELAY_OK\n\ndata: [DONE]\n\n", {
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = (url, controlToken = token) => fetch(`${endpoint}/v1/network/native-fetch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${controlToken}`, "x-native-url": url,
+      "x-native-authorization": "Bearer native-test-token", "x-native-method": "POST",
+      "content-type": "application/json", cookie: "DO_NOT_FORWARD", "sec-fetch-mode": "cors" },
+    body: '{"model":"gpt-5.6-sol"}',
+  });
+  try {
+    const url = "https://chatgpt.com/backend-api/codex/responses";
+    assert.equal((await send(url, "wrong")).status, 401);
+    assert.equal((await send("https://example.com/backend-api/codex/responses")).status, 400);
+    const response = await send(url);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/event-stream");
+    assert.equal(await response.text(), "data: NATIVE_RELAY_OK\n\ndata: [DONE]\n\n");
+    assert.deepEqual(calls, [{ url, method: "POST", credentials: "omit",
+      authorization: "Bearer native-test-token", cookie: null, secFetchMode: null,
+      body: '{"model":"gpt-5.6-sol"}' }]);
+  } finally { await server.close(); }
+});
+
 test("browser control server authenticates and owns turn visibility", async () => {
   const calls = [];
   const logs = [];

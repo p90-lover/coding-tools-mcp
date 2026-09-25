@@ -83,19 +83,19 @@ test("mesh construction rejects non-loopback overlays", () => {
   );
 });
 
-test("Paseo and Anneal peer env alias CommandCode; MCP env does not", () => {
+test("Anneal peer env aliases CommandCode while Paseo keeps its CPA route", () => {
   const mesh = buildLoopbackMesh();
   const paseo = loopbackMeshEnvironment(mesh, {
     targetId: "paseo",
     commandCodeApiKey: "peer-secret-not-for-json",
     meshPath: "/tmp/loopback-mesh.json",
   });
-  assert.equal(paseo.OPENAI_BASE_URL, "http://127.0.0.1:9090/v1");
-  assert.equal(paseo.ANTHROPIC_BASE_URL, "http://127.0.0.1:9090/v1");
+  assert.equal(paseo.OPENAI_BASE_URL, undefined);
+  assert.equal(paseo.ANTHROPIC_BASE_URL, undefined);
   assert.equal(paseo.CODING_TOOLS_COMMANDCODE_URL, "http://127.0.0.1:9090");
   assert.equal(paseo.CODING_TOOLS_CPA_URL, "http://127.0.0.1:8317");
   assert.equal(paseo.CODING_TOOLS_CODEX_ROUTER_URL, "http://127.0.0.1:4202");
-  assert.equal(paseo.OPENAI_API_KEY, "peer-secret-not-for-json");
+  assert.equal(paseo.OPENAI_API_KEY, undefined);
 
   const commandcode = loopbackMeshEnvironment(mesh, { targetId: "commandcode-proxy", commandCodeApiKey: "peer-secret-not-for-json" });
   assert.equal(commandcode.OPENAI_BASE_URL, undefined);
@@ -144,6 +144,7 @@ test("external-services runtimeEnvironment advertises Paseo and Anneal origins w
       clone: () => ({ json: async () => ({ data: [] }) }),
     }),
     spawnProcess: () => mockChild(),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
   const env = controller.runtimeEnvironment();
   assert.equal(env.CODING_TOOLS_CODEX_ROUTER_URL, "http://127.0.0.1:4202");
@@ -177,6 +178,7 @@ test("managed controller shares one mesh file with MCP and keeps Anneal on 5173"
       clone: () => ({ json: async () => ({ data: [] }) }),
     }),
     spawnProcess: () => mockChild(),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
   const env = controller.runtimeEnvironment();
   const mesh = controller.loopbackMesh();
@@ -256,6 +258,7 @@ test("managed Start injects peer loopbacks and does not override PROXY_PORT", as
       spawned.push({ executable, args, env: options.env });
       return mockChild(8100 + spawned.length);
     },
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
     resolveRuntimeExecutable: () => process.execPath,
     peerEnvironment: (manifest) => loopbackMeshEnvironment(buildLoopbackMesh(), {
       targetId: manifest.id,

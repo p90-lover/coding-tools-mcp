@@ -3,7 +3,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
-const { routerLongRunEnvironment } = require("./cpa-codex-long-run.cjs");
 
 const CONTROL_CENTER_RELATIVE = path.join("apps", "control-center");
 const ORIGINAL_SECTIONS = Object.freeze([
@@ -66,19 +65,10 @@ function bundledElectronPath(root) {
 }
 
 function routerEnvironment(home, state) {
-  const routerState = path.join(state, "router");
-  const codexHome = path.join(state, "codex-home");
-  fs.mkdirSync(routerState, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  const env = require("./codex-router-managed.cjs").environment(home, state);
   return {
-    MODEL_ROUTER_TARGET: "codex",
-    MODEL_ROUTER_STATE_DIR: routerState,
+    ...env,
     MODEL_ROUTER_SOURCE_ROOT: home,
-    CODEX_ROUTER_STATE_DIR: routerState,
-    CODEX_HOME: codexHome,
-    CODEX_ROUTER_SOURCE_ROOT: home,
-    CODEX_ROUTER_NODE_BIN: process.execPath,
-    ...routerLongRunEnvironment(),
   };
 }
 

@@ -264,18 +264,46 @@ const genericObject = Object.freeze({
   additionalProperties: true,
 });
 
+const linkedProjectSummary = Object.freeze({
+  type: "object",
+  required: Object.freeze(["alias", "name", "path", "mode"]),
+  properties: Object.freeze({
+    alias: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    name: Object.freeze({ type: "string", minLength: 1, maxLength: 240 }),
+    path: Object.freeze({ type: "string", minLength: 1, maxLength: 4096 }),
+    mode: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+  }),
+  additionalProperties: false,
+});
+
 const workspaceSummary = Object.freeze({
   type: "object",
-  required: Object.freeze(["id", "name", "path", "mcpState", "policyRevision"]),
+  required: Object.freeze(["id", "name", "path", "mcpState", "policyRevision", "linkedProjects", "permissionMode", "approvalMode", "toolProfile", "mcpAuthType", "actionsAuthType", "mcpLocalPort", "actionsLocalPort", "screenCaptureEnabled", "mcpOAuthClientId", "mcpOAuthRedirectUris", "mcpUseSharedSecrets", "actionsOAuthClientId", "actionsOAuthRedirectUris", "actionsOAuthScopes", "actionsUseSharedSecrets"]),
   properties: Object.freeze({
     id: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
     name: Object.freeze({ type: "string", minLength: 1, maxLength: 240 }),
     path: Object.freeze({ type: "string", minLength: 1, maxLength: 4096 }),
+    linkedProjects: Object.freeze({ type: "array", items: linkedProjectSummary, maxItems: 100 }),
     mcpState: Object.freeze({
       type: "string",
       enum: Object.freeze(["stopped", "starting", "running", "stopping", "error"]),
     }),
     policyRevision: Object.freeze({ type: "integer", minimum: 0 }),
+    permissionMode: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+    approvalMode: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+    toolProfile: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+    mcpAuthType: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+    actionsAuthType: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+    mcpLocalPort: Object.freeze({ type: "integer", minimum: 1, maximum: 65535, nullable: true }),
+    actionsLocalPort: Object.freeze({ type: "integer", minimum: 1, maximum: 65535, nullable: true }),
+    screenCaptureEnabled: Object.freeze({ type: "boolean", nullable: true }),
+    mcpOAuthClientId: Object.freeze({ type: "string", maxLength: 256 }),
+    mcpOAuthRedirectUris: Object.freeze({ type: "array", items: Object.freeze({ type: "string", maxLength: 2048 }), maxItems: 32 }),
+    mcpUseSharedSecrets: Object.freeze({ type: "boolean", nullable: true }),
+    actionsOAuthClientId: Object.freeze({ type: "string", maxLength: 256 }),
+    actionsOAuthRedirectUris: Object.freeze({ type: "array", items: Object.freeze({ type: "string", maxLength: 2048 }), maxItems: 32 }),
+    actionsOAuthScopes: Object.freeze({ type: "string", maxLength: 1024 }),
+    actionsUseSharedSecrets: Object.freeze({ type: "boolean", nullable: true }),
   }),
   additionalProperties: false,
 });
@@ -295,6 +323,80 @@ const workspaceRequest = Object.freeze({
   required: Object.freeze(["workspaceId"]),
   properties: Object.freeze({
     workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+  }),
+  additionalProperties: false,
+});
+
+const workspacePolicyUpdateRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "permissionMode", "approvalMode", "toolProfile", "screenCaptureEnabled"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    permissionMode: Object.freeze({ type: "string", enum: Object.freeze(["read-only", "workspace-write"]) }),
+    approvalMode: Object.freeze({ type: "string", enum: Object.freeze(["ask", "on-request", "never"]) }),
+    toolProfile: Object.freeze({ type: "string", enum: Object.freeze(["read-only", "core", "advanced", "compat-readonly-all"]) }),
+    screenCaptureEnabled: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
+const nativeCodexStatusRequest = Object.freeze({
+  type: "object",
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+  }),
+  additionalProperties: false,
+});
+
+const nativeCodexConnectRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "executable", "codexHome", "model", "allowModelUsage", "allowCommandExecution", "permissionProfile", "requestLimit", "lifetimeSeconds"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    executable: Object.freeze({ type: "string", minLength: 1, maxLength: 4096 }),
+    codexHome: Object.freeze({ type: "string", minLength: 1, maxLength: 4096 }),
+    model: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    allowModelUsage: Object.freeze({ type: "boolean" }),
+    allowCommandExecution: Object.freeze({ type: "boolean" }),
+    permissionProfile: Object.freeze({ type: "string", enum: Object.freeze([":read-only", ":workspace"]) }),
+    requestLimit: Object.freeze({ type: "integer", minimum: 0, maximum: 20 }),
+    lifetimeSeconds: Object.freeze({ type: "integer", minimum: 0, maximum: 900 }),
+  }),
+  additionalProperties: false,
+});
+
+const workspaceAuthUpdateRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "service", "authType", "oauthClientId", "oauthRedirectUris", "oauthScopes", "useSharedSecrets"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    service: Object.freeze({ type: "string", enum: Object.freeze(["mcp", "actions"]) }),
+    authType: Object.freeze({ type: "string", enum: Object.freeze(["oauth", "bearer", "noauth", "api_key", "none"]) }),
+    oauthClientId: Object.freeze({ type: "string", maxLength: 256 }),
+    oauthRedirectUris: Object.freeze({ type: "array", items: Object.freeze({ type: "string", maxLength: 2048 }), maxItems: 32 }),
+    oauthScopes: Object.freeze({ type: "string", maxLength: 1024 }),
+    useSharedSecrets: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
+const workspaceServiceRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "service", "operation"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    service: Object.freeze({ type: "string", enum: Object.freeze(["mcp", "actions"]) }),
+    operation: Object.freeze({ type: "string", enum: Object.freeze(["status", "start", "stop", "restart"]) }),
+  }),
+  additionalProperties: false,
+});
+
+const workspaceSecretRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["workspaceId", "key"]),
+  properties: Object.freeze({
+    workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    key: Object.freeze({ type: "string", enum: Object.freeze(["bearer_token", "oauth_password", "actions_api_key", "actions_oauth_client_secret", "actions_oauth_password"]) }),
   }),
   additionalProperties: false,
 });
@@ -328,9 +430,34 @@ const appsCallRequest = Object.freeze({
 
 const taskListRequest = Object.freeze({
   type: "object",
+  required: Object.freeze(["workspaceId"]),
   properties: Object.freeze({
     ...pageProperties,
+    cursor: Object.freeze({ type: "integer", minimum: 0, maximum: 256 }),
     workspaceId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+  }),
+  additionalProperties: false,
+});
+
+const taskSummary = Object.freeze({
+  type: "object",
+  required: Object.freeze(["id", "title", "description", "state"]),
+  properties: Object.freeze({
+    id: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    title: Object.freeze({ type: "string", minLength: 1, maxLength: 240 }),
+    description: Object.freeze({ type: "string", maxLength: 8192 }),
+    state: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
+  }),
+  additionalProperties: false,
+});
+
+const taskListResponse = Object.freeze({
+  type: "object",
+  required: Object.freeze(["items", "nextCursor", "revision"]),
+  properties: Object.freeze({
+    items: Object.freeze({ type: "array", items: taskSummary, maxItems: 100 }),
+    nextCursor: Object.freeze({ type: "integer", minimum: 0, nullable: true }),
+    revision: Object.freeze({ type: "integer", minimum: 0 }),
   }),
   additionalProperties: false,
 });
@@ -451,6 +578,26 @@ const CONTRACTS = Object.freeze({
     request: pageRequest,
     response: pagedWorkspaceResponse,
   }),
+  "workspaces.updatePolicy": Object.freeze({
+    channel: "coding-tools:workspaces:policy-update",
+    request: workspacePolicyUpdateRequest,
+    response: genericObject,
+  }),
+  "workspaces.updateAuth": Object.freeze({
+    channel: "coding-tools:workspaces:auth-update",
+    request: workspaceAuthUpdateRequest,
+    response: genericObject,
+  }),
+  "workspaces.service": Object.freeze({
+    channel: "coding-tools:workspaces:service",
+    request: workspaceServiceRequest,
+    response: genericObject,
+  }),
+  "workspaces.copySecret": Object.freeze({
+    channel: "coding-tools:workspaces:copy-secret",
+    request: workspaceSecretRequest,
+    response: genericObject,
+  }),
   "permissions.snapshot": Object.freeze({
     channel: "coding-tools:permissions:snapshot",
     request: workspaceRequest,
@@ -464,7 +611,7 @@ const CONTRACTS = Object.freeze({
   "tasks.list": Object.freeze({
     channel: "coding-tools:tasks:list",
     request: taskListRequest,
-    response: genericListResponse,
+    response: taskListResponse,
   }),
   "history.search": Object.freeze({
     channel: "coding-tools:history:search",
@@ -473,7 +620,17 @@ const CONTRACTS = Object.freeze({
   }),
   "nativeCodex.status": Object.freeze({
     channel: "coding-tools:native-codex:status",
-    request: emptyObject,
+    request: nativeCodexStatusRequest,
+    response: genericObject,
+  }),
+  "nativeCodex.connect": Object.freeze({
+    channel: "coding-tools:native-codex:connect",
+    request: nativeCodexConnectRequest,
+    response: genericObject,
+  }),
+  "nativeCodex.disconnect": Object.freeze({
+    channel: "coding-tools:native-codex:disconnect",
+    request: workspaceRequest,
     response: genericObject,
   }),
   "integrations.snapshot": Object.freeze({

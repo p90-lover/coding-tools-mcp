@@ -8,8 +8,10 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
+const { invokeContract } = require("../electron/ipc-schema.cjs");
 const { createAppsProviderServices } = require("../electron/apps-provider-services.cjs");
 const { createProviderNetworkStore } = require("../electron/provider-network.cjs");
+const { createManagedExternalServicesController } = require("../electron/managed-external-services.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..");
@@ -165,6 +167,81 @@ test("CPA models/health/chatCompletions talk to a mocked loopback with bearer au
     assert.ok(seen.some((entry) => entry.authorization === "Bearer proxy-secret"));
     assert.ok(seen.some((entry) => entry.url === "/v0/management/auth-files"));
   } finally {
+    await mock.close();
+  }
+});
+
+test("CommandCode OpenAI handlers use the composite local bearer and block unavailable credentials", async () => {
+  const dataRoot = temporaryDirectory("coding-tools-commandcode-auth");
+  const manifest = JSON.parse(readRepo("desktop-electron/vendor/managed-components/commandcode-proxy.json"));
+  const home = path.join(dataRoot, "components", manifest.id, manifest.version);
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "proxy.mjs"), "// test package entrypoint\n");
+  const upstreamKey = "fixture-upstream-key-not-for-local-auth";
+  const controller = createManagedExternalServicesController({
+    dataRoot,
+    filePath: path.join(dataRoot, "external-services.json"),
+    keyPath: path.join(dataRoot, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    env: { CC_API_KEY: upstreamKey },
+    resolveRuntimeExecutable: () => process.execPath,
+    spawnProcess: () => assert.fail("credential lookup must not start a process"),
+    terminateProcessTree: () => assert.fail("no process is owned by this fixture"),
+  });
+  let localKey = "";
+  const seen = [];
+  const mock = await listenMock((request, response) => {
+    seen.push({ method: request.method, path: request.url, authorization: request.headers.authorization });
+    if (!localKey || request.headers.authorization !== `Bearer ${localKey}`) {
+      json(response, 401, { error: "missing local bearer" });
+    } else if (request.url === "/v1/models") {
+      json(response, 200, { data: [{ id: "fixture-model" }] });
+    } else {
+      json(response, 502, { error: { message: `diagnostic Bearer ${localKey}` } });
+    }
+  });
+  try {
+    const host = createCodingToolsAppsHost({ services: {
+      loopbackRequest: (id) => ({ ...controller.loopbackRequest(id), origin: mock.origin }),
+    } });
+    const needsRepair = await host.call(manifest.id, "models");
+    assert.equal(needsRepair.ok, false);
+    assert.match(needsRepair.result.reason, /repair-required/);
+    assert.equal(seen.length, 0);
+
+    fs.writeFileSync(path.join(home, ".coding-tools-managed-component.json"), JSON.stringify({
+      schemaVersion: 1, id: manifest.id, version: manifest.version, strategy: manifest.strategy,
+      repository: manifest.repository, commit: manifest.commit, installedAt: new Date().toISOString(),
+    }));
+    const noKey = await host.call(manifest.id, "models");
+    assert.equal(noKey.ok, false);
+    assert.match(noKey.result.reason, /proxy API key is unavailable/);
+    assert.equal(seen.length, 0);
+
+    localKey = controller.runtimeEnvironment().CODING_TOOLS_COMMANDCODE_API_KEY;
+    assert.ok(localKey && localKey !== upstreamKey, "fixture must have a distinct managed local key");
+    const spec = controller.loopbackRequest(manifest.id);
+    assert.equal(spec.origin, "http://127.0.0.1:9090/");
+    assert.equal(spec.healthPath, "/");
+    const models = await host.call(manifest.id, "models");
+    assert.equal(models.ok, true);
+    assert.deepEqual(models.result.models, ["fixture-model"]);
+    const chat = await host.call(manifest.id, "chatCompletions", {
+      model: "fixture-model", messages: [{ role: "user", content: "probe" }],
+    });
+    assert.equal(chat.ok, false);
+    assert.equal(chat.result.status, 502);
+    assert.equal(chat.result.json.error.message, "diagnostic Bearer [REDACTED]");
+    assert.deepEqual(seen.map(({ method, path }) => ({ method, path })), [
+      { method: "GET", path: "/v1/models" },
+      { method: "POST", path: "/v1/chat/completions" },
+    ]);
+    assert.ok(seen.every((request) => request.authorization === `Bearer ${localKey}`), "every request must use the local bearer");
+    const output = JSON.stringify({ needsRepair, noKey, models, chat });
+    assert.equal(output.includes(localKey), false);
+    assert.equal(output.includes(upstreamKey), false);
+  } finally {
+    controller.dispose();
     await mock.close();
   }
 });
@@ -519,6 +596,68 @@ test("CPA provider catalog fallback excludes disconnected accounts", async () =>
     const models = await host.call("cpa", "models");
     assert.equal(models.ok, false);
     assert.deepEqual(models.result.models, []);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("CPA managementHealth uses a bounded range GET and requires a working panel", async () => {
+  const panelBody = "<html>" + "x".repeat(2 * 1024 * 1024) + "</html>";
+  const panelRequests = [];
+  let panelStatus = 200;
+  const mock = await listenMock((request, response) => {
+    if (request.url === "/management.html") {
+      panelRequests.push({ method: request.method, range: request.headers.range });
+      if (request.method === "HEAD" || panelStatus !== 200) {
+        text(response, 404, "not found");
+      } else if (request.headers.range === "bytes=0-0") {
+        response.writeHead(206, {
+          "content-type": "text/html",
+          "content-length": "1",
+          "content-range": `bytes 0-0/${Buffer.byteLength(panelBody)}`,
+        });
+        response.end(panelBody[0]);
+      } else {
+        text(response, 200, panelBody);
+      }
+      return;
+    }
+    if (request.url === "/v0/management/auth-files") {
+      assert.equal(request.headers.authorization, "Bearer management-secret");
+      json(response, 200, { files: [{ name: "fixture.json", status: "ok" }] });
+      return;
+    }
+    json(response, 404, {});
+  });
+  try {
+    const host = createCodingToolsAppsHost({
+      services: {
+        loopbackRequest: () => ({
+          origin: mock.origin,
+          managementHeaders: { Authorization: "Bearer management-secret" },
+        }),
+      },
+    });
+    const management = await host.call("cpa", "managementHealth");
+    assert.equal(management.ok, true);
+    assert.equal(management.result.reachable, true);
+    assert.equal(management.result.status, 206);
+    assert.equal(management.result.authFileCount, 1);
+    assert.deepEqual(panelRequests, [{ method: "GET", range: "bytes=0-0" }]);
+    const viaIpc = await invokeContract({
+      invoke: (channel, payload) => {
+        assert.equal(channel, "coding-tools:apps:call");
+        return host.call(payload.moduleId, payload.operation, payload.arguments || {});
+      },
+    }, "apps.call", { moduleId: "cpa", operation: "managementHealth" });
+    assert.equal(viaIpc.result.ok, true);
+    assert.equal(Object.hasOwn(viaIpc.result, "reason"), false);
+
+    panelStatus = 404;
+    const missing = await host.call("cpa", "managementHealth");
+    assert.equal(missing.ok, false);
+    assert.equal(missing.result.reachable, true);
+    assert.match(missing.result.reason, /management panel.*HTTP 404/);
   } finally {
     await mock.close();
   }

@@ -1,0 +1,86 @@
+.network-proxy-surface .control-heading p { max-width: 64ch; }
+
+.network-proxy-surface .control-panel,
+.network-proxy-surface .global-proxy-banner,
+.proxy-route-overview {
+  background: var(--panel-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.proxy-route-overview {
+  box-sizing: border-box;
+  margin: 0 auto 18px;
+  max-width: 1280px;
+  padding: 20px;
+}
+
+.proxy-route-header,
+.proxy-route-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+  justify-content: space-between;
+}
+
+.proxy-route-header h2 { margin: 4px 0 0; }
+
+.proxy-route-badge {
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.proxy-route-badge.is-ready {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.proxy-route-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 18px 0;
+}
+
+.proxy-route-list > div {
+  border-top: 1px solid var(--border-subtle);
+  min-width: 0;
+  padding: 12px 16px 0 0;
+}
+
+.proxy-route-list dt,
+.proxy-route-actions small,
+.proxy-secret-help { color: var(--text-secondary); font-size: 12px; }
+.proxy-route-list dd { margin: 6px 0 0; overflow-wrap: anywhere; }
+.proxy-route-actions { justify-content: flex-start; }
+.proxy-route-actions small { max-width: 65ch; }
+.proxy-secret-help { margin: 12px 0 0; }
+
+.proxy-detail-group {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 16px;
+  padding-top: 14px;
+}
+
+.proxy-detail-group > summary { cursor: pointer; font-weight: 600; }
+.proxy-detail-group > summary span { color: var(--text-secondary); font-size: 12px; margin-left: 6px; }
+.proxy-detail-group .scope-grid { margin-top: 14px; }
+.proxy-advanced { margin: 0 auto; max-width: 1280px; }
+.proxy-advanced > .control-grid { margin: 16px 0 0; }
+
+.network-proxy-surface input:not([type="checkbox"]),
+.network-proxy-surface select,
+.network-proxy-surface button { min-height: 40px; }
+.network-proxy-surface :is(button, input, select, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .proxy-route-list { grid-template-columns: 1fr; gap: 12px; }
+  .proxy-route-overview { padding: 16px; }
+}

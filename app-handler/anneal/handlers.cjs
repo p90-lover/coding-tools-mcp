@@ -1,7 +1,7 @@
 "use strict";
 
 const { defineModule } = require("../lib/define-module.cjs");
-const { inspectResult, moduleSnapshot, runtimeUnavailable } = require("../lib/in-process-runtime.cjs");
+const { runtimeUnavailable } = require("../lib/in-process-runtime.cjs");
 const { classifyAnnealUnavailable, errorMessage, sanitizePublic } = require("../lib/sanitize.cjs");
 
 const LOOPBACK = Object.freeze({
@@ -14,10 +14,12 @@ async function act(op, args, context) {
     return runtimeUnavailable("anneal", "anneal-runtime", "Anneal runtime is not started");
   }
   try {
+    const connection = context.services?.loopbackRequest?.();
     return sanitizePublic(await context.actUpstream({
       toolId: "anneal",
       op,
-      endpoint: args.endpoint || context.loopback?.api || LOOPBACK.api,
+      endpoint: connection?.origin || `${LOOPBACK.web}api/`,
+      credential: connection?.credential || "",
       taskId: args.taskId,
       projectId: args.projectId,
       messageId: args.messageId,
@@ -25,6 +27,9 @@ async function act(op, args, context) {
       name: args.name,
       description: args.description,
       cwd: args.cwd,
+      status: args.status,
+      assigneeAgentId: args.assigneeAgentId,
+      repoId: args.repoId,
     }));
   } catch (error) {
     const unavailable = classifyAnnealUnavailable(error);
@@ -42,45 +47,22 @@ async function act(op, args, context) {
   }
 }
 
-function inProcessBoard() {
-  const snapshot = moduleSnapshot("anneal");
-  if (!snapshot.present) {
-    return {
-      ok: false,
-      softFail: true,
-      unavailable: true,
-      detail: "Anneal bundled source is missing",
-      listening: false,
-      runtimeStarted: false,
-      source: snapshot.source,
-      vendor: snapshot.vendor,
-    };
-  }
-  return sanitizePublic({
-    ok: true,
-    status: 200,
-    tasks: [],
-    json: [],
-    listening: false,
-    runtimeStarted: false,
-    transport: "in-process",
-    source: snapshot.source,
-    vendor: snapshot.vendor,
-    legacyLoopback: snapshot.legacyLoopback,
-  });
-}
-
 function createModule() {
   const extraOperations = {
-      inspect: {
+      projects: {
         readOnly: true,
-        description: "Inspect the in-process Anneal handler and bundled source. Does not probe :3000/:5173.",
-        run: () => inspectResult("anneal"),
+        description: "List real Anneal projects from the managed API.",
+        run: (args, context) => act("projects", args, context),
+      },
+      updateTask: {
+        readOnly: false,
+        description: "Change task state subject to Anneal's current move authority.",
+        run: (args, context) => act("update", args, context),
       },
       listTasks: {
         readOnly: true,
-        description: "List Anneal tasks in-process from bundled module state. Does not require :3000.",
-        run: () => inProcessBoard(),
+        description: "List Anneal tasks from the managed board API.",
+        run: (args, context) => act("board", args, context),
       },
       preview: {
         readOnly: true,
@@ -158,7 +140,11 @@ function createModule() {
       },
   };
   extraOperations.board = extraOperations.listTasks;
-  extraOperations.activity = extraOperations.preview;
+  extraOperations.activity = {
+    readOnly: true,
+    description: "Read one Anneal task's activity from the managed API.",
+    run: (args, context) => act("activity", args, context),
+  };
   extraOperations["task-start"] = extraOperations.startTask;
   extraOperations.inbox_decision = extraOperations.inboxDecision;
   extraOperations.inbox_reply = {

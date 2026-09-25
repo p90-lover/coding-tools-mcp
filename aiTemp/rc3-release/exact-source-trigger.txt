@@ -1,3 +1,0 @@
-v0.7.0-rc.3 exact-source release trigger
-
-The package identity is aligned to v0.7.0-rc.3 at branch head 8fa81fda21fbd9e3eac8248b7defcb1f493cb1c7. This retained aiTemp marker creates a stable user-originated source commit for the exact-source Windows build, packaged smoke test, provenance generation, and prerelease publication. No file or branch is deleted.

@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import * as z from "zod/v4";
 import { namespacedToolName, type CodexTool } from "../../types";
 import { VERSION } from "../../version";
+import { readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
@@ -42,6 +43,13 @@ const AGENT_WAIT_TRANSPORT_RULE = `ChatGPT Web transport rule: wait for exactly 
 // must settle first so an abandoned native tool call is returned as an MCP error instead of
 // letting the tunnel tear down and poison its long-lived stdio transport.
 export const CHATGPT_WEB_MCP_INVOCATION_TIMEOUT_MS = 90_000;
+
+const NATIVE_MCP_INSTRUCTIONS = [
+  "Use the supplied turn_token with codex_tool_inventory to discover the exact tools available in this Codex turn.",
+  "For computer use, vision, browser, workspace, or other capabilities, invoke only a returned wire_name through codex_tool_call; the outer Codex runtime owns approvals and tool results.",
+  "A missing tool is unavailable in this turn. Computer input also requires its separate local consent.",
+  "For an independent native Codex session, use coding_tools_workspaces and coding_tools_native_codex after enabling that workspace in the local desktop UI; this path does not need a Codex turn_token.",
+].join(" ");
 
 const ZERO_RISK_MCP_INSTRUCTIONS = [
   "For each pasted Codex Web GPT request, begin with codex_turn_start using the request_id in its request block.",
@@ -448,7 +456,159 @@ export async function runChatGptMcpServer(options: {
   const contract = options.contract ?? "native";
   const server = new McpServer(
     { name: contract === "safe" ? "codex-safe" : "codex-native", version: VERSION },
-    contract === "safe" ? { instructions: ZERO_RISK_MCP_INSTRUCTIONS } : undefined,
+    { instructions: contract === "safe" ? ZERO_RISK_MCP_INSTRUCTIONS : NATIVE_MCP_INSTRUCTIONS },
+  );
+
+  server.registerTool(
+    "coding_tools_workspaces",
+    {
+      title: "List Coding Tools workspaces",
+      description: "Read local Coding Tools workspace paths and configured MCP permission, approval, and tool-profile modes. Does not change access.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async (_input, extra) => {
+      const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
+      if (!descriptorPath) {
+        return result({ code: "workspace_host_unavailable", message: "Open the Coding Tools desktop app to read its workspaces." }, true);
+      }
+      try {
+        const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+        const response = await fetch(`${descriptor.control.endpoint}/v1/coding-tools/workspaces`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${descriptor.control.token}`,
+            "content-type": "application/json",
+          },
+          body: "{}",
+          signal: extra.signal,
+        });
+        if (!response.ok) throw new Error(`Workspace catalog returned HTTP ${response.status}`);
+        const payload = await response.json() as Record<string, unknown>;
+        if (!payload || !Array.isArray(payload.workspaces)) throw new Error("Workspace catalog response is invalid");
+        return result(payload);
+      } catch {
+        return result({ code: "workspace_catalog_unavailable", message: "The Coding Tools workspace catalog is unavailable. Check the desktop runtime." }, true);
+      }
+    },
+  );
+
+  server.registerTool(
+    "coding_tools_apps_inspect",
+    {
+      title: "Inspect Coding Tools modules",
+      description: "List in-process Coding Tools modules, inspect their available operations, or read their status. This tool cannot invoke mutating module operations.",
+      inputSchema: { view: z.enum(["list", "catalog", "status"]) },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ view }, extra) => {
+      const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
+      if (!descriptorPath) {
+        return result({ code: "module_host_unavailable", message: "Open the Coding Tools desktop app to inspect its modules." }, true);
+      }
+      try {
+        const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+        const response = await fetch(`${descriptor.control.endpoint}/v1/coding-tools/apps`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${descriptor.control.token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ tool: `apps_${view}` }),
+          signal: extra.signal,
+        });
+        if (!response.ok) throw new Error(`Module catalog returned HTTP ${response.status}`);
+        const payload = await response.json() as Record<string, unknown>;
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Module catalog response is invalid");
+        return result(payload);
+      } catch {
+        return result({ code: "module_catalog_unavailable", message: "The Coding Tools module catalog is unavailable. Check the desktop runtime." }, true);
+      }
+    },
+  );
+
+  if (contract === "native") server.registerTool(
+    "coding_tools_native_codex",
+    {
+      title: "Use the locally connected Codex App Server",
+      description: "Independent of an active outer Codex turn. Use codex_runtime_status with {}, codex_agent_control with operation/start/send/review/compact/interrupt/close plus thread_id and text when applicable, codex_agent_read with thread_id, or codex_command_exec with argv and optional timeout_ms/approval_token. The workspace authenticated MCP listener and native Codex session must be enabled in the local Coding Tools desktop UI. Use a new request_id for each new operation; retry only with the same ID and identical fields to inspect a pending or uncertain receipt. A start/send receipt is not task completion; follow with codex_agent_read. Model calls and commands can consume quota or change files under the locally selected permissions.",
+      inputSchema: {
+        workspace_id: z.string().min(1).max(128),
+        request_id: z.string().regex(/^[A-Za-z0-9_-]{6,128}$/),
+        tool: z.enum(["codex_runtime_status", "codex_agent_control", "codex_agent_read", "codex_command_exec"]),
+        arguments: z.record(z.string(), z.unknown()),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ workspace_id, request_id, tool, arguments: toolArguments }, extra) => {
+      const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
+      if (!descriptorPath) {
+        return result({ code: "native_codex_host_unavailable", message: "Open Coding Tools to use a locally connected native Codex session." }, true);
+      }
+      try {
+        const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+        const response = await fetch(`${descriptor.control.endpoint}/v1/coding-tools/native-codex`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${descriptor.control.token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ workspace_id, request_id, tool, arguments: tool === "codex_agent_control" || tool === "codex_command_exec" ? { ...toolArguments, request_id } : toolArguments }),
+          signal: extra.signal,
+        });
+        if (!response.ok) throw new Error(`Native Codex control returned HTTP ${response.status}`);
+        const payload = await response.json() as Record<string, unknown>;
+        const operation = payload?.operation as Record<string, unknown> | undefined;
+        if (payload?.ok !== true || !operation || typeof operation !== "object") {
+          throw new Error("Native Codex receipt is invalid");
+        }
+        const toolResult = operation.result as Record<string, unknown> | undefined;
+        return result(payload, operation.state === "failed" || operation.state === "unknown" || toolResult?.ok === false);
+      } catch {
+        return result({ code: "native_codex_bridge_unavailable", message: "Check the Coding Tools workspace listener and native Codex connection, then retry with the same request_id and arguments." }, true);
+      }
+    },
+  );
+
+  if (contract === "native") server.registerTool(
+    "coding_tools_agent_orchestrator",
+    {
+      title: "Use the Coding Tools plan board",
+      description: "Inspect the existing Coding Tools plan and durable AO runs. Use board/runs/next for readback, models to inspect CPA worker-provider availability, create/append/move_task/move_clause for plan edits, and update_run for a revisioned AO graph change. Writes require confirmation in the focused desktop window. AO execution remains unavailable until its WebGPT planner/reviewer and selected worker harness routes are connected.",
+      inputSchema: {
+        workspace_id: z.string().min(1).max(128),
+        operation: z.enum(["inspect", "board", "models", "runs", "update_run", "next", "create", "append", "move_task", "move_clause"]),
+        arguments: z.record(z.string(), z.unknown()),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ workspace_id, operation, arguments: arguments_ }, extra) => {
+      const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
+      if (!descriptorPath) {
+        return result({ code: "agent_orchestrator_host_unavailable", message: "Open Coding Tools to use its plan board." }, true);
+      }
+      try {
+        const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+        const response = await fetch(`${descriptor.control.endpoint}/v1/coding-tools/agent-orchestrator`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${descriptor.control.token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ workspace_id, operation, arguments: arguments_ }),
+          signal: extra.signal,
+        });
+        if (!response.ok) throw new Error(`Agent Orchestrator returned HTTP ${response.status}`);
+        const payload = await response.json() as Record<string, unknown>;
+        const operationResult = payload?.result as Record<string, unknown> | undefined;
+        if (!payload || typeof payload !== "object" || Array.isArray(payload) || !operationResult) {
+          throw new Error("Agent Orchestrator response is invalid");
+        }
+        return result(payload, payload.ok === false || operationResult.ok === false);
+      } catch {
+        return result({ code: "agent_orchestrator_unavailable", message: "Check the Coding Tools desktop window and workspace, then refresh the board before retrying." }, true);
+      }
+    },
   );
 
   const claimTurn = async (

@@ -119,7 +119,8 @@ export async function installTunnelClient(): Promise<string> {
   if (!entry) throw new Error(`${asset} does not contain ${expectedName}`);
   const binary = entry[1];
   mkdirSync(dirname(executable), { recursive: true, mode: 0o700 });
-  const stagedExecutable = `${executable}.install-${process.pid}-${randomUUID()}${process.platform === "win32" ? ".exe" : ""}`;
+  // Avoid Windows installer detection: "install" in an unsigned executable name requests elevation.
+  const stagedExecutable = `${executable}.stage-${process.pid}-${randomUUID()}${process.platform === "win32" ? ".exe" : ""}`;
   atomicWriteFile(stagedExecutable, binary);
   let version: ReturnType<typeof runChecked>;
   try {

@@ -1,3 +1,0 @@
-Paseo/Anneal 0.7 validation target
-source_sha=55d961853fa3370b15c4640821bfe3b37a232850
-purpose=trigger exact-head compile, contract, UI, and pinned-upstream validation

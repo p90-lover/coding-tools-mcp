@@ -1,6 +1,6 @@
 use coding_tools_headless::{HeadlessService, ServiceConfig};
 use serde_json::Value;
-use std::{fs, path::PathBuf, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn loopback_control_requires_token_and_stops_cleanly() {
@@ -131,4 +131,73 @@ async fn loopback_control_requires_token_and_stops_cleanly() {
     assert_eq!(stopped["status"], "stopped");
     assert_eq!(stopped["shutdown_reason"], "fixture-complete");
     assert!(token_file.exists());
+}
+
+#[tokio::test]
+async fn execution_read_uses_the_validated_workspace_binding() {
+    let fixture = std::env::current_dir()
+        .expect("current directory")
+        .join("aiTemp/headless-workspace-binding")
+        .join(uuid::Uuid::new_v4().to_string());
+    let workspace = fixture.join("workspace");
+    fs::create_dir_all(&workspace).expect("workspace directory");
+    let workspace = workspace.canonicalize().expect("canonical workspace");
+    let workspace_id = "workspace-binding-fixture";
+    let data = serde_json::from_value(serde_json::json!({
+        "profiles": [{
+            "id": workspace_id,
+            "name": "Workspace binding fixture",
+            "path": workspace.to_string_lossy(),
+            "tunnel": {},
+            "auth": {"type": "bearer"},
+            "runtime": {},
+            "actions": {}
+        }]
+    }))
+    .expect("fixture app data");
+    let core = Arc::new(coding_tools_core::CoreState::from_data(data).expect("fixture core"));
+    let app_data_dir = fixture.join("app-data");
+    let descriptor_path = fixture.join("runtime/headless.json");
+    let service = HeadlessService::start_with_core(
+        ServiceConfig {
+            app_data_dir,
+            descriptor_path: descriptor_path.clone(),
+            max_active_requests: 4,
+            drain_timeout: Duration::from_secs(2),
+        },
+        core,
+    )
+    .await
+    .expect("headless service starts");
+    let descriptor: Value =
+        serde_json::from_slice(&fs::read(descriptor_path).expect("descriptor"))
+            .expect("descriptor json");
+    let token = fs::read_to_string(descriptor["token_file"].as_str().expect("token file"))
+        .expect("token");
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client")
+        .post(format!("{}/api/v1/execution/read", service.endpoint()))
+        .bearer_auth(token.trim())
+        .json(&serde_json::json!({
+            "workspace_id": workspace_id,
+            "mission_id": null,
+            "refresh_source": false
+        }))
+        .send()
+        .await
+        .expect("execution response");
+    let status = response.status();
+    let body: Value = response.json().await.expect("execution json");
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body.pointer("/error/message").and_then(Value::as_str),
+        Some("Workspace no longer exists"),
+        "the request must pass the workspace-bound-listener gate before the isolated fixture reaches the process-global store check"
+    );
+    service
+        .shutdown("workspace-binding-complete")
+        .await
+        .expect("clean shutdown");
 }

@@ -17,6 +17,7 @@ import type {
 import "./provider-hub-saas.css";
 
 interface SurfaceProps {
+  initialCategory?: ProviderCategoryFilter;
   language: Language;
   setError: (error: string | null) => void;
 }
@@ -436,12 +437,14 @@ function normalizeSearch(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
-export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
+export function ProviderCenterSurface({ initialCategory = "all", language, setError }: SurfaceProps) {
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot>(EMPTY_SNAPSHOT);
   const [externalServices, setExternalServices] = useState<ExternalServicesSnapshot>(EMPTY_EXTERNAL_SERVICES);
   const [providerSearch, setProviderSearch] = useState("");
-  const [providerCategory, setProviderCategory] = useState<ProviderCategoryFilter>("all");
-  const [selectedProviderId, setSelectedProviderId] = useState(PROVIDER_CATALOG[0].id);
+  const [providerCategory, setProviderCategory] = useState<ProviderCategoryFilter>(initialCategory);
+  const [selectedProviderId, setSelectedProviderId] = useState(() =>
+    PROVIDER_CATALOG.find((provider) => initialCategory === "all" || provider.category === initialCategory)?.id ?? PROVIDER_CATALOG[0].id,
+  );
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [draft, setDraft] = useState<AccountDraft>(() => emptyDraft());
   const [secret, setSecret] = useState("");

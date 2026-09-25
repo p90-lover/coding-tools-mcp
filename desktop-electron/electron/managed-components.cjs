@@ -9,6 +9,7 @@ const { pipeline } = require("node:stream/promises");
 const { spawn, spawnSync } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const { writeInAppProvidersFile } = require("./five-stack-cross-use.cjs");
+const { terminateOwnedProcessTree } = require("./process-tree.cjs");
 
 const COMPONENT_IDS = Object.freeze([
   "codex-router",
@@ -26,7 +27,6 @@ const INSTALL_STATES = Object.freeze([
   "external",
   "error",
 ]);
-const INSTALL_STATE_SET = new Set(INSTALL_STATES);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 const ALLOWED_STEP_KINDS = new Set([
   "download",
@@ -343,7 +343,7 @@ function quoteBash(value) {
   return `'${String(value).replaceAll("'", `'\"'\"'`)}'`;
 }
 
-function copyBundledTree(sourceRoot, destinationRoot) {
+function copyBundledTree(sourceRoot, destinationRoot, { skipNodeModules = false } = {}) {
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
   if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
@@ -352,7 +352,7 @@ function copyBundledTree(sourceRoot, destinationRoot) {
   const visit = (from, to) => {
     fs.mkdirSync(to, { recursive: true, mode: 0o700 });
     for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
-      if (entry.name === ".git") continue;
+      if (entry.name === ".git" || (skipNodeModules && entry.name === "node_modules")) continue;
       const fromPath = path.join(from, entry.name);
       const toPath = path.join(to, entry.name);
       const stat = fs.lstatSync(fromPath);
@@ -420,6 +420,7 @@ function createManagedComponentController({
   logger = null,
   fetchImpl = globalThis.fetch,
   spawnProcess = spawn,
+  terminateProcessTree = terminateOwnedProcessTree,
   spawnSyncProcess = spawnSync,
   resolveRuntimeExecutable = () => process.execPath,
   resolveCrossUseEnvironment = null,
@@ -440,6 +441,8 @@ function createManagedComponentController({
   const codec = createSecretCodec({ safeStorage, keyPath: secretKeyPath });
   const operations = new Map();
   const processes = new Map();
+  const stoppingChildren = new WeakSet();
+  let disposed = false;
   let secrets = readJson(secretPath) || { version: SECRET_VERSION, components: {} };
 
   for (const directory of [componentsRoot, stateRoot, aiTempRoot, trashRoot]) {
@@ -479,6 +482,7 @@ function createManagedComponentController({
       strategy: manifest.strategy,
       repository: manifest.repository,
       commit: manifest.commit || null,
+      ...(manifest.patchRevision ? { patchRevision: manifest.patchRevision } : {}),
     };
   }
 
@@ -489,7 +493,8 @@ function createManagedComponentController({
       && marker.version === expected.version
       && marker.strategy === expected.strategy
       && marker.repository === expected.repository
-      && (marker.commit || null) === expected.commit;
+      && (marker.commit || null) === expected.commit
+      && (marker.patchRevision || null) === (expected.patchRevision || null);
   }
 
   function readMarker(manifest) {
@@ -502,6 +507,18 @@ function createManagedComponentController({
     const marker = exists ? readMarker(manifest) : null;
     if (!exists) return { state: "not-installed", home, marker: null };
     if (!markerMatches(manifest, marker)) return { state: "repair-required", home, marker };
+    const requiredFiles = manifest.install.steps
+      .filter((step) => step.kind === "assert-file")
+      .map((step) => step.path);
+    if (manifest.bundle?.entrypoint) requiredFiles.push(manifest.bundle.entrypoint);
+    if (marker.artifact) requiredFiles.push(marker.artifact);
+    try {
+      if (requiredFiles.some((relative) => !fs.statSync(path.join(
+        home, assertSafeRelativePath(relative, "Managed package file"),
+      )).isFile())) return { state: "repair-required", home, marker };
+    } catch {
+      return { state: "repair-required", home, marker };
+    }
     return { state: "installed", home, marker };
   }
 
@@ -589,9 +606,11 @@ function createManagedComponentController({
     const manifest = manifestFor(id);
     const source = sourceState(manifest);
     const operation = operationState(id);
-    const installState = operation?.state && INSTALL_STATE_SET.has(operation.state)
-      ? operation.state
-      : source.state;
+    const installState = operation?.state === "installing"
+      ? "installing"
+      : source.state === "not-installed" && operation?.state === "error"
+        ? "error"
+        : source.state;
     return {
       id,
       name: manifest.name,
@@ -751,12 +770,13 @@ function createManagedComponentController({
       && isNetworkInstallStep(step);
   }
 
-  function copyBundleTree(sourceRoot, destinationRoot) {
+  function copyBundleTree(sourceRoot, destinationRoot, { skipNodeModules = false } = {}) {
     const source = path.resolve(sourceRoot);
     const destination = path.resolve(destinationRoot);
     fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
     for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === "CODING_TOOLS_TRASH_RECORD.json") continue;
+      if (entry.name === ".git" || entry.name === "CODING_TOOLS_TRASH_RECORD.json"
+        || (skipNodeModules && entry.name === "node_modules")) continue;
       const from = path.join(source, entry.name);
       const to = path.join(destination, entry.name);
       assertWithin(destinationRoot, to, "Bundled runtime member");
@@ -764,7 +784,7 @@ function createManagedComponentController({
       try { metadata = fs.statSync(from); }
       catch (error) { throw new Error(`Bundled runtime entry is unreadable: ${entry.name}`); }
       if (metadata.isDirectory()) {
-        copyBundleTree(from, to);
+        copyBundleTree(from, to, { skipNodeModules });
         continue;
       }
       if (!metadata.isFile()) throw new Error(`Bundled runtime contains an unsupported entry: ${entry.name}`);
@@ -848,16 +868,20 @@ function createManagedComponentController({
         key,
         expandToken(value, wslContext),
       ]));
-      const exported = Object.entries({ ...crossUseEnvironment, ...peerEnv(context), ...wslEnvironment })
-        .map(([key, value]) => `export ${key}=${quoteBash(value)}`)
-        .join("; ");
+      const forwarded = { ...crossUseEnvironment, ...peerEnv(context), ...wslEnvironment };
+      const names = Object.keys(forwarded);
+      if (names.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
+        throw new Error("WSL environment contains an invalid name");
+      }
+      const existing = String(env.WSLENV || "").split(":")
+        .filter((entry) => entry && !names.includes(entry.split("/")[0]));
+      const wslEnv = [...existing, ...names.map((name) => `${name}/u`)].join(":");
       const command = [wslExecutable, ...wslArgs].map(quoteBash).join(" ");
-      const script = exported ? `${exported}; exec ${command}` : `exec ${command}`;
       return {
         executable: "wsl.exe",
-        args: ["--cd", linuxHome, "--exec", "bash", "-lc", script],
+        args: ["--cd", linuxHome, "--exec", "bash", "-lc", `exec ${command}`],
         options: {
-          env: { ...env },
+          env: { ...env, ...forwarded, WSLENV: wslEnv },
           shell: false,
           windowsHide: true,
           stdio: ["ignore", "pipe", "pipe"],
@@ -898,14 +922,24 @@ function createManagedComponentController({
   function runCommand(entry, context, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS) {
     const spec = commandSpec(entry, context);
     return new Promise((resolve, reject) => {
+      if (disposed) throw new Error("Managed component controller has been disposed");
       const child = spawnProcess(spec.executable, spec.args, spec.options);
+      const active = processes.get(context.id) || new Map();
+      processes.set(context.id, active);
+      active.set(entry.id, child);
       let stdout = "";
       let stderr = "";
       let settled = false;
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        try { child.kill("SIGTERM"); } catch {}
+        if (platform === "win32") {
+          try { terminateProcessTree(child, "SIGTERM"); }
+          catch (error) {
+            reject(new Error(`${entry.id} timed out; cleanup failed: ${error.message}`, { cause: error }));
+            return;
+          }
+        } else try { child.kill("SIGTERM"); } catch {}
         reject(new Error(`${entry.id} timed out`));
       }, timeoutMs);
       timer.unref?.();
@@ -920,12 +954,14 @@ function createManagedComponentController({
         if (message) logger?.debug?.("managed-component.stderr", { componentId: context.id, step: entry.id, message });
       });
       child.once?.("error", (error) => {
+        active.delete(entry.id);
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         reject(error);
       });
       child.once?.("exit", (code, signal) => {
+        active.delete(entry.id);
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -1080,6 +1116,14 @@ function createManagedComponentController({
     const extraResources = explicitHome ? null : bundledSourceRoot(manifest);
     const inApp = explicitHome || (extraResources ? null : bundledSourceHome(manifest, null, env));
     const source = explicitHome || extraResources || inApp;
+    if (manifest.id === "paseo" && manifest.patchRevision && source) {
+      const bundle = readJson(path.join(path.dirname(source), "BUNDLE.json"))
+        || readJson(path.join(source, "CODING_TOOLS_BUNDLED.json"));
+      if (bundle?.id !== manifest.id || bundle.version !== manifest.version
+        || bundle.patchRevision !== manifest.patchRevision || bundle.commit !== manifest.commit) {
+        throw new Error("Paseo bundled patch revision does not match its managed manifest");
+      }
+    }
     if (!source) {
       throw new Error(`${manifest.name} bundled runtime is missing from this Coding Tools build`);
     }
@@ -1089,8 +1133,9 @@ function createManagedComponentController({
       error: null,
     });
     fs.mkdirSync(stagingHome, { recursive: true, mode: 0o700 });
-    if (inApp) copyBundledTree(source, stagingHome);
-    else copyBundleTree(source, stagingHome);
+    const skipNodeModules = platform === "win32" && platformMode(manifest) === "wsl2";
+    if (inApp) copyBundledTree(source, stagingHome, { skipNodeModules });
+    else copyBundleTree(source, stagingHome, { skipNodeModules });
     writeBundledMarker(stagingHome, manifest);
     return { artifact: "" };
   }
@@ -1315,12 +1360,14 @@ function createManagedComponentController({
   }
 
   async function startComponent(idValue) {
+    if (disposed) throw new Error("Managed component controller has been disposed");
     const id = requiredComponentId(idValue);
     const manifest = manifestFor(id);
     const source = sourceState(manifest);
     if (source.state !== "installed") {
       await installComponent(id, { repair: source.state === "repair-required" || source.state === "error" });
     }
+    if (disposed) throw new Error("Managed component controller has been disposed");
     const context = launchContext(manifest);
     if (id === "codex-router") {
       writeInAppProvidersFile(path.join(context.state, "router"));
@@ -1339,6 +1386,7 @@ function createManagedComponentController({
           continue;
         }
         const spec = commandSpec(processEntry, context);
+        if (disposed) throw new Error("Managed component controller has been disposed");
         const child = spawnProcess(spec.executable, spec.args, spec.options);
         active.set(processEntry.id, child);
         attachProcessLogging(manifest, processEntry, child);
@@ -1348,7 +1396,7 @@ function createManagedComponentController({
         });
         child.once?.("exit", (code, signal) => {
           active.delete(processEntry.id);
-          if (code !== 0 && code !== null) {
+          if (code !== 0 && code !== null && !stoppingChildren.has(child)) {
             setOperation(id, { state: "error", step: null, error: `${processEntry.id} exited (${code ?? signal ?? "unknown"})` });
           } else emit();
         });
@@ -1364,16 +1412,18 @@ function createManagedComponentController({
 
   async function stopChild(child) {
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    const exited = await new Promise((resolve) => {
+    if (platform === "win32") stoppingChildren.add(child);
+    const exited = await new Promise((resolve, reject) => {
       let settled = false;
       let timer;
-      const finish = (value) => {
+      const finish = (value, error = null) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         child.removeListener?.("exit", onExit);
         child.removeListener?.("error", onError);
-        resolve(value);
+        if (error) reject(error);
+        else resolve(value);
       };
       const onExit = () => finish(true);
       const onError = () => finish(true);
@@ -1382,13 +1432,16 @@ function createManagedComponentController({
       timer = setTimeout(() => finish(false), DEFAULT_STOP_TIMEOUT_MS);
       timer.unref?.();
       try {
-        if (child.kill("SIGTERM") === false) finish(false);
-      } catch {
-        finish(false);
+        if (platform === "win32") terminateProcessTree(child, "SIGTERM");
+        else if (child.kill("SIGTERM") === false) finish(false);
+      } catch (error) {
+        stoppingChildren.delete(child);
+        finish(false, platform === "win32" ? error : null);
       }
     });
     if (!exited && child.exitCode === null && child.signalCode === null) {
-      try { child.kill("SIGKILL"); } catch {}
+      if (platform === "win32") terminateProcessTree(child, "SIGKILL");
+      else try { child.kill("SIGKILL"); } catch {}
     }
   }
 
@@ -1471,14 +1524,28 @@ function createManagedComponentController({
   }
 
   function dispose() {
-    for (const active of processes.values()) {
-      for (const child of active.values()) {
-        if (child && child.exitCode === null && child.signalCode === null) {
-          try { child.kill("SIGTERM"); } catch {}
+    disposed = true;
+    const failures = [];
+    for (const [id, active] of processes) {
+      for (const [processId, child] of active) {
+        try {
+          if (child && child.exitCode === null && child.signalCode === null) {
+            if (platform === "win32") {
+              stoppingChildren.add(child);
+              terminateProcessTree(child, "SIGTERM");
+            } else child.kill("SIGTERM");
+          }
+          active.delete(processId);
+        } catch (error) {
+          stoppingChildren.delete(child);
+          failures.push(error);
         }
       }
+      if (active.size === 0) processes.delete(id);
     }
-    processes.clear();
+    if (failures.length > 0) {
+      throw new AggregateError(failures, `Managed component cleanup failed: ${failures.map((error) => error.message).join("; ")}`);
+    }
   }
 
   return Object.freeze({

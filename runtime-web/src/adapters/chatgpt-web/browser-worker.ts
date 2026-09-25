@@ -124,7 +124,6 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
 export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
 export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
 export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
-const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
 const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
 const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
 const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
@@ -2033,6 +2032,7 @@ export function chatGptPromptFilePayloads(
 export function insertPlainTextIntoComposer(element: HTMLElement, value: string): boolean {
   if (document.activeElement !== element) element.focus();
   if (document.activeElement !== element) return false;
+  if (element.tagName === "TEXTAREA") return document.execCommand("insertText", false, value);
   const selection = window.getSelection();
   if (!selection) return false;
   const alreadyPlaced = selection.isCollapsed
@@ -2993,7 +2993,7 @@ export class ChatGptBrowserWorker {
     }
     return `ChatGPT connector menu opened but exposed no row named ${JSON.stringify(this.config.appName)}`
       + ` after ${triggerAttempts} complete mention trigger attempt(s)`
-      + `; create a connector with that exact name before retrying`;
+      + `; the app may already be installed. Check that ChatGPT exposes it for this account, workspace, model, and chat before retrying`;
   }
 
   private async clearChatGptComposerState(page: Page): Promise<void> {
@@ -3038,6 +3038,7 @@ export class ChatGptBrowserWorker {
     attemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 },
     abortSignal?: AbortSignal,
   ): Promise<Locator> {
+    const CHATGPT_CONNECTOR_MENTION_QUERY = `@${this.config.appName}`;
     const capture = async (checkpoint: string): Promise<void> => {
       throwIfPromptAttachmentAborted(abortSignal);
       await withBrowserTurnAbort(captureDiagnostic?.(checkpoint) ?? Promise.resolve(), abortSignal);

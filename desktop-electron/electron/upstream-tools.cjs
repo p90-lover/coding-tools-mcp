@@ -251,6 +251,10 @@ function createUpstreamToolController({
     try {
       let state = await inspect(toolId);
       if (state.status !== "ready") {
+        const installState = managedSnapshot(toolId)?.managedInstall?.state;
+        if (state.status === "error" || ["not-installed", "repair-required", "error"].includes(installState)) {
+          throw new Error(state.error || `${manifest.name} needs setup. Use Start or Repair; opening this page does not install it.`);
+        }
         await start(toolId);
         state = await waitUntilReady(toolId);
       }
@@ -294,7 +298,7 @@ function createUpstreamToolController({
             transport: "in-process",
           },
           unavailable: true,
-          dependency: classified?.dependency || "postgres",
+          dependency: classified?.dependency || null,
           error: message,
         };
       }

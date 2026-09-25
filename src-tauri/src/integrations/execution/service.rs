@@ -2,20 +2,21 @@
 //! supplied by local operator consent, never by MCP task arguments. Background
 //! workers survive a dropped HTTP waiter; no failed write is auto-replayed.
 use super::{
-    book::{Binding, Entry},
+    book::{Binding, Entry, OrchestrationRecord},
     model::*,
     observation, protocol, transport,
 };
 use crate::{
     data::{AppData, DataStore},
     error::{AppError, AppResult},
+    integrations::board_sync,
     tools::{registry, ToolContext},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
@@ -124,6 +125,10 @@ pub struct Settings {
     pub endpoint: String,
     pub provider: String,
     pub model: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub route_id: Option<String>,
     pub mode: String,
     pub project_id: Option<String>,
     pub repo_id: Option<String>,
@@ -131,6 +136,36 @@ pub struct Settings {
     pub max_duration_min: u32,
     pub allow_codex: bool,
     pub confirm_external_execution: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrchestrationStage {
+    pub binding_id: String,
+    pub binding_generation: String,
+    pub mission_id: String,
+    pub request_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrchestrationReservation {
+    pub workspace_id: String,
+    pub id: String,
+    pub task_id: String,
+    pub expected_board_revision: u64,
+    pub planner_prompt: String,
+    pub planner: OrchestrationStage,
+    pub workers: Vec<OrchestrationStage>,
+    pub reviewer: OrchestrationStage,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrchestrationStatus {
+    pub workspace_id: String,
+    pub id: String,
+    pub expected_revision: u64,
+    pub status: String,
 }
 /// Call ONLY from a focused, visible main-window command. Changing the binding
 /// invalidates old credential sessions; this function never starts a daemon.
@@ -169,6 +204,8 @@ pub fn configure(
                 .to_string(),
             provider: s.provider,
             model: s.model,
+            account_id: s.account_id,
+            route_id: s.route_id,
             mode: s.mode,
             project_id: s.project_id,
             repo_id: s.repo_id,
@@ -258,6 +295,312 @@ pub fn disable(ctx: &ToolContext, id: &str) -> AppResult<Value> {
     invalidate(id);
     view(ctx, None)
 }
+
+#[doc(hidden)]
+pub fn reserve_orchestration_in_data(
+    ctx: &ToolContext,
+    data: &mut AppData,
+    request: OrchestrationReservation,
+) -> AppResult<OrchestrationRecord> {
+    let workspace = scope(ctx, data)?;
+    if request.workspace_id != workspace {
+        return Err(fail("Orchestration workspace does not match this listener"));
+    }
+    for value in [&request.id, &request.task_id] {
+        identifier(value).map_err(fail)?;
+    }
+    let planner_prompt = request.planner_prompt.trim();
+    if planner_prompt.is_empty()
+        || planner_prompt.len() > 8192
+        || planner_prompt
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+    {
+        return Err(fail(
+            "Planner prompt is empty, oversized or contains controls",
+        ));
+    }
+    if request.workers.is_empty() || request.workers.len() > 8 {
+        return Err(fail("Orchestration requires 1..8 workers"));
+    }
+    if request.planner.binding_id != request.reviewer.binding_id
+        || request.planner.binding_generation != request.reviewer.binding_generation
+    {
+        return Err(fail(
+            "Planner and reviewer must use the same approved Web GPT binding",
+        ));
+    }
+    let stages = std::iter::once(&request.planner)
+        .chain(request.workers.iter())
+        .chain(std::iter::once(&request.reviewer))
+        .collect::<Vec<_>>();
+    let mut mission_ids = HashSet::new();
+    let mut request_keys = HashSet::new();
+    for stage in &stages {
+        for value in [
+            &stage.binding_id,
+            &stage.binding_generation,
+            &stage.mission_id,
+            &stage.request_key,
+        ] {
+            identifier(value).map_err(fail)?;
+        }
+        if !mission_ids.insert(stage.mission_id.as_str())
+            || !request_keys.insert(stage.request_key.as_str())
+        {
+            return Err(fail(
+                "Orchestration mission IDs and request keys must be unique",
+            ));
+        }
+    }
+    let parent = data
+        .control_board
+        .tasks
+        .iter()
+        .find(|task| task.id == request.task_id && task.workspace_id == workspace)
+        .ok_or_else(|| fail("Parent task is not in this listener's approved workspace"))?;
+    if parent.state == "archived" {
+        return Err(fail("Parent task is archived"));
+    }
+    for (stage, provider, model) in stages.iter().enumerate().map(|(index, stage)| {
+        if index == 0 || index + 1 == stages.len() {
+            (*stage, "chatgpt-web", "chatgpt-web/high")
+        } else {
+            (*stage, "cliproxyapi-antigravity", "gemini-3.8-flash-high")
+        }
+    }) {
+        let binding = data
+            .execution_book
+            .binding(&workspace, &stage.binding_id)
+            .map_err(fail)?;
+        if binding.generation != stage.binding_generation
+            || binding.engine != Engine::Paseo
+            || binding.provider != provider
+            || binding.model != model
+        {
+            return Err(fail(
+                "Orchestration binding identity or approved route changed",
+            ));
+        }
+        permit(ctx, binding, true)?;
+    }
+
+    if let Some(existing) = data
+        .execution_book
+        .orchestrations
+        .iter()
+        .find(|record| record.id == request.id)
+        .cloned()
+    {
+        let same = existing.workspace_id == workspace
+            && existing.task_id == request.task_id
+            && existing.planner_binding_id == request.planner.binding_id
+            && existing.planner_binding_generation == request.planner.binding_generation
+            && existing.planner_mission_id == request.planner.mission_id
+            && existing.planner_request_key == request.planner.request_key
+            && existing.worker_binding_ids
+                == request
+                    .workers
+                    .iter()
+                    .map(|stage| stage.binding_id.clone())
+                    .collect::<Vec<_>>()
+            && existing.worker_binding_generations
+                == request
+                    .workers
+                    .iter()
+                    .map(|stage| stage.binding_generation.clone())
+                    .collect::<Vec<_>>()
+            && existing.worker_mission_ids
+                == request
+                    .workers
+                    .iter()
+                    .map(|stage| stage.mission_id.clone())
+                    .collect::<Vec<_>>()
+            && existing.worker_request_keys
+                == request
+                    .workers
+                    .iter()
+                    .map(|stage| stage.request_key.clone())
+                    .collect::<Vec<_>>()
+            && existing.reviewer_binding_id == request.reviewer.binding_id
+            && existing.reviewer_binding_generation == request.reviewer.binding_generation
+            && existing.reviewer_mission_id == request.reviewer.mission_id
+            && existing.reviewer_request_key == request.reviewer.request_key;
+        let task_ids = std::iter::once(existing.planner_task_id.as_str())
+            .chain(existing.worker_task_ids.iter().map(String::as_str))
+            .chain(std::iter::once(existing.reviewer_task_id.as_str()))
+            .collect::<Vec<_>>();
+        let tasks_exist = task_ids.iter().all(|id| {
+            data.control_board
+                .tasks
+                .iter()
+                .any(|task| task.id == *id && task.workspace_id == workspace)
+        });
+        let prompt_matches = data
+            .control_board
+            .tasks
+            .iter()
+            .find(|task| task.id == existing.planner_task_id && task.workspace_id == workspace)
+            .is_some_and(|task| task.description == planner_prompt);
+        return if same && tasks_exist && prompt_matches {
+            Ok(existing)
+        } else {
+            Err(fail(
+                "Orchestration ID already identifies different durable work",
+            ))
+        };
+    }
+    if data.execution_book.orchestrations.iter().any(|record| {
+        mission_ids.contains(record.planner_mission_id.as_str())
+            || mission_ids.contains(record.reviewer_mission_id.as_str())
+            || record
+                .worker_mission_ids
+                .iter()
+                .any(|id| mission_ids.contains(id.as_str()))
+            || request_keys.contains(record.planner_request_key.as_str())
+            || request_keys.contains(record.reviewer_request_key.as_str())
+            || record
+                .worker_request_keys
+                .iter()
+                .any(|key| request_keys.contains(key.as_str()))
+    }) || data.execution_book.missions.iter().any(|entry| {
+        mission_ids.contains(entry.mission.spec.mission_id.as_str())
+            || entry
+                .mission
+                .receipts
+                .keys()
+                .any(|key| request_keys.contains(key.as_str()))
+    }) {
+        return Err(fail(
+            "Orchestration mission IDs and request keys must be unique across durable work",
+        ));
+    }
+    if data.control_board.revision != request.expected_board_revision {
+        return Err(fail("Board changed before orchestration reservation"));
+    }
+
+    let mut board = data.control_board.clone();
+    let planner_task_id = board_sync::apply_scoped(
+        &mut board,
+        &workspace,
+        request.expected_board_revision,
+        board_sync::Update::Create {
+            title: "Web GPT planner".into(),
+            description: planner_prompt.into(),
+            state: Some("backlog".into()),
+        },
+    )?;
+    let mut worker_task_ids = Vec::with_capacity(request.workers.len());
+    for index in 0..request.workers.len() {
+        let revision = board.revision;
+        worker_task_ids.push(board_sync::apply_scoped(
+            &mut board,
+            &workspace,
+            revision,
+            board_sync::Update::Create {
+                title: format!("Gemini worker {}", index + 1),
+                description: String::new(),
+                state: Some("backlog".into()),
+            },
+        )?);
+    }
+    let revision = board.revision;
+    let reviewer_task_id = board_sync::apply_scoped(
+        &mut board,
+        &workspace,
+        revision,
+        board_sync::Update::Create {
+            title: "Web GPT reviewer".into(),
+            description: String::new(),
+            state: Some("backlog".into()),
+        },
+    )?;
+    let record = OrchestrationRecord {
+        id: request.id.clone(),
+        workspace_id: workspace.clone(),
+        task_id: request.task_id,
+        planner_task_id,
+        planner_binding_id: request.planner.binding_id,
+        planner_binding_generation: request.planner.binding_generation,
+        planner_mission_id: request.planner.mission_id,
+        planner_request_key: request.planner.request_key,
+        worker_binding_ids: request
+            .workers
+            .iter()
+            .map(|stage| stage.binding_id.clone())
+            .collect(),
+        worker_binding_generations: request
+            .workers
+            .iter()
+            .map(|stage| stage.binding_generation.clone())
+            .collect(),
+        worker_mission_ids: request
+            .workers
+            .iter()
+            .map(|stage| stage.mission_id.clone())
+            .collect(),
+        worker_task_ids,
+        worker_request_keys: request
+            .workers
+            .iter()
+            .map(|stage| stage.request_key.clone())
+            .collect(),
+        reviewer_binding_id: request.reviewer.binding_id,
+        reviewer_binding_generation: request.reviewer.binding_generation,
+        reviewer_task_id,
+        reviewer_mission_id: request.reviewer.mission_id,
+        reviewer_request_key: request.reviewer.request_key,
+        status: "planning".into(),
+        revision: 0,
+    };
+    let mut book = data.execution_book.clone();
+    book.save_orchestration(record, 0).map_err(fail)?;
+    let saved = book
+        .orchestration(&workspace, &request.id)
+        .map_err(fail)?
+        .clone();
+    data.control_board = board;
+    data.execution_book = book;
+    Ok(saved)
+}
+
+pub fn reserve_orchestration(
+    ctx: &ToolContext,
+    request: OrchestrationReservation,
+) -> AppResult<Value> {
+    let record = DataStore::update_file(|data| reserve_orchestration_in_data(ctx, data, request))?;
+    Ok(json!({
+        "ok": true,
+        "orchestration": record,
+        "execution": view(ctx, None)?,
+    }))
+}
+
+pub fn update_orchestration_status(
+    ctx: &ToolContext,
+    request: OrchestrationStatus,
+) -> AppResult<Value> {
+    let record = DataStore::update_file(|data| {
+        let workspace = scope(ctx, data)?;
+        if request.workspace_id != workspace {
+            return Err(fail("Orchestration workspace does not match this listener"));
+        }
+        data.execution_book
+            .advance_orchestration(
+                &workspace,
+                &request.id,
+                request.expected_revision,
+                &request.status,
+            )
+            .map_err(fail)
+    })?;
+    Ok(json!({
+        "ok": true,
+        "orchestration": record,
+        "execution": view(ctx, None)?,
+    }))
+}
+
 pub fn view(ctx: &ToolContext, mission: Option<&str>) -> AppResult<Value> {
     let mut result = DataStore::update_file(|data| {
         let id = scope(ctx, data)?;
@@ -555,6 +898,7 @@ pub fn refresh(ctx: &ToolContext, id: &str) -> AppResult<Value> {
             .binding(&workspace, &entry.binding_id)
             .map_err(fail)?
             .clone();
+        matching_binding_generation(&entry, &b)?;
         permit(ctx, &b, false)?;
         let connected = connection(&b)?;
         Ok(Job {
@@ -599,6 +943,12 @@ fn spec_record(e: &Entry) -> AppResult<&str> {
         .as_deref()
         .ok_or_else(|| fail("No confirmed provider record"))
 }
+fn matching_binding_generation(entry: &Entry, binding: &Binding) -> AppResult<()> {
+    if entry.binding_generation != binding.generation {
+        return Err(fail("Mission belongs to an older provider grant"));
+    }
+    Ok(())
+}
 async fn process(job: &Job) -> AppResult<()> {
     let current = job.ctx.for_request().map_err(|e| fail(e.message()))?;
     permit(&current, &job.binding, job.action.writes())?;
@@ -618,6 +968,36 @@ async fn process(job: &Job) -> AppResult<()> {
     })?;
     if job.action == Action::Inspect {
         let evidence = inspect_source(job).await?;
+        let mut output = None;
+        if job.binding.engine == Engine::Paseo
+            && evidence.observation.quiescent
+            && evidence.observation.status.eq_ignore_ascii_case("idle")
+        {
+            if let Some(start_key) = job.entry.start_message_id.as_deref() {
+                let request = protocol::build(
+                    &job.entry.mission.spec,
+                    job.entry.mission.record_id.as_deref(),
+                    job.entry.mission.run_id.as_deref(),
+                    Action::Events,
+                    &uuid::Uuid::new_v4().to_string(),
+                )
+                .map_err(fail)?;
+                let response = transport::send(
+                    Engine::Paseo,
+                    &job.binding.endpoint,
+                    &job.connection.credential,
+                    &request,
+                )
+                .await
+                .map_err(|e| fail(e.to_string()))?;
+                output = super::result::parse_paseo_start_result(
+                    &response.body,
+                    spec_record(&job.entry)?,
+                    start_key,
+                )
+                .map_err(fail)?;
+            }
+        }
         DataStore::update_file(|d| {
             scope(&current, d)?;
             let row = d
@@ -628,6 +1008,9 @@ async fn process(job: &Job) -> AppResult<()> {
                 return Err(fail("Newer mission state supersedes this observation"));
             }
             observation::apply(row, evidence, now()).map_err(fail)?;
+            if let Some(output) = output {
+                row.output = Some(output);
+            }
             d.execution_book.size_check().map_err(fail)
         })?;
         return Ok(());
@@ -721,4 +1104,180 @@ async fn process(job: &Job) -> AppResult<()> {
             .map_err(fail)
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod orchestration_reservation_tests {
+    use super::*;
+    use crate::{
+        integrations::{board, execution::book::Book},
+        workspace::WorkspaceProfile,
+    };
+
+    #[test]
+    fn reservation_is_atomic_idempotent_and_preserves_the_parent_task() {
+        let workspace = tempfile::tempdir().unwrap();
+        let harness = tempfile::tempdir().unwrap();
+        let mut ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .unwrap();
+        ctx.bind_workspace_id("qa");
+        ctx.auth.auth_type = "bearer".into();
+        ctx.tool_profile = "advanced".into();
+
+        let mut data = AppData::default();
+        data.profiles.push(
+            serde_json::from_value::<WorkspaceProfile>(json!({
+                "id": "qa",
+                "name": "QA",
+                "path": workspace.path().to_string_lossy(),
+                "tunnel": {},
+                "auth": {"type": "bearer"},
+                "runtime": {"permission_mode": "workspace-write", "tool_profile": "advanced"},
+                "actions": {}
+            }))
+            .unwrap(),
+        );
+        data.control_board.tasks.push(board::Task {
+            id: "parent-task".into(),
+            workspace_id: "qa".into(),
+            title: "User task".into(),
+            description: "Do not replace this description".into(),
+            state: "in_progress".into(),
+            step: 0,
+            created_at: 1,
+            updated_at: 1,
+            clauses: vec![],
+            evidence: vec![],
+        });
+        let binding = |id: &str, generation: &str, provider: &str, model: &str| Binding {
+            id: id.into(),
+            workspace_id: "qa".into(),
+            root: ctx.workspace.root_display(),
+            roots_revision: ctx.workspace.roots_revision(),
+            policy_stamp: stamp(&ctx),
+            generation: generation.into(),
+            engine: Engine::Paseo,
+            endpoint: "ws://127.0.0.1:6768/ws".into(),
+            provider: provider.into(),
+            model: model.into(),
+            account_id: Some(format!("{id}-account")),
+            route_id: Some(format!("{id}-route")),
+            mode: "full-access".into(),
+            project_id: None,
+            repo_id: None,
+            assignee_id: None,
+            max_duration_min: 10,
+            allow_codex: false,
+            enabled: true,
+        };
+        data.execution_book = Book {
+            bindings: vec![
+                binding("web", "web-generation", "chatgpt-web", "chatgpt-web/high"),
+                binding(
+                    "gemini",
+                    "gemini-generation",
+                    "cliproxyapi-antigravity",
+                    "gemini-3.8-flash-high",
+                ),
+            ],
+            ..Book::default()
+        };
+        let request = OrchestrationReservation {
+            workspace_id: "qa".into(),
+            id: "run-1".into(),
+            task_id: "parent-task".into(),
+            expected_board_revision: 0,
+            planner_prompt: "{\"task\":\"plan only\"}".into(),
+            planner: OrchestrationStage {
+                binding_id: "web".into(),
+                binding_generation: "web-generation".into(),
+                mission_id: "planner-mission".into(),
+                request_key: "planner-request".into(),
+            },
+            workers: vec![OrchestrationStage {
+                binding_id: "gemini".into(),
+                binding_generation: "gemini-generation".into(),
+                mission_id: "worker-mission".into(),
+                request_key: "worker-request".into(),
+            }],
+            reviewer: OrchestrationStage {
+                binding_id: "web".into(),
+                binding_generation: "web-generation".into(),
+                mission_id: "reviewer-mission".into(),
+                request_key: "reviewer-request".into(),
+            },
+        };
+
+        let reserved = reserve_orchestration_in_data(&ctx, &mut data, request.clone()).unwrap();
+        assert_eq!(reserved.status, "planning");
+        assert_eq!(data.control_board.tasks.len(), 4);
+        assert_eq!(
+            data.control_board.tasks[0].description,
+            "Do not replace this description"
+        );
+        assert_eq!(
+            data.control_board
+                .tasks
+                .iter()
+                .find(|task| task.id == reserved.planner_task_id)
+                .unwrap()
+                .description,
+            request.planner_prompt
+        );
+
+        let replay = reserve_orchestration_in_data(&ctx, &mut data, request.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replay).unwrap(),
+            serde_json::to_value(&reserved).unwrap()
+        );
+        assert_eq!(data.control_board.tasks.len(), 4);
+
+        let mut conflict = request;
+        conflict.planner_prompt = "{\"task\":\"different\"}".into();
+        let before = serde_json::to_value(&data).unwrap();
+        assert!(reserve_orchestration_in_data(&ctx, &mut data, conflict).is_err());
+        assert_eq!(serde_json::to_value(&data).unwrap(), before);
+    }
+
+    #[test]
+    fn refresh_rejects_a_reconfigured_binding_generation() {
+        let binding = Binding {
+            id: "web".into(),
+            workspace_id: "qa".into(),
+            root: "C:/qa".into(),
+            roots_revision: "roots".into(),
+            policy_stamp: "policy".into(),
+            generation: "new-generation".into(),
+            engine: Engine::Paseo,
+            endpoint: "ws://127.0.0.1:6768/ws".into(),
+            provider: "chatgpt-web".into(),
+            model: "chatgpt-web/high".into(),
+            account_id: Some("web-account".into()),
+            route_id: Some("web-route".into()),
+            mode: "full-access".into(),
+            project_id: None,
+            repo_id: None,
+            assignee_id: None,
+            max_duration_min: 10,
+            allow_codex: false,
+            enabled: true,
+        };
+        let entry = Entry {
+            binding_id: binding.id.clone(),
+            binding_generation: "old-generation".into(),
+            mission: Mission::new(binding.spec("mission", "task", "Read", "Read only")).unwrap(),
+            owner_runtime: None,
+            created_at: 1,
+            updated_at: 1,
+            observed_at: None,
+            source_revision: None,
+            last_error: None,
+            observation: Value::Null,
+            start_message_id: None,
+            output: None,
+        };
+
+        assert!(matching_binding_generation(&entry, &binding).is_err());
+    }
 }
