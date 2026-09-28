@@ -1,0 +1,269 @@
+diff --git a/README.en.md b/README.en.md
+index f87cb4f..48081d1 100644
+--- a/README.en.md
++++ b/README.en.md
+@@ -4,7 +4,7 @@
+ 
+ A local desktop control center for AI-assisted development: the human defines the goal and permissions, the connected AI reasons about the task, and the app executes approved local tools and returns evidence. Project history helps the next conversation continue from verified work rather than reconstructing it from memory.
+ 
+-**Release line: `v0.4.3-rc.1` — MCP discovery, native Codex and task board.** Read the [release notes](docs/releases/v0.4.3-rc.1.md) and the published release's validation evidence. A version in source code is not proof that a build passed. This is a release candidate, not a certified security sandbox.
++**Release line: `v0.4.3-rc.2` — accurate catalog selection and tool-exposure diagnostics.** Read the [release notes](docs/releases/v0.4.3-rc.2.md) and the published release's validation evidence. A version in source code is not proof that a build passed. This is a release candidate, not a certified security sandbox.
+ 
+ ## Optional native Codex bridge
+ 
+@@ -12,12 +12,16 @@ The current candidate adds an explicitly opted-in native App Server bridge, sepa
+ 
+ ## Download and start
+ 
+-Get `Coding.Tools.MCP_0.4.3-rc.1_x64-setup.exe` from the [versioned release page](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.3-rc.1). The same release provides the Apple Silicon `.dmg`, SHA-256 checksums, source provenance and validation logs. Windows is publisher-unsigned; macOS uses ad-hoc signing and is not notarized. Verify the source and checksum before opening a downloaded installer.
++Get `Coding.Tools.MCP_0.4.3-rc.2_x64-setup.exe` from the [versioned release page](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.3-rc.2). This focused Windows release provides SHA-256 checksums, source provenance and validation logs. The prior `v0.4.3-rc.1` release retains the Apple Silicon `.dmg`. Windows is publisher-unsigned; macOS uses ad-hoc signing and is not notarized. Verify the source and checksum before opening a downloaded installer.
+ 
+ Install and open the app, add your project directory as a workspace, select its authentication and permission settings, and start MCP. For a remote client, configure the supported FRP or Cloudflare connection and copy the displayed HTTPS `/mcp` endpoint. Complete the client-side authorization and tool scan. Start with `server_info`, `codex_tools_status`, `get_default_cwd` and `git_status` before making changes.
+ 
+ For ChatGPT, use the account/workspace's available Apps/developer-mode setup. Availability, action approval and tool refresh are controlled by the client and its administrators; this app cannot grant a ChatGPT account access or suppress client approvals. Consult [OpenAI's current setup guidance](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt-beta). Do not use old menu screenshots as authoritative instructions. The app offers assisted setup, not silent connector creation or reauthorization.
+ 
++## Why ChatGPT may not show every tool
++
++The saved tool catalog and execution permissions are different settings. This build fixes Core/Advanced/full-alias selection, and ChatGPT setup now shows the running listener's exact advertised names, profile-hidden names and metadata fingerprint. `server_info.tool_catalog` exposes the same evidence. It never claims to know which tools your ChatGPT chat has loaded. [Follow the tool-exposure guide](docs/guides/tool-exposure.en.md).
++
+ ## What is in the product
+ 
+ | Area | Implemented behavior |
+diff --git a/README.md b/README.md
+index fb832d8..6e680bb 100644
+--- a/README.md
++++ b/README.md
+@@ -4,7 +4,11 @@
+ 
+ 協助 AI 開發工作的本機桌面控制中心：人類訂立目標與權限，已連接的 AI 思考任務，應用程式執行獲准的本機工具並回傳證據。專案歷史讓下一次對話接續已驗證的工作，而非憑記憶重建進度。
+ 
+-**版本系列：`v0.4.3-rc.1`——MCP 探索、原生 Codex 與任務看板。** 請閱讀[版本說明](docs/releases/v0.4.3-rc.1.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
++**版本系列：`v0.4.3-rc.2`——準確目錄選擇與工具公開診斷。** 請閱讀[版本說明](docs/releases/v0.4.3-rc.2.md)及公開版本所附的驗證紀錄。原始碼中的版本號不代表建置已通過；這是候選版本，不是經認證的安全沙箱。
++
++## 為何 ChatGPT 可能看不到全部工具
++
++已存工具目錄與執行權限是兩種不同設定。本版修正 Core／Advanced／full 別名的選項，ChatGPT 設定現會顯示運行中服務實際公開及被目錄隱藏的名稱，以及中繼資料雜湊；`server_info.tool_catalog` 回報相同證據，不會假稱已知 ChatGPT 對話載入了哪些工具。[查看工具公開指南](docs/guides/tool-exposure.zh-Hant.md)。
+ 
+ ## 選用的原生 Codex 橋接
+ 
+@@ -12,7 +16,7 @@
+ 
+ ## 下載及開始使用
+ 
+-從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.3-rc.1)取得 `Coding.Tools.MCP_0.4.3-rc.1_x64-setup.exe`。同頁亦提供 Apple Silicon `.dmg`、SHA-256 校驗碼、原始碼來源及驗證紀錄。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
++從[指定版本頁面](https://github.com/p90-lover/coding-tools-mcp/releases/tag/v0.4.3-rc.2)取得 `Coding.Tools.MCP_0.4.3-rc.2_x64-setup.exe`。本次 Windows 修正版提供 SHA-256 校驗碼、原始碼來源及驗證紀錄；Apple Silicon `.dmg` 仍保留於前一版 `v0.4.3-rc.1`。Windows 安裝程式沒有發佈者簽署；macOS 使用 ad-hoc 簽署，未經公證。開啟下載檔案前，請先核對來源及校驗碼。
+ 
+ 安裝並開啟程式，把專案目錄加入工作區，選擇認證及權限設定，然後啟動 MCP。遠端用戶端需要設定支援的 FRP／Cloudflare 連線，再複製介面顯示的 HTTPS `/mcp` 網址。在用戶端完成授權及工具掃描；修改前先使用 `server_info`、`codex_tools_status`、`get_default_cwd` 及 `git_status`。
+ 
+diff --git a/package-lock.json b/package-lock.json
+index a7ed5dd..9dfb7d7 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "coding-tools-mcp-desktop",
+-  "version": "0.4.3-rc.1",
++  "version": "0.4.3-rc.2",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "coding-tools-mcp-desktop",
+-      "version": "0.4.3-rc.1",
++      "version": "0.4.3-rc.2",
+       "license": "Apache-2.0",
+       "dependencies": {
+         "@lucide/svelte": "^0.487.0",
+diff --git a/package.json b/package.json
+index 508e6c4..aa7e016 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "coding-tools-mcp-desktop",
+-  "version": "0.4.3-rc.1",
++  "version": "0.4.3-rc.2",
+   "description": "Coding Tools MCP desktop client",
+   "type": "module",
+   "scripts": {
+diff --git a/src-tauri/Cargo.lock b/src-tauri/Cargo.lock
+index 2852932..45f3134 100644
+--- a/src-tauri/Cargo.lock
++++ b/src-tauri/Cargo.lock
+@@ -672,7 +672,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "coding-tools-mcp-desktop"
+-version = "0.4.3-rc.1"
++version = "0.4.3-rc.2"
+ dependencies = [
+  "axum",
+  "base64 0.22.1",
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 47b9b7c..9d2a66a 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "coding-tools-mcp-desktop"
+-version = "0.4.3-rc.1"
++version = "0.4.3-rc.2"
+ description = "Coding Tools MCP desktop client"
+ authors = ["Coding Tools MCP Contributors"]
+ edition = "2021"
+diff --git a/src-tauri/src/commands/mod.rs b/src-tauri/src/commands/mod.rs
+index 4e7566d..229f411 100644
+--- a/src-tauri/src/commands/mod.rs
++++ b/src-tauri/src/commands/mod.rs
+@@ -1,3 +1,5 @@
++mod tool_catalog;
++pub use tool_catalog::get_tool_catalog_status;
+ mod codex_runtime;
+ pub use codex_runtime::{
+     codex_local_command, codex_local_connect, codex_local_control, codex_local_disconnect,
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 6e7f5fc..d76288f 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -214,6 +214,7 @@ pub fn run() {
+             start_runtime,
+             stop_runtime,
+             get_runtime_status,
++            commands::get_tool_catalog_status,
+             start_actions_runtime,
+             stop_actions_runtime,
+             get_actions_runtime_status,
+diff --git a/src-tauri/src/tools/dispatch.rs b/src-tauri/src/tools/dispatch.rs
+index 9eadda0..1a1140b 100644
+--- a/src-tauri/src/tools/dispatch.rs
++++ b/src-tauri/src/tools/dispatch.rs
+@@ -547,7 +547,9 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
+         "server": "coding-tools-mcp",
+         "title": "Coding Tools MCP",
+         "version": env!("CARGO_PKG_VERSION"),
+-        "protocol_version": "2025-06-18",
++        "protocol_version": crate::mcp::server::LEGACY_PROTOCOLS[0],
++        "supported_protocol_versions": crate::mcp::server::SUPPORTED_PROTOCOLS,
++        "protocol_version_basis": "default_legacy_version_not_request_negotiation",
+         "workspace": ctx.workspace.root_display(),
+         "linked_projects": ctx.workspace.linked_projects(),
+         "permission_mode": ctx.permission_mode,
+@@ -571,7 +573,8 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
+         "vision": {"screen_capture_enabled": ctx.policy.allow_screen_capture, "storage": "memory_only", "model_calls": false},
+         "local_tool_engine": {"implementation": "embedded_rust", "codex_agent": false, "model_calls": false, "os_sandbox": false},
+         "tools": tools,
+-        "tool_count": tools.len()
++        "tool_count": tools.len(),
++        "tool_catalog": crate::tools::catalog::describe_current(ctx)
+     })))
+ }
+ 
+diff --git a/src-tauri/src/tools/mod.rs b/src-tauri/src/tools/mod.rs
+index 251a2b0..0ae27ae 100644
+--- a/src-tauri/src/tools/mod.rs
++++ b/src-tauri/src/tools/mod.rs
+@@ -1,3 +1,4 @@
++pub mod catalog;
+ pub mod approval;
+ mod codex_runtime;
+ pub mod computer;
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index fe2cde2..db092ff 100644
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -1,7 +1,7 @@
+ {
+   "$schema": "https://schema.tauri.app/config/2",
+   "productName": "Coding Tools MCP",
+-  "version": "0.4.3-rc.1",
++  "version": "0.4.3-rc.2",
+   "identifier": "com.codingtools.mcp.desktop",
+   "build": {
+     "beforeDevCommand": "npm run dev",
+diff --git a/src/lib/components/ChatGptSetup.svelte b/src/lib/components/ChatGptSetup.svelte
+index fa228d5..598e42c 100644
+--- a/src/lib/components/ChatGptSetup.svelte
++++ b/src/lib/components/ChatGptSetup.svelte
+@@ -1,4 +1,5 @@
+ <script lang="ts">
++  import ToolCatalogStatus from "./ToolCatalogStatus.svelte";
+   import { onMount } from "svelte";
+   import { openUrl } from "$lib/api/app-info";
+   import { getRuntimeStatus, startRuntime } from "$lib/api/workspaces";
+@@ -132,3 +133,5 @@
+   </div>
+   {#if message}<p role="status" class="text-xs break-words">{message}</p>{/if}
+ </section>
++
++<ToolCatalogStatus {workspaceId} profile={profile.runtime.tool_profile} />
+diff --git a/src/lib/components/RuntimePolicyForm.svelte b/src/lib/components/RuntimePolicyForm.svelte
+index e0ee7c5..3a99601 100644
+--- a/src/lib/components/RuntimePolicyForm.svelte
++++ b/src/lib/components/RuntimePolicyForm.svelte
+@@ -1,4 +1,7 @@
+ <script lang="ts">
++  import { untrack } from "svelte";
++  import { TOOL_PROFILE_OPTIONS, normalizeToolProfile } from "$lib/tool-profile.js";
++
+   export interface RuntimePolicyDraft {
+     toolProfile: string;
+     permissionMode: string;
+@@ -20,12 +23,6 @@
+     onSave: (draft: RuntimePolicyDraft) => void | Promise<void>;
+   }
+ 
+-  const TOOL_PROFILE_OPTIONS = [
+-    { value: "full", label: "完整工具" },
+-    { value: "read-only", label: "只读工具" },
+-    { value: "compat-readonly-all", label: "Compatibility / 完整目錄（如實權限）" },
+-  ] as const;
+-
+   const APPROVAL_MODE_OPTIONS = [
+     { value: "ask", label: "每次變更都詢問" },
+     { value: "on-request", label: "按需批准（Codex）" },
+@@ -55,7 +52,7 @@
+ 
+   let { toolProfile, permissionMode, approvalMode, allowedCommands, workspaceLocalEntries, workspaceScriptExtensions, allowScreenCapture = false, onSave }: Props = $props();
+ 
+-  let draftProfile = $state("full");
++  let draftProfile = $state(untrack(() => normalizeToolProfile(toolProfile)));
+   let draftMode = $state("workspace-write");
+   let draftApprovalMode = $state("on-request");
+   let draftCommands = $state("");
+@@ -65,11 +62,11 @@
+   let saving = $state(false);
+ 
+   const dirty = $derived(
+-    draftProfile !== toolProfile || draftMode !== normalizePermissionMode(permissionMode) || draftApprovalMode !== normalizeApprovalMode(approvalMode) || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions || draftScreenCapture !== allowScreenCapture,
++    draftProfile !== normalizeToolProfile(toolProfile) || draftMode !== normalizePermissionMode(permissionMode) || draftApprovalMode !== normalizeApprovalMode(approvalMode) || draftCommands !== allowedCommands || draftLocalEntries !== workspaceLocalEntries || draftExtensions !== workspaceScriptExtensions || draftScreenCapture !== allowScreenCapture,
+   );
+ 
+   $effect(() => {
+-    draftProfile = toolProfile;
++    draftProfile = normalizeToolProfile(toolProfile);
+     draftMode = normalizePermissionMode(permissionMode);
+     draftApprovalMode = normalizeApprovalMode(approvalMode);
+     draftCommands = allowedCommands;
+@@ -97,9 +94,10 @@
+   }}
+ >
+   <label class="grid gap-1">
+-    <span class="text-xs text-[var(--color-text-muted)]">工具档位</span>
++    <span class="text-xs text-[var(--color-text-muted)]">Tool catalog / 工具目錄</span>
+     <select
+       class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm"
++      aria-label="Tool catalog / 工具目錄"
+       bind:value={draftProfile}
+     >
+       {#each TOOL_PROFILE_OPTIONS as option}
+@@ -107,6 +105,10 @@
+       {/each}
+     </select>
+   </label>
++  <p class="text-xs text-[var(--color-text-muted)]">
++    Core is a smaller catalog. Advanced / Full advertises every registered tool definition, not every internal Codex capability. Saving the catalog does not grant execution permissions. Refresh the existing ChatGPT connection and enable its actions after changing the catalog; ordinary permission changes need no MCP restart or relink.
++    核心目錄只包含部分工具；Advanced／Full 公開所有已註冊工具定義，不代表所有 Codex 內部功能。儲存目錄不會提升執行權限。變更目錄後請刷新既有 ChatGPT 連接並啟用其操作；一般權限變更不必重啟或重連 MCP。
++  </p>
+   <label class="grid gap-1">
+     <span class="text-xs text-[var(--color-text-muted)]">系统命令（逗号分隔）</span>
+     <input type="text" class="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-sm" placeholder="python,git,curl,powershell,..." bind:value={draftCommands} />

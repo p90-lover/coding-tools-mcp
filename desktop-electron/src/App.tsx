@@ -13,7 +13,6 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
-import { OrchestratorSurface } from "./features/ProviderOrchestratorSurfaces";
 import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
 import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
@@ -721,7 +720,6 @@ function LauncherShell({
                 <SidebarItem active={surface === "native-codex"} icon="orchestrator" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
                 <SidebarItem active={surface === "oauth"} icon="providers" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
 
-                <SidebarItem active={surface === "orchestrator"} icon="orchestrator" label={copy.structuredOrchestrator} onClick={() => navigateSurface("orchestrator")} />
                 <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Agent Orchestrator" onClick={() => navigateSurface("agent-orchestrator")} />
 
 
@@ -848,9 +846,6 @@ function LauncherShell({
             ) : null}
             {(surface === "providers" || surface === "api-models") ? (
               <ProviderCenterSurface initialCategory={surface === "api-models" ? "api_key" : "all"} language={language} setError={setError} />
-            ) : null}
-            {surface === "orchestrator" ? (
-              <OrchestratorSurface language={language} setError={setError} />
             ) : null}
             {surface === "agent-orchestrator" ? (
               <ContentSurface title="Agent Orchestrator"><AgentOrchestratorSurface language={language} setError={setError} /></ContentSurface>

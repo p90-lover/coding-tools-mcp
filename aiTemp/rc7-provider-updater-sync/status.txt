@@ -1,0 +1,5 @@
+base=e4fd29a9c272c310fd5985bf15cb7b5e27701e2a
+head=eb06bdb4a2b2f122d3180cf847569abae15dab72
+status=conflicts
+merge_exit=1
+count=1

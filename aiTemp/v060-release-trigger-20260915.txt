@@ -1,0 +1,3 @@
+Purpose: trigger the complete exact-source Electron Full Harness CI after the verified Rust lockfiles were materialized.
+Requested release scope: v0.6.0 first, including the integrated ChatGPT Web/Codex harness and Windows installer.
+No files are deleted by this trigger.

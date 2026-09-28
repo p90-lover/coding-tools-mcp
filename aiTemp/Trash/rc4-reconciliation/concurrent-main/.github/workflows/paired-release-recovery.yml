@@ -1,0 +1,117 @@
+name: Finalize verified Desktop extension pair
+on:
+  push:
+    branches: [release/main-extension-0.4.3-rc.3]
+    paths: [.github/workflows/paired-release-recovery.yml, 'aiTemp/paired-validation/**']
+permissions:
+  contents: read
+concurrency:
+  group: paired-release-finalization-rc3
+  cancel-in-progress: false
+env:
+  SOURCE: 9c749e1eb7030c25a6f84cc81e4719b6e01bef7d
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  validate:
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    permissions:
+      contents: read
+      actions: read
+    env:
+      EXTENSION_SOURCE_DIR: ${{ github.workspace }}/aiTemp/extension-source
+      PIP_CACHE_DIR: ${{ github.workspace }}/aiTemp/pip-cache
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: p90-lover/coding-tools-mcp-fast-access-extension
+          ref: b0d4db553227fa3c7300050b8edff6e2eb9afee4
+          path: aiTemp/extension-source
+          clean: false
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+      - name: Require unchanged compiled sources and retrieve the original production fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p aiTemp/evidence
+          python - <<'PY'
+          import os,subprocess,json
+          from pathlib import Path
+          paths=subprocess.check_output(['git','diff','--name-only',os.environ['SOURCE'],'HEAD'],text=True).splitlines()
+          allowed={'.github/workflows/paired-browser-diagnostic.yml','.github/workflows/paired-release-recovery.yml'}
+          assert paths and all(p in allowed or p.startswith('aiTemp/paired-validation/') for p in paths),paths
+          assert not subprocess.check_output(['git','diff','--diff-filter=D','--name-only',os.environ['SOURCE'],'HEAD']).strip()
+          Path('aiTemp/evidence/compiled-inputs.json').write_text(json.dumps({'source':os.environ['SOURCE'],'validation_source':os.environ['GITHUB_SHA'],'compiled_inputs_unchanged':True,'validation_only_changes':paths},indent=2)+'\n')
+          PY
+          gh run download 34456274103 --repo "$GITHUB_REPOSITORY" --name oauth-popup-browser-fixture-34456274103 --dir aiTemp/browser-fixture
+      - name: Focused pair validation with all browser redirect hops isolated
+        run: |
+          set -euo pipefail
+          node --test "$EXTENSION_SOURCE_DIR/aiTemp/compat/worker.test.mjs" "$EXTENSION_SOURCE_DIR/aiTemp/compat/connection-dom.test.mjs" 2>&1 | tee aiTemp/evidence/extension-focused.txt
+          (cd "$EXTENSION_SOURCE_DIR" && node tests/core.test.mjs && node tests/workflow.test.mjs) 2>&1 | tee aiTemp/evidence/extension-smoke.txt
+          python -m pip install playwright==1.57.0
+          python aiTemp/paired-validation/replay.py 2>&1 | tee aiTemp/evidence/browser-test.txt
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: paired-extension-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/extension-package/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paired-browser-evidence-${{ github.run_id }}
+          path: aiTemp/checkout/aiTemp/evidence/
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: validate
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      contents: write
+      actions: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: aiTemp/checkout
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: aiTemp/checkout
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Verify retained build and new browser evidence, read back uploads, then publish without forcing main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python aiTemp/paired-validation/publish.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paired-publication-${{ github.run_id }}
+          path: |
+            aiTemp/checkout/aiTemp/paired-release-receipt.json
+            aiTemp/checkout/aiTemp/paired-release-draft.json
+          if-no-files-found: warn
+          retention-days: 14

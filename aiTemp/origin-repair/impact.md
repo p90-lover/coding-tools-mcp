@@ -1,0 +1,11 @@
+# OAuth form Origin repair — impact and verification
+
+Base: ccfa3e7cee5f917f3ad4584c5ec2a5a91d87f8f4. User priority: fix the rc.4 local authorization rejection after extension setup; do not bundle other features.
+
+Root cause reproduced in workflow 34467925847 using real Chromium and the rc.4 production consent HTML: no-referrer produced Origin:null with the consent cookie present. strict-origin produced the actual page origin and origin-only Referer. The previous replay reconstructed selected headers and omitted Referrer-Policy.
+
+Production symbol changed: auth::http_security::secure_response. Direct callers: HTTP guard, validated OAuth response marker, OAuth GET/POST, tool-capacity rejection. Both MCP and Actions listeners share the guard. Authentication is a critical path; therefore the change is confined to the existing private OAuthFormRedirect response marker, which is installed only after GET client/redirect/PKCE validation. The guard's allowed origins, trusted configuration, nonce/cookie, token and PKCE code remain unmodified. Ordinary responses and authorization redirects keep no-referrer. No null-origin exception is introduced.
+
+Tool-channel limitation: neither GitNexus nor mcp-probe-kit was returned by plugin search. The pinned local probe installer was attempted in the isolated checkout but was not cached and DNS access was unavailable. The repository's graph report already documents unstable Rust symbol resolution; direct source/caller tracing was used instead. No graph result or formal security certification is claimed.
+
+Focused verification: private-marker header scope/outer-middleware reapplication; Chromium manual and exact v0.0.7 extension helper submitted through a real Rust listener with all response headers; old-policy and forged/null-Origin rejection. Existing OAuth/token/catalog/connection checks and actual NSIS extraction/version checks are retained. Browser routing and extension IPC are synthetic, but authorization/password/nonce/PKCE/token/catalog handling executes in the actual Rust server. No account, user password, model or Codex executable is used. Temporary data remains in aiTemp; previous versions remain in Trash; no file removal or forced main update.

@@ -686,7 +686,10 @@ fn exact_external_write(root: &Path, permissions: &Value) -> Option<PathBuf> {
         return None;
     }
     let canonical = path.canonicalize().ok()?;
-    (!canonical.starts_with(root)).then_some(canonical)
+    // Compare canonical forms: on Windows canonicalize() adds a `\\?\` prefix, so a raw
+    // root would never contain the path and in-workspace files would look external.
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    (!canonical.starts_with(&root)).then_some(canonical)
 }
 
 impl Bridge {
