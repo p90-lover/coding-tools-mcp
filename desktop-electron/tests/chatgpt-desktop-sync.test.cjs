@@ -110,3 +110,27 @@ test("account slots are stable per ChatGPT account and file names yield the plan
   assert.equal(planFromFileName("codex-person@example.com-pro.json", "person@example.com"), "pro");
   assert.equal(planFromFileName("codex-person@example.com.json", "person@example.com"), null);
 });
+
+test("CPA Codex accounts are found by type, with or without the codex- file prefix", () => {
+  const { createChatGptDesktopHost } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-accounts-"));
+  const authDir = path.join(root, "auth");
+  fs.mkdirSync(authDir);
+  const write = (name, body) => fs.writeFileSync(path.join(authDir, name), JSON.stringify(body));
+  write("codex-a@x.com-pro.json", { type: "codex", email: "a@x.com", account_id: "1", refresh_token: "r" });
+  write("b@x.com.json", { type: "codex", email: "b@x.com", account_id: "2", refresh_token: "r" });
+  write("antigravity-c@x.com.json", { type: "antigravity", email: "c@x.com", refresh_token: "r" });
+  try {
+    const host = createChatGptDesktopHost({
+      dataRoot: path.join(root, "data"),
+      resolveCpaAuthDir: () => authDir,
+      helper: { call: async () => null },
+      platform: "linux",
+    });
+    const accounts = host.status().accounts;
+    assert.deepEqual(accounts.map((a) => [a.email, a.plan, a.source]), [
+      ["a@x.com", "pro", "cpa"],
+      ["b@x.com", null, "cpa"],
+    ]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

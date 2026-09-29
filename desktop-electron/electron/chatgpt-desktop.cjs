@@ -137,7 +137,9 @@ function createChatGptDesktopHost({
     try { names = fs.readdirSync(directory); } catch { return []; }
     const accounts = [];
     for (const name of names) {
-      if (!/^codex-.*\.json$/i.test(name)) continue;
+      // CPA identifies a Codex account by its `type`, not its file name: accounts added through
+      // some flows are saved as "<email>.json" with no "codex-" prefix. The type check below decides.
+      if (!/\.json$/i.test(name)) continue;
       const file = path.join(directory, name);
       let raw;
       try { raw = readJson(file); } catch { continue; }
