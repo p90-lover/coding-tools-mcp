@@ -440,6 +440,11 @@ class BrowserControlServer {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn("browser.control_rejected", { message });
+      // A handler that already started its response can't be turned into a 4xx now.
+      if (response.headersSent) {
+        if (!response.destroyed) response.destroy();
+        return;
+      }
       const cancelled = error?.code === "turn_cancelled";
       const retainedUnavailable = error?.code === "retained_conversation_unavailable";
       const manualInspectionDisabled = error?.code === "manual_browser_inspection_disabled";
@@ -517,10 +522,16 @@ class BrowserControlServer {
       });
     } catch (error) {
       if (response.destroyed) return;
+      // Electron net errors carry no code, only "net::ERR_*" text; keep that name and nothing else.
+      const netError = /^net::(ERR_[A-Z0-9_]+)$/.exec(String(error?.message ?? ""))?.[1] ?? null;
       this.logger.warn("browser.native_fetch_failed", {
         code: typeof error?.code === "string" ? error.code : "network_error",
+        ...(netError ? { netError } : {}),
       });
-      writeJson(response, 502, { error: "Native Codex network request failed", code: "native_network_error" });
+      writeJson(response, 502, {
+        error: netError ? `Native Codex network request failed (${netError})` : "Native Codex network request failed",
+        code: "native_network_error",
+      });
       return;
     }
     const outgoing = {};
@@ -532,8 +543,26 @@ class BrowserControlServer {
       if (!excludedResponse.has(name)) outgoing[name] = value;
     }
     response.writeHead(upstream.status, outgoing);
-    if (upstream.body) await pipeline(Readable.fromWeb(upstream.body), response);
-    else response.end();
+    if (!upstream.body) {
+      response.end();
+      return;
+    }
+    try {
+      await pipeline(Readable.fromWeb(upstream.body), response);
+    } catch (error) {
+      // Headers are already on the wire, so no JSON error can follow; dropping the connection is
+      // the only signal left. Never rethrow: handle() would try to write a second status line.
+      if (!response.destroyed) response.destroy();
+      // The caller hanging up mid-body (a cancelled turn, a catalog probe's own timeout) is routine.
+      if (error?.code === "ERR_STREAM_PREMATURE_CLOSE" || error?.name === "AbortError") {
+        this.logger.debug?.("browser.native_fetch_stream_closed", { path: url.pathname });
+        return;
+      }
+      this.logger.warn("browser.native_fetch_stream_failed", {
+        path: url.pathname,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async close() {

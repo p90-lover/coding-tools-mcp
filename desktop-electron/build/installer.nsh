@@ -213,4 +213,14 @@ Var LegacyRegistryAfter
     SetRegView 32
   ${EndIf}
 !macroend
+
+; An upgrade must not stop because the previous version could not remove every one of its
+; files (for example one held by security software). Log it and install over what remains;
+; the file copy that follows still reports anything it cannot replace.
+!macro customUnInstallCheck
+  ${If} $R0 != 0
+    DetailPrint `Previous version was not fully removed (uninstaller code $R0); installing over it.`
+  ${EndIf}
+  ClearErrors
+!macroend
 !endif

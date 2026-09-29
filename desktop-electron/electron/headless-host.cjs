@@ -80,7 +80,12 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
           return;
         }
         if ((response.statusCode || 500) < 200 || (response.statusCode || 500) >= 300) {
-          const message = value?.error?.message || "Headless service rejected the request";
+          // Keep the service's own reason, whichever error shape it used, so the UI is not left
+          // with a generic message; fall back to the HTTP status.
+          const message = value?.error?.message
+            || (typeof value?.error === "string" && value.error)
+            || (typeof value?.message === "string" && value.message)
+            || `Headless service rejected the request (HTTP ${response.statusCode || 500})`;
           reject(new Error(safeErrorMessage(message)));
           return;
         }

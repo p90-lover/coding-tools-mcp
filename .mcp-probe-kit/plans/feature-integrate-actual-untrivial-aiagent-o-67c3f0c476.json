@@ -1,0 +1,220 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-integrate-actual-untrivial-aiagent-o-67c3f0c476",
+  "plan": {
+    "planId": "feature-integrate-actual-untrivial-aiagent-o-67c3f0c476",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "ΦºäσêÆσ╣╢σ«₧µû╜µû░σèƒΦâ╜∩╝Üintegrate-actual-untrivial-aiagent-orchestrator",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "τ╝║σ░æ AGENTS.md µêû docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "σà╝σ«╣ΦÇüΘí╣τ¢«∩╝Üσì│Σ╜┐σ╖▓µ£ëµùºτëê project-context∩╝îσÅ¬Φªüτ╝║σ░æσ¢╛Φ░▒µûçµíú∩╝îΣ╣ƒΦªüσàêΦíÑΘ╜É docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/integrate-actual-untrivial-aiagent-orchestrator/requirements.md",
+          "docs/specs/integrate-actual-untrivial-aiagent-orchestrator/design.md",
+          "docs/specs/integrate-actual-untrivial-aiagent-orchestrator/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/integrate-actual-untrivial-aiagent-orchestrator/requirements.md",
+          "docs/specs/integrate-actual-untrivial-aiagent-orchestrator/design.md",
+          "docs/specs/integrate-actual-untrivial-aiagent-orchestrator/tasks.md"
+        ],
+        "note": "Φºäµá╝µ¿íµ¥┐σ╖▓τ╗Åτö▒ start_feature σåàΘâ¿τöƒµêÉ∩╝¢Agent τ¢┤µÄÑµîëσåàσ╡îΦìëτ¿┐σåÖσàÑσ╣╢ΦíÑσà¿σìáΣ╜ì"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks ΦÉ╜τ¢ÿσÉÄπÇüΦ┐¢σàÑΣ╝░τ«ùµêûσ«₧τÄ░σëì",
+        "args": {
+          "feature_name": "integrate-actual-untrivial-aiagent-orchestrator",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "µ£¬ΘÇÜΦ┐çσêÖµîëµèÑσæèΦíÑσà¿σÉÄΘçìΦ╖æ∩╝¢ΘÇÜΦ┐çσëìΣ╕ìΦªüσåÖσ«₧τÄ░Σ╗úτáü",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "σ«₧τÄ░ integrate-actual-untrivial-aiagent-orchestrator σèƒΦâ╜∩╝ÜIntegrate actual Untrivial-ai/agent-orchestrator UI and backend under More > Agent Orchestrator, preserve Runtime > Agent Orchestrator mission panel, expose authenticated validated handler APIs, bind all listeners to loopback only with no tunnels/public IP, verify live WebGPT orchestrator plus Gemini 3.8 Flash workers, build/install/restart safely.",
+          "code_context": "σÅéΦÇâτöƒµêÉτÜä docs/specs/integrate-actual-untrivial-aiagent-orchestrator/tasks.md\nσªéσ¡ÿσ£¿ docs/graph-insights/latest.md∩╝îΦ»╖Σ╕Çσ╣╢σÅéΦÇâσà╢Σ╕¡τÜäµ¿íσ¥ùΣ╛¥Φ╡ûσÆîΦ░âτö¿Θô╛µæÿΦªü"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/integrate-actual-untrivial-aiagent-orchestrator/tasks.md"
+        ],
+        "expectedOutputs": [
+          "σ«îµêÉΣ╗╗σèíµ╕àσìòσ»╣σ║öτÜäτöƒΣ║ºΣ╗úτáüΣ╕Äσ┐àΦªüΦ┐üτº╗"
+        ],
+        "completionEvidence": [
+          "σ«₧ΘÖàσÅÿµ¢┤µûçΣ╗╢Σ╕Äσ«îµêÉτÜäΣ╗╗σèíµ¥íτ¢«",
+          "σà│Θö«ΦíîΣ╕║Σ╕ÄΦºäµá╝Σ╕ÇΦç┤"
+        ],
+        "outputs": [],
+        "note": "Agent Σ╜┐τö¿σ«┐Σ╕╗µûçΣ╗╢Σ╕ÄΣ╗úτáüΦâ╜σè¢σ«₧µû╜∩╝¢Σ╕ìσ╛ùµèèΦºäσêÆτ╗ôµ₧£σ╜ôµêÉσ╖▓σ«îµêÉσ«₧τÄ░"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "σÅùσ╜▒σôìµ╡ïΦ»òπÇüΣ╕╗Θô╛σ¢₧σ╜ÆσÆîσ┐àΦªüΘ¥ÖµÇüµúÇµƒÑτ╗ôµ₧£"
+        ],
+        "completionEvidence": [
+          "τ£ƒσ«₧µ╡ïΦ»òσæ╜Σ╗ñπÇüΘÇÇσç║τáüσÆîΘÇÜΦ┐çµò░ΘçÅ"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "σÅÿµ¢┤Φîâσ¢┤Σ╗úτáüσ«íµƒÑτ╗ôµ₧£Σ╕Äσ╛àσñäτÉåΘù«Θóÿ"
+        ],
+        "completionEvidence": [
+          "Θ½ÿΣ╝ÿσàêτ║ºΘù«Θóÿσ╖▓σà│Θù¡µêûµ£ëµÿÄτí«Θÿ╗µû¡Φ«░σ╜ò"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Θªûµ¼íµëºΦíîΦ«íσêÆµù╢Φ░âτö¿ plan_heartbeat σ╣╢ΘÖäσ«îµò┤ plan∩╝îσ╗║τ½ïµ£¼σ£░µúÇµƒÑτé╣",
+      "µ»Åσ«îµêÉπÇüΦ╖│Φ┐çµêûΘÿ╗σí₧Σ╕ÇΣ╕¬µ¡ÑΘ¬ñσÉÄΦ░âτö¿ plan_heartbeat µ¢┤µû░Φ»üµì«Σ╕Äτè╢µÇü",
+      "Σ╝ÜΦ»¥Σ╕¡µû¡µêûσêçµìó Agent σÉÄσàêΦ░âτö¿ resume_plan∩╝îσåìτ╗ºτ╗¡µ£¬σ«îµêÉµ¡ÑΘ¬ñ",
+      "σÅ¬µ£ë converge Φ┐öσ¢₧ passed=true σÉÄ∩╝îµëìΦâ╜σ░åµ£¼µ¼íτ╗ôΦ«║µ¡úσ╝ÅσåÖσàÑΘò┐µ£ƒΦ«░σ┐å",
+      "Agent σ┐àΘí╗µîëµ¡ÑΘ¬ñΘí║σ║ÅΦ░âτö¿ MCP∩╝îσ╣╢Σ╜┐τö¿σ«┐Σ╕╗Φâ╜σè¢σ«îµêÉτ£ƒσ«₧µûçΣ╗╢Σ╕ÄΣ╗úτáüµôìΣ╜£",
+      "Θªûµ¼íµëºΦíîσëìσ┐àΘí╗τö¿σ«îµò┤ plan σ╗║τ½ï plan_heartbeat µúÇµƒÑτé╣∩╝¢µ»Åσ«îµêÉπÇüΦ╖│Φ┐çµêûΘÿ╗µû¡Σ╕Çµ¡Ñτ½ïσì│τ┤»Φ«íσ¢₧σåÖ",
+      "check_spec µ£¬ΘÇÜΦ┐çσëìΣ╕ìσ╛ùΦ┐¢σàÑσ«₧τÄ░Θÿ╢µ«╡",
+      "Σ╕ìσ╛ùµèè delegated plan τÜäΦ╛ôσç║Φ»»Φ«ñΣ╕║Σ╗úτáüσ╖▓τ╗Åσ«₧µû╜",
+      "σÄåσÅ▓Φ«░σ┐åΣ╗àΣ╜£Σ╕║σÅéΦÇâ∩╝îσ╜ôσëìΘí╣τ¢«Σ║ïσ«₧Σ╕ÄΣ╗úτáüΣ╝ÿσàê"
+    ],
+    "completionCriteria": [
+      "Φºäµá╝µûçµíúσ╖▓τöƒµêÉσ╣╢ΘÇÜΦ┐ç check_spec",
+      "σ╖ÑΣ╜£ΘçÅΣ╕ÄΣ╕╗ΦªüΘúÄΘÖ⌐σ╖▓σ«îµêÉΦ»äΣ╝░",
+      "Agent σ╖▓µîë tasks.md σ«îµêÉσ«₧τÄ░πÇüµ╡ïΦ»òΣ╕ÄΣ╗úτáüσ«íµƒÑ",
+      "µëÇµ£ëµ¡ÑΘ¬ñτè╢µÇüΣ╕ÄΦ»üµì«σ╖▓ΘÇÜΦ┐ç plan_heartbeat σåÖσàÑµúÇµƒÑτé╣"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "integrate-actual-untrivial-aiagent-orchestrator",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "active",
+  "completedStepIds": [
+    "context",
+    "write-spec",
+    "check-spec",
+    "estimate",
+    "implement"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [
+    "User reports AO visual absent. Need user screenshot/manual confirmation because desktop-control permission was denied.",
+    "End-to-end WebGPT/Gemini mission receipt remains unverified; do not infer completion from unit tests."
+  ],
+  "evidence": [
+    {
+      "kind": "implementation",
+      "summary": "User-directed automatic original AO UI requests and Runtime original project SessionsBoard implemented, packaged, installed and restarted. 39 focused AO regressions, TypeScript, production renderer, package verifier, packaged and installed UI navigation passed. Added current ChatGPT accessible composer selector, session/browser-worker tests passed, validated installed and active runtime bundle 335954ce7818fc57b9681c625fb45979ae4be91291b727c5813a70192044dec5. Live session inspect authenticated true and temporary true; exact CPA Gemini 3.8 Flash High catalog present. Full three-stage live mission receipt and remaining broad UI acceptance still outstanding. See docs/specs/ao-upstream-desktop/verification.md.",
+      "verifiedAt": "2026-09-27T02:22:40.824Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Current source Runtime branch mounted legacy AgentOrchestratorSurface; added failing renderer-wiring regression and corrected it to AgentOrchestratorOriginalSurface projectBoard. Renderer-wiring plus all five AO suites pass, TypeScript/preload/Vite build pass. Installed baseline already has newer original AO route and WebGPT runtime, so observed display issue is not conclusively explained. Desktop-control permission denied; no alternate desktop automation used. Rebuilding renderer while preserving installed host and runtime.",
+      "verifiedAt": "2026-09-27T03:34:41.575Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "featureName": "integrate-actual-untrivial-aiagent-orchestrator",
+    "specLayout": "flat"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-26T15:32:46.346Z",
+  "updatedAt": "2026-09-27T03:34:41.575Z"
+}

@@ -1,0 +1,276 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-add-a-full-pane-steady-90deea117b",
+  "plan": {
+    "planId": "feature-add-a-full-pane-steady-90deea117b",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "规划并实施新功能：add-a-full-pane",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：即使已有旧版 project-context，只要缺少图谱文档，也要先补齐 docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/add-a-full-pane/requirements.md",
+          "docs/specs/add-a-full-pane/design.md",
+          "docs/specs/add-a-full-pane/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/add-a-full-pane/requirements.md",
+          "docs/specs/add-a-full-pane/design.md",
+          "docs/specs/add-a-full-pane/tasks.md"
+        ],
+        "note": "规格模板已经由 start_feature 内部生成；Agent 直接按内嵌草稿写入并补全占位"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks 落盘后、进入估算或实现前",
+        "args": {
+          "feature_name": "add-a-full-pane",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "未通过则按报告补全后重跑；通过前不要写实现代码",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "实现 add-a-full-pane 功能：Add a full-pane Runtime -> Email entry inside existing non-DEV Coding Tools, connected to the user's existing Cloudflare Workers email setup. User is signed into Cloudflare and confirms using Workers. Display a message list and safe readable email content. Inspect existing Worker API and storage before selecting an adapter; deployment, DNS/routing changes, sending, automatic replies, deletion, and AI reading of messages are not yet requested or approved. Reuse current app integration, local credential handling, and GUI patterns. This is architectural discovery and design first; no product implementation before design/spec/plan approval. Preserve current MCP, AO, CPA, proxy, native Codex, and active workspace changes. Need Worker identity/API and mailbox scope from existing signed-in session or user.",
+          "code_context": "参考生成的 docs/specs/add-a-full-pane/tasks.md\n如存在 docs/graph-insights/latest.md，请一并参考其中的模块依赖和调用链摘要"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/add-a-full-pane/tasks.md"
+        ],
+        "expectedOutputs": [
+          "完成任务清单对应的生产代码与必要迁移"
+        ],
+        "completionEvidence": [
+          "实际变更文件与完成的任务条目",
+          "关键行为与规格一致"
+        ],
+        "outputs": [],
+        "note": "Agent 使用宿主文件与代码能力实施；不得把规划结果当成已完成实现"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "受影响测试、主链回归和必要静态检查结果"
+        ],
+        "completionEvidence": [
+          "真实测试命令、退出码和通过数量"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "变更范围代码审查结果与待处理问题"
+        ],
+        "completionEvidence": [
+          "高优先级问题已关闭或有明确阻断记录"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Agent 必须按步骤顺序调用 MCP，并使用宿主能力完成真实文件与代码操作",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "check_spec 未通过前不得进入实现阶段",
+      "不得把 delegated plan 的输出误认为代码已经实施",
+      "历史记忆仅作为参考，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "规格文档已生成并通过 check_spec",
+      "工作量与主要风险已完成评估",
+      "Agent 已按 tasks.md 完成实现、测试与代码审查",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "add-a-full-pane",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "blocked",
+  "currentStepId": "write-spec",
+  "completedStepIds": [
+    "context"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [
+    "API/source/authentication discovery is resolved. Await the user's approval of the proposed read-only Runtime -> Email inbox scope and layout, then complete the required written spec and implementation-plan review before product code.",
+    "Chrome UI automation is unavailable, but is no longer needed for backend access. The existing Worker credential was verified without copying, changing, or printing it."
+  ],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "User requested Cloudflare email handling with a visual message reader and specifically named the navigation Runtime -> Email. User confirms an existing Worker; prefer reuse instead of creating another service.",
+      "verifiedAt": "2026-09-28T05:12:07.857Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Existing project context was read and GitNexus cloudflare query found tunnel-related flows; no inbox implementation conclusion was drawn from that graph result.",
+      "reference": "docs/project-context.md; node .gitnexus/run.cjs query cloudflare --repo .",
+      "verifiedAt": "2026-09-28T05:12:07.857Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "User screenshot identifies existing Cloudflare Worker leung-mail-worker with custom domain mail-api.leunghongyu.com. Navigation must be Runtime -> Email with a visual email reader.",
+      "verifiedAt": "2026-09-28T07:16:20.315Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Project context and graph summary exist and were read; those dated summaries are stale and cannot serve as current Electron integration implementation evidence.",
+      "stepId": "context",
+      "reference": "docs/project-context/architecture.md; docs/graph-insights/latest.md",
+      "verifiedAt": "2026-09-28T07:16:20.315Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Unauthenticated GET of Worker root returned HTTP 200 text OK. OpenAPI metadata at /openapi.json returned HTTP 404. No email contents or credentials were retrieved.",
+      "reference": "https://mail-api.leunghongyu.com/; https://mail-api.leunghongyu.com/openapi.json",
+      "verifiedAt": "2026-09-28T07:16:20.315Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Exact Worker/domain source search in active repository and GitHub search returned no match; no replacement Worker was created.",
+      "reference": "rg filename-only search for leung-mail-worker/mail-api.leunghongyu.com; GitHub search query mail-api.leunghongyu.com",
+      "verifiedAt": "2026-09-28T07:16:20.315Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "User explicitly directed inspection of reg-factory to reuse its Cloudflare mail integration. Proposed first version: full-pane Runtime -> Email mailbox selection, message list, search, safe HTML/text preview, existing local credential; no send/delete or automatic AI ingestion.",
+      "verifiedAt": "2026-09-28T07:41:26.484Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Found the local Wrangler deployment named leung-mail-worker, entry src/worker.ts, under the explicitly named reg-machine/reg-factory workspace. Confirmed admin endpoint routes and authentication from current source.",
+      "reference": "C:/Users/simon/Documents/ChatGPT/reg-machine/aiTemp/cfmail-staging/worker/wrangler.toml; worker/src/worker.ts; worker/src/admin_api/index.ts; C:/Users/simon/Documents/ChatGPT/reg-machine/reg-factory/common/temp_email.py:759-845",
+      "verifiedAt": "2026-09-28T07:41:26.484Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Live read-only GET /open_api/settings and authenticated GET /admin/statistics both returned HTTP 200. Domain matches leunghongyu.com; version v1.12.0; 18 messages and 2 addresses. No mail bodies were requested, no credentials printed, and no remote data was changed.",
+      "reference": "https://mail-api.leunghongyu.com/open_api/settings; https://mail-api.leunghongyu.com/admin/statistics",
+      "verifiedAt": "2026-09-28T07:41:26.484Z"
+    }
+  ],
+  "declaredScope": {
+    "feature": "Runtime -> Email",
+    "workerName": "leung-mail-worker",
+    "workerBaseUrl": "https://mail-api.leunghongyu.com",
+    "referenceProject": "C:/Users/simon/Documents/ChatGPT/reg-machine",
+    "referenceProjectReadOnly": true,
+    "mailContract": {
+      "headers": [
+        "x-admin-auth"
+      ],
+      "readEndpoints": [
+        "GET /admin/address",
+        "GET /admin/mails?limit=&offset=&address=",
+        "GET /admin/mails/:id"
+      ]
+    },
+    "credentialSource": "Existing private local mail-service configuration; never include values in plans, logs, or source",
+    "excluded": [
+      "Unapproved cloud/DNS/routing changes",
+      "Sending or automatic replies",
+      "Deletion",
+      "Automatic AI access to mail contents",
+      "Credential rotation",
+      "Changes to reg-machine/reg-factory",
+      "Unrelated AO/MCP/CPA/proxy changes"
+    ]
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-28T05:12:07.857Z",
+  "updatedAt": "2026-09-28T07:41:26.484Z"
+}

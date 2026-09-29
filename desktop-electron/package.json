@@ -94,6 +94,10 @@
     ],
     "extraResources": [
       {
+        "from": "assets/keysmith",
+        "to": "codex-keysmith"
+      },
+      {
         "from": "build/agent-orchestrator",
         "to": "agent-orchestrator"
       },

@@ -1,0 +1,308 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-gui-only-one-click-update-steady-6356c88264",
+  "plan": {
+    "planId": "feature-gui-only-one-click-update-steady-6356c88264",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "规划并实施新功能：gui-only-one-click-update",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：即使已有旧版 project-context，只要缺少图谱文档，也要先补齐 docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/gui-only-one-click-update/requirements.md",
+          "docs/specs/gui-only-one-click-update/design.md",
+          "docs/specs/gui-only-one-click-update/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/gui-only-one-click-update/requirements.md",
+          "docs/specs/gui-only-one-click-update/design.md",
+          "docs/specs/gui-only-one-click-update/tasks.md"
+        ],
+        "note": "规格模板已经由 start_feature 内部生成；Agent 直接按内嵌草稿写入并补全占位"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks 落盘后、进入估算或实现前",
+        "args": {
+          "feature_name": "gui-only-one-click-update",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "未通过则按报告补全后重跑；通过前不要写实现代码",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "实现 gui-only-one-click-update 功能：Add a one-click GUI-only update path to the existing Electron Coding Tools desktop app. Download a trusted checksum-verified renderer build, apply it, and reload only the renderer window. Keep MCP, Codex Bridge, and Proxy Bridge running with no stop, restart, route restore, or whole-app installer. Support release packaging. Preserve unrelated dirty edits. Verify focused tests and rendered UI.",
+          "code_context": "参考生成的 docs/specs/gui-only-one-click-update/tasks.md\n如存在 docs/graph-insights/latest.md，请一并参考其中的模块依赖和调用链摘要"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/gui-only-one-click-update/tasks.md"
+        ],
+        "expectedOutputs": [
+          "完成任务清单对应的生产代码与必要迁移"
+        ],
+        "completionEvidence": [
+          "实际变更文件与完成的任务条目",
+          "关键行为与规格一致"
+        ],
+        "outputs": [],
+        "note": "Agent 使用宿主文件与代码能力实施；不得把规划结果当成已完成实现"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "受影响测试、主链回归和必要静态检查结果"
+        ],
+        "completionEvidence": [
+          "真实测试命令、退出码和通过数量"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "变更范围代码审查结果与待处理问题"
+        ],
+        "completionEvidence": [
+          "高优先级问题已关闭或有明确阻断记录"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Agent 必须按步骤顺序调用 MCP，并使用宿主能力完成真实文件与代码操作",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "check_spec 未通过前不得进入实现阶段",
+      "不得把 delegated plan 的输出误认为代码已经实施",
+      "历史记忆仅作为参考，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "规格文档已生成并通过 check_spec",
+      "工作量与主要风险已完成评估",
+      "Agent 已按 tasks.md 完成实现、测试与代码审查",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "gui-only-one-click-update",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "converged",
+  "completedStepIds": [
+    "context",
+    "write-spec",
+    "check-spec",
+    "estimate",
+    "implement",
+    "test",
+    "review"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "User requested one-click GUI updates while keeping MCP and both bridges running",
+      "stepId": "context",
+      "verifiedAt": "2026-09-26T01:28:03.775Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "Requirements, design and bounded tasks written from the embedded draft; project context and both graph files exist",
+      "stepId": "write-spec",
+      "reference": "docs/specs/gui-only-one-click-update/",
+      "verifiedAt": "2026-09-26T12:36:27.638Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "check_spec passed with 3 FRs, zero errors and warnings",
+      "stepId": "check-spec",
+      "reference": "docs/specs/gui-only-one-click-update/",
+      "verifiedAt": "2026-09-26T12:46:32.911Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Estimate: bounded 3 production new files and 3 existing edits, main risks are renderer compatibility and initial shell bootstrap; focused TypeScript baseline passed",
+      "stepId": "estimate",
+      "reference": "docs/specs/gui-only-one-click-update/tasks.md",
+      "verifiedAt": "2026-09-26T12:46:32.911Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "3 production modules/workflow added and 3 existing files changed; existing full updater helpers reused unchanged; no service lifecycle change",
+      "stepId": "implement",
+      "reference": "aiTemp/gui-update/implementation.diff",
+      "verifiedAt": "2026-09-26T15:22:23.663Z"
+    },
+    {
+      "kind": "test",
+      "summary": "13 checks passed, 1 Linux-only check skipped on Windows; TypeScript and Vite build passed; isolated Electron one-click GUI reload kept parent PID and all 3 fixture service PIDs/ports; wide/compact and localized render checked",
+      "stepId": "test",
+      "reference": "aiTemp/gui-update/verification.json",
+      "revision": "218666b55e3f2b53cb960997f8a6154302cf60155dc995e6996066821c976f45",
+      "verifiedAt": "2026-09-26T15:22:23.663Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Final focused run: 18 passed, 1 Linux-only skipped. Existing updater regression contract updated. GUI workflow YAML and opt-in publishing gate passed.",
+      "stepId": "test",
+      "reference": "aiTemp/gui-update/verification.json",
+      "revision": "218666b55e3f2b53cb960997f8a6154302cf60155dc995e6996066821c976f45",
+      "verifiedAt": "2026-09-26T15:29:55.021Z"
+    },
+    {
+      "kind": "review",
+      "summary": "Scoped review found no remaining blockers in the GUI-only update path.",
+      "stepId": "review",
+      "reference": "aiTemp/gui-update/review.json",
+      "revision": "218666b55e3f2b53cb960997f8a6154302cf60155dc995e6996066821c976f45",
+      "verifiedAt": "2026-09-26T15:29:55.021Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "featureName": "gui-only-one-click-update",
+    "specLayout": "flat",
+    "scope": "GUI renderer bundle and Electron update control only; do not restart or reconfigure MCP, Codex Bridge, or Proxy Bridge"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [
+    {
+      "gateId": "FR-1",
+      "passed": true,
+      "summary": "One click produced one verified download and a renderer-only reload, with visible progress and no duplicate install.",
+      "reference": "aiTemp/gui-update/electron-evidence.json",
+      "verifiedAt": "2026-09-26T15:29:55.021Z"
+    },
+    {
+      "gateId": "FR-2",
+      "passed": true,
+      "summary": "Actual IPC handler bypasses quit; rollback test passed; isolated Electron and fixture service PIDs/ports remained stable.",
+      "reference": "aiTemp/gui-update/verification.json",
+      "verifiedAt": "2026-09-26T15:29:55.021Z"
+    },
+    {
+      "gateId": "FR-3",
+      "passed": true,
+      "summary": "Artifact format/checksum/compatibility checks and opt-in publication/backend-diff gate verified locally; publication is outside this task.",
+      "reference": "aiTemp/gui-update/release-final/SHA256SUMS.txt",
+      "verifiedAt": "2026-09-26T15:29:55.021Z"
+    }
+  ],
+  "runtimeEvidence": [
+    {
+      "kind": "electron_fixture",
+      "summary": "Single download and renderer reload; Electron PID 61004 and fixture service PIDs 35628/44860/62748 remained alive and answered same ports",
+      "reference": "aiTemp/gui-update/electron-evidence.json",
+      "verifiedAt": "2026-09-26T15:22:23.663Z"
+    }
+  ],
+  "lastVerifiedRevision": "218666b55e3f2b53cb960997f8a6154302cf60155dc995e6996066821c976f45",
+  "createdAt": "2026-09-26T01:28:03.775Z",
+  "updatedAt": "2026-09-26T15:30:05.846Z",
+  "lastConvergence": {
+    "checkedAt": "2026-09-26T15:30:05.846Z",
+    "passed": true,
+    "blockers": [],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "requiredQualityGates": [],
+    "missingQualityGates": []
+  }
+}

@@ -1,0 +1,321 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "bugfix-installed-coding-tools-setup-reports-28c42c628d",
+  "plan": {
+    "planId": "bugfix-installed-coding-tools-setup-reports-28c42c628d",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "bugfix",
+    "workflowVersion": "4.0.0",
+    "objective": "定位真因并修复 Bug：Installed Coding Tools Setup reports Codex model catalog loading failed: HTTP 502 transport after launcher reached; ChatGPT sign-in and smoke test green.",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：如果旧项目没有 graph-insights/latest.*，先补齐图谱初始化再进入 bug 收敛",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "src8-1",
+        "action": "SRC-1 明确差距（PLAN）：写清理想行为、实际行为、可观察 gap；禁止只有情绪无差距",
+        "outputs": [
+          "BugAnalysis.tbp.phenomenon",
+          "BugAnalysis.summary"
+        ],
+        "note": "写入 structuredContent.bugfixInput.phenomenon；反模式：「坏了/卡了」",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.tbp.phenomenon",
+          "BugAnalysis.summary"
+        ]
+      },
+      {
+        "id": "src8-2",
+        "tool": "code_insight",
+        "when": "边界/调用链不清，或需收敛影响面",
+        "args": {
+          "mode": "auto",
+          "query": "Installed Coding Tools Setup reports Codex model catalog loading failed: HTTP 502 transport after launcher reached; ChatGPT sign-in and smoke test green.",
+          "project_root": "C:\\Users\\simon\\Documents\\ChatGPT\\coding-tools-mcp"
+        },
+        "outputs": [
+          "BugAnalysis.tbp.boundary",
+          "BugAnalysis.tbp.timeline"
+        ],
+        "dependsOn": [
+          "src8-1"
+        ],
+        "note": "图谱缺失时先执行 init_project_context；再读本步输出收敛边界",
+        "type": "tool",
+        "expectedOutputs": [
+          "BugAnalysis.tbp.boundary",
+          "BugAnalysis.tbp.timeline"
+        ]
+      },
+      {
+        "id": "src8-3",
+        "action": "SRC-3 验收契约（PLAN）：定义 SMART 验收（failing test 变绿 / repro 命令 / 明确手动步骤）",
+        "outputs": [
+          "BugAnalysis.testPlan"
+        ],
+        "dependsOn": [
+          "src8-1"
+        ],
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.testPlan"
+        ]
+      },
+      {
+        "id": "src8-4",
+        "action": "SRC-4 把握真因（PLAN）：按 rootCauseWorksheet 完成 4a~4e，输出 rootCauseAnalysis 与因果句",
+        "outputs": [
+          "rootCauseAnalysis",
+          "BugAnalysis.rootCause",
+          "BugAnalysis.tbp.rootCauseStatement",
+          "BugAnalysis.tbp.ruledOut"
+        ],
+        "dependsOn": [
+          "src8-1",
+          "src8-2",
+          "src8-3"
+        ],
+        "note": "硬门禁：本步闭合前禁止改代码；见 structuredContent.rootCauseWorksheet",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "rootCauseAnalysis",
+          "BugAnalysis.rootCause",
+          "BugAnalysis.tbp.rootCauseStatement",
+          "BugAnalysis.tbp.ruledOut"
+        ]
+      },
+      {
+        "id": "src8-5",
+        "action": "SRC-5 制定对策（PLAN）：最小 patch，评估有效性/可行性/回归风险",
+        "outputs": [
+          "BugAnalysis.fixPlan",
+          "BugAnalysis.tbp.repair"
+        ],
+        "dependsOn": [
+          "src8-4"
+        ],
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.fixPlan",
+          "BugAnalysis.tbp.repair"
+        ]
+      },
+      {
+        "id": "src8-6",
+        "action": "SRC-6 贯彻修复（DO）：复现门禁通过后改代码，改动仅限 Bug 范围",
+        "when": "rootCauseWorksheet 已闭合且复现/failing test 已就绪",
+        "outputs": [
+          "BugAnalysis.affectedFiles",
+          "代码补丁"
+        ],
+        "dependsOn": [
+          "src8-5"
+        ],
+        "note": "三次修复仍失败 → 回 src8-2 或 src8-4，不得盲试",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.affectedFiles",
+          "代码补丁"
+        ]
+      },
+      {
+        "id": "src8-7",
+        "tool": "gentest",
+        "when": "SRC-6 代码已修改",
+        "args": {
+          "code": "[修复后的代码]",
+          "framework": "[按项目上下文选择 vitest/jest/mocha]",
+          "project_root": "C:\\Users\\simon\\Documents\\ChatGPT\\coding-tools-mcp"
+        },
+        "outputs": [
+          "回归测试代码"
+        ],
+        "dependsOn": [
+          "src8-6"
+        ],
+        "note": "SRC-7 评价双轨（结果轨）：对照 Step 3 验收契约",
+        "type": "tool",
+        "expectedOutputs": [
+          "回归测试代码"
+        ]
+      },
+      {
+        "id": "src8-8",
+        "action": "SRC-8 巩固传播（ACT）：准备成功/失败/证伪/回归记忆候选",
+        "when": "验证通过",
+        "args": {
+          "type": "[bugfix | failed_approach | false_root_cause | regression_case]",
+          "tags": "[bugfix,root-cause 或 negative-memory]",
+          "summary": "[关键词] Installed Coding Tools Setup reports Codex model catalog loading failed: HTTP 50",
+          "content": "【现象】【根因】【修复】【验证】",
+          "evidence": [
+            "[测试、日志、反例或监控证据]"
+          ],
+          "applicability": "[适用条件、边界和不适用场景]"
+        },
+        "outputs": [
+          "待收敛的 MemoryCandidate"
+        ],
+        "dependsOn": [
+          "src8-7"
+        ],
+        "note": "只准备候选并写入 plan_heartbeat 证据；converge passed=true 后再调用 memorize_asset；候选面向跨仓库共享：勿填 source_project/source_path；name/summary 抽象化，路径仅放 content 末尾【来源参考】",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "待收敛的 MemoryCandidate"
+        ]
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "未完成 SRC-8 真因收敛前不得直接实施猜测性修复",
+      "Agent 必须使用宿主能力完成真实代码修改和测试执行",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "修复完成必须包含回归验证与防复发措施",
+      "历史记忆仅作为候选证据，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "真因能够解释全部关键现象并排除主要竞争假设",
+      "修复方案作用于原因层而不是仅隐藏症状",
+      "回归测试与关联规格闸门通过",
+      "可复用的成功或失败经验已评估是否沉淀",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "analysisMode": "src8"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "blocked",
+  "currentStepId": "src8-4",
+  "completedStepIds": [
+    "context",
+    "src8-1",
+    "src8-2",
+    "src8-3"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [
+    "Historical 2026-09-28 transport exception lacks a retained low-level socket/proxy code; current installed runtime successfully serves the model catalog, so no reproducing failure or justified product patch remains.",
+    "Parent directed read-only stop during separate package build; do not change source, app, proxy, or Codex session."
+  ],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "Observed Setup catalog HTTP 502 transport while sign-in and smoke test rows are green.",
+      "stepId": "context",
+      "verifiedAt": "2026-09-28T09:59:39.881Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "Setup screenshot: catalog load HTTP 502 transport; sign-in and smoke test green.",
+      "stepId": "src8-1",
+      "verifiedAt": "2026-09-28T10:00:12.387Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Read AGENTS.md and docs/project-context.md; graph-insights/latest.md exists but is dated 2026-07-13 and explicitly stale.",
+      "stepId": "context",
+      "reference": "docs/graph-insights/latest.md",
+      "verifiedAt": "2026-09-28T10:00:12.387Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "Expected: Codex GET /backend-api/codex/models returns augmented catalog and successful_model_catalog_requests increments. Actual: installed Setup observed HTTP 502 classified transport while browser login and smoke test pass.",
+      "stepId": "src8-1",
+      "reference": "desktop-electron/electron/main.cjs:326-345; runtime-web/src/server.ts:390-425",
+      "verifiedAt": "2026-09-28T10:05:37.633Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Source trace: modelsRequest calls forwardNativeCodexRequest; after dispatch starts, a thrown fetch is classified transport and returned as HTTP 502.",
+      "stepId": "src8-2",
+      "reference": "runtime-web/src/server.ts:399-406; runtime-web/src/native-network.ts:33-54",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Historical installed daemon result request #1 at 2026-09-28T09:49:56.565Z was 502, transport, elapsed 128 ms, with no failure code; launcher logged the toast at 09:50:08.127Z.",
+      "stepId": "src8-2",
+      "reference": "%APPDATA%/Coding Tools/logs/launcher.jsonl",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Current installed loopback /healthz: runtime 5.0.6 PID 48076; 882 catalog requests, 843 successes, latest request #882 HTTP 200 at 2026-09-29T16:10:18.486Z. Launcher logged catalog verified on Sep 29.",
+      "stepId": "src8-3",
+      "reference": "http://127.0.0.1:17841/healthz; %APPDATA%/Coding Tools/logs/launcher.jsonl",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Graph CLI index bound to coding-tools-mcp but status/query hung; code_insight degraded to lexical source evidence.",
+      "stepId": "src8-2",
+      "reference": ".gitnexus; mcp-probe code_insight",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "analysisMode": "src8"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [
+    {
+      "kind": "installed-runtime",
+      "summary": "Installed bundle SHA256 4AB002541ECFD6AFD18E4714A79DE379F7C341D6445239C9F695B166D955AE39; latest catalog request #882 HTTP 200.",
+      "reference": "Coding Tools resources/app.asar; /healthz",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    }
+  ],
+  "createdAt": "2026-09-28T09:59:39.881Z",
+  "updatedAt": "2026-09-29T16:15:12.771Z"
+}

@@ -1,0 +1,207 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-continue-the-source-only-steady-2d3f3743d3",
+  "plan": {
+    "planId": "feature-continue-the-source-only-steady-2d3f3743d3",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "规划并实施新功能：continue-the-source-only",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：即使已有旧版 project-context，只要缺少图谱文档，也要先补齐 docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/continue-the-source-only/requirements.md",
+          "docs/specs/continue-the-source-only/design.md",
+          "docs/specs/continue-the-source-only/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/continue-the-source-only/requirements.md",
+          "docs/specs/continue-the-source-only/design.md",
+          "docs/specs/continue-the-source-only/tasks.md"
+        ],
+        "note": "规格模板已经由 start_feature 内部生成；Agent 直接按内嵌草稿写入并补全占位"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks 落盘后、进入估算或实现前",
+        "args": {
+          "feature_name": "continue-the-source-only",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "未通过则按报告补全后重跑；通过前不要写实现代码",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "实现 continue-the-source-only 功能：Continue the source-only Agent Orchestrator module in Coding Tools. Keep the existing Coding Tools plan board as durable mission board with nested clauses. WebGPT running through Codex is the AO planner and reviewer. AO alone owns worker agent creation and launch; each worker uses a user-selected harness and its exact configuration. CPA is only a model provider for eligible worker harnesses, not an orchestrator or special planner. Expose AO through Runtime UI and browser MCP with workspace-scoped permissions and local confirmation for writes. Do not bundle or launch an AO executable, and preserve unrelated dirty worktree files.",
+          "code_context": "参考生成的 docs/specs/continue-the-source-only/tasks.md\n如存在 docs/graph-insights/latest.md，请一并参考其中的模块依赖和调用链摘要"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/continue-the-source-only/tasks.md"
+        ],
+        "expectedOutputs": [
+          "完成任务清单对应的生产代码与必要迁移"
+        ],
+        "completionEvidence": [
+          "实际变更文件与完成的任务条目",
+          "关键行为与规格一致"
+        ],
+        "outputs": [],
+        "note": "Agent 使用宿主文件与代码能力实施；不得把规划结果当成已完成实现"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "受影响测试、主链回归和必要静态检查结果"
+        ],
+        "completionEvidence": [
+          "真实测试命令、退出码和通过数量"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "变更范围代码审查结果与待处理问题"
+        ],
+        "completionEvidence": [
+          "高优先级问题已关闭或有明确阻断记录"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Agent 必须按步骤顺序调用 MCP，并使用宿主能力完成真实文件与代码操作",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "check_spec 未通过前不得进入实现阶段",
+      "不得把 delegated plan 的输出误认为代码已经实施",
+      "历史记忆仅作为参考，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "规格文档已生成并通过 check_spec",
+      "工作量与主要风险已完成评估",
+      "Agent 已按 tasks.md 完成实现、测试与代码审查",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "continue-the-source-only",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "active",
+  "completedStepIds": [
+    "context",
+    "write-spec",
+    "check-spec",
+    "estimate"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [],
+  "evidence": [
+    {
+      "kind": "implementation",
+      "summary": "Partial AO source: revisioned Rust run graph, guarded headless read/update, in-process module and browser MCP run controls; execution remains disabled pending exact WebGPT and worker harness routes.",
+      "verifiedAt": "2026-09-25T02:02:26.241Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "featureName": "continue-the-source-only",
+    "specLayout": "flat"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-25T01:10:39.497Z",
+  "updatedAt": "2026-09-25T02:02:26.241Z"
+}

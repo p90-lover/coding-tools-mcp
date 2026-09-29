@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -540,8 +540,119 @@ export interface LauncherSnapshot {
   update: UpdateState;
 }
 
+export interface ChatGptDesktopAccount {
+  slotId: string;
+  source: "cpa" | "local";
+  email: string | null;
+  plan: string | null;
+  disabled: boolean;
+  signedIn: boolean;
+  active: boolean;
+}
+
+export interface ChatGptDesktopStatus {
+  supported: boolean;
+  installed: boolean;
+  version: string | null;
+  running: boolean;
+  activeSlotId: string | null;
+  runningSlotId: string | null;
+  busy: "launching" | "switching" | "clearing" | "stopping" | null;
+  error: string | null;
+  accounts: ChatGptDesktopAccount[];
+}
+
+export interface EmailStatus {
+  configured: boolean;
+  origin: string | null;
+  encryptionAvailable: boolean;
+  capabilities: { version: string | null; domains: string[]; sendEnabled: boolean } | null;
+  lastRefresh: string | null;
+  error: string | null;
+}
+
+export interface EmailMailbox {
+  id: number;
+  address: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  mailCount: number | null;
+}
+
+export interface EmailMessageSummary {
+  id: number;
+  mailbox: string | null;
+  from: string | null;
+  subject: string | null;
+  receivedAt: string | null;
+  preview: string | null;
+}
+
+export interface EmailAttachment {
+  filename: string | null;
+  mimeType: string | null;
+  size: number | null;
+}
+
+export interface EmailMessage {
+  id: number;
+  from: string | null;
+  to: string | null;
+  subject: string | null;
+  receivedAt: string | null;
+  text: string | null;
+  html: string | null;
+  attachments: EmailAttachment[];
+}
+
+export interface KeysmithCommandResult {
+  ok: boolean;
+  installed?: boolean;
+  managedByCodingTools?: boolean;
+  state?: string;
+  pythonVersion?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  fileSha256?: string;
+  cancelled?: boolean;
+  error?: string;
+}
+
+export interface KeysmithSelectedFile {
+  path: string;
+  name: string;
+  content: string;
+  sha256: string;
+}
+
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
+  chatGptDesktopStatus(): Promise<ChatGptDesktopStatus>;
+  openChatGptDesktop(slotId: string): Promise<ChatGptDesktopStatus>;
+  newChatGptDesktopSignIn(): Promise<ChatGptDesktopStatus>;
+  clearChatGptDesktopAccount(): Promise<ChatGptDesktopStatus>;
+  stopChatGptDesktop(): Promise<ChatGptDesktopStatus>;
+  setChatGptDesktopSurfaceActive(active: boolean): Promise<boolean>;
+  setChatGptDesktopBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
+  onChatGptDesktopChanged(listener: (status: ChatGptDesktopStatus) => void): () => void;
+  onChatGptDesktopRemeasure(listener: () => void): () => void;
+  emailStatus(): Promise<EmailStatus>;
+  connectEmail(input: { origin: string; adminAuth: string }): Promise<EmailStatus>;
+  disconnectEmail(): Promise<EmailStatus>;
+  listEmailMailboxes(input: { limit?: number; offset?: number; query?: string }): Promise<{ mailboxes: EmailMailbox[]; count: number }>;
+  listEmailMessages(input: { address?: string; limit?: number; offset?: number }): Promise<{ messages: EmailMessageSummary[]; count: number }>;
+  getEmailMessage(input: { id: number }): Promise<{ message: EmailMessage | null }>;
+  createEmailAddress(input: { name: string; domain: string }): Promise<{ address: string }>;
+  deleteEmailMessage(input: { id: number }): Promise<{ deleted: number }>;
+  clearEmailInbox(input: { id: number }): Promise<{ clearedMailboxId: number }>;
+  removeEmailMailbox(input: { id: number }): Promise<{ removedMailboxId: number }>;
+  keysmithStatus(): Promise<KeysmithCommandResult>;
+  keysmithSelectFile(): Promise<KeysmithSelectedFile | null>;
+  keysmithPreview(): Promise<KeysmithCommandResult>;
+  keysmithApply(): Promise<KeysmithCommandResult>;
+  keysmithPreviewRemoval(): Promise<KeysmithCommandResult>;
+  keysmithRemove(): Promise<KeysmithCommandResult>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;

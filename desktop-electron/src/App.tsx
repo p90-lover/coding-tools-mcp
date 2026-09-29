@@ -24,6 +24,9 @@ import { NativeCodexPanel } from "./features/NativeCodexPanel";
 import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorSurface } from "./features/AgentOrchestratorSurface";
 import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
+import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
+import { EmailSurface } from "./features/EmailSurface";
+import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
 
 import type {
   BrowserInteractionMode,
@@ -697,6 +700,18 @@ function LauncherShell({
                   label={copy.browser}
                   onClick={() => navigateSurface("browser")}
                 />
+                <SidebarItem
+                  active={surface === "chatgpt-desktop"}
+                  icon="browser"
+                  label="ChatGPT Desktop"
+                  onClick={() => navigateSurface("chatgpt-desktop")}
+                />
+                <SidebarItem
+                  active={surface === "email"}
+                  icon="mail"
+                  label="Email"
+                  onClick={() => navigateSurface("email")}
+                />
               </SidebarGroup>
               <SidebarGroup label={copy.configuration}>
                 <SidebarItem
@@ -818,6 +833,16 @@ function LauncherShell({
                 platform={snapshot.platform}
                 setError={setError}
               />
+            ) : null}
+            {surface === "chatgpt-desktop" ? (
+              <ChatGptDesktopSurface
+                active={!(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
+                api={api!}
+                setError={setError}
+              />
+            ) : null}
+            {surface === "email" ? (
+              <EmailSurface api={api!} setError={setError} />
             ) : null}
             {surface === "setup" ? (
               <SetupSurface
@@ -1395,6 +1420,21 @@ function SetupSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [localBusy, setLocalBusy] = useState(false);
+  const [keysmithOpen, setKeysmithOpen] = useState(false);
+  const [keysmithInstalled, setKeysmithInstalled] = useState(false);
+  // A renderer can run on an installed preload that predates Keysmith; hide the step there
+  // rather than throw on a missing bridge method.
+  const keysmithAvailable = !devProfile && typeof api?.keysmithStatus === "function";
+  useEffect(() => {
+    if (!keysmithAvailable) return;
+    let active = true;
+    void api!.keysmithStatus().then((status) => {
+      if (active) setKeysmithInstalled(status.ok && status.managedByCodingTools === true && status.state === "active");
+    }).catch(() => {
+      if (active) setKeysmithInstalled(false);
+    });
+    return () => { active = false; };
+  }, [keysmithAvailable]);
   const manualInteraction = snapshot.state.browserInteractionMode === "manual";
   const busy = localBusy
     || operation?.status === "running"
@@ -1485,6 +1525,23 @@ function SetupSurface({
             />
           ) : undefined}
         />
+        {keysmithAvailable ? (
+          <>
+            <SetupRow
+              action={keysmithOpen ? copy.close : copy.keysmithConfigure}
+              complete={keysmithInstalled}
+              description={copy.keysmithStepBody}
+              disabled={false}
+              index={manualInteraction ? 2 : 4}
+              onAction={() => setKeysmithOpen((open) => !open)}
+              repeatable
+              title={copy.keysmithStep}
+            />
+            {keysmithOpen ? (
+              <KeysmithSetupPanel api={api!} copy={copy} onInstalledChange={setKeysmithInstalled} />
+            ) : null}
+          </>
+        ) : null}
       </div>
 
       {!devProfile && snapshot.state.codexRestartRequired ? (

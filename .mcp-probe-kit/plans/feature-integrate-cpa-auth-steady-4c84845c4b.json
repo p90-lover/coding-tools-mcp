@@ -1,0 +1,263 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-integrate-cpa-auth-steady-4c84845c4b",
+  "plan": {
+    "planId": "feature-integrate-cpa-auth-steady-4c84845c4b",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "è§„åˆ’å¹¶å®žæ–½æ–°åŠŸèƒ½ï¼šintegrate-cpa-auth",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "ç¼ºå°‘ AGENTS.md æˆ– docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "å…¼å®¹è€é¡¹ç›®ï¼šå³ä½¿å·²æœ‰æ—§ç‰ˆ project-contextï¼Œåªè¦ç¼ºå°‘å›¾è°±æ–‡æ¡£ï¼Œä¹Ÿè¦å…ˆè¡¥é½ docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/integrate-cpa-auth/requirements.md",
+          "docs/specs/integrate-cpa-auth/design.md",
+          "docs/specs/integrate-cpa-auth/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/integrate-cpa-auth/requirements.md",
+          "docs/specs/integrate-cpa-auth/design.md",
+          "docs/specs/integrate-cpa-auth/tasks.md"
+        ],
+        "note": "è§„æ ¼æ¨¡æ¿å·²ç»ç”± start_feature å†…éƒ¨ç”Ÿæˆï¼›Agent ç›´æŽ¥æŒ‰å†…åµŒè‰ç¨¿å†™å…¥å¹¶è¡¥å…¨å ä½"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks è½ç›˜åŽã€è¿›å…¥ä¼°ç®—æˆ–å®žçŽ°å‰",
+        "args": {
+          "feature_name": "integrate-cpa-auth",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "æœªé€šè¿‡åˆ™æŒ‰æŠ¥å‘Šè¡¥å…¨åŽé‡è·‘ï¼›é€šè¿‡å‰ä¸è¦å†™å®žçŽ°ä»£ç ",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "å®žçŽ° integrate-cpa-auth åŠŸèƒ½ï¼šIntegrate CPA auth management into Runtime > Accounts; remove API Models and Codex Router; enable CPA plugins; convert the existing pinned GitHub commandcode-proxy integration to a CPA plugin with CommandCode login under Accounts; install and verify the plugin before moving the local CommandCode module to Trash; preserve existing account credentials and unrelated dirty worktree changes.",
+          "code_context": "å‚è€ƒç”Ÿæˆçš„ docs/specs/integrate-cpa-auth/tasks.md\nå¦‚å­˜åœ¨ docs/graph-insights/latest.mdï¼Œè¯·ä¸€å¹¶å‚è€ƒå…¶ä¸­çš„æ¨¡å—ä¾èµ–å’Œè°ƒç”¨é“¾æ‘˜è¦"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/integrate-cpa-auth/tasks.md"
+        ],
+        "expectedOutputs": [
+          "å®Œæˆä»»åŠ¡æ¸…å•å¯¹åº”çš„ç”Ÿäº§ä»£ç ä¸Žå¿…è¦è¿ç§»"
+        ],
+        "completionEvidence": [
+          "å®žé™…å˜æ›´æ–‡ä»¶ä¸Žå®Œæˆçš„ä»»åŠ¡æ¡ç›®",
+          "å…³é”®è¡Œä¸ºä¸Žè§„æ ¼ä¸€è‡´"
+        ],
+        "outputs": [],
+        "note": "Agent ä½¿ç”¨å®¿ä¸»æ–‡ä»¶ä¸Žä»£ç èƒ½åŠ›å®žæ–½ï¼›ä¸å¾—æŠŠè§„åˆ’ç»“æžœå½“æˆå·²å®Œæˆå®žçŽ°"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "å—å½±å“æµ‹è¯•ã€ä¸»é“¾å›žå½’å’Œå¿…è¦é™æ€æ£€æŸ¥ç»“æžœ"
+        ],
+        "completionEvidence": [
+          "çœŸå®žæµ‹è¯•å‘½ä»¤ã€é€€å‡ºç å’Œé€šè¿‡æ•°é‡"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "å˜æ›´èŒƒå›´ä»£ç å®¡æŸ¥ç»“æžœä¸Žå¾…å¤„ç†é—®é¢˜"
+        ],
+        "completionEvidence": [
+          "é«˜ä¼˜å…ˆçº§é—®é¢˜å·²å…³é—­æˆ–æœ‰æ˜Žç¡®é˜»æ–­è®°å½•"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "é¦–æ¬¡æ‰§è¡Œè®¡åˆ’æ—¶è°ƒç”¨ plan_heartbeat å¹¶é™„å®Œæ•´ planï¼Œå»ºç«‹æœ¬åœ°æ£€æŸ¥ç‚¹",
+      "æ¯å®Œæˆã€è·³è¿‡æˆ–é˜»å¡žä¸€ä¸ªæ­¥éª¤åŽè°ƒç”¨ plan_heartbeat æ›´æ–°è¯æ®ä¸ŽçŠ¶æ€",
+      "ä¼šè¯ä¸­æ–­æˆ–åˆ‡æ¢ Agent åŽå…ˆè°ƒç”¨ resume_planï¼Œå†ç»§ç»­æœªå®Œæˆæ­¥éª¤",
+      "åªæœ‰ converge è¿”å›ž passed=true åŽï¼Œæ‰èƒ½å°†æœ¬æ¬¡ç»“è®ºæ­£å¼å†™å…¥é•¿æœŸè®°å¿†",
+      "Agent å¿…é¡»æŒ‰æ­¥éª¤é¡ºåºè°ƒç”¨ MCPï¼Œå¹¶ä½¿ç”¨å®¿ä¸»èƒ½åŠ›å®ŒæˆçœŸå®žæ–‡ä»¶ä¸Žä»£ç æ“ä½œ",
+      "é¦–æ¬¡æ‰§è¡Œå‰å¿…é¡»ç”¨å®Œæ•´ plan å»ºç«‹ plan_heartbeat æ£€æŸ¥ç‚¹ï¼›æ¯å®Œæˆã€è·³è¿‡æˆ–é˜»æ–­ä¸€æ­¥ç«‹å³ç´¯è®¡å›žå†™",
+      "check_spec æœªé€šè¿‡å‰ä¸å¾—è¿›å…¥å®žçŽ°é˜¶æ®µ",
+      "ä¸å¾—æŠŠ delegated plan çš„è¾“å‡ºè¯¯è®¤ä¸ºä»£ç å·²ç»å®žæ–½",
+      "åŽ†å²è®°å¿†ä»…ä½œä¸ºå‚è€ƒï¼Œå½“å‰é¡¹ç›®äº‹å®žä¸Žä»£ç ä¼˜å…ˆ"
+    ],
+    "completionCriteria": [
+      "è§„æ ¼æ–‡æ¡£å·²ç”Ÿæˆå¹¶é€šè¿‡ check_spec",
+      "å·¥ä½œé‡ä¸Žä¸»è¦é£Žé™©å·²å®Œæˆè¯„ä¼°",
+      "Agent å·²æŒ‰ tasks.md å®Œæˆå®žçŽ°ã€æµ‹è¯•ä¸Žä»£ç å®¡æŸ¥",
+      "æ‰€æœ‰æ­¥éª¤çŠ¶æ€ä¸Žè¯æ®å·²é€šè¿‡ plan_heartbeat å†™å…¥æ£€æŸ¥ç‚¹"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "integrate-cpa-auth",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "active",
+  "completedStepIds": [
+    "context",
+    "write-spec",
+    "check-spec",
+    "estimate",
+    "implement",
+    "test"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "Existing AGENTS.md, docs/project-context.md, docs/graph-insights/latest.md and latest.json read; context bootstrap condition false.",
+      "verifiedAt": "2026-09-24T16:05:20.973Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "Three feature spec files written under docs/specs/integrate-cpa-auth.",
+      "verifiedAt": "2026-09-24T16:20:17.313Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "check_spec passed: 6 FR, 0 errors, 0 warnings.",
+      "verifiedAt": "2026-09-24T16:21:36.059Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "Estimate run for CPA Accounts, plugin migration, and Codex Router removal.",
+      "verifiedAt": "2026-09-24T16:22:06.821Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Runtime Accounts now opens CPA auth-files; API Models and Codex Router navigation hidden. CPA generated config enables plugins and installs the bundled Windows CommandCode DLL at startup. Source and binary saved under desktop-electron/vendor.",
+      "verifiedAt": "2026-09-24T17:31:37.714Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Isolated CPA 7.3.7 test: plugin registered/effective/OAuth true, fake browser callback persisted auth, model listed, mock inference returned hello with selected key. Go tests, Electron typecheck, CPA config test, original UI focused test, and isolated Vite build passed.",
+      "verifiedAt": "2026-09-24T17:31:37.714Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Partial implementation: Accounts embeds CPA Auth Files, API Models and Codex Router nav hidden, plugin config and hash-pinned Windows DLL/source bundled; old modules retained pending cutover.",
+      "verifiedAt": "2026-09-24T17:36:53.889Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Go plugin tests passed; isolated CPA 7.3.7 registered/effective/OAuth true, saved fake auth file, listed CommandCode model, mocked inference returned hello with selected key; Electron typecheck, isolated Vite build, CPA config test and original-UI test passed.",
+      "verifiedAt": "2026-09-24T17:36:53.889Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "User clarified both CLI/Go-plan and Studio CommandCode accounts, and full Codex Router backend removal. Spec updated; check_spec passed with 6 FR, 0 errors/warnings.",
+      "verifiedAt": "2026-09-25T00:48:39.376Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Accounts embeds CPA Auth Files. CPA managed config enables and installs hash-pinned CommandCode Go and Studio plugins; Provider Hub OAuth adapters use CPA plugin management routes. Codex Router and standalone CommandCode handlers, binaries, IPC, package manifests, runtime-web routes and Tauri process controller moved to Trash. Legacy account IDs/data retained for migration.",
+      "verifiedAt": "2026-09-25T03:49:19.062Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Isolated CPA 7.3.7: both plugins effective and OAuth capable, fake callbacks persist auth, both models listed and mock inference uses selected keys. Electron and runtime-web typechecks pass; focused CPA login, managed service, package, mesh and Rust integration tests pass. Default Rust test build blocked by missing pre-existing native snapshot probe fixture; cargo check and no-default-features integration tests pass.",
+      "verifiedAt": "2026-09-25T03:49:19.062Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "featureName": "integrate-cpa-auth",
+    "specLayout": "flat"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-24T16:04:01.521Z",
+  "updatedAt": "2026-09-25T03:49:19.062Z"
+}

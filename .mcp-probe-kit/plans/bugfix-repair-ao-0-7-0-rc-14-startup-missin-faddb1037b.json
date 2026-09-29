@@ -1,0 +1,277 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "bugfix-repair-ao-0-7-0-rc-14-startup-missin-faddb1037b",
+  "plan": {
+    "planId": "bugfix-repair-ao-0-7-0-rc-14-startup-missin-faddb1037b",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "bugfix",
+    "workflowVersion": "4.0.0",
+    "objective": "σ«ÜΣ╜ìτ£ƒσ¢áσ╣╢Σ┐«σñì Bug∩╝ÜRepair AO 0.7.0-rc.14 startup missing paseo-provider-routes.cjs caused by retired package exclusions. Preserve backups, repair packaged dependency boundary, verify installed AO window.",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "τ╝║σ░æ AGENTS.md µêû docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "σà╝σ«╣ΦÇüΘí╣τ¢«∩╝Üσªéµ₧£µùºΘí╣τ¢«µ▓íµ£ë graph-insights/latest.*∩╝îσàêΦíÑΘ╜Éσ¢╛Φ░▒σê¥σºïσîûσåìΦ┐¢σàÑ bug µö╢µò¢",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "src8-1",
+        "action": "SRC-1 µÿÄτí«σ╖«Φ╖¥∩╝êPLAN∩╝ë∩╝ÜσåÖµ╕àτÉåµâ│ΦíîΣ╕║πÇüσ«₧ΘÖàΦíîΣ╕║πÇüσÅ»Φºéσ»ƒ gap∩╝¢τªüµ¡óσÅ¬µ£ëµâàτ╗¬µùáσ╖«Φ╖¥",
+        "outputs": [
+          "BugAnalysis.tbp.phenomenon",
+          "BugAnalysis.summary"
+        ],
+        "note": "σåÖσàÑ structuredContent.bugfixInput.phenomenon∩╝¢σÅìµ¿íσ╝Å∩╝ÜπÇîσ¥ÅΣ║å/σìíΣ║åπÇì",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.tbp.phenomenon",
+          "BugAnalysis.summary"
+        ]
+      },
+      {
+        "id": "src8-2",
+        "tool": "code_insight",
+        "when": "Φ╛╣τòî/Φ░âτö¿Θô╛Σ╕ìµ╕à∩╝îµêûΘ£Çµö╢µò¢σ╜▒σôìΘ¥ó",
+        "args": {
+          "mode": "auto",
+          "query": "Repair AO 0.7.0-rc.14 startup missing paseo-provider-routes.cjs caused by retired package exclusions. Preserve backups, repair packaged dependency boundary, verify installed AO window.",
+          "project_root": "C:\\Users\\simon\\Documents\\ChatGPT\\coding-tools-mcp"
+        },
+        "outputs": [
+          "BugAnalysis.tbp.boundary",
+          "BugAnalysis.tbp.timeline"
+        ],
+        "dependsOn": [
+          "src8-1"
+        ],
+        "note": "σ¢╛Φ░▒τ╝║σñ▒µù╢σàêµëºΦíî init_project_context∩╝¢σåìΦ»╗µ£¼µ¡ÑΦ╛ôσç║µö╢µò¢Φ╛╣τòî",
+        "type": "tool",
+        "expectedOutputs": [
+          "BugAnalysis.tbp.boundary",
+          "BugAnalysis.tbp.timeline"
+        ]
+      },
+      {
+        "id": "src8-3",
+        "action": "SRC-3 Θ¬îµö╢σÑæτ║ª∩╝êPLAN∩╝ë∩╝Üσ«ÜΣ╣ë SMART Θ¬îµö╢∩╝êfailing test σÅÿτ╗┐ / repro σæ╜Σ╗ñ / µÿÄτí«µëïσè¿µ¡ÑΘ¬ñ∩╝ë",
+        "outputs": [
+          "BugAnalysis.testPlan"
+        ],
+        "dependsOn": [
+          "src8-1"
+        ],
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.testPlan"
+        ]
+      },
+      {
+        "id": "src8-4",
+        "action": "SRC-4 µèèµÅíτ£ƒσ¢á∩╝êPLAN∩╝ë∩╝Üµîë rootCauseWorksheet σ«îµêÉ 4a~4e∩╝îΦ╛ôσç║ rootCauseAnalysis Σ╕Äσ¢áµ₧£σÅÑ",
+        "outputs": [
+          "rootCauseAnalysis",
+          "BugAnalysis.rootCause",
+          "BugAnalysis.tbp.rootCauseStatement",
+          "BugAnalysis.tbp.ruledOut"
+        ],
+        "dependsOn": [
+          "src8-1",
+          "src8-2",
+          "src8-3"
+        ],
+        "note": "τí¼Θù¿τªü∩╝Üµ£¼µ¡ÑΘù¡σÉêσëìτªüµ¡óµö╣Σ╗úτáü∩╝¢Φºü structuredContent.rootCauseWorksheet",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "rootCauseAnalysis",
+          "BugAnalysis.rootCause",
+          "BugAnalysis.tbp.rootCauseStatement",
+          "BugAnalysis.tbp.ruledOut"
+        ]
+      },
+      {
+        "id": "src8-5",
+        "action": "SRC-5 σê╢σ«Üσ»╣τ¡û∩╝êPLAN∩╝ë∩╝Üµ£Çσ░Å patch∩╝îΦ»äΣ╝░µ£ëµòêµÇº/σÅ»ΦíîµÇº/σ¢₧σ╜ÆΘúÄΘÖ⌐",
+        "outputs": [
+          "BugAnalysis.fixPlan",
+          "BugAnalysis.tbp.repair"
+        ],
+        "dependsOn": [
+          "src8-4"
+        ],
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.fixPlan",
+          "BugAnalysis.tbp.repair"
+        ]
+      },
+      {
+        "id": "src8-6",
+        "action": "SRC-6 Φ┤»σ╜╗Σ┐«σñì∩╝êDO∩╝ë∩╝ÜσñìτÄ░Θù¿τªüΘÇÜΦ┐çσÉÄµö╣Σ╗úτáü∩╝îµö╣σè¿Σ╗àΘÖÉ Bug Φîâσ¢┤",
+        "when": "rootCauseWorksheet σ╖▓Θù¡σÉêΣ╕öσñìτÄ░/failing test σ╖▓σ░▒τ╗¬",
+        "outputs": [
+          "BugAnalysis.affectedFiles",
+          "Σ╗úτáüΦíÑΣ╕ü"
+        ],
+        "dependsOn": [
+          "src8-5"
+        ],
+        "note": "Σ╕ëµ¼íΣ┐«σñìΣ╗ìσñ▒Φ┤Ñ ΓåÆ σ¢₧ src8-2 µêû src8-4∩╝îΣ╕ìσ╛ùτ¢▓Φ»ò",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.affectedFiles",
+          "Σ╗úτáüΦíÑΣ╕ü"
+        ]
+      },
+      {
+        "id": "src8-7",
+        "tool": "gentest",
+        "when": "SRC-6 Σ╗úτáüσ╖▓Σ┐«µö╣",
+        "args": {
+          "code": "[Σ┐«σñìσÉÄτÜäΣ╗úτáü]",
+          "framework": "[µîëΘí╣τ¢«Σ╕èΣ╕ïµûçΘÇëµï⌐ vitest/jest/mocha]",
+          "project_root": "C:\\Users\\simon\\Documents\\ChatGPT\\coding-tools-mcp"
+        },
+        "outputs": [
+          "σ¢₧σ╜Æµ╡ïΦ»òΣ╗úτáü"
+        ],
+        "dependsOn": [
+          "src8-6"
+        ],
+        "note": "SRC-7 Φ»äΣ╗╖σÅîΦ╜¿∩╝êτ╗ôµ₧£Φ╜¿∩╝ë∩╝Üσ»╣τàº Step 3 Θ¬îµö╢σÑæτ║ª",
+        "type": "tool",
+        "expectedOutputs": [
+          "σ¢₧σ╜Æµ╡ïΦ»òΣ╗úτáü"
+        ]
+      },
+      {
+        "id": "src8-8",
+        "action": "SRC-8 σ╖⌐σ¢║Σ╝áµÆ¡∩╝êACT∩╝ë∩╝ÜσçåσñçµêÉσèƒ/σñ▒Φ┤Ñ/Φ»üΣ╝¬/σ¢₧σ╜ÆΦ«░σ┐åσÇÖΘÇë",
+        "when": "Θ¬îΦ»üΘÇÜΦ┐ç",
+        "args": {
+          "type": "[bugfix | failed_approach | false_root_cause | regression_case]",
+          "tags": "[bugfix,root-cause µêû negative-memory]",
+          "summary": "[σà│Θö«Φ»ì] Repair AO 0.7.0-rc.14 startup missing paseo-provider-routes.cjs caused by retire",
+          "content": "πÇÉτÄ░Φ▒íπÇæπÇÉµá╣σ¢áπÇæπÇÉΣ┐«σñìπÇæπÇÉΘ¬îΦ»üπÇæ",
+          "evidence": [
+            "[µ╡ïΦ»òπÇüµùÑσ┐ùπÇüσÅìΣ╛ïµêûτ¢æµÄºΦ»üµì«]"
+          ],
+          "applicability": "[ΘÇéτö¿µ¥íΣ╗╢πÇüΦ╛╣τòîσÆîΣ╕ìΘÇéτö¿σ£║µÖ»]"
+        },
+        "outputs": [
+          "σ╛àµö╢µò¢τÜä MemoryCandidate"
+        ],
+        "dependsOn": [
+          "src8-7"
+        ],
+        "note": "σÅ¬σçåσñçσÇÖΘÇëσ╣╢σåÖσàÑ plan_heartbeat Φ»üµì«∩╝¢converge passed=true σÉÄσåìΦ░âτö¿ memorize_asset∩╝¢σÇÖΘÇëΘ¥óσÉæΦ╖¿Σ╗ôσ║ôσà▒Σ║½∩╝Üσï┐σí½ source_project/source_path∩╝¢name/summary µè╜Φ▒íσîû∩╝îΦ╖»σ╛äΣ╗àµö╛ content µ£½σ░╛πÇÉµ¥Ñµ║ÉσÅéΦÇâπÇæ",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "σ╛àµö╢µò¢τÜä MemoryCandidate"
+        ]
+      },
+      {
+        "id": "check-spec",
+        "tool": "check_spec",
+        "when": "Σ┐«σñìΣ╕Äσ¢₧σ╜Æµ╡ïΦ»òΘÇÜΦ┐çσÉÄ∩╝îΣ╕öµ£¼µ¼í Bug σà│ΦüöσèƒΦâ╜Φºäµá╝σ¡ÿσ£¿µù╢",
+        "args": {
+          "feature_name": "original-paseo-anneal-commandcode-panels",
+          "docs_dir": "docs"
+        },
+        "outputs": [
+          "docs/specs/original-paseo-anneal-commandcode-panels/"
+        ],
+        "note": "ΦïÑΣ┐«σñìµö╣σè¿σ╜▒σôì requirements/design/tasks∩╝îσàêµ¢┤µû░Φºäµá╝µûçµíúσåìΘçìΦ╖æ check_spec∩╝¢µ£¬ΘÇÜΦ┐çΣ╕ìσ╛ùΦºåΣ╕║Σ┐«σñìΘù¡τÄ»",
+        "type": "tool",
+        "expectedOutputs": [
+          "docs/specs/original-paseo-anneal-commandcode-panels/"
+        ]
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Θªûµ¼íµëºΦíîΦ«íσêÆµù╢Φ░âτö¿ plan_heartbeat σ╣╢ΘÖäσ«îµò┤ plan∩╝îσ╗║τ½ïµ£¼σ£░µúÇµƒÑτé╣",
+      "µ»Åσ«îµêÉπÇüΦ╖│Φ┐çµêûΘÿ╗σí₧Σ╕ÇΣ╕¬µ¡ÑΘ¬ñσÉÄΦ░âτö¿ plan_heartbeat µ¢┤µû░Φ»üµì«Σ╕Äτè╢µÇü",
+      "Σ╝ÜΦ»¥Σ╕¡µû¡µêûσêçµìó Agent σÉÄσàêΦ░âτö¿ resume_plan∩╝îσåìτ╗ºτ╗¡µ£¬σ«îµêÉµ¡ÑΘ¬ñ",
+      "σÅ¬µ£ë converge Φ┐öσ¢₧ passed=true σÉÄ∩╝îµëìΦâ╜σ░åµ£¼µ¼íτ╗ôΦ«║µ¡úσ╝ÅσåÖσàÑΘò┐µ£ƒΦ«░σ┐å",
+      "µ£¬σ«îµêÉ SRC-8 τ£ƒσ¢áµö╢µò¢σëìΣ╕ìσ╛ùτ¢┤µÄÑσ«₧µû╜τî£µ╡ïµÇºΣ┐«σñì",
+      "Agent σ┐àΘí╗Σ╜┐τö¿σ«┐Σ╕╗Φâ╜σè¢σ«îµêÉτ£ƒσ«₧Σ╗úτáüΣ┐«µö╣σÆîµ╡ïΦ»òµëºΦíî",
+      "Θªûµ¼íµëºΦíîσëìσ┐àΘí╗τö¿σ«îµò┤ plan σ╗║τ½ï plan_heartbeat µúÇµƒÑτé╣∩╝¢µ»Åσ«îµêÉπÇüΦ╖│Φ┐çµêûΘÿ╗µû¡Σ╕Çµ¡Ñτ½ïσì│τ┤»Φ«íσ¢₧σåÖ",
+      "Σ┐«σñìσ«îµêÉσ┐àΘí╗σîàσÉ½σ¢₧σ╜ÆΘ¬îΦ»üΣ╕ÄΘÿ▓σñìσÅæµÄ¬µû╜",
+      "σÄåσÅ▓Φ«░σ┐åΣ╗àΣ╜£Σ╕║σÇÖΘÇëΦ»üµì«∩╝îσ╜ôσëìΘí╣τ¢«Σ║ïσ«₧Σ╕ÄΣ╗úτáüΣ╝ÿσàê"
+    ],
+    "completionCriteria": [
+      "τ£ƒσ¢áΦâ╜σñƒΦºúΘçèσà¿Θâ¿σà│Θö«τÄ░Φ▒íσ╣╢µÄÆΘÖñΣ╕╗Φªüτ½₧Σ║ëσüçΦ«╛",
+      "Σ┐«σñìµû╣µíêΣ╜£τö¿Σ║ÄσÄƒσ¢áσ▒éΦÇîΣ╕ìµÿ»Σ╗àΘÜÉΦùÅτùçτè╢",
+      "σ¢₧σ╜Æµ╡ïΦ»òΣ╕Äσà│ΦüöΦºäµá╝Θù╕Θù¿ΘÇÜΦ┐ç",
+      "σÅ»σñìτö¿τÜäµêÉσèƒµêûσñ▒Φ┤Ñτ╗ÅΘ¬îσ╖▓Φ»äΣ╝░µÿ»σÉªµ▓ëµ╖Ç",
+      "µëÇµ£ëµ¡ÑΘ¬ñτè╢µÇüΣ╕ÄΦ»üµì«σ╖▓ΘÇÜΦ┐ç plan_heartbeat σåÖσàÑµúÇµƒÑτé╣"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "analysisMode": "src8"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "active",
+  "completedStepIds": [
+    "src8-1",
+    "src8-2",
+    "src8-3",
+    "src8-4",
+    "src8-5"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [],
+  "evidence": [],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "analysisMode": "src8"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-26T15:01:30.805Z",
+  "updatedAt": "2026-09-26T15:01:45.899Z"
+}

@@ -24,6 +24,10 @@ const {
   powerSaveBlocker,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+const { createChatGptDesktopHost } = require("./chatgpt-desktop.cjs");
+const { createEmailHost } = require("./email-host.cjs");
+const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
+const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
@@ -125,6 +129,9 @@ let mainWindow = null;
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
+let chatgptDesktop = null;
+let emailHost = null;
+const chatgptDesktopOwners = new WeakSet();
 let runtimeHost = null;
 let headlessHost = null;
 let browserControl = null;
@@ -184,6 +191,79 @@ function send(channel, value) {
 function publishOperation(operation) {
   lastOperation = operation;
   send("launcher:operation", operation);
+}
+
+function cpaAuthDirectory() {
+  const stateDirectory = path.join(app.getPath("userData"), "integrations", "state", "cpa");
+  try {
+    const line = fs.readFileSync(path.join(stateDirectory, "config.yaml"), "utf8").match(/^auth-dir:\s*(.+)$/m);
+    if (line) return path.resolve(JSON.parse(line[1]));
+  } catch {}
+  return path.join(stateDirectory, "auth");
+}
+
+// The docked ChatGPT desktop window follows the main window; it must hide whenever the main
+// window is minimized or hidden, and re-pin after every move or resize.
+function watchChatGptDesktopOwner(window) {
+  if (!chatgptDesktop || !window || window.isDestroyed() || chatgptDesktopOwners.has(window)) return;
+  chatgptDesktopOwners.add(window);
+  const handle = window.getNativeWindowHandle();
+  chatgptDesktop.setOwner(Number(handle.length >= 8 ? handle.readBigUInt64LE(0) : handle.readUInt32LE(0)));
+  const visibility = () => {
+    if (!window.isDestroyed()) chatgptDesktop?.setOwnerVisible(window.isVisible() && !window.isMinimized());
+  };
+  for (const name of ["minimize", "restore", "hide", "show"]) window.on(name, visibility);
+  for (const name of ["move", "resize", "maximize", "unmaximize"]) {
+    window.on(name, () => mainWindow?.webContents.send("launcher:chatgpt-desktop-remeasure"));
+  }
+  visibility();
+}
+
+function getChatGptDesktop(logger) {
+  if (!chatgptDesktop) {
+    chatgptDesktop = createChatGptDesktopHost({
+      logger,
+      dataRoot: path.join(CORE_HOME, "chatgpt-desktop"),
+      resolveCpaAuthDir: cpaAuthDirectory,
+      onChange: (status) => send("launcher:chatgpt-desktop-changed", status),
+    });
+    chatgptDesktop.ready = chatgptDesktop.initialize().catch((error) => {
+      logger.warn("chatgpt_desktop.initialize_failed", { message: error instanceof Error ? error.message : String(error) });
+    });
+  }
+  watchChatGptDesktopOwner(mainWindow);
+  return chatgptDesktop;
+}
+
+function getEmailHost(logger) {
+  if (emailHost) return emailHost;
+  const partition = LAUNCHER_PROFILE.browserPartition;
+  // Same proxy-aware, cookie-less native fetch the browser control server uses (NFR-2).
+  const fetchNative = async (url, options) => {
+    const network = await providerNetworkReady();
+    const routing = network.store.snapshot().routing;
+    const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
+    const credentials = profile ? network.store.proxySecret(profile.id) : null;
+    return fetchNativeWithProxyAuth({
+      electronNet, browserSession: session.fromPartition(partition), url, options,
+      getProxyCredentials: (authInfo) => (
+        profile && authInfo.port === profile.endpoint.port
+        && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
+          === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
+          ? credentials : null
+      ),
+    });
+  };
+  emailHost = createEmailHost({
+    logger,
+    filePath: path.join(app.getPath("userData"), "runtime-email.json"),
+    keyPath: path.join(app.getPath("userData"), "runtime-email.key"),
+    safeStorage,
+    fetchNative,
+    parseMessage,
+    sanitizeHtml,
+  });
+  return emailHost;
 }
 
 /** Identifies one installation, so a fresh install's own backend takes over from older bundles. */
@@ -1448,6 +1528,108 @@ function registerIpc({ logger, stateStore }) {
     send("launcher:state-changed", state);
     return { browser, state };
   });
+  handle("launcher:chatgpt-desktop-status", async () => {
+    const host = getChatGptDesktop(logger);
+    await host.ready;
+    return host.status();
+  });
+  handle("launcher:chatgpt-desktop-open", async (event, slotId) => {
+    assertFocusedMainWindow(event, true);
+    const host = getChatGptDesktop(logger);
+    await host.ready;
+    return host.open(slotId);
+  });
+  handle("launcher:chatgpt-desktop-new-sign-in", async (event) => {
+    assertFocusedMainWindow(event, true);
+    const host = getChatGptDesktop(logger);
+    await host.ready;
+    return host.newSignIn();
+  });
+  handle("launcher:chatgpt-desktop-clear", async (event) => {
+    assertFocusedMainWindow(event, true);
+    const host = getChatGptDesktop(logger);
+    await host.ready;
+    return host.clearActive();
+  });
+  handle("launcher:chatgpt-desktop-stop", async (event) => {
+    assertFocusedMainWindow(event, true);
+    const host = getChatGptDesktop(logger);
+    await host.ready;
+    return host.stop();
+  });
+  handle("launcher:chatgpt-desktop-surface-active", (_event, active) => {
+    getChatGptDesktop(logger).setSurfaceActive(active === true);
+    return true;
+  });
+
+  // Runtime -> Email. Reads require the trusted main renderer; mutations require it focused.
+  handle("launcher:email-status", (event) => {
+    assertFocusedMainWindow(event, false);
+    return getEmailHost(logger).status();
+  });
+  handle("launcher:email-connect", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    return getEmailHost(logger).connect(input);
+  });
+  handle("launcher:email-disconnect", (event) => {
+    assertFocusedMainWindow(event, true);
+    return getEmailHost(logger).disconnect();
+  });
+  handle("launcher:email-mailboxes", (event, input) => {
+    assertFocusedMainWindow(event, false);
+    return getEmailHost(logger).listMailboxes(input);
+  });
+  handle("launcher:email-messages", (event, input) => {
+    assertFocusedMainWindow(event, false);
+    return getEmailHost(logger).listMessages(input);
+  });
+  handle("launcher:email-message", (event, input) => {
+    assertFocusedMainWindow(event, false);
+    return getEmailHost(logger).getMessage(input);
+  });
+  handle("launcher:email-create-address", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    return getEmailHost(logger).createAddress(input);
+  });
+  handle("launcher:email-delete-message", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    return getEmailHost(logger).deleteMessage(input);
+  });
+  handle("launcher:email-clear-inbox", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    return getEmailHost(logger).clearInbox(input);
+  });
+  handle("launcher:email-remove-mailbox", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    return getEmailHost(logger).removeMailbox(input);
+  });
+  installKeysmithIpc({
+    handle,
+    assertFocusedMainWindow,
+    dialog,
+    mainWindow: () => mainWindow,
+    scriptPath: app.isPackaged
+      ? path.join(process.resourcesPath, "codex-keysmith", "codex-instruct-v0.6.0.py")
+      : path.join(__dirname, "..", "assets", "keysmith", "codex-instruct-v0.6.0.py"),
+    pythonExecutable: process.platform === "win32" ? "py" : "python3",
+    codexDir: LAUNCHER_PROFILE.codexHome,
+  });
+  handle("launcher:chatgpt-desktop-bounds", (event, bounds) => {
+    const rect = validateBounds(bounds);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) return false;
+    // Renderer CSS pixels -> window DIPs -> physical screen pixels for the Win32 helper.
+    const zoom = event.sender.getZoomFactor();
+    const content = window.getContentBounds();
+    const dip = {
+      x: Math.round(content.x + rect.x * zoom),
+      y: Math.round(content.y + rect.y * zoom),
+      width: Math.round(rect.width * zoom),
+      height: Math.round(rect.height * zoom),
+    };
+    getChatGptDesktop(logger).setBounds(process.platform === "win32" ? screen.dipToScreenRect(window, dip) : dip);
+    return true;
+  });
   handle("launcher:session-reminder-dismiss", () => {
     const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
     send("launcher:state-changed", state);
@@ -1897,6 +2079,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     backendBundles?.stopWatching();
     await agentOrchestratorUpstream?.stop();
     antigravityReauth?.stop();
+    // The embedded ChatGPT instance belongs to this app; its own stop path logs failures.
+    await chatgptDesktop?.shutdown().catch(() => {});
     await browserHost?.persistSession();
     browserHost?.destroy();
     await browserControl?.close();
@@ -1970,16 +2154,27 @@ async function start() {
     });
   }
   const autostart = IS_DEV_PROFILE ? { supported: false, enabled: false } : getAutostart(app);
+  // Re-applying the saved autostart preference must never stop the app from starting: the
+  // login item can be refused or removed by Windows policy or security software.
+  let autostartStartupError = null;
   if (!IS_DEV_PROFILE
     && stateStore.read().onboardingComplete
     && autostart.supported
     && stateStore.read().autoStart !== autostart.enabled) {
-    setAutostart(app, stateStore.read().autoStart);
+    try {
+      setAutostart(app, stateStore.read().autoStart);
+    } catch (error) {
+      autostartStartupError = error instanceof Error ? error.message : String(error);
+      // Reflect what Windows actually allows, so Settings shows the truth and launch does not
+      // retry a refused login item every time; the user can turn it back on in Settings.
+      stateStore.update({ autoStart: getAutostart(app).enabled });
+    }
   }
   const logger = createLogger({
     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
     publish: (record) => send("launcher:log", record),
   });
+  if (autostartStartupError) logger.warn("launcher.autostart_unavailable", { message: autostartStartupError });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
   updateController = createGuiUpdateController({
     currentVersion: app.getVersion(),

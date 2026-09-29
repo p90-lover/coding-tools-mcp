@@ -188,3 +188,13 @@ test("renderer verification uses an isolated aiTemp output before the package bu
     "the release runner must not build desktop-electron/dist before package:win",
   );
 });
+
+test("an upgrade continues when the previous version could not remove all of its files", () => {
+  const include = readInstallerInclude();
+  const macro = include.match(/!macro customUnInstallCheck\r?\n([\s\S]*?)!macroend/);
+  assert.ok(macro, "installer.nsh overrides electron-builder's per-user uninstall result check");
+  assert.match(macro[1], /ClearErrors/);
+  assert.doesNotMatch(macro[1], /\b(Quit|Abort|SetErrorLevel)\b/, "a partial uninstall must not stop the upgrade");
+  const guarded = include.slice(0, include.lastIndexOf("!endif"));
+  assert.ok(guarded.includes("!macro customUnInstallCheck"), "the override is installer-only, inside the BUILD_UNINSTALLER guard");
+});

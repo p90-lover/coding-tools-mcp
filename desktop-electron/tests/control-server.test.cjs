@@ -70,6 +70,39 @@ test("native relay restricts the backend and streams without cookies", async () 
   } finally { await server.close(); }
 });
 
+test("native relay treats a caller hanging up mid-body as routine, not a second error response", async () => {
+  const logs = [];
+  const record = (level) => (event, detail) => logs.push({ level, event, detail });
+  let upstreamCancelled;
+  const cancelled = new Promise((resolve) => { upstreamCancelled = resolve; });
+  const server = await new BrowserControlServer({
+    logger: { info() {}, debug: record("debug"), warn: record("warn"), error: record("error") },
+    getBrowserHost: () => null,
+    getPreferences: () => ({}),
+    // Headers arrive at once, then the body stalls — like a slow /models body behind a proxy.
+    fetchNative: async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("{\"models\":[")); },
+      cancel() { upstreamCancelled(); },
+    }), { headers: { "content-type": "application/json" } }),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const caller = new AbortController();
+  try {
+    const response = await fetch(`${endpoint}/v1/network/native-fetch`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models",
+        "x-native-authorization": "Bearer native-test-token", "x-native-method": "GET" },
+      signal: caller.signal,
+    });
+    assert.equal(response.status, 200);
+    caller.abort();
+    await cancelled;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(logs.filter((l) => l.level !== "debug"), []);
+    assert.deepEqual(logs.map((l) => l.event), ["browser.native_fetch_stream_closed"]);
+  } finally { await server.close(); }
+});
+
 test("browser control server authenticates and owns turn visibility", async () => {
   const calls = [];
   const logs = [];

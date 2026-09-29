@@ -1,0 +1,266 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-integrate-pinned-upstream-steady-396404ea59",
+  "plan": {
+    "planId": "feature-integrate-pinned-upstream-steady-396404ea59",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "Integrate codex-keysmith as optional Setup step 4 in Coding Tools",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：即使已有旧版 project-context，只要缺少图谱文档，也要先补齐 docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/codex-keysmith-setup/requirements.md",
+          "docs/specs/codex-keysmith-setup/design.md",
+          "docs/specs/codex-keysmith-setup/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/codex-keysmith-setup/requirements.md",
+          "docs/specs/codex-keysmith-setup/design.md",
+          "docs/specs/codex-keysmith-setup/tasks.md"
+        ],
+        "note": "规格模板已经由 start_feature 内部生成；Agent 直接按内嵌草稿写入并补全占位"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks 落盘后、进入估算或实现前",
+        "args": {
+          "feature_name": "codex-keysmith-setup",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "未通过则按报告补全后重跑；通过前不要写实现代码",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "实现 integrate-pinned-upstream 功能：Integrate pinned upstream codex-keysmith as optional Coding Tools Setup step 4. Implement real status, preview, install and removal with a user-selected custom instruction Markdown file and --skip-hooks-isolation so existing Codex hooks are preserved. Do not use upstream refusal-override bundled prompt. Step 4 never gates existing ChatGPT sign-in, smoke, install, or MCP setup. Preserve existing global Codex config and user app data; apply changes only from an explicit in-app user action after preview. No silent download/credential reading or app restart. Use existing React/Electron shell, narrow IPC, exact origin and trusted-main-window checks, private errors, focused tests, and installed non-DEV verification. No new worktree, commit, push, or modification to unrelated AO/CPA/Email modules.",
+          "code_context": "参考生成的 docs/specs/integrate-pinned-upstream/tasks.md\n如存在 docs/graph-insights/latest.md，请一并参考其中的模块依赖和调用链摘要"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/integrate-pinned-upstream/tasks.md"
+        ],
+        "expectedOutputs": [
+          "完成任务清单对应的生产代码与必要迁移"
+        ],
+        "completionEvidence": [
+          "实际变更文件与完成的任务条目",
+          "关键行为与规格一致"
+        ],
+        "outputs": [],
+        "note": "Agent 使用宿主文件与代码能力实施；不得把规划结果当成已完成实现"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "受影响测试、主链回归和必要静态检查结果"
+        ],
+        "completionEvidence": [
+          "真实测试命令、退出码和通过数量"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "变更范围代码审查结果与待处理问题"
+        ],
+        "completionEvidence": [
+          "高优先级问题已关闭或有明确阻断记录"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Agent 必须按步骤顺序调用 MCP，并使用宿主能力完成真实文件与代码操作",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "check_spec 未通过前不得进入实现阶段",
+      "不得把 delegated plan 的输出误认为代码已经实施",
+      "历史记忆仅作为参考，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "规格文档已生成并通过 check_spec",
+      "工作量与主要风险已完成评估",
+      "Agent 已按 tasks.md 完成实现、测试与代码审查",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "codex-keysmith-setup",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "active",
+  "currentStepId": "implement",
+  "completedStepIds": [
+    "context",
+    "write-spec",
+    "check-spec",
+    "estimate"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [
+    "Desktop host/IPC/UI implementation and installed runtime verification remain open. Normal real Codex home apply/uninstall must be gated by user's in-app confirmation."
+  ],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "User explicitly asked to add codex-keysmith to Coding Tools Setup as optional step 4 and said keep going. Subagent verified upstream v0.6.0 custom --file mode, explicit --codex-dir, --skip-hooks-isolation, --status and --dry-run; Windows Python 3.14.6 is available.",
+      "verifiedAt": "2026-09-29T15:16:10.688Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "Existing AGENTS.md, docs/project-context.md and docs/graph-insights/latest.md/.json are present. Dated graph overview was read earlier; current package/source is desktop-electron React/Electron rc.14 at commit 9f48df77, so implementation uses live source rather than the old Tauri-only overview.",
+      "reference": "desktop-electron/package.json; desktop-electron/src/App.tsx; docs/graph-insights/latest.md; git rev-parse HEAD",
+      "verifiedAt": "2026-09-29T15:19:10.690Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Verified upstream codex-keysmith v0.6.0 script exact SHA-256 against release SHA256SUMS before any execution; upstream license MIT and Python 3.14.6 installed. The script remains under project aiTemp as unexecuted staged source.",
+      "reference": "aiTemp/keysmith-setup/third-party/codex-instruct-v0.6.0.py; https://github.com/Jia-Ethan/codex-keysmith/releases/tag/v0.6.0",
+      "verifiedAt": "2026-09-29T15:19:10.690Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "Written Keysmith specification passed mcp-probe check_spec with four linked FRs and zero errors or warnings. User authorized implementation of optional Setup Step 4.",
+      "stepId": "check-spec",
+      "reference": "docs/specs/codex-keysmith-setup/requirements.md; docs/specs/codex-keysmith-setup/design.md; docs/specs/codex-keysmith-setup/tasks.md",
+      "verifiedAt": "2026-09-29T15:22:59.953Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Plan estimates 8 story points, 6/10/18 hours optimistic/normal/pessimistic and PERT 10.7 hours; risks are shared dirty files, Windows CLI behavior, and package parity.",
+      "stepId": "estimate",
+      "reference": "docs/superpowers/plans/2026-09-29-codex-keysmith-setup.md",
+      "verifiedAt": "2026-09-29T15:33:53.757Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Packaging guard observed red because pinned Keysmith asset was absent, then green (1/1) after byte-verified v0.6.0 source and MIT license were added to an extraResources package entry. Upstream SHA-256 matches release checksum.",
+      "stepId": "implement",
+      "reference": "desktop-electron/tests/keysmith-package.test.cjs; desktop-electron/assets/keysmith/codex-instruct-v0.6.0.py; desktop-electron/package.json",
+      "verifiedAt": "2026-09-29T15:33:53.757Z"
+    }
+  ],
+  "declaredScope": {
+    "feature": "Setup step 4: Codex Keysmith",
+    "optional": true,
+    "upstream": "Jia-Ethan/codex-keysmith v0.6.0",
+    "mode": "Custom user-selected instructions only; preserve existing hooks",
+    "excluded": [
+      "Default refusal-override prompt",
+      "Automatic global Codex config changes",
+      "Gating Steps 1-3 or MCP readiness",
+      "Unrelated AO/CPA/Email changes"
+    ]
+  },
+  "artifacts": [
+    {
+      "id": "keysmith-spec",
+      "kind": "specification",
+      "summary": "Pinned safe custom instruction and hook-preserving optional setup design",
+      "reference": "docs/specs/codex-keysmith-setup/design.md",
+      "stepId": "write-spec",
+      "recordedAt": "2026-09-29T15:22:59.953Z"
+    },
+    {
+      "id": "keysmith-implementation-plan",
+      "kind": "plan",
+      "summary": "Focused native optional-step plan in existing checkout; no new worktree/commit",
+      "reference": "docs/superpowers/plans/2026-09-29-codex-keysmith-setup.md",
+      "stepId": "estimate",
+      "recordedAt": "2026-09-29T15:33:53.757Z"
+    }
+  ],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-29T15:16:10.688Z",
+  "updatedAt": "2026-09-29T15:33:53.757Z"
+}

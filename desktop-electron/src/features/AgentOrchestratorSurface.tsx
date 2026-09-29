@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from "react";
 import { getCodingToolsClient } from "../api/client";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
@@ -33,16 +33,16 @@ type AoApproval = { nodeId: string; approval_id: string; kind?: string; path?: s
 type Sheet = "" | "mission" | "worker" | "settings";
 
 const words = {
-  en: { title: "Agent Orchestrator", workspace: "Workspace", mission: "Mission", newMission: "New mission", canvas: "Canvas", board: "Board",
+  en: { title: "Agent Orchestrator", workspace: "Workspace", mission: "Mission", newMission: "New mission", canvas: "Mission tab", board: "Mission board",
     start: "Start", resume: "Resume", pause: "Pause", stop: "Stop", settings: "Settings", refresh: "Refresh", addWorker: "Worker",
     noMissions: "No missions yet", noWorkspace: "Add a workspace to begin", create: "Create", add: "Add", cancel: "Cancel" },
-  "zh-CN": { title: "代理编排", workspace: "工作区", mission: "任务", newMission: "新任务", canvas: "画布", board: "看板",
+  "zh-CN": { title: "代理编排", workspace: "工作区", mission: "任务", newMission: "新任务", canvas: "任务页", board: "任务看板",
     start: "开始", resume: "继续", pause: "暂停", stop: "停止", settings: "设置", refresh: "刷新", addWorker: "工作者",
     noMissions: "尚无任务", noWorkspace: "先添加工作区", create: "创建", add: "添加", cancel: "取消" },
-  "zh-TW": { title: "代理編排", workspace: "工作區", mission: "任務", newMission: "新任務", canvas: "畫布", board: "看板",
+  "zh-TW": { title: "代理編排", workspace: "工作區", mission: "任務", newMission: "新任務", canvas: "任務分頁", board: "任務看板",
     start: "開始", resume: "繼續", pause: "暫停", stop: "停止", settings: "設定", refresh: "重新整理", addWorker: "工作者",
     noMissions: "尚無任務", noWorkspace: "先新增工作區", create: "建立", add: "新增", cancel: "取消" },
-  ja: { title: "エージェント編成", workspace: "ワークスペース", mission: "ミッション", newMission: "新規ミッション", canvas: "キャンバス", board: "ボード",
+  ja: { title: "エージェント編成", workspace: "ワークスペース", mission: "ミッション", newMission: "新規ミッション", canvas: "ミッション", board: "ミッションボード",
     start: "開始", resume: "再開", pause: "一時停止", stop: "停止", settings: "設定", refresh: "更新", addWorker: "ワーカー",
     noMissions: "ミッションはまだありません", noWorkspace: "ワークスペースを追加してください", create: "作成", add: "追加", cancel: "キャンセル" },
 } satisfies Record<Language, Record<string, string>>;
@@ -63,6 +63,49 @@ function Glyph({ name }: { name: GlyphName }) {
 }
 function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon: GlyphName; label: string; onClick: () => void; disabled?: boolean; primary?: boolean; pressed?: boolean }) {
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
+}
+
+/** A popup that opens centred in the stage and moves by dragging its header. */
+function FloatingSheet({ stage, title, onClose, children }: { stage: RefObject<HTMLDivElement | null>; title: string; onClose: () => void; children: ReactNode }) {
+  const sheet = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+  const clamp = useCallback((x: number, y: number) => {
+    const area = stage.current?.getBoundingClientRect();
+    const box = sheet.current?.getBoundingClientRect();
+    if (!area || !box) return { x, y };
+    return { x: Math.min(Math.max(8, x), Math.max(8, area.width - box.width - 8)), y: Math.min(Math.max(8, y), Math.max(8, area.height - box.height - 8)) };
+  }, [stage]);
+  useLayoutEffect(() => {
+    const area = stage.current?.getBoundingClientRect();
+    const box = sheet.current?.getBoundingClientRect();
+    if (area && box) setPosition(clamp((area.width - box.width) / 2, (area.height - box.height) / 2));
+  }, [clamp, stage]);
+  useEffect(() => {
+    const keep = () => setPosition(current => current && clamp(current.x, current.y));
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("resize", keep);
+    window.addEventListener("keydown", escape);
+    return () => { window.removeEventListener("resize", keep); window.removeEventListener("keydown", escape); };
+  }, [clamp, onClose]);
+  const drag = (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || !position || (event.target as HTMLElement).closest("button")) return;
+    const handle = event.currentTarget;
+    const start = { pointerX: event.clientX, pointerY: event.clientY, ...position };
+    handle.setPointerCapture(event.pointerId);
+    const move = (next: PointerEvent) => setPosition(clamp(start.x + next.clientX - start.pointerX, start.y + next.clientY - start.pointerY));
+    const end = () => { handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", end); handle.removeEventListener("pointercancel", end); };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  };
+  return <div ref={sheet} className="ao-float" role="dialog" aria-label={title}
+    style={position ? { left: position.x, top: position.y } : { visibility: "hidden" }}>
+    <div className="ao-float-head" onPointerDown={drag} title="Drag to move">
+      <h2>{title}</h2>
+      <button type="button" className="ao-float-close" aria-label="Close" onClick={onClose}>✕</button>
+    </div>
+    {children}
+  </div>;
 }
 
 async function moduleCall(operation: string, args: JsonObject = {}) {
@@ -147,6 +190,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [workspaceId, setWorkspaceId] = useState(() => { try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
   const [view, setView] = useState<"board" | "team">("team");
   const [sheet, setSheet] = useState<Sheet>("");
+  const stageRef = useRef<HTMLDivElement>(null);
+  const closeSheet = useCallback(() => setSheet(""), []);
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
   const [board, setBoard] = useState<Board | null>(null);
@@ -535,40 +580,49 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
-      <header className="ao-toolbar">
-        <select className="ao-select" aria-label={copy.workspace} title={copy.workspace} value={workspaceId} disabled={Boolean(busy)}
-          onChange={(event) => { setWorkspaceId(event.target.value); try { localStorage.setItem("coding-tools:ao:workspace", event.target.value); } catch { /* Selection still works for this session. */ } }}>
-          {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
-        </select>
-        <span className="ao-toolbar-sep" aria-hidden="true">/</span>
-        <select className="ao-select ao-select-mission" aria-label={copy.mission} title={copy.mission} value={selectedRunId} disabled={Boolean(busy) || !missions.length}
-          onChange={(event) => setSelectedRunId(event.target.value)}>
-          {!missions.length ? <option value="">{copy.noMissions}</option> : null}
-          {missions.map((mission) => <option key={mission.id} value={mission.id}>{taskName(mission.project_id)}</option>)}
-        </select>
-        <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission"} onClick={() => openSheet("mission")} />
-        <div className="ao-segmented" role="tablist" aria-label="View">
-          <button type="button" role="tab" aria-selected={view === "team"} onClick={() => setView("team")}>{copy.canvas}</button>
-          <button type="button" role="tab" aria-selected={view === "board"} onClick={() => { setSheet(""); setView("board"); }}>{copy.board}</button>
+      <nav className="ao-rail" aria-label={copy.title}>
+        <label className="ao-rail-field" title={copy.workspace}><span aria-hidden="true">📁</span>
+          <select className="ao-select" aria-label={copy.workspace} value={workspaceId} disabled={Boolean(busy)}
+            onChange={(event) => { setWorkspaceId(event.target.value); try { localStorage.setItem("coding-tools:ao:workspace", event.target.value); } catch { /* Selection still works for this session. */ } }}>
+            {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+          </select>
+        </label>
+        <div className="ao-rail-field" title={copy.mission}><span aria-hidden="true">🎯</span>
+          <select className="ao-select" aria-label={copy.mission} value={selectedRunId} disabled={Boolean(busy) || !missions.length}
+            onChange={(event) => setSelectedRunId(event.target.value)}>
+            {!missions.length ? <option value="">{copy.noMissions}</option> : null}
+            {missions.map((mission) => <option key={mission.id} value={mission.id}>{taskName(mission.project_id)}</option>)}
+          </select>
+          <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission"} onClick={() => openSheet("mission")} />
         </div>
-        <span className="ao-toolbar-spacer" />
+        <div className="ao-rail-nav" role="tablist" aria-label="View" aria-orientation="vertical">
+          <button type="button" role="tab" aria-selected={view === "team"} onClick={() => setView("team")}><span aria-hidden="true">🧭</span>{copy.canvas}</button>
+          <button type="button" role="tab" aria-selected={view === "board"} onClick={() => { setSheet(""); setView("board"); }}><span aria-hidden="true">📋</span>{copy.board}</button>
+        </div>
+        <span className="ao-rail-spacer" />
         {selectedRun ? <span className={`ao-pill status-${statusText}`} role="status" title={advanceNotice || statusText}>
           <span className="ao-pill-dot" aria-hidden="true" />{statusText}
           {advanceNotice && ["held", "paused"].includes(statusText) ? <span className="ao-pill-detail">{advanceNotice}</span> : null}
         </span> : null}
-        {selectedRun?.paused
-          ? <ToolButton icon="play" label={copy.resume} primary disabled={!canStart} onClick={() => controlRun("resume")} />
-          : <ToolButton icon="play" label={copy.start} primary disabled={!canStart} onClick={startRun} />}
-        <ToolButton icon="pause" label={copy.pause} disabled={!selectedRun || selectedRun.cancelled || selectedRun.paused || autoStatus !== "running" || Boolean(busy)} onClick={() => controlRun("pause")} />
-        <ToolButton icon="stop" label={copy.stop} disabled={!selectedRun || selectedRun.cancelled || finished || Boolean(busy)} onClick={() => controlRun("stop")} />
-        <span className="ao-toolbar-sep" aria-hidden="true" />
-        <ToolButton icon="refresh" label={copy.refresh} disabled={!workspaceId || Boolean(busy)} onClick={() => void run("refresh", async () => { modelCache.current.clear(); await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]); })} />
-        <ToolButton icon="gear" label={copy.settings} pressed={sheet === "settings"} onClick={() => openSheet("settings")} />
-      </header>
+        <div className="ao-rail-tools">
+          {selectedRun?.paused
+            ? <ToolButton icon="play" label={copy.resume} primary disabled={!canStart} onClick={() => controlRun("resume")} />
+            : <ToolButton icon="play" label={copy.start} primary disabled={!canStart} onClick={startRun} />}
+          <ToolButton icon="pause" label={copy.pause} disabled={!selectedRun || selectedRun.cancelled || selectedRun.paused || autoStatus !== "running" || Boolean(busy)} onClick={() => controlRun("pause")} />
+          <ToolButton icon="stop" label={copy.stop} disabled={!selectedRun || selectedRun.cancelled || finished || Boolean(busy)} onClick={() => controlRun("stop")} />
+        </div>
+        <div className="ao-rail-tools">
+          <ToolButton icon="refresh" label={copy.refresh} disabled={!workspaceId || Boolean(busy)} onClick={() => void run("refresh", async () => { modelCache.current.clear(); await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]); })} />
+          <ToolButton icon="gear" label={copy.settings} pressed={sheet === "settings"} onClick={() => openSheet("settings")} />
+        </div>
+      </nav>
 
-      <div className="ao-stage">
-        {sheet === "mission" ? <form className="ao-sheet" aria-label={copy.newMission} onSubmit={(event) => { event.preventDefault(); createRun(); }}>
-          <h2>{copy.newMission}</h2>
+      <div className="ao-main">
+      <div className="ao-dragstrip" aria-hidden="true" />
+
+      <div className="ao-stage" ref={stageRef}>
+        {sheet === "mission" ? <FloatingSheet stage={stageRef} title={`🚀 ${copy.newMission}`} onClose={closeSheet}>
+          <form className="ao-sheet" aria-label={copy.newMission} onSubmit={(event) => { event.preventDefault(); createRun(); }}>
           <label>Task<select aria-label="Mission task" value={runTaskId} onChange={(event) => setRunTaskId(event.target.value)}>
             <option value="">New task</option>{board?.tasks.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
           </select></label>
@@ -584,12 +638,12 @@ export function AgentOrchestratorSurface({ language, setError }: {
           <label>Max workers<input type="number" min={1} max={24} value={missionLimit} onChange={event => setMissionLimit(Number(event.target.value))} /></label>
           <div className="ao-sheet-actions ao-wide">
             <button className="button-primary" disabled={(!runTaskId && !missionPrompt.trim()) || !workerRouteDraft.model || Boolean(busy)} type="submit">{copy.create}</button>
-            <button className="button-secondary" onClick={() => setSheet("")} type="button">{copy.cancel}</button>
+            <button className="button-secondary" onClick={closeSheet} type="button">{copy.cancel}</button>
           </div>
-        </form> : null}
+        </form></FloatingSheet> : null}
 
-        {sheet === "worker" && selectedRun ? <form className="ao-sheet" aria-label="Add worker" onSubmit={(event) => { event.preventDefault(); addWorker(); }}>
-          <h2>Add worker</h2>
+        {sheet === "worker" && selectedRun ? <FloatingSheet stage={stageRef} title="👷 Add worker" onClose={closeSheet}>
+          <form className="ao-sheet" aria-label="Add worker" onSubmit={(event) => { event.preventDefault(); addWorker(); }}>
           <div className="ao-field-row ao-wide">
             <label>Name<input maxLength={96} value={workerName} onChange={event => setWorkerName(event.target.value)} /></label>
             <label>Focus<select value={workerSpecialty} onChange={event => { setWorkerSpecialty(event.target.value); setWorkerName(event.target.value[0].toUpperCase() + event.target.value.slice(1)); }}>
@@ -605,34 +659,48 @@ export function AgentOrchestratorSurface({ language, setError }: {
           </div>
           <div className="ao-sheet-actions ao-wide">
             <button className="button-primary" disabled={!runTaskId || !workerRouteDraft.model || Boolean(busy)} type="submit">{copy.add}</button>
-            <button className="button-secondary" onClick={() => setSheet("")} type="button">{copy.cancel}</button>
+            <button className="button-secondary" onClick={closeSheet} type="button">{copy.cancel}</button>
           </div>
-        </form> : null}
+        </form></FloatingSheet> : null}
 
-        {sheet === "settings" ? <div className="ao-sheet ao-sheet-right" aria-label={copy.settings}>
-          <h2>{copy.settings}</h2>
-          <label className="ao-wide" title="Runs the WebGPT orchestrator/reviewer and Native Codex workers">Native Codex executable<input aria-label="Native Codex executable" autoComplete="off" placeholder="C:\…\codex.exe"
-            spellCheck={false} value={executable} onChange={(event) => {
-              const value = event.target.value;
-              setExecutable(value);
-              try { localStorage.setItem("coding-tools:ao:codex-executable", value); } catch { /* Keep it for this session. */ }
-            }} /></label>
-          <form className="ao-field-row ao-wide" onSubmit={event => { event.preventDefault(); saveLimits(); }}>
-            <label>Workers (all)<input type="number" min={1} max={24} value={globalLimit} onChange={event => setGlobalLimit(Number(event.target.value))} /></label>
-            <label>This mission<input type="number" min={1} max={24} value={missionLimit} onChange={event => setMissionLimit(Number(event.target.value))} /></label>
-            <button className="button-secondary" type="submit" disabled={Boolean(busy) || !workspaceId || ![globalLimit, missionLimit].every(value => Number.isInteger(value) && value >= 1 && value <= 24)}>Save</button>
-          </form>
-          <label className="ao-check ao-wide"><input type="checkbox" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} /> Show cancelled cards</label>
-          <p className="ao-hint ao-wide">{harnesses.filter(item => item.runnable).length} runnable harnesses{harnessNotice ? ` · ${harnessNotice}` : ""}</p>
-          <details className="ao-more ao-wide"><summary>Add workspace</summary>
-            <form className="ao-field-row" onSubmit={(event) => { event.preventDefault(); createWorkspace(); }}>
-              <label>Directory<input aria-label="Workspace directory" value={workspacePath} onChange={(event) => setWorkspacePath(event.target.value)} /></label>
-              <label>Name<input aria-label="Workspace name" maxLength={128} value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} /></label>
-              <button className="button-primary" disabled={!workspacePath.trim() || Boolean(busy)} type="submit">{copy.add}</button>
+        {sheet === "settings" ? <FloatingSheet stage={stageRef} title={`⚙️ ${copy.settings}`} onClose={closeSheet}>
+          <div className="ao-settings">
+            <label className="ao-set-row" title="Native Codex executable: runs the WebGPT orchestrator/reviewer and Native Codex workers">
+              <span className="ao-set-icon" aria-hidden="true">🧠</span>
+              <input aria-label="Native Codex executable" autoComplete="off" placeholder="C:…codex.exe" spellCheck={false} value={executable} onChange={(event) => {
+                const value = event.target.value;
+                setExecutable(value);
+                try { localStorage.setItem("coding-tools:ao:codex-executable", value); } catch { /* Keep it for this session. */ }
+              }} />
+            </label>
+            <form className="ao-set-row" onSubmit={event => { event.preventDefault(); saveLimits(); }}>
+              <span className="ao-set-icon" aria-hidden="true">👷</span>
+              <label className="ao-set-num" title="Workers across all missions"><span aria-hidden="true">🌐</span>
+                <input aria-label="Workers across all missions" type="number" min={1} max={24} value={globalLimit} onChange={event => setGlobalLimit(Number(event.target.value))} /></label>
+              <label className="ao-set-num" title="Workers for this mission"><span aria-hidden="true">🎯</span>
+                <input aria-label="Workers for this mission" type="number" min={1} max={24} value={missionLimit} onChange={event => setMissionLimit(Number(event.target.value))} /></label>
+              <button className="ao-set-save" type="submit" aria-label="Save worker limits" title="Save worker limits"
+                disabled={Boolean(busy) || !workspaceId || ![globalLimit, missionLimit].every(value => Number.isInteger(value) && value >= 1 && value <= 24)}>💾</button>
             </form>
-          </details>
-          {selectedRun && board ? <details className="ao-more ao-wide"><summary>Next prompt</summary><pre>{aoPreviewText(selectedRun, board.tasks)}</pre></details> : null}
-        </div> : null}
+            <label className="ao-set-row ao-set-toggle" title="Show cancelled and archived cards on the mission tab">
+              <span className="ao-set-icon" aria-hidden="true">👁️</span>
+              <span>Cancelled cards</span>
+              <input type="checkbox" role="switch" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
+            </label>
+            <p className="ao-set-row ao-set-note" title={harnessNotice || undefined}>
+              <span className="ao-set-icon" aria-hidden="true">🧩</span>
+              <span>{harnesses.filter(item => item.runnable).length} harnesses ready{harnessNotice ? " ⚠️" : ""}</span>
+            </p>
+            <details className="ao-set-more"><summary><span aria-hidden="true">📂</span> Add workspace</summary>
+              <form className="ao-field-row" onSubmit={(event) => { event.preventDefault(); createWorkspace(); }}>
+                <label>Directory<input aria-label="Workspace directory" value={workspacePath} onChange={(event) => setWorkspacePath(event.target.value)} /></label>
+                <label>Name<input aria-label="Workspace name" maxLength={128} value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} /></label>
+                <button className="button-primary" disabled={!workspacePath.trim() || Boolean(busy)} type="submit">{copy.add}</button>
+              </form>
+            </details>
+            {selectedRun && board ? <details className="ao-set-more"><summary><span aria-hidden="true">🔮</span> Next prompt</summary><pre>{aoPreviewText(selectedRun, board.tasks)}</pre></details> : null}
+          </div>
+        </FloatingSheet> : null}
 
         {view === "board" && workspaceReady && workspaceId && !sheet ? <div className="ao-workspace-board">
           <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("team")} />
@@ -664,6 +732,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             change={setDraftTeam} apply={applyTeam} discard={() => setDraftTeam(teamForMission(selectedRun, team))}
             close={() => setInspectedId("")} taskName={taskName} /> : null}
         </div>
+      </div>
       </div>
     </section>
   );

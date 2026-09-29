@@ -13,11 +13,5 @@
     "webUi": "http://127.0.0.1:3000/#/tasks",
     "boardEndpoint": "/tasks?view=board&archived=false"
   },
-  "commandcode": {
-    "repository": "MAXeaglet/commandcode-proxy",
-    "mode": "live_allowlist",
-    "health": "/health",
-    "models": "/v1/models"
-  },
   "agentLaunchEnabled": false
 }

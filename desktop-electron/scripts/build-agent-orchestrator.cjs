@@ -58,7 +58,7 @@ async function main() {
   const portableGo = path.join(projectRoot, "aiTemp", "ao-go-toolchain-1.27.1", "go", "bin", "go.exe");
   const goExecutable = process.env.CODING_TOOLS_GO || (fs.existsSync(portableGo) ? portableGo : "go");
   const daemonPath = path.join(outputRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
-  run(goExecutable, ["build", "-trimpath", "-ldflags", "-X=github.com/aoagents/agent-orchestrator/backend/internal/config.CodingToolsLocalOnly=1", "-o", daemonPath, "."], path.join(sourceRoot, "backend"), {
+  run(goExecutable, ["build", "-trimpath", "-ldflags", "-X=github.com/aoagents/agent-orchestrator/backend/internal/config.CodingToolsLocalOnly=1", "-o", daemonPath, "./cmd/ao"], path.join(sourceRoot, "backend"), {
     GOWORK: "off", GOTOOLCHAIN: "local",
   });
   fs.copyFileSync(path.join(sourceRoot, "LICENSE"), path.join(outputRoot, "LICENSE"));

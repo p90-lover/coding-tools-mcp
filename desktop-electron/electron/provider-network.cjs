@@ -722,6 +722,18 @@ function proxyUrl(profile, credentials = null) {
   return parsed.toString();
 }
 
+// A hostname with several addresses fails with an AggregateError whose message is empty;
+// report the per-address codes (for example "EACCES 1.2.3.4") so a blocked or refused
+// proxy is diagnosable from the Network Proxy test.
+function tcpErrorText(error) {
+  if (!(error instanceof Error)) return String(error);
+  const attempts = Array.isArray(error.errors)
+    ? error.errors.map((item) => [item?.code, item?.address].filter(Boolean).join(" ")).filter(Boolean)
+    : [];
+  if (attempts.length) return `Connection failed: ${attempts.join(", ")}`;
+  return error.message || error.code || "Connection failed";
+}
+
 function testTcpEndpoint(profile, timeoutMs = 7_000) {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -736,10 +748,7 @@ function testTcpEndpoint(profile, timeoutMs = 7_000) {
     socket.setTimeout(timeoutMs);
     socket.once("connect", () => finish({ reachable: true, latencyMs: Date.now() - started }));
     socket.once("timeout", () => finish({ reachable: false, error: "Connection timed out" }));
-    socket.once("error", (error) => finish({
-      reachable: false,
-      error: error instanceof Error ? error.message : String(error),
-    }));
+    socket.once("error", (error) => finish({ reachable: false, error: tcpErrorText(error) }));
   });
 }
 
@@ -1367,6 +1376,7 @@ function createProviderNetworkController({
 }
 
 module.exports = {
+  tcpErrorText,
   ANTIGRAVITY_PROVIDER_ID,
   COMMANDCODE_PROVIDER_ID,
   DEFAULT_ANTIGRAVITY_BASE_URL,

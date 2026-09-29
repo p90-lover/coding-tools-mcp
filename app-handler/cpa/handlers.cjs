@@ -129,7 +129,8 @@ function createModule() {
           accounts,
           summary: { ...summary, authFileCount: auth.count || 0 },
           authFiles: auth.files || [],
-          reason,
+          // Omit an absent reason: undefined is not a JSON value and fails the IPC response schema.
+          ...(typeof reason === "string" && reason ? { reason } : {}),
         });
       },
     },

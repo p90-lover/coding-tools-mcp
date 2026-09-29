@@ -31,12 +31,14 @@ function createHarness(hooks = {}) {
   const requests = [];
   const events = [];
   const warnings = [];
+  const opened = [];
   const binary = Buffer.from("fake source-built Go daemon");
   const resourceRoot = path.resolve("ao-lifecycle-fixture/resources");
   const dataRoot = path.resolve("ao-lifecycle-fixture/data");
   const manifest = { localOnly: true, standaloneInstall: false, daemonSha256: crypto.createHash("sha256").update(binary).digest("hex"), ...hooks.manifest };
   const parent = {
     isDestroyed: () => false,
+    isFocused: () => true,
     getContentBounds: () => ({ width: 1000, height: 800 }),
     contentView: {
       children: [],
@@ -61,10 +63,14 @@ function createHarness(hooks = {}) {
       this.boundsHistory = [];
       this.webContents = new EventEmitter();
       this.webContents.session = {
-        setPermissionRequestHandler() {},
-        setPermissionCheckHandler() {},
+        setPermissionRequestHandler: (handler) => { this.permissionRequest = handler; },
+        setPermissionCheckHandler: (handler) => { this.permissionCheck = handler; },
       };
-      this.webContents.setWindowOpenHandler = () => {};
+      this.webContents.setWindowOpenHandler = (handler) => { this.windowOpen = handler; };
+      this.focusCalls = 0;
+      this.webContents.isDestroyed = () => this.closed;
+      this.webContents.isFocused = () => false;
+      this.webContents.focus = () => { this.focusCalls += 1; };
       this.webContents.close = () => {
         assert.equal(this.closed, false);
         this.closed = true;
@@ -162,7 +168,7 @@ function createHarness(hooks = {}) {
     module: loadedModule,
     require(name) { assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`); return dependencies[name]; },
     process: { platform: process.platform, env: { PATH: "fixture", AO_PORT: "1", AO_REMOTE: "inherited-value" } },
-    Buffer, URL, AbortSignal, setTimeout, clearTimeout,
+    Buffer, URL, URLSearchParams, AbortSignal, setTimeout, clearTimeout,
     async fetch(url, options) {
       const endpoint = new URL(url);
       assert.equal(endpoint.hostname, "127.0.0.1");
@@ -182,10 +188,11 @@ function createHarness(hooks = {}) {
   }, { filename: sourcePath });
   const controller = loadedModule.exports.createAgentOrchestratorUpstream({
     resourceRoot, dataRoot, WebContentsView: FakeView, getWindow: () => parent,
-    confirm: async () => hooks.confirm?.() ?? true,
+    confirm: async (request) => hooks.confirm?.(request) ?? true,
+    shell: { openExternal: async (url) => { opened.push(url); } },
     logger: { warn: (...entry) => warnings.push(entry) },
   });
-  return { controller, children, gateways, reservations, views, requests, events, warnings, parent };
+  return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened };
 }
 
 test("Runtime opens the original AO board and keeps the selected project", async () => {
@@ -199,6 +206,46 @@ test("Runtime opens the original AO board and keeps the selected project", async
     await views[0].webContents.loadURL(`${gateways[0].origin}/#/coding-tools-board?workspaceId=qa`);
     await controller.show(latestBounds, false);
     assert.equal(views[0].url, `${gateways[0].origin}/#/projects/project-a/sessions/worker-a`);
+  } finally { await controller.stop(); }
+});
+
+test("the AO view may use the clipboard from its gateway origin and nothing else", async () => {
+  const { controller, views, gateways } = createHarness();
+  try {
+    await controller.show(firstBounds);
+    const [view] = views;
+    const origin = gateways[0].origin;
+    const request = (permission, requestingUrl) => new Promise((resolve) => view.permissionRequest(null, permission, resolve, { requestingUrl }));
+    assert.equal(await request("clipboard-read", `${origin}/#/coding-tools-terminal`), true);
+    assert.equal(await request("clipboard-sanitized-write", `${origin}/`), true);
+    assert.equal(await request("clipboard-read", "https://example.com/"), false);
+    assert.equal(await request("media", `${origin}/`), false);
+    assert.equal(await request("clipboard-read", undefined), false);
+    assert.equal(view.permissionCheck(null, "clipboard-read", origin), true);
+    assert.equal(view.permissionCheck(null, "clipboard-read", "https://example.com"), false);
+    assert.equal(view.permissionCheck(null, "notifications", origin), false);
+  } finally { await controller.stop(); }
+});
+
+test("terminal links open in the system browser, asking first unless they are sign-in links", async () => {
+  let answer = false;
+  const asked = [];
+  const { controller, views, opened } = createHarness({ confirm: (request) => { if (request?.detail) { asked.push(request.detail); return answer; } return true; } });
+  try {
+    await controller.show(firstBounds);
+    const click = async (url) => {
+      assert.equal(views[0].windowOpen({ url }).action, "deny");
+      await nextTurn(); await nextTurn();
+    };
+    await click("https://accounts.google.com/o/oauth2/auth?client_id=x");
+    await click("https://example.com/docs");
+    answer = true;
+    await click("https://example.com/readme");
+    await click("https://user:secret@accounts.google.com/");
+    await click("file:///C:/Windows/System32/calc.exe");
+    await click("javascript:alert(1)");
+    assert.deepEqual(opened, ["https://accounts.google.com/o/oauth2/auth?client_id=x", "https://example.com/readme"]);
+    assert.deepEqual(asked, ["https://example.com/docs", "https://example.com/readme"]);
   } finally { await controller.stop(); }
 });
 
@@ -397,9 +444,25 @@ test("lifecycle changes preserve manifest validation, daemon environment, and st
   assert.equal(environment.AO_REMOTE, undefined);
   assert.equal(environment.AO_TELEMETRY_REMOTE, "off");
   assert.equal(harness.children[0].options.windowsHide, true);
+  // The AO CLI binary must be told to run the daemon; it answers pty-host itself when relaunched.
+  assert.deepEqual([...harness.children[0].args], ["daemon"]);
   assert.equal((await controller.call("upstream_stop")).cancelled, true);
   assert.equal(controller.snapshot().state, "ready");
   allowStop = true;
   assert.equal((await controller.call("upstream_stop")).state, "stopped");
   assert.equal(harness.children[0].kills, 0, "the daemon uses its HTTP shutdown endpoint first");
+});
+
+test("an AO terminal takes keyboard focus when it opens and whenever it is clicked", async () => {
+  const { controller, views } = createHarness();
+  try {
+    await controller.show(firstBounds, false, undefined, { handle: "shellterm-1", generation: "g1", title: "agy" });
+    const view = views[0];
+    assert.match(new URL(view.url).hash, /^#\/coding-tools-terminal\?handle=shellterm-1/);
+    assert.equal(view.focusCalls, 1, "a freshly opened terminal is focused");
+    view.webContents.emit("before-mouse-event", {}, { type: "mouseMove", x: 5, y: 5 });
+    assert.equal(view.focusCalls, 1, "moving the pointer does not move focus");
+    view.webContents.emit("before-mouse-event", {}, { type: "mouseDown", x: 5, y: 5, button: "left" });
+    assert.equal(view.focusCalls, 2, "clicking the AO view gives it keyboard focus");
+  } finally { await controller.stop(); }
 });

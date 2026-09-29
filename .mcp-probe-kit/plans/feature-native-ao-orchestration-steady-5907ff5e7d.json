@@ -1,0 +1,289 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-native-ao-orchestration-steady-5907ff5e7d",
+  "plan": {
+    "planId": "feature-native-ao-orchestration-steady-5907ff5e7d",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "规划并实施新功能：native-ao-orchestration",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：即使已有旧版 project-context，只要缺少图谱文档，也要先补齐 docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/native-ao-orchestration/requirements.md",
+          "docs/specs/native-ao-orchestration/design.md",
+          "docs/specs/native-ao-orchestration/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/native-ao-orchestration/requirements.md",
+          "docs/specs/native-ao-orchestration/design.md",
+          "docs/specs/native-ao-orchestration/tasks.md"
+        ],
+        "note": "规格模板已经由 start_feature 内部生成；Agent 直接按内嵌草稿写入并补全占位"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks 落盘后、进入估算或实现前",
+        "args": {
+          "feature_name": "native-ao-orchestration",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "未通过则按报告补全后重跑；通过前不要写实现代码",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "实现 native-ao-orchestration 功能：Native AO orchestration replaces Runtime Structured Orchestrator with durable full-pane top-to-bottom task tree; Web GPT plans and reviews via its browser bridge; all other models launch via explicitly selected AO harness/account/model; reuse workflow board and guarded workspace creation, no Paseo execution dependency. After AO passes a real installed-app run with Paseo stopped, decommission Paseo Coding Tools navigation, auto-start/service, handlers/APIs and packaged runtime, while archiving existing Paseo config and run records for recovery. Amend approved docs/superpowers/specs/2026-09-25-native-ao-orchestrator-design.md and both linked plans, then seek review before product implementation. Preserve dirty checkout, no new worktrees, no per-task commits, keep Codex open.",
+          "code_context": "参考生成的 docs/specs/native-ao-orchestration/tasks.md\n如存在 docs/graph-insights/latest.md，请一并参考其中的模块依赖和调用链摘要"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/native-ao-orchestration/tasks.md"
+        ],
+        "expectedOutputs": [
+          "完成任务清单对应的生产代码与必要迁移"
+        ],
+        "completionEvidence": [
+          "实际变更文件与完成的任务条目",
+          "关键行为与规格一致"
+        ],
+        "outputs": [],
+        "note": "Agent 使用宿主文件与代码能力实施；不得把规划结果当成已完成实现"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "受影响测试、主链回归和必要静态检查结果"
+        ],
+        "completionEvidence": [
+          "真实测试命令、退出码和通过数量"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "变更范围代码审查结果与待处理问题"
+        ],
+        "completionEvidence": [
+          "高优先级问题已关闭或有明确阻断记录"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Agent 必须按步骤顺序调用 MCP，并使用宿主能力完成真实文件与代码操作",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "check_spec 未通过前不得进入实现阶段",
+      "不得把 delegated plan 的输出误认为代码已经实施",
+      "历史记忆仅作为参考，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "规格文档已生成并通过 check_spec",
+      "工作量与主要风险已完成评估",
+      "Agent 已按 tasks.md 完成实现、测试与代码审查",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "native-ao-orchestration",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "active",
+  "completedStepIds": [
+    "context",
+    "write-spec",
+    "check-spec",
+    "estimate",
+    "implement"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "AGENTS.md and docs/graph-insights/latest.md/latest.json exist in the current checkout",
+      "stepId": "context",
+      "verifiedAt": "2026-09-25T01:00:20.885Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "Revised AO-only specification and three linked implementation plans are written",
+      "verifiedAt": "2026-09-25T01:18:52.992Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "check_spec passed: FR-1 through FR-4, zero errors and zero warnings",
+      "verifiedAt": "2026-09-25T01:20:46.839Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "High-complexity cross-module delivery; rough range 35h optimistic, 80h normal, 140h pessimistic. Main risks are shared-service regression, exact Gemini harness availability, and installed-app safe handoff. This is planning, not completion.",
+      "verifiedAt": "2026-09-25T01:21:40.457Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Partial implementation only: AO-only Runtime navigation and honest unavailable-execution copy reviewed PASS; renderer-wiring 22/22 and typecheck pass. Paseo service, handler, package and AO execution remain pending.",
+      "verifiedAt": "2026-09-25T01:36:58.534Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Partial decommission source only: AO-only UI reviewed; Electron archive/startup slice reviewed; Rust fail-closed slice under review. Competing thread 01a0cc79 was identified and user confirmed paused. HEAD 9daf0a68 retained. No live install or complete AO run.",
+      "verifiedAt": "2026-09-25T02:49:21.365Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "Latest user scope: retire standalone Paseo, Codex Router, CommandCode Proxy, and Anneal; preserve CPA/MCP/native Codex and CPA CommandCode OAuth providers; AO sole task/orchestration board. Anneal Postgres volume requires private recovery. Revised spec check passes 4 FR, zero errors/warnings. Legacy task import choice pending; no automatic migration.",
+      "verifiedAt": "2026-09-25T03:38:05.816Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "User approved amended AO spec and legacy decommission plan: retire standalone Paseo, Router, CommandCode Proxy, Anneal; preserve CPA/MCP/native Codex and CPA CommandCode OAuth. Spec check passed 4 FR, zero errors/warnings. Old Anneal Postgres tasks preserved, not automatically imported.",
+      "verifiedAt": "2026-09-25T03:40:55.176Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Partial AO board implementation: full-pane selected-run tree, revisioned dependency edits, explicit new run and one-at-a-time add_worker; focused Node 4/4 and Rust ao_graph 2/2, renderer typecheck passed. No model execution, private CPA key handoff, live install, or Anneal volume archive claimed.",
+      "verifiedAt": "2026-09-25T08:28:28.821Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Partial AO board: full-pane selected-run tree with measured multi-parent links, drag/keyboard dependency updates, incremental workers and per-run preview. Rendered Playwright mock checks desktop/narrow, drag, add-worker, reduced motion, no page errors. Guarded canonical workspace creation added through store, headless POST and confirmed Electron IPC; workspace test 1/1, AO routes 1/1, preload 15/15, renderer typecheck passed. Installed app, Anneal Docker volume archive, WebGPT/Gemini live route and CPA key handoff remain unverified.",
+      "verifiedAt": "2026-09-25T08:59:53.842Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Archive gate remains unresolved: user reports WSL, but permitted Unified Agent Tools Bash refuses wsl.exe as an unchecked nested shell. docker.exe is not found through Get-Command and no agentos_postgres_data filename or .dump export is present in project aiTemp. No live config, Docker volume, installed package, or Codex process changed. Need explicit native WSL/Docker tool exception or verified private export before installed decommission.",
+      "verifiedAt": "2026-09-25T10:37:16.051Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "User requested Anneal removal and live AO Web GPT planner -> Gemini worker -> Web GPT reviewer. Moved only app-handler/anneal and modules/anneal to recoverable project Trash; source handler/dispatch/package tests 12/12 and focused Rust AO graph/routes/workspace tests 4/4 pass. Native WSL inspection approved: only Ubuntu distro, docker command absent, /var/lib/docker/volumes absent, no agentos_postgres_data directory under /home /var/lib /mnt/wsl; original volume not touched and no export produced. Installed app not replaced. AO source still lacks worker connect/owned turns and route_verified remains false; private CPA key handoff approval and decision about installing without verified old task backup pending. No live three-stage model run claimed.",
+      "verifiedAt": "2026-09-25T10:51:35.838Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "AO-only rc.14 Windows package built from current local source without installing: renderer/preload/typecheck passed, runtime rebuilt with pinned Bun 1.4.0, CPA-only managed runtime staged, fresh Rust headless release SHA-256 aa8d072f881bc0030af33e51d916f697237ef014773a70e0d1d501300ae87aaf matched staged resource, installer at desktop-electron/artifacts/Coding.Tools_0.7.0-rc.14_win_x64.exe SHA-256 19850fd0e80bf38170b382a5dfe9b9ca6b24ad253a115f29f534e9aad70a82e4 passed verify-package with no retired modules. User explicitly chose package only, no install. Source Anneal handler/shim dirs moved to Trash; WSL volume not found, WSL untouched. AO still has no completed WebGPT/Gemini/reviewer run; private CPA key handoff approval pending.",
+      "verifiedAt": "2026-09-25T11:19:36.922Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "AO shared CPA pool UI, private child env handoff, keyless WebGPT home config, and bundled exact WebGPT catalog command implemented. Focused Node/Rust/UI tests and local catalog smoke pass. Real AO turn dispatch/review and package/live test remain unverified.",
+      "verifiedAt": "2026-09-25T13:43:56.389Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "AO host advance and observe operations, in-process handler and local control allowlist, compact harness selector and receipt display added. Node 6/6, browser preview and renderer typecheck pass. Rust durable dispatch is in progress; exact Gemini custom-model route and live three-stage turn remain hard gates.",
+      "verifiedAt": "2026-09-25T14:07:37.779Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "AO-only background grant, exact WebGPT planner/reviewer and shared-CPA Gemini worker routes, durable receipts, all-parent joins, explicit tool approvals, cancellation, full-pane UI, and private CPA child env implemented. Source tests: Node 23/23, headless AO lib 5/5, AO route 1/1, AO graph 1/1, typechecks and renderer build pass. Corrected rc.14 Windows package built; extracted payload verifier passes and published installer matches preserved builder hash. Live three-stage model run remains unverified because user authorized package only, not install/restart.",
+      "verifiedAt": "2026-09-25T15:27:11.656Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Installed non-DEV AO board schema repair verified in live renderer: taskCount 5, task null and revision 10. Transient workspace transport failure cleared on retry. Exact Web GPT High and CPA Gemini 3.8 Flash High catalog available. Isolated real workflow preparation awaiting guarded native workspace/task/mission confirmations; no end-to-end completion claimed.",
+      "verifiedAt": "2026-09-26T16:30:11.842Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "featureName": "native-ao-orchestration",
+    "specLayout": "flat"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-25T00:57:22.329Z",
+  "updatedAt": "2026-09-26T16:30:11.842Z"
+}

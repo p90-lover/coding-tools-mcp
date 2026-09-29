@@ -23,6 +23,13 @@ const API_OPERATIONS = Object.freeze({
 const TUI_RESULT_FILE = "AO_RESULT.md";
 const TUI_RESULT_INSTRUCTION = `When the assignment is finished, write your complete final report (what you did and the evidence) to ${TUI_RESULT_FILE} at the root of your working directory, then stop and wait.`;
 
+const CLIPBOARD_PERMISSIONS = new Set(["clipboard-read", "clipboard-sanitized-write"]);
+const TRUSTED_TERMINAL_LINK_HOSTS = new Set(["accounts.google.com", "antigravity.google"]);
+
+function safeOrigin(value) {
+  try { return new URL(String(value || "")).origin; } catch { return ""; }
+}
+
 async function allocatePort() {
   const reservation = net.createServer();
   await new Promise((resolve, reject) => { reservation.once("error", reject); reservation.listen(0, "127.0.0.1", resolve); });
@@ -49,6 +56,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let logTail = "";
   let missionSelection = null;
   let originalPath = "/";
+
+  // AO terminals open clicked links with window.open (e.g. agy's Google sign-in URL). The view
+  // always denies the new window; this decides whether the URL goes to the system browser.
+  async function openTerminalLink(rawUrl) {
+    let url;
+    try { url = new URL(String(rawUrl || "")); } catch { return false; }
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return false;
+    // Terminal output is untrusted: only the sign-in hosts agy prints open without asking.
+    const trusted = url.protocol === "https:" && TRUSTED_TERMINAL_LINK_HOSTS.has(url.hostname);
+    if (!trusted && !(await confirm({ message: "Open this link from the terminal?", detail: url.toString() }))) return false;
+    await shell.openExternal(url.toString());
+    return true;
+  }
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
     ? createAoWorkspaceBoard({
       listWorkspaces: getWorkspaces, missionCall,
@@ -71,14 +91,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(method === "GET" ? 30000 : 180000) });
     const text = await response.text();
     if (Buffer.byteLength(text) > 900000) throw new Error("AO response exceeds the handler limit");
-    return { ok: response.ok, status: response.status, data: JSON.parse(text) };
+    // AO answers some failures with an empty or non-JSON body; keep the status instead of
+    // failing on JSON.parse and losing it.
+    let data = {};
+    if (text) {
+      try { data = JSON.parse(text); } catch { data = response.ok ? {} : { error: { message: text.slice(0, 300) } }; }
+    }
+    return { ok: response.ok, status: response.status, data };
+  }
+
+  function aoErrorMessage(result) {
+    const error = result.data?.error;
+    return String(error?.message || (typeof error === "string" && error) || result.data?.message
+      || `AO request failed (${result.status})`).slice(0, 300);
   }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
   async function internalApi(method, endpoint, body) {
     await start();
     const result = await requestApi(method, endpoint, body === undefined ? undefined : JSON.stringify(body));
-    if (!result.ok) throw new Error(String(result.data?.error?.message || `AO request failed (${result.status})`).slice(0, 300));
+    if (!result.ok) throw new Error(aoErrorMessage(result));
     return result.data;
   }
   const agentId = (value) => {
@@ -300,7 +332,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           const pathKey = Object.keys(environment).find(key => key.toUpperCase() === "PATH") || "PATH";
           environment[pathKey] = [toolBin, environment[pathKey]].filter(Boolean).join(path.delimiter);
         }
-        child = spawn(executable, [], {
+          // The AO CLI build answers the daemon command and the internal commands the daemon
+          // relaunches itself with (pty-host, chat-host, agent-process); a daemon-only build cannot.
+          child = spawn(executable, ["daemon"], {
           cwd: resourceRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
           env: { ...environment, AO_PORT: String(daemonPort), AO_DATA_DIR: dataRoot, AO_RUN_FILE: path.join(dataRoot, "running.json"), AO_ALLOWED_ORIGINS: gatewayOrigin, AO_TELEMETRY_EVENTS: "off", AO_TELEMETRY_METRICS: "off", AO_TELEMETRY_REMOTE: "off", AO_SENTRY_DSN: "" },
         });
@@ -361,11 +395,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const needsLoad = !view;
     if (needsLoad) {
       view = new WebContentsView({ webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, partition: `ao-local-${crypto.randomUUID()}` } });
-      view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-      view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-      view.webContents.session.setPermissionCheckHandler(() => false);
+      view.webContents.setWindowOpenHandler(({ url }) => {
+        void openTerminalLink(url).catch((cause) => logger.warn?.("ao.link_open_failed", { message: String(cause?.message || cause) }));
+        return { action: "deny" };
+      });
+      // Without AO's own preload, its terminal copies and pastes through navigator.clipboard, so
+      // the gateway page (and nothing else) may use the clipboard; every other permission stays denied.
+      const clipboardAllowed = (permission, origin) => CLIPBOARD_PERMISSIONS.has(permission) && Boolean(gatewayOrigin) && origin === gatewayOrigin;
+      view.webContents.session.setPermissionRequestHandler((_contents, permission, callback, details) => {
+        callback(clipboardAllowed(permission, safeOrigin(details?.requestingUrl)));
+      });
+      view.webContents.session.setPermissionCheckHandler((_contents, permission, requestingOrigin) => clipboardAllowed(permission, safeOrigin(requestingOrigin)));
       view.webContents.on("will-navigate", (event, url) => { if (new URL(url).origin !== gatewayOrigin) event.preventDefault(); });
       view.webContents.on("console-message", (_event, _level, message) => logger.warn?.("ao.renderer", { message: String(message).slice(0, 1000) }));
+      // Clicking this child view does not reliably move keyboard focus into it on Windows, so
+      // typing would still go to the main window. Focus it on mouse-down so AO terminals (agy)
+      // and inputs receive keys.
+      const created = view;
+      created.webContents.on("before-mouse-event", (_event, mouse) => {
+        if (mouse.type === "mouseDown" && !created.webContents.isDestroyed() && !created.webContents.isFocused()) {
+          created.webContents.focus();
+        }
+      });
     }
     const showingView = view;
     const viewGeneration = lifecycleGeneration;
@@ -393,6 +444,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!current.hash.startsWith("#/coding-tools-terminal") && !current.hash.startsWith("#/coding-tools-board")) originalPath = current.pathname + current.search + current.hash;
       const target = `/#/coding-tools-terminal?${query}`;
       if (current.pathname + current.search + current.hash !== target) await navigate(target);
+      // A freshly opened terminal is ready to type into, like a terminal window.
+      if (parent.isFocused() && !showingView.webContents.isDestroyed()) showingView.webContents.focus();
     } else if (projectBoard && showRequest === showGeneration && viewGeneration === lifecycleGeneration && view === showingView) {
       const current = new URL(showingView.webContents.getURL());
       const route = current.hash.startsWith("#/") ? new URL(current.hash.slice(1), gatewayOrigin) : current;

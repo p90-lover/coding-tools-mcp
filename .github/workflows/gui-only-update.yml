@@ -1,0 +1,103 @@
+name: GUI-only update bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Positive GUI revision for the installed shell version
+        required: true
+        type: string
+      publish:
+        description: Publish the verified GUI bundle after backend compatibility checks
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      shell_version: ${{ steps.identity.outputs.shell_version }}
+      gui_tag: ${{ steps.identity.outputs.gui_tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          clean: false
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76
+        with:
+          bun-version: 1.4.2
+      - id: identity
+        shell: bash
+        env:
+          GUI_REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          [[ "$GUI_REVISION" =~ ^[1-9][0-9]*$ ]]
+          version=$(node -p "require('./desktop-electron/package.json').version")
+          echo "shell_version=$version" >> "$GITHUB_OUTPUT"
+          echo "gui_tag=v$version-gui.r$GUI_REVISION" >> "$GITHUB_OUTPUT"
+          mkdir -p aiTemp/gui-release/renderer aiTemp/gui-release/assets aiTemp/gui-release/tmp
+      - name: Build and validate only the GUI
+        shell: bash
+        env:
+          GUI_REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          export TMPDIR="$PWD/aiTemp/gui-release/tmp"
+          bun install --cwd desktop-electron --frozen-lockfile
+          bun run --cwd desktop-electron typecheck
+          node --test desktop-electron/tests/update.test.cjs
+          cd desktop-electron
+          bun run build:renderer --outDir ../aiTemp/gui-release/renderer --emptyOutDir false
+          node scripts/package-gui-update.cjs --dist ../aiTemp/gui-release/renderer --revision "$GUI_REVISION" --output ../aiTemp/gui-release/assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gui-update-${{ github.sha }}
+          path: aiTemp/gui-release/assets/
+          if-no-files-found: error
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          clean: false
+          persist-credentials: false
+      - name: Require unchanged shell and backend source
+        shell: bash
+        env:
+          SHELL_VERSION: ${{ needs.build.outputs.shell_version }}
+        run: |
+          set -euo pipefail
+          base="v$SHELL_VERSION"
+          git cat-file -e "$base:desktop-electron/electron/gui-update.cjs"
+          git diff --exit-code "$base" -- desktop-electron/electron app-handler runtime-web rust-core src-tauri modules
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: gui-update-${{ github.sha }}
+          path: aiTemp/gui-release/assets
+      - name: Publish verified GUI bytes with no backend installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GUI_TAG: ${{ needs.build.outputs.gui_tag }}
+        run: |
+          set -euo pipefail
+          cd aiTemp/gui-release/assets
+          sha256sum -c SHA256SUMS.txt
+          printf 'Renderer-only update. MCP, Codex Bridge and Proxy Bridge continue running.\n' > ../notes.md
+          gh release create "$GUI_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --latest=false --title "Coding Tools GUI $GUI_TAG" --notes-file ../notes.md ./*
+          mkdir -p ../readback
+          gh release download "$GUI_TAG" --repo "$GITHUB_REPOSITORY" --dir ../readback
+          cd ../readback
+          sha256sum -c SHA256SUMS.txt
+          gh release edit "$GUI_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

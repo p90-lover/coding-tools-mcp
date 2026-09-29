@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "package": "mcp-probe-kit",
+  "version": "4.0.2",
+  "packageSpec": "mcp-probe-kit@4.0.2",
+  "source": "mcp-bootstrap",
+  "generatedByVersion": "4.0.2",
+  "installedAt": "2026-09-24T16:01:53.900Z",
+  "wrappers": {
+    "powershell": ".mcp-probe-kit/bin/probe.ps1",
+    "cmd": ".mcp-probe-kit/bin/probe.cmd",
+    "shell": ".mcp-probe-kit/bin/probe"
+  }
+}
