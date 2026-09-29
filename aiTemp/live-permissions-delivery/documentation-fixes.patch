@@ -1,0 +1,81 @@
+diff --git a/src-tauri/src/tools/dispatch.rs b/src-tauri/src/tools/dispatch.rs
+index be4b382..29dbbec 100644
+--- a/src-tauri/src/tools/dispatch.rs
++++ b/src-tauri/src/tools/dispatch.rs
+@@ -86,7 +86,7 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
+     {
+         return tool_err_code(
+             "TOOL_PROFILE_RESTRICTED",
+-            "The current live tool profile does not permit this tool".into(),
++            "The current live tool profile does not permit this tool",
+             "permission",
+         );
+     }
+@@ -108,8 +108,7 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
+     {
+         return tool_err_code(
+             "CAPTURE_PERMISSION_CHANGED",
+-            "Permissions changed during capture; the frame was discarded. No image was saved."
+-                .into(),
++            "Permissions changed during the operation; any frame was discarded. An input may already have been submitted: inspect state and do not automatically replay it.",
+             "permission",
+         );
+     }
+diff --git a/src-tauri/src/tunnel/supervisor.rs b/src-tauri/src/tunnel/supervisor.rs
+index 20bb6f1..96522e3 100644
+--- a/src-tauri/src/tunnel/supervisor.rs
++++ b/src-tauri/src/tunnel/supervisor.rs
+@@ -1037,11 +1037,21 @@ fn recovery_config_matches(
+     if a.id != b.id || a.path != b.path {
+         return false;
+     }
+-    let value = |p: &WorkspaceProfile| match kind {
+-        TunnelServiceKind::Mcp => {
+-            serde_json::json!({"auth":p.auth,"runtime":p.runtime,"tunnel":p.tunnel})
++    let value = |p: &WorkspaceProfile| {
++        let mut value = match kind {
++            TunnelServiceKind::Mcp => serde_json::json!({"auth":p.auth,"runtime":p.runtime,"tunnel":p.tunnel}),
++            TunnelServiceKind::Actions => serde_json::json!({"actions":p.actions}),
++        };
++        // Authorization changes are live; they do not change the listener/tunnel
++        // identity. Keep ports, authentication and tunnel settings pinned.
++        let (section, fields): (&str, &[&str]) = match kind {
++            TunnelServiceKind::Mcp => ("runtime", &["permission_mode","approval_mode","allow_screen_capture","allowed_commands","workspace_local_entries","workspace_script_extensions","tool_profile"]),
++            TunnelServiceKind::Actions => ("actions", &["permission_mode","allowed_commands","max_patch_bytes"]),
++        };
++        if let Some(config) = value[section].as_object_mut() {
++            for field in fields { config.remove(*field); }
+         }
+-        TunnelServiceKind::Actions => serde_json::json!({"actions":p.actions}),
++        value
+     };
+     value(a) == value(b)
+ }
+@@ -1646,3 +1656,27 @@ mod connection_regressions {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod live_permission_recovery_test {
++    use super::*;
++    #[test]
++    fn live_policy_change_preserves_cloudflare_recovery_identity() {
++        let base = WorkspaceProfile::new("fixture-root".into(), Some("fixture".into()));
++        let mut changed = base.clone();
++        changed.runtime.permission_mode = "read-only".into();
++        changed.runtime.approval_mode = "ask".into();
++        changed.runtime.allow_screen_capture = !base.runtime.allow_screen_capture;
++        changed.runtime.allowed_commands = "echo".into();
++        changed.runtime.tool_profile = "advanced".into();
++        assert!(recovery_config_matches(&base, &changed, TunnelServiceKind::Mcp));
++        changed.actions.permission_mode = "read-only".into();
++        changed.actions.allowed_commands = "echo".into();
++        changed.actions.max_patch_bytes = base.actions.max_patch_bytes + 1;
++        assert!(recovery_config_matches(&base, &changed, TunnelServiceKind::Actions));
++        changed.runtime.local_port += 1;
++        assert!(!recovery_config_matches(&base, &changed, TunnelServiceKind::Mcp));
++        changed.actions.oauth_client_id = "different-client".into();
++        assert!(!recovery_config_matches(&base, &changed, TunnelServiceKind::Actions));
++    }
++}

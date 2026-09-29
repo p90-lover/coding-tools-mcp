@@ -1,0 +1,3 @@
+branch reservation: subagent/electron-prerelease-gate-0.6.0-rc.1-20260914
+base: 5d133149f6bc8aef6972f191708165d2b5c33983
+scope: Task 18 dedicated Electron prerelease policy, verification scripts, and workflow only

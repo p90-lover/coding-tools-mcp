@@ -41,7 +41,8 @@ test("Paseo surface can plan ChatGPT Web work and control an owned mission", () 
   assert.match(source, /workload:\s*"paseo"/);
   assert.match(source, /chatgpt-web/);
   assert.match(source, /execution\.update/);
-  assert.match(source, /agent_prepare/);
+  // Runs are prepared by the orchestration service; the surface follows and controls them.
+  assert.match(source, /followRun\("run"/);
   assert.match(source, /agent_control/);
   for (const action of ["create", "start", "hold", "resume", "cancel", "close"]) {
     assert.match(source, new RegExp(`\\"${action}\\"`), `missing Paseo action ${action}`);
@@ -52,10 +53,10 @@ test("Anneal task menu lists tasks and can dispatch through localized Paseo cont
   const source = read("desktop-electron/src/features/AnnealTasksSurface.tsx");
   const copy = read("desktop-electron/src/features/orchestration-copy.ts");
 
-  assert.match(source, /tasks\.list/);
+  // The board reads Anneal's own task API; missions are controlled through the execution plane.
+  assert.match(source, /operation: "listTasks"/);
   assert.match(source, /providerExecutionPlan/);
   assert.match(source, /workload:\s*dispatchThroughPaseo\s*\?\s*"paseo"\s*:\s*"anneal"/);
-  assert.match(source, /agent_prepare/);
   assert.match(source, /agent_control/);
   assert.match(source, /copy\.annealDispatchThroughPaseo/);
   assert.match(copy, /annealDispatchThroughPaseo:\s*"Dispatch through Paseo"/);

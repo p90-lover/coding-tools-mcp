@@ -13,8 +13,6 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
-
-
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
@@ -743,8 +741,6 @@ function LauncherShell({
                 <SidebarItem active={surface === "workspace-auth"} icon="mcp" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
                 <SidebarItem active={surface === "native-codex"} icon="orchestrator" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
                 <SidebarItem active={surface === "oauth"} icon="providers" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
-
-
                 <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Agent Orchestrator" onClick={() => navigateSurface("agent-orchestrator")} />
 
 
@@ -894,7 +890,6 @@ function LauncherShell({
             {(surface === "providers" || surface === "api-models") ? (
               <ProviderCenterSurface initialCategory={surface === "api-models" ? "api_key" : "all"} language={language} setError={setError} />
             ) : null}
-
             {surface === "agent-orchestrator" ? (
               <AgentOrchestratorSurface language={language} setError={setError} />
             ) : null}

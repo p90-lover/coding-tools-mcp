@@ -27,6 +27,8 @@ docs/history-session/
 tmp-run
 
 # Local scratch, recovery archives, and generated builds.
+# Fixtures already tracked under aiTemp/ (Rust #[path] modules, CI evidence scripts) stay tracked;
+# add new permanent fixtures with `git add -f`.
 aiTemp/
 Trash/
 target/

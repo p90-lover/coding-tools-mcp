@@ -84,8 +84,8 @@ impl Spec {
             &self.repo_id,
             &self.assignee_id,
         ]
-            .into_iter()
-            .flatten()
+        .into_iter()
+        .flatten()
         {
             identifier(s)?;
         }

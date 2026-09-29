@@ -228,8 +228,12 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /RUNNER_TOOL_CACHE/);
   assert.match(source, /isUsableNodeExecutable/);
 
+  // Host PATH entries survive only if they hold real host tools, so give the fixture one on every OS.
+  const hostTools = path.join(temporaryDirectory("coding-tools-npm-host-path"), "nodejs-host");
+  fs.mkdirSync(hostTools, { recursive: true });
+  fs.writeFileSync(path.join(hostTools, "cmd.exe"), "");
   const windows = npmSpawnInvocation(["ci"], "win32", {
-    Path: "C:\\nodejs;C:\\Windows\\system32",
+    Path: `C:\\nodejs;${hostTools}`,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
   assert.match(String(windows.command).replaceAll("\\", "/"), /cmd\.exe$/i);
