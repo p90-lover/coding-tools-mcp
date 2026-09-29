@@ -502,6 +502,16 @@ code {
   height: 100%;
 }
 
+/* Each visited tab stays mounted; only the current one is laid out. */
+.surface-pane {
+  width: 100%;
+  height: 100%;
+}
+
+.surface-pane[hidden] {
+  display: none !important;
+}
+
 .state-dot {
   display: inline-block;
   width: 6px;

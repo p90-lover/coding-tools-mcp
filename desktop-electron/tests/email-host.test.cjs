@@ -73,6 +73,36 @@ test("parseMessage decodes a multipart/alternative body", async () => {
   assert.match(parsed.html, /hello html/);
 });
 
+test("parseMessage decodes transfer encodings as bytes in the part's charset", async () => {
+  const raw = [
+    "From: =?UTF-8?Q?Caf=C3=A9_Bot?= <bot@x.com>",
+    "Subject: =?UTF-8?B?5L2g5aW9?= =?UTF-8?Q?_w=C3=B6rld?=",
+    'Content-Type: multipart/alternative; boundary="B"', "", "--B",
+    "Content-Type: text/html; charset=utf-8", "Content-Transfer-Encoding: quoted-printable", "",
+    "<p>OpenAI =C2=A9 2015=E2=80=932026 soft=", "wrap</p>", "--B",
+    "Content-Type: text/plain; charset=big5", "Content-Transfer-Encoding: base64", "",
+    Buffer.from([0xa4, 0xa4, 0xa4, 0xe5]).toString("base64"), "--B--",
+  ].join("\r\n");
+  const parsed = await parseMessage(raw);
+  assert.equal(parsed.subject, "你好 wörld");
+  assert.equal(parsed.from, "Café Bot <bot@x.com>");
+  assert.match(parsed.html, /OpenAI © 2015–2026 softwrap/);
+  assert.equal(parsed.html.includes("Â"), false);
+  assert.equal(parsed.text.trim(), "中文");
+});
+
+test("list rows take subject and sender from the message headers, not the bounce envelope", () => {
+  const row = normalizeMessageListRow({
+    id: 9, address: "me@x.com", source: "bounces+123-me=x.com@em7877.tm.example",
+    raw: "From: ChatGPT <noreply@codex.chatgpt.com>\r\nSubject: =?UTF-8?Q?You=E2=80=99re_invited?=\r\n\r\nbody",
+  });
+  assert.equal(row.subject, "You’re invited");
+  assert.equal(row.from, "ChatGPT <noreply@codex.chatgpt.com>");
+  const bare = normalizeMessageListRow({ id: 10, source: "s@x.com", subject: "Hi" });
+  assert.equal(bare.from, "s@x.com");
+  assert.equal(bare.subject, "Hi");
+});
+
 test("connect verifies read-only before persisting and never returns the credential", async () => {
   const dir = tmp();
   const requests = [];

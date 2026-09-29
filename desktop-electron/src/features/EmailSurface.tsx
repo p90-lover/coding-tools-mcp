@@ -68,14 +68,19 @@ function mergeNewest(current: EmailMessageSummary[], newest: EmailMessageSummary
 // sandboxed iframe (no scripts, forms, same-origin, or top navigation) with a CSP that blocks
 // every network fetch, so tracking pixels and remote resources never load and the content can
 // never reach a launcher:* channel. The HTML is already sanitized in the main process.
+// Links are the one way out: <base target="_blank"> plus sandbox allow-popups turns a click into
+// a window-open request, which the main window's open handler denies and hands to the system
+// browser (http/https only). Without allow-scripts nothing can open a window without a click.
 const PREVIEW_CSP =
   "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:;";
+const PREVIEW_SANDBOX = "allow-popups";
 
 function previewDocument(html: string): string {
   return `<!doctype html><html><head><meta charset="utf-8">`
     + `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`
+    + `<base target="_blank">`
     + `<style>body{font:14px/1.5 system-ui,sans-serif;color:#e7e7ea;margin:12px;overflow-wrap:anywhere}`
-    + `a{color:#8ab4ff;pointer-events:none}img{max-width:100%}</style></head>`
+    + `a{color:#8ab4ff;cursor:pointer}img{max-width:100%}</style></head>`
     + `<body>${html}</body></html>`;
 }
 
@@ -399,7 +404,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
                 </div>
               </div>
               {previewMode === "html" && openMessage.html ? (
-                <iframe className="email-html" sandbox="" title="Email content" srcDoc={previewDocument(openMessage.html)} />
+                <iframe className="email-html" sandbox={PREVIEW_SANDBOX} title="Email content" srcDoc={previewDocument(openMessage.html)} />
               ) : (
                 <pre className="email-text">{openMessage.text ?? "(no text content)"}</pre>
               )}

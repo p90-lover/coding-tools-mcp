@@ -413,6 +413,20 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
+  // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
+  // them. The MCP wizard is left out: it seeds its step from how it was opened.
+  const [visitedSurfaces, setVisitedSurfaces] = useState<ReadonlySet<Surface>>(() => new Set([surface]));
+  useEffect(() => {
+    setVisitedSurfaces((current) => (current.has(surface) ? current : new Set(current).add(surface)));
+  }, [surface]);
+  // A group of surfaces can share one pane (one mounted instance for all of them).
+  const keepAlive = (ids: Surface | readonly Surface[], render: () => ReactNode) => {
+    const group: readonly Surface[] = typeof ids === "string" ? [ids] : ids;
+    const current = group.includes(surface);
+    return current || group.some((id) => visitedSurfaces.has(id))
+      ? <div className="surface-pane" hidden={!current}>{render()}</div>
+      : null;
+  };
   const devProfile = snapshot.profile === "development";
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(compactAtMount ? false : snapshot.state.sidebarOpen !== false);
@@ -818,8 +832,8 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
-        <div className="surface-transition" key={surface}>
-            {surface === "browser" ? (
+        <div className="surface-transition">
+            {keepAlive("browser", () => (
               <BrowserSurface
                 browser={browser}
                 browserSlotRef={browserSlotRef}
@@ -829,18 +843,18 @@ function LauncherShell({
                 platform={snapshot.platform}
                 setError={setError}
               />
-            ) : null}
-            {surface === "chatgpt-desktop" ? (
+            ))}
+            {keepAlive("chatgpt-desktop", () => (
               <ChatGptDesktopSurface
-                active={!(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
+                active={surface === "chatgpt-desktop" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
                 api={api!}
                 setError={setError}
               />
-            ) : null}
-            {surface === "email" ? (
+            ))}
+            {keepAlive("email", () => (
               <EmailSurface api={api!} setError={setError} />
-            ) : null}
-            {surface === "setup" ? (
+            ))}
+            {keepAlive("setup", () => (
               <SetupSurface
                 activateBrowser={activateBrowser}
                 browser={browser}
@@ -855,7 +869,7 @@ function LauncherShell({
                 snapshot={snapshot}
                 updateState={updateState}
               />
-            ) : null}
+            ))}
             {surface === "mcp" ? (
               <McpSurface
                 copy={copy}
@@ -872,53 +886,53 @@ function LauncherShell({
                 updateState={updateState}
               />
             ) : null}
-            {surface === "activity" ? (
+            {keepAlive("activity", () => (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
-            ) : null}
-            {surface === "instant-mcp" ? (
+            ))}
+            {keepAlive("instant-mcp", () => (
               <InstantMcpToolsSurface copy={copy} language={language} setError={setError} />
-            ) : null}
-            {surface === "workspace-auth" ? (
+            ))}
+            {keepAlive("workspace-auth", () => (
               <ContentSurface title={copy.workspaceAuth}><WorkspaceAuthPanel copy={copy} language={language} setError={setError} /></ContentSurface>
-            ) : null}
-            {surface === "native-codex" ? (
+            ))}
+            {keepAlive("native-codex", () => (
               <ContentSurface title={copy.nativeCodex}><NativeCodexPanel copy={copy} language={language} setError={setError} /></ContentSurface>
-            ) : null}
-            {surface === "oauth" ? (
+            ))}
+            {keepAlive("oauth", () => (
               <OriginalUiSurface initialSection="auth-files" language={language} setError={setError} toolId="cpa" />
-            ) : null}
-            {(surface === "providers" || surface === "api-models") ? (
+            ))}
+            {keepAlive(["providers", "api-models"], () => (
               <ProviderCenterSurface initialCategory={surface === "api-models" ? "api_key" : "all"} language={language} setError={setError} />
-            ) : null}
-            {surface === "agent-orchestrator" ? (
+            ))}
+            {keepAlive("agent-orchestrator", () => (
               <AgentOrchestratorSurface language={language} setError={setError} />
-            ) : null}
-            {surface === "agent-orchestrator-original" ? (
+            ))}
+            {keepAlive("agent-orchestrator-original", () => (
               <AgentOrchestratorOriginalSurface openMissions={() => navigateSurface("agent-orchestrator")} />
-            ) : null}
-            {surface === "antigravity-cli" ? (
+            ))}
+            {keepAlive("antigravity-cli", () => (
               <AntigravityCliSurface setError={setError} openNetwork={() => navigateSurface("network")} />
-            ) : null}
-            {surface === "integrations" ? (
+            ))}
+            {keepAlive("integrations", () => (
               <ExternalServicesSurface
                 language={language}
                 openCpa={() => navigateSurface("cpa")}
                 openProviders={() => navigateSurface("providers")}
                 setError={setError}
               />
-            ) : null}
-            {surface === "cpa" ? (
+            ))}
+            {keepAlive("cpa", () => (
               <OriginalUiSurface language={language} setError={setError} toolId="cpa" />
-            ) : null}
+            ))}
 
 
             {["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(surface) ? (
               <ContentSurface title="Module retired"><p>This standalone module is retired and unavailable.</p></ContentSurface>
             ) : null}
-            {surface === "network" ? (
+            {keepAlive("network", () => (
               <NetworkProxySurface language={language} setError={setError} />
-            ) : null}
-            {surface === "settings" ? (
+            ))}
+            {keepAlive("settings", () => (
               <SettingsSurface
                 configureInteractionMode={(mode) => {
                   setMcpTargetMode(mode);
@@ -931,7 +945,7 @@ function LauncherShell({
                 snapshot={snapshot}
                 updateState={updateState}
               />
-            ) : null}
+            ))}
         </div>
       </section>
 

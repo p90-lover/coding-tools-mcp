@@ -11,6 +11,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { parseHeaderSummary } = require("./email-mime.cjs");
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 50;
@@ -142,11 +143,15 @@ function normalizeMessageListRow(row) {
   const id = Number(row.id);
   if (!Number.isInteger(id)) return null;
   const preview = pickString(row, ["message", "text", "snippet", "preview"]);
+  // The Worker's list rows carry the raw MIME but no subject, and `source` is the envelope
+  // sender (often a bounces+… address). The message's own headers are what a reader expects.
+  const raw = pickString(row, ["raw", "message", "mail"]);
+  const headers = raw ? parseHeaderSummary(raw) : {};
   return {
     id,
     mailbox: pickString(row, ["address", "mailbox"]),
-    from: pickString(row, ["source", "from", "sender"]),
-    subject: pickString(row, ["subject"]),
+    from: headers.from || pickString(row, ["from", "sender", "source"]),
+    subject: headers.subject || pickString(row, ["subject"]),
     receivedAt: pickString(row, ["created_at", "createdAt", "date"]),
     preview: preview ? preview.replace(/\s+/g, " ").slice(0, 240) : null,
   };
