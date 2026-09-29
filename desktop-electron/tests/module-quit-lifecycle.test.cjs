@@ -38,6 +38,8 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
     runtimeSupervisor: { shutdown: async () => { order.push("stop-runtime"); nativeStops.push("runtime"); } },
     headlessHost: { shutdown: async () => {} }, browserControl: { close: async () => {} },
     stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} },
+    stopBridgeWatchdog() {}, backendBundles: { stopWatching() {} },
+    agentOrchestratorUpstream: { stop: async () => {} }, antigravityReauth: { stop() {} },
     managedBootstrapController: controller("bootstrap"), originalUiController: controller("visuals"),
     externalServicesController: controller("external"), upstreamToolController: controller("upstream"),
     showMainWindow() {}, publishOperation() {}, app: { quit: () => quits.push(true) },

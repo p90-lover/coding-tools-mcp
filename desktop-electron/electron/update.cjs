@@ -445,6 +445,10 @@ function createUpdateController({
 
 module.exports = {
   DEFAULT_UPDATE_CHECK_INTERVAL_MS,
+  RELEASE_API_URL,
+  downloadFile,
+  downloadText,
+  sha256,
   buildJob,
   compareVersions,
   createUpdateController,

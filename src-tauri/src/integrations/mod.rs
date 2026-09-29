@@ -1,9 +1,9 @@
 //! Observation snapshots stay here. Original-function RPCs live in `actions`.
 pub mod actions;
 pub mod ao;
+pub mod ao_team;
 pub mod board;
 pub mod board_sync;
-pub mod commandcode;
 pub mod execution;
 pub mod lease;
 pub mod live;
@@ -196,6 +196,12 @@ fn unique_ids(items: &[Item]) -> AppResult<()> {
     Ok(())
 }
 pub async fn read(source: Source, raw: &str, credential: &str) -> AppResult<Snapshot> {
+    if source == Source::Paseo {
+        return Err(err("Paseo integration is retired"));
+    }
+    if source == Source::Anneal {
+        return Err(err("Anneal integration is retired"));
+    }
     let _permit = SLOTS
         .try_acquire()
         .map_err(|_| err("Two integration checks are already in progress"))?;

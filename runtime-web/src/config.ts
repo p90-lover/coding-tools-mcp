@@ -89,6 +89,8 @@ export interface AppConfig {
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
   autoApproveToolCalls: boolean;
+  /** Local history-read consent; absent/unknown values remain workspace-scoped. Never set through MCP. */
+  codexHistoryScope?: "workspace" | "all";
   controlToken: string;
   runtimeCommand: string[];
   acknowledgedUnofficialAt?: string;

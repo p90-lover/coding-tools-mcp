@@ -3,7 +3,7 @@ import type { Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 import type { CodexProviderConfig } from "../src/types";
 
-test("an already-enabled ChatGPT send control has no unconditional settle delay", async () => {
+test.each(['data-testid="send-button"', 'aria-label="Send"'])("an already-enabled ChatGPT send control (%s) has no unconditional settle delay", async attribute => {
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: `browser://send-latency-${Date.now()}-${Math.random()}`,
@@ -44,7 +44,12 @@ test("an already-enabled ChatGPT send control has no unconditional settle delay"
     press: async () => {},
   };
   worker.activeComposer = async () => ({
-    locator: () => ({ getByTestId: () => sendButton }),
+    locator: () => ({ locator: (selector: string) => {
+      const { createDocument } = require("@mixmark-io/domino");
+      const document = createDocument(`<form><button id="send" ${attribute}></button><button aria-label="Resend"></button></form>`);
+      expect([...document.querySelectorAll(selector)].map((node: Element) => node.id)).toEqual(["send"]);
+      return sendButton;
+    } }),
   });
   worker.waitForSubmissionAcceptedWithRecovery = async () => "user_turn";
 

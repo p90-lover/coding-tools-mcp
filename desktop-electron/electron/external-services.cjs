@@ -10,13 +10,7 @@ const { publicUrlMap } = require("./five-stack-cross-use.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
 const STORE_VERSION = 1;
-const SERVICE_IDS = Object.freeze([
-  "codex-router",
-  "commandcode-proxy",
-  "cpa",
-  "paseo",
-  "anneal",
-]);
+const SERVICE_IDS = Object.freeze(["cpa"]);
 const SERVICE_ID_SET = new Set(SERVICE_IDS);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 const CALLER_KEY = /^[A-Za-z0-9_-]{32,}$/;
@@ -28,33 +22,8 @@ const KEEP_ALIVE_BACKOFF_CAP_MS = 60_000;
 const KEEP_ALIVE_STABLE_RESET_MS = 120_000;
 const PASEO_STALE_MS = 90_000;
 const HTTP_STALE_MS = 120_000;
-const COMMANDCODE_DEFAULT_ENDPOINT = "http://127.0.0.1:9090/";
-const COMMANDCODE_ALTERNATE_ENDPOINT = "http://127.0.0.1:3050/";
 
 const DEFAULTS = Object.freeze({
-  "codex-router": Object.freeze({
-    name: "Codex Router",
-    endpoint: "http://127.0.0.1:4202/",
-    home: "",
-    executable: "",
-    arguments: [],
-    routerCli: "model-router",
-    curateCli: "curate-models",
-    webBaseUrl: "http://127.0.0.1:17841/router/v1",
-    enabled: true,
-    autoStart: false,
-    keepAlive: false,
-  }),
-  "commandcode-proxy": Object.freeze({
-    name: "CommandCode Proxy",
-    endpoint: COMMANDCODE_DEFAULT_ENDPOINT,
-    home: "",
-    executable: "",
-    arguments: [],
-    enabled: true,
-    autoStart: false,
-    keepAlive: false,
-  }),
   cpa: Object.freeze({
     name: "CPA / CLIProxyAPI",
     endpoint: "http://127.0.0.1:8317/",
@@ -259,11 +228,7 @@ function initialState(env) {
         ? env.CODING_TOOLS_PASEO_URL
         : id === "anneal"
           ? env.CODING_TOOLS_ANNEAL_URL
-          : id === "codex-router"
-            ? env.CODING_TOOLS_CODEX_ROUTER_URL
-            : id === "commandcode-proxy"
-              ? env.CODING_TOOLS_COMMANDCODE_URL
-              : env.CODING_TOOLS_CPA_URL;
+: env.CODING_TOOLS_CPA_URL;
       const environmentExecutionEndpoint = id === "paseo"
         ? env.CODING_TOOLS_PASEO_EXECUTION_URL
         : id === "anneal"
@@ -314,27 +279,17 @@ function normalizeState(value, env) {
       arguments: Array.isArray(input.arguments)
         ? input.arguments.filter((entry) => typeof entry === "string").slice(0, 64)
         : [...defaults.arguments],
-      enabled: input.enabled !== false,
-      autoStart: input.autoStart === true,
-      keepAlive: input.keepAlive === true,
-      ...(id === "codex-router" ? {
-        routerCli: typeof input.routerCli === "string" && input.routerCli.trim()
-          ? input.routerCli.trim()
-          : defaults.routerCli,
-        curateCli: typeof input.curateCli === "string" && input.curateCli.trim()
-          ? input.curateCli.trim()
-          : defaults.curateCli,
-        webBaseUrl: (() => {
-          try { return normalizeLoopbackServiceEndpoint(input.webBaseUrl || defaults.webBaseUrl).replace(/\/$/, ""); }
-          catch { return defaults.webBaseUrl; }
-        })(),
-      } : {}),
+      enabled: id !== "paseo" && input.enabled !== false,
+      autoStart: id !== "paseo" && input.autoStart === true,
+      keepAlive: id !== "paseo" && input.keepAlive === true,
     };
   }
   return {
     version: STORE_VERSION,
     services,
-    secrets: value.secrets && typeof value.secrets === "object" ? value.secrets : {},
+    secrets: value.secrets && typeof value.secrets === "object" && Object.hasOwn(value.secrets, "cpa")
+      ? { cpa: value.secrets.cpa }
+      : {},
   };
 }
 
@@ -346,42 +301,6 @@ function countModels(payload) {
   return null;
 }
 
-function boundedText(value, maximum) {
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim();
-  return normalized ? normalized.slice(0, maximum) : undefined;
-}
-
-function projectCommandCodeHealth(payload) {
-  if (!payload || typeof payload !== "object") return null;
-  const endpoints = payload.endpoints && typeof payload.endpoints === "object"
-    ? Object.fromEntries(
-      Object.entries(payload.endpoints)
-        .filter(([, value]) => typeof value === "string")
-        .slice(0, 8)
-        .map(([key, value]) => [String(key).slice(0, 40), String(value).slice(0, 120)]),
-    )
-    : undefined;
-  const models = Array.isArray(payload.models)
-    ? payload.models.map((item) => String(item).slice(0, 80)).filter(Boolean).slice(0, 64)
-    : undefined;
-  const user = payload.user && typeof payload.user === "object"
-    ? {
-      id: boundedText(payload.user.id, 80),
-      email: boundedText(payload.user.email, 120),
-    }
-    : undefined;
-  return {
-    status: boundedText(payload.status, 32),
-    proxy: boundedText(payload.proxy, 64),
-    version: boundedText(payload.version, 32),
-    ...(endpoints ? { endpoints } : {}),
-    ...(user && (user.id || user.email) ? { user } : {}),
-    ...(typeof payload.credits === "number" ? { credits: payload.credits } : {}),
-    ...(models && models.length ? { models } : {}),
-  };
-}
-
 function nextKeepAliveDelayMs(attempts, random = Math.random) {
   const exponent = Math.min(Math.max(Number(attempts) || 0, 0), 6);
   const base = Math.min(KEEP_ALIVE_BACKOFF_CAP_MS, 1_000 * (2 ** exponent));
@@ -389,43 +308,97 @@ function nextKeepAliveDelayMs(attempts, random = Math.random) {
   return Math.max(1_000, base + jitter);
 }
 
-function commandCodeAlternateEndpoint(endpoint) {
-  let parsed;
-  try {
-    parsed = new URL(String(endpoint || ""));
-  } catch {
-    return null;
-  }
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (!LOOPBACK_HOSTS.has(hostname)) return null;
-  if (parsed.port === "9090") parsed.port = "3050";
-  else if (parsed.port === "3050") parsed.port = "9090";
-  else return null;
-  parsed.search = "";
-  parsed.hash = "";
-  if (!parsed.pathname.endsWith("/")) parsed.pathname += "/";
-  return parsed.toString();
-}
-
-function commandCodeOriginUrls(endpoint) {
-  const parsed = new URL(endpoint);
-  const origin = `${parsed.protocol}//${parsed.host}`;
-  const path = parsed.pathname.replace(/\/+$/u, "");
-  const cursor = !path || path === "/" || path === "/v1"
-    ? `${origin}/v1`
-    : path.endsWith("/v1")
-      ? `${origin}${path}`
-      : `${origin}${path}/v1`;
-  return { listen: parsed.toString(), cursorBaseUrl: cursor, anthropicBaseUrl: origin };
-}
-
 function staleWindowMs(id) {
   return id === "paseo" ? PASEO_STALE_MS : HTTP_STALE_MS;
+}
+
+function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null }) {
+  const privateRoot = path.dirname(filePath);
+  if (archiveDataRoot) {
+    const relative = path.relative(privateRoot, archiveDataRoot);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("Paseo archive source must remain inside private userData");
+    }
+  }
+  const sources = {};
+  function include(source, relative) {
+    if (!fs.existsSync(source)) return;
+    const info = fs.lstatSync(source);
+    if (info.isSymbolicLink()) throw new Error("Paseo archive refuses linked state");
+    if (info.isDirectory()) {
+      for (const entry of fs.readdirSync(source)) include(path.join(source, entry), path.join(relative, entry));
+    } else if (info.isFile()) {
+      sources[relative.split(path.sep).join("/")] = source;
+    } else {
+      throw new Error("Paseo archive requires regular files");
+    }
+  }
+  include(filePath, "external-services.json");
+  include(keyPath, "external-services.key");
+  if (archiveDataRoot) {
+    include(path.join(archiveDataRoot, "managed-components.secrets.json"), "integrations/managed-components.secrets.json");
+    include(path.join(archiveDataRoot, "managed-components.key"), "integrations/managed-components.key");
+    for (const id of ["paseo", "codex-router", "commandcode-proxy", "anneal"]) {
+      include(path.join(archiveDataRoot, "state", id), `integrations/state/${id}`);
+    }
+  }
+  if (Object.keys(sources).length === 0) return null;
+  const encrypted = (value) => value && typeof value === "object" && value.scheme === "aes-256-gcm-v1";
+  let saved;
+  try { saved = JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { saved = null; }
+  if (Object.values(saved?.secrets || {}).some(encrypted) && !fs.existsSync(keyPath)) {
+    throw new Error("Paseo archive requires the external service key");
+  }
+  const managedSecrets = archiveDataRoot && path.join(archiveDataRoot, "managed-components.secrets.json");
+  if (managedSecrets && fs.existsSync(managedSecrets)) {
+    const stored = JSON.parse(fs.readFileSync(managedSecrets, "utf8"));
+    if (Object.values(stored?.components || {}).some(encrypted)
+        && !fs.existsSync(path.join(archiveDataRoot, "managed-components.key"))) {
+      throw new Error("Paseo archive requires the managed component key");
+    }
+  }
+
+  const archiveRoot = path.join(privateRoot, "archives", "retired-services");
+  const manifestPath = path.join(archiveRoot, "manifest.json");
+  let destination = archiveRoot;
+  if (fs.existsSync(manifestPath)) {
+    const pointer = path.join(archiveRoot, "latest.json");
+    if (fs.existsSync(pointer)) {
+      const relative = JSON.parse(fs.readFileSync(pointer, "utf8")).relative;
+      if (typeof relative !== "string" || !/^snapshots\/[a-f0-9-]{36}$/.test(relative)) {
+        throw new Error("Paseo archive pointer is invalid");
+      }
+      destination = path.join(archiveRoot, relative);
+    }
+    const previous = JSON.parse(fs.readFileSync(path.join(destination, "manifest.json"), "utf8"));
+    const keys = Object.keys(sources).sort();
+    if (keys.length === Object.keys(previous.sources || {}).length
+        && keys.every((relative) => previous.sources[relative] === sources[relative]
+          && fs.readFileSync(sources[relative]).equals(fs.readFileSync(path.join(destination, relative))))) {
+      return destination;
+    }
+    destination = path.join(archiveRoot, "snapshots", crypto.randomUUID());
+  }
+  for (const [relative, source] of Object.entries(sources)) {
+    const target = path.join(destination, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(source, target);
+    if (process.platform !== "win32") fs.chmodSync(target, 0o600);
+    if (!fs.readFileSync(source).equals(fs.readFileSync(target))) {
+      throw new Error("Paseo archive copy could not be verified");
+    }
+  }
+  writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources }, null, 2));
+  if (destination !== archiveRoot) {
+    writePrivateFileAtomic(path.join(archiveRoot, "latest.json"), JSON.stringify({ relative: path.relative(archiveRoot, destination).split(path.sep).join("/") }));
+  }
+  return destination;
 }
 
 function createExternalServicesController({
   filePath,
   keyPath,
+  archiveDataRoot = null,
   loopbackMeshPath = null,
   safeStorage = null,
   logger = null,
@@ -433,7 +406,6 @@ function createExternalServicesController({
   fetchImpl = globalThis.fetch,
   spawnProcess = spawn,
   terminateProcessTree = terminateOwnedProcessTree,
-  runRuntimeCommand = null,
   getProviderSnapshot = null,
   getHealthHeaders = null,
   publish = null,
@@ -441,6 +413,7 @@ function createExternalServicesController({
 } = {}) {
   if (!filePath || !keyPath) throw new Error("External service state paths are required");
   const meshFilePath = loopbackMeshPath || path.join(path.dirname(filePath), "loopback-mesh.json");
+  archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot });
   const codec = createSecretCodec({ safeStorage, keyPath });
   let state;
   try {
@@ -498,20 +471,15 @@ function createExternalServicesController({
   function providerMetrics(id) {
     const snapshot = typeof getProviderSnapshot === "function" ? getProviderSnapshot() : null;
     const accounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts : [];
-    const selected = id === "commandcode-proxy"
-      ? accounts.filter((account) => account.providerId === "commandcode-proxy" && !account.archivedAt)
-      : id === "cpa"
-        ? accounts.filter((account) => (
-            !account.archivedAt
-              && (
-                account.credentialSource === "cpa"
-                || String(account.loginAdapterId || "").startsWith("cpa-")
-                || account.providerId === "cliproxyapi-antigravity"
-              )
-          ))
-        : id === "codex-router"
-          ? accounts.filter((account) => account.enabled !== false && !account.archivedAt)
-          : [];
+    const selected = id === "cpa"
+      ? accounts.filter((account) => (
+        !account.archivedAt && (
+          account.credentialSource === "cpa"
+          || String(account.loginAdapterId || "").startsWith("cpa-")
+          || account.providerId === "cliproxyapi-antigravity"
+        )
+      ))
+      : [];
     return {
       accountCount: selected.length,
       connectedAccountCount: selected.filter((account) => account.status === "connected").length,
@@ -543,7 +511,6 @@ function createExternalServicesController({
       statusCode: activity.statusCode,
       modelCount: activity.modelCount,
       error: activity.error,
-      ...(id === "commandcode-proxy" && activity.health ? { health: activity.health } : {}),
       banner: activity.banner || null,
       alternateEndpoint: activity.alternateEndpoint || null,
       stale: Boolean(
@@ -552,13 +519,8 @@ function createExternalServicesController({
         && (Date.now() - Date.parse(activity.lastOkAt || 0) > staleWindowMs(id) || activity.status === "offline" || activity.status === "error"),
       ) && activity.status !== "ready",
       reconnectAttempts: activity.reconnectAttempts || 0,
-      secretConfigured: id === "codex-router" && Boolean(secretFor(id).callerKey),
+      secretConfigured: false,
       sourceConfigured: Boolean(config.home || config.executable),
-      ...(id === "codex-router" ? {
-        routerCli: config.routerCli,
-        curateCli: config.curateCli,
-        webBaseUrl: config.webBaseUrl,
-      } : {}),
       ...providerMetrics(id),
     };
   }
@@ -599,24 +561,7 @@ function createExternalServicesController({
       ...(input.autoStart !== undefined ? { autoStart: input.autoStart === true } : {}),
       ...(input.keepAlive !== undefined ? { keepAlive: input.keepAlive === true } : {}),
     };
-    if (id === "codex-router") {
-      next.routerCli = input.routerCli !== undefined
-        ? optionalText(input.routerCli, 1_024) || "model-router"
-        : current.routerCli;
-      next.curateCli = input.curateCli !== undefined
-        ? optionalText(input.curateCli, 1_024) || "curate-models"
-        : current.curateCli;
-      next.webBaseUrl = input.webBaseUrl !== undefined
-        ? normalizeLoopbackServiceEndpoint(input.webBaseUrl).replace(/\/$/, "")
-        : current.webBaseUrl;
-      if (input.callerKey !== undefined) {
-        const callerKey = optionalText(input.callerKey, 1_024) || "";
-        if (callerKey && !CALLER_KEY.test(callerKey)) {
-          throw new Error("Codex Router caller key must be at least 32 URL-safe characters");
-        }
-        if (callerKey) state.secrets[id] = codec.encrypt({ callerKey });
-      }
-    }
+    if (id === "paseo") Object.assign(next, { enabled: false, autoStart: false, keepAlive: false });
     state.services[id] = next;
     const activity = runtime.get(id);
     runtime.set(id, {
@@ -634,144 +579,10 @@ function createExternalServicesController({
 
   function healthUrl(id, endpoint = state.services[id].endpoint) {
     const configEndpoint = endpoint || state.services[id].endpoint;
-    if (id === "codex-router") {
-      const callerKey = secretFor(id).callerKey;
-      if (!callerKey) throw new Error("Codex Router caller key is not configured");
-      return new URL(`/_codex-router/${encodeURIComponent(callerKey)}/v1/models`, configEndpoint).toString();
-    }
-    if (id === "commandcode-proxy" || id === "cpa") {
+    if (id === "cpa") {
       return new URL("/v1/models", configEndpoint).toString();
     }
     return configEndpoint;
-  }
-
-  function commandCodeHealthUrl(endpoint) {
-    return new URL("/health", endpoint).toString();
-  }
-
-  async function fetchProbe(url, id, signal) {
-    const response = await fetchImpl(url, {
-      method: "GET",
-      headers: {
-        accept: "application/json,text/html;q=0.8,*/*;q=0.1",
-        ...(typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {}),
-      },
-      signal,
-    });
-    let modelCount = null;
-    let health = null;
-    try {
-      const contentType = response.headers?.get?.("content-type") || "";
-      if (contentType.includes("json") && typeof response.clone === "function") {
-        modelCount = countModels(await response.clone().json());
-      }
-    } catch {}
-    try {
-      if (typeof response.text === "function") {
-        const body = await (typeof response.clone === "function" && typeof response.clone().text === "function"
-          ? response.clone().text()
-          : response.text());
-        health = String(body || "").replace(/[\u0000-\u001f]/gu, "").slice(0, 32) || null;
-      }
-    } catch {}
-    return { response, modelCount, health };
-  }
-
-  async function inspectCommandCode(id, config, signal) {
-    const primary = config.endpoint;
-    async function probe(endpoint) {
-      let healthStatus = null;
-      try {
-        const healthResult = await fetchProbe(commandCodeHealthUrl(endpoint), id, signal);
-        healthStatus = healthResult.response.status;
-      } catch {}
-      const modelsResult = await fetchProbe(new URL("/v1/models", endpoint).toString(), id, signal);
-      const statusCode = modelsResult.response.status;
-      const ready = modelsResult.response.ok || (healthStatus != null && healthStatus >= 200 && healthStatus < 300);
-      let health = null;
-      if (ready) {
-        try {
-          const banner = await fetchImpl(new URL("/", endpoint).toString(), {
-            method: "GET",
-            headers: {
-              accept: "application/json",
-              ...(typeof getHealthHeaders === "function" ? getHealthHeaders(id) : {}),
-            },
-            signal,
-          });
-          if (banner.ok && typeof banner.json === "function") {
-            health = projectCommandCodeHealth(await banner.json());
-          }
-        } catch {}
-      }
-      const origins = commandCodeOriginUrls(endpoint);
-      return {
-        ready,
-        statusCode,
-        modelCount: modelsResult.response.ok ? modelsResult.modelCount : null,
-        health,
-        banner: {
-          version: health?.version || null,
-          listen: origins.listen,
-          cursor_base_url: origins.cursorBaseUrl,
-          anthropic_base_url: origins.anthropicBaseUrl,
-        },
-        endpoint,
-        error: ready ? null : `HTTP ${statusCode}`,
-      };
-    }
-
-    try {
-      const primaryResult = await probe(primary);
-      if (primaryResult.ready || primaryResult.statusCode != null) {
-        return { ...primaryResult, alternateEndpoint: null };
-      }
-    } catch (error) {
-      const alternate = commandCodeAlternateEndpoint(primary);
-      if (!alternate) throw error;
-      const alternateResult = await probe(alternate);
-      return { ...alternateResult, alternateEndpoint: alternateResult.ready ? alternate : null };
-    }
-    const alternate = commandCodeAlternateEndpoint(primary);
-    if (!alternate) {
-      const origins = commandCodeOriginUrls(primary);
-      return {
-        ready: false,
-        statusCode: null,
-        modelCount: null,
-        health: null,
-        banner: {
-          version: null,
-          listen: origins.listen,
-          cursor_base_url: origins.cursorBaseUrl,
-          anthropic_base_url: origins.anthropicBaseUrl,
-        },
-        endpoint: primary,
-        alternateEndpoint: null,
-        error: "CommandCode Proxy is not reachable",
-      };
-    }
-    try {
-      const alternateResult = await probe(alternate);
-      return { ...alternateResult, alternateEndpoint: alternateResult.ready ? alternate : null };
-    } catch {
-      const origins = commandCodeOriginUrls(primary);
-      return {
-        ready: false,
-        statusCode: null,
-        modelCount: null,
-        health: null,
-        banner: {
-          version: null,
-          listen: origins.listen,
-          cursor_base_url: origins.cursorBaseUrl,
-          anthropic_base_url: origins.anthropicBaseUrl,
-        },
-        endpoint: primary,
-        alternateEndpoint: null,
-        error: "CommandCode Proxy is not reachable on 9090 or 3050",
-      };
-    }
   }
 
   async function inspect(idValue) {
@@ -785,29 +596,6 @@ function createExternalServicesController({
     timer.unref?.();
     const previous = runtime.get(id);
     try {
-      if (id === "commandcode-proxy") {
-        const result = await inspectCommandCode(id, config, controller.signal);
-        const ready = result.ready;
-        runtime.set(id, {
-          ...previous,
-          status: ready ? "ready" : (result.statusCode != null ? "error" : processes.has(id) ? "starting" : "offline"),
-          pid: processes.get(id)?.pid || null,
-          owned: processes.has(id),
-          checkedAt: now(),
-          latencyMs: Date.now() - started,
-          statusCode: result.statusCode,
-          modelCount: result.modelCount,
-          health: result.health,
-          banner: result.banner,
-          alternateEndpoint: result.alternateEndpoint,
-          lastOkAt: ready ? now() : previous.lastOkAt,
-          reconnectAttempts: ready ? 0 : (previous.reconnectAttempts || 0),
-          stableSince: ready
-            ? (previous.status === "ready" ? previous.stableSince || now() : now())
-            : null,
-          error: ready ? null : result.error,
-        });
-      } else {
         const response = await fetchImpl(healthUrl(id), {
           method: "GET",
           headers: {
@@ -838,7 +626,6 @@ function createExternalServicesController({
             : null,
           error: reachable ? null : `HTTP ${response.status}`,
         });
-      }
     } catch (error) {
       runtime.set(id, {
         ...previous,
@@ -879,7 +666,6 @@ function createExternalServicesController({
       cwd: config.home || undefined,
       env: {
         ...env,
-        ...(id === "commandcode-proxy" ? { HOST: "127.0.0.1" } : {}),
       },
       shell: false,
       windowsHide: true,
@@ -996,57 +782,13 @@ function createExternalServicesController({
     return start(id);
   }
 
-  async function syncCodexRouter() {
-    if (typeof runRuntimeCommand !== "function") {
-      throw new Error("Codex Router integration command is unavailable");
-    }
-    const router = state.services["codex-router"];
-    const commandCode = state.services["commandcode-proxy"];
-    const cpa = state.services.cpa;
-    const commandCodeBaseUrl = new URL("/v1", commandCode.endpoint).toString().replace(/\/$/, "");
-    const cpaBaseUrl = new URL("/v1", cpa.endpoint).toString().replace(/\/$/, "");
-    const args = [
-      "router", "integrate", "--apply", "--with-commandcode-proxy", "--with-cpa",
-      "--router-cli", router.routerCli,
-      "--curate-cli", router.curateCli,
-      "--web-base-url", router.webBaseUrl,
-      "--commandcode-base-url", commandCodeBaseUrl,
-      "--cpa-base-url", cpaBaseUrl,
-    ];
-    const result = await runRuntimeCommand(args);
-    const callerKey = secretFor("codex-router").callerKey;
-    const redact = (value) => String(value || "").split(callerKey || "\0").join("[REDACTED]");
-    logger?.info?.("external-service.codex-router-synced", {
-      routerCli: router.routerCli,
-      commandCodeBaseUrl,
-    });
-    return {
-      ok: true,
-      args,
-      stdout: redact(result?.stdout),
-      stderr: redact(result?.stderr),
-    };
-  }
-
   function runtimeEnvironment() {
-    const router = state.services["codex-router"];
-    const commandCode = state.services["commandcode-proxy"];
     const cpa = state.services.cpa;
     const mesh = buildLoopbackMesh(snapshot().services);
     try { persistLoopbackMesh(meshFilePath, mesh); } catch {}
-    const callerKey = secretFor("codex-router").callerKey;
     return Object.freeze({
-      ...publicUrlMap({
-        cpaOrigin: cpa.endpoint,
-        routerOrigin: router.endpoint,
-        commandCodeOrigin: commandCode.endpoint,
-        paseoOrigin: state.services.paseo.endpoint,
-        paseoExecution: state.services.paseo.executionEndpoint,
-        annealWeb: state.services.anneal.endpoint,
-        annealApi: state.services.anneal.executionEndpoint,
-      }),
+      ...publicUrlMap({ cpaOrigin: cpa.endpoint }),
       ...loopbackMeshEnvironment(mesh, { meshPath: meshFilePath }),
-      ...(callerKey ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: callerKey } : {}),
     });
   }
 
@@ -1175,7 +917,6 @@ function createExternalServicesController({
     start,
     stop,
     restart,
-    syncCodexRouter,
     runtimeEnvironment,
     loopbackMesh: () => buildLoopbackMesh(snapshot().services),
     upstreamConfiguration,
@@ -1186,15 +927,11 @@ function createExternalServicesController({
 }
 
 module.exports = {
-  COMMANDCODE_ALTERNATE_ENDPOINT,
-  COMMANDCODE_DEFAULT_ENDPOINT,
   DEFAULT_INSPECT_TIMEOUT_MS,
   KEEP_ALIVE_POLL_MS,
   SERVICE_IDS,
-  commandCodeAlternateEndpoint,
   createExternalServicesController,
   nextKeepAliveDelayMs,
   normalizeLoopbackExecutionEndpoint,
   normalizeLoopbackServiceEndpoint,
-  projectCommandCodeHealth,
 };

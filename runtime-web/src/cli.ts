@@ -23,13 +23,13 @@ import {
 import { formatDoctorReport, runDoctor } from "./doctor";
 import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
 import { runCommand } from "./process";
+import { augmentNativeModelCatalog } from "./model-catalog";
 import { startServer } from "./server";
 import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, interruptActiveTurn, restartService, startService, stopService, uninstallService } from "./service";
 import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions } from "./setup";
 import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
-import { codexRouterIntegrationMain } from "../scripts/codex-router-integration";
 import { runDevCommand } from "./dev-chat/cli";
 
 const HELP = `codex-chatgpt-web ${VERSION}
@@ -43,7 +43,6 @@ Usage:
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web subagents <status|compatibility-v1|native>
-  codex-chatgpt-web router integrate [--apply] [--with-commandcode-proxy] [--with-cpa] [options]
   codex-chatgpt-web browser check
   codex-chatgpt-web dev launcher
   codex-chatgpt-web dev status [--json]
@@ -559,14 +558,23 @@ async function main(): Promise<void> {
   else if (command === "login") await loginCommand(args);
   else if (command === "doctor" || command === "status") await doctorCommand(args);
   else if (command === "route") await routeCommand(args);
-  else if (command === "subagents") await subagentsCommand(args);
-  else if (command === "router") {
+  else if (command === "catalog") {
     const action = args.shift();
-    if (action !== "integrate") {
-      throw new Error("Router command must be: router integrate");
+    const codex = takeOption(args, "--codex");
+    assertNoArgs(args);
+    if (action !== "ao-web" || !codex || !isAbsolute(codex)) {
+      throw new Error("AO catalog command requires an absolute selected Codex executable");
     }
-    codexRouterIntegrationMain(args);
+    const bundled = runCommand(codex, ["debug", "models", "--bundled"], {
+      timeout: 15_000, maxBuffer: 8 * 1024 * 1024,
+    });
+    if (bundled.status !== 0) throw new Error("Selected Codex bundled catalog is unavailable");
+    const catalog = augmentNativeModelCatalog(JSON.parse(bundled.stdout), loadConfig());
+    const model = (catalog.models as Array<{ slug?: string }>).find((entry) => entry.slug === "chatgpt-web/high");
+    if (!model) throw new Error("Selected Codex has no AO WebGPT model template");
+    stdout.write(`${JSON.stringify({ models: [model] })}\n`);
   }
+  else if (command === "subagents") await subagentsCommand(args);
   else if (command === "browser") {
     const action = args.shift();
     assertNoArgs(args);

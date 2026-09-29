@@ -10,9 +10,6 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 _tauri-scaffold
 
-# 已归档的旧版实现，仅保留本地参考
-/old/
-
 # Rust
 src-tauri/target
 
@@ -34,6 +31,7 @@ aiTemp/
 Trash/
 target/
 /desktop-electron/build/
+/desktop-electron/artifacts/
 
 # Paseo/Anneal source trees are package-time extraResources; git keeps only BUNDLE.json.
 /desktop-electron/vendor/bundled/paseo/**

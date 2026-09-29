@@ -1,0 +1,12 @@
+{
+  "id": "antigravity-cli",
+  "name": "Antigravity CLI",
+  "kind": "managed-tool",
+  "transport": "in-process",
+  "source": {
+    "strategy": "release-binary",
+    "repository": "google-antigravity/antigravity-cli",
+    "manifest": "desktop-electron/vendor/tools/antigravity-cli.json"
+  },
+  "note": "Installs the pinned, checksum-verified Antigravity CLI for Coding Tools and Agent Orchestrator (agy harness). Keeps CPA's Antigravity (Gemini) accounts signed in through CPA's own refresh and OAuth; the CLI's stored credentials are never read."
+}

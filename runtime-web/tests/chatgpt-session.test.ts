@@ -5,6 +5,7 @@ import {
   CHATGPT_EFFORT_CONTROL_SELECTOR,
   CHATGPT_EFFORT_MENU_SELECTOR,
   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
+  CHATGPT_EFFORT_SLIDER_SELECTOR,
   activateChatGptEffortMenu,
   detectChatGptAccountCapabilities,
 } from "../src/chatgpt-session";
@@ -19,12 +20,19 @@ test("composer and effort selectors exclude unrelated editable fields and menu b
     <div data-testid="prompt-textarea" id="composer-testid"></div>
     <div id="prompt-textarea"></div>
     <div contenteditable="true" data-lexical-editor="true" id="composer-lexical"></div>
+    <div contenteditable="true" role="textbox" aria-label="Ask ChatGPT" id="composer-accessible"></div>
     <button aria-haspopup="menu" data-tone="neutral" id="effort"></button>
     <button aria-haspopup="menu" data-testid="model-switcher-dropdown-button" id="model"></button>
+    <button aria-haspopup="menu" aria-label="Select ChatGPT model" id="current-model"></button>
+    <div data-model-picker-power-slider id="power-container"><span role="slider" id="power-slider"></span></div>
+    <div data-model-reasoning-effort-slider id="legacy-container"><span role="slider" id="legacy-slider"></span></div>
+    <span role="slider" id="unrelated-volume-slider"></span>
   </form></body>`);
   const matches = (selector: string) => Array.from(document.querySelectorAll(selector)).map(element => element.id);
-  expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-fallback", "composer-testid", "prompt-textarea", "composer-lexical"]);
-  expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model"]);
+  expect(matches(CHATGPT_COMPOSER_SELECTOR)).toEqual(["composer-fallback", "composer-testid", "prompt-textarea", "composer-lexical", "composer-accessible"]);
+  expect(matches(CHATGPT_EFFORT_CONTROL_SELECTOR)).toEqual(["effort", "model", "current-model"]);
+  expect(matches(CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR)).toEqual(["power-container", "legacy-container"]);
+  expect(matches(CHATGPT_EFFORT_SLIDER_SELECTOR)).toEqual(["power-slider", "legacy-slider"]);
 });
 
 test("effort activation binds the owned menu after the control opens", async () => {
@@ -212,7 +220,7 @@ test("a transient effort control does not turn a Luna-only account into Sol", as
   expect(visibilityReads).toBe(2);
 });
 
-function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean } = {}) {
+function reasoningPicker(options: { max?: string; delay?: number; missing?: boolean; locked?: boolean } = {}) {
   let value = 0;
   const keys: string[] = [];
   const hidden = {
@@ -246,7 +254,8 @@ function reasoningPicker(options: { max?: string; delay?: number; missing?: bool
   };
   const composer = { filter() { return this; }, last() { return this; }, locator: () => ({ locator: () => control }) };
   const modelRows = { count: async () => 3, first() { return this; }, waitFor: async () => {}, nth: () => { throw new Error("Model rows are not effort choices"); } };
-  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows };
+  const menu = { filter() { return this; }, last() { return this; }, isVisible: async () => true, locator: () => modelRows,
+    getByText: () => ({ count: async () => options.locked ? 1 : 0 }) };
   const page = {
     locator: (selector: string) => {
       if (selector === CHATGPT_COMPOSER_SELECTOR) return composer;
@@ -272,6 +281,11 @@ test("an absent effort slider cannot turn three model rows into a saved non-Pro 
 test("the authoritative three-step range is non-Pro; a malformed range fails closed", async () => {
   await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "2" }).page as never)).resolves.toEqual({ solAvailable: true, proAvailable: false });
   await expect(detectChatGptAccountCapabilities(reasoningPicker({ max: "bad" }).page as never)).rejects.toThrow("model controls are unavailable");
+});
+
+test("a five-step picker with locked access does not advertise Pro or Extra High", async () => {
+  await expect(detectChatGptAccountCapabilities(reasoningPicker({ locked: true }).page as never))
+    .resolves.toEqual({ solAvailable: true, proAvailable: false });
 });
 
 test("Pro selection changes the hidden slider through its visible owner, never through model rows", async () => {

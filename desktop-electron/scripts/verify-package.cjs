@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { pinnedCpaSha256, validateCpaRuntime } = require("./prepare-package-resources.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(desktopRoot, "..");
@@ -72,20 +73,14 @@ const REQUIRED_ASAR_FILES = Object.freeze([
   "app-handler/handler-registry.cjs",
   "app-handler/lib/in-process-handler.cjs",
   "app-handler/cpa/handler.cjs",
-  "app-handler/codex-router/handler.cjs",
-  "app-handler/commandcode-proxy/handler.cjs",
-  "app-handler/paseo/handler.cjs",
-  "app-handler/anneal/handler.cjs",
+  "app-handler/agent-orchestrator/handler.cjs",
 ]);
 const REQUIRED_MODULE_FILES = Object.freeze([
   "app-handler/host.cjs",
   "app-handler/handler-registry.cjs",
   "app-handler/lib/in-process-handler.cjs",
   "app-handler/cpa/handler.cjs",
-  "app-handler/codex-router/handler.cjs",
-  "app-handler/commandcode-proxy/handler.cjs",
-  "app-handler/paseo/handler.cjs",
-  "app-handler/anneal/handler.cjs",
+  "app-handler/agent-orchestrator/handler.cjs",
 ]);
 const REQUIRED_MODULE_SHIMS = Object.freeze([
   "modules/host.cjs",
@@ -429,7 +424,7 @@ function envTemplateName(base) {
 function forbiddenName(relative) {
   const base = path.posix.basename(relative).toLowerCase();
   const extension = path.posix.extname(base);
-  // Bundled Paseo/Anneal/CommandCode ship .env.example for first-run setup.
+  // Bundled Paseo/Anneal ship .env.example for first-run setup.
   // Those templates are not secrets; live .env / .env.production still fail closed.
   if (base.startsWith(".env") && !envTemplateName(base)) return "environment-file";
   if (["id_rsa", "id_ecdsa", "id_ed25519", "credentials.json", "secrets.json", "token.json", "service-account.json"].includes(base)) {
@@ -441,7 +436,6 @@ function forbiddenName(relative) {
 function bundledRuntimeVendorPath(relative) {
   const normalized = String(relative).replaceAll("\\", "/");
   const markers = [
-    "bundled-runtimes/codex-router/source/",
     "five-stack-runtime/",
   ];
   for (const marker of markers) {
@@ -451,9 +445,6 @@ function bundledRuntimeVendorPath(relative) {
     if (parts.includes("node_modules") || parts.includes(".venv")) return true;
   }
   return false;
-}
-function bundledRouterVendorPath(relative) {
-  return bundledRuntimeVendorPath(relative);
 }
 function bundledUpstreamSourcePath(relative) {
   const normalized = String(relative).replaceAll("\\", "/");
@@ -509,7 +500,15 @@ function normalizeAsarEntries(entries) {
 function listAsarEntries(asarPath) {
   return normalizeAsarEntries(asarApi().listPackage(asarPath));
 }
+function retiredPackagePath(relative) {
+  const normalized = String(relative).replaceAll("\\", "/").toLowerCase();
+  return /(?:^|\/)(?:paseo|anneal|codex-router|commandcode-proxy)(?:\/|$)/.test(normalized)
+    || /(?:^|\/)vendor\/(?:upstream|managed-components)\/(?:paseo|anneal|codex-router|commandcode-proxy)\.json$/.test(normalized)
+    || /(?:^|\/)electron\/(?:paseo|anneal|codex-router|commandcode-proxy)-[^/]+\.cjs$/.test(normalized);
+}
 function validateAsarIntegration(entries) {
+  const retired = entries.find(retiredPackagePath);
+  if (retired) fail("PACKAGE_RETIRED_ASSET_FOUND", retired);
   const set = new Set(normalizeAsarEntries(entries));
   for (const required of REQUIRED_ASAR_FILES) {
     if (!set.has(required)) fail("PACKAGE_ASAR_REQUIRED_FILE_MISSING", required);
@@ -519,6 +518,34 @@ function scanAsar(asarPath, entries) {
   const api = asarApi();
   return scanEntries(entries, (entry) => api.extractFile(asarPath, entry))
     .map((finding) => ({ ...finding, path: `app.asar/${finding.path}` }));
+}
+
+function validateCpaPlugins(resourcesRoot, expectedManifest = readJson(
+  path.join(desktopRoot, "vendor", "bundled", "cpa-plugins", "BUNDLE.json"),
+  "PACKAGE_CPA_PLUGIN_SOURCE_MANIFEST_INVALID",
+)) {
+  const prefix = "app.asar.unpacked/vendor/bundled/cpa-plugins";
+  const packaged = regularFile(resourcesRoot, `${prefix}/BUNDLE.json`, "PACKAGE_CPA_PLUGIN_MANIFEST");
+  const manifest = readJson(packaged.absolutePath, "PACKAGE_CPA_PLUGIN_MANIFEST_INVALID");
+  if (JSON.stringify(manifest) !== JSON.stringify(expectedManifest)
+    || manifest.id !== "commandcode-go" || manifest.studio?.id !== "auth-commandcode") {
+    fail("PACKAGE_CPA_PLUGIN_MANIFEST_MISMATCH", packaged.absolutePath);
+  }
+  const platform = `${PRODUCT.platform}/${PRODUCT.arch}`;
+  const assets = [manifest.platforms?.[platform], manifest.studio.platforms?.[platform]];
+  return assets.map((asset) => {
+    if (!plain(asset) || !Number.isSafeInteger(asset.size) || asset.size < 1 || !SHA256.test(asset.sha256)) {
+      fail("PACKAGE_CPA_PLUGIN_ASSET_INVALID", platform);
+    }
+    const relative = safePath(asset.path, "PACKAGE_CPA_PLUGIN_PATH_UNSAFE");
+    const file = regularFile(resourcesRoot, `${prefix}/${relative}`, "PACKAGE_CPA_PLUGIN");
+    const bytes = fs.readFileSync(file.absolutePath);
+    if (file.stat.size !== asset.size || digest(bytes) !== asset.sha256
+      || bytes.subarray(0, 2).toString("ascii") !== "MZ") {
+      fail("PACKAGE_CPA_PLUGIN_CHECKSUM_MISMATCH", relative);
+    }
+    return relative;
+  });
 }
 
 function validatePackageManifest(resourcesRoot, appManifest, options = {}) {
@@ -547,6 +574,9 @@ function validatePackageManifest(resourcesRoot, appManifest, options = {}) {
     );
   }
   const runtime = validateRuntimeBundle(path.join(resourcesRoot, "runtime"));
+  validateCpaRuntime(path.join(resourcesRoot, "five-stack-runtime"), PRODUCT.platform, PRODUCT.arch,
+    pinnedCpaSha256(desktopRoot, PRODUCT.platform, PRODUCT.arch));
+  validateCpaPlugins(resourcesRoot);
   validateMigrationRollback(resourcesRoot);
   const notices = fs.readFileSync(path.join(resourcesRoot, REQUIRED_COMPONENTS["third-party-notices"]), "utf8");
   for (const marker of ["codex-chatgpt-web", "MIT", "Apache-2.0"]) {
@@ -574,7 +604,10 @@ function inspectExtractedApplication(appRoot, options = {}) {
   const asarEntries = options.asarEntries ? normalizeAsarEntries(options.asarEntries) : listAsarEntries(asarPath);
   validateAsarIntegration(asarEntries);
   const validated = validatePackageManifest(resources, appManifest, options);
-  const findings = scanEntries(walkFiles(root), (relative) => fs.readFileSync(path.join(root, ...relative.split("/"))));
+  const extractedEntries = walkFiles(root);
+  const retired = extractedEntries.find(retiredPackagePath);
+  if (retired) fail("PACKAGE_RETIRED_ASSET_FOUND", retired);
+  const findings = scanEntries(extractedEntries, (relative) => fs.readFileSync(path.join(root, ...relative.split("/"))));
   if (!options.appManifest) findings.push(...scanAsar(asarPath, asarEntries));
   if (findings.length) fail("PACKAGE_SECRET_MATERIAL_FOUND", JSON.stringify(findings));
   return { ok: true, productVersion: PRODUCT.version, appId: PRODUCT.appId, sourceSha: validated.sourceSha,
@@ -706,13 +739,14 @@ module.exports = {
   REQUIRED_MODULE_SHIMS,
   REQUIRED_COMPONENTS,
   REQUIRED_TUNNEL_MEMBERS,
-  bundledRouterVendorPath,
+  retiredPackagePath,
   bundledRuntimeVendorPath,
   bundledUpstreamSourcePath,
   findWindowsInstaller,
   forbiddenName,
   inspectExtractedApplication,
   validatePackageManifest,
+  validateCpaPlugins,
   validateRuntimeBundle,
   validateTunnelSupplyChain,
   verifyPackage,

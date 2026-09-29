@@ -32,8 +32,6 @@ function toolFrom(snapshot: OriginalUiCatalog | null, toolId: OriginalUiId): Ori
 function emptyCopy(language: Language, toolId: OriginalUiId, ready: boolean): { title: string; body: string } {
   const name = toolId === "cpa"
     ? "CPA"
-    : toolId === "codex-router"
-      ? "Codex Router"
       : toolId === "paseo"
         ? "Paseo"
         : "Anneal";

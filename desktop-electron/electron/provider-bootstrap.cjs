@@ -86,13 +86,6 @@ function installProviderNetwork({
         });
       });
     }
-    try {
-      await controller.reviveCommandCodeSessions();
-    } catch (error) {
-      logger.warn("commandcode.session_revive_failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
     return controller;
   });
   const controllerPromise = providerNetworkControllerPromise;
@@ -143,9 +136,6 @@ function installProviderNetwork({
   });
   handle("launcher:provider-account-probe", async (active, _event, accountId) => (
     publish(await active.probeProviderAccount(accountId))
-  ));
-  handle("launcher:provider-session-import", async (active, _event, accountId) => (
-    publish(await active.importProviderSession(accountId))
   ));
 
   handle("launcher:proxy-profile-save", (active, _event, input) => {

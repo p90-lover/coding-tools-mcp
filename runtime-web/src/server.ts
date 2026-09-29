@@ -49,12 +49,6 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import {
-  augmentWithCodexRouterModels,
-  forwardCodexRouterResponse,
-  parseCodexRouterModelId,
-  resolveCodexRouterConnection,
-} from "./routed-providers";
-import {
   routeRouterWebResponse,
   routerWebModelsResponse,
 } from "./router-web-ingress";
@@ -418,16 +412,6 @@ export async function modelsRequest(
   let catalog: Record<string, unknown>;
   try {
     catalog = augmentNativeModelCatalog(await upstream.json(), config, contextOverride?.());
-    const routerConnection = (() => {
-      try {
-        return resolveCodexRouterConnection();
-      } catch {
-        return undefined;
-      }
-    })();
-    if (routerConnection) {
-      catalog = await augmentWithCodexRouterModels(catalog, config, routerConnection);
-    }
   } catch (error) {
     onFailure?.(modelCatalogFailure("catalog", error));
     return formatErrorResponse(502, "invalid_response_error", error instanceof Error ? error.message : String(error));
@@ -510,38 +494,6 @@ export async function responseRequest(
     }
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
-  }
-  if (typeof requestedModel === "string" && parseCodexRouterModelId(requestedModel)) {
-    let routerConnection;
-    try {
-      routerConnection = resolveCodexRouterConnection();
-    } catch (error) {
-      return formatErrorResponse(
-        400,
-        "invalid_request_error",
-        error instanceof Error ? error.message : "Invalid Codex Router configuration",
-      );
-    }
-    if (!routerConnection) {
-      return formatErrorResponse(
-        503,
-        "upstream_error",
-        "Codex Router is not configured for this Coding Tools runtime",
-      );
-    }
-    try {
-      return await forwardCodexRouterResponse(
-        req,
-        raw as Record<string, unknown>,
-        routerConnection,
-      );
-    } catch (error) {
-      return formatErrorResponse(
-        502,
-        "upstream_error",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
   }
   if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
     try {

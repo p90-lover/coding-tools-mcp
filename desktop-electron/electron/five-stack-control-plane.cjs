@@ -16,8 +16,6 @@ const MAX_RECORDS = 50;
 
 const STACK_IDS = Object.freeze([
   "cpa",
-  "codex-router",
-  "commandcode-proxy",
   "paseo",
   "anneal",
 ]);
@@ -92,7 +90,7 @@ function sanitizePublic(value) {
 
 function requiredStackId(value) {
   const id = text(value);
-  if (!STACK_IDS.includes(id)) throw new Error("Stack must be cpa, codex-router, commandcode-proxy, paseo or anneal");
+  if (!STACK_IDS.includes(id)) throw new Error("Stack must be cpa, paseo or anneal");
   return id;
 }
 
@@ -133,26 +131,10 @@ function routeSummary(plan) {
   });
 }
 
-const CPA_BACKEND_PROVIDERS = Object.freeze([
-  "cliproxyapi-antigravity",
-  "gemini-oauth",
-  "gemini-api",
-  "gemini-reverse-proxy",
-  "ai-studio-reverse-proxy",
-  "aistudio-to-api",
-]);
-const ROUTER_BACKEND_PROVIDERS = Object.freeze([
-  "codex-oauth",
-  "openai-api",
-  "chatgpt-web",
-]);
-
 function inAppBackends(endpoints) {
   return Object.freeze({
     web: endpoints.web.v1,
     cpa: endpoints.cpa.v1,
-    router: endpoints["codex-router"].v1,
-    commandcode: endpoints["commandcode-proxy"].v1,
     paseo: endpoints.paseo.ws,
     anneal: endpoints.anneal.api,
   });
@@ -176,44 +158,22 @@ function stackAvailability(snapshot) {
   const byId = new Map(rows.map((row) => [text(row?.id), row]));
   return Object.freeze({
     cpa: flagUp(byId.get("cpa")),
-    router: flagUp(byId.get("codex-router")),
-    commandcode: flagUp(byId.get("commandcode-proxy")),
     anneal: flagUp(byId.get("anneal")),
     paseo: flagUp(byId.get("paseo")),
   });
 }
 
 function preferredKind(providerId) {
-  if (providerId === "chatgpt-web") return "web";
-  if (providerId === "commandcode-proxy") return "commandcode";
-  if (CPA_BACKEND_PROVIDERS.includes(providerId)) return "cpa";
-  if (ROUTER_BACKEND_PROVIDERS.includes(providerId)) return "router";
-  return "cpa";
+  return providerId === "chatgpt-web" ? "web" : "cpa";
 }
 
 function selectInAppBackend(providerId, backends, availability = {}) {
-  const preferred = preferredKind(providerId);
-  const order = preferred === "web"
-    ? ["web"]
-    : preferred === "commandcode"
-    ? ["commandcode"]
-    : preferred === "router"
-      ? ["router", "cpa", "commandcode"]
-      : ["cpa", "router", "commandcode"];
-  for (const kind of order) {
-    if (availability[kind] === false) continue;
-    return Object.freeze({
-      url: backends[kind],
-      kind,
-      fallback: kind !== preferred,
-      available: availability[kind] !== false,
-    });
-  }
+  const kind = preferredKind(providerId);
   return Object.freeze({
-    url: backends.commandcode,
-    kind: "commandcode",
-    fallback: preferred !== "commandcode",
-    available: false,
+    url: backends[kind],
+    kind,
+    fallback: false,
+    available: availability[kind] !== false,
   });
 }
 
@@ -254,21 +214,6 @@ function apiMap(endpoints) {
         origin: endpoints.cpa.origin,
         bundleOwner: "pr-194",
       }),
-      "codex-router": Object.freeze({
-        id: "codex-router",
-        manage: Object.freeze(["five_stack_manage", "launcher.syncCodexRouter", "launcher.startExternalService"]),
-        monitor: Object.freeze(["five_stack_status", "five_stack_inspect", "launcher.inspectExternalService"]),
-        openai: backends.router,
-        origin: endpoints["codex-router"].origin,
-        bundleOwner: "pr-194",
-      }),
-      "commandcode-proxy": Object.freeze({
-        id: "commandcode-proxy",
-        manage: Object.freeze(["five_stack_manage", "launcher.startExternalService"]),
-        monitor: Object.freeze(["five_stack_status", "five_stack_inspect", "launcher.inspectExternalService"]),
-        openai: backends.commandcode,
-        origin: endpoints["commandcode-proxy"].origin,
-      }),
       paseo: Object.freeze({
         id: "paseo",
         manage: Object.freeze(["five_stack_manage", "paseo_plan", "paseo_run", "execution.update"]),
@@ -283,10 +228,6 @@ function apiMap(endpoints) {
         web: endpoints.anneal.web,
         api: endpoints.anneal.api,
       }),
-    }),
-    compose: Object.freeze({
-      cpaRouterBundle: "pr-194",
-      commandcodeLongrun: "pr-193",
     }),
     mcp: Object.freeze({
       tools: TOOL_NAMES.slice(),
@@ -435,12 +376,12 @@ function createFiveStackControlPlane({
     try { web = typeof getWebBridgeStatus === "function" && await getWebBridgeStatus() === true; }
     catch {}
     if (typeof getServicesSnapshot !== "function") {
-      return { web, cpa: null, router: null, commandcode: null, anneal: null, paseo: null };
+      return { web, cpa: null, anneal: null, paseo: null };
     }
     try {
       return { ...stackAvailability(await getServicesSnapshot()), web };
     } catch {
-      return { web, cpa: null, router: null, commandcode: null, anneal: null, paseo: null };
+      return { web, cpa: null, anneal: null, paseo: null };
     }
   }
 
@@ -1101,10 +1042,10 @@ function createFiveStackControlPlane({
 }
 
 module.exports = {
-  CPA_BACKEND_PROVIDERS,
+
   FIVE_STACK_CONTROL_PLANE_TOOLS: TOOL_NAMES,
   FIVE_STACK_IDS: STACK_IDS,
-  ROUTER_BACKEND_PROVIDERS,
+
   annealHandoffBody,
   apiMap,
   createFiveStackControlPlane,

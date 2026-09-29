@@ -21,6 +21,10 @@ pub struct AppData {
     #[serde(default)]
     pub ao_runs: Vec<crate::integrations::ao::Run>,
     #[serde(default)]
+    pub ao_teams: Vec<crate::integrations::ao_team::Team>,
+    #[serde(default)]
+    pub ao_limits: crate::integrations::ao_team::Limits,
+    #[serde(default)]
     pub execution_book: crate::integrations::execution::book::Book,
     #[serde(default)]
     pub control_board: crate::integrations::board::Board,

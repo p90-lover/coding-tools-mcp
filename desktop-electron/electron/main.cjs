@@ -6,6 +6,7 @@ const { pathToFileURL } = require("node:url");
 const {
   app,
   BrowserWindow,
+  WebContentsView,
   clipboard,
   dialog,
   ipcMain,
@@ -13,6 +14,7 @@ const {
   net: electronNet,
   nativeImage,
   nativeTheme,
+  Notification,
   screen,
   safeStorage,
   session,
@@ -32,33 +34,29 @@ const {
   registerLoggedIpc,
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
-const { HeadlessHost } = require("./headless-host.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
 const { ensurePackagedRuntime, waitForPackagedRuntimeSource } = require("./runtime-install.cjs");
 const { RuntimeSupervisor } = require("./runtime-supervisor.cjs");
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { runtimeBundlePaths } = require("./runtime-command.cjs");
-const { createUpdateController } = require("./update.cjs");
+const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   providerNetworkReady,
   setProviderBrowserHost,
   setProviderCpaConnection,
 } = require("./provider-bootstrap.cjs");
-const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
-const { executionSettingsPayload } = require("./execution-settings.cjs");
-const { createFiveStackControlPlane } = require("./five-stack-control-plane.cjs");
-const { createOrchestrationHeadlessBridge } = require("./orchestration-headless.cjs");
-const { FIVE_STACK_ENDPOINTS } = require("./five-stack-cross-use.cjs");
-const { createManagedExternalServicesController } = require("./managed-external-services.cjs");
+
+const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
 const { installCpaPanelSession } = require("./cpa-panel-session.cjs");
-const { requireAppHandler } = require("./app-handler-paths.cjs");
-function loadCreateCodingToolsAppsHost() {
+const { resolveAppHandlerRoot } = require("./app-handler-paths.cjs");
+const { createBackendBundles } = require("./backend-bundle.cjs");
+function loadCreateCodingToolsAppsHost(appHandlerRoot) {
   try {
-    return requireAppHandler("host.cjs").createCodingToolsAppsHost;
+    return require(path.join(appHandlerRoot || resolveAppHandlerRoot(), "host.cjs")).createCodingToolsAppsHost;
   } catch (error) {
     const failed = error;
     return function createCodingToolsAppsHostUnavailable() {
@@ -66,25 +64,17 @@ function loadCreateCodingToolsAppsHost() {
     };
   }
 }
-const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost();
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
-const { createAgentOrchestratorWorkflow } = require("./agent-orchestrator-workflow.cjs");
 const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {
   KEEP_UI_RESPONSIVE_SKIP_REASON,
   createIpcRegistrar,
-  createLazyFactory,
   createRendererLoader,
   deferUiWork,
   safeRead,
   scheduleFullIpcAfterPaint,
 } = require("./launcher-ready-path.cjs");
-const {
-  applyCommandCodeProxyPlan,
-  commandCodeProxyRegistrationPlan,
-  renderCommandCodeProxyPlan,
-} = require("./commandcode-proxy-plan.cjs");
-const { actUpstream, registerFixedPaseoProviders } = require("./upstream-actions.cjs");
+const { actUpstream } = require("./upstream-actions.cjs");
 const {
   createStateStore,
   nextSessionRefreshReminderAt,
@@ -112,7 +102,8 @@ const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
 const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
 const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL]);
-const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
+const PACKAGED_RENDERER_PATH = path.join(__dirname, "..", "dist", "index.html");
+const PACKAGED_RENDERER_URL = pathToFileURL(PACKAGED_RENDERER_PATH).href;
 const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
 
 process.env.CODEX_CHATGPT_WEB_HOME = CORE_HOME;
@@ -158,6 +149,12 @@ let managedBootstrapController = null;
 let upstreamToolController = null;
 let originalUiController = null;
 let appsHost = null;
+let agentOrchestratorUpstream = null;
+let antigravityReauth = null;
+// The swappable backend tier (see backend-bundle.cjs): restarted in place, never with the core.
+let backendBundles = null;
+let backendControl = null;
+let activeBackend = null;
 let getFiveStack = () => ({ ok: false });
 const appsMcp = createCodingToolsAppsMcp({
   getHost: () => appsHost,
@@ -187,6 +184,111 @@ function send(channel, value) {
 function publishOperation(operation) {
   lastOperation = operation;
   send("launcher:operation", operation);
+}
+
+/** Identifies one installation, so a fresh install's own backend takes over from older bundles. */
+function packagedInstallId() {
+  try {
+    const asar = fs.statSync(path.join(process.resourcesPath, "app.asar"));
+    return `${app.getVersion()}:${Math.round(asar.mtimeMs)}:${asar.size}`;
+  } catch {
+    return app.getVersion();
+  }
+}
+
+// While Coding Tools is open, keep the Codex bridge and MCP tunnel running.
+const BRIDGE_WATCHDOG_INTERVAL_MS = 60_000;
+let bridgeWatchdogTimer = null;
+let bridgeWatchdogBusy = false;
+function startBridgeWatchdog(logger, stateStore) {
+  if (IS_DEV_PROFILE || bridgeWatchdogTimer) return;
+  bridgeWatchdogTimer = setInterval(async () => {
+    if (quitting || shutdownInProgress || bridgeWatchdogBusy || !runtimeSupervisor || !runtimeHost) return;
+    if (!runtimeHost.runtimeConfigSnapshot().configured || runtimeHost.currentOperation()) return;
+    const config = runtimeSupervisor.readConfig();
+    if (!config) return;
+    bridgeWatchdogBusy = true;
+    try {
+      if (await runtimeSupervisor.ownedRuntimeReady(config)) return;
+      logger.warn("runtime.watchdog_restart", { mode: config.mode });
+      const result = await runtimeSupervisor.startIfConfigured();
+      logger.info("runtime.watchdog_result", { status: result?.status });
+      // Point Codex back at the bridge once it is running again (a failed launch restores the old route).
+      if (result?.status === "ready" || result?.status === "degraded") {
+        scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "watchdog" });
+      }
+    } catch (error) {
+      logger.warn("runtime.watchdog_failed", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      bridgeWatchdogBusy = false;
+    }
+  }, BRIDGE_WATCHDOG_INTERVAL_MS);
+  bridgeWatchdogTimer.unref?.();
+}
+function stopBridgeWatchdog() {
+  if (bridgeWatchdogTimer) clearInterval(bridgeWatchdogTimer);
+  bridgeWatchdogTimer = null;
+}
+
+const REFRESH_PARTS = Object.freeze(["ui", "bridge", "mcp", "agent-orchestrator", "cpa", "headless", "backend", "all", "app"]);
+async function refreshPart(part, logger) {
+  if (!REFRESH_PARTS.includes(part)) throw new Error("Choose a part to refresh");
+  const run = async (name, action) => {
+    try {
+      const result = await action();
+      logger.info("launcher.part_refreshed", { part: name });
+      return { part: name, ok: true, ...(result && typeof result === "object" ? { status: result.status } : {}) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn("launcher.part_refresh_failed", { part: name, message });
+      return { part: name, ok: false, message: message.slice(0, 300) };
+    }
+  };
+  const actions = {
+    bridge: () => runtimeSupervisor.restartDaemonOnly(),
+    mcp: () => runtimeSupervisor.restartTunnelOnly(),
+    "agent-orchestrator": async () => { await agentOrchestratorUpstream?.stop(); return agentOrchestratorUpstream?.start(); },
+    cpa: () => externalServicesController.restart("cpa"),
+    headless: async () => { await headlessHost?.shutdown("part-refresh"); return headlessHost?.ensureStarted(); },
+    // Reload the whole backend tier from the active bundle; the core keeps running.
+    backend: () => backendControl.restart("part-refresh"),
+  };
+  if (part === "app") {
+    // Restart the app shell only; the bridge and MCP tunnel stay up and are adopted on relaunch.
+    setTimeout(() => { void requestQuit({ keepBridge: true, relaunch: true }); }, 100);
+    return { ok: true, results: [{ part: "app", ok: true, status: "restarting" }] };
+  }
+  const names = part === "all" ? ["bridge", "mcp", "agent-orchestrator", "cpa", "headless"] : part === "ui" ? [] : [part];
+  const results = [];
+  for (const name of names) results.push(await run(name, actions[name]));
+  if (part === "ui" || part === "all") {
+    setTimeout(() => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reloadIgnoringCache(); }, 150);
+    results.push({ part: "ui", ok: true, status: "reloading" });
+  }
+  return { ok: results.every((result) => result.ok), results };
+}
+
+const AUTHENTICATION_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
+const STARTUP_AUTH_WAIT_MS = 20_000;
+const delay = (ms) => new Promise((resolve) => { setTimeout(resolve, ms).unref?.(); });
+function scheduleAuthenticationRetry(logger, attempt = 0) {
+  if (attempt >= AUTHENTICATION_RETRY_DELAYS_MS.length) return;
+  const timer = setTimeout(() => {
+    if (quitting || shutdownInProgress || !browserHost) return;
+    if (browserHost.snapshot()?.authenticated === true) return;
+    // Never navigate the embedded browser under a running login, smoke test or turn.
+    if (browserHost.currentOperation?.() || browserHost.activeTraceId) {
+      scheduleAuthenticationRetry(logger, attempt);
+      return;
+    }
+    void browserHost.refreshAuthentication().then((state) => {
+      logger.info("browser.session_refresh_retried", { attempt: attempt + 1, authenticated: state?.authenticated === true });
+    }).catch((error) => {
+      logger.warn("browser.session_refresh_failed", { ...navigationErrorForLog(error), attempt: attempt + 1 });
+      scheduleAuthenticationRetry(logger, attempt + 1);
+    });
+  }, AUTHENTICATION_RETRY_DELAYS_MS[attempt]);
+  timer.unref?.();
 }
 
 function stopCatalogVerificationMonitor() {
@@ -355,7 +457,7 @@ async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reaso
   const work = (async () => {
     await waitForRuntimeHostIdle();
     const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready") return { skipped: true, reason: runtime.status, runtime };
+    if (runtime.status !== "ready" && runtime.status !== "degraded") return { skipped: true, reason: runtime.status, runtime };
     const route = await runtimeHost.connectBridgeRoute();
     applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
     logger.info("bridge.auto_connected", { reason, changed: route.changed === true });
@@ -438,91 +540,13 @@ function nativeCopyFor(language) {
   return NATIVE_COPY[language] || NATIVE_COPY.en;
 }
 
-const UPDATE_PROMPT_COPY = Object.freeze({
-  en: Object.freeze({
-    title: "Coding Tools beta update",
-    message: "A newer Coding Tools beta is ready.",
-    detail: "Install it into the current application folder and restart Coding Tools now?",
-    installNow: "Install and restart",
-    later: "Later",
-  }),
-  "zh-CN": Object.freeze({
-    title: "Coding Tools 测试版更新",
-    message: "检测到较新的 Coding Tools 测试版。",
-    detail: "是否安装到当前应用目录并立即重新启动 Coding Tools？",
-    installNow: "安装并重新启动",
-    later: "稍后",
-  }),
-  "zh-TW": Object.freeze({
-    title: "Coding Tools 測試版更新",
-    message: "偵測到較新嘅 Coding Tools 測試版。",
-    detail: "要唔要安裝到目前應用程式目錄，並立即重新啟動 Coding Tools？",
-    installNow: "安裝並重新啟動",
-    later: "稍後",
-  }),
-  ja: Object.freeze({
-    title: "Coding Tools ベータ更新",
-    message: "新しい Coding Tools ベータ版を検出しました。",
-    detail: "現在のアプリケーションフォルダーにインストールして再起動しますか？",
-    installNow: "インストールして再起動",
-    later: "後で",
-  }),
-});
-
-function updatePromptCopyFor(language) {
-  return UPDATE_PROMPT_COPY[language] || UPDATE_PROMPT_COPY.en;
-}
-
-let updatePromptVersion = null;
-let updatePromptInFlight = false;
-
-async function promptForAvailableUpdate(next, { logger, stateStore }) {
-  if (next?.status !== "available" || typeof next.version !== "string") return;
-  if (stateStore.read().automaticUpdates !== true) return;
-  if (updatePromptInFlight || updatePromptVersion === next.version) return;
-
-  updatePromptInFlight = true;
-  updatePromptVersion = next.version;
-  const copy = updatePromptCopyFor(stateStore.read().language);
-  try {
-    showMainWindow();
-    const result = await dialog.showMessageBox(mainWindow, {
-      type: "info",
-      title: copy.title,
-      message: `${copy.message} v${next.version}`,
-      detail: copy.detail,
-      buttons: [copy.installNow, copy.later],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-    });
-    if (result.response !== 0) {
-      logger.info("launcher.update_prompt_deferred", { version: next.version });
-      return;
-    }
-    const launch = await updateController.beginInstall();
-    const quitResult = await requestQuit();
-    if (!quitResult.ok) {
-      updateController.cancelInstall(launch);
-      throw new Error(quitResult.message);
-    }
-  } catch (error) {
-    updatePromptVersion = null;
-    logger.warn("launcher.update_prompt_failed", {
-      version: next.version,
-      message: error instanceof Error ? error.message : String(error),
-    });
-  } finally {
-    updatePromptInFlight = false;
-  }
-}
-
 function updateTrayMenu(language) {
   if (!tray) return;
   const copy = nativeCopyFor(language);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: copy.openLauncher, click: () => showMainWindow() },
     { type: "separator" },
+    { label: copy.restartKeepBridge || "Restart app (keep Codex bridge, MCP, CPA)", click: () => { void requestQuit({ keepBridge: true, relaunch: true }); } },
     { label: copy.quit, click: () => { void requestQuit(); } },
   ]));
 }
@@ -578,7 +602,9 @@ function rendererNavigationAllowed(value) {
   }
   target.hash = "";
   target.search = "";
-  return target.href === PACKAGED_RENDERER_URL;
+  return target.href === (updateController
+    ? pathToFileURL(updateController.getRendererPath()).href
+    : PACKAGED_RENDERER_URL);
 }
 
 function windowStateSnapshot(window) {
@@ -687,11 +713,12 @@ async function loadRenderer(window) {
     await window.loadURL(process.env.VITE_DEV_SERVER_URL);
     return;
   }
-  await window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+  await window.loadFile(updateController?.getRendererPath() ?? PACKAGED_RENDERER_PATH);
 }
 
 async function ensureRendererLoaded(window, logger) {
-  const packagedRendererUrl = isDev ? process.env.VITE_DEV_SERVER_URL : PACKAGED_RENDERER_URL;
+  const packagedRendererUrl = isDev ? process.env.VITE_DEV_SERVER_URL
+    : pathToFileURL(updateController?.getRendererPath() ?? PACKAGED_RENDERER_PATH).href;
   const loader = createRendererLoader({
     getUrl: () => {
       try {
@@ -849,85 +876,22 @@ function registerIpc({ logger, stateStore }) {
     getHeadlessHost: () => headlessHost,
     getUpdateController: () => updateController,
   });
-  const orchestration = createOrchestrationHeadlessBridge({
-    request: (route, body) => {
-      if (!headlessHost) throw new Error("Local execution service is unavailable");
-      return headlessHost.request(route, body);
-    },
-    registerPaseoProviders: async () => {
-      const paseo = externalServicesController?.snapshot()?.services?.find((service) => service.id === "paseo");
-      if (paseo?.status !== "ready") throw new Error("Managed Paseo is not ready");
-      return registerFixedPaseoProviders(paseo.executionEndpoint || FIVE_STACK_ENDPOINTS.paseo.ws, "");
-    },
-  });
-  const fiveStackControlPlane = createLazyFactory(() => createFiveStackControlPlane({
-    ...orchestration,
-    planProvider: createProviderExecutionPlan,
-    getWebBridgeStatus: async () => {
-      if (!runtimeHost || browserHost?.snapshot()?.authenticated !== true) return false;
-      try {
-        const route = await runtimeHost.bridgeStatus("paseo-web-route-check");
-        if (!route.installed || !route.active) return false;
-        const health = await fetch(`${FIVE_STACK_ENDPOINTS.web.origin}/healthz`, {
-          signal: AbortSignal.timeout(3_000),
-        });
-        return health.ok;
-      } catch {
-        return false;
-      }
-    },
-    getProviderSnapshot: async () => {
-      const providerNetwork = await providerNetworkReady();
-      return providerNetwork.store.snapshot();
-    },
-    getServicesSnapshot: () => safeRead(
-      "five-stack.services_snapshot",
-      () => {
-        if (!externalServicesController) return { version: 1, services: [] };
-        return externalServicesController.snapshot();
-      },
-      { version: 1, services: [] },
-      logger,
-    ),
-    inspectService: (stack) => {
-      if (!externalServicesController) throw new Error("External services controller is unavailable");
-      return externalServicesController.inspect(stack);
-    },
-    manageService: async (stack, action) => {
-      if (!externalServicesController) throw new Error("External services controller is unavailable");
-      if (action === "start") return externalServicesController.start(stack);
-      if (action === "stop") return externalServicesController.stop(stack);
-      if (action === "restart") return externalServicesController.restart(stack);
-      if (action === "repair") return externalServicesController.repairManagedComponent(stack);
-      throw new Error(`Unsupported manage action ${action}`);
-    },
-    handoffAnnealTask: async ({ projectId, body }) => {
-      const connection = externalServicesController?.loopbackRequest?.("anneal");
-      const result = await actUpstream({
-        toolId: "anneal",
-        op: "create",
-        projectId,
-        endpoint: connection?.origin || "http://127.0.0.1:5173/api/",
-        name: body?.name,
-        description: body?.description,
-        cwd: body?.workingDirectory,
-      });
-      return result.body && typeof result.body === "object" ? result.body : { id: null };
-    },
-    fetchAnnealTask: async ({ taskId }) => {
-      const connection = externalServicesController?.loopbackRequest?.("anneal");
-      const result = await actUpstream({
-        toolId: "anneal",
-        op: "preview",
-        taskId,
-        endpoint: connection?.origin || "http://127.0.0.1:5173/api/",
-      });
-      return result.body;
-    },
-  }));
-  getFiveStack = () => fiveStackControlPlane.tryGet();
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
+  handle("coding-tools:workspaces:create", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!headlessHost || !input || Object.keys(input).some((key) => !["path", "name", "confirm"].includes(key))
+      || input.confirm !== true || typeof input.path !== "string" || input.path.length > 4096
+      || !path.isAbsolute(input.path) || input.name !== undefined && (typeof input.name !== "string" || !input.name.trim() || input.name.length > 128)) {
+      throw new Error("Select an absolute workspace directory and confirm creation");
+    }
+    const canonical = await fs.promises.realpath(input.path);
+    if (!(await fs.promises.stat(canonical)).isDirectory()) throw new Error("Workspace must be a directory");
+    const created = await headlessHost.request("/api/v1/workspaces", {
+      path: canonical, ...(input.name ? { name: input.name.trim() } : {}), confirm: true,
+    }, { localConfirmation: true });
+    return { cancelled: false, id: created.id, name: created.name, path: created.path };
+  });
   handle("coding-tools:workspaces:auth-update", async (event, input) => {
     assertFocusedMainWindow(event, true);
     const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
@@ -1160,12 +1124,7 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:integrations:snapshot", async (event) => {
     const snapshot = await codingTools.integrationsSnapshot(event);
-    const plane = fiveStackControlPlane.tryGet();
-    return {
-      ...snapshot,
-      available: true,
-      five_stack: plane.ok ? plane.value.apiMap() : null,
-    };
+    return { ...snapshot, available: true, five_stack: null };
   });
   handle("coding-tools:updates:status", (event) => codingTools.updatesStatus(event));
   handle("coding-tools:diagnostics:snapshot", (event) => codingTools.diagnosticsSnapshot(event));
@@ -1177,22 +1136,18 @@ function registerIpc({ logger, stateStore }) {
     } catch {
       headless = { tools: [], unavailable: true };
     }
-    const plane = fiveStackControlPlane.tryGet();
-    const merged = plane.ok ? plane.value.mergeCatalog(headless) : headless;
-    return mergeAppsCatalog(merged);
+    return mergeAppsCatalog({
+      ...headless,
+      tools: (headless.tools || []).filter((tool) => !/^(five_stack_|paseo_|anneal_)/.test(tool.name)),
+    });
   });
   handle("coding-tools:tools:call", async (event, input) => {
+    if (/^(five_stack_|paseo_|anneal_)/.test(input.tool)) {
+      throw new Error(`Retired Coding Tools tool: ${input.tool}`);
+    }
     if (appsMcp.hasTool(input.tool)) {
       assertFocusedMainWindow(event, !appsMcp.isReadOnly(input.tool, input.arguments ?? {}));
       return appsMcp.callTool(input.tool, input.arguments ?? {}, {
-        workspaceId: input.workspaceId,
-        requestId: input.requestId,
-      });
-    }
-    const plane = fiveStackControlPlane.tryGet();
-    if (plane.ok && plane.value.hasTool(input.tool)) {
-      assertFocusedMainWindow(event, !plane.value.isReadOnly(input.tool));
-      return plane.value.callTool(input.tool, input.arguments ?? {}, {
         workspaceId: input.workspaceId,
         requestId: input.requestId,
       });
@@ -1205,70 +1160,14 @@ function registerIpc({ logger, stateStore }) {
     return headlessHost.request("/api/v1/execution/read", {
       workspace_id: input.workspaceId,
       mission_id: input.missionId ?? null,
-      refresh_source: input.refreshSource === true,
+      refresh_source: false,
     });
   });
-  handle("coding-tools:execution:provider", async (event, input) => {
-    assertFocusedMainWindow(event, true);
-    if (!headlessHost) throw new Error("Local execution service is unavailable");
-
-    let settings = input.settings;
-    let selectedPlan = null;
-    const controlCredential = typeof input.controlCredential === "string"
-      ? input.controlCredential.trim()
-      : "";
-    const plannedWorkload = input.operation === "configure"
-      && settings
-      && (settings.engine === "paseo" || settings.engine === "anneal");
-    if (plannedWorkload) {
-      if (!input.providerAccountId?.trim()) {
-        throw new Error("Select an exact provider account before execution");
-      }
-      const providerNetwork = await providerNetworkReady();
-      const plan = createProviderExecutionPlan(providerNetwork.store.snapshot(), {
-        workload: settings.engine,
-        providerId: settings.provider,
-        accountId: input.providerAccountId ?? undefined,
-        model: settings.model,
-        allowFallback: false,
-      });
-      selectedPlan = plan;
-      settings = {
-        ...settings,
-        provider: plan.provider.id,
-        model: plan.model ?? settings.model,
-      };
-      logger.info("execution.provider_planned", {
-        workload: plan.workload,
-        providerId: plan.provider.id,
-        accountId: plan.account.id,
-        model: plan.model,
-        fallbackUsed: plan.fallbackUsed,
-        proxyMode: plan.proxy.mode,
-        proxySource: plan.proxy.source,
-        proxyProfileId: plan.proxy.profile?.id ?? null,
-      });
-    }
-
-    return headlessHost.request("/api/v1/execution/provider", {
-      workspace_id: input.workspaceId,
-      operation: input.operation,
-      expected_revision: input.expectedRevision ?? null,
-      binding_id: input.bindingId ?? null,
-      settings: executionSettingsPayload(settings, selectedPlan),
-      credential: controlCredential,
-      confirm: input.confirm === true,
-    });
+  handle("coding-tools:execution:provider", async () => {
+    throw new Error("Retired legacy execution mutation: provider");
   });
-  handle("coding-tools:execution:update", async (event, input) => {
-    assertFocusedMainWindow(event, true);
-    if (!headlessHost) throw new Error("Local execution service is unavailable");
-    return headlessHost.request("/api/v1/execution/update", {
-      workspace_id: input.workspaceId,
-      expected_revision: input.expectedRevision,
-      change: input.change,
-      confirm: input.confirm === true,
-    });
+  handle("coding-tools:execution:update", async () => {
+    throw new Error("Retired legacy execution mutation: update");
   });
 
   handle("launcher:snapshot", async () => launcherSnapshotPayload(stateStore, logger));
@@ -1357,41 +1256,6 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.restart(serviceId);
   });
-  handle("launcher:codex-router-sync", (event) => {
-    assertFocusedMainWindow(event, true);
-    if (!externalServicesController) throw new Error("External services controller is unavailable");
-    return externalServicesController.syncCodexRouter();
-  });
-  handle("launcher:commandcode-proxy-plan", (event, input = {}) => {
-    assertFocusedMainWindow(event, false);
-    if (!externalServicesController) throw new Error("External services controller is unavailable");
-    const snapshot = externalServicesController.snapshot();
-    const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");
-    const router = snapshot.services.find((service) => service.id === "codex-router");
-    const baseUrl = input.baseUrl || commandCode?.endpoint || "http://127.0.0.1:9090/";
-    const plan = commandCodeProxyRegistrationPlan({
-      baseUrl,
-      routerCli: input.routerCli || router?.routerCli || "model-router",
-      curateCli: input.curateCli || router?.curateCli || "curate-models",
-    });
-    return {
-      text: renderCommandCodeProxyPlan(plan),
-      credentialPromptRequired: true,
-      provider: plan.provider,
-    };
-  });
-  handle("launcher:commandcode-proxy-apply", (event, input = {}) => {
-    assertFocusedMainWindow(event, true);
-    if (!externalServicesController) throw new Error("External services controller is unavailable");
-    const snapshot = externalServicesController.snapshot();
-    const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");
-    const router = snapshot.services.find((service) => service.id === "codex-router");
-    return applyCommandCodeProxyPlan({
-      baseUrl: input.baseUrl || commandCode?.endpoint || "http://127.0.0.1:9090/",
-      routerCli: input.routerCli || router?.routerCli || "model-router",
-      curateCli: input.curateCli || router?.curateCli || "curate-models",
-    });
-  });
   handle("launcher:managed-bootstrap-snapshot", (event) => {
     assertFocusedMainWindow(event, false);
     if (!managedBootstrapController) throw new Error("Managed bootstrap controller is unavailable");
@@ -1447,9 +1311,12 @@ function registerIpc({ logger, stateStore }) {
     return upstreamToolController.openExternalTool(toolId, section);
   });
   handle("launcher:upstream-tool-act", (event, input = {}) => {
+    const toolId = String(input.toolId || "").trim();
+    if (["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(toolId)) {
+      throw new Error(`Retired upstream integration: ${toolId}`);
+    }
     assertFocusedMainWindow(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
-    const toolId = String(input.toolId || "").trim();
     const config = externalServicesController.upstreamConfiguration(toolId);
     const annealConnection = toolId === "anneal" ? externalServicesController.loopbackRequest("anneal") : null;
     return actUpstream({
@@ -1512,7 +1379,9 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:apps:call", (event, input = {}) => {
     if (!appsHost) throw new Error("Apps host is unavailable");
-    assertFocusedMainWindow(event, !appsHost.isReadOnly(input.moduleId, input.operation));
+    const passiveAoLayout = input.moduleId === "agent-orchestrator"
+      && ["upstream_bounds", "upstream_hide"].includes(input.operation);
+    assertFocusedMainWindow(event, !passiveAoLayout && !appsHost.isReadOnly(input.moduleId, input.operation));
     return appsHost.call(input.moduleId, input.operation, input.arguments || {});
   });
 
@@ -1752,6 +1621,7 @@ function registerIpc({ logger, stateStore }) {
     stopCatalogVerificationMonitor();
     return { cancelled: false, state };
   });
+  handle("launcher:refresh-part", async (_event, part) => refreshPart(String(part || ""), logger));
   handle("launcher:setup-core", async () => {
     const setupState = stateStore.read();
     if (setupState.browserInteractionMode === "automatic") {
@@ -1947,7 +1817,9 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:update-automatic", async (_event, enabled) => {
     const state = stateStore.update({ automaticUpdates: enabled === true });
     send("launcher:state-changed", state);
+    updateController?.stopPeriodicChecks();
     if (state.automaticUpdates && updateController) {
+      updateController.startPeriodicChecks();
       void updateController.checkNow({ force: true }).catch((error) => {
         logger.warn("launcher.update_check_failed", {
           message: error instanceof Error ? error.message : String(error),
@@ -1958,13 +1830,7 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
-    const launch = await updateController.beginInstall();
-    const result = await requestQuit();
-    if (!result.ok) {
-      updateController.cancelInstall(launch);
-      throw new Error(result.message);
-    }
-    return true;
+    return updateController.beginInstall();
   });
   handle("launcher:window-state", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -1978,7 +1844,7 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
-async function requestQuit() {
+async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
@@ -1995,7 +1861,8 @@ async function requestQuit() {
       throw new Error(`Wait for ${runtimeOperation} to finish before quitting Codex Web GPT`);
     }
     try {
-      await runtimeHost?.restoreBridgeRoute();
+      // A keep-bridge restart leaves Codex pointed at the bridge, which stays running.
+      if (!keepBridge) await runtimeHost?.restoreBridgeRoute();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const decision = await dialog.showMessageBox(mainWindow, {
@@ -2016,16 +1883,25 @@ async function requestQuit() {
     }
     managedBootstrapController?.dispose();
     originalUiController?.dispose();
-    externalServicesController?.dispose();
+    externalServicesController?.dispose({ keepPersistent: keepBridge });
     upstreamToolController?.dispose();
-    await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    const detached = keepBridge ? await runtimeSupervisor?.detach(relaunch ? "launcher-restart" : "launcher-quit").catch((error) => {
+      publishOperation({ name: "launcher-quit", status: "warning", message: `Codex bridge could not be kept running: ${error instanceof Error ? error.message : String(error)}` });
+      return null;
+    }) : null;
+    if (detached?.status !== "detached") await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    stopBridgeWatchdog();
     await headlessHost?.shutdown("launcher-quit");
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
+    backendBundles?.stopWatching();
+    await agentOrchestratorUpstream?.stop();
+    antigravityReauth?.stop();
     await browserHost?.persistSession();
     browserHost?.destroy();
     await browserControl?.close();
     exitCommitted = true;
+    if (relaunch) app.relaunch();
     app.quit();
     return { ok: true };
   } catch (error) {
@@ -2105,6 +1981,16 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
+  updateController = createGuiUpdateController({
+    currentVersion: app.getVersion(),
+    shellHash: guiShellHash(__dirname),
+    packaged: app.isPackaged && !IS_DEV_PROFILE,
+    rendererPath: PACKAGED_RENDERER_PATH,
+    updateRoot: path.join(app.getPath("userData"), "gui-updates"),
+    reloadRenderer: (entry) => mainWindow.loadFile(entry),
+    publish: (state) => send("launcher:update-state", state),
+    logger,
+  });
   registerMinimalPreRendererIpc({ logger, stateStore });
   externalServicesController = createManagedExternalServicesController({
     dataRoot: path.join(app.getPath("userData"), "integrations"),
@@ -2118,24 +2004,9 @@ async function start() {
     safeStorage,
     env: process.env,
     logger,
+    // CPA (the local model proxy) is core: it outlives launcher restarts and backend updates.
+    persistentComponents: IS_DEV_PROFILE ? [] : ["cpa"],
     publish: (value) => send("launcher:external-services-changed", value),
-    runRuntimeCommand: async (args) => {
-      if (!runtimeSupervisor) throw new Error("Packaged runtime is not ready");
-      const invocation = runtimeSupervisor.runtimeCommand(args);
-      const result = spawnSync(invocation.executable, invocation.args, {
-        cwd: invocation.cwd,
-        env: { ...process.env },
-        encoding: "utf8",
-        timeout: 120_000,
-        windowsHide: true,
-      });
-      if (result.error) throw result.error;
-      if (result.status !== 0) {
-        const detail = String(result.stderr || result.stdout || "").trim();
-        throw new Error(`Codex Router integration failed (${result.status ?? "unknown"})${detail ? `: ${detail}` : ""}`);
-      }
-      return { stdout: String(result.stdout || ""), stderr: String(result.stderr || "") };
-    },
   });
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
   managedBootstrapController = createManagedBootstrap({
@@ -2166,86 +2037,219 @@ async function start() {
     },
   });
   const providerServices = createAppsProviderServices({ providerNetworkReady });
-  const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
-    requestHeadless: (endpoint, body, options) => {
-      if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
-      return headlessHost.request(endpoint, body, options);
+  const confirmAoAction = async ({ message, detail }) => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+      throw new Error("Use the focused Coding Tools window to approve workflow changes");
+    }
+    const answer = await dialog.showMessageBox(mainWindow, {
+      type: "warning", title: "Coding Tools: Agent Orchestrator",
+      message: String(message).slice(0, 200), detail: String(detail).slice(0, 65_536),
+      buttons: ["Cancel", "Continue"], defaultId: 0, cancelId: 0, noLink: true,
+    });
+    return answer.response === 1;
+  };
+  const listHeadlessWorkspaces = async () => {
+    const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
+    if (!Array.isArray(catalog.workspaces)) throw new Error("Workspace catalog is unavailable");
+    return catalog.workspaces;
+  };
+  // The Antigravity CLI always runs through the app's global network proxy (fail closed).
+  const antigravityProxyEnvironment = () => {
+    const env = resolveManagedProxyEnvironment("antigravity-cli", path.join(app.getPath("userData"), "integrations"), safeStorage);
+    const allowed = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY"];
+    return Object.fromEntries(allowed.filter(key => typeof env[key] === "string" && env[key]).map(key => [key, env[key]]));
+  };
+  // Backend tier: the headless service, Agent Orchestrator, Antigravity CLI and app modules load
+  // from the active backend bundle and restart in place. The GUI, Codex bridge, MCP tunnel and
+  // CPA proxy are not touched when the backend changes.
+  backendBundles = createBackendBundles({
+    userDataRoot: app.getPath("userData"),
+    builtin: {
+      codeRoot: path.join(__dirname, ".."),
+      appHandlerRoot: (() => { try { return resolveAppHandlerRoot(); } catch { return null; } })(),
+      resourcesRoot: null,
     },
-    cpaConnection: () => externalServicesController.cpaConnection(),
-    confirm: async ({ message, detail }) => {
-      if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
-        throw new Error("Use the focused Coding Tools window to approve workflow changes");
+    installId: app.isPackaged ? packagedInstallId() : null,
+    logger,
+  });
+  const startBackendFrom = (backend) => {
+    const { createAntigravityCli, shimProxyEnvironment } = backendBundles.requireModule(backend, "antigravity-cli.cjs");
+    const { createAntigravityReauth } = backendBundles.requireModule(backend, "cpa-antigravity-reauth.cjs");
+    const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
+    const { createAgentOrchestratorWorkflow, resolveAoNativeConnection } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
+    const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
+    const createCodingToolsAppsHost = loadCreateCodingToolsAppsHost(backend.appHandlerRoot);
+    const antigravityCli = createAntigravityCli({
+      toolsRoot: path.join(app.getPath("userData"), "tools"),
+      confirm: confirmAoAction, getWorkspaces: listHeadlessWorkspaces, logger,
+    });
+    antigravityReauth = createAntigravityReauth({
+      cpaConnection: () => externalServicesController?.cpaConnection(),
+      openExternal: (url) => {
+        const target = new URL(url);
+        if (target.protocol !== "https:" || target.username || target.password) throw new Error("CPA sign-in URL is unsafe");
+        return shell.openExternal(target.toString());
+      },
+      notify: ({ title, body }) => { if (Notification.isSupported()) new Notification({ title, body, silent: true }).show(); },
+      statePath: path.join(app.getPath("userData"), "tools", "antigravity-reauth.json"),
+      logger,
+    });
+    antigravityReauth.start();
+    setTimeout(() => { void antigravityReauth?.sweep(); }, 90_000).unref?.();
+    const antigravityCall = async (operation, args = {}) => {
+      switch (operation) {
+        case "status": {
+          let proxy;
+          try { proxy = { configured: Boolean(antigravityProxyEnvironment().HTTPS_PROXY) }; }
+          catch (error) { proxy = { configured: false, error: String(error?.message || error).slice(0, 200) }; }
+          return { ...antigravityCli.status(), proxy, cpa: await antigravityReauth.status() };
+        }
+        case "install": return antigravityCli.install();
+        case "terminal_open": {
+          const env = antigravityProxyEnvironment();
+          if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy in Network Proxy first");
+          const terminal = await agentOrchestratorUpstream.harness.openTerminal({
+            executable: antigravityCli.executable(), env, workspaceId: args.workspaceId || undefined,
+          });
+          return { ok: true, ...terminal, title: "agy" };
+        }
+        case "terminal_close":
+          await agentOrchestratorUpstream.harness.closeTerminal(args.handle);
+          return { ok: true };
+        case "refresh": return antigravityReauth.refresh(args.name);
+        case "sign_in": return antigravityReauth.signIn(args.name);
+        case "sweep": return antigravityReauth.sweep();
+        case "set_auto": return antigravityReauth.setAuto(args.auto);
+        default: throw new Error("Unknown Antigravity CLI operation");
       }
-      const answer = await dialog.showMessageBox(mainWindow, {
-        type: "warning",
-        title: "Coding Tools · Agent Orchestrator",
-        message: String(message).slice(0, 200),
-        detail: String(detail).slice(0, 1200),
-        buttons: ["Cancel", "Continue"],
-        defaultId: 0,
-        cancelId: 0,
-        noLink: true,
+    };
+    agentOrchestratorUpstream = createAgentOrchestratorUpstream({
+      resourceRoot: backend.source === "bundle"
+        ? path.join(backend.resourcesRoot, "agent-orchestrator")
+        : app.isPackaged
+          ? path.join(process.resourcesPath, "agent-orchestrator")
+          : path.join(__dirname, "..", "build", "agent-orchestrator"),
+      dataRoot: process.env.CODING_TOOLS_AO_DATA_DIR
+        ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
+        : path.join(app.getPath("home"), ".ao", IS_DEV_PROFILE ? "coding-tools-development" : "coding-tools"),
+      confirm: confirmAoAction, getWindow: () => mainWindow,
+      getWorkspaces: listHeadlessWorkspaces,
+      extraPath: () => antigravityCli.binDir(),
+      extraEnv: () => { try { return shimProxyEnvironment(antigravityProxyEnvironment()); } catch { return {}; } },
+      missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
+      WebContentsView, dialog, shell, logger,
+    });
+    const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
+      requestHeadless: (endpoint, body, options) => {
+        if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");
+        return headlessHost.request(endpoint, body, options);
+      },
+      cpaConnection: () => externalServicesController.cpaConnection(),
+      webBridgeConnection: () => {
+        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const config = snapshot.config;
+        if (!snapshot.configured || config?.host !== "127.0.0.1"
+          || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
+          throw new Error("Managed WebGPT bridge is not configured on loopback");
+        }
+        return { baseUrl: `http://127.0.0.1:${config.port}/v1` };
+      },
+      webModelCatalog: async ({ executable }) => {
+        const result = await runtimeHost.run("ao-web-model-catalog", ["catalog", "ao-web", "--codex", executable], {
+          embedded: true, timeoutMs: 20_000, message: "Checking the AO WebGPT model",
+          successMessage: "AO WebGPT model checked",
+        });
+        const catalog = JSON.parse(result.stdout);
+        if (!Array.isArray(catalog.models) || catalog.models.length !== 1
+          || catalog.models[0]?.slug !== "chatgpt-web/high") {
+          throw new Error("AO WebGPT catalog is unavailable");
+        }
+        return catalog;
+      },
+      resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
+      aoHarness: agentOrchestratorUpstream.harness,
+      confirm: confirmAoAction,
+    });
+    try {
+      appsHost = createCodingToolsAppsHost({
+      services: {
+        inspect: (id) => externalServicesController.inspect(id),
+        agentOrchestrator: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
+        agentOrchestratorUpstream: (operation, args) => agentOrchestratorUpstream.call(operation, args),
+        antigravityCli: antigravityCall,
+        start: (id) => externalServicesController.start(id),
+        stop: (id) => externalServicesController.stop(id),
+        restart: (id) => externalServicesController.restart(id),
+        repair: (id) => externalServicesController.repairManagedComponent(id),
+        loopbackRequest: (id) => externalServicesController.loopbackRequest?.(id) || null,
+        listProviders: (input) => providerServices.listProviders(input),
+        linkProvider: (input) => providerServices.linkProvider(input),
+        unlinkProvider: (input) => providerServices.unlinkProvider(input),
+        providerStatus: (input) => providerServices.providerStatus(input),
+        providerCatalog: (id) => providerServices.providerCatalog(id),
+        explainEmptyModels: (id, details) => providerServices.explainEmptyModels(id, details),
+      },
+      actUpstream,
+      getFiveStack: () => getFiveStack(),
+    });
+    } catch (error) {
+      logger.warn("apps.host_prefer_local_failed", {
+        message: error instanceof Error ? error.message : String(error),
+        softFail: true,
       });
-      return answer.response === 1;
-    },
-  });
-  try {
-    appsHost = createCodingToolsAppsHost({
-    services: {
-      inspect: (id) => externalServicesController.inspect(id),
-      agentOrchestrator: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
-      start: (id) => externalServicesController.start(id),
-      stop: (id) => externalServicesController.stop(id),
-      restart: (id) => externalServicesController.restart(id),
-      repair: (id) => externalServicesController.repairManagedComponent(id),
-      syncCodexRouter: () => externalServicesController.syncCodexRouter(),
-      loopbackRequest: (id) => externalServicesController.loopbackRequest?.(id) || null,
-      listProviders: (input) => providerServices.listProviders(input),
-      linkProvider: (input) => providerServices.linkProvider(input),
-      unlinkProvider: (input) => providerServices.unlinkProvider(input),
-      providerStatus: (input) => providerServices.providerStatus(input),
-      providerCatalog: (id) => providerServices.providerCatalog(id),
-      explainEmptyModels: (id, details) => providerServices.explainEmptyModels(id, details),
-      commandCodeProxyPlan: (input = {}) => {
-        const snapshot = externalServicesController.snapshot();
-        const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");
-        const router = snapshot.services.find((service) => service.id === "codex-router");
-        const plan = commandCodeProxyRegistrationPlan({
-          baseUrl: input.baseUrl || commandCode?.endpoint || "http://127.0.0.1:9090/",
-          routerCli: input.routerCli || router?.routerCli || "model-router",
-          curateCli: input.curateCli || router?.curateCli || "curate-models",
-        });
-        return {
-          text: renderCommandCodeProxyPlan(plan),
-          credentialPromptRequired: true,
-          provider: plan.provider,
-        };
-      },
-      applyCommandCodeProxyPlan: (input = {}) => {
-        const snapshot = externalServicesController.snapshot();
-        const commandCode = snapshot.services.find((service) => service.id === "commandcode-proxy");
-        const router = snapshot.services.find((service) => service.id === "codex-router");
-        return applyCommandCodeProxyPlan({
-          baseUrl: input.baseUrl || commandCode?.endpoint || "http://127.0.0.1:9090/",
-          routerCli: input.routerCli || router?.routerCli || "model-router",
-          curateCli: input.curateCli || router?.curateCli || "curate-models",
-        });
-      },
-    },
-    actUpstream,
-    getFiveStack: () => getFiveStack(),
-  });
-  } catch (error) {
-    logger.warn("apps.host_prefer_local_failed", {
-      message: error instanceof Error ? error.message : String(error),
-      softFail: true,
+      appsHost = null;
+    }
+    headlessHost = new HeadlessHost({
+      app,
+      logger,
+      sourceRoot: SOURCE_ROOT,
+      binaryRoot: backend.source === "bundle" ? backend.resourcesRoot : null,
+    });
+    activeBackend = backend;
+    logger.info("backend.started", { source: backend.source, id: backend.id });
+  };
+  const startBackend = () => {
+    const backend = backendBundles.current();
+    try {
+      startBackendFrom(backend);
+    } catch (error) {
+      if (backend.source !== "bundle") throw error;
+      // A broken deployed backend never takes the app down: fall back to the installer's backend.
+      logger.error("backend.bundle_start_failed", { id: backend.id, message: error instanceof Error ? error.message : String(error) });
+      antigravityReauth?.stop();
+      backendBundles.useBuiltin();
+      startBackendFrom(backendBundles.current());
+      publishOperation({ name: "backend-update", status: "failed", message: `Backend ${backend.id} failed to start; using the installed backend` });
+    }
+  };
+  const stopBackend = async (reason) => {
+    antigravityReauth?.stop();
+    await agentOrchestratorUpstream?.stop().catch((error) => {
+      logger.warn("backend.ao_stop_failed", { message: error instanceof Error ? error.message : String(error) });
+    });
+    await headlessHost?.shutdown(reason).catch((error) => {
+      logger.warn("backend.headless_stop_failed", { message: error instanceof Error ? error.message : String(error) });
     });
     appsHost = null;
-  }
-  headlessHost = new HeadlessHost({
-    app,
-    logger,
-    sourceRoot: SOURCE_ROOT,
+  };
+  startBackend();
+  let backendRestart = null;
+  backendControl = {
+    current: () => activeBackend,
+    // Serialized: a second request waits for the running restart instead of racing it.
+    restart: (reason) => {
+      backendRestart = Promise.resolve(backendRestart).catch(() => undefined).then(async () => {
+        await stopBackend(reason);
+        startBackend();
+        return { status: "restarted", source: activeBackend.source, id: activeBackend.id };
+      });
+      return backendRestart;
+    },
+  };
+  backendBundles.watchIncoming(async (manifest) => {
+    publishOperation({ name: "backend-update", status: "running", message: `Installing backend ${manifest.id}` });
+    await backendControl.restart("backend-update");
+    publishOperation({ name: "backend-update", status: "completed", message: `Backend ${manifest.id} is live; the app, Codex bridge, MCP and CPA kept running` });
   });
   nativeTheme.themeSource = "system";
   mainWindow = createWindow({
@@ -2314,6 +2318,8 @@ async function start() {
     launcherProfile: LAUNCHER_PROFILE.kind,
     publishOperation,
     getRuntimeEnvironment: () => externalServicesController.runtimeEnvironment(),
+    // The Codex bridge and MCP tunnel outlive launcher restarts and updates; the next launcher adopts them.
+    persistentBridge: !IS_DEV_PROFILE,
   });
   runtimeHost = new RuntimeHost({
     app,
@@ -2361,25 +2367,6 @@ async function start() {
     getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
   });
   setProviderBrowserHost(() => browserHost);
-  const updaterRuntimeRoot = runtimeRootProvider();
-  updateController = createUpdateController({
-    currentVersion: app.getVersion(),
-    platform: process.platform,
-    arch: process.arch,
-    packaged: app.isPackaged && !IS_DEV_PROFILE,
-    executablePath: process.execPath,
-    runtimeExecutable: updaterRuntimeRoot
-      ? runtimeBundlePaths(updaterRuntimeRoot, process.platform).executable
-      : null,
-    logsDirectory: app.getPath("logs"),
-    publish: (state) => {
-      send("launcher:update-state", state);
-      if (state.status === "available") {
-        void promptForAvailableUpdate(state, { logger, stateStore });
-      }
-    },
-    logger,
-  });
   registerIpc({ logger, stateStore });
   const trayAvailable = createTray(logger, stateStore.read().language);
   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
@@ -2404,6 +2391,8 @@ async function start() {
       logger.warn("browser.session_refresh_failed", {
         ...navigationErrorForLog(error),
       });
+      // A slow proxy or network at launch must not leave a saved sign-in looking signed out.
+      scheduleAuthenticationRetry(logger);
       return browserHost.snapshot();
     });
   }
@@ -2413,7 +2402,7 @@ async function start() {
         message: error instanceof Error ? error.message : String(error),
       });
     });
-    updateController.startPeriodicChecks();
+    if (stateStore.read().automaticUpdates) updateController.startPeriodicChecks();
   }
   if (launcherSmokeTest) {
     const smokeRuntimeRoot = runtimeRootProvider();
@@ -2481,7 +2470,10 @@ async function start() {
       });
     }
   } else runtimeStartupInFlight = (async () => {
-    await startupAuthenticationRefresh;
+    // A runtime upgrade probes the ChatGPT browser, so it waits for the saved-session refresh to settle.
+    // Otherwise a slow sign-in or proxy must not hold the Codex bridge down: start it after a bounded wait.
+    if (runtimeHost.managedRuntimeUpgradeRequired()) await startupAuthenticationRefresh;
+    else await Promise.race([startupAuthenticationRefresh, delay(STARTUP_AUTH_WAIT_MS)]);
     const upgrade = await runtimeHost.upgradeManagedRuntime();
     if (upgrade.updated) {
       const state = stateStore.update({
@@ -2520,7 +2512,8 @@ async function start() {
       }
     }
     const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready") return runtime;
+    // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
+    if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;
     const browser = await startupAuthenticationRefresh;
     if (stateStore.read().browserInteractionMode === "automatic" && browser?.authenticated !== true) {
       logger.warn("bridge.connect_deferred_until_chatgpt_ready");
@@ -2547,7 +2540,7 @@ async function start() {
       }
       return;
     }
-    if (runtime.status === "ready") {
+    if (runtime.status === "ready" || runtime.status === "degraded") {
       if (!runtime.bridgeConnected) {
         applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: runtime.bridgeRouteChanged === true });
       }
@@ -2607,6 +2600,9 @@ async function start() {
     send("launcher:state-changed", state);
     publishOperation({ name: "runtime-start", status: "failed", message });
   });
+  // From launch on, keep the bridge and MCP tunnel alive while the app is open; the supervisor
+  // coalesces a watchdog start with any launch-time start that is still in flight.
+  startBridgeWatchdog(logger, stateStore);
 
   app.on("activate", () => showMainWindow());
   app.on("before-quit", (event) => {

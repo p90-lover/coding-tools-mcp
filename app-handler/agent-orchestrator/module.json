@@ -6,9 +6,10 @@
   "source": {
     "strategy": "adapted-source",
     "repository": "Untrivial-ai/agent-orchestrator",
-    "commit": "213dae6e09abf3464e5e3e01eb8f7a85aeba1a2e",
+    "commit": "73473d45f0c18f3a81f66f150868459e3098ca35",
     "license": "Apache-2.0",
-    "path": "app-handler/agent-orchestrator"
+    "path": "app-handler/agent-orchestrator",
+    "checkout": "module/agent-orchestrator"
   },
-  "note": "Uses the existing Coding Tools plan board; WebGPT-on-Codex will plan and review, while CPA supplies models only to selected workers. No AO executable is bundled or launched."
+  "note": "More embeds the original source-built AO renderer with an owned loopback-only daemon. Runtime retains Coding Tools missions with WebGPT planning/review and CPA workers. Named APIs use this in-process handler; no separate AO desktop application is installed."
 }

@@ -61,6 +61,35 @@ async fn ao_routes_require_auth_workspace_scope_and_local_update_consent() {
     let body: Value = read.json().await.unwrap();
     assert_eq!(body["runs"][0]["id"], "run-1");
     assert_eq!(body["board_revision"], 2);
+    let grant_body = json!({"workspace_id":"qa","run_id":"run-1","expected_revision":1,
+        "executable_sha256":"a".repeat(64),"confirm":true});
+    let grant_endpoint = format!("{}/api/v1/ao/grant", service.endpoint());
+    let unauthenticated_grant = client
+        .post(&grant_endpoint)
+        .json(&grant_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unauthenticated_grant.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let unfocused_grant = client
+        .post(&grant_endpoint)
+        .bearer_auth(token.trim())
+        .json(&grant_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unfocused_grant.status(), reqwest::StatusCode::FORBIDDEN);
+    let create = client
+        .post(format!("{}/api/v1/workspaces", service.endpoint()))
+        .bearer_auth(token.trim())
+        .json(&json!({"path": workspace.to_string_lossy(), "name":"Duplicate", "confirm":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), reqwest::StatusCode::FORBIDDEN);
     let foreign = client
         .post(&endpoint)
         .bearer_auth(token.trim())
@@ -81,6 +110,50 @@ async fn ao_routes_require_auth_workspace_scope_and_local_update_consent() {
     assert_eq!(update.status(), reqwest::StatusCode::FORBIDDEN);
     let denied: Value = update.json().await.unwrap();
     assert_eq!(denied["error"]["code"], "AO_LOCAL_CONFIRMATION_REQUIRED");
+    let connect = client
+        .post(format!("{}/api/v1/ao/harness/connect", service.endpoint()))
+        .bearer_auth(token.trim())
+        .json(
+            &json!({"workspace_id":"qa","run_id":"run-1","node_id":"planner",
+            "connection":{},"confirm":true}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(connect.status(), reqwest::StatusCode::FORBIDDEN);
+    let denied_connect: Value = connect.json().await.unwrap();
+    assert_eq!(
+        denied_connect["error"]["code"],
+        "AO_LOCAL_CONFIRMATION_REQUIRED"
+    );
+    let private_denied = client
+        .post(format!("{}/api/v1/ao/harness/connect", service.endpoint()))
+        .bearer_auth(token.trim())
+        .json(
+            &json!({"workspace_id":"qa","run_id":"run-1","node_id":"worker",
+            "connection":{},"confirm":true,
+            "private_proxy_api_key":"SENTINEL_KEY_DO_NOT_LOG_1234567890"}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(private_denied.status(), reqwest::StatusCode::FORBIDDEN);
+    let private_body = private_denied.text().await.unwrap();
+    assert!(!private_body.contains("SENTINEL_KEY_DO_NOT_LOG_1234567890"));
+    let execute = client
+        .post(format!("{}/api/v1/ao/harness/execute", service.endpoint()))
+        .bearer_auth(token.trim())
+        .json(
+            &json!({"workspace_id":"qa","run_id":"run-1","node_id":"planner",
+            "expected_revision":1,"confirm":true,"prompt":"untrusted renderer text"}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        execute.status() == reqwest::StatusCode::FORBIDDEN
+            || execute.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
     service
         .shutdown("ao-route-contract-complete")
         .await

@@ -1,35 +1,141 @@
-.ao-workflow { min-width: 0; padding-bottom: 32px; }
-.ao-workflow-intro, .ao-model-note, .ao-empty { color: var(--color-text-secondary); line-height: 1.5; }
-.ao-workflow-toolbar, .ao-create { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 18px 0; }
-.ao-workflow-toolbar label { display: grid; flex: 1 1 180px; min-width: 0; gap: 6px; color: var(--color-text-secondary); font-size: 12px; }
-.ao-workflow select, .ao-workflow input, .ao-workflow textarea { min-width: 0; width: 100%; padding: 9px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 8px; background: var(--color-bg-secondary); color: var(--color-text-primary); }
-.ao-workflow button { flex: 0 0 auto; }
-.ao-create input { flex: 1 1 200px; width: auto; }
-.ao-board { display: grid; grid-template-columns: repeat(4, minmax(240px, 1fr)); gap: 12px; min-width: 0; overflow-x: auto; padding-bottom: 12px; }
-.ao-lane { min-width: 240px; padding: 12px; border: 1px solid rgb(255 255 255 / 9%); border-radius: 12px; background: rgb(255 255 255 / 3%); }
-.ao-lane > header, .ao-card-head, .ao-clauses-head { display: flex; justify-content: space-between; align-items: start; gap: 8px; }
-.ao-lane h2 { margin: 0 0 12px; font-size: 14px; }
-.ao-card { min-width: 0; margin-bottom: 10px; padding: 12px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 10px; background: var(--color-bg-primary); }
-.ao-card h3 { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 14px; }
-.ao-card-head span, .ao-card-stage, .ao-card-empty, .ao-clauses-head span { color: var(--color-text-secondary); font-size: 11px; }
-.ao-card-stage { margin: 10px 0; }
-.ao-state { display: grid; gap: 5px; font-size: 11px; }
-.ao-clauses-head { margin-top: 14px; font-size: 12px; }
-.ao-clauses { padding-left: 18px; }
-.ao-clauses li { margin: 8px 0; overflow-wrap: anywhere; }
-.ao-clauses li select { margin-top: 5px; }
-.ao-missions { margin: 18px 0; }
-.ao-missions h2 { font-size: 14px; }
-.ao-missions article { margin: 8px 0; padding: 12px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 10px; overflow-wrap: anywhere; }
-.ao-missions article > span { float: right; color: var(--color-text-secondary); font-size: 11px; }
-.ao-missions ul { margin: 8px 0 0; padding-left: 18px; color: var(--color-text-secondary); font-size: 11px; }
-.ao-next, .ao-draft { margin: 14px 0; padding: 14px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 10px; overflow-wrap: anywhere; }
-.ao-next p, .ao-draft p { white-space: pre-wrap; }
-.ao-draft li { display: grid; gap: 7px; margin: 12px 0; }
-.ao-draft li textarea { min-height: 70px; resize: vertical; }
-.ao-draft li button { justify-self: start; }
+.content-scroll:has(> .ao-workflow) { width: 100%; max-width: none; height: 100%; padding: 0; overflow: hidden; }
+.ao-workflow {
+  --color-bg-primary: var(--color-background-surface); --color-bg-secondary: var(--color-background-elevated);
+  --ao-line: rgb(255 255 255 / 9%); --ao-muted: var(--color-text-secondary);
+  --ao-green: #3fb950; --ao-amber: #d29922; --ao-red: #f85149; --ao-blue: #58a6ff;
+  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; overflow: hidden;
+}
+
+/* One toolbar in the window title strip: draggable, and clear of the native window controls. */
+.ao-toolbar {
+  display: flex; flex: 0 0 auto; align-items: center; gap: 6px; min-width: 0; height: 46px; padding: 0 10px 0 12px;
+  padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 10px);
+  border-bottom: 1px solid var(--ao-line); -webkit-app-region: drag;
+}
+.ao-toolbar > * { -webkit-app-region: no-drag; }
+.ao-toolbar-spacer { flex: 1 1 auto; align-self: stretch; -webkit-app-region: drag; }
+.ao-toolbar-sep { color: var(--ao-muted); opacity: .5; }
+.ao-toolbar-sep:empty { width: 1px; height: 18px; background: var(--ao-line); opacity: 1; }
+.ao-workflow .ao-select { width: auto; max-width: 180px; min-width: 0; height: 30px; padding: 0 24px 0 8px; border: 0; border-radius: 6px; background-color: transparent; color: var(--color-text-primary); font-weight: 600; text-overflow: ellipsis; }
+.ao-workflow .ao-select:hover { background-color: rgb(255 255 255 / 6%); }
+.ao-workflow .ao-select-mission { max-width: 260px; font-weight: 500; }
+.ao-tool { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-primary); }
+.ao-tool:hover:not(:disabled), .ao-tool[aria-pressed="true"] { background: rgb(255 255 255 / 8%); }
+.ao-tool.is-primary:not(:disabled) { background: var(--ao-green); color: #07130a; }
+.ao-tool:disabled { opacity: .35; }
+.ao-tool:active:not(:disabled) { transform: scale(.94); }
+.ao-segmented { display: inline-flex; margin-left: 6px; padding: 2px; border-radius: 7px; background: rgb(255 255 255 / 5%); }
+.ao-segmented button { height: 26px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted); font-size: 12px; }
+.ao-segmented button[aria-selected="true"] { background: var(--color-bg-secondary); color: var(--color-text-primary); box-shadow: 0 1px 2px rgb(0 0 0 / 25%); }
+.ao-pill { display: inline-flex; align-items: center; gap: 6px; max-width: 280px; height: 24px; padding: 0 9px; border-radius: 12px; background: rgb(255 255 255 / 5%); color: var(--ao-muted); font-size: 11px; text-transform: capitalize; white-space: nowrap; }
+.ao-pill-detail { overflow: hidden; text-overflow: ellipsis; text-transform: none; }
+.ao-pill-dot, .ao-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .7; }
+.ao-pill.status-running { color: var(--ao-green); }
+.ao-pill.status-running .ao-pill-dot { animation: ao-pulse 1.4s ease-in-out infinite; }
+.ao-pill.status-paused { color: var(--ao-amber); }
+.ao-pill.status-held, .ao-pill.status-stopped { color: var(--ao-red); }
+.ao-pill.status-finished { color: var(--ao-blue); }
+@keyframes ao-pulse { 50% { opacity: .25; } }
+
+.ao-stage { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
+.ao-workspace-board { position: absolute; inset: 0; z-index: 2; background: var(--color-bg-primary); }
+.ao-team-view { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
+.ao-team-view[hidden] { display: none; }
+.ao-empty-state { display: grid; flex: 1; place-content: center; justify-items: center; gap: 12px; color: var(--ao-muted); }
+
+/* Pop-over sheets instead of inline forms. */
+.ao-sheet { position: absolute; z-index: 8; top: 8px; left: 12px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; width: min(460px, calc(100% - 24px)); max-height: calc(100% - 16px); overflow: auto; padding: 14px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-secondary); box-shadow: 0 16px 40px rgb(0 0 0 / 35%); }
+.ao-sheet-right { left: auto; right: 12px; }
+.ao-sheet h2 { grid-column: 1 / -1; margin: 0 0 2px; font-size: 13px; font-weight: 600; }
+.ao-sheet > label, .ao-field-row > label, .ao-role-inspector label { display: grid; gap: 5px; min-width: 0; color: var(--ao-muted); font-size: 11px; }
+.ao-wide { grid-column: 1 / -1; }
+.ao-field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: end; }
+.ao-field-row > button { grid-column: 1 / -1; justify-self: start; }
+.ao-sheet textarea { min-height: 84px; resize: vertical; }
+.ao-sheet-actions, .ao-inspector-actions { display: flex; gap: 8px; }
+.ao-check { display: flex !important; align-items: center; gap: 8px; }
+.ao-check input { width: auto; }
+.ao-hint { margin: 0; color: var(--ao-muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.ao-more summary { cursor: pointer; color: var(--ao-muted); font-size: 11px; padding: 4px 0; }
+.ao-more[open] > :not(summary) { margin-top: 8px; }
+.ao-more pre { white-space: pre-wrap; font-size: 11px; }
+.ao-chip-line { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.ao-chip { padding: 3px 8px; border-radius: 10px; background: rgb(255 255 255 / 6%); color: var(--color-text-primary); font-size: 11px; }
+.ao-workflow select, .ao-workflow input, .ao-workflow textarea { min-width: 0; width: 100%; padding: 7px 8px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 7px; background: var(--color-bg-primary); color: var(--color-text-primary); font-size: 12px; }
+.ao-workflow button:focus-visible, .ao-workflow select:focus-visible, .ao-workflow input:focus-visible, .ao-workflow textarea:focus-visible { outline: 2px solid var(--color-text-primary); outline-offset: 2px; }
+
+/* Canvas fills the stage; controls float. */
+.ao-canvas { position: relative; flex: 1 1 auto; min-height: 240px; overflow: hidden; touch-action: none; background-color: var(--color-bg-primary); background-image: radial-gradient(rgb(255 255 255 / 7%) 1px, transparent 1px); background-size: 22px 22px; }
+.ao-canvas-scene { position: absolute; inset: 0; transform-origin: 0 0; }
+.ao-canvas-wires { position: absolute; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.ao-canvas-wires path { fill: none; stroke: var(--color-text-secondary); stroke-opacity: .4; stroke-width: 1.5; }
+.ao-canvas-wires path.is-running { stroke: var(--ao-green); stroke-opacity: .9; stroke-dasharray: 8 6; animation: ao-wire-flow 1.1s linear infinite; }
+@keyframes ao-wire-flow { to { stroke-dashoffset: -28; } }
+.ao-canvas-card { position: absolute; top: 0; left: 0; width: 212px; min-height: 76px; border-radius: 10px; border: 1px solid rgb(255 255 255 / 10%); background: var(--color-bg-secondary); box-shadow: 0 1px 2px rgb(0 0 0 / 25%); }
+.ao-canvas-card.is-selected, .ao-canvas-card.is-target { outline: 2px solid var(--ao-blue); outline-offset: 2px; }
+.ao-canvas-card.is-dragging { z-index: 2; box-shadow: 0 14px 30px rgb(0 0 0 / 30%); }
+.ao-canvas-card.ao-node-running, .ao-canvas-card.ao-node-reserved { border-color: color-mix(in srgb, var(--ao-green) 55%, transparent); }
+.ao-canvas-card.ao-node-held { border-color: color-mix(in srgb, var(--ao-red) 55%, transparent); }
+.ao-canvas-card.ao-node-finished { background: color-mix(in srgb, var(--color-bg-secondary) 70%, transparent); border-color: rgb(255 255 255 / 5%); }
+.ao-canvas-card.ao-node-cancelled, .ao-canvas-card.ao-node-archived { opacity: .5; }
+.ao-card-handle { display: flex; flex-direction: column; justify-content: center; gap: 6px; width: 100%; min-height: 76px; padding: 12px 14px; border: 0; border-radius: inherit; color: var(--color-text-primary); background: transparent; text-align: left; cursor: grab; }
+.ao-card-handle:active { cursor: grabbing; transform: scale(.98); }
+.ao-card-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ao-card-title strong { flex: 1 1 auto; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ao-canvas-state { color: var(--ao-muted); font-size: 10px; text-transform: capitalize; }
+.ao-card-route { overflow: hidden; color: var(--ao-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ao-dot { color: var(--ao-muted); }
+.ao-dot-running, .ao-dot-reserved { color: var(--ao-green); opacity: 1; animation: ao-pulse 1.4s ease-in-out infinite; }
+.ao-dot-finished { color: var(--ao-blue); opacity: 1; }
+.ao-dot-held { color: var(--ao-red); opacity: 1; }
+.ao-port { position: absolute; left: calc(50% - 16px); width: 32px; height: 32px; padding: 0; border: 0; background: transparent; color: var(--color-text-secondary); font-size: 11px; cursor: crosshair; opacity: 0; transition: opacity 120ms; }
+.ao-canvas-card:hover .ao-port, .ao-canvas-card.is-selected .ao-port, .ao-port[aria-pressed="true"], .ao-port:focus-visible, .ao-port:not(:disabled) { opacity: .8; }
+.ao-port-in { top: -18px; } .ao-port-out { bottom: -18px; }
+.ao-port[aria-pressed="true"] { color: var(--ao-blue); transform: scale(1.25); }
+.ao-port:disabled { cursor: default; }
+.ao-canvas-card:hover .ao-port:disabled { opacity: .25; }
+.ao-canvas-controls { position: absolute; z-index: 3; left: 12px; bottom: 12px; display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--ao-line); border-radius: 8px; background: var(--color-bg-secondary); }
+.ao-canvas-controls button { min-width: 28px; height: 28px; border: 0; border-radius: 5px; padding: 0 6px; background: transparent; color: var(--color-text-primary); }
+.ao-canvas-controls button:hover { background: rgb(255 255 255 / 8%); }
+.ao-canvas-controls span { min-width: 38px; color: var(--ao-muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: center; }
+.ao-connect-hint { position: absolute; z-index: 3; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 6px 12px; border-radius: 14px; background: var(--color-bg-secondary); font-size: 12px; }
+.ao-fab { position: absolute; z-index: 3; right: 14px; bottom: 14px; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px 0 11px; border: 1px solid var(--ao-line); border-radius: 17px; background: var(--color-bg-secondary); color: var(--color-text-primary); font-size: 12px; box-shadow: 0 6px 18px rgb(0 0 0 / 30%); }
+.ao-fab:hover:not(:disabled) { background: color-mix(in srgb, var(--color-bg-secondary) 80%, white); }
+.ao-fab:disabled { opacity: .4; }
+
+.ao-approvals { position: absolute; z-index: 5; top: 12px; left: 50%; transform: translateX(-50%); width: min(520px, calc(100% - 24px)); max-height: 45%; overflow: auto; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--ao-amber) 45%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--color-bg-secondary) 92%, var(--ao-amber)); box-shadow: 0 10px 30px rgb(0 0 0 / 30%); }
+.ao-approvals > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ao-approvals > div + div { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--ao-line); }
+.ao-approvals p { flex: 1 1 100%; margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.ao-approvals pre { flex: 1 1 100%; margin: 0; padding: 6px 8px; border-radius: 6px; background: rgb(0 0 0 / 25%); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ao-approvals details { flex: 1 1 100%; font-size: 11px; }
+
+/* Inspector: dismissible drawer over the canvas. */
+.ao-role-inspector { position: absolute; z-index: 6; right: 12px; top: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 10px; width: min(330px, calc(100% - 24px)); padding: 0 14px 14px; overflow: auto; border: 1px solid var(--ao-line); border-radius: 10px; background: color-mix(in srgb, var(--color-bg-secondary) 97%, transparent); box-shadow: 0 16px 40px rgb(0 0 0 / 35%); }
+.ao-role-inspector form { display: flex; flex-direction: column; gap: 10px; }
+.ao-inspector-header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; margin: 0 -14px; padding: 10px 8px 10px 14px; background: var(--color-bg-secondary); }
+.ao-inspector-header strong { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.ao-inspector-state { color: var(--ao-muted); font-size: 11px; text-transform: capitalize; }
+.ao-inspector-header button { width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-primary); font-size: 18px; }
+.ao-inspector-header button:hover { background: rgb(255 255 255 / 8%); }
+.ao-inspector-tabs { display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgb(255 255 255 / 5%); }
+.ao-inspector-tabs button { flex: 1 1 0; min-width: 0; height: 26px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted); text-transform: capitalize; font-size: 12px; }
+.ao-inspector-tabs button[aria-selected="true"] { background: var(--color-bg-secondary); color: var(--color-text-primary); }
+.ao-role-inspector dl { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 6px; font-size: 11px; }
+.ao-role-inspector dd { margin: 0; overflow-wrap: anywhere; }
+.ao-role-inspector dt { color: var(--ao-muted); }
+.ao-role-inspector p, .ao-role-inspector pre { margin: 0; font-family: inherit; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ao-role-inspector textarea { resize: vertical; }
+.ao-attempt-history { padding: 10px 0; border-bottom: 1px solid var(--ao-line); font-size: 12px; }
+.ao-attempt-history summary { cursor: pointer; margin-top: 6px; color: var(--ao-muted); }
+
 @media (max-width: 760px) {
-  .ao-board { grid-template-columns: minmax(0, 1fr); overflow-x: visible; }
-  .ao-lane { min-width: 0; }
-  .ao-workflow-toolbar button, .ao-create button { flex: 1 1 100%; }
+  .ao-toolbar { overflow-x: auto; }
+  .ao-workflow .ao-select { max-width: 120px; }
+  .ao-pill-detail { display: none; }
+  .ao-sheet, .ao-field-row { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ao-canvas-wires path.is-running, .ao-pill-dot, .ao-dot { animation: none !important; }
+  .ao-card-handle:active, .ao-tool:active { transform: none; }
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_CONNECTOR_MENU_ROW_SELECTOR, ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
 
 test("an already-personalized connector menu has no unconditional pre-mention delay", async () => {
   let menuVisible = false;
@@ -78,7 +78,7 @@ test("an already-personalized connector menu has no unconditional pre-mention de
       return exactLabel;
     },
     locator: (selector: string) => {
-      expect(selector).toBe('.__menu-item[tabindex="0"]');
+      expect(selector).toBe(CHATGPT_CONNECTOR_MENU_ROW_SELECTOR);
       return menuRows;
     },
   };

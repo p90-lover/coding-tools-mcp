@@ -64,10 +64,18 @@ export const builtInProviderCapabilities: ProviderCapabilityProfile[] = [
   },
   {
     id: 'commandcode-proxy',
-    name: 'CommandCode Proxy',
-    auth: 'local_proxy',
+    name: 'CommandCode Go (CPA)',
+    auth: 'oauth',
     protocol: 'openai_chat',
     capabilities: ['text', 'reasoning', 'tools'],
+    targets: ['paseo', 'anneal'],
+  },
+  {
+    id: 'commandcode-studio',
+    name: 'CommandCode Studio (CPA)',
+    auth: 'oauth',
+    protocol: 'openai_chat',
+    capabilities: ['text', 'reasoning', 'tools', 'vision'],
     targets: ['paseo', 'anneal'],
   },
 ];

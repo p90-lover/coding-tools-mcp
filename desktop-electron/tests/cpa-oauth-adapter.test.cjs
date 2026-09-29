@@ -177,3 +177,27 @@ test("timed-out CPA OAuth cancels its management session", async () => {
     request.pathname === "/v0/management/oauth-session" && request.method === "DELETE"
   )));
 });
+
+for (const [adapterId, route, provider] of [
+  ["cpa-commandcode-go", "commandcode-go-auth-url", "commandcode-go"],
+  ["cpa-commandcode-studio", "commandcode-auth-url", "commandcode"],
+]) {
+  test(`${adapterId} logs in through CPA and binds its plugin auth file`, async () => {
+    const { startCpaAccountLogin } = require("../electron/cpa-oauth-adapter.cjs");
+    const created = { name: `${provider}-user.json`, provider, email: "user@example.test", status: "ready" };
+    const fixture = jsonSequenceFixture({ provider, route, created, models: [`${provider}/test-model`] });
+    let clock = 0;
+    const result = await startCpaAccountLogin({
+      adapterId,
+      requestJson: fixture.requestJson,
+      openExternal: async () => undefined,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      now: () => clock,
+      timeoutMs: 10_000,
+      pollIntervalMs: 10,
+    });
+    assert.equal(result.authFile.provider, provider);
+    assert.deepEqual(result.models, [`${provider}/test-model`]);
+    assert.ok(fixture.requests.some((request) => request.pathname.endsWith(`/${route}`)));
+  });
+}

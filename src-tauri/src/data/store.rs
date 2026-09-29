@@ -1,8 +1,9 @@
-use std::sync::Mutex;
+use std::{path::Path, sync::Mutex};
 
 use crate::error::{AppError, AppResult};
 use crate::settings::AppSettings;
 use crate::workspace::legacy_import::import_legacy_profiles_if_empty;
+use crate::workspace::resources::assign_free_workspace_ports;
 use crate::workspace::WorkspaceProfile;
 
 use super::migrate::{data_file_path, load_or_migrate, maybe_backup_legacy_files, save};
@@ -21,6 +22,56 @@ const SHARED_KEYS: &[&str] = &[
     "actions_oauth_password",
     "actions_oauth_token_secret",
 ];
+const WORKSPACE_SECRET_KEYS: &[&str] = &[
+    "oauth_password",
+    "oauth_token_secret",
+    "bearer_token",
+    "actions_api_key",
+    "actions_oauth_client_secret",
+    "actions_oauth_password",
+    "actions_oauth_token_secret",
+];
+
+fn create_workspace_in_data(
+    data: &mut AppData,
+    path: &str,
+    name: Option<String>,
+) -> AppResult<WorkspaceProfile> {
+    let canonical = Path::new(path.trim())
+        .canonicalize()
+        .map_err(|_| AppError::Message("Workspace must be an existing directory".into()))?;
+    if !canonical.is_dir() {
+        return Err(AppError::Message("Workspace must be a directory".into()));
+    }
+    let duplicate = data.profiles.iter().any(|profile| {
+        let Ok(existing) = Path::new(&profile.path).canonicalize() else {
+            return false;
+        };
+        if cfg!(windows) {
+            existing
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&canonical.to_string_lossy())
+        } else {
+            existing == canonical
+        }
+    });
+    if duplicate {
+        return Err(AppError::Message(
+            "Workspace path is already registered".into(),
+        ));
+    }
+    let mut profile = WorkspaceProfile::new(canonical.to_string_lossy().into_owned(), name);
+    assign_free_workspace_ports(&data.profiles, &mut profile)?;
+    let secrets = data
+        .workspace_secrets
+        .entry(profile.id.clone())
+        .or_default();
+    for key in WORKSPACE_SECRET_KEYS {
+        secrets.insert((*key).into(), random_secret());
+    }
+    data.profiles.push(profile.clone());
+    Ok(profile)
+}
 
 #[derive(Debug)]
 pub struct DataStore {
@@ -154,6 +205,24 @@ impl DataStore {
         self.save()
     }
 
+    pub fn create_workspace(
+        &mut self,
+        path: String,
+        name: Option<String>,
+    ) -> AppResult<WorkspaceProfile> {
+        if self.persistent {
+            let profile = Self::update_file(|data| create_workspace_in_data(data, &path, name))?;
+            self.refresh()?;
+            Ok(profile)
+        } else {
+            let mut next = self.data.clone();
+            let profile = create_workspace_in_data(&mut next, &path, name)?;
+            self.data = next;
+            self.save()?;
+            Ok(profile)
+        }
+    }
+
     pub fn update(&mut self, profile: WorkspaceProfile) -> AppResult<()> {
         let Some(index) = self
             .data
@@ -178,18 +247,6 @@ impl DataStore {
         self.data.workspace_secrets.remove(id);
         self.save()?;
         Ok(Some(removed))
-    }
-
-    pub fn init_workspace_secrets(&mut self, profile_id: &str) -> AppResult<()> {
-        // oauth_client_secret is optional for MCP OAuth (ChatGPT PKCE); not auto-generated.
-        self.set_workspace_secret(profile_id, "oauth_password", &random_secret())?;
-        self.set_workspace_secret(profile_id, "oauth_token_secret", &random_secret())?;
-        self.set_workspace_secret(profile_id, "bearer_token", &random_secret())?;
-        self.set_workspace_secret(profile_id, "actions_api_key", &random_secret())?;
-        self.set_workspace_secret(profile_id, "actions_oauth_client_secret", &random_secret())?;
-        self.set_workspace_secret(profile_id, "actions_oauth_password", &random_secret())?;
-        self.set_workspace_secret(profile_id, "actions_oauth_token_secret", &random_secret())?;
-        Ok(())
     }
 
     pub fn init_shared_secrets(&mut self) -> AppResult<()> {

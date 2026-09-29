@@ -55,7 +55,7 @@ function plane() {
     getProviderSnapshot: async () => snapshot(),
     getWebBridgeStatus: async () => true,
     getServicesSnapshot: async () => ({
-      services: ["cpa", "codex-router", "commandcode-proxy"].map((id) => ({ id, status: "ready" })),
+      services: ["cpa"].map((id) => ({ id, status: "ready" })),
     }),
   });
 }
@@ -65,9 +65,7 @@ test("API map covers all five stacks and the Paseo→Anneal loop", () => {
   assert.equal(map.control_plane, "coding-tools-five-stack");
   assert.match(map.loop, /paseo_plan/);
   assert.match(map.loop, /anneal_open_from_review/);
-  assert.equal(map.compose.cpaRouterBundle, "pr-194");
-  assert.equal(map.compose.commandcodeLongrun, "pr-193");
-  for (const id of ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]) {
+  for (const id of ["cpa", "paseo", "anneal"]) {
     assert.ok(map.stacks[id], `missing stack ${id}`);
     assert.ok(map.stacks[id].manage.includes("five_stack_manage"));
     assert.ok(map.stacks[id].monitor.includes("five_stack_status"));
@@ -75,7 +73,6 @@ test("API map covers all five stacks and the Paseo→Anneal loop", () => {
   }
   assert.equal(map.stacks.cpa.openai, "http://127.0.0.1:8317/v1");
   assert.equal(map.stacks.cpa.bundleOwner, "pr-194");
-  assert.equal(map.stacks["codex-router"].bundleOwner, "pr-194");
   assert.equal(map.stacks.paseo.execution, "ws://127.0.0.1:6768/ws");
   assert.equal(map.stacks.anneal.api, "http://127.0.0.1:3000");
   assert.deepEqual(map.mcp.tools, [...FIVE_STACK_CONTROL_PLANE_TOOLS]);
@@ -105,8 +102,6 @@ test("Paseo plans an orchestrator and assigned subagents on in-app backends", as
   assert.equal(planned.subagents[1].backendKind, "cpa");
   assert.equal(planned.backends.cpa, "http://127.0.0.1:8317/v1");
   assert.equal(planned.backends.web, "http://127.0.0.1:17841/v1");
-  assert.equal(planned.backends.router, "http://127.0.0.1:4202/v1");
-  assert.equal(planned.backends.commandcode, "http://127.0.0.1:9090/v1");
   assert.equal(JSON.stringify(planned).includes("must-never-leak"), false);
 });
 
@@ -249,7 +244,7 @@ test("Paseo plans refuse backend substitution when the selected service is down"
       getProviderSnapshot: async () => snapshot(),
       getWebBridgeStatus: async () => unavailableId !== "chatgpt-web",
       getServicesSnapshot: async () => ({
-        services: ["cpa", "codex-router", "commandcode-proxy"].map((id) => ({
+        services: ["cpa"].map((id) => ({
           id,
           status: id === unavailableId ? "stopped" : "ready",
         })),
@@ -276,7 +271,6 @@ test("Web GPT planning uses the verified bridge and refuses an unavailable bridg
     getServicesSnapshot: async () => ({
       services: [
         { id: "cpa", status: "ready" },
-        { id: "codex-router", status: "ready" },
       ],
     }),
   });
@@ -345,78 +339,14 @@ test("manual results cannot fabricate a Paseo review or Anneal task", async () =
   assert.equal(status.annealTasks.length, 0);
 });
 
-test("Paseo uses CPA 8317 and Web bridge 17841 only when those services are available", async () => {
-  const {
-    createFiveStackControlPlane,
-    selectInAppBackend,
-    stackAvailability,
-  } = require("../electron/five-stack-control-plane.cjs");
-  const { FIVE_STACK_ENDPOINTS } = require("../electron/five-stack-cross-use.cjs");
-  const backends = {
-    cpa: FIVE_STACK_ENDPOINTS.cpa.v1,
-    router: FIVE_STACK_ENDPOINTS["codex-router"].v1,
-    commandcode: FIVE_STACK_ENDPOINTS["commandcode-proxy"].v1,
-  };
-  assert.equal(backends.cpa, "http://127.0.0.1:8317/v1");
-  assert.equal(backends.router, "http://127.0.0.1:4202/v1");
-  assert.equal(backends.commandcode, "http://127.0.0.1:9090/v1");
-
-  const down = stackAvailability({
-    services: [
-      { id: "cpa", status: "error", running: false },
-      { id: "codex-router", status: "ready", running: true },
-      { id: "commandcode-proxy", status: "ready", running: true },
-    ],
-  });
-  assert.equal(down.cpa, false);
-  assert.equal(down.router, true);
-  const cpaFallback = selectInAppBackend("cliproxyapi-antigravity", backends, down);
-  assert.equal(cpaFallback.url, "http://127.0.0.1:4202/v1");
-  assert.equal(cpaFallback.kind, "router");
-  assert.equal(cpaFallback.fallback, true);
-
-  const commandcode = selectInAppBackend("commandcode-proxy", backends, {
-    cpa: true,
-    router: true,
-    commandcode: true,
-  });
-  assert.equal(commandcode.url, "http://127.0.0.1:9090/v1");
-  assert.equal(commandcode.kind, "commandcode");
-  assert.equal(commandcode.fallback, false);
-
-  let seq = 0;
-  const posted = [];
-  const control = createFiveStackControlPlane({
-    clock: () => "2026-09-18T00:00:00.000Z",
-    idFactory: () => `id${String(++seq).padStart(4, "0")}`,
-    planProvider: createProviderExecutionPlan,
-    getProviderSnapshot: async () => snapshot(),
-    getWebBridgeStatus: async () => true,
-    getServicesSnapshot: async () => ({
-      services: [
-        { id: "cpa", status: "ready" },
-        { id: "codex-router", status: "ready" },
-        { id: "anneal", status: "ready" },
-        { id: "commandcode-proxy", status: "ready" },
-      ],
-    }),
-    handoffAnnealTask: async ({ projectId, path, body }) => {
-      posted.push({ projectId, path, body });
-      return { id: "remote-task-1" };
-    },
-  });
-  const planned = await control.callTool("paseo_plan", {
-    brief: "Handoff after review",
-    orchestrator: { providerId: "chatgpt-web", accountId: "webgpt-main", model: "chatgpt-web/high" },
-    subagents: [{ role: "cpa-worker", providerId: "cliproxyapi-antigravity", accountId: "cpa-main", model: "gemini-3.8-flash-high" }],
-  }, { workspaceId: "ws-1" });
-  assert.equal(planned.orchestrator.backendKind, "web");
-  assert.equal(planned.subagents[0].backendKind, "cpa");
-  await assert.rejects(
-    () => control.callTool("paseo_run", { planId: planned.id, message: "Go" }, { workspaceId: "ws-1" }),
-    /execution service is unavailable/i,
-  );
-  assert.equal(posted.length, 0);
+test("Paseo selects CPA for CommandCode plugin accounts and fails closed when CPA is down", () => {
+  const { selectInAppBackend, stackAvailability } = require("../electron/five-stack-control-plane.cjs");
+  const cpa = "http://127.0.0.1:8317/v1";
+  const up = stackAvailability({ services: [{ id: "cpa", status: "ready" }] });
+  assert.equal(selectInAppBackend("commandcode-proxy", { cpa }, up).url, cpa);
+  assert.equal(selectInAppBackend("commandcode-proxy", { cpa }, up).kind, "cpa");
+  const down = stackAvailability({ services: [{ id: "cpa", status: "error" }] });
+  assert.equal(selectInAppBackend("commandcode-proxy", { cpa }, down).available, false);
 });
 
 test("MCP catalog overlay keeps headless tools and exposes five-stack resources", () => {
@@ -466,9 +396,9 @@ test("MCP manage/inspect uses the panel controller and strips secrets", async ()
     getServicesSnapshot: async () => ({
       version: 1,
       services: [{
-        id: "commandcode-proxy",
+        id: "cpa",
         running: true,
-        endpoint: "http://127.0.0.1:9090/",
+        endpoint: "http://127.0.0.1:8317/",
         callerKey: "must-never-leak",
         proxyApiKey: "must-never-leak",
         secretConfigured: true,
@@ -486,23 +416,23 @@ test("MCP manage/inspect uses the panel controller and strips secrets", async ()
   });
 
   const status = await control.callTool("five_stack_status", {});
-  assert.equal(status.services.services[0].id, "commandcode-proxy");
+  assert.equal(status.services.services[0].id, "cpa");
   assert.equal(status.services.services[0].secretConfigured, true);
   assert.equal(JSON.stringify(status).includes("must-never-leak"), false);
 
-  const inspected = await control.callTool("five_stack_inspect", { stack: "commandcode-proxy" });
-  assert.equal(inspected.id, "commandcode-proxy");
+  const inspected = await control.callTool("five_stack_inspect", { stack: "cpa" });
+  assert.equal(inspected.id, "cpa");
   assert.equal(inspected.managementKey, undefined);
 
   const started = await control.callTool("five_stack_manage", {
-    stack: "commandcode-proxy",
+    stack: "cpa",
     action: "start",
   });
-  assert.equal(started.id, "commandcode-proxy");
-  assert.deepEqual(actions, [{ stack: "commandcode-proxy", action: "start" }]);
+  assert.equal(started.id, "cpa");
+  assert.deepEqual(actions, [{ stack: "cpa", action: "start" }]);
 
   await assert.rejects(
-    () => control.callTool("five_stack_manage", { stack: "commandcode-proxy", action: "install" }),
+    () => control.callTool("five_stack_manage", { stack: "cpa", action: "install" }),
     /start, stop, restart or repair/,
   );
 });

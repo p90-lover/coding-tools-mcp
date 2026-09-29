@@ -85,7 +85,8 @@ export function modelAfterProviderAccountChange(
 function presetBaseUrl(providerId: string): string {
   switch (providerId) {
     case "commandcode-proxy":
-      return "http://127.0.0.1:9090/v1/";
+    case "commandcode-studio":
+      return "http://127.0.0.1:8317/v1/";
     case "ai-studio-reverse-proxy":
       return "http://127.0.0.1:7860/v1beta/";
     case "gemini-reverse-proxy":

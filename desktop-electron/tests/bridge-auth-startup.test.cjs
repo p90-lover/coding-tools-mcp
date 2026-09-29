@@ -21,7 +21,11 @@ test("runtime upgrade waits for the saved-session refresh to release the browser
   const stop = new Error("Stop after testing upgrade entry");
   const start = vm.runInNewContext(`(${startup.getText(file)})`, {
     startupAuthenticationRefresh,
-    runtimeHost: { upgradeManagedRuntime: async () => { events.push("upgrade"); throw stop; } },
+    // A pending upgrade probes the browser, so startup waits for the refresh in full.
+    runtimeHost: {
+      managedRuntimeUpgradeRequired: () => true,
+      upgradeManagedRuntime: async () => { events.push("upgrade"); throw stop; },
+    },
   });
   const result = start().catch(error => error);
   await Promise.resolve();

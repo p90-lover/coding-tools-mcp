@@ -3,7 +3,6 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -22,11 +21,6 @@ const CPA_OPS = [
   "health", "models", "chatCompletions", "managementHealth",
   "listProviders", "providers", "linkProvider", "unlinkProvider", "providerStatus",
 ];
-const ROUTER_OPS = [
-  "inspect", "start", "stop", "restart", "repair", "install",
-  "health", "models", "chatCompletions", "sync",
-];
-
 function listenMock(handler) {
   return new Promise((resolve, reject) => {
     const server = http.createServer(handler);
@@ -57,17 +51,17 @@ function text(response, status, value, contentType = "text/html") {
 }
 
 function temporaryDirectory(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
+  const scratch = path.join(repoRoot, "aiTemp");
+  fs.mkdirSync(scratch, { recursive: true });
+  return fs.mkdtempSync(path.join(scratch, `${prefix}-`));
 }
 
-test("CPA and Codex Router expose the full in-process ops table without an apps listen port", () => {
+test("CPA exposes the full in-process ops table without an apps listen port", () => {
   const host = createCodingToolsAppsHost();
   const listed = host.list();
   const catalog = host.catalog();
   const cpa = listed.modules.find((entry) => entry.id === "cpa");
-  const router = listed.modules.find((entry) => entry.id === "codex-router");
   assert.deepEqual(CPA_OPS.filter((name) => !cpa.operations.includes(name)), []);
-  assert.deepEqual(ROUTER_OPS.filter((name) => !router.operations.includes(name)), []);
   assert.equal(host.listenLoopback, undefined);
   assert.equal(host.transport, "in-process");
   const models = catalog.modules.find((entry) => entry.id === "cpa")
@@ -77,9 +71,7 @@ test("CPA and Codex Router expose the full in-process ops table without an apps 
   assert.doesNotMatch(readRepo("app-handler/host.cjs"), /createServer/);
   assert.doesNotMatch(readRepo("app-handler/host.cjs"), /listenLoopback/);
   assert.doesNotMatch(readRepo("app-handler/cpa/handlers.cjs"), /createServer|listenLoopback/);
-  assert.doesNotMatch(readRepo("app-handler/codex-router/handlers.cjs"), /createServer|listenLoopback/);
-  assert.match(readRepo("app-handler/README.md"), /listProviders/);
-  assert.match(readRepo("app-handler/README.md"), /linkProvider/);
+  assert.match(readRepo("app-handler/README.md"), /provider accounts/);
 });
 
 test("CPA models/health/chatCompletions talk to a mocked loopback with bearer auth", async () => {
@@ -167,81 +159,6 @@ test("CPA models/health/chatCompletions talk to a mocked loopback with bearer au
     assert.ok(seen.some((entry) => entry.authorization === "Bearer proxy-secret"));
     assert.ok(seen.some((entry) => entry.url === "/v0/management/auth-files"));
   } finally {
-    await mock.close();
-  }
-});
-
-test("CommandCode OpenAI handlers use the composite local bearer and block unavailable credentials", async () => {
-  const dataRoot = temporaryDirectory("coding-tools-commandcode-auth");
-  const manifest = JSON.parse(readRepo("desktop-electron/vendor/managed-components/commandcode-proxy.json"));
-  const home = path.join(dataRoot, "components", manifest.id, manifest.version);
-  fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, "proxy.mjs"), "// test package entrypoint\n");
-  const upstreamKey = "fixture-upstream-key-not-for-local-auth";
-  const controller = createManagedExternalServicesController({
-    dataRoot,
-    filePath: path.join(dataRoot, "external-services.json"),
-    keyPath: path.join(dataRoot, "external-services.key"),
-    safeStorage: { isEncryptionAvailable: () => false },
-    env: { CC_API_KEY: upstreamKey },
-    resolveRuntimeExecutable: () => process.execPath,
-    spawnProcess: () => assert.fail("credential lookup must not start a process"),
-    terminateProcessTree: () => assert.fail("no process is owned by this fixture"),
-  });
-  let localKey = "";
-  const seen = [];
-  const mock = await listenMock((request, response) => {
-    seen.push({ method: request.method, path: request.url, authorization: request.headers.authorization });
-    if (!localKey || request.headers.authorization !== `Bearer ${localKey}`) {
-      json(response, 401, { error: "missing local bearer" });
-    } else if (request.url === "/v1/models") {
-      json(response, 200, { data: [{ id: "fixture-model" }] });
-    } else {
-      json(response, 502, { error: { message: `diagnostic Bearer ${localKey}` } });
-    }
-  });
-  try {
-    const host = createCodingToolsAppsHost({ services: {
-      loopbackRequest: (id) => ({ ...controller.loopbackRequest(id), origin: mock.origin }),
-    } });
-    const needsRepair = await host.call(manifest.id, "models");
-    assert.equal(needsRepair.ok, false);
-    assert.match(needsRepair.result.reason, /repair-required/);
-    assert.equal(seen.length, 0);
-
-    fs.writeFileSync(path.join(home, ".coding-tools-managed-component.json"), JSON.stringify({
-      schemaVersion: 1, id: manifest.id, version: manifest.version, strategy: manifest.strategy,
-      repository: manifest.repository, commit: manifest.commit, installedAt: new Date().toISOString(),
-    }));
-    const noKey = await host.call(manifest.id, "models");
-    assert.equal(noKey.ok, false);
-    assert.match(noKey.result.reason, /proxy API key is unavailable/);
-    assert.equal(seen.length, 0);
-
-    localKey = controller.runtimeEnvironment().CODING_TOOLS_COMMANDCODE_API_KEY;
-    assert.ok(localKey && localKey !== upstreamKey, "fixture must have a distinct managed local key");
-    const spec = controller.loopbackRequest(manifest.id);
-    assert.equal(spec.origin, "http://127.0.0.1:9090/");
-    assert.equal(spec.healthPath, "/");
-    const models = await host.call(manifest.id, "models");
-    assert.equal(models.ok, true);
-    assert.deepEqual(models.result.models, ["fixture-model"]);
-    const chat = await host.call(manifest.id, "chatCompletions", {
-      model: "fixture-model", messages: [{ role: "user", content: "probe" }],
-    });
-    assert.equal(chat.ok, false);
-    assert.equal(chat.result.status, 502);
-    assert.equal(chat.result.json.error.message, "diagnostic Bearer [REDACTED]");
-    assert.deepEqual(seen.map(({ method, path }) => ({ method, path })), [
-      { method: "GET", path: "/v1/models" },
-      { method: "POST", path: "/v1/chat/completions" },
-    ]);
-    assert.ok(seen.every((request) => request.authorization === `Bearer ${localKey}`), "every request must use the local bearer");
-    const output = JSON.stringify({ needsRepair, noKey, models, chat });
-    assert.equal(output.includes(localKey), false);
-    assert.equal(output.includes(upstreamKey), false);
-  } finally {
-    controller.dispose();
     await mock.close();
   }
 });
@@ -390,101 +307,6 @@ test("CPA linkProvider and unlinkProvider drive the in-process provider store wi
   assert.ok(unlinked.result.accounts[0].archivedAt);
 });
 
-test("Codex Router models/sync/chatCompletions use the caller-secret path and never echo it", async () => {
-  const callerKey = "router-caller-secret-value-32chars!!";
-  const seen = [];
-  const mock = await listenMock((request, response) => {
-    seen.push({ method: request.method, url: request.url });
-    const prefix = `/_codex-router/${encodeURIComponent(callerKey)}`;
-    if (request.url === `${prefix}/v1/models`) {
-      json(response, 200, { data: [{ id: "gpt-4o-mini" }, { id: "o3-mini" }] });
-      return;
-    }
-    if (request.url === `${prefix}/v1/chat/completions`) {
-      json(response, 200, { id: "chatcmpl-router", choices: [{ message: { content: "routed" } }] });
-      return;
-    }
-    json(response, 401, { error: "missing caller key" });
-  });
-
-  try {
-    const host = createCodingToolsAppsHost({
-      services: {
-        loopbackRequest: () => ({
-          origin: mock.origin,
-          headers: {},
-          modelsPath: `/_codex-router/${encodeURIComponent(callerKey)}/v1/models`,
-          chatPath: `/_codex-router/${encodeURIComponent(callerKey)}/v1/chat/completions`,
-          healthPath: `/_codex-router/${encodeURIComponent(callerKey)}/v1/models`,
-        }),
-        syncCodexRouter: async () => ({
-          ok: true,
-          args: ["router", "integrate", "--apply"],
-          stdout: "synced models",
-          stderr: "",
-        }),
-      },
-    });
-
-    const synced = await host.invoke({ handle: "codex-router", operation: "sync" });
-    assert.equal(synced.ok, true);
-    assert.equal(synced.result.ok, true);
-    assert.equal(synced.result.stdout, "synced models");
-
-    const models = await host.call("codex-router", "models");
-    assert.equal(models.ok, true);
-    assert.deepEqual(models.result.models, ["gpt-4o-mini", "o3-mini"]);
-
-    const health = await host.call("codex-router", "health");
-    assert.equal(health.result.reachable, true);
-    assert.equal(health.result.modelCount, 2);
-
-    const chat = await host.call("codex-router", "chatCompletions", {
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: "ping" }],
-    });
-    assert.equal(chat.result.json.choices[0].message.content, "routed");
-
-    const payload = JSON.stringify({ synced, models, health, chat });
-    assert.equal(payload.includes(callerKey), false);
-    assert.ok(seen.some((entry) => entry.url.includes("/_codex-router/")));
-  } finally {
-    await mock.close();
-  }
-});
-
-test("Codex Router models reports a missing caller secret instead of hanging on an unauthenticated probe", async () => {
-  const seen = [];
-  const mock = await listenMock((request, response) => {
-    seen.push(request.url);
-    json(response, 200, { data: [{ id: "should-not-be-used" }] });
-  });
-  try {
-    const host = createCodingToolsAppsHost({
-      services: {
-        loopbackRequest: () => ({
-          origin: mock.origin,
-          headers: {},
-          modelsPath: "/v1/models",
-          chatPath: "/v1/chat/completions",
-          healthPath: "/",
-          credentialReason: "Codex Router caller secret is not configured",
-        }),
-      },
-    });
-    const models = await host.call("codex-router", "models");
-    const chat = await host.call("codex-router", "chatCompletions", { model: "x", messages: [] });
-    assert.equal(models.ok, false);
-    assert.deepEqual(models.result.models, []);
-    assert.match(models.result.reason, /caller secret is not configured/);
-    assert.equal(chat.ok, false);
-    assert.match(chat.result.reason, /caller secret is not configured/);
-    assert.deepEqual(seen, []);
-  } finally {
-    await mock.close();
-  }
-});
-
 test("CPA models does not advertise cached catalogs when loopback auth fails", async () => {
   const mock = await listenMock((request, response) => {
     if (request.url === "/v1/models") {
@@ -510,48 +332,6 @@ test("CPA models does not advertise cached catalogs when loopback auth fails", a
     assert.equal(models.ok, false);
     assert.deepEqual(models.result.models, []);
     assert.equal(models.result.status, 401);
-  } finally {
-    await mock.close();
-  }
-});
-
-test("Codex Router models stay empty until sync even if provider-network has cached models", async () => {
-  const mock = await listenMock((request, response) => {
-    json(response, 200, { data: [] });
-  });
-  try {
-    const directory = temporaryDirectory("coding-tools-router-catalog");
-    const store = createProviderNetworkStore({
-      filePath: path.join(directory, "provider-network.json"),
-      keyPath: path.join(directory, "provider-network.key"),
-      safeStorage: { isEncryptionAvailable: () => false },
-    });
-    store.saveAccount({
-      providerId: "claude-oauth",
-      label: "Claude",
-      auth: "oauth",
-      status: "connected",
-      enabled: true,
-      models: ["claude-sonnet"],
-    });
-    const providerServices = createAppsProviderServices({
-      providerNetworkReady: async () => ({ store }),
-    });
-    const host = createCodingToolsAppsHost({
-      services: {
-        loopbackRequest: () => ({
-          origin: mock.origin,
-          modelsPath: "/v1/models",
-          chatPath: "/v1/chat/completions",
-          healthPath: "/v1/models",
-        }),
-        providerCatalog: (id) => providerServices.providerCatalog(id),
-        explainEmptyModels: (id, details) => providerServices.explainEmptyModels(id, details),
-      },
-    });
-    const models = await host.call("codex-router", "models");
-    assert.equal(models.ok, false);
-    assert.deepEqual(models.result.models, []);
   } finally {
     await mock.close();
   }
@@ -693,39 +473,7 @@ test("CPA managementHealth is not ok when the authenticated management API fails
   }
 });
 
-test("Codex Router chatCompletions redacts caller keys inside JSON error payloads", async () => {
-  const callerKey = "router-caller-secret-value-32chars!!";
-  const prefix = `/_codex-router/${encodeURIComponent(callerKey)}`;
-  const mock = await listenMock((request, response) => {
-    json(response, 500, {
-      error: { message: `upstream failed at ${prefix}/v1/chat/completions` },
-    });
-  });
-  try {
-    const host = createCodingToolsAppsHost({
-      services: {
-        loopbackRequest: () => ({
-          origin: mock.origin,
-          modelsPath: `${prefix}/v1/models`,
-          chatPath: `${prefix}/v1/chat/completions`,
-          healthPath: `${prefix}/v1/models`,
-        }),
-      },
-    });
-    const chat = await host.call("codex-router", "chatCompletions", {
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: "ping" }],
-    });
-    assert.equal(chat.ok, false);
-    const payload = JSON.stringify(chat);
-    assert.equal(payload.includes(callerKey), false);
-    assert.match(chat.result.json.error.message, /_codex-router\/\[REDACTED\]/);
-  } finally {
-    await mock.close();
-  }
-});
-
-test("desktop wiring keeps CPA/Router handler auth in-process", () => {
+test("desktop wiring keeps CPA handler auth in-process", () => {
   const main = fs.readFileSync(path.join(desktopRoot, "electron/main.cjs"), "utf8");
   const managed = fs.readFileSync(path.join(desktopRoot, "electron/managed-external-services.cjs"), "utf8");
   const original = fs.readFileSync(path.join(desktopRoot, "electron/original-ui.cjs"), "utf8");
@@ -733,7 +481,6 @@ test("desktop wiring keeps CPA/Router handler auth in-process", () => {
   assert.match(main, /loopbackRequest:/);
   assert.match(main, /linkProvider:/);
   assert.match(managed, /function loopbackRequest\(/);
-  assert.match(managed, /\/_codex-router\/\$\{encodeURIComponent\(callerKey\)\}/);
   assert.match(original, /via: "codingTools\.apps"/);
   assert.doesNotMatch(original, /openOriginalControlCenter/);
 });

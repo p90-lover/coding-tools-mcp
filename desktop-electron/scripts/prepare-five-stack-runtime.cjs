@@ -7,13 +7,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { createRetentionSession, PRODUCT_VERSION } = require("./prepare-package-resources.cjs");
 
-const COMPONENT_IDS = Object.freeze([
-  "codex-router",
-  "commandcode-proxy",
-  "cpa",
-  "paseo",
-  "anneal",
-]);
+const COMPONENT_IDS = Object.freeze(["cpa"]);
 const COMMIT_SHA = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_ASSET_BYTES = 512 * 1024 * 1024;
@@ -779,24 +773,6 @@ function patchPaseoCodexAppServerAgentSource(source) {
   return source.replace(match, PASEO_CODEX_API_KEY_PATCH.replaceAll("\n", newline));
 }
 
-function prepareRouterPythonWheels(sourceRoot, spawnSyncProcess = spawnSync, workRoot = sourceRoot) {
-  const requirements = path.join(sourceRoot, "requirements", "python.txt");
-  if (!isFile(requirements)) fail("FIVE_STACK_PYTHON_LOCK_MISSING", requirements);
-  const { resolvePythonExecutable } = require("../electron/codex-router-managed.cjs");
-  const python = resolvePythonExecutable({ spawnSyncProcess });
-  const wheels = path.join(sourceRoot, "requirements", "wheels");
-  fs.mkdirSync(wheels, { recursive: true, mode: 0o700 });
-  const scratch = path.join(workRoot, "aiTemp", "python-download");
-  fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-  const result = spawnSyncProcess(python, ["-I", "-B", "-m", "pip", "--isolated", "--disable-pip-version-check", "download", "--require-hashes", "--only-binary=:all:", "--no-cache-dir", "--dest", wheels, "-r", requirements], {
-    cwd: sourceRoot, env: { ...process.env, TEMP: scratch, TMP: scratch }, encoding: "utf8", shell: false, windowsHide: true, timeout: 30 * 60_000,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) fail("FIVE_STACK_PYTHON_DOWNLOAD_FAILED", String(result.stderr || result.stdout || "").trim());
-  if (!fs.readdirSync(wheels).some((name) => name.endsWith(".whl"))) fail("FIVE_STACK_PYTHON_WHEELS_MISSING", wheels);
-  return wheels;
-}
-
 async function materializeComponent({
   manifest,
   outputRoot,
@@ -867,11 +843,6 @@ async function materializeComponent({
     if (prepareDependencies && hostNpmPrepareAllowed(manifest, platform)) {
       if (manifest.id === "paseo") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build:server"], true);
       if (manifest.id === "anneal") maybePrepareDependencies(sourceDestination, spawnSyncProcess, ["build"]);
-      if (manifest.id === "codex-router") {
-        prepareRouterPythonWheels(sourceDestination, spawnSyncProcess, workRoot);
-        maybePrepareDependencies(sourceDestination, spawnSyncProcess);
-        maybePrepareDependencies(path.join(sourceDestination, "apps", "control-center"), spawnSyncProcess, ["build"]);
-      }
     }
     writeBundledMarker(sourceDestination, manifest);
     record.source = "source";
@@ -970,7 +941,6 @@ module.exports = {
   materializeNpmWorkspaceLinks,
   npmSpawnInvocation,
   patchPaseoCodexAppServerAgentSource,
-  prepareRouterPythonWheels,
   prepareFiveStackRuntime,
   resolveNpmCliJs,
   resolveNodeExecutable,

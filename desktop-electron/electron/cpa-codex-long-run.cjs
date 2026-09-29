@@ -1,22 +1,17 @@
 "use strict";
 
 const fs = require("node:fs");
-const path = require("node:path");
+
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 
-const TOOL_IDS = Object.freeze(["cpa", "codex-router"]);
+const TOOL_IDS = Object.freeze(["cpa"]);
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const EXECUTION_TIMEOUT_MS = 8 * 24 * 60 * 60 * 1000;
 const HEALTH_POLL_MS = 45_000;
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_CAP_MS = 5 * 60_000;
 const BLIP_RESTART_THRESHOLD = 3;
 const MAX_JOURNAL_EVENTS = 80;
 const MAX_JOURNAL_BYTES = 32_768;
-const GROK_STREAM_STALL_MS = 2 * 60 * 60_000;
-const GATEWAY_RESTARTS = 32;
-const GATEWAY_RESTART_WINDOW_MS = 10 * 60_000;
-const LITELLM_REQUEST_TIMEOUT_SECONDS = Math.ceil(EXECUTION_TIMEOUT_MS / 1000);
 const CPA_LOGS_MAX_TOTAL_SIZE_MB = 256;
 const SCHEMA_VERSION = 1;
 
@@ -40,7 +35,7 @@ function emptyState() {
     schemaVersion: SCHEMA_VERSION,
     tools: {
       cpa: emptyToolState(),
-      "codex-router": emptyToolState(),
+
     },
     events: [],
   };
@@ -78,33 +73,6 @@ function trimJournal(events, { maxEvents = MAX_JOURNAL_EVENTS, maxBytes = MAX_JO
     next = next.slice(1);
   }
   return next;
-}
-
-function routerLongRunEnvironment() {
-  return {
-    MODEL_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS: String(EXECUTION_TIMEOUT_MS),
-    CODEX_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS: String(EXECUTION_TIMEOUT_MS),
-    MODEL_ROUTER_ACTIVITY_RECORD_RETENTION_MS: String(EXECUTION_TIMEOUT_MS),
-    CODEX_ROUTER_ACTIVITY_RECORD_RETENTION_MS: String(EXECUTION_TIMEOUT_MS),
-    CODEX_ROUTER_GROK_STREAM_STALL_MS: String(GROK_STREAM_STALL_MS),
-    CODEX_ROUTER_GATEWAY_RESTARTS: String(GATEWAY_RESTARTS),
-    CODEX_ROUTER_GATEWAY_RESTART_WINDOW_MS: String(GATEWAY_RESTART_WINDOW_MS),
-    CODEX_ROUTER_GATEWAY_RESTART_BACKOFF_MS: String(BACKOFF_BASE_MS),
-    LITELLM_REQUEST_TIMEOUT: String(LITELLM_REQUEST_TIMEOUT_SECONDS),
-  };
-}
-
-function applyLongRunLiteLlmTimeout(home) {
-  const filePath = path.join(home, "src", "litellm-config.mjs");
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return false;
-  const source = fs.readFileSync(filePath, "utf8");
-  const next = source.replace(
-    /request_timeout:\s*600\b/g,
-    `request_timeout: ${LITELLM_REQUEST_TIMEOUT_SECONDS}`,
-  );
-  if (next === source) return false;
-  fs.writeFileSync(filePath, next);
-  return true;
 }
 
 function cpaLongRunYamlLines() {
@@ -157,7 +125,7 @@ function writeState(filePath, state) {
     schemaVersion: SCHEMA_VERSION,
     tools: {
       cpa: { ...emptyToolState(), ...(state.tools?.cpa || {}) },
-      "codex-router": { ...emptyToolState(), ...(state.tools?.["codex-router"] || {}) },
+
     },
     events: trimJournal(state.events),
   };
@@ -273,9 +241,6 @@ function attachCpaCodexLongRun(inner, {
         await inner.start(toolId);
         current.lastStartedAt = new Date(now()).toISOString();
         persist();
-        if (toolId === "codex-router") {
-          try { await inner.openEmbedded(toolId); } catch {}
-        }
         watchDesired(toolId);
       } catch (error) {
         current.lastError = error instanceof Error ? error.message : String(error);
@@ -452,7 +417,7 @@ function attachCpaCodexLongRun(inner, {
       schemaVersion: SCHEMA_VERSION,
       tools: {
         cpa: projectLongRun(state.tools.cpa),
-        "codex-router": projectLongRun(state.tools["codex-router"]),
+
       },
     }),
   });
@@ -461,12 +426,12 @@ function attachCpaCodexLongRun(inner, {
 module.exports = {
   TOOL_IDS,
   WEEK_MS,
-  EXECUTION_TIMEOUT_MS,
+
   HEALTH_POLL_MS,
   BACKOFF_CAP_MS,
   CPA_LOGS_MAX_TOTAL_SIZE_MB,
-  LITELLM_REQUEST_TIMEOUT_SECONDS,
-  applyLongRunLiteLlmTimeout,
+
+
   attachCpaCodexLongRun,
   cpaLongRunYamlLines,
   classifyObservation,
@@ -474,7 +439,7 @@ module.exports = {
   projectLongRun,
   readState,
   rotateFileIfNeeded,
-  routerLongRunEnvironment,
+
   shouldAbandonLongRun,
   trimJournal,
   writeState,

@@ -122,6 +122,17 @@ test("a typed workspace list call uses its exact channel and validates its respo
   }]);
 });
 
+test("workspace creation has an exact confirmed IPC contract with no renderer secret fields", async () => {
+  const created = { id: "ao-qa", name: "AO QA", path: "C:\\ao-qa", cancelled: false };
+  const { api, invocations } = loadPreload(() => created);
+  assert.deepEqual(await api.workspaces.create({ path: created.path, name: created.name, confirm: true }), created);
+  assert.deepEqual(invocations, [{ channel: "coding-tools:workspaces:create",
+    payload: { path: created.path, name: created.name, confirm: true } }]);
+  await assert.rejects(api.workspaces.create({ path: created.path, name: created.name, confirm: false }), /IPC_REQUEST_SCHEMA_INVALID/);
+  await assert.rejects(api.workspaces.create({ path: created.path, name: created.name, confirm: true, bearer_token: "not allowed" }), /IPC_REQUEST_SCHEMA_INVALID/);
+  assert.equal(invocations.length, 1);
+});
+
 test("a typed apps catalog call uses its exact channel", async () => {
   const response = { version: 1, host: "coding-tools-apps", modules: [] };
   const { api, invocations } = loadPreload(() => response);

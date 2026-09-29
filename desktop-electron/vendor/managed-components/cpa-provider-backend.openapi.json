@@ -1,0 +1,61 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Coding Tools CPA provider backend",
+    "version": "1.0.0",
+    "description": "Stable loopback OpenAI-compatible APIs for Desktop, MCP, and Paseo. Paseo/Anneal orchestration is owned elsewhere."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8317",
+      "description": "CPA main provider"
+    }
+  ],
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "cpa"
+        ],
+        "operationId": "cpaListModels",
+        "security": [
+          {
+            "cpaProxyApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAI-compatible model list"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": [
+          "cpa"
+        ],
+        "operationId": "cpaChatCompletions",
+        "security": [
+          {
+            "cpaProxyApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAI-compatible chat completion"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "cpaProxyApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "CODING_TOOLS_CPA_PROXY_API_KEY"
+      }
+    }
+  }
+}

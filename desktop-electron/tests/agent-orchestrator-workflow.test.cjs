@@ -1,11 +1,54 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow, resolveAoNativeConnection } = require("../electron/agent-orchestrator-workflow.cjs");
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
+const { invokeContract } = require("../electron/ipc-schema.cjs");
 
-test("AO keeps manual clauses on the old board and confirms durable run changes locally", async () => {
+test("team settings use their local UI operation and cannot be changed through mission graph tools", async () => {
+  const requests = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+    requests.push({ endpoint, body, options });
+    return { ok: true, team: { id: "team", workspace_id: "ws-1", revision: 1 } };
+  } });
+  await assert.rejects(workflow.call("update_run", { workspaceId: "ws-1", change: { operation: "set_limits", max_workers: 24 } }), /supported AO graph/);
+  const result = await workflow.call("team_update", { workspaceId: "ws-1", change: { operation: "save_team", expected_revision: 0, team: { id: "team", workspace_id: "ws-1" } } });
+  assert.equal(result.team.revision, 1);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].endpoint, "/api/v1/ao/update");
+  assert.deepEqual(requests[0].options, { localConfirmation: true });
+  assert.equal(requests[0].body.workspace_id, "ws-1");
+});
+
+test("AO board list and detail responses remain valid across the renderer IPC boundary", async () => {
+  const task = { id: "task-1", title: "Read-only task", state: "backlog", step: 0, clauses: [] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (_endpoint, body) => ({ ok: true, operation: { state: "completed", result: {
+      ok: true, revision: 1, workspace_id: "ws-1", steps: ["Plan"],
+      ...(body.arguments.task_id ? { task } : { tasks: [task] }),
+    } } }),
+  });
+  const host = createCodingToolsAppsHost({ services: {
+    agentOrchestrator: (operation, args) => workflow.call(operation, args),
+  } });
+  const ipc = { invoke: (_channel, payload) => host.call(payload.moduleId, payload.operation, payload.arguments) };
+  const list = await invokeContract(ipc, "apps.call", {
+    moduleId: "agent-orchestrator", operation: "board", arguments: { workspaceId: "ws-1" },
+  });
+  assert.equal(list.result.tasks.length, 1);
+  assert.equal(list.result.task, null);
+  const detail = await invokeContract(ipc, "apps.call", {
+    moduleId: "agent-orchestrator", operation: "board", arguments: { workspaceId: "ws-1", taskId: "task-1" },
+  });
+  assert.deepEqual(detail.result.tasks, []);
+  assert.equal(detail.result.task.id, "task-1");
+});
+
+test("AO keeps manual clauses and applies revisioned mission edits without a second dialog", async () => {
   const task = { id: "old", title: "Improve workflow", state: "in_progress", step: 1, clauses: [] };
   let revision = 4;
   let grants = 0;
@@ -60,6 +103,10 @@ test("AO keeps manual clauses on the old board and confirms durable run changes 
   assert.ok(host.list().modules.some((module) => module.id === "agent-orchestrator"));
   assert.equal(host.catalog().modules.find((module) => module.id === "agent-orchestrator")
     .operations.some((operation) => operation.name === "plan"), false);
+  assert.equal(host.catalog().modules.find((module) => module.id === "agent-orchestrator")
+    .operations.find((operation) => operation.name === "run_status")?.readOnly, true);
+  assert.equal(host.catalog().modules.find((module) => module.id === "agent-orchestrator")
+    .operations.find((operation) => operation.name === "start_run")?.readOnly, false);
   const saved = (await host.call("agent-orchestrator", "append", {
     workspaceId: "ws-1", taskId: "old", expectedRevision: 4,
     clauses: [{ title: "Plan boundaries", detail: "List scopes" }],
@@ -75,7 +122,7 @@ test("AO keeps manual clauses on the old board and confirms durable run changes 
   })).result;
   assert.equal(changed.run.cancelled, true);
   assert.equal(aoUpdates, 1);
-  assert.deepEqual(confirmations, ["Add clauses to this Coding Tools plan?", "Change this AO mission?"]);
+  assert.deepEqual(confirmations, ["Add clauses to this Coding Tools plan?"]);
 });
 
 test("AO readiness requires both the task and its clauses to be complete", () => {
@@ -87,4 +134,467 @@ test("AO readiness requires both the task and its clauses to be complete", () =>
   assert.equal(presentTask(task).lane, "needs_review");
   task.state = "done";
   assert.equal(presentTask(task).lane, "ready");
+});
+
+test("AO worker passes the managed CPA key to its child only after exact-model and local approval", async () => {
+  const sentinel = "SENTINEL_KEY_DO_NOT_LOG_1234567890";
+  const calls = [];
+  const confirmations = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
+        id: "run-1", workspace_id: "ws-1", nodes: [{
+          id: "worker", role: "worker", state: "pending",
+          route: { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity",
+            account_id: "shared-cpa-pool", model: "gemini-3.8-flash-high",
+            permission_profile: ":read-only" },
+        }],
+      }] };
+      assert.equal(endpoint, "/api/v1/ao/harness/connect");
+      calls.push({ body, options });
+      return { ok: true, owned: true, route_verified: false,
+        status: { connected: true, model: "gemini-3.8-flash-high" } };
+    },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: sentinel }),
+    resolveHarness: async ({ model }) => ({ executable: "C:\\codex.exe", expected_sha256: "0".repeat(64),
+      codex_home: "C:\\ao-home", model, allow_model_usage: true,
+      allow_command_execution: false, permission_profile: ":read-only",
+      request_limit: 2, lifetime_seconds: 120 }),
+    confirm: async (details) => { confirmations.push(details); return true; },
+    fetchImpl: async (url, options) => {
+      assert.equal(url, "http://127.0.0.1:8317/v1/models");
+      assert.equal(options.headers.Authorization, `Bearer ${sentinel}`);
+      return { ok: true, json: async () => ({ data: [{ id: "gemini-3.8-flash-high" }] }) };
+    },
+  });
+  await assert.rejects(workflow.call("connect_harness", {
+    workspaceId: "ws-1", runId: "run-1", nodeId: "worker", executable: "C:\\codex.exe",
+    proxyApiKey: sentinel,
+  }), /renderer credential/i);
+  assert.equal(calls.length, 0);
+  const result = await workflow.call("connect_harness", {
+    workspaceId: "ws-1", runId: "run-1", nodeId: "worker", executable: "C:\\codex.exe",
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].options, { localConfirmation: true });
+  assert.equal(calls[0].body.private_proxy_api_key, sentinel);
+  assert.equal(calls[0].body.connection.model, "gemini-3.8-flash-high");
+  assert.equal(result.status.model, "gemini-3.8-flash-high");
+  assert.equal(JSON.stringify({ result, confirmations }).includes(sentinel), false);
+});
+
+test("AO WebGPT connect uses the selected Codex bundled catalog without a CPA key", async () => {
+  const calls = [];
+  let confirmed = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
+        id: "run-1", workspace_id: "ws-1", nodes: [{ id: "planner", role: "planner", state: "pending",
+          route: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+            model: "chatgpt-web/high", permission_profile: ":read-only" } }],
+      }] };
+      calls.push(body);
+      return { ok: true, owned: true, status: { model: "chatgpt-web/high" } };
+    },
+    cpaConnection: () => { throw new Error("WebGPT must not request a CPA key"); },
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webModelCatalog: async ({ executable, model }) => {
+      assert.equal(confirmed, true, "do not launch a selected executable before local approval");
+      assert.equal(executable, "C:\\codex.exe");
+      assert.equal(model, "chatgpt-web/high");
+      return { models: [{ slug: "chatgpt-web/high", visibility: "list" }] };
+    },
+    resolveHarness: async () => ({ executable: "C:\\codex.exe", expected_sha256: "0".repeat(64),
+      codex_home: "C:\\ao-home", model: "chatgpt-web/high", allow_model_usage: true,
+      allow_command_execution: false, permission_profile: ":read-only", request_limit: 2, lifetime_seconds: 120 }),
+    confirm: async () => { confirmed = true; return true; },
+    fetchImpl: async () => { throw new Error("AO WebGPT catalog must not require a bearer token"); },
+  });
+  await workflow.call("connect_harness", {
+    workspaceId: "ws-1", runId: "run-1", nodeId: "planner", executable: "C:\\codex.exe",
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].web_bridge_base_url, "http://127.0.0.1:17841/v1");
+  assert.deepEqual(calls[0].web_model_catalog, { models: [{ slug: "chatgpt-web/high", visibility: "list" }] });
+  assert.equal(calls[0].private_proxy_api_key, undefined);
+});
+
+test("AO native resolver pins an executable and a distinct unopened home per node", async () => {
+  const root = path.resolve(__dirname, "../../aiTemp/ao-native-resolver-tests", `${process.pid}-${crypto.randomUUID()}`);
+  fs.mkdirSync(root, { recursive: true });
+  const executable = path.join(root, "codex.exe");
+  fs.writeFileSync(executable, "MZ fixture");
+  const userData = path.join(root, "user-data");
+  const input = { workspaceId: "qa", runId: "run-1", nodeId: "worker-a", executable,
+    model: "gemini-3.8-flash-high", userData };
+  const first = await resolveAoNativeConnection(input);
+  const second = await resolveAoNativeConnection({ ...input, nodeId: "worker-b" });
+  assert.equal(first.executable, fs.realpathSync.native(executable));
+  assert.equal(first.expected_sha256, crypto.createHash("sha256").update("MZ fixture").digest("hex"));
+  assert.equal(path.dirname(first.codex_home), path.join(userData, "headless", "ao-homes"));
+  assert.match(path.basename(first.codex_home), /^[a-f0-9]{64}$/);
+  assert.notEqual(first.codex_home, second.codex_home);
+  assert.equal(fs.existsSync(first.codex_home), false, "inspection must not create an AO home before approval");
+  assert.equal(first.permission_profile, ":read-only");
+  assert.equal(first.allow_command_execution, false);
+  await assert.rejects(resolveAoNativeConnection({ ...input, executable: "relative-codex.exe" }), /absolute/i);
+});
+
+test("AO advances only a ready card and observes an existing reservation without replay", async () => {
+  const calls = [];
+  let state = "pending";
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      calls.push({ endpoint, body, options });
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
+        id: "run-1", workspace_id: "ws-1", revision: 3, cancelled: false, nodes: [
+          { id: "planner", role: "planner", task_id: "task-1", parents: [], state,
+            route: { provider_id: "chatgpt-web", model: "chatgpt-web/high" } },
+          { id: "worker", role: "worker", task_id: "task-1", parents: ["planner"], state: "pending",
+            route: { provider_id: "cliproxyapi-antigravity", model: "gemini-3.8-flash-high" } },
+        ],
+      }] };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, owned: true,
+        status: { connected: true, model: "chatgpt-web/high" } };
+      if (endpoint === "/api/v1/ao/harness/execute") {
+        assert.deepEqual(options, { localConfirmation: true });
+        assert.equal(body.expected_revision, 3);
+        assert.equal(body.node_id, "planner");
+        state = "reserved";
+        return { ok: true, receipt: { status: "submitted" } };
+      }
+      if (endpoint === "/api/v1/ao/harness/observe") return { ok: true,
+        receipt: { status: "submitted" } };
+      throw new Error(`Unexpected AO endpoint ${endpoint}`);
+    },
+    cpaConnection: () => { throw new Error("Planner must not use CPA"); },
+    confirm: async () => true,
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
+  const host = createCodingToolsAppsHost({
+    services: { agentOrchestrator: (operation, args) => workflow.call(operation, args) },
+  });
+  assert.equal((await host.call("agent-orchestrator", "advance", input)).result.receipt.status, "submitted");
+  assert.equal((await workflow.call("advance", input)).receipt.status, "submitted");
+  assert.equal(calls.filter((item) => item.endpoint === "/api/v1/ao/harness/execute").length, 1);
+  assert.equal(calls.filter((item) => item.endpoint === "/api/v1/ao/harness/observe").length, 1);
+});
+
+test("a held sibling does not block an independent ready AO worker", async () => {
+  const calls = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      calls.push({ endpoint, body });
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
+        id: "run-1", workspace_id: "ws-1", revision: 8, cancelled: false, nodes: [
+          { id: "planner", state: "finished", parents: [] },
+          { id: "held", state: "held", parents: ["planner"] },
+          { id: "ready", role: "worker", state: "pending", parents: ["planner"],
+            route: { model: "gemini-3.8-flash-high" } },
+        ],
+      }] };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true,
+        status: { connected: true, model: "gemini-3.8-flash-high" } };
+      if (endpoint === "/api/v1/ao/harness/execute") return { ok: true,
+        receipt: { status: "submitted" } };
+      throw new Error(`Unexpected AO endpoint ${endpoint}`);
+    },
+    confirm: async () => true,
+  });
+  await workflow.call("advance", { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" });
+  assert.equal(calls.some((call) => call.endpoint === "/api/v1/ao/harness/observe"), false);
+  assert.equal(calls.find((call) => call.endpoint === "/api/v1/ao/harness/execute")?.body.node_id, "ready");
+});
+
+test("AO tool approval is scoped to a visible pending request and needs local confirmation", async () => {
+  const calls = [];
+  const prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      calls.push({ endpoint, body, options });
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: {
+        pending_approvals: [{ approval_id: "approval-1", kind: "command", command: "Get-Content tool-check.txt", cwd: "C:\\project", reason: "Read file", permissions: { additionalPermissions: null, networkApprovalContext: null } }],
+      } };
+      if (endpoint === "/api/v1/ao/harness/approval") return { ok: true,
+        result: { ok: true, approved: false, scope: "once" } };
+      throw new Error(`Unexpected AO endpoint ${endpoint}`);
+    },
+    confirm: async prompt => { prompts.push(prompt); return true; },
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", nodeId: "planner", approvalId: "approval-1", allow: false };
+  await assert.rejects(workflow.call("approve_harness", { ...input, approvalId: "forged" }), /pending/i);
+  assert.equal(calls.filter((item) => item.endpoint === "/api/v1/ao/harness/approval").length, 0);
+  const result = await workflow.call("approve_harness", input);
+  assert.equal(result.result.approved, false);
+  const approved = calls.find((item) => item.endpoint === "/api/v1/ao/harness/approval");
+  assert.deepEqual(approved.options, { localConfirmation: true });
+  assert.equal(approved.body.allow, false);
+  assert.equal(approved.body.approval_id, "approval-1");
+  assert.match(prompts[0].detail, /Get-Content tool-check\.txt/);
+  assert.match(prompts[0].detail, /C:\\project/);
+  assert.doesNotMatch(JSON.stringify(approved.body), /acceptForSession|execpolicy/);
+});
+
+test("AO granted run dispatches parallel workers after focus loss and finishes each saved stage once", async () => {
+  const roles = ["planner", "worker", "reviewer"];
+  const nodes = roles.map((role, index) => ({
+    id: role, role, state: "pending", parents: index ? [roles[index - 1]] : [],
+    route: role === "worker"
+      ? { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model: "gemini-3.8-flash-high", permission_profile: ":read-only" }
+      : { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" },
+  }));
+  const run = { id: "run-1", workspace_id: "ws-1", project_id: "project-1", revision: 3, cancelled: false, nodes };
+  nodes.splice(2, 0, { ...structuredClone(nodes[1]), id: "worker-two" });
+  nodes[3].parents = ["worker", "worker-two"];
+  let workersLaunched = 0;
+  let peakWorkers = 0;
+  const calls = [];
+  let focused = true;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      calls.push({ endpoint, body, options });
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 2 - nodes.filter(node => node.role === "worker" && node.state === "running").length } };
+      if (endpoint === "/api/v1/ao/grant") {
+        assert.equal(focused, true);
+        assert.deepEqual(options, { localConfirmation: true });
+        assert.equal(body.expected_revision, 3);
+        assert.equal(body.executable_sha256, "a".repeat(64));
+        focused = false;
+        return { ok: true, run: structuredClone(run), grant: { executable_sha256: "a".repeat(64) } };
+      }
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: false } };
+      if (endpoint === "/api/v1/ao/harness/connect") {
+        assert.equal(focused, false);
+        assert.equal(body.confirm, false);
+        assert.equal(options?.localConfirmation, undefined);
+        return { ok: true, owned: true, status: { connected: true, model: body.connection.model } };
+      }
+      if (endpoint === "/api/v1/ao/harness/execute") {
+        assert.equal(focused, false);
+        assert.equal(body.confirm, false);
+        assert.equal(options?.localConfirmation, undefined);
+        const node = nodes.find((entry) => entry.id === body.node_id);
+        assert.equal(node.state, "pending");
+        node.state = "running";
+        if (node.role === "worker") { workersLaunched++; peakWorkers = Math.max(peakWorkers, nodes.filter(node => node.role === "worker" && node.state === "running").length); }
+        node.receipt = { status: "submitted" };
+        run.revision += 1;
+        return { ok: true, run: structuredClone(run), receipt: node.receipt };
+      }
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        const node = nodes.find((entry) => entry.id === body.node_id);
+        if (node.role === "worker" && workersLaunched < 2) return { ok: true, run: structuredClone(run), receipt: node.receipt };
+        node.state = "finished";
+        node.receipt = { status: "completed", answer: "READY" };
+        run.revision += 1;
+        return { ok: true, run: structuredClone(run), receipt: node.receipt };
+      }
+      throw new Error(`Unexpected endpoint ${endpoint}`);
+    },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "SENTINEL_PRIVATE_KEY_12345678901234567890" }),
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
+    resolveHarness: async ({ model }) => ({ executable: "C:\\codex.exe", expected_sha256: "a".repeat(64),
+      codex_home: "C:\\ao-home", model, allow_model_usage: true,
+      allow_command_execution: false, permission_profile: ":read-only", request_limit: 3, lifetime_seconds: 900 }),
+    confirm: async () => { throw new Error("Start mission must not open a second confirmation dialog"); },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gemini-3.8-flash-high" }] }) }),
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
+  await assert.rejects(workflow.call("start_run", { ...input, proxyApiKey: "SENTINEL_PRIVATE_KEY" }), /renderer credential/i);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await workflow.call("start_run", input), { ok: true, started: true, status: "running" });
+  assert.equal((await workflow.call("start_run", input)).started, false, "duplicate clicks do not create a second loop");
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if ((await workflow.call("run_status", input)).status === "finished") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal((await workflow.call("run_status", input)).status, "finished");
+  assert.deepEqual(calls.filter((item) => item.endpoint === "/api/v1/ao/harness/execute").map((item) => item.body.node_id), ["planner", "worker", "worker-two", "reviewer"]);
+  assert.equal(peakWorkers, 2);
+  assert.equal(calls.filter((item) => item.endpoint === "/api/v1/ao/grant").length, 1);
+  assert.equal(JSON.stringify(await workflow.call("run_status", input)).includes("SENTINEL_PRIVATE_KEY"), false);
+});
+
+test("AO restart sees a reserved turn as held and never resubmits it", async () => {
+  const calls = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
+        id: "run-1", workspace_id: "ws-1", revision: 5, cancelled: false,
+        nodes: [{ id: "planner", role: "planner", state: "reserved", parents: [],
+          receipt: { request_key: "ao-first-send", status: "reserved" } }],
+      }] };
+      throw new Error("A reserved turn must not be sent again");
+    },
+    confirm: async () => { throw new Error("Do not request another grant for a reserved turn"); },
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
+  assert.deepEqual(await workflow.call("run_status", input), { ok: true, status: "held" });
+  await assert.rejects(workflow.call("start_run", input), /active or unresolved card/i);
+  assert.deepEqual(calls, ["/api/v1/ao/read", "/api/v1/ao/read"]);
+});
+
+test("AO explicit resume observes an existing granted turn without a new grant or send", async () => {
+  const route = { model: "chatgpt-web/high" };
+  const nodes = [
+    { id: "planner", state: "finished", parents: [], route },
+    { id: "worker", state: "finished", parents: ["planner"], route },
+    { id: "reviewer", role: "reviewer", state: "running", parents: ["worker"],
+      route, receipt: { request_key: "ao-original-send", status: "submitted" } },
+  ];
+  const run = { id: "run-1", workspace_id: "ws-1", revision: 8, nodes,
+    grant: { executable_sha256: "a".repeat(64) } };
+  const calls = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 3 } };
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        nodes[2].state = "finished";
+        return { ok: true, run: structuredClone(run), receipt: { status: "completed" } };
+      }
+      throw new Error("Resume must observe the original turn only");
+    },
+    resolveHarness: async () => ({ executable: "C:\\codex.exe", expected_sha256: "a".repeat(64) }),
+    confirm: async () => true,
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
+  assert.equal((await workflow.call("start_run", input)).started, true);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await workflow.call("run_status", input)).status === "finished") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal((await workflow.call("run_status", input)).status, "finished");
+  assert.deepEqual(calls.filter((endpoint) => endpoint !== "/api/v1/ao/read"), ["/api/v1/ao/harness/observe"]);
+});
+
+test("AO background waits for an explicit tool decision without approving it", async () => {
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+    model: "chatgpt-web/high", permission_profile: ":read-only" };
+  const nodes = [
+    { id: "planner", role: "planner", state: "finished", parents: [], route },
+    { id: "worker", role: "worker", state: "finished", parents: ["planner"], route },
+    { id: "reviewer", role: "reviewer", state: "pending", parents: ["worker"], route },
+  ];
+  const run = { id: "run-1", workspace_id: "ws-1", revision: 5, nodes };
+  let toolAnswered = false;
+  const calls = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 3 } };
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: structuredClone(run),
+        grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: false } };
+      if (endpoint === "/api/v1/ao/harness/connect") return { ok: true, status: { model: route.model } };
+      if (endpoint === "/api/v1/ao/harness/execute") {
+        nodes[2].state = "running";
+        run.revision += 1;
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        if (toolAnswered) nodes[2].state = "finished";
+        return { ok: true, run: structuredClone(run),
+          pending_approvals: toolAnswered ? [] : [{ approval_id: "approval-1" }] };
+      }
+      throw new Error(`Unexpected ${endpoint} ${body.node_id}`);
+    },
+    resolveHarness: async ({ model }) => ({ executable: "C:\\codex.exe", expected_sha256: "a".repeat(64),
+      model, allow_model_usage: true, allow_command_execution: false, permission_profile: ":read-only" }),
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
+    confirm: async () => true,
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
+  await workflow.call("start_run", input);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await workflow.call("run_status", input)).detail === "Waiting for your tool approval") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal((await workflow.call("run_status", input)).detail, "Waiting for your tool approval");
+  assert.equal(calls.includes("/api/v1/ao/harness/approval"), false);
+  toolAnswered = true;
+  for (let attempt = 0; attempt < 70; attempt += 1) {
+    if ((await workflow.call("run_status", input)).status === "finished") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal((await workflow.call("run_status", input)).status, "finished");
+  assert.equal(calls.filter((endpoint) => endpoint === "/api/v1/ao/harness/execute").length, 1);
+});
+
+test("AO harness workers run as AO sessions and return their answer as the card receipt", async () => {
+  const calls = [];
+  const spawned = [];
+  let worker = { id: "worker", role: "worker", task_id: "task-1", parents: ["planner"], state: "pending",
+    route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "default", permission_profile: ":ao-default" } };
+  let turn = { turnId: "turn-1", turnState: "running", answer: "" };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      calls.push({ endpoint, body, options });
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", revision: 4, cancelled: false, nodes: [
+        { id: "planner", role: "planner", task_id: "task-1", parents: [], state: "finished", route: { provider_id: "chatgpt-web", model: "chatgpt-web/high" } },
+        worker,
+      ] }] };
+      if (endpoint === "/api/v1/ao/external/reserve") {
+        assert.deepEqual(options, { localConfirmation: true });
+        assert.equal(body.confirm, true);
+        worker = { ...worker, state: "reserved", receipt: { request_key: "ao-key", status: "reserved" } };
+        return { ok: true, request_key: "ao-key", prompt: "Do the task" };
+      }
+      if (endpoint === "/api/v1/ao/external/submitted") {
+        assert.equal(body.request_key, "ao-key");
+        worker = { ...worker, state: "running", receipt: { request_key: "ao-key", status: "submitted", thread_id: body.session_id } };
+        return { ok: true, run: { id: "run-1" } };
+      }
+      if (endpoint === "/api/v1/ao/external/terminal") {
+        assert.deepEqual({ ...body }, { workspace_id: "ws-1", run_id: "run-1", node_id: "worker", session_id: "sess-1",
+          turn_id: "turn-1", answer: "Done with evidence", completed: true });
+        worker = { ...worker, state: "finished" };
+        return { ok: true, receipt: { status: "completed" } };
+      }
+      throw new Error(`Unexpected AO endpoint ${endpoint}`);
+    },
+    aoHarness: {
+      spawn: async (input) => { spawned.push(input); return "sess-1"; },
+      observe: async () => turn,
+      catalog: async () => [{ id: "claude-code", label: "Claude Code", installed: true, chat: true, authStatus: "authorized" },
+        { id: "aider", label: "Aider", installed: true, chat: false }],
+      models: async () => [{ id: "sonnet" }],
+      interrupt: async () => undefined,
+    },
+    cpaConnection: () => { throw new Error("AO harness workers must not use CPA"); },
+    confirm: async () => true,
+  });
+  const catalog = await workflow.call("harnesses");
+  // Any installed AO agent is selectable; agents without chat mode run in their terminal UI.
+  assert.deepEqual(catalog.harnesses.map((item) => [item.id, item.runnable, item.chat]),
+    [["codex-native", true, undefined], ["ao:claude-code", true, true], ["ao:aider", true, false]]);
+  assert.deepEqual((await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws-1" })).models, ["default", "sonnet"]);
+  await workflow.call("advance", { workspaceId: "ws-1", runId: "run-1", executable: "C:\codex.exe" });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].agent, "claude-code");
+  assert.equal(spawned[0].prompt, "Do the task");
+  assert.equal((await workflow.call("observe", { workspaceId: "ws-1", runId: "run-1", nodeId: "worker" })).pending_approvals.length, 0);
+  assert.equal(calls.filter((item) => item.endpoint === "/api/v1/ao/external/terminal").length, 0);
+  turn = { turnId: "turn-1", turnState: "completed", answer: "Done with evidence" };
+  assert.equal((await workflow.call("observe", { workspaceId: "ws-1", runId: "run-1", nodeId: "worker" })).receipt.status, "completed");
+  assert.equal(calls.filter((item) => item.endpoint.startsWith("/api/v1/ao/harness/")).length, 0);
+});
+
+test("any worker can pick WebGPT or any CPA pool model on Native Codex", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gemini-3.8-flash-high" }, { id: "claude-sonnet-4-6" }, { id: "gpt-5.5" }] }) }),
+    confirm: async () => true,
+  });
+  assert.deepEqual((await workflow.call("models", { harness: "codex-native" })).models,
+    ["chatgpt-web/high", "gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-5.5"]);
+  const offline = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    cpaConnection: () => null, confirm: async () => true,
+  });
+  assert.deepEqual((await offline.call("models", { harness: "codex-native" })).models, ["chatgpt-web/high"]);
 });

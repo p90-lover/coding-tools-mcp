@@ -181,11 +181,18 @@ test("composes the exact Windows payload from the official seven-member client a
   const options = createFixture("complete");
   writeFile(path.join(options.outputRoot, "old-resource.txt"), "retain this prior output\n");
   const fiveStackRuntimeRoot = path.join(options.repositoryRoot, "aiTemp", "input", "five-stack-runtime");
-  writeFile(path.join(fiveStackRuntimeRoot, "MANIFEST.json"), `${JSON.stringify({
-    schemaVersion: 1,
-    productVersion: PRODUCT_VERSION,
-  }, null, 2)}\n`);
-  writeFile(path.join(fiveStackRuntimeRoot, "commandcode-proxy", "source", "proxy.mjs"), "export {}\n");
+  const cpaArchive = Buffer.from("fixture CPA release archive");
+  const cpaSha = sha256(cpaArchive);
+  const cpaFileName = "cpa-fixture.zip";
+  const cpaComponent = { id: "cpa", fileName: cpaFileName, sha256: cpaSha };
+  writeFile(path.join(options.desktopRoot, "vendor", "managed-components", "cpa.json"), JSON.stringify({
+    id: "cpa", platforms: { win32: { x64: { sha256: cpaSha } } },
+  }));
+  writeFile(path.join(fiveStackRuntimeRoot, "MANIFEST.json"), JSON.stringify({
+    schemaVersion: 1, platform: "win32", arch: "x64", components: [cpaComponent],
+  }));
+  writeFile(path.join(fiveStackRuntimeRoot, "cpa", "BUNDLE.json"), JSON.stringify(cpaComponent));
+  writeFile(path.join(fiveStackRuntimeRoot, "cpa", cpaFileName), cpaArchive);
   options.fiveStackRuntimeRoot = fiveStackRuntimeRoot;
 
   const result = preparePackageResources(options);
@@ -286,10 +293,11 @@ test("composes the exact Windows payload from the official seven-member client a
   }
   assert.equal(fs.readFileSync(path.join(options.outputRoot, "coding-tools", "coding-tools-headless.exe")).subarray(0, 2).toString("ascii"), "MZ");
   assert.equal(fs.readFileSync(path.join(options.outputRoot, "native", "tunnel-client.exe")).subarray(0, 2).toString("ascii"), "MZ");
-  assert.equal(
-    fs.readFileSync(path.join(options.outputRoot, "five-stack-runtime", "commandcode-proxy", "source", "proxy.mjs"), "utf8"),
-    "export {}\n",
+  assert.deepEqual(
+    fs.readFileSync(path.join(options.outputRoot, "five-stack-runtime", "cpa", cpaFileName)),
+    cpaArchive,
   );
+  assert.equal(fs.existsSync(path.join(options.outputRoot, "five-stack-runtime", "commandcode-proxy")), false);
 });
 
 test("five-stack package copy keeps production node_modules and omits expo, Paseo app, fastlane, and file-named directories", () => {
@@ -317,7 +325,7 @@ test("five-stack package copy keeps production node_modules and omits expo, Pase
     false,
   );
 
-  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "coding-tools-five-stack-links-"));
+  const root = fixtureRoot("five-stack-links");
   const source = path.join(root, "source");
   const destination = path.join(root, "destination");
   const scoped = path.join(source, "paseo", "source", "node_modules", "@getpaseo");
@@ -358,7 +366,7 @@ test("five-stack package copy keeps production node_modules and omits expo, Pase
 });
 
 test("five-stack package copy skips Windows file-named directories that 7za cannot archive", () => {
-  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "coding-tools-five-stack-file-dirs-"));
+  const root = fixtureRoot("five-stack-file-dirs");
   const source = path.join(root, "source");
   const destination = path.join(root, "destination");
   fs.mkdirSync(path.join(source, "anneal", "source"), { recursive: true });
@@ -532,6 +540,10 @@ test("package and runtime preparation use repository aiTemp retention without de
       to: "app-handler",
       filter: [
         "**/*",
+        "!paseo/**",
+        "!anneal/**",
+        "!codex-router/**",
+        "!commandcode-proxy/**",
         "!**/node_modules/**",
         "!**/source/test/**",
       ],
@@ -541,6 +553,10 @@ test("package and runtime preparation use repository aiTemp retention without de
       to: "app-modules",
       filter: [
         "**/*",
+        "!paseo/**",
+        "!anneal/**",
+        "!codex-router/**",
+        "!commandcode-proxy/**",
         "!**/node_modules/**",
         "!**/source/test/**",
       ],
@@ -550,12 +566,27 @@ test("package and runtime preparation use repository aiTemp retention without de
       to: "modules",
       filter: [
         "**/*",
+        "!paseo/**",
+        "!anneal/**",
+        "!codex-router/**",
+        "!commandcode-proxy/**",
         "!**/node_modules/**",
         "!**/source/test/**",
       ],
     },
   ]);
-  assert.ok(manifest.build.files.some((entry) => (
+  const asarCopy = manifest.build.files.find((entry) => (
     entry && entry.from === "../app-handler" && entry.to === "app-handler"
-  )), "asar root must include app-handler/**");
+  ));
+  assert.ok(asarCopy, "asar root must include app-handler/**");
+  for (const copy of [asarCopy, ...manifest.build.extraResources.filter((entry) => entry.filter)]) {
+    assert.ok(copy.filter.includes("**/*"), `${copy.to}: include handlers`);
+    for (const retired of ["paseo", "anneal", "codex-router", "commandcode-proxy"]) {
+      assert.ok(copy.filter.includes(`!${retired}/**`), `${copy.to}: exclude ${retired}`);
+    }
+    for (const retained of ["agent-orchestrator", "cpa"]) {
+      assert.ok(!copy.filter.includes(`!${retained}/**`), `${copy.to}: retain ${retained}`);
+    }
+  }
+  assert.ok(manifest.build.files.includes("vendor/bundled/cpa-plugins/**"));
 });

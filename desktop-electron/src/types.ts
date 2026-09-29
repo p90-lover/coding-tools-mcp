@@ -1,7 +1,8 @@
 export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
+export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "providers" | "integrations" | "cpa" | "codex-router" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -170,7 +171,7 @@ export interface ProviderExecutionPlan {
   };
 }
 
-export type ExternalServiceId = "codex-router" | "commandcode-proxy" | "cpa" | "paseo" | "anneal";
+export type ExternalServiceId = "cpa" | "paseo" | "anneal";
 export type ExternalServiceStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 export type ManagedComponentInstallState =
   | "not-installed"
@@ -246,19 +247,6 @@ export interface ManagedBootstrapSnapshot {
   components: ManagedBootstrapComponentSnapshot[];
 }
 
-export interface CommandCodeProxyHealth {
-  status?: string;
-  proxy?: string;
-  version?: string;
-  endpoints?: Record<string, string>;
-  user?: {
-    id?: string;
-    email?: string;
-  };
-  credits?: number;
-  models?: string[];
-}
-
 export interface ExternalServiceSnapshot {
   id: ExternalServiceId;
   name: string;
@@ -282,13 +270,9 @@ export interface ExternalServiceSnapshot {
   error: string | null;
   secretConfigured: boolean;
   sourceConfigured: boolean;
-  routerCli?: string;
-  curateCli?: string;
-  webBaseUrl?: string;
   accountCount?: number;
   connectedAccountCount?: number;
   providerModelCount?: number;
-  health?: CommandCodeProxyHealth;
   banner?: {
     version: string | null;
     listen: string;
@@ -320,36 +304,6 @@ export interface ExternalServiceConfigurationInput {
   enabled?: boolean;
   autoStart?: boolean;
   keepAlive?: boolean;
-  callerKey?: string;
-  routerCli?: string;
-  curateCli?: string;
-  webBaseUrl?: string;
-}
-
-export interface CodexRouterSyncResult {
-  ok: boolean;
-  args: string[];
-  stdout: string;
-  stderr: string;
-}
-
-export interface CommandCodeProxyPlanResult {
-  text: string;
-  credentialPromptRequired: true;
-  provider: {
-    id: "commandcode-proxy";
-    name: string;
-    baseUrl: string;
-    adapter: string;
-    modelEndpoint: string;
-  };
-}
-
-export interface CommandCodeProxyApplyResult {
-  endpoint: string;
-  credentialPromptRequired: true;
-  steps: Array<{ name: string; ok: boolean; detail: string }>;
-  planText?: string;
 }
 
 export interface UpstreamToolActInput {
@@ -375,7 +329,7 @@ export interface UpstreamToolActResult {
 }
 
 export type UpstreamToolId = "anneal" | "paseo";
-export type OriginalUiId = "cpa" | "codex-router" | "paseo" | "anneal";
+export type OriginalUiId = "cpa" | "paseo" | "anneal";
 export type UpstreamToolStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 
 export interface UpstreamToolSnapshot {
@@ -615,6 +569,7 @@ export interface LauncherApi {
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
+  refreshPart(part: RefreshPart): Promise<{ ok: boolean; results: { part: string; ok: boolean; status?: string; message?: string }[] }>;
   setupMcp(input: {
     tunnelId?: string;
     runtimeKey?: string;
@@ -649,17 +604,6 @@ export interface LauncherApi {
   startExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   stopExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   restartExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
-  syncCodexRouter(): Promise<CodexRouterSyncResult>;
-  commandCodeProxyPlan(input?: {
-    baseUrl?: string;
-    routerCli?: string;
-    curateCli?: string;
-  }): Promise<CommandCodeProxyPlanResult>;
-  applyCommandCodeProxyPlan(input?: {
-    baseUrl?: string;
-    routerCli?: string;
-    curateCli?: string;
-  }): Promise<CommandCodeProxyApplyResult>;
   managedBootstrapSnapshot(): Promise<ManagedBootstrapSnapshot>;
   reconcileManagedBootstrap(input?: {
     reason?: string;
@@ -695,7 +639,6 @@ export interface LauncherApi {
     adapterId?: string;
     snapshot?: ProviderNetworkSnapshot;
   }>;
-  importProviderSession(accountId: string): Promise<ProviderNetworkSnapshot>;
   probeProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
   saveProxyProfile(input: ProxyProfileInput): Promise<ProviderNetworkSnapshot>;
   archiveProxyProfile(profileId: string): Promise<ProviderNetworkSnapshot>;

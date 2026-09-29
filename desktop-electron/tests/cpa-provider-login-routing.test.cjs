@@ -18,7 +18,7 @@ function jsonResponse(value, status = 200) {
 }
 
 function fixtureRoot() {
-  const directory = path.join(desktopRoot, "aiTemp/rc9-cpa-oauth-tests", crypto.randomUUID());
+  const directory = path.join(desktopRoot, "..", "aiTemp", "rc9-cpa-oauth-tests", crypto.randomUUID());
   fs.mkdirSync(directory, { recursive: true });
   return directory;
 }
@@ -219,3 +219,42 @@ test("unsupported providers no longer report success after merely opening a webs
   await assert.rejects(() => controller.openProviderLogin(account.id), /login adapter|not configured/i);
   assert.deepEqual(opened, []);
 });
+
+for (const [providerId, adapterId, route, cpaProvider] of [
+  ["commandcode-proxy", "commandcode-oauth", "commandcode-go-auth-url", "commandcode-go"],
+  ["commandcode-studio", "cpa-commandcode-studio", "commandcode-auth-url", "commandcode"],
+]) {
+  test(`${providerId} logs in through its CPA plugin and preserves the account`, async () => {
+    let listingReads = 0;
+    const requests = [];
+    const fetchImpl = async (url) => {
+      const parsed = new URL(url);
+      requests.push(parsed.pathname);
+      if (parsed.pathname === "/v0/management/auth-files") {
+        listingReads += 1;
+        return jsonResponse({ files: listingReads === 1 ? [] : [{
+          name: `${cpaProvider}-user.json`, provider: cpaProvider,
+          email: "user@example.test", status: "ready",
+        }] });
+      }
+      if (parsed.pathname === `/v0/management/${route}`) {
+        return jsonResponse({ status: "ok", state: "plugin-state", url: "https://login.example.test/commandcode" });
+      }
+      if (parsed.pathname === "/v0/management/get-auth-status") return jsonResponse({ status: "ok" });
+      if (parsed.pathname === "/v0/management/auth-files/models") return jsonResponse({ models: [{ id: "test-model" }] });
+      throw new Error(`Unexpected request ${parsed.pathname}`);
+    };
+    const { controller, opened } = controllerFixture(fetchImpl);
+    const account = saveCpaAccount(controller, providerId, adapterId, {
+      auth: providerId === "commandcode-proxy" ? "local_proxy" : "oauth",
+    });
+    const result = await controller.openProviderLogin(account.id);
+    const connected = result.snapshot.accounts.find((candidate) => candidate.id === account.id);
+    assert.deepEqual(opened, ["https://login.example.test/commandcode"]);
+    assert.equal(connected.auth, "oauth");
+    assert.equal(connected.credentialSource, "cpa");
+    assert.equal(connected.loginAdapterId, providerId === "commandcode-proxy" ? "cpa-commandcode-go" : adapterId);
+    assert.equal(connected.endpoint, "http://127.0.0.1:8317");
+    assert.ok(requests.includes(`/v0/management/${route}`));
+  });
+}

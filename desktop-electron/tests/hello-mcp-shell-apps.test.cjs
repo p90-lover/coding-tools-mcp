@@ -70,7 +70,6 @@ test("apps MCP tools list, call, invoke, and report ready without spawning ports
   assert.equal(listed.transport, "in-process");
   assert.equal(listed.dedicatedListenPorts, false);
   assert.ok(listed.modules.some((entry) => entry.id === "cpa"));
-  assert.ok(listed.modules.some((entry) => entry.id === "codex-router"));
 
   const called = await mcp.callTool("apps_call", { moduleId: "cpa", operation: "inspect" });
   assert.equal(called.via, "codingTools.apps.call");
@@ -96,11 +95,6 @@ test("apps MCP tools list, call, invoke, and report ready without spawning ports
   const inspectCalls = calls.filter((entry) => entry[0] === "inspect");
   assert.ok(inspectCalls.some((entry) => entry[1] === "cpa"));
   assert.equal(inspectCalls.some((entry) => entry[1] === "commandcode-proxy"), false);
-  assert.equal(inspectCalls.some((entry) => entry[1] === "paseo"), false);
-  assert.equal(inspectCalls.some((entry) => entry[1] === "anneal"), false);
-  const commandCode = status.modules.find((entry) => entry.id === "commandcode-proxy");
-  assert.equal(commandCode.ready, true);
-  assert.equal(commandCode.listening, false);
   assert.equal(mcp.isReadOnly("apps_list"), true);
   assert.equal(mcp.isReadOnly("apps_call", { moduleId: "cpa", operation: "inspect" }), true);
   assert.equal(mcp.isReadOnly("apps_call", { moduleId: "cpa", operation: "start" }), false);
@@ -117,25 +111,13 @@ test("mergeAppsCatalog does not invent loopback-port MCP tools", () => {
 test("desktop shell and MCP catalog share the in-process apps overlay", () => {
   const main = read("electron/main.cjs");
   const panel = read("src/features/InProcessAppsPanel.tsx");
-  const app = read("src/App.tsx");
-  const i18n = read("src/i18n.ts");
-  const readme = readRepo("app-handler/README.md");
 
   assert.match(main, /createCodingToolsAppsMcp/);
   assert.match(main, /mergeAppsCatalog/);
   assert.match(main, /appsMcp\.hasTool/);
   assert.match(main, /appsMcp\.callTool/);
-  assert.match(app, /<InProcessAppsPanel/);
-  assert.match(app, /SidebarGroup label=\{copy\.workspace\}/);
-  assert.match(app, /label="MCP"/);
-  assert.doesNotMatch(app, /FiveStackLoopbackPanel/);
   assert.match(panel, /getCodingToolsClient\(\)/);
   assert.match(panel, /client\.apps\.list/);
   assert.match(panel, /client\.apps\.call/);
   assert.match(panel, /client\.apps\.invoke/);
-  assert.match(i18n, /127\.0\.0\.1:17891/);
-  assert.doesNotMatch(i18n, /:7890/);
-  assert.match(readme, /apps_list/);
-  assert.match(readme, /codingTools\.apps\.invoke/);
-  assert.match(readme, /listening: false/);
 });

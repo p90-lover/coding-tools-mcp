@@ -7,7 +7,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { classifyOriginalUiUnavailable } = require("./original-ui.cjs");
 
-const TOOL_IDS = Object.freeze(["anneal", "paseo"]);
+const TOOL_IDS = Object.freeze([]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
 const DEFAULT_PROBE_TIMEOUT_MS = 2_500;
 const DEFAULT_START_TIMEOUT_MS = 30_000;

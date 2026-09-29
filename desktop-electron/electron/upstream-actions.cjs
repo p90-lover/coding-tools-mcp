@@ -1,7 +1,6 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { planPaseoProviderPatch } = require("./paseo-provider-routes.cjs");
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const ACTION_TIMEOUT_MS = 12_000;
@@ -442,6 +441,8 @@ async function paseoConfigRpc(endpoint, credential, type, config, options = {}) 
 }
 
 async function registerFixedPaseoProviders(endpoint, credential, options = {}) {
+  // Retained source-only helper; AO packages intentionally exclude Paseo modules.
+  const { planPaseoProviderPatch } = require("./paseo-provider-routes.cjs");
   const patch = planPaseoProviderPatch(await paseoConfigRpc(
     endpoint,
     credential,
@@ -515,42 +516,10 @@ async function annealPost(endpoint, credential, path, body, options = {}) {
   return `HTTP ${result.status} at ${path}`;
 }
 
-async function actUpstream(input = {}, options = {}) {
+async function actUpstream(input = {}) {
   const toolId = String(input.toolId || input.source || "").trim();
-  if (toolId === "paseo") {
-    const message = buildPaseoMessage(input);
-    return paseoRpc(
-      input.endpoint,
-      input.credential,
-      message,
-      message.requestId,
-      expectedPaseoResponse(message.type),
-      options,
-    );
-  }
-  if (toolId === "anneal") {
-    const id = String(input.op || "").startsWith("inbox_")
-      ? (input.messageId || input.message_id)
-      : (input.op === "create"
-        ? (input.projectId || input.project_id)
-        : (input.taskId || input.task_id));
-    const spec = annealPathForOp(input.op, id, input);
-    const method = spec.method || "POST";
-    const allowed = method === "GET" ? ALLOWED_ANNEAL_GET
-      : method === "PATCH" ? ALLOWED_ANNEAL_PATCH : ALLOWED_ANNEAL_POST;
-    if (!allowed.includes(spec.pattern)) {
-      throw new Error("Anneal operation is not in the original-function allowlist");
-    }
-    const body = spec.body && typeof spec.body === "object" ? { ...spec.body } : spec.body;
-    if (input.op === "inbox_decision") body.decision = boundedText(input.text, 8000, "decision");
-    if (input.op === "inbox_reply") body.body = boundedText(input.text, 8000, "reply");
-    const result = await annealRequest(input.endpoint, input.credential, {
-      ...options,
-      method,
-      path: spec.path,
-      body: method === "GET" ? null : body,
-    });
-    return { ok: true, op: input.op, detail: `HTTP ${result.status} at ${spec.path}`, body: result.json };
+  if (["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(toolId)) {
+    throw new Error(`Retired upstream integration: ${toolId}`);
   }
   throw new Error("Unknown integration source");
 }

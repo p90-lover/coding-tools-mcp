@@ -1,0 +1,605 @@
+diff --git a/backend/internal/config/coding_tools.go b/backend/internal/config/coding_tools.go
+new file mode 100644
+index 0000000..3cc9a38
+--- /dev/null
++++ b/backend/internal/config/coding_tools.go
+@@ -0,0 +1,5 @@
++package config
++
++// CodingToolsLocalOnly is set to "1" by the source-integration build. It cannot
++// be disabled by a renderer request, persisted setting, or environment variable.
++var CodingToolsLocalOnly = ""
+diff --git a/backend/internal/httpd/coding_tools.go b/backend/internal/httpd/coding_tools.go
+new file mode 100644
+index 0000000..b154ae1
+--- /dev/null
++++ b/backend/internal/httpd/coding_tools.go
+@@ -0,0 +1,26 @@
++package httpd
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/aoagents/agent-orchestrator/backend/internal/config"
++)
++
++func codingToolsLocalOnly(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
++		if config.CodingToolsLocalOnly == "1" {
++			for _, prefix := range []string{"/api/v1/mobile", "/api/v1/cloud", "/api/v1/remotes", "/api/v1/dev"} {
++				if request.URL.Path == prefix || strings.HasPrefix(request.URL.Path, prefix+"/") {
++					http.Error(writer, "Remote access is disabled in Coding Tools", http.StatusForbidden)
++					return
++				}
++			}
++			if strings.HasSuffix(request.URL.Path, "/preview/server") {
++				http.Error(writer, "Preview server launch is unavailable in the local-only integration", http.StatusForbidden)
++				return
++			}
++		}
++		next.ServeHTTP(writer, request)
++	})
++}
+diff --git a/backend/internal/httpd/coding_tools_test.go b/backend/internal/httpd/coding_tools_test.go
+new file mode 100644
+index 0000000..0a6f9d0
+--- /dev/null
++++ b/backend/internal/httpd/coding_tools_test.go
+@@ -0,0 +1,28 @@
++package httpd
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/aoagents/agent-orchestrator/backend/internal/config"
++)
++
++func TestCodingToolsCannotEnableLAN(testContext *testing.T) {
++	previous := config.CodingToolsLocalOnly
++	config.CodingToolsLocalOnly = "1"
++	testContext.Cleanup(func() { config.CodingToolsLocalOnly = previous })
++	manager := NewMobileLAN(http.NotFoundHandler(), 0, nil, nil)
++	if port, err := manager.Start(0); err == nil || port != 0 || manager.Running() {
++		testContext.Fatal("local-only build must reject LAN activation before binding")
++	}
++	for _, endpoint := range []string{"/api/v1/mobile/enable", "/api/v1/mobile/secure-pairing", "/api/v1/cloud/tasks", "/api/v1/sessions/test/preview/server"} {
++		response := httptest.NewRecorder()
++		codingToolsLocalOnly(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
++			testContext.Fatal("forbidden route reached daemon handler")
++		})).ServeHTTP(response, httptest.NewRequest(http.MethodPost, endpoint, nil))
++		if response.Code != http.StatusForbidden {
++			testContext.Fatalf("%s: got %d", endpoint, response.Code)
++		}
++	}
++}
+diff --git a/backend/internal/httpd/controllers/dto.go b/backend/internal/httpd/controllers/dto.go
+index b1207fa..3648f7a 100644
+--- a/backend/internal/httpd/controllers/dto.go
++++ b/backend/internal/httpd/controllers/dto.go
+@@ -1744,9 +1744,10 @@ type ShellTerminalHandleIDParam struct {
+ 
+ // OpenShellTerminalRequest is the body of POST /api/v1/shell-terminals.
+ type OpenShellTerminalRequest struct {
+-	ProjectID string `json:"projectId,omitempty" description:"Project whose root the shell starts in. Omitted opens the shell in the daemon data dir."`
+-	SessionID string `json:"sessionId,omitempty" description:"Agent session the shell is scoped to, so it appears only in that session's tab strip. Omitted makes it a standalone shell."`
+-	Shell     string `json:"shell,omitempty" description:"Windows shell selector: auto, git-bash, pwsh, powershell, cmd, or a custom executable path. Ignored on macOS and Linux."`
++	ProjectID string            `json:"projectId,omitempty" description:"Project whose root the shell starts in. Omitted opens the shell in the daemon data dir."`
++	SessionID string            `json:"sessionId,omitempty" description:"Agent session the shell is scoped to, so it appears only in that session's tab strip. Omitted makes it a standalone shell."`
++	Shell     string            `json:"shell,omitempty" description:"Windows shell selector: auto, git-bash, pwsh, powershell, cmd, or a custom executable path. Ignored on macOS and Linux."`
++	Env       map[string]string `json:"env,omitempty" description:"Outbound proxy variables for this terminal only (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY and lowercase forms, NODE_USE_ENV_PROXY)."`
+ }
+ 
+ // UpdateShellTerminalRequest is the body of PATCH /api/v1/shell-terminals/{handleId}.
+diff --git a/backend/internal/httpd/controllers/shell_terminals.go b/backend/internal/httpd/controllers/shell_terminals.go
+index 2a0f3c8..68673f5 100644
+--- a/backend/internal/httpd/controllers/shell_terminals.go
++++ b/backend/internal/httpd/controllers/shell_terminals.go
+@@ -70,6 +70,7 @@ func (c *ShellTerminalsController) open(w http.ResponseWriter, r *http.Request)
+ 		ProjectID: domain.ProjectID(req.ProjectID),
+ 		SessionID: domain.SessionID(req.SessionID),
+ 		Shell:     req.Shell,
++		Env:       req.Env,
+ 	})
+ 	if err != nil {
+ 		envelope.WriteError(w, r, err)
+diff --git a/backend/internal/httpd/lan_listener.go b/backend/internal/httpd/lan_listener.go
+index 8e0a4d1..ce231ba 100644
+--- a/backend/internal/httpd/lan_listener.go
++++ b/backend/internal/httpd/lan_listener.go
+@@ -12,6 +12,7 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+ 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+ )
+ 
+@@ -141,6 +142,9 @@ func (m *LANManager) PasswordHash() string {
+ // ephemeral port if that port is in use) and serves the wrapped handler. It is
+ // idempotent: a second call while running returns the already-bound port.
+ func (m *LANManager) Start(port int) (int, error) {
++	if config.CodingToolsLocalOnly == "1" {
++		return 0, errors.New("LAN and mobile access are disabled in the Coding Tools local-only build")
++	}
+ 	m.transitionMu.Lock()
+ 	defer m.transitionMu.Unlock()
+ 	m.mu.Lock()
+diff --git a/backend/internal/httpd/router.go b/backend/internal/httpd/router.go
+index 8699efe..eb42840 100644
+--- a/backend/internal/httpd/router.go
++++ b/backend/internal/httpd/router.go
+@@ -61,6 +61,7 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
+ 	api := newAPIWithLogger(cfg, deps, log)
+ 
+ 	r.Use(middleware.RequestID)
++	r.Use(codingToolsLocalOnly)
+ 	r.Use(requestLogger(log, deps.Telemetry))
+ 	r.Use(recoverTelemetry(log, deps.Telemetry))
+ 	// Account-management routes do not inherit the general localhost preview
+diff --git a/backend/internal/service/shellterm/proxy_env_test.go b/backend/internal/service/shellterm/proxy_env_test.go
+new file mode 100644
+index 0000000..a87f3c8
+--- /dev/null
++++ b/backend/internal/service/shellterm/proxy_env_test.go
+@@ -0,0 +1,31 @@
++package shellterm
++
++import "testing"
++
++func TestMergeShellProxyEnvAcceptsOnlyProxyKeys(t *testing.T) {
++	base := map[string]string{"PATH": `C:\ao`}
++	merged, err := mergeShellProxyEnv(base, map[string]string{
++		"HTTPS_PROXY": "http://127.0.0.1:7890", "NO_PROXY": "127.0.0.1,localhost",
++	})
++	if err != nil {
++		t.Fatalf("proxy env rejected: %v", err)
++	}
++	if merged["PATH"] != `C:\ao` || merged["HTTPS_PROXY"] != "http://127.0.0.1:7890" || merged["NO_PROXY"] == "" {
++		t.Fatalf("unexpected merged env: %#v", merged)
++	}
++	if base["HTTPS_PROXY"] != "" {
++		t.Fatal("base env must not be mutated")
++	}
++	for _, bad := range []map[string]string{
++		{"PATH": `C:\evil`},
++		{"HTTPS_PROXY": "http://proxy\r\nPATH=x"},
++		{"ALL_PROXY": string(make([]byte, 2049))},
++	} {
++		if _, err := mergeShellProxyEnv(base, bad); err == nil {
++			t.Fatalf("expected rejection for %#v", bad)
++		}
++	}
++	if same, err := mergeShellProxyEnv(base, nil); err != nil || same["PATH"] != `C:\ao` {
++		t.Fatalf("empty extra env should keep base: %#v %v", same, err)
++	}
++}
+diff --git a/backend/internal/service/shellterm/service.go b/backend/internal/service/shellterm/service.go
+index 4194205..e1b806f 100644
+--- a/backend/internal/service/shellterm/service.go
++++ b/backend/internal/service/shellterm/service.go
+@@ -176,6 +176,36 @@ func NewService(runtime ShellRuntime, store Store, projects ProjectRootLocator,
+ 	}
+ }
+ 
++// shellProxyEnvKeys are the only variables a caller may add to a shell terminal.
++var shellProxyEnvKeys = map[string]struct{}{
++	"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "ALL_PROXY": {}, "NO_PROXY": {},
++	"http_proxy": {}, "https_proxy": {}, "all_proxy": {}, "no_proxy": {},
++	"NODE_USE_ENV_PROXY": {},
++}
++
++func mergeShellProxyEnv(base, extra map[string]string) (map[string]string, error) {
++	if len(extra) == 0 {
++		return base, nil
++	}
++	if len(extra) > len(shellProxyEnvKeys) {
++		return nil, apierr.Invalid("SHELL_TERMINAL_ENV_INVALID", "Too many shell terminal environment values", nil)
++	}
++	merged := make(map[string]string, len(base)+len(extra))
++	for key, value := range base {
++		merged[key] = value
++	}
++	for key, value := range extra {
++		if _, ok := shellProxyEnvKeys[key]; !ok {
++			return nil, apierr.Invalid("SHELL_TERMINAL_ENV_INVALID", "Only proxy variables can be set on a shell terminal", nil)
++		}
++		if len(value) > 2048 || strings.ContainsAny(value, "\x00\r\n") {
++			return nil, apierr.Invalid("SHELL_TERMINAL_ENV_INVALID", "Invalid proxy environment value", nil)
++		}
++		merged[key] = value
++	}
++	return merged, nil
++}
++
+ func (s *Service) pinnedEnv() map[string]string {
+ 	path, err := agentlaunch.PinnedPATH(s.executable, os.Getenv, nil, s.dataDir)
+ 	if err != nil {
+@@ -257,9 +287,13 @@ func (s *Service) OpenShellTerminal(ctx context.Context, in OpenShellTerminalInp
+ 		return ShellTerminal{}, apierr.Internal("SHELL_TERMINAL_NO_SHELL",
+ 			"Could not determine a shell to launch. Set SHELL (macOS/Linux) or ComSpec (Windows).")
+ 	}
++	env, err := mergeShellProxyEnv(s.pinnedEnv(), in.Env)
++	if err != nil {
++		return ShellTerminal{}, err
++	}
+ 	return s.openTerminal(ctx, openTerminalConfig{
+ 		argv:       argv,
+-		env:        s.pinnedEnv(),
++		env:        env,
+ 		projectID:  projectID,
+ 		sessionID:  in.SessionID,
+ 		workingDir: workingDir,
+diff --git a/backend/internal/service/shellterm/types.go b/backend/internal/service/shellterm/types.go
+index 6641be4..dd4dcb5 100644
+--- a/backend/internal/service/shellterm/types.go
++++ b/backend/internal/service/shellterm/types.go
+@@ -41,6 +41,9 @@ type OpenShellTerminalInput struct {
+ 	ProjectID domain.ProjectID `json:"projectId,omitempty"`
+ 	SessionID domain.SessionID `json:"sessionId,omitempty"`
+ 	Shell     string           `json:"shell,omitempty"`
++	// Env carries outbound proxy settings for this one terminal (Coding Tools
++	// routes an embedded CLI through the user's proxy). Only proxy keys are kept.
++	Env map[string]string `json:"env,omitempty"`
+ }
+ 
+ // InitialInputReadyState describes a terminal state that is ready to receive
+diff --git a/frontend/src/renderer/components/CodingToolsMissionBoard.tsx b/frontend/src/renderer/components/CodingToolsMissionBoard.tsx
+new file mode 100644
+index 0000000..d0137dc
+--- /dev/null
++++ b/frontend/src/renderer/components/CodingToolsMissionBoard.tsx
+@@ -0,0 +1,80 @@
++import { useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Bot } from "lucide-react";
++import { SessionCardView, SessionsBoardGridView, type BoardSessionPresentation } from "@aoagents/product-ui";
++import { readCodingToolsMissions, openCodingToolsMission } from "../lib/coding-tools-bridge";
++import { boardKanbanColumnOrder, getKanbanColumnView } from "../lib/session-presentation";
++import { useTranslation } from "react-i18next";
++import { ProductExternalLink } from "./ProductExternalLink";
++import { Button } from "./ui/button";
++
++type Mission = {
++	id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean;
++	nodes: { id: string; role: string; state: string; receipt?: { error?: string } }[];
++};
++type Board = { workspaceId: string; projectId: string | null; runs: Mission[]; tasks: { id: string; title: string; updated_at?: number }[] };
++type Card = BoardSessionPresentation & { mission: Mission; state: string };
++
++export function missionCard(mission: Mission, task?: Board["tasks"][number]): Card {
++	const state = mission.nodes.some(node => node.role === "reviewer" && ["running", "reserved"].includes(node.state)) ? "review"
++		: mission.nodes.some(node => ["running", "reserved"].includes(node.state)) ? "running"
++		: mission.cancelled ? "cancelled"
++		: mission.nodes.some(node => node.state === "held") ? "held"
++		: mission.nodes.length > 0 && mission.nodes.every(node => node.state === "finished") ? "finished"
++		: mission.nodes.length > 0 && mission.nodes.every(node => ["archived", "cancelled"].includes(node.state)) ? "archived" : "pending";
++	return {
++		id: mission.id, title: task?.title || mission.id, mission, state, provider: "chatgpt-web",
++		status: state === "held" ? "needs_input" : ["running", "review"].includes(state) ? "working" : "idle",
++		kanbanColumn: ["finished", "cancelled", "archived"].includes(state) ? "ready" : ["review", "held"].includes(state) ? "needs_review" : state === "running" ? "validating" : "building",
++		displayStatus: mission.paused && !mission.cancelled ? "Paused" : state[0].toUpperCase() + state.slice(1),
++		updatedAt: task?.updated_at ? new Date(task.updated_at).toISOString() : "",
++	};
++}
++
++export function CodingToolsMissionBoard({ workspaceId }: { workspaceId: string }) {
++	const { t } = useTranslation();
++	const [showInactive, setShowInactive] = useState(false);
++	const [error, setError] = useState("");
++	const [busy, setBusy] = useState("");
++	const query = useQuery({
++		queryKey: ["coding-tools-missions", workspaceId], retry: false, refetchInterval: 3000,
++		queryFn: async (): Promise<Board> => {
++			const result = await readCodingToolsMissions(workspaceId);
++			if (!result?.ok || result.workspaceId !== workspaceId || !Array.isArray(result.runs) || !Array.isArray(result.tasks)) throw new Error("Workspace mission board is unavailable");
++			return result;
++		},
++	});
++	const labels: Record<string, string> = { building: "Pending", validating: "Running", needs_review: "Review", ready: "Finished" };
++	const columns = boardKanbanColumnOrder.map(column => { const view = getKanbanColumnView(column, t); return { ...view, label: labels[column] ?? view.label }; });
++	const rows = (query.data?.runs ?? []).map(mission => missionCard(mission, query.data?.tasks.find(task => task.id === mission.project_id)))
++		.filter(card => showInactive || !["cancelled", "archived"].includes(card.state));
++	const open = async (card: Card, intent: "open" | "start" | "resume") => {
++		if (busy) return;
++		setBusy(card.id); setError("");
++		try { await openCodingToolsMission(workspaceId, card.id, intent); }
++		catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
++		finally { setBusy(""); }
++	};
++	return <section className="flex h-screen min-h-0 flex-col bg-background text-foreground" aria-label="AO workspace mission board">
++		<div className="flex shrink-0 items-center justify-between gap-3 px-4 py-2 text-xs">
++			<strong>Workspace missions</strong>
++			<label className="flex items-center gap-2"><input type="checkbox" checked={showInactive} onChange={event => setShowInactive(event.target.checked)} />Show cancelled and archived</label>
++		</div>
++		{error || query.error ? <p role="alert" className="px-4 py-2 text-sm text-destructive">{error || query.error?.message}</p> : null}
++		{query.isPending ? <p role="status" className="p-4 text-sm text-muted-foreground">Loading missions</p> : null}
++		{query.isSuccess && rows.length === 0 ? <p className="p-4 text-sm text-muted-foreground">No missions in this workspace. Use New mission to add one.</p> : null}
++		<div className="min-h-0 flex-1">
++			<SessionsBoardGridView columns={columns} labels={{ columnAria: label => `${label} missions` }} sessions={rows} renderSessionCard={card => (
++				<div className={["finished", "held"].includes(card.state) ? "opacity-75" : ""} data-mission-id={card.id}>
++					<SessionCardView session={card} onOpen={() => void open(card, "open")}
++						externalLink={ProductExternalLink} renderAvatar={() => <Bot className="size-4" aria-hidden="true" />}
++						error={card.mission.nodes.find(node => node.state === "held")?.receipt?.error}
++						labels={{ formatTime: () => "", updatedAt: () => "", intakeIssue: id => id, pr: { short: "PR", states: { open: "Open", closed: "Closed", draft: "Draft", merged: "Merged" } } }}
++						footer={<span className="text-xs text-muted-foreground">{card.mission.cancelled ? "Future stages cancelled · " : ""}{card.mission.nodes.filter(node => node.state === "finished").length}/{card.mission.nodes.length} stages finished</span>}
++						action={!card.mission.cancelled && (card.state === "pending" || card.mission.paused) ? <Button size="sm" disabled={Boolean(busy)} onClick={event => { event.stopPropagation(); void open(card, card.mission.paused ? "resume" : "start"); }}>{card.mission.paused ? "Resume mission" : "Start mission"}</Button> : undefined}
++					/>
++				</div>
++			)} />
++		</div>
++	</section>;
++}
+diff --git a/frontend/src/renderer/components/Sidebar.tsx b/frontend/src/renderer/components/Sidebar.tsx
+index acb7d45..5a03465 100644
+--- a/frontend/src/renderer/components/Sidebar.tsx
++++ b/frontend/src/renderer/components/Sidebar.tsx
+@@ -1,4 +1,5 @@
+ import { useQuery, useQueryClient } from "@tanstack/react-query";
++import { CODING_TOOLS_EMBEDDED } from "../lib/coding-tools-bridge";
+ import { useTranslation } from "react-i18next";
+ import type { TFunction } from "i18next";
+ import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
+@@ -1064,7 +1065,7 @@ export function Sidebar({
+ 						status={updateStatus}
+ 						tabIndex={isCollapsed ? -1 : 0}
+ 					/>
+-					<button
++					{CODING_TOOLS_EMBEDDED ? null : <button
+ 						aria-label={t("settings.connectMobile")}
+ 						className={FOOTER_NAV_BUTTON_CLASS}
+ 						onClick={() => selection.goConnectMobile()}
+@@ -1076,7 +1077,7 @@ export function Sidebar({
+ 							<Smartphone aria-hidden="true" />
+ 							<span className="tracking-tight">{t("settings.connectMobile")}</span>
+ 						</span>
+-					</button>
++					</button>}
+ 					<button
+ 						aria-label={t("shell.settings")}
+ 						className={FOOTER_NAV_BUTTON_CLASS}
+@@ -1103,7 +1104,7 @@ export function Sidebar({
+ 					/>
+ 					<CloudSignInRailButton tabIndex={isCollapsed ? 0 : -1} />
+ 					<CloudAccountRailButton tabIndex={isCollapsed ? 0 : -1} />
+-					<Tooltip>
++					{CODING_TOOLS_EMBEDDED ? null : <Tooltip>
+ 						<TooltipTrigger asChild>
+ 							<button
+ 								aria-label={t("settings.connectMobile")}
+@@ -1119,7 +1120,7 @@ export function Sidebar({
+ 							</button>
+ 						</TooltipTrigger>
+ 						<TooltipContent side="right">{t("settings.connectMobile")}</TooltipContent>
+-					</Tooltip>
++					</Tooltip>}
+ 					<Tooltip>
+ 						<TooltipTrigger asChild>
+ 							<button
+diff --git a/frontend/src/renderer/components/TerminalPane.tsx b/frontend/src/renderer/components/TerminalPane.tsx
+index ae98e54..423e7eb 100644
+--- a/frontend/src/renderer/components/TerminalPane.tsx
++++ b/frontend/src/renderer/components/TerminalPane.tsx
+@@ -1,4 +1,5 @@
+ import { useQueryClient } from "@tanstack/react-query";
++import { CODING_TOOLS_EMBEDDED } from "../lib/coding-tools-bridge";
+ import { RotateCcw } from "lucide-react";
+ import {
+ 	createContext,
+@@ -704,7 +705,10 @@ export function TerminalPane({
+ 			? terminalTarget.handleId
+ 			: `${session?.terminalHandleId ?? "empty"}:${session?.terminalGeneration ?? ""}`;
+ 
+-	if (!window.ao) {
++	// Embedded in Coding Tools there is no window.ao, but the daemon mux is reachable
++	// through the host gateway, so the live terminal works; only the plain browser preview
++	// falls back to a static transcript.
++	if (!window.ao && !CODING_TOOLS_EMBEDDED) {
+ 		// A standalone shell has no agent and no branch, so it previews as a plain
+ 		// prompt rather than borrowing the session's agent transcript.
+ 		if (terminalTarget?.kind === "shell") {
+diff --git a/frontend/src/renderer/components/WindowTitlebar.tsx b/frontend/src/renderer/components/WindowTitlebar.tsx
+index 1d6a553..cb9d2b3 100644
+--- a/frontend/src/renderer/components/WindowTitlebar.tsx
++++ b/frontend/src/renderer/components/WindowTitlebar.tsx
+@@ -22,6 +22,7 @@ import {
+   DropdownMenuTrigger,
+ } from "./ui/dropdown-menu";
+ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
++import { CODING_TOOLS_EMBEDDED } from "../lib/coding-tools-bridge";
+ 
+ // Windows-only: macOS keeps its system menu bar and inset traffic lights; Linux
+ // keeps the existing minimal chrome. Only Windows loses the native title bar and
+@@ -256,7 +257,7 @@ export function WindowTitlebar() {
+         </TooltipTrigger>
+         <TooltipContent side="bottom">{t("titlebar.goForward")}</TooltipContent>
+       </Tooltip>
+-      <nav className="window-titlebar__menus">
++      {CODING_TOOLS_EMBEDDED ? null : <nav className="window-titlebar__menus">
+         <TopMenu
+           id="view"
+           label={t("titlebar.view")}
+@@ -303,9 +304,9 @@ export function WindowTitlebar() {
+             {t("titlebar.about")}
+           </DropdownMenuItem>
+         </TopMenu>
+-      </nav>
++      </nav>}
+       <div className="window-titlebar__spacer" />
+-      <WindowControls isMaximized={isMaximized} t={t} />
++      {CODING_TOOLS_EMBEDDED ? null : <WindowControls isMaximized={isMaximized} t={t} />}
+     </header>
+   );
+ }
+diff --git a/frontend/src/renderer/lib/bridge.ts b/frontend/src/renderer/lib/bridge.ts
+index f356b0a..c5e7f91 100644
+--- a/frontend/src/renderer/lib/bridge.ts
++++ b/frontend/src/renderer/lib/bridge.ts
+@@ -1,11 +1,10 @@
+ import type { AoBridge } from "../../preload";
+ import { coerceUiSettings, DEFAULT_UI_SETTINGS } from "../../shared/ui-locale";
++import { createCodingToolsBridge } from "./coding-tools-bridge";
+ export type { FeatureBuild } from "../../main/feature-builds";
+ 
+ 
+-export const aoBridge: AoBridge =
+-	window.ao ??
+-	({
++const browserBridge: AoBridge = ({
+ 		app: {
+ 			getVersion: async () => "0.0.0-preview",
+ 			chooseDirectory: async () => null,
+@@ -296,3 +295,9 @@ export const aoBridge: AoBridge =
+ 			onStreamEvent: () => () => undefined,
+ 		},
+ 	} satisfies AoBridge);
++
++export const aoBridge: AoBridge = window.ao ?? (
++	import.meta.env.VITE_CODING_TOOLS_EMBEDDED === "1"
++		? createCodingToolsBridge(browserBridge)
++		: browserBridge
++);
+diff --git a/frontend/src/renderer/lib/coding-tools-bridge.ts b/frontend/src/renderer/lib/coding-tools-bridge.ts
+new file mode 100644
+index 0000000..c3e971d
+--- /dev/null
++++ b/frontend/src/renderer/lib/coding-tools-bridge.ts
+@@ -0,0 +1,80 @@
++import type { AoBridge } from "../../preload";
++import { coerceUiSettings, DEFAULT_UI_SETTINGS } from "../../shared/ui-locale";
++
++/** The renderer is hosted inside a Coding Tools pane: no native window, menus or mobile pairing. */
++export const CODING_TOOLS_EMBEDDED = import.meta.env.VITE_CODING_TOOLS_EMBEDDED === "1";
++
++async function hostRequest(operation: string, args: unknown = {}) {
++	const response = await fetch("/integration/desktop", {
++		method: "POST", headers: { "content-type": "application/json" },
++		body: JSON.stringify({ operation, args }), credentials: "same-origin",
++	});
++	const result = await response.json();
++	if (!response.ok || result.ok === false) throw new Error(result.error || "Coding Tools host request failed");
++	return result.value;
++}
++
++async function readStatus() {
++	const response = await fetch("/integration/status", { credentials: "same-origin" });
++	if (!response.ok) throw new Error("Coding Tools AO runtime is unavailable");
++	return response.json();
++}
++
++export function readCodingToolsMissions(workspaceId: string) {
++	return hostRequest("mission_board", { workspaceId });
++}
++
++export function openCodingToolsMission(workspaceId: string, runId: string, intent: "open" | "start" | "resume") {
++	return hostRequest("mission_open", { workspaceId, runId, intent });
++}
++
++const unavailable = async () => {
++	throw new Error("This desktop capability is not exposed by the local-only Coding Tools integration.");
++};
++
++export function createCodingToolsBridge(base: AoBridge): AoBridge {
++	return {
++		...base,
++		app: {
++			...base.app,
++			getVersion: () => hostRequest("version"),
++			chooseDirectory: () => hostRequest("choose_directory"),
++			checkGitRepository: (directory) => hostRequest("check_repository", { directory }),
++			getRepositoryBranch: (directory) => hostRequest("repository_branch", { directory }),
++			openExternal: (url) => hostRequest("open_external", { url }),
++			scanImportFolder: unavailable,
++			checkAncestorRepo: unavailable,
++			checkGitHubRepositoryAvailability: unavailable,
++			getPathForFile: () => { throw new Error("Use Add project to select a local directory."); },
++		},
++		daemon: {
++			getStatus: readStatus,
++			start: () => hostRequest("start"),
++			stop: () => hostRequest("stop"),
++			restart: () => hostRequest("restart"),
++			onStatus: () => () => undefined,
++		},
++		appState: { getMigration: async () => ({ status: "declined" as const }), setMigration: unavailable },
++		uiSettings: {
++			get: async () => coerceUiSettings(JSON.parse(localStorage.getItem("coding-tools-ao-settings") || "null") ?? DEFAULT_UI_SETTINGS),
++			set: async (settings) => {
++				const stored = JSON.parse(localStorage.getItem("coding-tools-ao-settings") || "null") ?? DEFAULT_UI_SETTINGS;
++				const next = coerceUiSettings({ ...stored, ...settings });
++				localStorage.setItem("coding-tools-ao-settings", JSON.stringify(next));
++				return next;
++			},
++		},
++		keybindings: {
++			...base.keybindings,
++			get: async () => JSON.parse(localStorage.getItem("coding-tools-ao-keys") || "{}"),
++			set: async (overrides) => { localStorage.setItem("coding-tools-ao-keys", JSON.stringify(overrides)); return overrides; },
++		},
++		remotes: { list: async () => [], add: unavailable, update: unavailable, remove: unavailable, probe: unavailable, request: unavailable },
++		cloud: { ...base.cloud, signIn: unavailable, signOut: unavailable, connectProviderAuth: unavailable },
++		updates: { ...base.updates, check: unavailable, download: unavailable, install: unavailable, relaunch: unavailable },
++		updateSettings: { ...base.updateSettings, set: unavailable, setMacDifferentialUpdates: unavailable },
++		browserProfiles: { ...base.browserProfiles, create: unavailable, rename: unavailable, clear: unavailable, delete: unavailable, import: unavailable },
++		browser: { ...base.browser, nativeCompositionEnabled: false, ensure: unavailable, navigate: unavailable, openTab: unavailable },
++		terminal: { ...base.terminal, saveDroppedFile: unavailable },
++	};
++}
+diff --git a/frontend/src/renderer/routes/coding-tools-board.tsx b/frontend/src/renderer/routes/coding-tools-board.tsx
+new file mode 100644
+index 0000000..0ddf8c6
+--- /dev/null
++++ b/frontend/src/renderer/routes/coding-tools-board.tsx
+@@ -0,0 +1,12 @@
++import { createFileRoute } from "@tanstack/react-router";
++import { CodingToolsMissionBoard } from "../components/CodingToolsMissionBoard";
++
++export const Route = createFileRoute("/coding-tools-board")({
++	validateSearch: (search: Record<string, unknown>) => ({ workspaceId: typeof search.workspaceId === "string" ? search.workspaceId : "" }),
++	component: CodingToolsBoardRoute,
++});
++
++function CodingToolsBoardRoute() {
++	const { workspaceId } = Route.useSearch();
++	return <CodingToolsMissionBoard workspaceId={workspaceId} />;
++}
+diff --git a/frontend/src/renderer/routes/coding-tools-terminal.tsx b/frontend/src/renderer/routes/coding-tools-terminal.tsx
+new file mode 100644
+index 0000000..0622c5b
+--- /dev/null
++++ b/frontend/src/renderer/routes/coding-tools-terminal.tsx
+@@ -0,0 +1,32 @@
++import { createFileRoute } from "@tanstack/react-router";
++import { TerminalPane } from "../components/TerminalPane";
++import { useResolvedTheme } from "../stores/ui-store";
++
++// One full-window standalone terminal for a Coding Tools pane (e.g. the Antigravity CLI).
++// The host opens the AO shell terminal and passes its handle; this route only renders it.
++export const Route = createFileRoute("/coding-tools-terminal")({
++	validateSearch: (search: Record<string, unknown>) => ({
++		handle: typeof search.handle === "string" ? search.handle : "",
++		title: typeof search.title === "string" ? search.title : "Terminal",
++		generation: typeof search.generation === "string" ? search.generation : "",
++	}),
++	component: CodingToolsTerminalRoute,
++});
++
++function CodingToolsTerminalRoute() {
++	const { handle, title, generation } = Route.useSearch();
++	const theme = useResolvedTheme();
++	if (!handle) {
++		return <div className="grid h-screen place-items-center bg-terminal font-mono text-terminal-dim">No terminal selected</div>;
++	}
++	return (
++		<div className="h-screen w-screen overflow-hidden bg-terminal">
++			<TerminalPane
++				daemonReady
++				fontSize={13}
++				theme={theme}
++				terminalTarget={{ kind: "shell", handleId: handle, title, generation: generation || handle }}
++			/>
++		</div>
++	);
++}

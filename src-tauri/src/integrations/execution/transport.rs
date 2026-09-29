@@ -56,6 +56,12 @@ pub async fn send(
     credential: &str,
     request: &Request,
 ) -> Result<Response, Failure> {
+    if engine == Engine::Paseo || request.engine == Engine::Paseo {
+        return Err(fail("paseo_retired", false));
+    }
+    if engine == Engine::Anneal || request.engine == Engine::Anneal {
+        return Err(fail("anneal_retired", false));
+    }
     if request.engine != engine {
         return Err(fail("source_mismatch", false));
     }
@@ -345,4 +351,62 @@ async fn socket(
         }
     }
     Err(fail("frame_limit", sent.load(Ordering::SeqCst)))
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn paseo_transport_refuses_before_socket_connect() {
+        let request = Request {
+            engine: Engine::Paseo,
+            action: Action::Inspect,
+            request_id: "old-request".into(),
+            record_id: Some("old-agent".into()),
+            run_id: None,
+            wire: Wire::Socket {
+                message: json!({}),
+                response: "fetch_agent_response".into(),
+                status: None,
+            },
+        };
+        let error = send(Engine::Paseo, "ws://127.0.0.1:6768/ws", "", &request)
+            .await
+            .unwrap_err();
+        assert_eq!(error.stage, "paseo_retired");
+        assert!(!error.request_may_have_been_sent);
+    }
+
+    #[tokio::test]
+    async fn anneal_transport_refuses_before_socket_connect() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let request = Request {
+            engine: Engine::Anneal,
+            action: Action::Inspect,
+            request_id: "old-request".into(),
+            record_id: Some("old-task".into()),
+            run_id: None,
+            wire: Wire::Http {
+                method: "GET".into(),
+                path: "/tasks/old-task".into(),
+                body: Value::Null,
+            },
+        };
+        let error = send(
+            Engine::Anneal,
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "",
+            &request,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.stage, "anneal_retired");
+        assert!(!error.request_may_have_been_sent);
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
 }

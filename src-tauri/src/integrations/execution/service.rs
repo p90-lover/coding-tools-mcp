@@ -66,6 +66,9 @@ pub fn scope(ctx: &ToolContext, data: &AppData) -> AppResult<String> {
     Ok(id.into())
 }
 fn permit(ctx: &ToolContext, b: &Binding, write: bool) -> AppResult<()> {
+    if matches!(b.engine, Engine::Paseo | Engine::Anneal) {
+        return Err(fail("Standalone provider execution is retired"));
+    }
     if !b.enabled
         || ctx.workspace_id.as_deref() != Some(&b.workspace_id)
         || std::path::Path::new(&b.root).canonicalize()? != ctx.workspace.root()
@@ -97,6 +100,9 @@ fn key(b: &Binding) -> String {
     format!("{}:{}", b.id, b.generation)
 }
 fn connection(b: &Binding) -> AppResult<Connection> {
+    if matches!(b.engine, Engine::Paseo | Engine::Anneal) {
+        return Err(fail("Standalone provider execution is retired"));
+    }
     vault()
         .lock()
         .map_err(|_| fail("Provider credential store unavailable"))?
@@ -175,6 +181,9 @@ pub fn configure(
     s: Settings,
     credential: String,
 ) -> AppResult<Value> {
+    if matches!(s.engine, Engine::Paseo | Engine::Anneal) {
+        return Err(fail("Standalone provider execution is retired"));
+    }
     if !s.confirm_external_execution {
         return Err(fail(
             "Explicit local acknowledgement of provider execution and costs is required",
@@ -255,6 +264,9 @@ pub fn reconnect(
             .find(|b| b.id == id && b.workspace_id == workspace)
             .cloned()
             .ok_or_else(|| fail("Binding not found"))?;
+        if matches!(b.engine, Engine::Paseo | Engine::Anneal) {
+            return Err(fail("Standalone provider execution is retired"));
+        }
         let mut candidate = b.clone();
         candidate.enabled = true;
         candidate.policy_stamp = stamp(ctx);
@@ -373,6 +385,9 @@ pub fn reserve_orchestration_in_data(
             .execution_book
             .binding(&workspace, &stage.binding_id)
             .map_err(fail)?;
+        if matches!(binding.engine, Engine::Paseo | Engine::Anneal) {
+            return Err(fail("Standalone orchestration is retired"));
+        }
         if binding.generation != stage.binding_generation
             || binding.engine != Engine::Paseo
             || binding.provider != provider
@@ -577,36 +592,15 @@ pub fn reserve_orchestration(
 }
 
 pub fn update_orchestration_status(
-    ctx: &ToolContext,
-    request: OrchestrationStatus,
+    _ctx: &ToolContext,
+    _request: OrchestrationStatus,
 ) -> AppResult<Value> {
-    let record = DataStore::update_file(|data| {
-        let workspace = scope(ctx, data)?;
-        if request.workspace_id != workspace {
-            return Err(fail("Orchestration workspace does not match this listener"));
-        }
-        data.execution_book
-            .advance_orchestration(
-                &workspace,
-                &request.id,
-                request.expected_revision,
-                &request.status,
-            )
-            .map_err(fail)
-    })?;
-    Ok(json!({
-        "ok": true,
-        "orchestration": record,
-        "execution": view(ctx, None)?,
-    }))
+    Err(fail("Standalone orchestration is retired"))
 }
 
 pub fn view(ctx: &ToolContext, mission: Option<&str>) -> AppResult<Value> {
-    let mut result = DataStore::update_file(|data| {
+    let mut result = DataStore::read_file(|data| {
         let id = scope(ctx, data)?;
-        data.execution_book
-            .recover(&id, runtime(), now())
-            .map_err(fail)?;
         data.execution_book.view(&id, mission).map_err(fail)
     })?;
     if let Some(rows) = result["bindings"].as_array_mut() {
@@ -820,6 +814,14 @@ fn submit(ctx: &ToolContext, id: &str, expected: u64, key: &str, action: Action)
     let slot = slots(false)?;
     let work = DataStore::update_file(|data| {
         let workspace = scope(ctx, data)?;
+        let prior = data.execution_book.find(&workspace, id).map_err(fail)?;
+        let binding = data
+            .execution_book
+            .binding(&workspace, &prior.binding_id)
+            .map_err(fail)?;
+        if matches!(binding.engine, Engine::Paseo | Engine::Anneal) {
+            return Err(fail("Standalone provider execution is retired"));
+        }
         data.execution_book
             .recover(&workspace, runtime(), now())
             .map_err(fail)?;
@@ -869,6 +871,14 @@ pub fn refresh(ctx: &ToolContext, id: &str) -> AppResult<Value> {
     let slot = slots(true)?;
     let job = DataStore::update_file(|data| {
         let workspace = scope(ctx, data)?;
+        let prior = data.execution_book.find(&workspace, id).map_err(fail)?;
+        let binding = data
+            .execution_book
+            .binding(&workspace, &prior.binding_id)
+            .map_err(fail)?;
+        if matches!(binding.engine, Engine::Paseo | Engine::Anneal) {
+            return Err(fail("Standalone provider execution is retired"));
+        }
         data.execution_book
             .recover(&workspace, runtime(), now())
             .map_err(fail)?;
@@ -1115,7 +1125,7 @@ mod orchestration_reservation_tests {
     };
 
     #[test]
-    fn reservation_is_atomic_idempotent_and_preserves_the_parent_task() {
+    fn reservation_refuses_retired_paseo_without_mutating_board_or_book() {
         let workspace = tempfile::tempdir().unwrap();
         let harness = tempfile::tempdir().unwrap();
         let mut ctx =
@@ -1209,35 +1219,126 @@ mod orchestration_reservation_tests {
             },
         };
 
-        let reserved = reserve_orchestration_in_data(&ctx, &mut data, request.clone()).unwrap();
-        assert_eq!(reserved.status, "planning");
-        assert_eq!(data.control_board.tasks.len(), 4);
-        assert_eq!(
-            data.control_board.tasks[0].description,
-            "Do not replace this description"
-        );
-        assert_eq!(
-            data.control_board
-                .tasks
-                .iter()
-                .find(|task| task.id == reserved.planner_task_id)
-                .unwrap()
-                .description,
-            request.planner_prompt
-        );
-
-        let replay = reserve_orchestration_in_data(&ctx, &mut data, request.clone()).unwrap();
-        assert_eq!(
-            serde_json::to_value(replay).unwrap(),
-            serde_json::to_value(&reserved).unwrap()
-        );
-        assert_eq!(data.control_board.tasks.len(), 4);
-
-        let mut conflict = request;
-        conflict.planner_prompt = "{\"task\":\"different\"}".into();
         let before = serde_json::to_value(&data).unwrap();
-        assert!(reserve_orchestration_in_data(&ctx, &mut data, conflict).is_err());
+        let error = reserve_orchestration_in_data(&ctx, &mut data, request.clone()).unwrap_err();
+        assert!(error.to_string().contains("retired"), "{error}");
         assert_eq!(serde_json::to_value(&data).unwrap(), before);
+        for binding in &mut data.execution_book.bindings {
+            binding.engine = Engine::Anneal;
+            binding.endpoint = "http://127.0.0.1:3000/".into();
+        }
+        let before = serde_json::to_value(&data).unwrap();
+        let error = reserve_orchestration_in_data(&ctx, &mut data, request).unwrap_err();
+        assert!(error.to_string().contains("retired"), "{error}");
+        assert_eq!(serde_json::to_value(&data).unwrap(), before);
+    }
+
+    #[test]
+    fn anneal_configure_and_reconnect_preserve_saved_data() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/anneal-rust-retirement");
+        std::fs::create_dir_all(&fixture_root).unwrap();
+        let workspace = tempfile::tempdir_in(&fixture_root).unwrap();
+        let harness = tempfile::tempdir_in(&fixture_root).unwrap();
+        let mut ctx =
+            ToolContext::for_test(workspace.path().to_path_buf(), harness.path().to_path_buf())
+                .unwrap();
+        ctx.bind_workspace_id("qa");
+        ctx.auth.auth_type = "bearer".into();
+        ctx.tool_profile = "advanced".into();
+        let file = fixture_root
+            .join(uuid::Uuid::new_v4().to_string())
+            .join("data/profiles.json");
+        crate::data::with_test_file(file, || {
+            DataStore::update_file(|data| {
+                data.profiles.push(serde_json::from_value::<WorkspaceProfile>(json!({
+                    "id": "qa", "name": "QA", "path": workspace.path().to_string_lossy(),
+                    "tunnel": {}, "auth": {"type": "bearer"},
+                    "runtime": {"permission_mode": "workspace-write", "tool_profile": "advanced"},
+                    "actions": {}
+                })).unwrap());
+                data.execution_book.bindings.push(Binding {
+                    id: "old-anneal".into(),
+                    workspace_id: "qa".into(),
+                    root: ctx.workspace.root_display(),
+                    roots_revision: ctx.workspace.roots_revision(),
+                    policy_stamp: stamp(&ctx),
+                    generation: "old-generation".into(),
+                    engine: Engine::Anneal,
+                    endpoint: "http://127.0.0.1:3000/".into(),
+                    provider: "legacy".into(),
+                    model: "legacy".into(),
+                    account_id: None,
+                    route_id: None,
+                    mode: "default".into(),
+                    project_id: Some("legacy-project".into()),
+                    repo_id: Some("legacy-repo".into()),
+                    assignee_id: Some("legacy-agent".into()),
+                    max_duration_min: 10,
+                    allow_codex: false,
+                    enabled: true,
+                });
+                let binding = &data.execution_book.bindings[0];
+                let mut mission = Mission::new(binding.spec(
+                    "old-mission",
+                    "parent-task",
+                    "Legacy task",
+                    "Read only",
+                ))
+                .unwrap();
+                mission.reserve(0, "old-request", Action::Create).unwrap();
+                data.execution_book.missions.push(Entry {
+                    binding_id: binding.id.clone(),
+                    binding_generation: binding.generation.clone(),
+                    mission,
+                    owner_runtime: Some("previous-desktop".into()),
+                    created_at: 1,
+                    updated_at: 1,
+                    observed_at: None,
+                    source_revision: None,
+                    last_error: None,
+                    observation: Value::Null,
+                    start_message_id: None,
+                    output: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+            let before = DataStore::read_file(|d| Ok(serde_json::to_value(d).unwrap())).unwrap();
+            let settings = Settings {
+                id: Some("new-anneal".into()),
+                engine: Engine::Anneal,
+                endpoint: "http://127.0.0.1:3000/".into(),
+                provider: "legacy".into(),
+                model: "legacy".into(),
+                account_id: None,
+                route_id: None,
+                mode: "default".into(),
+                project_id: None,
+                repo_id: None,
+                assignee_id: None,
+                max_duration_min: 10,
+                allow_codex: false,
+                confirm_external_execution: true,
+            };
+            let error = configure(&ctx, 0, settings, "new-credential".into()).unwrap_err();
+            assert!(error.to_string().contains("retired"), "{error}");
+            let error = reconnect(&ctx, "old-anneal", "new-credential".into(), true).unwrap_err();
+            assert!(error.to_string().contains("retired"), "{error}");
+            let after = DataStore::read_file(|d| Ok(serde_json::to_value(d).unwrap())).unwrap();
+            assert_eq!(after, before);
+            let result = view(&ctx, Some("old-mission")).unwrap();
+            assert_eq!(result["missions"].as_array().unwrap().len(), 1);
+            assert_eq!(result["bindings"][0]["connected"], false);
+            let after_view =
+                DataStore::read_file(|d| Ok(serde_json::to_value(d).unwrap())).unwrap();
+            assert_eq!(
+                after_view, before,
+                "retired mission view must not save recovery changes"
+            );
+        });
     }
 
     #[test]

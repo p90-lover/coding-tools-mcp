@@ -3,7 +3,6 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
@@ -15,10 +14,12 @@ const {
 const { createManagedExternalServicesController } = require("../electron/managed-external-services.cjs");
 const { createProviderNetworkStore } = require("../electron/provider-network.cjs");
 
-const COMPONENT_IDS = ["codex-router", "commandcode-proxy", "cpa", "paseo", "anneal"];
+const COMPONENT_IDS = ["cpa"];
 
 function temporaryDirectory(name) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
+  const scratchRoot = path.resolve(__dirname, "..", "..", "aiTemp");
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  return fs.mkdtempSync(path.join(scratchRoot, `${name}-`));
 }
 
 function writeJson(filePath, value) {
@@ -79,7 +80,7 @@ function releaseManifest(id, payload) {
       ],
     },
     health: {
-      endpoint: `http://127.0.0.1:${id === "codex-router" ? 4202 : id === "commandcode-proxy" ? 9090 : id === "cpa" ? 8317 : id === "paseo" ? 6768 : 5173}/`,
+      endpoint: `http://127.0.0.1:${id === "cpa" ? 8317 : id === "paseo" ? 6768 : 5173}/`,
       acceptStatus: [200],
     },
   };
@@ -141,56 +142,226 @@ function controllerFixture({ fetchImpl, allowNetworkInstall = true, ...overrides
   return { controller, dataRoot, payload, children };
 }
 
-test("Paseo patch revision repairs an old marker and preserves state", async () => {
-  const manifestRoot = path.join(__dirname, "..", "vendor", "managed-components");
-  const paseo = JSON.parse(fs.readFileSync(path.join(manifestRoot, "paseo.json"), "utf8"));
-  const anneal = JSON.parse(fs.readFileSync(path.join(manifestRoot, "anneal.json"), "utf8"));
-  assert.equal(paseo.patchRevision, "codex-cpa-host-env-v1");
-  const scratchRoot = path.join(__dirname, "..", "..", "aiTemp");
-  fs.mkdirSync(scratchRoot, { recursive: true });
-  const dataRoot = fs.mkdtempSync(path.join(scratchRoot, "paseo-patch-marker-"));
-  const bundleRoot = path.join(dataRoot, "bundled");
-  const bundleSource = path.join(bundleRoot, "paseo", "source");
-  writeJson(path.join(bundleRoot, "paseo", "BUNDLE.json"), {
-    id: "paseo", version: paseo.version, commit: paseo.commit, patchRevision: "old-patch",
-  });
-  writeJson(path.join(bundleSource, "package.json"), {});
-  fs.mkdirSync(path.join(bundleSource, "node_modules"), { recursive: true });
-  fs.mkdirSync(path.join(bundleSource, "dist"), { recursive: true });
+test("CPA remains launchable as the sole managed component", async () => {
+  const { controller, children } = controllerFixture();
+  try {
+    const started = await controller.startComponent("cpa");
+    assert.equal(started.installState, "installed");
+    assert.equal(children.length, 1);
+    assert.deepEqual(controller.snapshot().components.map((component) => component.id), ["cpa"]);
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("retired Paseo marker and state remain untouched by the CPA manager", async () => {
+  const { controller, dataRoot, children } = controllerFixture();
   const stateFile = path.join(dataRoot, "state", "paseo", "keep.txt");
+  const markerPath = path.join(dataRoot, "components", "paseo", "1.0.0", ".coding-tools-managed-component.json");
   fs.mkdirSync(path.dirname(stateFile), { recursive: true });
   fs.writeFileSync(stateFile, "retained");
-  const controller = createManagedComponentController({ manifestRoot, dataRoot, bundleRoot });
+  writeJson(markerPath, { schemaVersion: 1, id: "paseo", version: "1.0.0", patchRevision: "old-patch" });
+  const marker = fs.readFileSync(markerPath, "utf8");
   try {
-    for (const manifest of [paseo, anneal]) {
-      const home = path.join(dataRoot, "components", manifest.id, manifest.version);
-      fs.mkdirSync(home, { recursive: true });
-      fs.writeFileSync(path.join(home, manifest.bundle.entrypoint), "{}");
-      writeJson(path.join(home, ".coding-tools-managed-component.json"), {
-        schemaVersion: 1, id: manifest.id, version: manifest.version,
-        strategy: manifest.strategy, repository: manifest.repository, commit: manifest.commit,
-      });
-    }
-    assert.equal(controller.project("paseo").installState, "repair-required");
-    assert.equal(controller.project("anneal").installState, "installed");
-
-    await assert.rejects(() => controller.repairComponent("paseo"), /patch revision does not match/);
-    writeJson(path.join(bundleRoot, "paseo", "BUNDLE.json"), {
-      id: "paseo", version: paseo.version, commit: paseo.commit, patchRevision: paseo.patchRevision,
-    });
-    await controller.repairComponent("paseo");
-    assert.equal(controller.project("paseo").installState, "installed");
-    assert.equal(controller.project("anneal").installState, "installed");
+    assert.throws(() => controller.project("paseo"), /Unknown managed component/);
+    await assert.rejects(() => controller.repairComponent("paseo"), /Unknown managed component/);
     assert.equal(fs.readFileSync(stateFile, "utf8"), "retained");
-    const trashEntries = fs.readdirSync(path.join(dataRoot, "Trash", "managed-components", "paseo"));
-    assert.equal(trashEntries.length, 1);
-    const oldMarker = JSON.parse(fs.readFileSync(path.join(dataRoot, "Trash", "managed-components", "paseo", trashEntries[0], ".coding-tools-managed-component.json"), "utf8"));
-    assert.equal(oldMarker.patchRevision, undefined);
+    assert.equal(fs.readFileSync(markerPath, "utf8"), marker);
+    assert.deepEqual(children, []);
+  } finally {
+    controller.dispose();
+  }
+});
 
-    const markerPath = path.join(dataRoot, "components", "paseo", paseo.version, ".coding-tools-managed-component.json");
-    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-    assert.equal(marker.patchRevision, paseo.patchRevision);
-    assert.equal(controller.project("paseo").installState, "installed");
+test("CPA runtime exit preserves installed bytes while missing files and invalid markers repair", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  let downloads = 0;
+  const { controller, dataRoot, children } = controllerFixture({
+    fetchImpl: async () => {
+      downloads += 1;
+      return new Response(payload, { status: 200, headers: { "content-length": String(payload.length) } });
+    },
+  });
+  try {
+    const first = await controller.startComponent("cpa");
+    const artifact = path.join(first.managedHome, "cpa.bin");
+    const markerPath = path.join(first.managedHome, ".coding-tools-managed-component.json");
+    const dependency = path.join(first.managedHome, ".venv", "retained-dependency.txt");
+    fs.mkdirSync(path.dirname(dependency), { recursive: true });
+    fs.writeFileSync(dependency, "retained");
+    const marker = fs.readFileSync(markerPath, "utf8");
+
+    children[0].exitCode = 7;
+    children[0].emit("exit", 7, null);
+    assert.equal(controller.project("cpa").installState, "installed");
+    assert.match(controller.project("cpa").error, /service exited \(7\)/);
+    const restarted = await controller.startComponent("cpa");
+    assert.equal(restarted.installedAt, first.installedAt);
+    assert.deepEqual(fs.readFileSync(artifact), payload);
+    assert.equal(fs.readFileSync(markerPath, "utf8"), marker);
+    assert.equal(fs.readFileSync(dependency, "utf8"), "retained");
+    assert.equal(downloads, 1);
+    assert.equal(children.length, 2);
+
+    await controller.stopComponent("cpa");
+    const missingArtifact = path.join(dataRoot, "Trash", "missing-cpa.bin");
+    fs.mkdirSync(path.dirname(missingArtifact), { recursive: true });
+    fs.renameSync(artifact, missingArtifact);
+    assert.equal(controller.project("cpa").installState, "repair-required");
+    await controller.startComponent("cpa");
+    assert.deepEqual(fs.readFileSync(artifact), payload);
+    assert.equal(downloads, 2);
+
+    await controller.stopComponent("cpa");
+    writeJson(markerPath, { schemaVersion: 1, id: "wrong-component" });
+    assert.equal(controller.project("cpa").installState, "repair-required");
+    await controller.startComponent("cpa");
+    assert.equal(controller.project("cpa").installState, "installed");
+    assert.deepEqual(fs.readFileSync(artifact), payload);
+    assert.equal(downloads, 3);
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("CPA peer environment reentry through runtimeConfiguration does not overflow", async () => {
+  let controller;
+  let entries = 0;
+  const fixture = controllerFixture({
+    peerEnvironment: (manifest) => {
+      entries += 1;
+      if (entries > 40) throw new Error("Maximum call stack size exceeded");
+      assert.ok(controller.runtimeConfiguration(manifest.id));
+      return { CODING_TOOLS_PEER_MARK: "1" };
+    },
+  });
+  controller = fixture.controller;
+  try {
+    await controller.installComponent("cpa");
+    const configuration = controller.runtimeConfiguration("cpa");
+    assert.ok(configuration.home.includes("cpa"));
+    assert.ok(entries >= 1 && entries < 40);
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("CPA managed keys are encrypted and absent from projected snapshots", async () => {
+  const { controller, dataRoot } = controllerFixture();
+  try {
+    await controller.installComponent("cpa");
+    const { proxyApiKey, managementKey } = controller.runtimeSecrets("cpa");
+    assert.ok(proxyApiKey);
+    assert.ok(managementKey);
+    const projected = JSON.stringify(controller.snapshot());
+    const persisted = fs.readFileSync(path.join(dataRoot, "managed-components.secrets.json"), "utf8");
+    assert.equal(controller.project("cpa").secretConfigured, true);
+    for (const key of [proxyApiKey, managementKey]) {
+      assert.equal(projected.includes(key), false);
+      assert.equal(persisted.includes(key), false);
+    }
+    assert.equal(persisted.includes("proxyApiKey"), false);
+    assert.equal(persisted.includes("managementKey"), false);
+    assert.equal(JSON.parse(persisted).components.cpa.scheme, "aes-256-gcm-v1");
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("CPA inspection errors redact managed keys from projected status", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const manifestRoot = manifestFixture(payload);
+  const manifest = releaseManifest("cpa", payload);
+  manifest.credentials = { proxyApiKey: {}, managementKey: {} };
+  writeJson(path.join(manifestRoot, "cpa.json"), manifest);
+  const bundleRoot = temporaryDirectory("coding-tools-cpa-redaction-bundle");
+  fs.mkdirSync(path.join(bundleRoot, "cpa"), { recursive: true });
+  fs.writeFileSync(path.join(bundleRoot, "cpa", "cpa.bin"), payload);
+  const dataRoot = path.join(temporaryDirectory("coding-tools-cpa-redaction"), "integrations");
+  configureTestProxy(dataRoot);
+  const keys = { proxyApiKey: "CPA+proxy/fixture?key", managementKey: "CPA+management/fixture?key" };
+  let failInspection = false;
+  const controller = createManagedExternalServicesController({
+    manifestRoot, bundleRoot, dataRoot,
+    filePath: path.join(dataRoot, "external-services.json"),
+    keyPath: path.join(dataRoot, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    resolveRuntimeExecutable: () => process.execPath,
+    fetchImpl: async (url) => {
+      if (String(url).includes("/v1/models")) {
+        if (failInspection) throw new Error(`inspection failed with ${Object.values(keys).flatMap((key) => [key, encodeURIComponent(key)]).join(" ")}`);
+        return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(payload, { status: 200, headers: { "content-length": String(payload.length) } });
+    },
+    spawnProcess: () => mockChild(9700),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+  });
+  try {
+    for (const [name, value] of Object.entries(keys)) controller.setManagedComponentCredential("cpa", name, value);
+    await controller.start("cpa");
+    const request = controller.loopbackRequest("cpa");
+    assert.equal(request.headers.Authorization, `Bearer ${keys.proxyApiKey}`);
+    assert.equal(request.managementHeaders["X-Management-Key"], keys.managementKey);
+    failInspection = true;
+    const inspected = await controller.inspect("cpa");
+    assert.equal(inspected.error, "inspection failed with [REDACTED] [REDACTED] [REDACTED] [REDACTED]");
+    for (const projected of [inspected, controller.snapshot()]) {
+      const text = JSON.stringify(projected);
+      for (const value of Object.values(keys)) {
+        assert.equal(text.includes(value), false);
+        assert.equal(text.includes(encodeURIComponent(value)), false);
+      }
+    }
+    failInspection = false;
+    const healthy = await controller.inspect("cpa");
+    assert.equal(healthy.error, null);
+    assert.equal(healthy.status, "ready");
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("CPA managed component snapshot redacts a secret-bearing process error", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const manifestRoot = manifestFixture(payload);
+  const manifest = releaseManifest("cpa", payload);
+  manifest.credentials = { proxyApiKey: {}, managementKey: {} };
+  writeJson(path.join(manifestRoot, "cpa.json"), manifest);
+  const bundleRoot = temporaryDirectory("coding-tools-cpa-managed-error-bundle");
+  fs.mkdirSync(path.join(bundleRoot, "cpa"), { recursive: true });
+  fs.writeFileSync(path.join(bundleRoot, "cpa", "cpa.bin"), payload);
+  const dataRoot = path.join(temporaryDirectory("coding-tools-cpa-managed-error"), "integrations");
+  configureTestProxy(dataRoot);
+  const keys = { proxyApiKey: "CPA+proxy/fixture?key", managementKey: "CPA+management/fixture?key" };
+  let child;
+  const controller = createManagedExternalServicesController({
+    manifestRoot, bundleRoot, dataRoot,
+    filePath: path.join(dataRoot, "external-services.json"),
+    keyPath: path.join(dataRoot, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    resolveRuntimeExecutable: () => process.execPath,
+    fetchImpl: async (url) => String(url).includes("/v1/models")
+      ? new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(payload, { status: 200, headers: { "content-length": String(payload.length) } }),
+    spawnProcess: () => { child = mockChild(9701); return child; },
+    terminateProcessTree: (owned, signal = "SIGTERM") => owned.kill(signal),
+  });
+  try {
+    for (const [name, value] of Object.entries(keys)) controller.setManagedComponentCredential("cpa", name, value);
+    await controller.start("cpa");
+    child.emit("error", new Error(`spawn failed with ${Object.values(keys).flatMap((key) => [key, encodeURIComponent(key)]).join(" ")}`));
+    const component = controller.managedComponentsSnapshot().components[0];
+    assert.equal(component.error, "service: spawn failed with [REDACTED] [REDACTED] [REDACTED] [REDACTED]");
+    const service = controller.snapshot().services.find((entry) => entry.id === "cpa");
+    assert.equal(service.managedInstall.error, component.error);
+    for (const projected of [controller.managedComponentsSnapshot(), service]) {
+      const text = JSON.stringify(projected);
+      for (const value of Object.values(keys)) {
+        assert.equal(text.includes(value), false);
+        assert.equal(text.includes(encodeURIComponent(value)), false);
+      }
+    }
   } finally {
     controller.dispose();
   }
@@ -198,13 +369,13 @@ test("Paseo patch revision repairs an old marker and preserves state", async () 
 
 test("manifest validation rejects remote listeners, unpinned sources, path escape and destructive commands", () => {
   const payload = Buffer.from("fixture");
-  const baseline = releaseManifest("codex-router", payload);
+  const baseline = releaseManifest("cpa", payload);
 
   assert.throws(
     () => assertSafeManifest({
       ...baseline,
       health: { ...baseline.health, endpoint: "https://example.com/" },
-    }, "codex-router"),
+    }, "cpa"),
     /loopback/i,
   );
 
@@ -214,7 +385,7 @@ test("manifest validation rejects remote listeners, unpinned sources, path escap
       strategy: "git-source",
       repositoryUrl: "https://github.com/fixture/repository.git",
       commit: "main",
-    }, "codex-router"),
+    }, "cpa"),
     /commit must be pinned/i,
   );
 
@@ -222,7 +393,7 @@ test("manifest validation rejects remote listeners, unpinned sources, path escap
     () => assertSafeManifest({
       ...baseline,
       install: { steps: [{ id: "escape", kind: "assert-file", path: "../secret" }] },
-    }, "codex-router"),
+    }, "cpa"),
     /escapes the component root/i,
   );
 
@@ -232,7 +403,7 @@ test("manifest validation rejects remote listeners, unpinned sources, path escap
       install: {
         steps: [{ id: "destructive", kind: "command", executable: "rm", arguments: ["-rf", "."] }],
       },
-    }, "codex-router"),
+    }, "cpa"),
     /destructive executable/i,
   );
 
@@ -242,24 +413,24 @@ test("manifest validation rejects remote listeners, unpinned sources, path escap
       install: {
         steps: [{ id: "shell-delete", kind: "command", executable: "bash", arguments: ["-lc", "rm -rf ."] }],
       },
-    }, "codex-router"),
+    }, "cpa"),
     /destructive shell command/i,
   );
 });
 
 test("release installation verifies bytes, activates atomically and reports the pinned install", async () => {
   const { controller, payload } = controllerFixture();
-  const installed = await controller.installComponent("codex-router");
+  const installed = await controller.installComponent("cpa");
 
   assert.equal(installed.installState, "installed");
   assert.equal(installed.version, "1.0.0");
   assert.ok(installed.installedAt);
-  const artifact = path.join(installed.managedHome, "codex-router.bin");
+  const artifact = path.join(installed.managedHome, "cpa.bin");
   assert.deepEqual(fs.readFileSync(artifact), payload);
   const marker = JSON.parse(fs.readFileSync(path.join(installed.managedHome, ".coding-tools-managed-component.json"), "utf8"));
-  assert.equal(marker.id, "codex-router");
+  assert.equal(marker.id, "cpa");
   assert.equal(marker.version, "1.0.0");
-  assert.equal(marker.artifact, "codex-router.bin");
+  assert.equal(marker.artifact, "cpa.bin");
   controller.dispose();
 });
 
@@ -285,14 +456,14 @@ test("release download retries a transient upstream HTTP failure before activati
 
 test("repair preserves the previous installation under Trash instead of deleting it", async () => {
   const { controller, dataRoot } = controllerFixture();
-  const first = await controller.installComponent("paseo");
+  const first = await controller.installComponent("cpa");
   fs.writeFileSync(path.join(first.managedHome, "user-retained.txt"), "retain me", "utf8");
 
-  const repaired = await controller.repairComponent("paseo");
+  const repaired = await controller.repairComponent("cpa");
   assert.equal(repaired.installState, "installed");
   assert.equal(fs.existsSync(path.join(repaired.managedHome, "user-retained.txt")), false);
 
-  const trashRoot = path.join(dataRoot, "Trash", "managed-components", "paseo");
+  const trashRoot = path.join(dataRoot, "Trash", "managed-components", "cpa");
   const retainedDirectories = fs.readdirSync(trashRoot);
   assert.equal(retainedDirectories.length, 1);
   const retainedRoot = path.join(trashRoot, retainedDirectories[0]);
@@ -301,78 +472,23 @@ test("repair preserves the previous installation under Trash instead of deleting
   controller.dispose();
 });
 
-test("peer environment reentry through runtimeConfiguration does not overflow", async () => {
-  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
-  const manifestRoot = manifestFixture(payload);
-  const dataRoot = temporaryDirectory("coding-tools-peer-reentry");
-  let controller;
-  let entries = 0;
-  controller = createManagedComponentController({
-    manifestRoot,
-    dataRoot,
-    allowNetworkInstall: true,
-    safeStorage: { isEncryptionAvailable: () => false },
-    fetchImpl: async () => new Response(payload, {
-      status: 200,
-      headers: { "content-length": String(payload.length) },
-    }),
-    spawnProcess: () => mockChild(9100),
-    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
-    resolveRuntimeExecutable: () => process.execPath,
-    peerEnvironment: (manifest) => {
-      entries += 1;
-      if (entries > 40) throw new Error("Maximum call stack size exceeded");
-      const configuration = controller.runtimeConfiguration(manifest.id);
-      assert.ok(configuration);
-      return { CODING_TOOLS_PEER_MARK: "1" };
-    },
-  });
-  await controller.installComponent("commandcode-proxy");
-  const configuration = controller.runtimeConfiguration("commandcode-proxy");
-  assert.equal(configuration.home.includes("commandcode-proxy"), true);
-  assert.ok(entries >= 1 && entries < 40);
-  controller.dispose();
-});
-
-test("CommandCode managed proxy key is encrypted and never appears in projected snapshots", async () => {
-  const { controller, dataRoot } = controllerFixture();
-  const installed = await controller.installComponent("commandcode-proxy");
-  assert.equal(installed.secretConfigured, true);
-  assert.equal(JSON.stringify(controller.snapshot()).includes("proxyApiKey"), false);
-
-  const persisted = fs.readFileSync(path.join(dataRoot, "managed-components.secrets.json"), "utf8");
-  assert.equal(persisted.includes("proxyApiKey"), false);
-  assert.equal(persisted.includes("generated-main-process-only"), false);
-  controller.dispose();
-});
-
 test("managed foreground lifecycle reports running process and stops it with bounded termination", async () => {
   const { controller, children } = controllerFixture();
-  await controller.installComponent("anneal");
-  const started = await controller.startComponent("anneal");
+  await controller.installComponent("cpa");
+  const started = await controller.startComponent("cpa");
   assert.equal(started.processes.length, 1);
   assert.equal(started.processes[0].running, true);
   assert.equal(children.length, 1);
 
-  const stopped = await controller.stopComponent("anneal");
+  const stopped = await controller.stopComponent("cpa");
   assert.equal(children[0].killed, true);
   assert.equal(stopped.processes.length, 0);
   controller.dispose();
 });
 
-test("Start materializes a missing managed component before launching it", async () => {
-  const { controller, children } = controllerFixture();
-  const started = await controller.startComponent("commandcode-proxy");
-  assert.equal(started.installState, "installed");
-  assert.equal(started.processes.length, 1);
-  assert.equal(started.processes[0].running, true);
-  assert.equal(children.length, 1);
-  controller.dispose();
-});
-
 function bundledSourceManifest(id) {
-  const entry = id === "commandcode-proxy" ? "proxy.mjs" : "package.json";
-  const port = id === "commandcode-proxy" ? 9090 : id === "paseo" ? 6768 : 5173;
+  const entry = "package.json";
+  const port = id === "cpa" ? 8317 : id === "paseo" ? 6768 : 5173;
   return {
     schemaVersion: 1,
     id,
@@ -409,119 +525,57 @@ function bundledSourceManifest(id) {
   };
 }
 
-test("bundled-source unpacks from app resources without git clone or network fetch", async () => {
-  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
-  const manifestRoot = temporaryDirectory("coding-tools-bundled-manifests");
-  const bundleRoot = temporaryDirectory("coding-tools-bundled-runtime");
-  const dataRoot = temporaryDirectory("coding-tools-bundled-data");
-  for (const id of COMPONENT_IDS) {
-    writeJson(path.join(manifestRoot, `${id}.json`), id === "commandcode-proxy"
-      ? bundledSourceManifest(id)
-      : releaseManifest(id, payload));
-  }
-  const sourceRoot = path.join(bundleRoot, "commandcode-proxy", "source");
-  fs.mkdirSync(sourceRoot, { recursive: true });
-  fs.writeFileSync(path.join(sourceRoot, "proxy.mjs"), "export const bundled = true;\n");
-  writeJson(path.join(bundleRoot, "MANIFEST.json"), { schemaVersion: 1 });
-
-  let fetched = 0;
-  const children = [];
-  const controller = createManagedComponentController({
-    manifestRoot,
-    dataRoot,
-    bundleRoot,
-    safeStorage: { isEncryptionAvailable: () => false },
-    fetchImpl: async () => {
-      fetched += 1;
-      throw new Error("network fetch must not run for bundled-source");
-    },
-    spawnProcess: () => {
-      const child = mockChild(9100 + children.length);
-      children.push(child);
-      return child;
-    },
-    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+test("managed service start refuses installed Paseo before spawning", async () => {
+  const manifestRoot = temporaryDirectory("coding-tools-retired-paseo-manifests");
+  const dataRoot = path.join(temporaryDirectory("coding-tools-retired-paseo-data"), "integrations");
+  configureTestProxy(dataRoot);
+  for (const id of COMPONENT_IDS) writeJson(path.join(manifestRoot, `${id}.json`), bundledSourceManifest(id));
+  const manifest = bundledSourceManifest("paseo");
+  const home = path.join(dataRoot, "components", "paseo", manifest.version);
+  writeJson(path.join(home, "package.json"), { name: "paseo-fixture" });
+  writeJson(path.join(home, ".coding-tools-managed-component.json"), {
+    schemaVersion: 1, id: manifest.id, version: manifest.version,
+    strategy: manifest.strategy, repository: manifest.repository, commit: manifest.commit,
+    installedAt: new Date().toISOString(),
   });
-
-  const started = await controller.startComponent("commandcode-proxy");
-  assert.equal(started.installState, "installed");
-  assert.equal(fetched, 0);
-  assert.equal(
-    fs.readFileSync(path.join(started.managedHome, "proxy.mjs"), "utf8"),
-    "export const bundled = true;\n",
-  );
-  controller.dispose();
+  const spawned = [];
+  const controller = createManagedExternalServicesController({
+    manifestRoot, dataRoot,
+    filePath: path.join(dataRoot, "external-services.json"),
+    keyPath: path.join(dataRoot, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    resolveRuntimeExecutable: () => process.execPath,
+    fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => "text/plain" } }),
+    spawnProcess: () => { spawned.push("paseo"); return mockChild(); },
+  });
+  try {
+    for (const id of ["paseo", "codex-router", "commandcode-proxy", "anneal"]) {
+      for (const operation of ["start", "restart", "installManagedComponent", "repairManagedComponent"]) {
+        await assert.rejects(() => controller[operation](id), /retired/i);
+      }
+    }
+    assert.deepEqual(spawned, []);
+  } finally {
+    controller.dispose();
+  }
 });
 
-test("Windows WSL Anneal stages Linux dependencies without leaking credentials in arguments", async () => {
-  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
-  const manifestRoot = temporaryDirectory("coding-tools-anneal-wsl-manifests");
-  const bundleRoot = temporaryDirectory("coding-tools-anneal-wsl-bundle");
-  const dataRoot = temporaryDirectory("coding-tools-anneal-wsl-data");
-  for (const id of COMPONENT_IDS) {
-    const manifest = id === "anneal" ? bundledSourceManifest(id) : releaseManifest(id, payload);
-    if (id === "anneal") {
-      manifest.platformModes = { win32: "wsl2" };
-      manifest.credentials = { githubReadToken: { required: false, minimumLength: 20, secret: true } };
-      manifest.install.steps.splice(1, 0, {
-        id: "install-dependencies",
-        kind: "command",
-        executable: "{npm}",
-        arguments: ["ci"],
-        skipIfFile: "node_modules",
-        skipIfExists: "node_modules",
-        execution: "managed-mode",
-      });
-      manifest.install.steps.splice(2, 0, {
-        id: "restore-or-create-config",
-        kind: "command",
-        executable: "bash",
-        arguments: ["-lc", "true"],
-        environment: { GITHUB_READ_TOKEN: "{secret:githubReadToken}" },
-        execution: "managed-mode",
-      });
-    }
-    writeJson(path.join(manifestRoot, id + ".json"), manifest);
-  }
-  const bundled = path.join(bundleRoot, "anneal", "source");
-  writeJson(path.join(bundled, "package.json"), { name: "anneal-fixture" });
-  fs.mkdirSync(path.join(bundled, "node_modules", "win32-only"), { recursive: true });
-  fs.writeFileSync(path.join(bundled, "node_modules", "win32-only", "index.js"), "windows");
+test("retired Anneal cannot stage WSL dependencies or accept credentials", async () => {
   const spawned = [];
-  const controller = createManagedComponentController({
-    manifestRoot,
-    bundleRoot,
-    dataRoot,
+  const { controller, dataRoot } = controllerFixture({
     platform: "win32",
-    env: { ...process.env, WSLENV: "KEEP_ME/p:GITHUB_READ_TOKEN/w" },
-    resolveCrossUseEnvironment: (id) => id === "anneal" ? { HTTPS_PROXY: "http://proxy.example.test:8080", NO_PROXY: "127.0.0.1" } : {},
-    safeStorage: { isEncryptionAvailable: () => false },
-    spawnSyncProcess: () => ({ status: 0, stdout: "/mnt/c/anneal-fixture\n", stderr: "" }),
-    spawnProcess: (executable, args, options) => {
-      spawned.push({ executable, args, env: options.env });
-      const child = mockChild(9400 + spawned.length);
-      queueMicrotask(() => { child.exitCode = 0; child.emit("exit", 0, null); });
-      return child;
-    },
-    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+    spawnSyncProcess: () => { spawned.push("wsl"); throw new Error("WSL must not run"); },
+    spawnProcess: () => { spawned.push("child"); throw new Error("Anneal must not spawn"); },
   });
-  const fixtureToken = "fixture-" + "x".repeat(32);
-  controller.setComponentCredential("anneal", "githubReadToken", fixtureToken);
+  const stateFile = path.join(dataRoot, "state", "anneal", "run.json");
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, "retired-state");
   try {
-    const installed = await controller.installComponent("anneal");
-    assert.equal(installed.installState, "installed");
-    assert.equal(fs.existsSync(path.join(installed.managedHome, "node_modules", "win32-only")), false);
-    assert.equal(spawned.length, 2);
-    assert.equal(spawned[0].executable, "wsl.exe");
-    assert.match(spawned[0].args.join(" "), /npm.*ci/);
-    assert.equal(spawned.some((entry) => entry.args.join(" ").includes(fixtureToken)), false);
-    assert.equal(spawned[1].env.GITHUB_READ_TOKEN, fixtureToken);
-    assert.equal(spawned[1].env.HTTPS_PROXY, "http://proxy.example.test:8080");
-    assert.match(spawned[1].env.WSLENV, /(?:^|:)HTTPS_PROXY\/u(?:$|:)/);
-    assert.match(spawned[1].env.WSLENV, /(?:^|:)NO_PROXY\/u(?:$|:)/);
-    assert.match(spawned[1].env.WSLENV, /(?:^|:)KEEP_ME\/p(?:$|:)/);
-    assert.match(spawned[1].env.WSLENV, /(?:^|:)GITHUB_READ_TOKEN\/u(?:$|:)/);
-    assert.doesNotMatch(spawned[1].env.WSLENV, /GITHUB_READ_TOKEN\/w/);
+    assert.throws(() => controller.setComponentCredential("anneal", "githubReadToken", "fixture-token"), /Unknown managed component/);
+    await assert.rejects(() => controller.installComponent("anneal"), /Unknown managed component/);
+    await assert.rejects(() => controller.startComponent("anneal"), /Unknown managed component/);
+    assert.deepEqual(spawned, []);
+    assert.equal(fs.readFileSync(stateFile, "utf8"), "retired-state");
   } finally {
     controller.dispose();
   }
@@ -576,15 +630,11 @@ test("Start fails closed when the bundled CPA archive is missing from app resour
   controller.dispose();
 });
 
-test("bundled-source Start fails closed when app resources are missing", async () => {
+test("CPA bundled-source Start fails closed when app resources are missing", async () => {
   const payload = Buffer.from("managed-component-fixture-v1", "utf8");
   const manifestRoot = temporaryDirectory("coding-tools-missing-bundle-manifests");
   const dataRoot = temporaryDirectory("coding-tools-missing-bundle-data");
-  for (const id of COMPONENT_IDS) {
-    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
-      ? bundledSourceManifest(id)
-      : releaseManifest(id, payload));
-  }
+  writeJson(path.join(manifestRoot, "cpa.json"), bundledSourceManifest("cpa"));
   const controller = createManagedComponentController({
     manifestRoot,
     dataRoot,
@@ -593,11 +643,11 @@ test("bundled-source Start fails closed when app resources are missing", async (
     fetchImpl: async () => {
       throw new Error("network fetch must not run when the bundled runtime is missing");
     },
-    spawnProcess: () => mockChild(9300),
+    spawnProcess: () => assert.fail("missing CPA bundle must not spawn"),
     terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
   await assert.rejects(
-    () => controller.startComponent("paseo"),
+    () => controller.startComponent("cpa"),
     /bundled runtime is missing|bundled inside Coding Tools Desktop/i,
   );
   controller.dispose();
@@ -673,152 +723,59 @@ test("Windows disposal owns an in-flight managed preparation command", { skip: p
   assert.deepEqual(controller.project("cpa").processes, []);
 });
 
-test("Router runtime exit preserves completed install state and generated dependencies", async () => {
-  const { controller, children } = controllerFixture();
-  try {
-    const started = await controller.startComponent("codex-router");
-    const dependency = path.join(started.managedHome, ".venv", "retained-dependency.txt");
-    fs.mkdirSync(path.dirname(dependency), { recursive: true });
-    fs.writeFileSync(dependency, "retained");
-    children[0].exitCode = 7;
-    children[0].emit("exit", 7, null);
-    const failed = controller.project("codex-router");
-    assert.equal(failed.installState, "installed");
-    assert.match(failed.error, /service exited \(7\)/);
-    const restarted = await controller.startComponent("codex-router");
-    assert.equal(restarted.installedAt, started.installedAt);
-    assert.equal(fs.readFileSync(dependency, "utf8"), "retained");
-    assert.equal(children.length, 2);
-  } finally {
-    controller.dispose();
-  }
-});
-
-test("Router composite caller key resolves without recursive launch expansion", async (t) => {
-  const manifestRoot = temporaryDirectory("coding-tools-router-composite-manifests");
-  const dataRoot = path.join(temporaryDirectory("coding-tools-router-composite-data"), "integrations");
-  configureTestProxy(dataRoot);
-  for (const id of COMPONENT_IDS) writeJson(path.join(manifestRoot, `${id}.json`), bundledSourceManifest(id));
-  const manifest = bundledSourceManifest("codex-router");
-  const home = path.join(dataRoot, "components", "codex-router", manifest.version);
-  writeJson(path.join(home, "package.json"), { name: "router-fixture" });
-  writeJson(path.join(home, ".coding-tools-managed-component.json"), {
-    schemaVersion: 1,
-    id: manifest.id,
-    version: manifest.version,
-    strategy: manifest.strategy,
-    repository: manifest.repository,
-    commit: manifest.commit,
-    installedAt: new Date().toISOString(),
-  });
-  const state = path.join(dataRoot, "state", "codex-router", "router");
-  fs.mkdirSync(state, { recursive: true });
-  const callerKey = "router-composite-fixture-key-1234567890";
-  fs.writeFileSync(path.join(state, "caller-secret"), callerKey);
-  const spawned = [];
-  const controller = createManagedExternalServicesController({
-    manifestRoot,
-    dataRoot,
-    filePath: path.join(dataRoot, "external-services.json"),
-    keyPath: path.join(dataRoot, "external-services.key"),
-    safeStorage: { isEncryptionAvailable: () => false },
-    resolveRuntimeExecutable: () => process.execPath,
-    fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => "application/json" }, clone: () => ({ json: async () => ({ data: [] }) }) }),
-    spawnProcess: () => {
-      const child = mockChild(8700 + spawned.length);
-      spawned.push(child);
+test("a persistent CPA runs detached, survives a keep-running dispose, and is adopted by the next launcher", async (t) => {
+  const { spawn } = require("node:child_process");
+  const survivor = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => survivor.kill());
+  const spawnOptions = [];
+  const first = controllerFixture({
+    persistentComponents: ["cpa"],
+    healthProbe: async () => true,
+    spawnProcess: (_executable, _args, options) => {
+      spawnOptions.push(options);
+      const child = mockChild(survivor.pid);
+      child.unref = () => {};
       return child;
     },
-    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
   });
-  try {
-    const startedAt = performance.now();
-    controller.snapshot();
-    const connection = controller.loopbackRequest("codex-router");
-    const started = await controller.start("codex-router");
-    const environment = controller.runtimeEnvironment();
-    const elapsedMs = performance.now() - startedAt;
-    t.diagnostic(`Router snapshot + loopback + Start + environment: ${elapsedMs.toFixed(1)} ms`);
-    assert.equal(connection.modelsPath, `/_codex-router/${callerKey}/v1/models`);
-    assert.equal(environment.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY, callerKey);
-    assert.equal(started.managedInstall.state, "installed");
-    assert.equal(spawned.length, 1);
-    assert.ok(elapsedMs < 5000, "caller-key lookup must not recurse through environment expansion");
-  } finally {
-    controller.dispose();
-  }
+  await first.controller.startComponent("cpa");
+  assert.equal(spawnOptions.length, 1);
+  assert.equal(spawnOptions[0].detached, true);
+  assert.equal(typeof spawnOptions[0].stdio[1], "number", "output goes to a log file, not a pipe");
+  const recordPath = path.join(first.dataRoot, "state", "cpa.process.json");
+  assert.equal(JSON.parse(fs.readFileSync(recordPath, "utf8")).pid, survivor.pid);
+
+  first.controller.dispose({ keepPersistent: true });
+  assert.equal(survivor.exitCode, null, "keep-running dispose must not stop CPA");
+  assert.equal(fs.existsSync(recordPath), true);
+
+  let spawnedAgain = 0;
+  const { controller: second } = controllerFixture({
+    dataRoot: first.dataRoot,
+    persistentComponents: ["cpa"],
+    healthProbe: async () => true,
+    spawnProcess: () => { spawnedAgain += 1; return mockChild(9999); },
+  });
+  t.after(() => second.dispose({ keepPersistent: true }));
+  await second.startComponent("cpa");
+  assert.equal(spawnedAgain, 0, "a healthy CPA of the same version is adopted, not restarted");
+  assert.equal(survivor.exitCode, null);
 });
 
-test("runtime failure restarts in place while missing package files and invalid markers repair", async () => {
-  const componentId = "codex-router";
-  const manifestRoot = temporaryDirectory("coding-tools-restart-manifests");
-  const bundleRoot = temporaryDirectory("coding-tools-restart-bundle");
-  const dataRoot = path.join(temporaryDirectory("coding-tools-restart-data"), "integrations");
-  configureTestProxy(dataRoot);
-  for (const id of COMPONENT_IDS) writeJson(path.join(manifestRoot, `${id}.json`), bundledSourceManifest(id));
-  const source = path.join(bundleRoot, componentId, "source");
-  writeJson(path.join(source, "package.json"), { name: "router-fixture", revision: 1 });
-  const routerState = path.join(dataRoot, "state", componentId, "router");
-  fs.mkdirSync(routerState, { recursive: true });
-  fs.writeFileSync(path.join(routerState, "caller-secret"), "router-restart-fixture-key-1234567890");
-  const children = [];
-  const controller = createManagedExternalServicesController({
-    manifestRoot,
-    bundleRoot,
-    dataRoot,
-    filePath: path.join(dataRoot, "external-services.json"),
-    keyPath: path.join(dataRoot, "external-services.key"),
-    safeStorage: { isEncryptionAvailable: () => false },
-    resolveRuntimeExecutable: () => process.execPath,
-    fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => "application/json" }, clone: () => ({ json: async () => ({ data: [] }) }) }),
-    spawnProcess: () => {
-      const child = mockChild(8500 + children.length);
-      children.push(child);
-      return child;
-    },
-    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+test("a persistent CPA from an older version is stopped and replaced instead of adopted", async (t) => {
+  const { spawn } = require("node:child_process");
+  const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => { if (stale.exitCode === null) stale.kill(); });
+  let spawned = 0;
+  const { controller, dataRoot } = controllerFixture({
+    persistentComponents: ["cpa"],
+    healthProbe: async () => true,
+    spawnProcess: () => { spawned += 1; const child = mockChild(9100); child.unref = () => {}; return child; },
   });
-  try {
-    const first = await controller.start(componentId);
-    const home = first.managedInstall.home;
-    const dependency = path.join(home, ".venv", "retained-dependency.txt");
-    fs.mkdirSync(path.dirname(dependency), { recursive: true });
-    fs.writeFileSync(dependency, "verified runtime dependency");
-    const markerPath = path.join(home, ".coding-tools-managed-component.json");
-    const marker = fs.readFileSync(markerPath, "utf8");
-    const installs = path.join(dataRoot, "aiTemp", "managed-components");
-    const originalInstallCount = fs.readdirSync(installs).length;
-    writeJson(path.join(source, "package.json"), { name: "router-fixture", revision: 2 });
-
-    children[0].exitCode = 7;
-    children[0].emit("exit", 7, null);
-    const failed = controller.snapshot().services.find((entry) => entry.id === componentId);
-    const restarted = await controller.start(componentId);
-    assert.equal(fs.existsSync(dependency), true, "runtime failure must not replace the installed home");
-    assert.equal(fs.readFileSync(dependency, "utf8"), "verified runtime dependency");
-    assert.equal(fs.readFileSync(markerPath, "utf8"), marker);
-    assert.equal(fs.readdirSync(installs).length, originalInstallCount);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(home, "package.json"), "utf8")).revision, 1);
-    assert.equal(failed.managedInstall.state, "installed");
-    assert.equal(failed.status, "error");
-    assert.match(failed.error, /service exited \(7\)/);
-    assert.equal(restarted.managedInstall.state, "installed");
-    assert.equal(restarted.error, null);
-
-    await controller.stop(componentId);
-    fs.renameSync(path.join(home, "package.json"), path.join(dataRoot, "Trash", "missing-package.json"));
-    assert.equal(controller.snapshot().services.find((entry) => entry.id === componentId).managedInstall.state, "repair-required");
-    await controller.start(componentId);
-    assert.equal(fs.readdirSync(installs).length, originalInstallCount + 1);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(home, "package.json"), "utf8")).revision, 2);
-
-    await controller.stop(componentId);
-    writeJson(markerPath, { schemaVersion: 1, id: "wrong-component" });
-    assert.equal(controller.snapshot().services.find((entry) => entry.id === componentId).managedInstall.state, "repair-required");
-    await controller.start(componentId);
-    assert.equal(fs.readdirSync(installs).length, originalInstallCount + 2);
-    assert.equal(controller.snapshot().services.find((entry) => entry.id === componentId).managedInstall.state, "installed");
-  } finally {
-    controller.dispose();
-  }
+  t.after(() => controller.dispose());
+  writeJson(path.join(dataRoot, "state", "cpa.process.json"), { pid: stale.pid, version: "0.9.0", startedAt: "2026-09-01T00:00:00.000Z" });
+  await controller.startComponent("cpa");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.notEqual(stale.exitCode === null && stale.signalCode === null, true, "the old CPA is stopped");
+  assert.equal(spawned, 1, "the current version is started");
 });

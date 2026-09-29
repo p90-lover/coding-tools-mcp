@@ -135,3 +135,49 @@ fn graph_checks_scope_cycles_joins_and_stale_revisions() {
     assert_eq!(cancelled.nodes[3].state, State::Reserved);
     assert!(reserve(&mut data, "qa", "run", "worker-a", 4, "request-2".into()).is_err());
 }
+
+#[test]
+fn adding_one_worker_extends_the_review_join_without_replaying_active_work() {
+    let (mut data, run) = fixture();
+    create(&mut data, 2, run).unwrap();
+    let mut worker = data.ao_runs[0].nodes[1].clone();
+    worker.id = "worker-c".into();
+    worker.parents.push("worker-b".into());
+    let added = update_graph(
+        &mut data,
+        "qa",
+        "run",
+        1,
+        GraphChange::AddWorker {
+            node: worker.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(added.revision, 2);
+    assert_eq!(added.nodes.len(), 5);
+    assert!(added.nodes[3].parents.contains(&worker.id));
+    let before = serde_json::to_value(&data).unwrap();
+    assert!(update_graph(
+        &mut data,
+        "qa",
+        "run",
+        1,
+        GraphChange::AddWorker {
+            node: worker.clone()
+        },
+    )
+    .is_err());
+    assert_eq!(serde_json::to_value(&data).unwrap(), before);
+    data.ao_runs[0].nodes[3].state = State::Running;
+    let mut late = worker;
+    late.id = "late-worker".into();
+    assert!(update_graph(
+        &mut data,
+        "qa",
+        "run",
+        2,
+        GraphChange::AddWorker { node: late }
+    )
+    .is_err());
+    assert_eq!(data.ao_runs[0].nodes.len(), 5);
+}

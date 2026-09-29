@@ -130,34 +130,45 @@ function yamlString(value) {
   return JSON.stringify(String(value));
 }
 
-const COMMANDCODE_PLUGIN_FILE = "commandcode-go-v1.0.0-codingtools.1.dll";
-const COMMANDCODE_PLUGIN_SHA256 = "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c";
+const COMMANDCODE_PLUGINS = [
+  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.1.dll", sha256: "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c" },
+  { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
+];
 
 function installBundledCommandCodePlugin(state) {
-  if (process.platform !== "win32" || process.arch !== "x64") return null;
-  const source = path.join(__dirname, "..", "vendor", "bundled", "cpa-plugins", "windows", "amd64", COMMANDCODE_PLUGIN_FILE);
+  if (process.platform !== "win32" || process.arch !== "x64") return [];
+  const bundle = path.join(__dirname, "..", "vendor", "bundled", "cpa-plugins", "windows", "amd64");
   const digest = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-  if (digest(source) !== COMMANDCODE_PLUGIN_SHA256) throw new Error("Bundled CommandCode CPA plugin hash mismatch");
+  const sources = COMMANDCODE_PLUGINS.map((plugin) => ({
+    ...plugin, source: path.join(bundle, plugin.file),
+  }));
+  for (const plugin of sources) {
+    if (digest(plugin.source) !== plugin.sha256) throw new Error(`Bundled ${plugin.id} CPA plugin hash mismatch`);
+  }
 
   const directory = path.join(state, "plugins", "windows", "amd64");
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const target = path.join(directory, COMMANDCODE_PLUGIN_FILE);
-  const current = fs.existsSync(target) && digest(target) === COMMANDCODE_PLUGIN_SHA256;
-  const old = fs.readdirSync(directory).filter((name) => (
-    /^commandcode-go(?:-v[0-9][0-9A-Za-z.+-]*)?\.dll$/i.test(name)
-    && (name !== COMMANDCODE_PLUGIN_FILE || !current)
-  ));
-  if (old.length) {
-    const archive = path.join(state, "Trash", "plugins", new Date().toISOString().replace(/[:.]/g, "-"));
-    fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
-    for (const name of old) {
-      const previous = path.join(directory, name);
-      if (!fs.lstatSync(previous).isFile()) throw new Error("CommandCode CPA plugin path is not a regular file");
-      fs.renameSync(previous, path.join(archive, name));
+  return sources.map((plugin) => {
+    const target = path.join(directory, plugin.file);
+    const stat = fs.existsSync(target) ? fs.lstatSync(target) : null;
+    if (stat && !stat.isFile()) throw new Error(`${plugin.id} CPA plugin path is not a regular file`);
+    const current = stat && digest(target) === plugin.sha256;
+    const old = fs.readdirSync(directory).filter((name) => (
+      (name === `${plugin.id}.dll` || (name.startsWith(`${plugin.id}-v`) && name.endsWith(".dll")))
+      && (name !== plugin.file || !current)
+    ));
+    if (old.length) {
+      const archive = path.join(state, "Trash", "plugins", `${Date.now()}-${plugin.id}`);
+      fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
+      for (const name of old) {
+        const previous = path.join(directory, name);
+        if (!fs.lstatSync(previous).isFile()) throw new Error(`${plugin.id} CPA plugin path is not a regular file`);
+        fs.renameSync(previous, path.join(archive, name));
+      }
     }
-  }
-  if (!current) fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
-  return target;
+    if (!current) fs.copyFileSync(plugin.source, target, fs.constants.COPYFILE_EXCL);
+    return target;
+  });
 }
 
 function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
@@ -189,6 +200,8 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     `  dir: ${yamlString(pluginDirectory)}`,
     "  configs:",
     "    commandcode-go:",
+    "      enabled: true",
+    "    auth-commandcode:",
     "      enabled: true",
     "debug: false",
     "request-log: false",

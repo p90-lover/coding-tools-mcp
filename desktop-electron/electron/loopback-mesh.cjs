@@ -7,23 +7,11 @@ const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const MESH_SCHEMA_VERSION = 1;
 const DEFAULT_IN_APP_LOOPBACKS = Object.freeze({
-  "codex-router": Object.freeze({
-    url: "http://127.0.0.1:4202",
-    executionUrl: null,
-    openaiBaseUrl: null,
-    role: "router",
-  }),
-  "commandcode-proxy": Object.freeze({
-    url: "http://127.0.0.1:9090",
-    executionUrl: null,
-    openaiBaseUrl: "http://127.0.0.1:9090/v1",
-    anthropicBaseUrl: "http://127.0.0.1:9090/v1",
-    role: "llm-proxy",
-  }),
   cpa: Object.freeze({
     url: "http://127.0.0.1:8317",
     executionUrl: null,
-    openaiBaseUrl: null,
+    openaiBaseUrl: "http://127.0.0.1:8317/v1",
+    anthropicBaseUrl: "http://127.0.0.1:8317/v1",
     role: "provider-hub",
   }),
   paseo: Object.freeze({
@@ -136,22 +124,12 @@ function sanitizeEnv(value) {
   );
 }
 
-function loopbackMeshEnvironment(mesh, {
-  targetId = null,
-  commandCodeApiKey = "",
-  meshPath = "",
-} = {}) {
+function loopbackMeshEnvironment(mesh, { meshPath = "" } = {}) {
   const services = mesh?.services || {};
-  const commandcode = services["commandcode-proxy"];
-  const router = services["codex-router"];
   const cpa = services.cpa;
   const paseo = services.paseo;
   const anneal = services.anneal;
   const env = {
-    CODING_TOOLS_CODEX_ROUTER_URL: router?.url || "",
-    CODING_TOOLS_COMMANDCODE_URL: commandcode?.url || "",
-    CODING_TOOLS_COMMANDCODE_OPENAI_BASE_URL: commandcode?.openaiBaseUrl || "",
-    CODING_TOOLS_COMMANDCODE_ANTHROPIC_BASE_URL: commandcode?.anthropicBaseUrl || "",
     CODING_TOOLS_CPA_URL: cpa?.url || "",
     CODING_TOOLS_PASEO_URL: paseo?.url || "",
     CODING_TOOLS_PASEO_EXECUTION_URL: paseo?.executionUrl || "",
@@ -159,15 +137,6 @@ function loopbackMeshEnvironment(mesh, {
     CODING_TOOLS_ANNEAL_EXECUTION_URL: anneal?.executionUrl || "",
     ...(meshPath ? { CODING_TOOLS_LOOPBACK_MESH: meshPath } : {}),
   };
-  if (targetId === "anneal" && commandcode?.openaiBaseUrl) {
-    env.OPENAI_BASE_URL = commandcode.openaiBaseUrl;
-    env.ANTHROPIC_BASE_URL = commandcode.anthropicBaseUrl || commandcode.openaiBaseUrl;
-    if (typeof commandCodeApiKey === "string" && commandCodeApiKey) {
-      env.OPENAI_API_KEY = commandCodeApiKey;
-      env.ANTHROPIC_API_KEY = commandCodeApiKey;
-      env.CODING_TOOLS_COMMANDCODE_API_KEY = commandCodeApiKey;
-    }
-  }
   return Object.freeze(sanitizeEnv(env));
 }
 

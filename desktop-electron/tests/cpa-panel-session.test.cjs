@@ -157,6 +157,21 @@ test("missing or mismatched main-process connection cancels marker requests with
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
 
+test("Accounts and CPA can reuse a cached launcher marker without accepting it outside the managed frame", async () => {
+  const f = fixture();
+  f.install();
+  await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
+  const cachedAuthorization = `Bearer coding-tools-${"a".repeat(48)}`;
+  const requestHeaders = { authorization: cachedAuthorization };
+  assert.deepEqual(await f.request({ requestHeaders }), {
+    requestHeaders: { authorization: `Bearer ${SECRET}` },
+  });
+  assert.deepEqual(await f.request({ webContentsId: 72, requestHeaders }), { requestHeaders });
+  assert.deepEqual(await f.request({ frame: null, requestHeaders }), { requestHeaders });
+  f.setConnection(null);
+  assert.deepEqual(await f.request({ requestHeaders }), { cancel: true });
+});
+
 test("opt-in auth probe distinguishes missing frame from a managed request without logging credentials", async () => {
   const previous = process.env.CODING_TOOLS_CPA_AUTH_DIAG;
   process.env.CODING_TOOLS_CPA_AUTH_DIAG = "1";

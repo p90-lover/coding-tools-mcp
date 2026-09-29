@@ -2,16 +2,14 @@ use std::path::PathBuf;
 
 use tauri::State;
 
-use crate::app_state::{bootstrap_workspace, teardown_workspace, AppState};
+use crate::app_state::{teardown_workspace, AppState};
 use crate::error::{AppError, AppResult};
 use crate::platform::open_path_in_file_manager;
 use crate::tunnel::drop_workspace as drop_tunnel_workspace;
 use crate::workspace::linked_projects::{
     list_linked_projects_for_root, quick_add_linked_project_for_root, LinkedProject,
 };
-use crate::workspace::resources::{
-    assign_free_workspace_ports, validate_workspace_resources_update,
-};
+use crate::workspace::resources::validate_workspace_resources_update;
 use crate::workspace::WorkspaceProfile;
 
 #[tauri::command]
@@ -61,15 +59,7 @@ pub fn create_workspace(
     path: String,
     name: Option<String>,
 ) -> AppResult<WorkspaceProfile> {
-    state.with_workspaces(|store| {
-        let mut profile = WorkspaceProfile::new(path, name);
-        // Create should not fail just because default ports are already claimed.
-        // Pick free ports now; start/update still enforce conflict checks.
-        assign_free_workspace_ports(store.list(), &mut profile)?;
-        bootstrap_workspace(store, &profile.id)?;
-        store.add(profile.clone())?;
-        Ok(profile)
-    })
+    state.with_workspaces(|store| store.create_workspace(path, name))
 }
 
 #[tauri::command]

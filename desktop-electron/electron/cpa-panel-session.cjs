@@ -52,7 +52,10 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
       return;
     }
     const authorizationHeader = Object.keys(headers).find((name) => name.toLowerCase() === "authorization");
-    if (authorizationHeader && headers[authorizationHeader] === `Bearer ${sessionMarker}`) {
+    // Accounts and CPA share persisted UI storage, including markers from earlier
+    // launcher instances. The owned frame/origin above is the authorization boundary;
+    // these opaque placeholders never authenticate directly with CPA.
+    if (authorizationHeader && /^Bearer coding-tools-[a-f0-9]{48}$/.test(headers[authorizationHeader])) {
       try {
         const connection = getConnection();
         if (connection?.baseUrl !== origin || !connection.managementKey) {

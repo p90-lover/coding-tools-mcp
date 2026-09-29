@@ -340,6 +340,29 @@ const workspacePolicyUpdateRequest = Object.freeze({
   additionalProperties: false,
 });
 
+const workspaceCreateRequest = Object.freeze({
+  type: "object",
+  required: Object.freeze(["path", "confirm"]),
+  properties: Object.freeze({
+    path: Object.freeze({ type: "string", minLength: 1, maxLength: 4096 }),
+    name: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
+    confirm: Object.freeze({ type: "boolean", enum: Object.freeze([true]) }),
+  }),
+  additionalProperties: false,
+});
+
+const workspaceCreatedResponse = Object.freeze({
+  type: "object",
+  required: Object.freeze(["id", "name", "path", "cancelled"]),
+  properties: Object.freeze({
+    id: Object.freeze({ type: "string", minLength: 1, maxLength: 128, nullable: true }),
+    name: Object.freeze({ type: "string", minLength: 1, maxLength: 128, nullable: true }),
+    path: Object.freeze({ type: "string", minLength: 1, maxLength: 4096, nullable: true }),
+    cancelled: Object.freeze({ type: "boolean" }),
+  }),
+  additionalProperties: false,
+});
+
 const nativeCodexStatusRequest = Object.freeze({
   type: "object",
   properties: Object.freeze({
@@ -413,13 +436,15 @@ const toolsCallRequest = Object.freeze({
   additionalProperties: false,
 });
 
+const RETIRED_APP_MODULE_IDS = Object.freeze(["paseo", "codex-router", "commandcode-proxy", "anneal"]);
+
 const appsCallRequest = Object.freeze({
   type: "object",
   required: Object.freeze(["moduleId", "operation"]),
   properties: Object.freeze({
     moduleId: Object.freeze({
       type: "string",
-      enum: Object.freeze(["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]),
+      enum: Object.freeze(["cpa", "agent-orchestrator", "antigravity-cli", ...RETIRED_APP_MODULE_IDS]),
     }),
     operation: Object.freeze({ type: "string", minLength: 1, maxLength: 64 }),
     requestId: Object.freeze({ type: "string", minLength: 1, maxLength: 128 }),
@@ -583,6 +608,11 @@ const CONTRACTS = Object.freeze({
     request: workspacePolicyUpdateRequest,
     response: genericObject,
   }),
+  "workspaces.create": Object.freeze({
+    channel: "coding-tools:workspaces:create",
+    request: workspaceCreateRequest,
+    response: workspaceCreatedResponse,
+  }),
   "workspaces.updateAuth": Object.freeze({
     channel: "coding-tools:workspaces:auth-update",
     request: workspaceAuthUpdateRequest,
@@ -702,6 +732,9 @@ async function invokeContract(ipcRenderer, name, payload = {}) {
     "IPC_REQUEST_SCHEMA_INVALID",
   );
   assertSchema(requestSnapshot, contract.request, "IPC_REQUEST_SCHEMA_INVALID");
+  if (name === "apps.call" && RETIRED_APP_MODULE_IDS.includes(requestSnapshot.moduleId)) {
+    throw codedError("APP_MODULE_RETIRED", `Retired Coding Tools module: ${requestSnapshot.moduleId}`);
+  }
 
   let response;
   try {

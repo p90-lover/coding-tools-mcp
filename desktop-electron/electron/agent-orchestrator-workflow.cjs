@@ -1,6 +1,8 @@
 "use strict";
 
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 
 function clean(value, limit, required = true) {
   if (typeof value !== "string") throw new Error("Expected text");
@@ -22,7 +24,46 @@ function clausesFrom(value) {
   }));
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, confirm, fetchImpl = fetch }) {
+async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executable, model, userData }) {
+  if (!path.isAbsolute(executable) || !path.isAbsolute(userData)) {
+    throw new Error("Select absolute native Codex executable and application-data paths");
+  }
+  const resolved = await fs.promises.realpath(executable);
+  const metadata = await fs.promises.stat(resolved);
+  if (!metadata.isFile() || metadata.size > 512 * 1024 * 1024
+    || process.platform === "win32" && !resolved.toLowerCase().endsWith(".exe")) {
+    throw new Error("Select a native codex.exe within the 512 MiB inspection limit");
+  }
+  const hash = createHash("sha256");
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(resolved);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", resolve);
+    stream.on("error", reject);
+  });
+  const nodeHash = createHash("sha256").update(JSON.stringify([
+    clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80),
+  ])).digest("hex");
+  return {
+    executable: resolved, expected_sha256: hash.digest("hex"),
+    codex_home: path.join(userData, "headless", "ao-homes", nodeHash),
+    allow_model_usage: true, allow_command_execution: false,
+    permission_profile: ":read-only", model: clean(model, 128),
+    request_limit: 3, lifetime_seconds: 900,
+  };
+}
+
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch }) {
+  const backgroundRuns = new Map();
+  const dispatching = new Set();
+  const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
+  const externalAgent = (node) => node?.role === "worker" && typeof node.route?.harness_id === "string"
+    && node.route.harness_id.startsWith("ao:") ? node.route.harness_id.slice(3) : null;
+  function harnessService() {
+    if (!aoHarness) throw new Error("Agent Orchestrator harnesses are unavailable");
+    return aoHarness;
+  }
+  const runKey = (workspaceId, runId) => JSON.stringify([workspaceId, runId]);
   async function tool(workspaceId, name, arguments_) {
     const response = await requestHeadless("/api/v1/tools/call", {
       request_id: randomUUID(),
@@ -63,8 +104,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, confi
       limit: 100,
       include_archived: false,
     }));
-    return { ok: true, revision: result.revision, steps: result.steps, tasks: result.tasks,
-      task: result.task, workspaceId: result.workspace_id };
+    return { ok: true, revision: result.revision, steps: result.steps, tasks: result.tasks ?? [],
+      task: result.task ?? null, workspaceId: result.workspace_id };
   }
 
   function connection() {
@@ -78,7 +119,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, confi
     return { baseUrl: url.origin, key: value.proxyApiKey };
   }
 
-  async function models() {
+  async function models({ harness, workspaceId } = {}) {
+    if (typeof harness === "string" && harness.startsWith("ao:")) {
+      const items = await harnessService().models(harness.slice(3), workspaceId);
+      return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default")] };
+    }
+    if (harness === "codex-native") {
+      // A Native Codex worker may use WebGPT or any model in the shared CPA pool.
+      let cpa = [];
+      try { cpa = (await models()).models; } catch { /* CPA not running: WebGPT only. */ }
+      return { ok: true, harness, models: ["chatgpt-web/high", ...cpa.filter(id => id !== "chatgpt-web/high")] };
+    }
     const { baseUrl, key } = connection();
     const response = await fetchImpl(`${baseUrl}/v1/models`, {
       headers: { Authorization: `Bearer ${key}` },
@@ -86,10 +137,82 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, confi
     });
     if (!response.ok) throw new Error(`CPA model catalog returned HTTP ${response.status}`);
     const payload = await response.json();
-    const models = [...new Set((Array.isArray(payload?.data) ? payload.data : [])
+    const ids = [...new Set((Array.isArray(payload?.data) ? payload.data : [])
       .map((entry) => entry?.id).filter((id) => typeof id === "string" && id.length <= 128))].slice(0, 100);
-    if (!models.length) throw new Error("CPA has no available models");
-    return { ok: true, models };
+    if (!ids.length) throw new Error("CPA has no available models");
+    return { ok: true, models: ids };
+  }
+
+  // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
+  async function harnesses() {
+    const native = { id: "codex-native", label: "Native Codex", runnable: true, installed: true, authStatus: "configured" };
+    try {
+      const catalog = await harnessService().catalog();
+      return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
+        installed: item.installed, authStatus: item.authStatus, chat: item.chat, runnable: item.installed }))] };
+    } catch (error) {
+      return { ok: true, harnesses: [native], notice: String(error?.message || "AO harness catalog unavailable").slice(0, 300) };
+    }
+  }
+
+  async function dispatchExternal(workspaceId, runId, node, expectedRevision, background) {
+    const agent = externalAgent(node);
+    const key = nodeKey(workspaceId, runId, node.id);
+    if (dispatching.has(key)) return { ok: true, waiting: true, reason: "dispatching" };
+    dispatching.add(key);
+    try {
+      const reserved = await requestHeadless("/api/v1/ao/external/reserve", {
+        workspace_id: workspaceId, run_id: runId, node_id: node.id,
+        expected_revision: expectedRevision, confirm: !background,
+      }, background ? undefined : { localConfirmation: true });
+      if (reserved?.ok === true && reserved.waiting) return reserved;
+      if (reserved?.ok !== true || typeof reserved.request_key !== "string") throw new Error("AO harness reservation outcome is unknown");
+      let session = null;
+      let failure = null;
+      try {
+        session = await harnessService().spawn({ workspaceId, agent, model: node.route.model, prompt: reserved.prompt,
+          name: node.settings?.name || "AO worker" });
+      } catch (error) { failure = error; }
+      const saved = await requestHeadless("/api/v1/ao/external/submitted", {
+        workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
+        ...(session ? { session_id: session } : {}),
+      });
+      if (failure) throw failure;
+      if (saved?.ok !== true) throw new Error("AO harness session outcome is unknown");
+      return { ok: true, run: saved.run, session_id: session };
+    } finally { dispatching.delete(key); }
+  }
+
+  const TERMINAL_TURNS = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
+  async function observeExternal(workspaceId, runId, node) {
+    const session = node.receipt?.thread_id;
+    if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
+      // The launch was lost before AO returned a session; hold it rather than replay.
+      const held = await requestHeadless("/api/v1/ao/external/submitted", {
+        workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: node.receipt?.request_key || node.request_key,
+      });
+      return { ok: true, run: held?.run, pending_approvals: [] };
+    }
+    if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
+    const observed = await harnessService().observe(session);
+    const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
+    if (!terminal) return { ok: true, pending_approvals: [], needs_input: observed.needsInput, session_id: session };
+    const completed = observed.turnState === "completed";
+    const result = await requestHeadless("/api/v1/ao/external/terminal", {
+      workspace_id: workspaceId, run_id: runId, node_id: node.id, session_id: session,
+      ...(observed.turnId ? { turn_id: observed.turnId } : {}),
+      ...(observed.answer ? { answer: observed.answer } : {}),
+      completed,
+      ...(!completed ? { failure: observed.error || (observed.exited ? "AO session exited before a final answer" : `AO turn ${observed.turnState}`) } : {}),
+    });
+    if (result?.ok !== true) throw new Error("AO harness result could not be saved; inspect the card");
+    return { ...result, pending_approvals: [] };
+  }
+
+  async function savedNode(workspaceId, runId, nodeId) {
+    const saved = await runs({ workspaceId, runId });
+    const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
+    return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
   }
 
   async function runs({ workspaceId, runId } = {}) {
@@ -107,17 +230,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, confi
   async function updateRun({ workspaceId, change } = {}) {
     const id = clean(workspaceId, 128);
     if (!change || typeof change !== "object" || Array.isArray(change)
-      || !["create", "graph", "cancel"].includes(change.operation)) {
+      || !["create", "create_from_team", "graph", "cancel"].includes(change.operation)) {
       throw new Error("Choose a supported AO graph change");
     }
-    const runId = clean(change.operation === "create" ? change.run?.id : change.run_id, 80);
-    const routes = change.operation === "create" && Array.isArray(change.run?.nodes)
-      ? change.run.nodes.map((node) => `${clean(node?.role, 20)}: ${clean(node?.route?.harness_id, 128)} / ${clean(node?.route?.model, 128)}`).join("\n")
-      : "";
-    if (!await confirm({
-      message: change.operation === "create" ? "Create this AO mission?" : "Change this AO mission?",
-      detail: `Workspace: ${id}\nRun: ${runId}\nAction: ${change.operation}\n${routes}`.slice(0, 1200),
-    })) return { ok: false, cancelled: true };
+    clean(change.operation === "create" ? change.run?.id : change.run_id, 80);
+    if (change.operation === "create" && Array.isArray(change.run?.nodes)) {
+      for (const node of change.run.nodes) {
+        clean(node?.role, 20); clean(node?.route?.harness_id, 128); clean(node?.route?.model, 128);
+      }
+    }
     const response = await requestHeadless("/api/v1/ao/update", {
       workspace_id: id, change, confirm: true,
     }, { localConfirmation: true });
@@ -127,14 +248,362 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, confi
     return response;
   }
 
+  async function teamUpdate({ workspaceId, change } = {}) {
+    if (!change || typeof change !== "object" || Array.isArray(change)
+      || !["save_team", "apply_team", "set_limits"].includes(change.operation)) {
+      throw new Error("Choose a supported local team setting");
+    }
+    const response = await requestHeadless("/api/v1/ao/update", {
+      workspace_id: clean(workspaceId, 128), change, confirm: true,
+    }, { localConfirmation: true });
+    if (response?.ok !== true) throw new Error("Team settings changed; refresh before applying again");
+    return response;
+  }
+
+  async function harnessStatus({ workspaceId, runId, nodeId } = {}) {
+    const response = await requestHeadless("/api/v1/ao/harness/status", {
+      workspace_id: clean(workspaceId, 128),
+      run_id: clean(runId, 80),
+      node_id: clean(nodeId, 80),
+    });
+    if (response?.ok !== true) throw new Error("AO harness status unavailable");
+    return response;
+  }
+
+  async function connectAoHarness(input = {}, granted = false) {
+    if (!input || typeof input !== "object" || Array.isArray(input)
+      || Object.keys(input).some((key) => !["workspaceId", "runId", "nodeId", "executable"].includes(key))) {
+      throw new Error("Renderer credential or unsupported AO connection field was refused");
+    }
+    if (typeof resolveHarness !== "function") throw new Error("AO-owned harness connection is unavailable");
+    const workspaceId = clean(input.workspaceId, 128);
+    const runId = clean(input.runId, 80);
+    const nodeId = clean(input.nodeId, 80);
+    const executable = clean(input.executable, 1024);
+    const saved = await runs({ workspaceId, runId });
+    const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
+    const node = mission?.nodes?.find((entry) => entry.id === nodeId);
+    if (!node || mission.cancelled || !["pending", "reserved"].includes(node.state)) {
+      throw new Error("Select a pending AO card in the active run");
+    }
+    const route = node.route || {};
+    // The route decides the connection: shared CPA pool (any model) or WebGPT.
+    const worker = route.provider_id === "cliproxyapi-antigravity";
+    let webBridge;
+    if (externalAgent(node)) throw new Error("AO harness workers run as AO sessions and need no Codex connection");
+    if (worker) {
+      if (node.role !== "worker" || route.harness_id !== "codex-native"
+        || route.account_id !== "shared-cpa-pool" || !route.model) {
+        throw new Error("AO worker requires the saved shared-CPA route");
+      }
+      const catalog = await models();
+      if (!catalog.models.includes(route.model)) throw new Error("Exact AO worker model is absent from CPA catalog");
+    } else if (!["planner", "reviewer", "worker"].includes(node.role)
+      || route.harness_id !== "codex-native" || route.provider_id !== "chatgpt-web"
+      || route.model !== "chatgpt-web/high") {
+      throw new Error("AO WebGPT route does not match the saved card");
+    } else {
+      const baseUrl = webBridgeConnection?.()?.baseUrl;
+      const url = new URL(baseUrl);
+      if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.pathname !== "/v1"
+        || !url.port || url.username || url.password || url.search || url.hash) {
+        throw new Error("AO WebGPT requires the managed local bridge");
+      }
+      webBridge = { baseUrl };
+    }
+    const selected = await resolveHarness({ workspaceId, runId, nodeId, executable,
+      model: route.model, providerId: route.provider_id, accountId: route.account_id });
+    if (!selected || selected.model !== route.model || selected.permission_profile !== ":read-only"
+      || selected.allow_model_usage !== true || selected.allow_command_execution !== false) {
+      throw new Error("AO native connection does not match the saved read-only route");
+    }
+    if (!granted && !await confirm({
+      message: "Connect this AO-owned Codex session?",
+      detail: `Workspace: ${workspaceId}\nRun: ${runId}\nNode: ${nodeId}\nProvider: ${route.provider_id}\nAccount policy: ${route.account_id}\nModel: ${route.model}\nExecutable: ${selected.executable}\nSHA-256: ${selected.expected_sha256}\nPermission: :read-only; standalone commands: off`.slice(0, 1200),
+    })) return { ok: false, cancelled: true };
+    if (!worker) {
+      const catalog = await webModelCatalog?.({ executable: selected.executable, model: route.model });
+      const model = Array.isArray(catalog?.models) && catalog.models.length === 1
+        ? catalog.models[0] : null;
+      if (model?.slug !== route.model || JSON.stringify(model).length > 256 * 1024) {
+        throw new Error("Exact AO WebGPT model is absent from the bundled Codex catalog");
+      }
+      webBridge.catalog = catalog;
+    }
+    const response = await requestHeadless("/api/v1/ao/harness/connect", {
+      workspace_id: workspaceId, run_id: runId, node_id: nodeId,
+      connection: selected, ...(worker ? { private_proxy_api_key: connection().key }
+        : { web_bridge_base_url: webBridge.baseUrl, web_model_catalog: webBridge.catalog }),
+      confirm: !granted,
+    }, granted ? undefined : { localConfirmation: true });
+    if (response?.ok === true && response.waiting === true) return response;
+    if (response?.ok !== true || response.status?.model !== route.model) {
+      throw new Error("AO harness connection outcome is unknown; inspect status before retrying");
+    }
+    return { ok: true, owned: response.owned === true, route_verified: false, status: response.status };
+  }
+
+  async function stopAoHarness({ workspaceId, runId, nodeId } = {}) {
+    const id = clean(workspaceId, 128);
+    const run = clean(runId, 80);
+    const node = clean(nodeId, 80);
+    if (!await confirm({
+      message: "Stop this AO-owned Codex session?",
+      detail: `Workspace: ${id}\nRun: ${run}\nNode: ${node}\nActive work may be interrupted.`,
+    })) return { ok: false, cancelled: true };
+    const response = await requestHeadless("/api/v1/ao/harness/disconnect", {
+      workspace_id: id, run_id: run, node_id: node, confirm: true,
+    }, { localConfirmation: true });
+    if (response?.ok !== true) throw new Error("AO harness stop outcome unknown");
+    return response;
+  }
+
+  async function observe({ workspaceId, runId, nodeId } = {}) {
+    const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
+    if (externalAgent(found.node)) return observeExternal(workspaceId, runId, found.node);
+    const response = await requestHeadless("/api/v1/ao/harness/observe", {
+      workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80),
+      node_id: clean(nodeId, 80),
+    });
+    if (response?.ok !== true) throw new Error("AO result is unavailable; inspect the run before retrying");
+    return response;
+  }
+
+  async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow } = {}) {
+    const id = clean(workspaceId, 128);
+    const run = clean(runId, 80);
+    const node = clean(nodeId, 80);
+    const approval = clean(approvalId, 128);
+    if (typeof allow !== "boolean") throw new Error("Choose Allow or Deny for this AO tool request");
+    const current = await harnessStatus({ workspaceId: id, runId: run, nodeId: node });
+    const pending = current.status?.pending_approvals?.find((entry) => entry.approval_id === approval);
+    if (!pending) throw new Error("AO tool request is no longer pending");
+    if (!await confirm({
+      message: allow ? "Allow this AO tool request once?" : "Deny this AO tool request?",
+      detail: pending.kind === "command"
+        ? `Run: ${run}\nNode: ${node}\nCommand: ${String(pending.command || "")}\nWorking directory: ${String(pending.cwd || "")}\nReason: ${String(pending.reason || "")}\nRequested permissions: ${JSON.stringify(pending.permissions || {})}\nThis approves this command once, not the session. The native runtime may execute it beyond the default read-only sandbox.`
+        : `Run: ${run}\nNode: ${node}\nPath: ${String(pending.path || "").slice(0, 500)}\nReason: ${String(pending.reason || "").slice(0, 500)}`,
+    })) return { ok: false, cancelled: true };
+    const response = await requestHeadless("/api/v1/ao/harness/approval", {
+      workspace_id: id, run_id: run, node_id: node,
+      approval_id: approval, allow, confirm: true,
+    }, { localConfirmation: true });
+    if (response?.ok !== true || response.result?.ok !== true) {
+      throw new Error("AO tool approval outcome is unknown; inspect the card before retrying");
+    }
+    return response;
+  }
+
+  async function advance({ workspaceId, runId, executable } = {}) {
+    const id = clean(workspaceId, 128);
+    const run = clean(runId, 80);
+    if (backgroundRuns.get(runKey(id, run))?.status === "running") {
+      throw new Error("This AO run is already advancing in the background");
+    }
+    const saved = await runs({ workspaceId: id, runId: run });
+    const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+    if (!mission || mission.cancelled) throw new Error("Select an active AO run");
+    const active = mission.nodes.find((node) => ["reserved", "running"].includes(node.state));
+    if (active) return observe({ workspaceId: id, runId: run, nodeId: active.id });
+    const ready = mission.nodes.find((node) => node.state === "pending"
+      && node.parents.every((parentId) => mission.nodes.some((parent) => parent.id === parentId && parent.state === "finished")));
+    if (!ready) {
+      const held = mission.nodes.find((node) => node.state === "held");
+      if (held) return observe({ workspaceId: id, runId: run, nodeId: held.id });
+      return { ok: true, completed: mission.nodes.every((node) => node.state === "finished"),
+        waiting: true, run: mission };
+    }
+    if (externalAgent(ready)) {
+      if (!await confirm({
+        message: "Run this AO card?",
+        detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nHarness: ${ready.route.harness_id}\nModel: ${ready.route.model}\nAO starts a worker session in its own worktree.`.slice(0, 1200),
+      })) return { ok: false, cancelled: true };
+      return dispatchExternal(id, run, ready, mission.revision, false);
+    }
+    const selectedExecutable = clean(executable, 1024);
+    const status = await harnessStatus({ workspaceId: id, runId: run, nodeId: ready.id });
+    if (status.status?.connected && status.status.model !== ready.route.model) {
+      throw new Error("AO connected harness model does not match the saved card");
+    }
+    if (!status.status?.connected) {
+      const connected = await connectAoHarness({ workspaceId: id, runId: run,
+        nodeId: ready.id, executable: selectedExecutable });
+      if (connected.cancelled) return connected;
+    }
+    if (!await confirm({
+      message: "Run this AO card?",
+      detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nRole: ${ready.role}\nModel: ${ready.route.model}\nPermission: :read-only; no automatic tool approval`.slice(0, 1200),
+    })) return { ok: false, cancelled: true };
+    const response = await requestHeadless("/api/v1/ao/harness/execute", {
+      workspace_id: id, run_id: run, node_id: ready.id,
+      expected_revision: mission.revision, confirm: true,
+    }, { localConfirmation: true });
+    if (response?.ok !== true) throw new Error("AO dispatch outcome is unknown; inspect the run before retrying");
+    return response;
+  }
+
+  async function runStatus({ workspaceId, runId } = {}) {
+    const id = clean(workspaceId, 128);
+    const run = clean(runId, 80);
+    const current = backgroundRuns.get(runKey(id, run));
+    if (current) return { ok: true, status: current.status, ...(current.detail ? { detail: current.detail } : {}) };
+    const saved = await runs({ workspaceId: id, runId: run });
+    const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+    if (!mission) throw new Error("AO run unavailable");
+    const status = mission.paused && !mission.cancelled ? "paused" : mission.cancelled || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved", "running"].includes(node.state))
+      ? "held" : mission.nodes.every((node) => node.state === "finished") ? "finished" : "idle";
+    return { ok: true, status };
+  }
+
+  async function controlRun({ workspaceId, runId, action, executable } = {}) {
+    if (!["pause", "resume", "stop"].includes(action)) throw new Error("Choose a mission control");
+    const id = clean(workspaceId, 128), run = clean(runId, 80);
+    const result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, confirm: true }, { localConfirmation: true });
+    if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
+    if (action === "stop") {
+      for (const node of result.run.nodes ?? []) {
+        if (externalAgent(node) && node.state === "running" && node.receipt?.thread_id) {
+          await harnessService().interrupt(node.receipt.thread_id).catch(() => undefined);
+        }
+      }
+    }
+    const current = backgroundRuns.get(runKey(id, run));
+    if (action === "resume") {
+      if (current?.driving) { current.status = "running"; current.detail = undefined; }
+      else return startRun({ workspaceId: id, runId: run, executable });
+    } else if (current) {
+      current.status = action === "pause" ? "paused" : "held";
+      current.stopped = action === "stop";
+      current.detail = action === "pause" ? "Paused; already-sent turns may finish" : "Stopped by you";
+    }
+    return result;
+  }
+
+  async function driveRun(workspaceId, runId, executable, state) {
+    const pause = () => new Promise(resolve => setTimeout(resolve, 500));
+    state.driving = true;
+    try {
+      for (;;) {
+        if (state.stopped) return;
+        let saved = await runs({ workspaceId, runId });
+        let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+        if (!mission) throw new Error("Saved mission is unavailable");
+        if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed AO service does not report worker capacity; update the matching runtime");
+        const active = mission.nodes.filter(node => node.state === "running");
+        if (active.length) {
+          const observed = await Promise.all(active.map(node => observe({ workspaceId, runId, nodeId: node.id })));
+          state.detail = observed.some(result => result.pending_approvals?.length) ? "Waiting for your tool approval"
+            : observed.some(result => result.needs_input) ? "An AO worker needs input on the Board" : undefined;
+          saved = await runs({ workspaceId, runId });
+          mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+          if (!mission) throw new Error("Saved mission is unavailable");
+        }
+        const running = mission.nodes.some(node => node.state === "running");
+        if (mission.cancelled || mission.nodes.some(node => ["held", "cancelled", "archived", "reserved"].includes(node.state))) {
+          if (running) { state.detail = "Finishing already-sent turns; no more work will start"; await pause(); continue; }
+          state.status = "held";
+          state.detail = "Run stopped; inspect the saved cards";
+          return;
+        }
+        if (mission.nodes.every(node => node.state === "finished")) {
+          state.status = "finished"; state.detail = undefined; return;
+        }
+        if (mission.paused) { state.status = "paused"; state.detail = "Paused; queued work will not start"; await pause(); continue; }
+        const capacity = Number(saved.worker_capacity?.[runId] ?? 0);
+        const ready = mission.nodes.find(node => node.state === "pending"
+          && (node.role !== "worker" || capacity > 0)
+          && node.parents.every(parentId => mission.nodes.some(parent => parent.id === parentId && parent.state === "finished")));
+        if (!ready) {
+          if (running || capacity === 0) {
+            if (mission.grant?.expires_at_ms && Date.now() >= mission.grant.expires_at_ms) throw new Error("Run grant expired while waiting for a worker slot");
+            state.detail ||= "Waiting for a worker slot";
+            await pause(); continue;
+          }
+          throw new Error("No card is ready; inspect dependencies");
+        }
+        if (externalAgent(ready)) {
+          const sent = await dispatchExternal(workspaceId, runId, ready, mission.revision, true);
+          if (sent.waiting) { state.detail = "Waiting for a worker slot or current graph revision"; await pause(); }
+          continue;
+        }
+        const status = await harnessStatus({ workspaceId, runId, nodeId: ready.id });
+        if (status.status?.connected && status.status.model !== ready.route.model) throw new Error("AO connected harness route changed");
+        if (!status.status?.connected) {
+          const connected = await connectAoHarness({ workspaceId, runId, nodeId: ready.id, executable }, true);
+          if (connected.waiting) { state.detail = "Waiting for a harness slot"; await pause(); continue; }
+        }
+        const sent = await requestHeadless("/api/v1/ao/harness/execute", {
+          workspace_id: workspaceId, run_id: runId, node_id: ready.id,
+          expected_revision: mission.revision, confirm: false,
+        });
+        if (sent?.ok !== true) throw new Error("AO turn outcome unknown");
+        if (sent.waiting) { state.detail = "Waiting for a worker slot or current graph revision"; await pause(); }
+      }
+    } catch (error) {
+      state.status = "held";
+      state.detail = String(error?.message || "AO stage outcome is uncertain; inspect the saved run before retrying")
+        .replace(/Bearer\\s+\\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]").slice(0, 500);
+    } finally { state.driving = false; }
+  }
+  async function startRun(input = {}) {
+    if (!input || typeof input !== "object" || Array.isArray(input)
+      || Object.keys(input).some((key) => !["workspaceId", "runId", "executable"].includes(key))) {
+      throw new Error("Renderer credential or unsupported AO start field was refused");
+    }
+    const { workspaceId, runId, executable } = input;
+    const id = clean(workspaceId, 128);
+    const run = clean(runId, 80);
+    const selectedExecutable = clean(executable, 1024);
+    const key = runKey(id, run);
+    const existing = backgroundRuns.get(key);
+    if (existing?.starting || existing?.driving || existing?.status === "running") {
+      return { ok: true, started: false, status: existing.status };
+    }
+    const state = { status: "idle", starting: true, detail: "Awaiting local approval" };
+    backgroundRuns.set(key, state);
+    try {
+      const saved = await runs({ workspaceId: id, runId: run });
+      const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+      if (mission?.paused) throw new Error("Resume this paused mission from its local controls");
+      if (!mission || mission.cancelled || !mission.nodes?.length
+        || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved"].includes(node.state))) {
+        throw new Error("AO run has an active or unresolved card; inspect it before starting");
+      }
+      if (mission.nodes.every((node) => node.state === "finished")) throw new Error("AO run is already finished");
+      const resuming = mission.nodes.some((node) => node.state === "running");
+      const selected = await resolveHarness({ workspaceId: id, runId: run, nodeId: mission.nodes[0].id,
+        executable: selectedExecutable, model: mission.nodes[0].route.model });
+      if (!/^[a-f0-9]{64}$/.test(selected?.expected_sha256 || "") || !path.isAbsolute(selected.executable)) {
+        throw new Error("AO executable identity changed; select the current executable");
+      }
+      if (resuming && mission.grant?.executable_sha256 !== selected.expected_sha256) {
+        throw new Error("AO running turn has no matching background grant");
+      }
+      if (!resuming) {
+        const grant = await requestHeadless("/api/v1/ao/grant", {
+          workspace_id: id, run_id: run, expected_revision: mission.revision,
+          executable_sha256: selected.expected_sha256, confirm: true,
+        }, { localConfirmation: true });
+        if (grant?.ok !== true || grant.run?.id !== run || grant.run?.workspace_id !== id
+          || grant.grant?.executable_sha256 !== selected.expected_sha256) {
+          throw new Error("AO run grant outcome is unknown; inspect before retrying");
+        }
+      }
+      state.status = "running";
+      state.starting = false;
+      state.detail = undefined;
+      void driveRun(id, run, selectedExecutable, state);
+      return { ok: true, started: true, status: "running" };
+    } catch (error) {
+      backgroundRuns.delete(key);
+      throw error;
+    }
+  }
+
   async function create({ workspaceId, title, description = "", expectedRevision } = {}) {
     const name = clean(title, 240);
     const detail = clean(description, 8192, false);
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("Refresh the board revision");
-    if (!await confirm({
-      message: "Create a Coding Tools plan task?",
-      detail: `Add "${name}" to this workspace's existing plan board.`,
-    })) return { ok: false, cancelled: true };
     await write(workspaceId, {
       expected_revision: expectedRevision,
       change: { operation: "create", title: name, description: detail },
@@ -208,9 +677,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, confi
     switch (operation) {
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);
-      case "models": return models();
+      case "models": return models(args);
+      case "harnesses": return harnesses();
       case "runs": return runs(args);
       case "update_run": return updateRun(args);
+      case "team_update": return teamUpdate(args);
+      case "harness_status": return harnessStatus(args);
+      case "connect_harness": return connectAoHarness(args);
+      case "stop_harness": return stopAoHarness(args);
+      case "observe": return observe(args);
+      case "advance": return advance(args);
+      case "start_run": return startRun(args);
+      case "control_run": return controlRun(args);
+      case "run_status": return runStatus(args);
+      case "approve_harness": return approveAoHarness(args);
       case "create": return create(args);
       case "append": return append(args);
       case "move_task": return moveTask(args);
@@ -223,4 +703,4 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, confi
   return Object.freeze({ call });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, clausesFrom };
+module.exports = { createAgentOrchestratorWorkflow, clausesFrom, resolveAoNativeConnection };

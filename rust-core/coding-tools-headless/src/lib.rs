@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
-use coding_tools_core::{integrations, tools, CoreState};
+use coding_tools_core::{integrations, tools, AoCodexConnection, AoCodexHub, CoreState};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -362,6 +362,8 @@ struct ServiceState {
     local_ui_token: Option<String>,
     core: Arc<CoreState>,
     contexts: Arc<Mutex<HashMap<String, ContextEntry>>>,
+    ao_hubs: Arc<Mutex<HashMap<(String, String, String), Arc<AoCodexHub>>>>,
+    ao_home_root: PathBuf,
     operations: Arc<Mutex<OperationStore>>,
     shutdown_tx: tokio::sync::watch::Sender<Option<String>>,
     drain_timeout: Duration,
@@ -469,6 +471,14 @@ struct WorkspaceAuthUpdateRequest {
     confirm: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceCreateRequest {
+    path: String,
+    name: Option<String>,
+    confirm: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkspacePolicyUpdateRequest {
@@ -549,6 +559,9 @@ struct AoReadRequest {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum AoMutation {
+    CreateFromTeam {
+        run_id: String, task_id: String, expected_board_revision: u64, team_revision: u64, worker_limit: u8,
+    },
     Create {
         expected_board_revision: u64,
         run: integrations::ao::Run,
@@ -562,6 +575,9 @@ enum AoMutation {
         run_id: String,
         expected_revision: u64,
     },
+    SaveTeam { expected_revision: u64, team: integrations::ao_team::Team },
+    ApplyTeam { run_id: String, expected_revision: u64, team_revision: u64 },
+    SetLimits { expected_revision: u64, max_workers: u8, run_id: Option<String>, run_revision: Option<u64>, worker_limit: Option<u8> },
 }
 
 #[derive(Deserialize)]
@@ -572,6 +588,101 @@ struct AoUpdateRequest {
     confirm: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoControlRequest { workspace_id: String, run_id: String, action: String, confirm: bool }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoHarnessNodeRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoHarnessConnectRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+    connection: Value,
+    #[serde(default)]
+    private_proxy_api_key: Option<String>,
+    #[serde(default)]
+    web_bridge_base_url: Option<String>,
+    #[serde(default)]
+    web_model_catalog: Option<Value>,
+    confirm: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoHarnessDisconnectRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+    confirm: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoHarnessExecuteRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+    expected_revision: u64,
+    confirm: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoExternalSubmittedRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+    request_key: String,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoExternalTerminalRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+    session_id: String,
+    #[serde(default)]
+    turn_id: Option<String>,
+    #[serde(default)]
+    answer: Option<String>,
+    completed: bool,
+    #[serde(default)]
+    failure: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoRunGrantRequest {
+    workspace_id: String,
+    run_id: String,
+    expected_revision: u64,
+    executable_sha256: String,
+    confirm: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AoHarnessApprovalRequest {
+    workspace_id: String,
+    run_id: String,
+    node_id: String,
+    approval_id: String,
+    allow: bool,
+    confirm: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutionReadRequest {
@@ -579,30 +690,6 @@ struct ExecutionReadRequest {
     mission_id: Option<String>,
     #[serde(default)]
     refresh_source: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExecutionProviderRequest {
-    workspace_id: String,
-    operation: String,
-    expected_revision: Option<u64>,
-    binding_id: Option<String>,
-    settings: Option<integrations::execution::service::Settings>,
-    #[serde(default)]
-    credential: String,
-    #[serde(default)]
-    confirm: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExecutionUpdateRequest {
-    workspace_id: String,
-    expected_revision: u64,
-    change: Value,
-    #[serde(default)]
-    confirm: bool,
 }
 
 fn json_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
@@ -867,6 +954,16 @@ fn apply_workspace_policy_update(
 #[cfg(test)]
 mod workspace_auth_tests {
     use super::*;
+
+    #[test]
+    fn ao_execute_accepts_only_saved_task_scope() {
+        let request = json!({"workspace_id":"qa","run_id":"run","node_id":"planner",
+            "expected_revision":1,"confirm":true});
+        assert!(serde_json::from_value::<AoHarnessExecuteRequest>(request.clone()).is_ok());
+        let mut with_prompt = request;
+        with_prompt["prompt"] = json!("renderer override");
+        assert!(serde_json::from_value::<AoHarnessExecuteRequest>(with_prompt).is_err());
+    }
 
     #[test]
     fn orchestration_reservation_body_is_nested_and_rejects_credentials() {
@@ -1135,6 +1232,144 @@ mod workspace_auth_tests {
     }
 
     #[test]
+    fn ao_cpa_home_config_is_keyless_and_refuses_drift() {
+        let app_data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../aiTemp/ao-cpa-home-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let home = app_data.join("ao-homes/worker");
+        prepare_ao_cpa_home(&home, &app_data).unwrap();
+        let config = home.join("config.toml");
+        let saved = fs::read_to_string(&config).unwrap();
+        assert!(saved.contains("model_provider = \"coding_tools_ao_cpa\""));
+        assert!(saved.contains("base_url = \"http://127.0.0.1:8317/v1\""));
+        assert!(saved.contains("env_key = \"CODING_TOOLS_AO_CPA_KEY\""));
+        assert!(!saved.contains("SENTINEL_KEY_DO_NOT_LOG"));
+        prepare_ao_cpa_home(&home, &app_data).unwrap();
+        assert_eq!(fs::read_to_string(&config).unwrap(), saved);
+        fs::write(&config, "unexpected provider config").unwrap();
+        assert!(prepare_ao_cpa_home(&home, &app_data).is_err());
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "unexpected provider config"
+        );
+    }
+
+    #[test]
+    fn ao_web_home_uses_only_the_local_bridge_and_its_verified_catalog() {
+        let app_data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../aiTemp/ao-web-home-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let home = app_data.join("ao-homes/planner");
+        let catalog =
+            serde_json::json!({"models":[{"slug":"chatgpt-web/high","visibility":"list"}]});
+        prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog).unwrap();
+        let config = fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(config.contains("model = \"chatgpt-web/high\""));
+        assert!(config.contains("env_key = \"CODING_TOOLS_AO_WEB_KEY\""));
+        assert!(config.contains("base_url = \"http://127.0.0.1:17841/v1\""));
+        assert!(!config.contains("SENTINEL_KEY_DO_NOT_LOG"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(home.join("models.json")).unwrap()
+            )
+            .unwrap(),
+            catalog
+        );
+        assert!(
+            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog).is_ok()
+        );
+        assert!(
+            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17842/v1", &catalog).is_err()
+        );
+        assert!(prepare_ao_web_home(&home, &app_data, "http://example.com/v1", &catalog).is_err());
+    }
+
+    #[test]
+    fn ao_home_creation_is_scoped_to_one_hashed_node() {
+        let app_data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../aiTemp/ao-home-scope-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(&app_data).unwrap();
+        let root = app_data.join("ao-homes");
+        let child = root.join("a".repeat(64));
+        let actual = prepare_ao_home(&root, &child).unwrap();
+        assert!(actual.is_dir());
+        assert_eq!(actual.parent().unwrap(), root.canonicalize().unwrap());
+        let outside = app_data.join("outside");
+        assert!(prepare_ao_home(&root, &outside).is_err());
+        assert!(!outside.exists());
+        let invalid = root.join("not-a-hash");
+        assert!(prepare_ao_home(&root, &invalid).is_err());
+        assert!(!invalid.exists());
+    }
+
+    #[test]
+    fn ao_connect_policy_keeps_worker_pool_and_web_key_separate() {
+        let mut node = integrations::ao::Node {
+            id: "worker".into(),
+            task_id: "task".into(),
+            clause_id: None,
+            role: integrations::ao::Role::Worker,
+            parents: vec!["planner".into()],
+            x: 0,
+            y: 1,
+            state: integrations::ao::State::Pending,
+            route: integrations::ao::Route {
+                harness_id: "codex-native".into(),
+                provider_id: "cliproxyapi-antigravity".into(),
+                account_id: "shared-cpa-pool".into(),
+                model: "gemini-3.8-flash-high".into(),
+                permission_profile: ":read-only".into(),
+            },
+            request_key: None,
+            receipt: None,
+        };
+        let mut connection = AoCodexConnection {
+            executable: PathBuf::from("codex"),
+            expected_sha256: "0".repeat(64),
+            codex_home: PathBuf::from("ao-home"),
+            allow_model_usage: true,
+            allow_command_execution: false,
+            permission_profile: ":read-only".into(),
+            model: "gemini-3.8-flash-high".into(),
+            request_limit: 1,
+            lifetime_seconds: 30,
+        };
+        let sentinel = "SENTINEL_KEY_DO_NOT_LOG_1234567890";
+        assert_eq!(
+            ao_connect_policy(&node, &connection, Some(sentinel)).unwrap(),
+            true
+        );
+        assert!(ao_connect_policy(&node, &connection, None).is_err());
+        // Any CPA pool model is allowed for a worker, but not a model name with config syntax.
+        node.route.model = "claude-sonnet-4-6".into();
+        connection.model = node.route.model.clone();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).unwrap());
+        node.route.model = "bad\"model".into();
+        connection.model = node.route.model.clone();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
+        // A worker may also run on WebGPT, which never receives the CPA key.
+        node.route.provider_id = "chatgpt-web".into();
+        node.route.model = "chatgpt-web/high".into();
+        connection.model = node.route.model.clone();
+        assert!(!ao_connect_policy(&node, &connection, None).unwrap());
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
+        node.route.provider_id = "cliproxyapi-antigravity".into();
+        node.route.model = "gemini-3.8-flash-high".into();
+        connection.model = node.route.model.clone();
+        node.route.account_id = "one-specific-account".into();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
+        node.role = integrations::ao::Role::Planner;
+        node.parents.clear();
+        node.route.provider_id = "chatgpt-web".into();
+        node.route.account_id = "chatgpt-web".into();
+        node.route.model = "chatgpt-web/high".into();
+        connection.model = "chatgpt-web/high".into();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
+        assert_eq!(ao_connect_policy(&node, &connection, None).unwrap(), false);
+    }
+
+    #[test]
     fn policy_update_requires_confirmation_and_preserves_authentication() {
         let data = serde_json::from_value(serde_json::json!({
             "profiles": [{
@@ -1191,6 +1426,8 @@ mod workspace_auth_tests {
             local_ui_token: None,
             core: Arc::new(CoreState::from_data(data).unwrap()),
             contexts: Arc::new(Mutex::new(HashMap::new())),
+            ao_hubs: Arc::new(Mutex::new(HashMap::new())),
+            ao_home_root: PathBuf::from("aiTemp/ao-test-home"),
             operations: Arc::new(Mutex::new(OperationStore::default())),
             shutdown_tx,
             drain_timeout: Duration::from_secs(1),
@@ -1739,6 +1976,47 @@ async fn workspace_list(State(state): State<ServiceState>, headers: HeaderMap) -
     }
 }
 
+async fn workspace_create(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<WorkspaceCreateRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "workspace_create") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm || !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm workspace creation in Coding Tools",
+        );
+    }
+    let core = state.core.clone();
+    match tokio::task::spawn_blocking(move || {
+        core.with_data(|store| store.create_workspace(body.path, body.name))
+    })
+    .await
+    {
+        Ok(Ok(profile)) => {
+            Json(json!({"id":profile.id,"name":profile.name,"path":profile.path})).into_response()
+        }
+        Ok(Err(error)) => json_error(
+            StatusCode::BAD_REQUEST,
+            "WORKSPACE_CREATE_FAILED",
+            text_error(error),
+        ),
+        Err(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "WORKSPACE_CREATE_UNKNOWN",
+            "Workspace creation outcome unknown; refresh before retrying",
+        ),
+    }
+}
+
 async fn tool_catalog(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -1800,6 +2078,1254 @@ fn execution_outcome(
     }
 }
 
+fn ao_target(
+    state: &ServiceState,
+    workspace_id: &str,
+    run_id: &str,
+    node_id: &str,
+) -> Result<(PathBuf, integrations::ao::Node, bool), String> {
+    state
+        .core
+        .with_data(|store| {
+            store.refresh()?;
+            let profile = store.get(workspace_id).ok_or_else(|| {
+                coding_tools_core::error::AppError::Message("Workspace not found".into())
+            })?;
+            let root = PathBuf::from(&profile.path).canonicalize().map_err(|_| {
+                coding_tools_core::error::AppError::Message("Workspace path unavailable".into())
+            })?;
+            let run = store
+                .data()
+                .ao_runs
+                .iter()
+                .find(|run| run.id == run_id && run.workspace_id == workspace_id)
+                .ok_or_else(|| {
+                    coding_tools_core::error::AppError::Message(
+                        "AO run not found in this workspace".into(),
+                    )
+                })?;
+            let node = run
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .ok_or_else(|| {
+                    coding_tools_core::error::AppError::Message("AO node not found".into())
+                })?;
+            Ok((root, node.clone(), run.cancelled))
+        })
+        .map_err(text_error)
+}
+
+fn ao_background_granted(
+    state: &ServiceState,
+    workspace_id: &str,
+    run_id: &str,
+    executable_sha256: &str,
+) -> bool {
+    state
+        .core
+        .with_data(|store| {
+            store.refresh()?;
+            let data = store.data();
+            let run = data
+                .ao_runs
+                .iter()
+                .find(|run| run.id == run_id && run.workspace_id == workspace_id)
+                .ok_or_else(|| {
+                    coding_tools_core::error::AppError::Message("AO run not found".into())
+                })?;
+            integrations::ao::grant_valid(data, run, now_ms(), executable_sha256)
+        })
+        .is_ok()
+}
+
+const AO_CPA_CONFIG: &str = "model_provider = \"coding_tools_ao_cpa\"\n\
+[model_providers.coding_tools_ao_cpa]\n\
+name = \"Coding Tools AO CPA\"\n\
+base_url = \"http://127.0.0.1:8317/v1\"\n\
+env_key = \"CODING_TOOLS_AO_CPA_KEY\"\n\
+requires_openai_auth = false\n\
+wire_api = \"responses\"\n";
+
+fn prepare_ao_home(root: &Path, requested: &Path) -> Result<PathBuf, String> {
+    let parent = root.parent().ok_or("AO app data is unavailable")?;
+    fs::create_dir_all(parent).map_err(text_error)?;
+    let parent = parent.canonicalize().map_err(text_error)?;
+    if root.exists() {
+        if fs::symlink_metadata(root)
+            .map_err(text_error)?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("AO home root is linked".into());
+        }
+    } else {
+        fs::create_dir(root).map_err(text_error)?;
+    }
+    let allowed = root.canonicalize().map_err(text_error)?;
+    if allowed.parent() != Some(parent.as_path())
+        || allowed.file_name().is_none_or(|name| name != "ao-homes")
+    {
+        return Err("AO home root left application data".into());
+    }
+    let name = requested
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("AO node home name is invalid")?;
+    if name.len() != 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || requested
+            .parent()
+            .and_then(|path| path.canonicalize().ok())
+            .as_deref()
+            != Some(allowed.as_path())
+    {
+        return Err("AO node home is outside its owned scope".into());
+    }
+    if requested.exists() {
+        let metadata = fs::symlink_metadata(requested).map_err(text_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("AO node home is not a private directory".into());
+        }
+    } else {
+        fs::create_dir(requested).map_err(text_error)?;
+    }
+    let selected = requested.canonicalize().map_err(text_error)?;
+    if selected.parent() != Some(allowed.as_path()) {
+        return Err("AO node home resolved outside its owned scope".into());
+    }
+    Ok(selected)
+}
+
+fn prepare_ao_cpa_home(home: &Path, app_data_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(home).map_err(text_error)?;
+    let config = home.join("config.toml");
+    if config.exists() {
+        if fs::symlink_metadata(&config)
+            .map_err(text_error)?
+            .file_type()
+            .is_symlink()
+            || fs::read(&config).map_err(text_error)? != AO_CPA_CONFIG.as_bytes()
+        {
+            return Err("AO CPA provider config changed; inspect before reconnecting".into());
+        }
+        return Ok(());
+    }
+    write_private_file(
+        &config,
+        AO_CPA_CONFIG.as_bytes(),
+        app_data_dir,
+        "ao-cpa-provider",
+    )
+}
+
+fn prepare_ao_web_home(
+    home: &Path,
+    app_data_dir: &Path,
+    base_url: &str,
+    catalog: &Value,
+) -> Result<(), String> {
+    let url = url::Url::parse(base_url).map_err(|_| "AO WebGPT bridge URL is invalid")?;
+    if url.scheme() != "http"
+        || url.host_str() != Some("127.0.0.1")
+        || url.port().is_none()
+        || url.path() != "/v1"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("AO WebGPT bridge must be the managed loopback Responses endpoint".into());
+    }
+    let models = catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or("AO WebGPT catalog is invalid")?;
+    if models.len() != 1
+        || models[0].get("slug").and_then(Value::as_str) != Some("chatgpt-web/high")
+    {
+        return Err("AO WebGPT catalog must contain only the selected model".into());
+    }
+    let catalog_bytes = serde_json::to_vec(catalog).map_err(text_error)?;
+    if catalog_bytes.len() > 256 * 1024 {
+        return Err("AO WebGPT catalog is too large".into());
+    }
+    let catalog_path = home.join("models.json");
+    let config_bytes = format!(
+        "model = \"chatgpt-web/high\"\nmodel_provider = \"coding_tools_ao_web\"\nmodel_catalog_json = {}\n\
+[model_providers.coding_tools_ao_web]\nname = \"Coding Tools AO WebGPT\"\nbase_url = {}\n\
+env_key = \"CODING_TOOLS_AO_WEB_KEY\"\nrequires_openai_auth = false\nwire_api = \"responses\"\n\
+supports_websockets = false\n",
+        serde_json::to_string(&catalog_path.to_string_lossy().as_ref()).map_err(text_error)?,
+        serde_json::to_string(base_url).map_err(text_error)?,
+    );
+    let config_path = home.join("config.toml");
+    for (path, expected) in [
+        (&catalog_path, catalog_bytes.as_slice()),
+        (&config_path, config_bytes.as_bytes()),
+    ] {
+        if path.exists()
+            && (fs::symlink_metadata(path)
+                .map_err(text_error)?
+                .file_type()
+                .is_symlink()
+                || fs::read(path).map_err(text_error)? != expected)
+        {
+            return Err("AO WebGPT provider config changed; inspect before reconnecting".into());
+        }
+    }
+    if !catalog_path.exists() {
+        write_private_file(
+            &catalog_path,
+            &catalog_bytes,
+            app_data_dir,
+            "ao-web-catalog",
+        )?;
+    }
+    if !config_path.exists() {
+        write_private_file(
+            &config_path,
+            config_bytes.as_bytes(),
+            app_data_dir,
+            "ao-web-provider",
+        )?;
+    }
+    Ok(())
+}
+
+fn ao_connect_policy(
+    node: &integrations::ao::Node,
+    connection: &AoCodexConnection,
+    private_key: Option<&str>,
+) -> Result<bool, String> {
+    if node.route.harness_id != "codex-native"
+        || node.route.permission_profile != ":read-only"
+        || connection.model != node.route.model
+        || connection.permission_profile != ":read-only"
+        || !connection.allow_model_usage
+        || connection.allow_command_execution
+        || connection.request_limit == 0
+        || connection.lifetime_seconds == 0
+    {
+        return Err("AO selected route or read-only limits do not match".into());
+    }
+    // The route's provider decides the connection, not the role: any worker may use
+    // WebGPT or any model in the shared CPA pool. Planner/reviewer routes are still
+    // pinned to WebGPT by run validation.
+    let cpa_model = |model: &str| {
+        (1..=128).contains(&model.len())
+            && model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-@+".contains(&byte))
+    };
+    match node.route.provider_id.as_str() {
+        "chatgpt-web" if node.route.model == "chatgpt-web/high" && private_key.is_none() => Ok(false),
+        "cliproxyapi-antigravity"
+            if node.role == integrations::ao::Role::Worker
+                && node.route.account_id == "shared-cpa-pool"
+                && cpa_model(&node.route.model)
+                && private_key.is_some_and(|key| {
+                    (32..=512).contains(&key.len()) && !key.chars().any(char::is_control)
+                }) =>
+        {
+            Ok(true)
+        }
+        _ => Err("AO provider, account policy, model, or private key does not match".into()),
+    }
+}
+
+async fn ao_run_grant(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoRunGrantRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_run_grant") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm || !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm this exact AO run in the focused local window",
+        );
+    }
+    let context = match state.context(&body.workspace_id) {
+        Ok(context) => context,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_WORKSPACE_INVALID",
+                "AO workspace unavailable",
+            )
+        }
+    };
+    let now = now_ms();
+    let result = tokio::task::spawn_blocking(move || {
+        let request = context.for_request().map_err(text_error)?;
+        let _guard = request.policy_execution_guard().map_err(text_error)?;
+        coding_tools_core::data::DataStore::update_file(|data| {
+            integrations::ao::grant_run(
+                data,
+                &body.workspace_id,
+                &body.run_id,
+                body.expected_revision,
+                &body.executable_sha256,
+                now,
+            )
+        })
+        .map_err(text_error)
+    })
+    .await;
+    match result {
+        Ok(Ok(run)) => Json(json!({"ok":true,"grant":run.grant,"run":run})).into_response(),
+        _ => json_error(
+            StatusCode::CONFLICT,
+            "AO_GRANT_FAILED",
+            "AO run, graph, or executable changed; refresh before confirming",
+        ),
+    }
+}
+
+async fn ao_harness_status(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessNodeRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_status") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if let Err(error) = ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        return json_error(StatusCode::BAD_REQUEST, "AO_NODE_SCOPE_FAILED", error);
+    }
+    let key = (body.workspace_id, body.run_id, body.node_id);
+    let hub = state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|hubs| hubs.get(&key).cloned());
+    match hub {
+        Some(hub) => match hub.status() {
+            Ok(status) => {
+                Json(json!({"ok":true,"owned":true,"route_verified":false,"status":status}))
+                    .into_response()
+            }
+            Err(error) => json_error(StatusCode::BAD_REQUEST, "AO_HARNESS_STATUS_FAILED", error),
+        },
+        None => Json(
+            json!({"ok":true,"owned":false,"route_verified":false,"status":{"connected":false}}),
+        )
+        .into_response(),
+    }
+}
+
+async fn ao_harness_connect(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessConnectRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_connect") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if body.confirm && !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm the exact AO harness locally",
+        );
+    }
+    let (root, node, cancelled) =
+        match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+            Ok(target) => target,
+            Err(error) => {
+                return json_error(StatusCode::BAD_REQUEST, "AO_NODE_SCOPE_FAILED", error)
+            }
+        };
+    let root = match root.join(&node.settings.working_directory).canonicalize() {
+        Ok(directory) if directory.is_dir() && directory.starts_with(&root) => directory,
+        _ => return json_error(StatusCode::BAD_REQUEST, "AO_WORKING_DIRECTORY_INVALID", "Role working directory must exist inside the registered workspace"),
+    };
+    if cancelled
+        || !matches!(
+            node.state,
+            integrations::ao::State::Pending | integrations::ao::State::Reserved
+        )
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "AO_NODE_NOT_READY",
+            "Select a pending AO node in an active run",
+        );
+    }
+    let private_key = body.private_proxy_api_key;
+    let web_base_url = body.web_bridge_base_url;
+    let web_catalog = body.web_model_catalog;
+    let connection: AoCodexConnection = match serde_json::from_value(body.connection) {
+        Ok(connection) => connection,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_CONNECTION_INVALID",
+                "Invalid AO harness connection",
+            )
+        }
+    };
+    let worker = match ao_connect_policy(&node, &connection, private_key.as_deref()) {
+        Ok(worker) => worker,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_ROUTE_MISMATCH", error),
+    };
+    if worker == web_base_url.is_some() || worker == web_catalog.is_some() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "AO_PROVIDER_CONFIG_MISMATCH",
+            "AO provider inputs do not match the selected role",
+        );
+    }
+    if !(body.confirm && local_ui_authorized(&headers, &state))
+        && (body.confirm
+            || !ao_background_granted(
+                &state,
+                &body.workspace_id,
+                &body.run_id,
+                &connection.expected_sha256,
+            ))
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_RUN_GRANT_REQUIRED",
+            "Confirm the exact AO run or card in the focused local window",
+        );
+    }
+    let selected_home = match prepare_ao_home(&state.ao_home_root, &connection.codex_home) {
+        Ok(home) => home,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_HOME_SCOPE",
+                "Use a dedicated AO home under application data",
+            )
+        }
+    };
+    if worker {
+        let Some(app_data_dir) = state.ao_home_root.parent() else {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_HOME_UNAVAILABLE",
+                "AO app data is unavailable",
+            );
+        };
+        if prepare_ao_cpa_home(&selected_home, app_data_dir).is_err() {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_CPA_HOME_INVALID",
+                "AO CPA provider config is unavailable or changed",
+            );
+        }
+    } else {
+        let Some(app_data_dir) = state.ao_home_root.parent() else {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_HOME_UNAVAILABLE",
+                "AO app data is unavailable",
+            );
+        };
+        if prepare_ao_web_home(
+            &selected_home,
+            app_data_dir,
+            web_base_url.as_deref().unwrap(),
+            web_catalog.as_ref().unwrap(),
+        )
+        .is_err()
+        {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_WEB_HOME_INVALID",
+                "AO WebGPT bridge catalog is unavailable or changed",
+            );
+        }
+    }
+    let key = (body.workspace_id, body.run_id, body.node_id);
+    let hub = Arc::new(AoCodexHub::default());
+    {
+        let mut hubs = match state.ao_hubs.lock() {
+            Ok(hubs) => hubs,
+            Err(_) => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "AO_HUBS_UNAVAILABLE",
+                    "AO harness store unavailable",
+                )
+            }
+        };
+        if hubs.contains_key(&key) {
+            return json_error(
+                StatusCode::CONFLICT,
+                "AO_HARNESS_OWNERSHIP",
+                "AO harness already connected",
+            );
+        }
+        if hubs.len() >= 8 { return Json(json!({"ok":true,"waiting":true,"reason":"harness_capacity"})).into_response(); }
+        hubs.insert(key.clone(), hub.clone());
+    }
+    let running = hub.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        if let Some(key) = private_key {
+            running.connect_ao_with_cpa_key(&root, connection, key)?;
+        } else {
+            running.connect_ao_web(&root, connection)?;
+        }
+        running.initialize()
+    })
+    .await;
+    match outcome {
+        Ok(Ok(status)) => {
+            Json(json!({"ok":true,"owned":true,"route_verified":false,"status":status}))
+                .into_response()
+        }
+        failure => {
+            hub.disconnect();
+            if let Ok(mut hubs) = state.ao_hubs.lock() {
+                hubs.remove(&key);
+            }
+            let detail = match failure {
+                Ok(Err(error)) => error,
+                Err(_) => "AO harness connection outcome unknown; inspect before retrying".into(),
+                Ok(Ok(_)) => unreachable!(),
+            };
+            json_error(StatusCode::BAD_REQUEST, "AO_HARNESS_CONNECT_FAILED", detail)
+        }
+    }
+}
+
+async fn ao_harness_disconnect(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessDisconnectRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_disconnect") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm || !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm AO harness stop locally",
+        );
+    }
+    if let Err(error) = ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        return json_error(StatusCode::BAD_REQUEST, "AO_NODE_SCOPE_FAILED", error);
+    }
+    let key = (body.workspace_id, body.run_id, body.node_id);
+    let hub = state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|mut hubs| hubs.remove(&key));
+    if let Some(hub) = hub {
+        hub.disconnect();
+    }
+    Json(json!({"ok":true,"connected":false,"owned":false})).into_response()
+}
+
+async fn ao_harness_execute(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessExecuteRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_execute") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    let background = !body.confirm;
+    if body.confirm && !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm the selected AO turn locally",
+        );
+    }
+    let context = match state.context(&body.workspace_id) {
+        Ok(context) => context,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_WORKSPACE_INVALID",
+                "AO workspace unavailable",
+            )
+        }
+    };
+    let key = (
+        body.workspace_id.clone(),
+        body.run_id.clone(),
+        body.node_id.clone(),
+    );
+    let hub = match state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|hubs| hubs.get(&key).cloned())
+    {
+        Some(hub) => hub,
+        None => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "AO_HARNESS_NOT_CONNECTED",
+                "Connect the selected AO harness first",
+            )
+        }
+    };
+    let (_root, node, cancelled) =
+        match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+            Ok(target) => target,
+            Err(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "AO_NODE_SCOPE_FAILED",
+                    "AO node unavailable",
+                )
+            }
+        };
+    if cancelled || node.state != integrations::ao::State::Pending {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_NODE_NOT_PENDING",
+            "AO node has already been reserved or cancelled",
+        );
+    }
+    let status = match hub.status() {
+        Ok(status) => status,
+        Err(_) => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "AO_HARNESS_UNAVAILABLE",
+                "AO harness status unavailable",
+            )
+        }
+    };
+    if status["connected"] != true
+        || status["model"] != node.route.model
+        || status["permission_profile"] != node.route.permission_profile
+    {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_ROUTE_CHANGED",
+            "Selected AO harness route changed",
+        );
+    }
+    if background
+        && !status["executable_sha256"]
+            .as_str()
+            .is_some_and(|sha| ao_background_granted(&state, &body.workspace_id, &body.run_id, sha))
+    {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_RUN_GRANT_REQUIRED",
+            "AO run grant expired or changed",
+        );
+    }
+    let grant_now_ms = background.then(now_ms);
+    let request_key = format!("ao-{}", uuid::Uuid::new_v4());
+    let workspace_id = body.workspace_id;
+    let run_id = body.run_id;
+    let node_id = body.node_id;
+    let expected_revision = body.expected_revision;
+    let reserved = tokio::task::spawn_blocking({
+        let workspace_id = workspace_id.clone();
+        let run_id = run_id.clone();
+        let node_id = node_id.clone();
+        let request_key = request_key.clone();
+        move || {
+            let request = context.for_request().map_err(text_error)?;
+            let _guard = request.policy_execution_guard().map_err(text_error)?;
+            coding_tools_core::data::DataStore::update_file(|data| {
+                let run = data
+                    .ao_runs
+                    .iter()
+                    .find(|run| run.id == run_id && run.workspace_id == workspace_id)
+                    .ok_or_else(|| {
+                        coding_tools_core::error::AppError::Message("AO run not found".into())
+                    })?;
+                let prompt = integrations::ao::prompt_for_node(data, run, &node_id)?;
+                let next = integrations::ao::reserve(
+                    data,
+                    &workspace_id,
+                    &run_id,
+                    &node_id,
+                    expected_revision,
+                    request_key,
+                    grant_now_ms,
+                )?;
+                Ok((next, prompt))
+            })
+            .map_err(text_error)
+        }
+    })
+    .await;
+    let (_reserved_run, prompt) = match reserved {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) if error == "AO_WORKER_CAPACITY_BUSY" => {
+            return Json(json!({"ok":true,"waiting":true,"reason":"worker_capacity"})).into_response();
+        },
+        Ok(Err(error)) if error == "AO node is not ready or run revision changed" => {
+            return Json(json!({"ok":true,"waiting":true,"reason":"revision_changed"})).into_response();
+        },
+        _ => {
+            return json_error(
+                StatusCode::CONFLICT,
+                "AO_RESERVATION_FAILED",
+                "AO graph or revision changed; refresh before retrying",
+            )
+        }
+    };
+    let submitted = tokio::task::spawn_blocking({
+        let hub = hub.clone();
+        let request_key = request_key.clone();
+        move || hub.start_ao(request_key, prompt)
+    })
+    .await;
+    let thread_id = submitted.ok().and_then(Result::ok).and_then(|value| {
+        if value["ok"] == true {
+            value["thread_id"].as_str().map(str::to_owned)
+        } else {
+            None
+        }
+    });
+    if thread_id.is_none() {
+        if let Ok(mut hubs) = state.ao_hubs.lock() {
+            if hubs.get(&key).is_some_and(|current| Arc::ptr_eq(current, &hub)) { hubs.remove(&key); }
+        }
+        hub.disconnect();
+    }
+    let saved = tokio::task::spawn_blocking({
+        let request_key = request_key.clone();
+        move || {
+            coding_tools_core::data::DataStore::update_file(|data| {
+                integrations::ao::record_submission(
+                    data,
+                    &workspace_id,
+                    &run_id,
+                    &node_id,
+                    &request_key,
+                    thread_id.as_deref(),
+                )
+            })
+            .map_err(text_error)
+        }
+    })
+    .await;
+    match saved {
+        Ok(Ok(run)) => {
+            let receipt = run.nodes.iter().find(|node| node.id == key.2.as_str()).and_then(|node| node.receipt.clone());
+            Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
+        }
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "AO_SUBMISSION_UNKNOWN", "AO native submission outcome could not be saved; inspect the reserved request before any retry"),
+    }
+}
+
+async fn ao_harness_observe(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessNodeRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_observe") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    let current = state.core.with_data(|store| {
+        store.refresh()?;
+        store
+            .data()
+            .ao_runs
+            .iter()
+            .find(|run| run.id == body.run_id && run.workspace_id == body.workspace_id)
+            .cloned()
+            .ok_or_else(|| coding_tools_core::error::AppError::Message("AO run not found".into()))
+    });
+    let run = match current {
+        Ok(run) => run,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_RUN_NOT_FOUND",
+                "AO run unavailable",
+            )
+        }
+    };
+    let Some(node) = run.nodes.iter().find(|node| node.id == body.node_id) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "AO_NODE_NOT_FOUND",
+            "AO node unavailable",
+        );
+    };
+    let Some(receipt) = node.receipt.as_ref() else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_NODE_NOT_RESERVED",
+            "AO node has no execution receipt",
+        );
+    };
+    if node.state == integrations::ao::State::Reserved {
+        return Json(json!({"ok":true,"run":run,"receipt":receipt,
+            "note":"AO submission is unresolved; inspect this request key before any retry"}))
+        .into_response();
+    }
+    let key = (
+        body.workspace_id.clone(),
+        body.run_id.clone(),
+        body.node_id.clone(),
+    );
+    if node.state != integrations::ao::State::Running {
+        return Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response();
+    }
+    let Some(thread_id) = receipt.thread_id.as_deref() else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_THREAD_UNKNOWN",
+            "AO native thread identity unavailable",
+        );
+    };
+    let hub = state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|hubs| hubs.get(&key).cloned());
+    let pending_approvals = hub
+        .as_ref()
+        .and_then(|hub| hub.status().ok())
+        .and_then(|status| status.get("pending_approvals").cloned())
+        .unwrap_or_else(|| json!([]));
+    let native = hub.as_ref().and_then(|hub| hub.read(thread_id).ok());
+    if native.as_ref().is_some_and(|native| {
+        matches!(
+            native["status"].as_str(),
+            Some("starting" | "inProgress" | "interrupt_requested")
+        )
+    }) {
+        return Json(
+            json!({"ok":true,"run":run,"receipt":receipt,"pending_approvals":pending_approvals}),
+        )
+        .into_response();
+    }
+    if native.as_ref().is_some_and(|native| {
+        !matches!(
+            native["status"].as_str(),
+            Some("completed" | "failed" | "interrupted")
+        )
+    }) {
+        return Json(
+            json!({"ok":true,"run":run,"receipt":receipt,"pending_approvals":pending_approvals}),
+        )
+        .into_response();
+    }
+    let completed = native
+        .as_ref()
+        .is_some_and(|native| native["status"] == "completed");
+    let failure = native.as_ref().and_then(|native| native["notice"].as_str()).map(str::to_owned)
+        .or_else(|| native.is_none().then(|| "Native connection ended without a terminal receipt; the reserved request will not be replayed".to_owned()));
+    let expected_request_key = receipt.request_key.clone();
+    let turn_id = native
+        .as_ref()
+        .and_then(|native| native["turn_id"].as_str())
+        .map(str::to_owned);
+    let answer = native
+        .as_ref()
+        .and_then(|native| native["answer"].as_str())
+        .map(str::to_owned);
+    let workspace_id = body.workspace_id;
+    let run_id = body.run_id;
+    let node_id = body.node_id;
+    let thread_id = thread_id.to_owned();
+    let saved = tokio::task::spawn_blocking(move || {
+        coding_tools_core::data::DataStore::update_file(|data| {
+            integrations::ao::record_terminal(
+                data,
+                &workspace_id,
+                &run_id,
+                &node_id,
+                &thread_id,
+                turn_id.as_deref(),
+                answer.as_deref(),
+                completed,
+                failure.as_deref(),
+            )
+        })
+        .map_err(text_error)
+    })
+    .await;
+    match saved {
+        Ok(Ok(mut run)) => {
+            let receipt = run
+                .nodes
+                .iter()
+                .find(|node| node.id == key.2.as_str())
+                .and_then(|node| node.receipt.clone());
+            if native.is_some() {
+                if let Ok(mut hubs) = state.ao_hubs.lock() {
+                    if let Some(hub) = hubs.remove(&key) {
+                        hub.disconnect();
+                    }
+                }
+            }
+            if receipt.as_ref().is_some_and(|receipt| receipt.verdict.as_deref() == Some("CHANGES_REQUIRED")) {
+                if let Ok(Some(reworked)) = coding_tools_core::data::DataStore::update_file(|data| {
+                    integrations::ao_team::queue_rework(data, &key.0, &key.1, &key.2, &expected_request_key, now_ms())
+                }) { run = reworked; }
+            }
+            Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
+        }
+        _ => {
+            let settled = state.core.with_data(|store| {
+                store.refresh()?;
+                let run = store
+                    .data()
+                    .ao_runs
+                    .iter()
+                    .find(|run| run.id == key.1 && run.workspace_id == key.0)
+                    .ok_or_else(|| {
+                        coding_tools_core::error::AppError::Message("AO run not found".into())
+                    })?;
+                let node = run
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == key.2)
+                    .ok_or_else(|| {
+                        coding_tools_core::error::AppError::Message("AO node not found".into())
+                    })?;
+                if !matches!(
+                    node.state,
+                    integrations::ao::State::Finished | integrations::ao::State::Held
+                ) || node
+                    .receipt
+                    .as_ref()
+                    .is_none_or(|receipt| receipt.request_key != expected_request_key)
+                {
+                    if let Some(previous) = node.history.iter().find(|receipt| receipt.request_key == expected_request_key && receipt.turn_id.is_some()) {
+                        return Ok((run.clone(), Some(previous.clone())));
+                    }
+                    return Err(coding_tools_core::error::AppError::Message(
+                        "AO receipt changed".into(),
+                    ));
+                }
+                Ok((run.clone(), node.receipt.clone()))
+            });
+            match settled {
+                Ok((run, receipt)) => {
+                    Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
+                }
+                Err(_) => json_error(
+                    StatusCode::CONFLICT,
+                    "AO_OBSERVE_CHANGED",
+                    "AO receipt changed; refresh before retrying",
+                ),
+            }
+        }
+    }
+}
+
+fn ao_external_node(
+    state: &ServiceState,
+    workspace_id: &str,
+    run_id: &str,
+    node_id: &str,
+) -> Result<integrations::ao::Node, Response> {
+    match ao_target(state, workspace_id, run_id, node_id) {
+        Ok((_root, node, _cancelled))
+            if node.role == integrations::ao::Role::Worker
+                && integrations::ao::external_harness(&node.route).is_some() =>
+        {
+            Ok(node)
+        }
+        _ => Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "AO_EXTERNAL_SCOPE_FAILED",
+            "AO harness worker unavailable",
+        )),
+    }
+}
+
+/// Reserve one ready AO-harness worker card and return its prompt. The caller
+/// spawns the AO session and reports it back; a reservation is never replayed.
+async fn ao_external_reserve(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessExecuteRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_external_reserve") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    let background = !body.confirm;
+    if body.confirm && !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_LOCAL_CONFIRMATION_REQUIRED",
+            "Confirm the selected AO turn locally",
+        );
+    }
+    let context = match state.context(&body.workspace_id) {
+        Ok(context) => context,
+        Err(_) => {
+            return json_error(StatusCode::BAD_REQUEST, "AO_WORKSPACE_INVALID", "AO workspace unavailable")
+        }
+    };
+    if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        return response;
+    }
+    let grant_now_ms = background.then(now_ms);
+    let request_key = format!("ao-{}", uuid::Uuid::new_v4());
+    let reserved = tokio::task::spawn_blocking({
+        let request_key = request_key.clone();
+        move || {
+            let request = context.for_request().map_err(text_error)?;
+            let _guard = request.policy_execution_guard().map_err(text_error)?;
+            coding_tools_core::data::DataStore::update_file(|data| {
+                let run = data
+                    .ao_runs
+                    .iter()
+                    .find(|run| run.id == body.run_id && run.workspace_id == body.workspace_id)
+                    .ok_or_else(|| coding_tools_core::error::AppError::Message("AO run not found".into()))?;
+                let prompt = integrations::ao::prompt_for_node(data, run, &body.node_id)?;
+                let next = integrations::ao::reserve(
+                    data,
+                    &body.workspace_id,
+                    &body.run_id,
+                    &body.node_id,
+                    body.expected_revision,
+                    request_key,
+                    grant_now_ms,
+                )?;
+                Ok((next, prompt))
+            })
+            .map_err(text_error)
+        }
+    })
+    .await;
+    match reserved {
+        Ok(Ok((run, prompt))) => {
+            Json(json!({"ok":true,"run":run,"request_key":request_key,"prompt":prompt})).into_response()
+        }
+        Ok(Err(error)) if error == "AO_WORKER_CAPACITY_BUSY" => {
+            Json(json!({"ok":true,"waiting":true,"reason":"worker_capacity"})).into_response()
+        }
+        Ok(Err(error)) if error == "AO node is not ready or run revision changed" => {
+            Json(json!({"ok":true,"waiting":true,"reason":"revision_changed"})).into_response()
+        }
+        _ => json_error(
+            StatusCode::CONFLICT,
+            "AO_RESERVATION_FAILED",
+            "AO graph or revision changed; refresh before retrying",
+        ),
+    }
+}
+
+async fn ao_external_submitted(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoExternalSubmittedRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_external_submitted") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        return response;
+    }
+    let saved = tokio::task::spawn_blocking(move || {
+        coding_tools_core::data::DataStore::update_file(|data| {
+            integrations::ao::record_submission(
+                data,
+                &body.workspace_id,
+                &body.run_id,
+                &body.node_id,
+                &body.request_key,
+                body.session_id.as_deref(),
+            )
+        })
+        .map_err(text_error)
+    })
+    .await;
+    match saved {
+        Ok(Ok(run)) => Json(json!({"ok":true,"run":run})).into_response(),
+        _ => json_error(
+            StatusCode::CONFLICT,
+            "AO_SUBMISSION_UNKNOWN",
+            "AO session outcome could not be saved; inspect the reserved card before any retry",
+        ),
+    }
+}
+
+async fn ao_external_terminal(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoExternalTerminalRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_external_terminal") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        return response;
+    }
+    let node_id = body.node_id.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        coding_tools_core::data::DataStore::update_file(|data| {
+            integrations::ao::record_terminal(
+                data,
+                &body.workspace_id,
+                &body.run_id,
+                &body.node_id,
+                &body.session_id,
+                body.turn_id.as_deref(),
+                body.answer.as_deref(),
+                body.completed,
+                body.failure.as_deref(),
+            )
+        })
+        .map_err(text_error)
+    })
+    .await;
+    match saved {
+        Ok(Ok(run)) => {
+            let receipt = run.nodes.iter().find(|node| node.id == node_id).and_then(|node| node.receipt.clone());
+            Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
+        }
+        _ => json_error(
+            StatusCode::CONFLICT,
+            "AO_OBSERVE_CHANGED",
+            "AO receipt changed; refresh before retrying",
+        ),
+    }
+}
+
+async fn ao_harness_approval(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<AoHarnessApprovalRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "ao_harness_approval") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if !body.confirm || !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "AO_LOCAL_CONFIRMATION_REQUIRED",
+            "Answer this AO approval in the focused local window",
+        );
+    }
+    let (_, node, _) = match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        Ok(target) => target,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "AO_NODE_SCOPE_FAILED",
+                "AO node unavailable",
+            )
+        }
+    };
+    if node.state != integrations::ao::State::Running {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_NODE_NOT_RUNNING",
+            "AO node has no active turn",
+        );
+    }
+    let key = (body.workspace_id, body.run_id, body.node_id);
+    let hub = state
+        .ao_hubs
+        .lock()
+        .ok()
+        .and_then(|hubs| hubs.get(&key).cloned());
+    let Some(hub) = hub else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "AO_HARNESS_NOT_CONNECTED",
+            "AO harness unavailable",
+        );
+    };
+    match hub.resolve_approval(&body.approval_id, body.allow) {
+        Ok(result) => Json(json!({"ok":true,"result":result})).into_response(),
+        Err(_) => json_error(
+            StatusCode::CONFLICT,
+            "AO_APPROVAL_UNAVAILABLE",
+            "AO approval expired or belongs to another turn",
+        ),
+    }
+}
+
+async fn ao_control(State(state): State<ServiceState>, headers: HeaderMap, Json(body): Json<AoControlRequest>) -> Response {
+    if let Err(response) = auth(&headers, &state) { return *response; }
+    let _lease = match admit(&state, "ao_control") { Ok(lease) => lease, Err(response) => return *response };
+    if !body.confirm || !local_ui_authorized(&headers, &state) || !matches!(body.action.as_str(), "pause" | "resume" | "stop") {
+        return json_error(StatusCode::FORBIDDEN, "AO_CONTROL_LOCAL_ONLY", "Use the local mission controls");
+    }
+    let workspace_id = body.workspace_id;
+    let run_id = body.run_id;
+    let stopping = body.action == "stop";
+    let updated = tokio::task::spawn_blocking({
+        let workspace_id = workspace_id.clone(); let run_id = run_id.clone();
+        move || coding_tools_core::data::DataStore::update_file(|data| integrations::ao_team::control(data, &workspace_id, &run_id, &body.action))
+    }).await;
+    let mut run = match updated {
+        Ok(Ok(run)) => run,
+        _ => return json_error(StatusCode::CONFLICT, "AO_CONTROL_FAILED", "Mission control failed; refresh its saved state"),
+    };
+    if stopping {
+        let owned = match state.ao_hubs.lock() {
+            Ok(mut hubs) => {
+                let keys: Vec<_> = hubs.keys().filter(|key| key.0 == workspace_id && key.1 == run_id).cloned().collect();
+                keys.iter().filter_map(|key| hubs.remove(key)).collect::<Vec<_>>()
+            },
+            Err(_) => return json_error(StatusCode::CONFLICT, "AO_STOP_UNKNOWN", "Future work is cancelled; owned harness shutdown needs inspection"),
+        };
+        let stopped = tokio::task::spawn_blocking(move || {
+            for hub in owned { hub.disconnect(); }
+            coding_tools_core::data::DataStore::update_file(|data| integrations::ao_team::control(data, &workspace_id, &run_id, "stopped"))
+        }).await;
+        match stopped {
+            Ok(Ok(stopped)) => run = stopped,
+            _ => return json_error(StatusCode::CONFLICT, "AO_STOP_UNKNOWN", "Owned harnesses stopped; refresh the final mission state"),
+        }
+    }
+    Json(json!({"ok":true,"run":run})).into_response()
+}
+
 async fn ao_read(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -1841,7 +3367,9 @@ async fn ao_read(
             } else {
                 scoped.take(100).cloned().collect()
             };
-            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision}))
+            let team = data.ao_teams.iter().find(|team| team.workspace_id == body.workspace_id);
+            let capacity: std::collections::HashMap<_, _> = runs.iter().map(|run| (run.id.clone(), integrations::ao_team::available_workers(data, run))).collect();
+            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"limits":data.ao_limits,"worker_capacity":capacity}))
         })
         .map_err(text_error)
     })
@@ -1891,6 +3419,22 @@ async fn ao_update(
             .policy_execution_guard()
             .map_err(|error| error.message().to_string())?;
         coding_tools_core::data::DataStore::update_file(|data| match body.change {
+            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, worker_limit } =>
+                integrations::ao_team::create_run(data, &workspace_id, run_id, task_id, expected_board_revision, team_revision, worker_limit)
+                    .map(|run| json!({"ok":true,"run":run})),
+            AoMutation::SaveTeam { expected_revision, team } => integrations::ao_team::save(data, &workspace_id, expected_revision, team)
+                .map(|team| json!({"ok":true,"team":team})),
+            AoMutation::ApplyTeam { run_id, expected_revision, team_revision } => integrations::ao_team::apply(data, &workspace_id, &run_id, expected_revision, team_revision)
+                .map(|run| json!({"ok":true,"run":run})),
+            AoMutation::SetLimits { expected_revision, max_workers, run_id, run_revision, worker_limit } => {
+                let mission = match (run_id.as_deref(), run_revision, worker_limit) {
+                    (Some(id), Some(revision), Some(limit)) => Some((id, revision, limit)),
+                    (None, None, None) => None,
+                    _ => return Err(coding_tools_core::error::AppError::Message("Select a mission revision and worker limit together".into())),
+                };
+                integrations::ao_team::set_limits(data, &workspace_id, expected_revision, max_workers, mission)?;
+                Ok(json!({"ok":true,"limits":data.ao_limits}))
+            },
             AoMutation::Create {
                 expected_board_revision,
                 run,
@@ -1900,7 +3444,7 @@ async fn ao_update(
                         "AO run belongs to another workspace".into(),
                     ));
                 }
-                integrations::ao::create(data, expected_board_revision, run)
+                integrations::ao::create(data, expected_board_revision, run).map(|run| json!({"ok":true,"run":run}))
             }
             AoMutation::Graph {
                 run_id,
@@ -1912,17 +3456,17 @@ async fn ao_update(
                 &run_id,
                 expected_revision,
                 change,
-            ),
+            ).map(|run| json!({"ok":true,"run":run})),
             AoMutation::Cancel {
                 run_id,
                 expected_revision,
-            } => integrations::ao::cancel(data, &workspace_id, &run_id, expected_revision),
+            } => integrations::ao::cancel(data, &workspace_id, &run_id, expected_revision).map(|run| json!({"ok":true,"run":run})),
         })
         .map_err(text_error)
     })
     .await;
     match outcome {
-        Ok(Ok(run)) => Json(json!({"ok":true,"run":run})).into_response(),
+        Ok(Ok(result)) => Json(result).into_response(),
         Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "AO_UPDATE_FAILED", error),
         Err(_) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1958,30 +3502,18 @@ async fn execution_read(
         }
     };
     let mission_id = body.mission_id;
-    let refresh_source = body.refresh_source;
+    let _ = body.refresh_source;
     let outcome = tokio::task::spawn_blocking(move || {
         let request = context
             .for_request()
             .map_err(|error| error.message().to_string())?;
-        if refresh_source {
-            let mission_id = mission_id
-                .as_deref()
-                .ok_or_else(|| "Select a mission before refreshing its source".to_string())?;
-            integrations::execution::service::refresh(&request, mission_id).map_err(text_error)
-        } else {
-            integrations::execution::service::view(&request, mission_id.as_deref())
-                .map_err(text_error)
-        }
+        integrations::execution::service::view(&request, mission_id.as_deref()).map_err(text_error)
     })
     .await;
     execution_outcome(outcome, "EXECUTION_READ_FAILED")
 }
 
-async fn execution_provider(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Json(body): Json<ExecutionProviderRequest>,
-) -> Response {
+async fn execution_provider(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
     if let Err(response) = auth(&headers, &state) {
         return *response;
     }
@@ -1989,61 +3521,14 @@ async fn execution_provider(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    if !body.confirm {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "LOCAL_PROVIDER_CONSENT_REQUIRED",
-            "Local provider consent was not confirmed",
-        );
-    }
-    let context = match state.context(&body.workspace_id) {
-        Ok(context) => context,
-        Err(error) => {
-            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
-        }
-    };
-    let outcome = tokio::task::spawn_blocking(move || {
-        let request = context
-            .for_request()
-            .map_err(|error| error.message().to_string())?;
-        match body.operation.as_str() {
-            "configure" => integrations::execution::service::configure(
-                &request,
-                body.expected_revision
-                    .ok_or_else(|| "Missing execution-book revision".to_string())?,
-                body.settings
-                    .ok_or_else(|| "Provider settings required".to_string())?,
-                body.credential,
-            )
-            .map_err(text_error),
-            "connect" => integrations::execution::service::reconnect(
-                &request,
-                body.binding_id
-                    .as_deref()
-                    .ok_or_else(|| "Select an existing provider binding".to_string())?,
-                body.credential,
-                true,
-            )
-            .map_err(text_error),
-            "disable" => integrations::execution::service::disable(
-                &request,
-                body.binding_id
-                    .as_deref()
-                    .ok_or_else(|| "Select an existing provider binding".to_string())?,
-            )
-            .map_err(text_error),
-            _ => Err("Unsupported local provider operation".to_string()),
-        }
-    })
-    .await;
-    execution_outcome(outcome, "EXECUTION_PROVIDER_FAILED")
+    json_error(
+        StatusCode::GONE,
+        "APP_MODULE_RETIRED",
+        "Standalone execution is retired; use AO routes",
+    )
 }
 
-async fn execution_update(
-    State(state): State<ServiceState>,
-    headers: HeaderMap,
-    Json(body): Json<ExecutionUpdateRequest>,
-) -> Response {
+async fn execution_update(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
     if let Err(response) = auth(&headers, &state) {
         return *response;
     }
@@ -2051,46 +3536,16 @@ async fn execution_update(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    if !body.confirm {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "LOCAL_MISSION_CONSENT_REQUIRED",
-            "Confirm this particular mission operation locally",
-        );
-    }
-    let change: integrations::execution::service::Change = match serde_json::from_value(body.change)
-    {
-        Ok(change) => change,
-        Err(_) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_MISSION_OPERATION",
-                "Invalid mission operation",
-            )
-        }
-    };
-    let context = match state.context(&body.workspace_id) {
-        Ok(context) => context,
-        Err(error) => {
-            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
-        }
-    };
-    let expected_revision = body.expected_revision;
-    let outcome = tokio::task::spawn_blocking(move || {
-        let request = context
-            .for_request()
-            .map_err(|error| error.message().to_string())?;
-        integrations::execution::service::change(&request, expected_revision, change)
-            .map_err(text_error)
-    })
-    .await;
-    execution_outcome(outcome, "EXECUTION_UPDATE_FAILED")
+    json_error(
+        StatusCode::GONE,
+        "APP_MODULE_RETIRED",
+        "Standalone execution is retired; use AO routes",
+    )
 }
 
 async fn execution_orchestration_reserve(
     State(state): State<ServiceState>,
     headers: HeaderMap,
-    Json(body): Json<integrations::execution::service::OrchestrationReservation>,
 ) -> Response {
     if let Err(response) = auth(&headers, &state) {
         return *response;
@@ -2099,38 +3554,16 @@ async fn execution_orchestration_reserve(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    let context = match state.context(&body.workspace_id) {
-        Ok(context) => context,
-        Err(error) => {
-            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
-        }
-    };
-    match tokio::task::spawn_blocking(move || {
-        let request = context
-            .for_request()
-            .map_err(|error| error.message().to_string())?;
-        integrations::execution::service::reserve_orchestration(&request, body).map_err(text_error)
-    })
-    .await
-    {
-        Ok(Ok(result)) => Json(result).into_response(),
-        Ok(Err(error)) => json_error(
-            StatusCode::BAD_REQUEST,
-            "ORCHESTRATION_RESERVATION_FAILED",
-            error,
-        ),
-        Err(_) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "EXECUTION_WORKER_UNAVAILABLE",
-            "Local execution worker unavailable",
-        ),
-    }
+    json_error(
+        StatusCode::GONE,
+        "APP_MODULE_RETIRED",
+        "Standalone execution is retired; use AO routes",
+    )
 }
 
 async fn execution_orchestration_status(
     State(state): State<ServiceState>,
     headers: HeaderMap,
-    Json(body): Json<integrations::execution::service::OrchestrationStatus>,
 ) -> Response {
     if let Err(response) = auth(&headers, &state) {
         return *response;
@@ -2139,33 +3572,11 @@ async fn execution_orchestration_status(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    let context = match state.context(&body.workspace_id) {
-        Ok(context) => context,
-        Err(error) => {
-            return json_error(StatusCode::BAD_REQUEST, "WORKSPACE_CONTEXT_FAILED", error)
-        }
-    };
-    match tokio::task::spawn_blocking(move || {
-        let request = context
-            .for_request()
-            .map_err(|error| error.message().to_string())?;
-        integrations::execution::service::update_orchestration_status(&request, body)
-            .map_err(text_error)
-    })
-    .await
-    {
-        Ok(Ok(result)) => Json(result).into_response(),
-        Ok(Err(error)) => json_error(
-            StatusCode::BAD_REQUEST,
-            "ORCHESTRATION_STATUS_FAILED",
-            error,
-        ),
-        Err(_) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "EXECUTION_WORKER_UNAVAILABLE",
-            "Local execution worker unavailable",
-        ),
-    }
+    json_error(
+        StatusCode::GONE,
+        "APP_MODULE_RETIRED",
+        "Standalone execution is retired; use AO routes",
+    )
 }
 
 async fn operation_read(
@@ -2348,7 +3759,10 @@ fn router(state: ServiceState) -> Router {
         .route("/control/v1/resume", post(resume))
         .route("/control/v1/shutdown", post(shutdown))
         .route("/api/v1/state", get(state_view))
-        .route("/api/v1/workspaces", get(workspace_list))
+        .route(
+            "/api/v1/workspaces",
+            get(workspace_list).post(workspace_create),
+        )
         .route("/api/v1/workspaces/auth", post(workspace_auth_update))
         .route("/api/v1/workspaces/policy", post(workspace_policy_update))
         .route("/api/v1/native-codex/status", post(native_codex_status))
@@ -2362,7 +3776,18 @@ fn router(state: ServiceState) -> Router {
         .route("/api/v1/workspaces/secret", post(workspace_secret))
         .route("/api/v1/integrations/read", post(integration_read))
         .route("/api/v1/ao/read", post(ao_read))
+        .route("/api/v1/ao/control", post(ao_control))
+        .route("/api/v1/ao/grant", post(ao_run_grant))
         .route("/api/v1/ao/update", post(ao_update))
+        .route("/api/v1/ao/harness/status", post(ao_harness_status))
+        .route("/api/v1/ao/harness/connect", post(ao_harness_connect))
+        .route("/api/v1/ao/harness/execute", post(ao_harness_execute))
+        .route("/api/v1/ao/harness/observe", post(ao_harness_observe))
+        .route("/api/v1/ao/harness/approval", post(ao_harness_approval))
+        .route("/api/v1/ao/harness/disconnect", post(ao_harness_disconnect))
+        .route("/api/v1/ao/external/reserve", post(ao_external_reserve))
+        .route("/api/v1/ao/external/submitted", post(ao_external_submitted))
+        .route("/api/v1/ao/external/terminal", post(ao_external_terminal))
         .route("/api/v1/execution/read", post(execution_read))
         .route("/api/v1/execution/provider", post(execution_provider))
         .route("/api/v1/execution/update", post(execution_update))
@@ -2457,6 +3882,8 @@ impl HeadlessService {
             local_ui_token,
             core,
             contexts: Arc::new(Mutex::new(HashMap::new())),
+            ao_hubs: Arc::new(Mutex::new(HashMap::new())),
+            ao_home_root: config.app_data_dir.join("ao-homes"),
             operations: Arc::new(Mutex::new(OperationStore::default())),
             shutdown_tx: shutdown_tx.clone(),
             drain_timeout: config.drain_timeout,

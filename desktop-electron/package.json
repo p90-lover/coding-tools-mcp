@@ -16,11 +16,13 @@
     "build:runtime": "bun run scripts/prepare-runtime.cjs",
     "build:five-stack-runtime": "node scripts/prepare-five-stack-runtime.cjs",
     "build:package-resources": "node scripts/prepare-package-resources.cjs",
-    "package": "bun run build && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs",
-    "package:mac": "bun run build && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --mac",
-    "package:win": "bun run build && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --win",
-    "package:linux": "bun run build && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --linux",
+    "build:agent-orchestrator": "node scripts/build-agent-orchestrator.cjs",
+    "package": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs",
+    "package:mac": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --mac",
+    "package:win": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --win",
+    "package:linux": "bun run build && bun run build:agent-orchestrator && bun run build:runtime && bun run build:five-stack-runtime && bun run build:package-resources && bun run scripts/package.cjs --linux",
     "smoke:package": "bun run scripts/smoke-package.cjs",
+    "package:backend": "node scripts/package-backend.cjs",
     "test": "node --test tests/*.test.cjs",
     "start": "bun run build:preload && electron ."
   },
@@ -51,8 +53,6 @@
     "asar": true,
     "asarUnpack": [
       "assets/linux-appimage-runner.sh",
-      "electron/codex-router-managed.cjs",
-      "electron/codex-router-original-ui.cjs",
       "electron/cpa-managed.cjs",
       "vendor/bundled/cpa-plugins/**",
       "electron/cpa-codex-long-run.cjs",
@@ -66,9 +66,15 @@
       "dist/**",
       "build/preload.cjs",
       "electron/**",
-      "vendor/upstream/**",
-      "vendor/managed-components/**",
-      "vendor/bundled/**",
+      "!electron/paseo-*.cjs",
+      "!electron/anneal-*.cjs",
+      "!electron/codex-router-*.cjs",
+      "!electron/commandcode-proxy-*.cjs",
+      "vendor/upstream/cpa.json",
+      "vendor/managed-components/cpa.json",
+      "vendor/managed-components/cpa-provider-backend.openapi.json",
+      "vendor/tools/antigravity-cli.json",
+      "vendor/bundled/cpa-plugins/**",
       "assets/icon.png",
       "assets/linux-appimage-runner.sh",
       "package.json",
@@ -77,12 +83,20 @@
         "to": "app-handler",
         "filter": [
           "**/*",
+          "!paseo/**",
+          "!anneal/**",
+          "!codex-router/**",
+          "!commandcode-proxy/**",
           "!**/node_modules/**",
           "!**/source/test/**"
         ]
       }
     ],
     "extraResources": [
+      {
+        "from": "build/agent-orchestrator",
+        "to": "agent-orchestrator"
+      },
       {
         "from": "build/package-resources",
         "to": "."
@@ -92,6 +106,10 @@
         "to": "app-handler",
         "filter": [
           "**/*",
+          "!paseo/**",
+          "!anneal/**",
+          "!codex-router/**",
+          "!commandcode-proxy/**",
           "!**/node_modules/**",
           "!**/source/test/**"
         ]
@@ -101,6 +119,10 @@
         "to": "app-modules",
         "filter": [
           "**/*",
+          "!paseo/**",
+          "!anneal/**",
+          "!codex-router/**",
+          "!commandcode-proxy/**",
           "!**/node_modules/**",
           "!**/source/test/**"
         ]
@@ -110,6 +132,10 @@
         "to": "modules",
         "filter": [
           "**/*",
+          "!paseo/**",
+          "!anneal/**",
+          "!codex-router/**",
+          "!commandcode-proxy/**",
           "!**/node_modules/**",
           "!**/source/test/**"
         ]

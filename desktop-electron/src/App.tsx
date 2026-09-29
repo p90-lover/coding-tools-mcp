@@ -13,17 +13,17 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
-import { OrchestratorSurface } from "./features/ProviderOrchestratorSurfaces";
-import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
-import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
+
+
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
-import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
 import { WorkspacePanel } from "./features/WorkspacePanel";
 import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
 import { NativeCodexPanel } from "./features/NativeCodexPanel";
+import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorSurface } from "./features/AgentOrchestratorSurface";
+import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 
 import type {
   BrowserInteractionMode,
@@ -34,6 +34,7 @@ import type {
   LauncherState,
   LogRecord,
   OperationState,
+  RefreshPart,
   Surface,
 } from "./types";
 
@@ -416,6 +417,8 @@ function LauncherShell({
   const [sidebarOpen, setSidebarOpen] = useState(compactAtMount ? false : snapshot.state.sidebarOpen !== false);
   const [sidebarWidth, setSidebarWidth] = useState(snapshot.state.sidebarWidth || 252);
   const extraSurfaceActive = surface === "providers"
+    || surface === "agent-orchestrator-original"
+    || surface === "antigravity-cli"
     || surface === "integrations"
     || surface === "cpa"
 
@@ -566,10 +569,14 @@ function LauncherShell({
   };
 
   const navigateSurface = (next: Surface) => {
+    if (["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(next)) {
+      setError(`${next} is retired and unavailable.`);
+      return;
+    }
     if (next !== "browser") {
       void api!.setBrowserSurfaceActive(false).catch((cause) => setError(messageOf(cause)));
     }
-    setSurface(next === "codex-router" ? "oauth" : next === "api-models" ? "providers" : next);
+    setSurface(next === "api-models" ? "providers" : next);
     if (compactSidebar) setSidebarOpen(false);
   };
 
@@ -635,6 +642,7 @@ function LauncherShell({
         copy={copy}
         devProfile={devProfile}
         draggable={surface !== "browser"}
+        setError={setError}
         sidebarOpen={sidebarOpen}
         toggleSidebar={toggleSidebar}
       />
@@ -721,13 +729,25 @@ function LauncherShell({
                 <SidebarItem active={surface === "native-codex"} icon="orchestrator" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
                 <SidebarItem active={surface === "oauth"} icon="providers" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
 
-                <SidebarItem active={surface === "orchestrator"} icon="orchestrator" label={copy.structuredOrchestrator} onClick={() => navigateSurface("orchestrator")} />
+
                 <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Agent Orchestrator" onClick={() => navigateSurface("agent-orchestrator")} />
 
 
               </SidebarGroup>
               <details className="sidebar-more" open={extraSurfaceActive}>
                 <summary>{copy.moreTools}</summary>
+                <SidebarItem
+                  active={surface === "agent-orchestrator-original"}
+                  icon="orchestrator"
+                  label="Agent Orchestrator"
+                  onClick={() => navigateSurface("agent-orchestrator-original")}
+                />
+                <SidebarItem
+                  active={surface === "antigravity-cli"}
+                  icon="setup"
+                  label="Antigravity CLI"
+                  onClick={() => navigateSurface("antigravity-cli")}
+                />
                 <SidebarItem
                   active={surface === "providers"}
                   icon="providers"
@@ -770,7 +790,7 @@ function LauncherShell({
                   active={false}
                   disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
                   icon="update"
-                  label={updateBusy ? copy.updating : `${copy.updateAvailable} Coding Tools v${updateVersion}`}
+                  label={updateBusy ? copy.updating : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`)}
                   onClick={() => void installUpdate()}
                   tone="update"
                 />
@@ -849,19 +869,20 @@ function LauncherShell({
             {(surface === "providers" || surface === "api-models") ? (
               <ProviderCenterSurface initialCategory={surface === "api-models" ? "api_key" : "all"} language={language} setError={setError} />
             ) : null}
-            {surface === "orchestrator" ? (
-              <OrchestratorSurface language={language} setError={setError} />
-            ) : null}
+
             {surface === "agent-orchestrator" ? (
-              <ContentSurface title="Agent Orchestrator"><AgentOrchestratorSurface language={language} setError={setError} /></ContentSurface>
+              <AgentOrchestratorSurface language={language} setError={setError} />
+            ) : null}
+            {surface === "agent-orchestrator-original" ? (
+              <AgentOrchestratorOriginalSurface openMissions={() => navigateSurface("agent-orchestrator")} />
+            ) : null}
+            {surface === "antigravity-cli" ? (
+              <AntigravityCliSurface setError={setError} openNetwork={() => navigateSurface("network")} />
             ) : null}
             {surface === "integrations" ? (
               <ExternalServicesSurface
                 language={language}
-                openAnneal={() => navigateSurface("anneal")}
                 openCpa={() => navigateSurface("cpa")}
-                openCodexRouter={() => navigateSurface("codex-router")}
-                openPaseo={() => navigateSurface("paseo")}
                 openProviders={() => navigateSurface("providers")}
                 setError={setError}
               />
@@ -870,21 +891,9 @@ function LauncherShell({
               <OriginalUiSurface language={language} setError={setError} toolId="cpa" />
             ) : null}
 
-            {surface === "paseo" ? (
-              <UpstreamToolSurface
-                language={language}
-                nativeControl={<PaseoOrchestratorSurface language={language} setError={setError} />}
-                setError={setError}
-                toolId="paseo"
-              />
-            ) : null}
-            {surface === "anneal" ? (
-              <UpstreamToolSurface
-                language={language}
-                nativeControl={<AnnealTasksSurface language={language} setError={setError} />}
-                setError={setError}
-                toolId="anneal"
-              />
+
+            {["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(surface) ? (
+              <ContentSurface title="Module retired"><p>This standalone module is retired and unavailable.</p></ContentSurface>
             ) : null}
             {surface === "network" ? (
               <NetworkProxySurface language={language} setError={setError} />
@@ -932,16 +941,82 @@ function LauncherShell({
   );
 }
 
+const REFRESH_PARTS: readonly [RefreshPart, string][] = [
+  ["all", "Refresh all"],
+  ["ui", "UI only"],
+  ["bridge", "Codex bridge"],
+  ["mcp", "MCP tunnel"],
+  ["agent-orchestrator", "Agent Orchestrator"],
+  ["cpa", "CPA"],
+  ["headless", "Workspace service"],
+  ["backend", "Whole backend (keep app, bridge, MCP, CPA)"],
+  ["app", "Restart app (keep bridge, MCP, CPA)"],
+];
+
+/** One-click refresh for the UI and each separately running part. */
+function RefreshMenu({ setError }: { setError: (error: string | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<RefreshPart | "">("");
+  const menu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (event: MouseEvent) => {
+      if (menu.current && !menu.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const run = async (part: RefreshPart) => {
+    setOpen(false);
+    setBusy(part);
+    setError(null);
+    try {
+      const result = await api!.refreshPart(part);
+      const failed = result.results.filter((item) => !item.ok);
+      if (failed.length) setError(failed.map((item) => `${item.part}: ${item.message ?? "refresh failed"}`).join("; "));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <div className="refresh-menu" ref={menu}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={busy ? `Refreshing ${busy}` : "Refresh"}
+        className={`icon-button${busy ? " is-busy" : ""}`}
+        disabled={Boolean(busy)}
+        onClick={() => setOpen((value) => !value)}
+        title="Refresh the UI or a single part"
+        type="button"
+      >
+        <Icon name="reload" />
+      </button>
+      {open ? (
+        <div className="refresh-menu-list" role="menu">
+          {REFRESH_PARTS.map(([part, label]) => (
+            <button key={part} onClick={() => void run(part)} role="menuitem" type="button">{label}</button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TitleBar({
   copy,
   devProfile,
   draggable,
+  setError,
   sidebarOpen,
   toggleSidebar,
 }: {
   copy: Copy;
   devProfile: boolean;
   draggable: boolean;
+  setError: (error: string | null) => void;
   sidebarOpen: boolean;
   toggleSidebar: () => void;
 }) {
@@ -953,6 +1028,7 @@ function TitleBar({
           label={sidebarOpen ? copy.hideSidebar : copy.showSidebar}
           onClick={toggleSidebar}
         />
+        <RefreshMenu setError={setError} />
         {devProfile ? <span className="titlebar-dev-profile">{copy.devBadge}</span> : null}
       </div>
     </header>
@@ -1850,6 +1926,7 @@ function SettingsSurface({
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
   const [updateNotice, setUpdateNotice] = useState("");
+  const guiUpdating = ["checking", "downloading", "installing"].includes(snapshot.update.status);
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1904,18 +1981,13 @@ function SettingsSurface({
       setBusy(false);
     }
   };
-  const checkForUpdates = async () => {
+  const updateGui = async () => {
     setBusy(true);
     setError(null);
+    setUpdateNotice("");
     try {
-      const next = await api!.checkForUpdates();
-      setUpdateNotice(next.status === "available"
-        ? (language === "zh-TW" ? `已找到 Coding Tools v${next.version}` : `Coding Tools v${next.version} is available`)
-        : next.status === "up-to-date"
-          ? (language === "zh-TW" ? "目前已是最新版本。" : "Coding Tools is up to date.")
-          : next.status === "error"
-            ? next.message
-            : (language === "zh-TW" ? "正在檢查更新…" : "Checking for updates…"));
+      const updated = await api!.installUpdate();
+      if (!updated) setUpdateNotice(language === "zh-TW" ? "GUI 已是最新版本。" : "The GUI is up to date.");
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1963,13 +2035,13 @@ function SettingsSurface({
         </SettingRow> : null}
         {!devProfile ? <SettingRow
           body={updateNotice || (language === "zh-TW"
-            ? "定期尋找完整而相容的 Coding Tools release；閒置時可自動安裝，亦可立即手動檢查。"
-            : "Periodically discover complete compatible Coding Tools releases, install while idle, or check immediately.")}
-          label={language === "zh-TW" ? "自動更新" : "Automatic updates"}
+            ? "自動檢查 GUI 更新；一鍵刷新介面。MCP、Codex Bridge 及 Proxy Bridge 持續執行。"
+            : "Automatically check for GUI updates. One click downloads and refreshes the interface while MCP, Codex Bridge and Proxy Bridge keep running.")}
+          label={language === "zh-TW" ? "GUI 更新" : "GUI updates"}
         >
           <div className="inline-actions">
-            <SecondaryButton disabled={busy} onClick={() => void checkForUpdates()}>
-              {language === "zh-TW" ? "立即檢查" : "Check now"}
+            <SecondaryButton disabled={busy || guiUpdating} onClick={() => void updateGui()}>
+              {guiUpdating ? (language === "zh-TW" ? "更新中…" : "Updating GUI…") : (language === "zh-TW" ? "更新 GUI" : "Update GUI")}
             </SecondaryButton>
             <Switch
               checked={snapshot.state.automaticUpdates}

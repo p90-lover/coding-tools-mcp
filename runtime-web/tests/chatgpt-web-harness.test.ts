@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildResponseJSON } from "../src/bridge";
@@ -29,9 +29,15 @@ import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compac
 import { parseRequest } from "../src/responses/parser";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
 
-const tempRoot = join(tmpdir(), `codex-chatgpt-web-harness-${process.pid}-${Date.now()}`);
+const tempName = `codex-chatgpt-web-harness-${process.pid}-${Date.now()}`;
+const tempParent = resolve(import.meta.dir, "../../aiTemp");
+const tempRoot = join(tempParent, tempName);
 mkdirSync(tempRoot, { recursive: true });
-afterAll(() => rmSync(tempRoot, { recursive: true, force: true }));
+afterAll(() => {
+  const trash = join(tempParent, "Trash");
+  mkdirSync(trash, { recursive: true });
+  if (existsSync(tempRoot)) renameSync(tempRoot, join(trash, tempName));
+});
 
 test("current-turn MCP progress tracks active calls without claiming completion", async () => {
   const progress = new ChatGptExternalTurnProgress();
@@ -2619,11 +2625,16 @@ describe("ChatGPT outer-native harness v4", () => {
       const listed = await client.listTools();
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
         "codex_apply_patch",
+        "codex_chat_sessions",
         "codex_exec",
         "codex_tool_call",
         "codex_tool_inventory",
         "codex_view_image",
         "codex_write_stdin",
+        "coding_tools_agent_orchestrator",
+        "coding_tools_apps_inspect",
+        "coding_tools_native_codex",
+        "coding_tools_workspaces",
       ]);
       const publicConnectorAbi = listed.tools.map(tool => ({
         name: tool.name,
@@ -2636,8 +2647,8 @@ describe("ChatGPT outer-native harness v4", () => {
       // ChatGPT caches the complete tools/list contract under a connector identity.
       // An intentional hash change therefore requires an explicit connector refresh or identity migration.
       expect(createHash("sha256").update(canonicalJson(publicConnectorAbi)).digest("hex"))
-        .toBe("5cb59b378c7d1939e260a2b4a60f58e22da31208fe09c2cc17a2cf31eb5ff3ad");
-      for (const tool of listed.tools) {
+        .toBe("4912226d6dbfe351ceae176642832059980956d7fbcbe0db8007b8d2b451dc09");
+      for (const tool of listed.tools.filter(tool => tool.name.startsWith("codex_"))) {
         const properties = tool.inputSchema.properties as Record<string, unknown>;
         expect(properties.turn_token).toEqual({ type: "string", minLength: 20, maxLength: 256 });
         expect(properties).not.toHaveProperty("binding_id");
@@ -2672,6 +2683,9 @@ describe("ChatGPT outer-native harness v4", () => {
         destructiveHint: false,
         idempotentHint: true,
         openWorldHint: false,
+      });
+      expect(listed.tools.find(tool => tool.name === "codex_chat_sessions")?.annotations).toMatchObject({
+        readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
       });
       expect(listed.tools.find(tool => tool.name === "codex_tool_call")?.annotations).toMatchObject({
         readOnlyHint: false,

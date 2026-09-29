@@ -95,10 +95,12 @@ function requestJson({ endpoint, token, localUiToken = null, pathname, method = 
 }
 
 class HeadlessHost {
-  constructor({ app, logger, sourceRoot }) {
+  constructor({ app, logger, sourceRoot, binaryRoot = null }) {
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
+    // A swappable backend bundle carries its own headless executable under coding-tools/.
+    this.binaryRoot = binaryRoot;
     this.child = null;
     this.control = null;
     this.starting = null;
@@ -110,6 +112,7 @@ class HeadlessHost {
     const name = `coding-tools-headless${suffix}`;
     const candidates = [
       process.env.CODING_TOOLS_HEADLESS_BINARY,
+      this.binaryRoot ? path.join(this.binaryRoot, "coding-tools", name) : null,
       this.app.isPackaged ? path.join(process.resourcesPath, "coding-tools", name) : null,
       path.join(this.sourceRoot, "rust-core", "target", "debug", name),
       path.join(this.sourceRoot, "rust-core", "target", "release", name),
@@ -152,6 +155,7 @@ class HeadlessHost {
       env: {
         ...process.env,
         CODING_TOOLS_APP_DATA_DIR: appDataDir,
+        ...(process.env.CODING_TOOLS_DEV_HOME ? { CODING_TOOLS_STATE_DIR: process.env.CODING_TOOLS_STATE_DIR || path.join(appDataDir, "state") } : {}),
         CODING_TOOLS_CONTROL_DESCRIPTOR_FILE: descriptorPath,
         CODING_TOOLS_CONTROL_TOKEN_FILE: tokenPath,
         CODING_TOOLS_LOCAL_UI_STDIN: "1",

@@ -7,7 +7,7 @@ const CHECKS = new Set([
   "tunnel-binary", "tunnel-key", "tunnel-service", "tunnel-runtime", "connector", "tools",
   "runtime", "dev-profile", "dev-tunnel-credentials", "dev-tunnel-runtime", "responses-listener",
 ]);
-const MODULES = new Set(["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]);
+const MODULES = new Set(["cpa", "paseo", "anneal"]);
 const CHECK_STATES = new Set(["ok", "warning", "error"]);
 const INSTALL_STATES = new Set(["installed", "not-installed", "repair-required", "error"]);
 

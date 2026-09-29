@@ -26,12 +26,11 @@ export type ProviderCapability =
   | "image_generation";
 
 export type ProxyMode = "inherit" | "direct" | "custom";
-export type ProviderLoginMode = "browser" | "antigravity_management" | "commandcode_oauth";
+export type ProviderLoginMode = "browser" | "antigravity_management";
 export type ProviderLoginAdapterKind =
   | "native_browser"
   | "cpa_oauth"
-  | "cpa_auth_file"
-  | "commandcode_oauth";
+  | "cpa_auth_file";
 
 export interface ProviderLoginAdapterDefinition {
   id: string;
@@ -204,23 +203,41 @@ export const DEFAULT_PROVIDERS = [
   },
   {
     id: "commandcode-proxy",
-    name: "CommandCode Proxy",
-    category: "reverse_proxy",
-    auth: "local_proxy",
+    name: "CommandCode Go (CPA)",
+    category: "oauth",
+    auth: "oauth",
     protocol: "openai_chat",
     capabilities: ["text", "reasoning", "tools"],
     models: [],
     proxyMode: "custom",
-    baseUrl: "http://127.0.0.1:9090",
+    baseUrl: "http://127.0.0.1:8317",
     modelsEndpoint: "/v1/models",
-    loginMode: "commandcode_oauth",
     loginAdapters: [
-      { id: "commandcode-oauth", kind: "commandcode_oauth", label: "CommandCode OAuth", labelTraditionalChinese: "CommandCode OAuth" },
+      { id: "cpa-commandcode-go", kind: "cpa_oauth", label: "CommandCode Go via CPA", labelTraditionalChinese: "透過 CPA 登入 CommandCode Go", route: "commandcode-go-auth-url", cpaProvider: "commandcode-go" },
     ],
     subagentEnabled: true,
     paseoEnabled: true,
     annealEnabled: true,
     priority: 30,
+  },
+  {
+    id: "commandcode-studio",
+    name: "CommandCode Studio (CPA)",
+    category: "oauth",
+    auth: "oauth",
+    protocol: "openai_chat",
+    capabilities: ["text", "reasoning", "tools"],
+    models: [],
+    proxyMode: "custom",
+    baseUrl: "http://127.0.0.1:8317",
+    modelsEndpoint: "/v1/models",
+    loginAdapters: [
+      { id: "cpa-commandcode-studio", kind: "cpa_oauth", label: "CommandCode Studio via CPA", labelTraditionalChinese: "透過 CPA 登入 CommandCode Studio", route: "commandcode-auth-url", cpaProvider: "commandcode" },
+    ],
+    subagentEnabled: true,
+    paseoEnabled: true,
+    annealEnabled: true,
+    priority: 31,
   },
 ] satisfies ProviderDefinition[];
 

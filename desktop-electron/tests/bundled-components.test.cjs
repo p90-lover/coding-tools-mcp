@@ -2,7 +2,6 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
@@ -15,10 +14,12 @@ const {
 } = require("../electron/managed-components.cjs");
 
 const root = path.resolve(__dirname, "..");
-const REAL_IDS = ["codex-router", "commandcode-proxy", "cpa", "paseo", "anneal"];
+const REAL_IDS = ["cpa", "paseo", "anneal"];
 
 function temporaryDirectory(name) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
+  const scratch = path.resolve(root, "..", "aiTemp");
+  fs.mkdirSync(scratch, { recursive: true });
+  return fs.mkdtempSync(path.join(scratch, `${name}-`));
 }
 
 function writeJson(filePath, value) {
@@ -104,88 +105,27 @@ test("Start copies bundled production node_modules so Paseo does not fetch npm p
   assert.equal(fs.existsSync(path.join(destination, ".git")), false);
 });
 
-test("real CommandCode, Paseo and Anneal manifests are bundled-source inside Desktop", () => {
-  assert.deepEqual([...BUNDLED_COMPONENT_IDS], ["commandcode-proxy", "paseo", "anneal"]);
-  const commandcode = loadManagedManifest("commandcode-proxy", path.join(root, "vendor", "managed-components"));
+test("Paseo and Anneal remain bundled while CPA uses its pinned release", () => {
+  assert.deepEqual([...BUNDLED_COMPONENT_IDS], ["paseo", "anneal"]);
   const paseo = loadManagedManifest("paseo", path.join(root, "vendor", "managed-components"));
   const anneal = loadManagedManifest("anneal", path.join(root, "vendor", "managed-components"));
-  const router = JSON.parse(fs.readFileSync(path.join(root, "vendor/managed-components/codex-router.json"), "utf8"));
-  const cpa = JSON.parse(fs.readFileSync(path.join(root, "vendor/managed-components/cpa.json"), "utf8"));
-
-  assert.equal(commandcode.strategy, "bundled-source");
+  const cpa = loadManagedManifest("cpa", path.join(root, "vendor", "managed-components"));
   assert.equal(paseo.strategy, "bundled-source");
   assert.equal(anneal.strategy, "bundled-source");
-  assert.equal(commandcode.bundle.entrypoint, "proxy.mjs");
-  assert.equal(anneal.credentials.githubReadToken.required, false);
-  assert.equal(fs.existsSync(path.join(root, "vendor/bundled/commandcode-proxy/proxy.mjs")), true);
-  assert.match(router.health.endpoint, /127\.0\.0\.1:4202|_codex-router/);
-  assert.match(cpa.health.endpoint, /127\.0\.0\.1:8317/);
+  assert.equal(cpa.strategy, "release-binary");
 });
 
 test("bundled-source manifests require a pinned commit and in-app entrypoint", () => {
-  const baseline = bundledManifest("commandcode-proxy");
-  assert.doesNotThrow(() => assertSafeManifest(baseline, "commandcode-proxy"));
+  const baseline = bundledManifest("paseo");
+  assert.doesNotThrow(() => assertSafeManifest(baseline, "paseo"));
   assert.throws(
-    () => assertSafeManifest({ ...baseline, commit: "main" }, "commandcode-proxy"),
+    () => assertSafeManifest({ ...baseline, commit: "main" }, "paseo"),
     /commit must be pinned/i,
   );
   assert.throws(
-    () => assertSafeManifest({ ...baseline, bundle: {} }, "commandcode-proxy"),
+    () => assertSafeManifest({ ...baseline, bundle: {} }, "paseo"),
     /bundled entrypoint/i,
   );
-});
-
-test("Start copies the in-app payload without git clone and then launches it", async () => {
-  const manifestRoot = temporaryDirectory("coding-tools-bundled-manifests");
-  const bundledRoot = temporaryDirectory("coding-tools-bundled-payload");
-  const dataRoot = temporaryDirectory("coding-tools-bundled-data");
-  const commands = [];
-  const children = [];
-  const payload = "console.log('bundled-proxy');\n";
-
-  for (const id of REAL_IDS) {
-    if (id === "commandcode-proxy") {
-      writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id));
-      writeBundleTree(bundledRoot, id, payload);
-      continue;
-    }
-    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id, {
-      health: { endpoint: `http://127.0.0.1:${id === "paseo" ? 6768 : 5173}/`, acceptStatus: [200] },
-    }));
-  }
-
-  const controller = createManagedComponentController({
-    manifestRoot,
-    bundledRoot,
-    dataRoot,
-    safeStorage: { isEncryptionAvailable: () => false },
-    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
-    spawnProcess: (executable, args) => {
-      commands.push({ executable, args: [...args] });
-      const child = mockChild(9300 + children.length);
-      children.push(child);
-      return child;
-    },
-    spawnSyncProcess: (executable, args) => {
-      commands.push({ executable, args: [...args], sync: true });
-      throw new Error(`unexpected sync spawn: ${executable}`);
-    },
-    resolveRuntimeExecutable: () => "/runtime/node",
-    now: () => "2026-09-18T08:00:00.000Z",
-  });
-
-  const before = controller.project("commandcode-proxy");
-  assert.equal(before.installState, "not-installed");
-  assert.equal(before.missingCredentials.length, 0);
-
-  const started = await controller.startComponent("commandcode-proxy");
-  assert.equal(started.installState, "installed");
-  assert.equal(started.strategy, "bundled-source");
-  assert.equal(fs.readFileSync(path.join(started.managedHome, "proxy.mjs"), "utf8"), payload);
-  assert.equal(commands.some((entry) => entry.args?.[0] === "clone"), false);
-  assert.equal(children.length, 1);
-  assert.equal(started.processes[0].running, true);
-  controller.dispose();
 });
 
 test("Anneal bundled install does not block on a missing GitHub token", async () => {

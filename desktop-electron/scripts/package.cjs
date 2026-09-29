@@ -43,6 +43,23 @@ const builderArgs = [
 if (target === "--mac" && !env.CSC_LINK && !env.CSC_NAME) {
   builderArgs.push("--config.mac.identity=-");
 }
+// Windows builds are Authenticode-signed with CSC_LINK/CSC_KEY_PASSWORD (a .pfx), or with
+// Azure Trusted Signing when its account is configured (credentials come from AZURE_TENANT_ID,
+// AZURE_CLIENT_ID and AZURE_CLIENT_SECRET). Unsigned builds are routinely flagged by antivirus.
+if (target === "--win" && !env.CSC_LINK && env.AZURE_TRUSTED_SIGNING_ENDPOINT) {
+  const required = ["AZURE_TRUSTED_SIGNING_ACCOUNT", "AZURE_TRUSTED_SIGNING_PROFILE", "AZURE_TRUSTED_SIGNING_PUBLISHER"];
+  const missing = required.filter((name) => !env[name]);
+  if (missing.length) throw new Error(`Azure Trusted Signing needs ${missing.join(", ")}`);
+  builderArgs.push(
+    `--config.win.azureSignOptions.endpoint=${env.AZURE_TRUSTED_SIGNING_ENDPOINT}`,
+    `--config.win.azureSignOptions.codeSigningAccountName=${env.AZURE_TRUSTED_SIGNING_ACCOUNT}`,
+    `--config.win.azureSignOptions.certificateProfileName=${env.AZURE_TRUSTED_SIGNING_PROFILE}`,
+    `--config.win.azureSignOptions.publisherName=${env.AZURE_TRUSTED_SIGNING_PUBLISHER}`,
+  );
+}
+if (target === "--win" && !env.CSC_LINK && !env.AZURE_TRUSTED_SIGNING_ENDPOINT) {
+  console.warn("[package] Windows build is unsigned; antivirus tools may quarantine Coding Tools.exe.");
+}
 
 const preservation = createPreservationSession({
   repositoryRoot,

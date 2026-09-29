@@ -35,12 +35,11 @@ test("upstream controller exposes a bounded restart operation", () => {
   controller.dispose();
 });
 
-test("main, preload, and types retain diagnostic restart while the renderer delegates lifecycle to managed controls", () => {
+test("diagnostic restart retains its IPC contract while retired upstream UI is unmounted", () => {
   const main = read("electron/main.cjs");
   const preload = read("electron/preload.cjs");
   const types = read("src/types.ts");
   const app = read("src/App.tsx");
-  const surface = read("src/features/UpstreamToolSurface.tsx");
 
   assert.match(main, /launcher:upstream-tool-restart/);
   assert.match(
@@ -55,10 +54,5 @@ test("main, preload, and types retain diagnostic restart while the renderer dele
     /restartUpstreamTool:\s*\(toolId\)\s*=>\s*ipcRenderer\.invoke\("launcher:upstream-tool-restart", toolId\)/,
   );
   assert.match(types, /restartUpstreamTool\(toolId: UpstreamToolId\)/);
-  assert.match(app, /<UpstreamToolSurface/);
-  assert.match(surface, /nativeControl/);
-  assert.match(surface, /Coding Tools managed connection controls/);
-  assert.doesNotMatch(surface, /restartUpstreamTool/);
-  assert.doesNotMatch(surface, /startUpstreamTool/);
-  assert.doesNotMatch(surface, /stopUpstreamTool/);
+  assert.doesNotMatch(app, /<UpstreamToolSurface/);
 });

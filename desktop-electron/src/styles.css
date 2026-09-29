@@ -2894,3 +2894,11 @@ code {
     transition-duration: 0.01ms !important;
   }
 }
+
+.refresh-menu { position: relative; display: inline-flex; }
+.refresh-menu .icon-button.is-busy svg { animation: refresh-spin 0.9s linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
+.refresh-menu-list { position: absolute; z-index: 300; top: calc(100% + 4px); left: 0; display: grid; min-width: 230px; padding: 4px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 8px; background: var(--color-background-elevated); box-shadow: 0 12px 32px rgb(0 0 0 / 35%); }
+.refresh-menu-list button { padding: 7px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-primary); font-size: 12px; text-align: left; }
+.refresh-menu-list button:hover, .refresh-menu-list button:focus-visible { background: rgb(255 255 255 / 7%); }
+@media (prefers-reduced-motion: reduce) { .refresh-menu .icon-button.is-busy svg { animation: none; } }

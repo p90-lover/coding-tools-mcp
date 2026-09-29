@@ -7,17 +7,42 @@ const path = require("node:path");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const { spawn, spawnSync } = require("node:child_process");
+const { EventEmitter } = require("node:events");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
-const { writeInAppProvidersFile } = require("./five-stack-cross-use.cjs");
-const { terminateOwnedProcessTree } = require("./process-tree.cjs");
+const { processRunning, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
-const COMPONENT_IDS = Object.freeze([
-  "codex-router",
-  "commandcode-proxy",
-  "cpa",
-  "paseo",
-  "anneal",
-]);
+const PERSISTENT_LOG_ROTATE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Handle for a persistent component process started by an earlier launcher. It reports
+ * exit by polling the pid, which is all the start, stop and keep-alive paths need.
+ */
+class PersistedComponentProcess extends EventEmitter {
+  constructor(pid, pollMs = 1_000) {
+    super();
+    this.pid = pid;
+    this.exitCode = null;
+    this.signalCode = null;
+    this.adopted = true;
+    this.timer = setInterval(() => {
+      if (processRunning(this.pid)) return;
+      clearInterval(this.timer);
+      this.exitCode = 0;
+      this.emit("exit", 0, null);
+    }, pollMs);
+    this.timer.unref?.();
+  }
+
+  kill(signal = "SIGTERM") {
+    try { process.kill(this.pid, signal); return true; } catch { return false; }
+  }
+
+  release() {
+    clearInterval(this.timer);
+  }
+}
+
+const COMPONENT_IDS = Object.freeze(["cpa"]);
 const COMPONENT_ID_SET = new Set(COMPONENT_IDS);
 const INSTALL_STATES = Object.freeze([
   "not-installed",
@@ -40,7 +65,7 @@ const ALLOWED_STEP_KINDS = new Set([
 ]);
 const PINNED_SOURCE_STRATEGIES = new Set(["git-source", "bundled-source"]);
 const ALLOWED_STRATEGIES = new Set(["release-binary", "git-source", "bundled-source"]);
-const BUNDLED_COMPONENT_IDS = Object.freeze(["commandcode-proxy", "paseo", "anneal"]);
+const BUNDLED_COMPONENT_IDS = Object.freeze([]);
 const SAFE_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const FORBIDDEN_COMMANDS = new Set([
   "del",
@@ -427,6 +452,10 @@ function createManagedComponentController({
   publish = null,
   now = () => new Date().toISOString(),
   peerEnvironment = null,
+  // Components listed here run detached with file-backed logs, outlive a launcher restart
+  // or update, and are adopted by the next launcher when their version and health match.
+  persistentComponents = [],
+  healthProbe = null,
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   const downloadFetch = typeof fetchImpl === "function" ? fetchImpl : null;
@@ -444,6 +473,7 @@ function createManagedComponentController({
   const stoppingChildren = new WeakSet();
   let disposed = false;
   let secrets = readJson(secretPath) || { version: SECRET_VERSION, components: {} };
+  const persistentIds = new Set(Array.isArray(persistentComponents) ? persistentComponents : []);
 
   for (const directory of [componentsRoot, stateRoot, aiTempRoot, trashRoot]) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -544,7 +574,7 @@ function createManagedComponentController({
   function ensureComponentSecrets(id) {
     let current = secretFor(id);
     let changed = false;
-    if ((id === "commandcode-proxy" || id === "cpa") && !current.proxyApiKey) {
+    if (id === "cpa" && !current.proxyApiKey) {
       current = { ...current, proxyApiKey: crypto.randomBytes(36).toString("base64url") };
       changed = true;
     }
@@ -1350,6 +1380,99 @@ function createManagedComponentController({
     };
   }
 
+  function persistentPrimaryId(manifest) {
+    return manifest.launch.primaryProcessId
+      || manifest.launch.processes.find((entry) => entry.mode !== "command" && entry.detached !== true)?.id;
+  }
+
+  function isPersistentProcess(manifest, processEntry) {
+    return persistentIds.has(manifest.id) && processEntry.id === persistentPrimaryId(manifest);
+  }
+
+  function persistedRecordPath(id) {
+    return path.join(stateRoot, `${id}.process.json`);
+  }
+
+  function persistedLogPath(id) {
+    return path.join(stateRoot, `${id}.process.log`);
+  }
+
+  function readPersistedRecord(id) {
+    const record = readJson(persistedRecordPath(id));
+    return record && Number.isInteger(record.pid) && record.pid > 0 ? record : null;
+  }
+
+  function clearPersistedRecord(id) {
+    try { fs.rmSync(persistedRecordPath(id), { force: true }); } catch {}
+  }
+
+  function openPersistedLog(id) {
+    const logPath = persistedLogPath(id);
+    try {
+      if (fs.statSync(logPath).size > PERSISTENT_LOG_ROTATE_BYTES) fs.renameSync(logPath, `${logPath}.1`);
+    } catch {}
+    return fs.openSync(logPath, "a", 0o600);
+  }
+
+  async function probeHealth(id) {
+    const health = manifestFor(id).health;
+    if (!health?.endpoint) return false;
+    if (typeof healthProbe === "function") return healthProbe(id, health);
+    if (!downloadFetch) return false;
+    try {
+      const response = await downloadFetch(health.endpoint, {
+        headers: healthHeaders(id),
+        signal: AbortSignal.timeout(3_000),
+      });
+      return (health.acceptStatus || [200]).includes(response.status);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Adopt a healthy persistent component left running by an earlier launcher. */
+  async function adoptPersistedComponent(manifest, active) {
+    if (!persistentIds.has(manifest.id)) return false;
+    const record = readPersistedRecord(manifest.id);
+    if (!record) return false;
+    if (!processRunning(record.pid)) {
+      clearPersistedRecord(manifest.id);
+      return false;
+    }
+    // A component from another version, or one that no longer answers, is replaced.
+    if (record.version !== manifest.version || !await probeHealth(manifest.id)) return false;
+    const primaryId = persistentPrimaryId(manifest);
+    const handle = new PersistedComponentProcess(record.pid);
+    active.set(primaryId, handle);
+    handle.once("exit", (code, signal) => {
+      active.delete(primaryId);
+      clearPersistedRecord(manifest.id);
+      if (!stoppingChildren.has(handle)) {
+        setOperation(manifest.id, { state: "error", step: null, error: `${primaryId} exited (${code ?? signal ?? "unknown"})` });
+      } else emit();
+    });
+    logger?.info?.("managed-component.adopted", { componentId: manifest.id, pid: record.pid, version: record.version });
+    return true;
+  }
+
+  /** Stop a stale persistent component (another version, or unhealthy) before replacing it. */
+  async function stopStalePersistedComponent(manifest) {
+    if (!persistentIds.has(manifest.id)) return;
+    const record = readPersistedRecord(manifest.id);
+    if (!record || !processRunning(record.pid)) {
+      clearPersistedRecord(manifest.id);
+      return;
+    }
+    const handle = new PersistedComponentProcess(record.pid);
+    try {
+      await stopChild(handle);
+    } finally {
+      handle.release();
+      clearPersistedRecord(manifest.id);
+    }
+    logger?.info?.("managed-component.replaced_stale", { componentId: manifest.id, pid: record.pid, version: record.version });
+  }
+
   function attachProcessLogging(manifest, processEntry, child) {
     const log = (stream, chunk) => {
       const message = String(chunk || "").trim().slice(-2_000);
@@ -1364,14 +1487,15 @@ function createManagedComponentController({
     const id = requiredComponentId(idValue);
     const manifest = manifestFor(id);
     const source = sourceState(manifest);
+    if (persistentIds.has(id) && readPersistedRecord(id)?.version !== manifest.version) {
+      // An older persistent build still holds its files open; stop it before installing over them.
+      await stopStalePersistedComponent(manifest);
+    }
     if (source.state !== "installed") {
       await installComponent(id, { repair: source.state === "repair-required" || source.state === "error" });
     }
     if (disposed) throw new Error("Managed component controller has been disposed");
     const context = launchContext(manifest);
-    if (id === "codex-router") {
-      writeInAppProvidersFile(path.join(context.state, "router"));
-    }
     const existing = processes.get(id);
     if (existing && [...existing.values()].some((child) => child && child.exitCode === null && child.signalCode === null)) {
       return project(id);
@@ -1380,6 +1504,11 @@ function createManagedComponentController({
     const active = new Map();
     processes.set(id, active);
     try {
+      if (await adoptPersistedComponent(manifest, active)) {
+        setOperation(id, { state: "installed", step: null, error: null });
+        return project(id);
+      }
+      await stopStalePersistedComponent(manifest);
       for (const processEntry of manifest.launch.processes) {
         if (processEntry.detached === true || processEntry.mode === "command") {
           await runCommand(processEntry, context);
@@ -1387,8 +1516,22 @@ function createManagedComponentController({
         }
         const spec = commandSpec(processEntry, context);
         if (disposed) throw new Error("Managed component controller has been disposed");
-        const child = spawnProcess(spec.executable, spec.args, spec.options);
+        const persistent = isPersistentProcess(manifest, processEntry);
+        const logFd = persistent ? openPersistedLog(id) : null;
+        let child;
+        try {
+          child = spawnProcess(spec.executable, spec.args, persistent
+            ? { ...spec.options, detached: true, stdio: ["ignore", logFd, logFd] }
+            : spec.options);
+        } finally {
+          if (logFd !== null) fs.closeSync(logFd);
+        }
         active.set(processEntry.id, child);
+        if (persistent && Number.isInteger(child.pid)) {
+          writePrivateFileAtomic(persistedRecordPath(id), `${JSON.stringify({
+            pid: child.pid, version: manifest.version, startedAt: now(),
+          })}\n`);
+        }
         attachProcessLogging(manifest, processEntry, child);
         child.once?.("error", (error) => {
           active.delete(processEntry.id);
@@ -1451,6 +1594,7 @@ function createManagedComponentController({
     const active = processes.get(id) || new Map();
     for (const child of [...active.values()].reverse()) await stopChild(child);
     processes.delete(id);
+    if (persistentIds.has(id)) clearPersistedRecord(id);
     const context = sourceState(manifest).state === "installed" ? launchContext(manifest) : null;
     if (context) {
       for (const stopEntry of manifest.launch.stop || []) {
@@ -1483,11 +1627,6 @@ function createManagedComponentController({
       || manifest.launch.processes.find((entry) => entry.mode !== "command" && entry.detached !== true)
       || manifest.launch.processes[0];
     const spec = commandSpec(primary, context);
-    const cli = manifest.cli?.[platform] || manifest.cli?.default || null;
-    const callerSecretPath = path.join(context.state, "router", "caller-secret");
-    const callerKey = id === "codex-router" && fs.existsSync(callerSecretPath)
-      ? fs.readFileSync(callerSecretPath, "utf8").trim()
-      : "";
     return {
       home: context.home,
       state: context.state,
@@ -1495,11 +1634,6 @@ function createManagedComponentController({
       arguments: [...spec.args],
       endpoint: manifest.health.endpoint.replace("{callerKey}", ""),
       executionEndpoint: manifest.executionEndpoint || undefined,
-      ...(id === "codex-router" ? {
-        routerCli: cli ? expandToken(cli.router, context) : context.artifact,
-        curateCli: cli ? expandToken(cli.curate, context) : context.artifact,
-        callerKey,
-      } : {}),
     };
   }
 
@@ -1523,11 +1657,19 @@ function createManagedComponentController({
     return { Authorization: authorization };
   }
 
-  function dispose() {
+  function dispose({ keepPersistent = false } = {}) {
     disposed = true;
     const failures = [];
     for (const [id, active] of processes) {
       for (const [processId, child] of active) {
+        if (keepPersistent && persistentIds.has(id) && processId === persistentPrimaryId(manifestFor(id))) {
+          // Leave the component running for the next launcher, which adopts it.
+          child?.release?.();
+          child?.unref?.();
+          active.delete(processId);
+          logger?.info?.("managed-component.detached", { componentId: id, pid: child?.pid ?? null });
+          continue;
+        }
         try {
           if (child && child.exitCode === null && child.signalCode === null) {
             if (platform === "win32") {

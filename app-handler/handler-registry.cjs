@@ -4,7 +4,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const MODULES_ROOT = __dirname;
-const FOREIGN_SLOTS = Object.freeze(["cpa", "codex-router"]);
+const FOREIGN_SLOTS = Object.freeze(["cpa"]);
+const ACTIVE_MODULE_IDS = new Set(["cpa", "agent-orchestrator", "antigravity-cli"]);
 const CORE_OPERATIONS = Object.freeze([
   "inspect",
   "install",
@@ -36,6 +37,7 @@ function loadModules() {
   for (const entry of fs.readdirSync(MODULES_ROOT, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const id = entry.name;
+    if (!ACTIVE_MODULE_IDS.has(id)) continue;
     const moduleJsonPath = path.join(MODULES_ROOT, id, "module.json");
     const handlerPath = path.join(MODULES_ROOT, id, "handler.cjs");
     if (!fs.existsSync(moduleJsonPath) || !fs.existsSync(handlerPath)) continue;

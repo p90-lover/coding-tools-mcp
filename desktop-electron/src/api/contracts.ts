@@ -57,6 +57,7 @@ export interface CodingToolsApi {
   };
   readonly workspaces: {
     list(input?: PageRequest): Promise<Page<WorkspaceSummary>>;
+    create(input: { readonly path: string; readonly name?: string; readonly confirm: true }): Promise<{ readonly cancelled: boolean; readonly id: string | null; readonly name: string | null; readonly path: string | null }>;
     updatePolicy(input: {
       readonly workspaceId: string;
       readonly permissionMode: "read-only" | "workspace-write";
@@ -161,14 +162,14 @@ export interface CodingToolsApi {
     list(): Promise<JsonObject>;
     catalog(): Promise<JsonObject>;
     call(input: {
-      readonly moduleId: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal" | "agent-orchestrator";
+      readonly moduleId: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli";
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;
     }): Promise<JsonObject>;
     invoke(input: {
-      readonly handle?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal" | "agent-orchestrator";
-      readonly moduleId?: "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal" | "agent-orchestrator";
+      readonly handle?: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli";
+      readonly moduleId?: "cpa" | "paseo" | "anneal" | "agent-orchestrator" | "antigravity-cli";
       readonly operation: string;
       readonly requestId?: string;
       readonly arguments?: JsonObject;

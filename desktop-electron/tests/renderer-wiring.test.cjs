@@ -11,6 +11,114 @@ const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
+const aoSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "AgentOrchestratorSurface.tsx"), "utf8");
+const servicesSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "ExternalServicesSurface.tsx"), "utf8");
+const proxySource = fs.readFileSync(path.join(launcherRoot, "src", "features", "NetworkProxySurface.tsx"), "utf8");
+
+test("both AO sidebar destinations mount the original UI and Runtime selects its mission board", () => {
+  assert.match(appSource, /surface === "agent-orchestrator" \? \(\s*<AgentOrchestratorOriginalSurface\s+projectBoard\s+openMissions=\{\(\) => navigateSurface\("agent-orchestrator-original"\)\}/);
+  assert.match(appSource, /surface === "agent-orchestrator-original" \? \(\s*<AgentOrchestratorOriginalSurface\s+openMissions=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
+  assert.doesNotMatch(appSource, /<AgentOrchestratorSurface\b/);
+});
+
+test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", async () => {
+  const vm = require("node:vm");
+  const ts = require(require.resolve("typescript", { paths: [launcherRoot] }));
+  const source = fs.readFileSync(path.join(launcherRoot, "src", "features", "InProcessAppsPanel.tsx"), "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  const calls = [];
+  const state = [];
+  let hook = 0;
+  const jsx = (type, props) => ({ type, props });
+  const client = { apps: {
+    list: async () => ({ modules: [
+      { id: "paseo", operations: ["inspect"] },
+      { id: "cpa", operations: ["inspect"] },
+      { id: "anneal", operations: ["inspect"] },
+      { id: "agent-orchestrator", operations: ["inspect"] },
+      { id: "codex-router", operations: ["inspect"] },
+      { id: "commandcode-proxy", operations: ["inspect"] },
+    ] }),
+    call: async (args) => { calls.push(["call", args]); return {}; },
+    invoke: async (args) => { calls.push(["invoke", args]); return {}; },
+  } };
+  const exports = {};
+  vm.runInNewContext(compiled, {
+    exports,
+    require: (name) => name === "react"
+      ? {
+          useState: (initial) => {
+            const index = hook++;
+            if (!(index in state)) state[index] = initial;
+            return [state[index], (value) => { state[index] = typeof value === "function" ? value(state[index]) : value; }];
+          },
+          useMemo: (compute) => compute(),
+          useEffect: () => {},
+        }
+      : name === "react/jsx-runtime"
+        ? { jsx, jsxs: jsx }
+        : name === "../api/client"
+          ? { getCodingToolsClient: () => client }
+          : {},
+  });
+  const render = () => {
+    hook = 0;
+    return exports.InProcessAppsPanel({
+      copy: { inProcessApps: "Apps", refreshTools: "Refresh", inProcessAppsCall: "Call", inProcessAppsInvoke: "Invoke" },
+      language: "en",
+      setError: () => {},
+    });
+  };
+  const nodes = (tree, type) => {
+    if (!tree || typeof tree !== "object") return [];
+    const children = [tree.props?.children].flat(Infinity);
+    return [...(tree.type === type ? [tree] : []), ...children.flatMap((child) => nodes(child, type))];
+  };
+  nodes(render(), "button")[0].props.onClick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const tree = render();
+  assert.deepEqual(Array.from(nodes(tree, "li"), (item) => item.props.children[1].props.children), ["cpa", "agent-orchestrator"]);
+  assert.deepEqual(Array.from(nodes(tree, "option"), (item) => item.props.value).slice(0, 2), ["cpa", "agent-orchestrator"]);
+
+  state[1] = "paseo"; // A selection held by an event handler during an async catalog refresh.
+  const stale = render();
+  await nodes(stale, "button")[1].props.onClick();
+  await nodes(stale, "button")[2].props.onClick();
+  assert.equal(calls.length, 0);
+
+  state[1] = "cpa";
+  const current = render();
+  await nodes(current, "button")[1].props.onClick();
+  await nodes(current, "button")[2].props.onClick();
+  assert.deepEqual(calls.map(([mode, args]) => [mode, args.moduleId ?? args.handle]), [["call", "cpa"], ["invoke", "cpa"]]);
+});
+
+test("AO is the sole Runtime orchestrator and lets workers pick an AO harness", () => {
+  assert.match(appSource, /label="Agent Orchestrator" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
+  assert.doesNotMatch(appSource, /label=\{copy\.structuredOrchestrator\}|surface === "orchestrator"|surface === "paseo"|navigateSurface\("paseo"\)/);
+  assert.match(appSource, /setError\(`\$\{next\} is retired and unavailable\.`\)/);
+  assert.match(aoSource, /moduleCall\("harnesses"\)/);
+  assert.match(aoSource, /<HarnessPicker route=\{workerRouteDraft\}/);
+});
+
+test("retired standalone surfaces cannot navigate or start from Integrations", () => {
+  assert.match(appSource, /\["paseo", "anneal", "codex-router", "commandcode-proxy"\]\.includes\(next\)/);
+  assert.doesNotMatch(appSource, /<AnnealTasksSurface|toolId="anneal"|navigateSurface\("anneal"\)/);
+  assert.match(servicesSource, /serviceRows = services\.services\.filter\(\(service\) => service\.id === "cpa"\)/);
+  assert.doesNotMatch(servicesSource, /reconcileManagedBootstrap|openPaseo|openAnneal/);
+  assert.match(appSource, /<McpSurface|<AgentOrchestratorSurface|toolId="cpa"/);
+  assert.match(servicesSource, /CommandCode login is available in CPA Accounts/);
+});
+
+test("proxy scope picker omits retired standalone modules", () => {
+  const scopeOptions = proxySource.slice(proxySource.indexOf("const SCOPES"), proxySource.indexOf("const MODES"));
+  assert.doesNotMatch(scopeOptions, /"paseo"|"anneal"/);
+  const defaultDraft = proxySource.slice(proxySource.indexOf("function emptyDraft"), proxySource.indexOf("function fromProfile"));
+  assert.doesNotMatch(defaultDraft, /"paseo"|"anneal"/);
+  assert.match(scopeOptions, /"mcp"/);
+});
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);

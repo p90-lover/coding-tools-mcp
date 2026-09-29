@@ -1,12 +1,6 @@
 "use strict";
 
-const DEFAULT_COMPONENT_IDS = Object.freeze([
-  "cpa",
-  "codex-router",
-  "commandcode-proxy",
-  "paseo",
-  "anneal",
-]);
+const DEFAULT_COMPONENT_IDS = Object.freeze(["cpa"]);
 
 const COMPONENT_STATUSES = new Set([
   "pending",
@@ -46,6 +40,9 @@ function normalizeComponentIds(values) {
   for (const value of values) {
     const id = typeof value === "string" ? value.trim() : "";
     if (!id) throw new Error("Managed bootstrap component IDs must be non-empty strings");
+    if (["paseo", "codex-router", "commandcode-proxy", "anneal"].includes(id)) {
+      throw new Error(`Managed bootstrap component is retired: ${id}`);
+    }
     if (seen.has(id)) continue;
     seen.add(id);
     normalized.push(id);
