@@ -53,7 +53,33 @@ async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executabl
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch }) {
+// The installed Codex desktop app keeps its CLI at %LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe;
+// the newest build wins. A chat send or a Start/Resume without a chosen executable uses it.
+function findInstalledCodexExecutable(env = process.env) {
+  if (process.platform !== "win32" || !env.LOCALAPPDATA) return null;
+  const root = path.join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin");
+  let best = null;
+  let builds = [];
+  try { builds = fs.readdirSync(root); } catch { return null; }
+  for (const build of builds) {
+    const file = path.join(root, build, "codex.exe");
+    try {
+      const metadata = fs.statSync(file);
+      if (metadata.isFile() && (!best || metadata.mtimeMs > best.mtimeMs)) best = { file, mtimeMs: metadata.mtimeMs };
+    } catch {}
+  }
+  return best?.file ?? null;
+}
+
+const CHAT_TASK_TITLE = "New task";
+
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable }) {
+  function codexExecutable(chosen) {
+    if (typeof chosen === "string" && chosen.trim()) return clean(chosen, 1024);
+    const found = findCodexExecutable();
+    if (!found) throw new Error("The Codex desktop app was not found; choose its codex.exe in AO settings");
+    return found;
+  }
   const backgroundRuns = new Map();
   const dispatching = new Set();
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
@@ -553,7 +579,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const { workspaceId, runId, executable } = input;
     const id = clean(workspaceId, 128);
     const run = clean(runId, 80);
-    const selectedExecutable = clean(executable, 1024);
+    const selectedExecutable = codexExecutable(executable);
     const key = runKey(id, run);
     const existing = backgroundRuns.get(key);
     if (existing?.starting || existing?.driving || existing?.status === "running") {
@@ -673,8 +699,64 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       prompt: fullClause ? `Work on ${task.title}: ${fullClause.title}. ${fullClause.detail} Inspect the exact workspace and report evidence before marking this clause done.`.trim() : null };
   }
 
+  // --- chat-first missions -------------------------------------------------------------
+  // One chat is one board task. The first message creates the task (titled "New task" unless the
+  // user names it) and starts a team run; a later message is appended to the task description and
+  // starts a fresh run on the same task. Appending mid-run would change the run's graph fingerprint
+  // and void its grant, so follow-ups wait until the chat's current run has settled.
+
+  function runSettled(run) {
+    return run.cancelled || (run.nodes ?? []).every((node) => ["finished", "cancelled", "archived"].includes(node.state));
+  }
+
+  async function chatSend({ workspaceId, taskId, title, message, executable } = {}) {
+    const id = clean(workspaceId, 128);
+    const text = clean(message, 8192, false);
+    if (!text.trim()) throw new Error("Type a message to start the chat");
+    const selectedExecutable = codexExecutable(executable);
+    const saved = await runs({ workspaceId: id });
+    const team = saved.team;
+    if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
+
+    let task;
+    if (taskId) {
+      task = clean(taskId, 128);
+      if (saved.runs.some((run) => run.project_id === task && !runSettled(run))) {
+        throw new Error("This chat is still running; wait for it to finish or stop it first");
+      }
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task) throw new Error("This chat's task no longer exists");
+      const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
+      const description = `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
+      if (description.length > 8192) throw new Error("This chat is full; start a new chat to continue");
+      await write(id, { expected_revision: detail.revision,
+        change: { operation: "edit", id: task, title: detail.task.title, description } });
+    } else {
+      const before = await board({ workspaceId: id });
+      const known = new Set(before.tasks.map((entry) => entry.id));
+      await write(id, { expected_revision: before.revision, change: {
+        operation: "create", title: clean(title && String(title).trim() ? title : CHAT_TASK_TITLE, 240), description: text,
+      } });
+      const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
+      if (added.length !== 1) throw new Error("The new chat's task needs review; refresh the board");
+      task = added[0].id;
+    }
+
+    const current = await board({ workspaceId: id });
+    const runId = randomUUID();
+    await updateRun({ workspaceId: id, change: {
+      operation: "create_from_team", run_id: runId, task_id: task,
+      expected_board_revision: current.revision, team_revision: team.revision,
+      worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
+    } });
+    const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
+    return { ok: true, taskId: task, runId, status: started.status };
+  }
+
   async function call(operation, args = {}) {
     switch (operation) {
+      case "chat_send": return chatSend(args);
+      case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };
       case "board": return board(args);
       case "models": return models(args);
@@ -703,4 +785,4 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   return Object.freeze({ call });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, clausesFrom, resolveAoNativeConnection };
+module.exports = { createAgentOrchestratorWorkflow, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable };

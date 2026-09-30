@@ -35,6 +35,8 @@ const SPECS = Object.freeze({
   run_status: { readOnly: true, description: "Read background AO run progress and held state." },
   approve_harness: { readOnly: false, description: "Allow once or deny one visible AO-owned native tool request after focused local confirmation." },
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },
+  chat_send: { readOnly: false, description: "Send a chat message: create the chat's task (or append a follow-up) and start a team run on it." },
+  codex_executable: { readOnly: true, description: "Locate the installed Codex desktop app's codex.exe used to run missions." },
 
   create: { readOnly: false, description: "Create a task for the Coding Tools mission board at its expected revision." },
   append: { readOnly: false, description: "Append reviewed clauses to the old plan board with its expected revision." },

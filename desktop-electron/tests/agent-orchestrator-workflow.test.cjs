@@ -598,3 +598,76 @@ test("any worker can pick WebGPT or any CPA pool model on Native Codex", async (
   });
   assert.deepEqual((await offline.call("models", { harness: "codex-native" })).models, ["chatgpt-web/high"]);
 });
+
+// A fake headless service holding one workspace's board, runs and team.
+function chatWorld({ runs = [], tasks = [] } = {}) {
+  const state = { revision: 3, tasks: tasks.map((task) => ({ ...task })), runs, updates: [], edits: [] };
+  const requestHeadless = async (endpoint, body) => {
+    if (endpoint === "/api/v1/tools/call") {
+      const args = body.arguments;
+      if (body.tool === "workflow_list") {
+        const listed = state.tasks.map(({ description, ...rest }) => rest);
+        return { operation: { state: "completed", result: { ok: true, revision: state.revision, workspace_id: "ws-1", steps: [],
+          ...(args.task_id ? { task: state.tasks.find((task) => task.id === args.task_id) ?? null } : { tasks: listed }) } } };
+      }
+      assert.equal(args.expected_revision, state.revision);
+      if (args.change.operation === "create") state.tasks.push({ id: `task-${state.tasks.length + 1}`, title: args.change.title, description: args.change.description, state: "backlog", clauses: [] });
+      if (args.change.operation === "edit") { state.edits.push(args.change); Object.assign(state.tasks.find((task) => task.id === args.change.id), { title: args.change.title, description: args.change.description }); }
+      state.revision += 1;
+      return { operation: { state: "completed", result: { ok: true } } };
+    }
+    if (endpoint === "/api/v1/ao/read") {
+      const pending = body.run_id ? [{ id: body.run_id, workspace_id: "ws-1", revision: 1, nodes: [{ id: "lead", state: "pending", route: { model: "chatgpt-web/high" } }] }] : state.runs;
+      return { ok: true, runs: pending, team: { id: "team-1", revision: 7, worker_limit: 2 } };
+    }
+    if (endpoint === "/api/v1/ao/update") {
+      state.updates.push(body.change);
+      return { ok: true, run: { id: body.change.run_id, workspace_id: "ws-1" } };
+    }
+    throw new Error(`unexpected ${endpoint}`);
+  };
+  return state.requestHeadless = requestHeadless, state;
+}
+
+test("a first chat message creates 'New task' and starts a team run on it with the installed Codex", async () => {
+  const world = chatWorld();
+  const seen = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: world.requestHeadless,
+    findCodexExecutable: () => "C:\Codex\codex.exe",
+    resolveHarness: async (input) => { seen.push(input.executable); throw new Error("stop before the background loop"); },
+  });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the email dots" }), /stop before the background loop/);
+  assert.deepEqual(world.tasks.map((task) => [task.title, task.description]), [["New task", "fix the email dots"]]);
+  assert.equal(world.updates.length, 1);
+  assert.equal(world.updates[0].operation, "create_from_team");
+  assert.equal(world.updates[0].task_id, "task-1");
+  assert.equal(world.updates[0].expected_board_revision, 4);
+  assert.equal(world.updates[0].team_revision, 7);
+  assert.equal(world.updates[0].worker_limit, 2);
+  assert.deepEqual(seen, ["C:\Codex\codex.exe"]);
+});
+
+test("a follow-up waits for the chat's run, then extends the same task and starts a new run", async () => {
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const busy = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "running" }] }] });
+  const blocked = createAgentOrchestratorWorkflow({ requestHeadless: busy.requestHeadless, findCodexExecutable: () => "C:\c.exe" });
+  await assert.rejects(blocked.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "also add tests" }), /still running/);
+  assert.equal(busy.edits.length, 0);
+
+  const done = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: done.requestHeadless, findCodexExecutable: () => "C:\c.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "also add tests" }), /stop before/);
+  assert.equal(done.edits.length, 1);
+  assert.equal(done.edits[0].title, "Fix auth");
+  assert.match(done.edits[0].description, /^first ask\n\nFollow-up \([0-9-]+ [0-9:]+ UTC\):\nalso add tests$/);
+  assert.equal(done.updates[0].task_id, "task-1");
+});
+
+test("without an installed Codex a chat send explains what to set", async () => {
+  const world = chatWorld();
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => null });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "hi" }), /Codex desktop app was not found/);
+  assert.equal(world.tasks.length, 0, "nothing is created when the run could not start");
+});
