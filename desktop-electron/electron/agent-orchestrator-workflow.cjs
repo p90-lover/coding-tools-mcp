@@ -502,7 +502,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
 
   async function controlRun({ workspaceId, runId, action, executable } = {}) {
-    if (!["pause", "resume", "stop"].includes(action)) throw new Error("Choose a mission control");
+    if (!["pause", "resume", "stop", "retry"].includes(action)) throw new Error("Choose a mission control");
     const id = clean(workspaceId, 128), run = clean(runId, 80);
     const result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, confirm: true }, { localConfirmation: true });
     if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
@@ -517,13 +517,74 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (action === "resume") {
       if (current?.driving) { current.status = "running"; current.detail = undefined; }
       else return startRun({ workspaceId: id, runId: run, executable });
-    } else if (current) {
+    } else if (current && action !== "retry") {
       current.status = action === "pause" ? "paused" : "held";
       current.stopped = action === "stop";
       current.detail = action === "pause" ? "Paused; already-sent turns may finish" : "Stopped by you";
       reportRun(id, run, current, null);
     }
     return result;
+  }
+
+  // --- recovery helper ------------------------------------------------------------------
+  // When a card is held (its turn failed or could not be confirmed), a helper model reads the
+  // failure and decides: retry the card, wait for the user, or stop. It runs on the CPA pool so it
+  // does not depend on the WebGPT path that may have just failed. Retries are bounded by the card's
+  // two-attempt history, so a card that keeps failing ends with the helper's reason, not a loop.
+  const HELPER_ATTEMPT_LIMIT = 2;
+  const TRANSIENT_FAILURE = /not confirm|timed out|timeout|disconnected|network|ECONNRESET|socket|502|503|504|stream/i;
+
+  async function askRecoveryHelper({ mission, node, task }) {
+    const { baseUrl, key } = connection();
+    const catalog = (await models()).models;
+    const preferred = mission.nodes.find((entry) => entry.route?.provider_id === "cliproxyapi-antigravity")?.route.model;
+    const model = catalog.includes(preferred) ? preferred : catalog[0];
+    if (!model) throw new Error("CPA has no model for the recovery helper");
+    const role = node.settings?.name || node.role;
+    const prompt = [
+      "A step in an orchestrated coding mission failed. Decide the next step.",
+      `Step: ${role} (${node.role}), model ${node.route?.model}`,
+      `Attempts so far: ${(node.history?.length ?? 0) + 1} of ${HELPER_ATTEMPT_LIMIT + 1}`,
+      `Failure: ${String(node.receipt?.error || "no error text").slice(0, 1500)}`,
+      `Task: ${String(task?.title || "").slice(0, 200)}`,
+      String(task?.description || "").slice(0, 1500),
+      'Answer with JSON only: {"action":"retry"|"wait"|"stop","reason":"<one sentence for the user>"}.',
+      "retry: the failure looks transient or fixable by running the step again.",
+      "wait: a person must act first (approval, sign-in, missing input). stop: retrying cannot help.",
+    ].join("\n");
+    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!response.ok) throw new Error(`Recovery helper returned HTTP ${response.status}`);
+    const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
+    const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+    if (!["retry", "wait", "stop"].includes(decision?.action)) throw new Error("Recovery helper gave no decision");
+    return { action: decision.action, reason: String(decision.reason || "").slice(0, 300), model };
+  }
+
+  // Returns a status detail for the user; retrying re-queues the held cards.
+  async function recoverHeld(workspaceId, mission) {
+    const held = mission.nodes.filter((node) => node.state === "held");
+    if (!held.length || mission.cancelled) return null;
+    const exhausted = held.find((node) => (node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT);
+    if (exhausted) return `${exhausted.settings?.name || exhausted.role} failed ${HELPER_ATTEMPT_LIMIT + 1} times; decide the next step yourself or send a follow-up`;
+    const node = held[0];
+    let decision;
+    try {
+      const task = (await board({ workspaceId, taskId: mission.project_id })).task;
+      decision = await askRecoveryHelper({ mission, node, task });
+    } catch {
+      // No helper available: retry only what looks transient.
+      decision = TRANSIENT_FAILURE.test(String(node.receipt?.error || ""))
+        ? { action: "retry", reason: "The failure looks transient" }
+        : { action: "wait", reason: "The recovery helper is unavailable; inspect the failed step" };
+    }
+    if (decision.action !== "retry") return `Helper: ${decision.reason || decision.action}`;
+    await controlRun({ workspaceId, runId: mission.id, action: "retry" });
+    return `Helper retried ${node.settings?.name || node.role}: ${decision.reason}`;
   }
 
   async function driveRun(workspaceId, runId, executable, state) {
@@ -552,8 +613,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         const running = mission.nodes.some(node => node.state === "running");
         if (mission.cancelled || mission.nodes.some(node => ["held", "cancelled", "archived", "reserved"].includes(node.state))) {
           if (running) { state.detail = "Finishing already-sent turns; no more work will start"; await pause(); continue; }
+          const helped = state.stopped ? null : await recoverHeld(workspaceId, mission).catch((error) => `Helper failed: ${error.message}`);
+          if (helped?.startsWith("Helper retried")) {
+            state.status = "held"; state.detail = helped;
+            // The retry dropped the grant; start again once this loop has ended.
+            setTimeout(() => { void startRun({ workspaceId, runId, executable }).catch(() => {}); }, 0);
+            return;
+          }
           state.status = "held";
-          state.detail = "Run stopped; inspect the saved cards";
+          state.detail = helped || "Run stopped; inspect the saved cards";
           reportRun(workspaceId, runId, state, mission, state.stopped ? null : "stopped");
           return;
         }
@@ -594,7 +662,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     } catch (error) {
       state.status = "held";
       state.detail = String(error?.message || "AO stage outcome is uncertain; inspect the saved run before retrying")
-        .replace(/Bearer\\s+\\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]").slice(0, 500);
+        .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]").slice(0, 500);
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
     } finally { state.driving = false; }
   }
@@ -616,8 +684,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     backgroundRuns.set(key, state);
     try {
       const saved = await runs({ workspaceId: id, runId: run });
-      const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+      let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
       if (mission?.paused) throw new Error("Resume this paused mission from its local controls");
+      // Starting a run whose card is held (and nothing still running) is an explicit retry.
+      if (mission && !mission.cancelled && mission.nodes.some((node) => node.state === "held")
+        && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
+        await controlRun({ workspaceId: id, runId: run, action: "retry" });
+        const again = await runs({ workspaceId: id, runId: run });
+        mission = again.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+      }
       if (!mission || mission.cancelled || !mission.nodes?.length
         || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved"].includes(node.state))) {
         throw new Error("AO run has an active or unresolved card; inspect it before starting");
@@ -736,6 +811,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return run.cancelled || (run.nodes ?? []).every((node) => ["finished", "cancelled", "archived"].includes(node.state));
   }
 
+  // A chat starts as "New task"; once its run has started, name it after what was asked.
+  function fallbackChatTitle(message) {
+    const words = String(message).replace(/\s+/g, " ").trim().split(" ").slice(0, 8).join(" ");
+    return words.length > 60 ? `${words.slice(0, 57).trimEnd()}...` : words || CHAT_TASK_TITLE;
+  }
+
+  async function nameChat(workspaceId, taskId, message) {
+    let name = "";
+    try {
+      const { baseUrl, key } = connection();
+      const model = (await models()).models[0];
+      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, temperature: 0, max_tokens: 30, messages: [{ role: "user", content:
+          `Name this coding task in at most 6 words. Reply with the name only, no quotes.\n\n${String(message).slice(0, 2000)}` }] }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (response.ok) name = String((await response.json())?.choices?.[0]?.message?.content ?? "");
+    } catch { /* CPA unavailable: fall back to the message itself. */ }
+    name = name.replace(/["'`*#]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || fallbackChatTitle(message);
+    const detail = await board({ workspaceId, taskId });
+    // Only a chat still using the default name is renamed; a name the user chose wins.
+    if (!detail.task || detail.task.title !== CHAT_TASK_TITLE || name === CHAT_TASK_TITLE) return;
+    await write(workspaceId, { expected_revision: detail.revision,
+      change: { operation: "edit", id: taskId, title: clean(name, 240), description: detail.task.description } });
+  }
+
   async function chatSend({ workspaceId, taskId, title, message, executable } = {}) {
     const id = clean(workspaceId, 128);
     const text = clean(message, 8192, false);
@@ -779,6 +882,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
       const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
+      if (!taskId) void nameChat(id, task, text).catch(() => undefined);
       return { ok: true, taskId: task, runId, status: started.status };
     } catch (error) {
       return { ok: true, taskId: task, runId, status: "failed", detail: error instanceof Error ? error.message : String(error) };

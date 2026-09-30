@@ -96,7 +96,8 @@ test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", 
 });
 
 test("AO is the sole Runtime orchestrator and lets workers pick an AO harness", () => {
-  assert.match(appSource, /label="Agent Orchestrator" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
+  // The Runtime entry is named Chat and sits first, above Activity.
+  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>\s*<SidebarItem active=\{surface === "activity"\}/);
   assert.doesNotMatch(appSource, /label=\{copy\.structuredOrchestrator\}|surface === "orchestrator"|surface === "paseo"|navigateSurface\("paseo"\)/);
   assert.match(appSource, /setError\(`\$\{next\} is retired and unavailable\.`\)/);
   assert.match(aoSource, /moduleCall\("harnesses"\)/);

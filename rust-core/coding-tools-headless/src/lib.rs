@@ -3334,7 +3334,7 @@ async fn ao_harness_approval(
 async fn ao_control(State(state): State<ServiceState>, headers: HeaderMap, Json(body): Json<AoControlRequest>) -> Response {
     if let Err(response) = auth(&headers, &state) { return *response; }
     let _lease = match admit(&state, "ao_control") { Ok(lease) => lease, Err(response) => return *response };
-    if !body.confirm || !local_ui_authorized(&headers, &state) || !matches!(body.action.as_str(), "pause" | "resume" | "stop") {
+    if !body.confirm || !local_ui_authorized(&headers, &state) || !matches!(body.action.as_str(), "pause" | "resume" | "stop" | "retry") {
         return json_error(StatusCode::FORBIDDEN, "AO_CONTROL_LOCAL_ONLY", "Use the local mission controls");
     }
     let workspace_id = body.workspace_id;

@@ -126,6 +126,22 @@ pub fn control(data: &mut AppData, workspace_id: &str, run_id: &str, action: &st
             run.paused = true; run.cancelled = true; run.grant = None;
             for node in &mut run.nodes { if node.state == State::Pending { node.state = State::Cancelled; } }
         },
+        // A held card (its turn failed or could not be confirmed) goes back to the queue; the
+        // failed attempt stays in its history. The grant is dropped so the next start re-grants.
+        "retry" if !run.cancelled => {
+            let mut retried = false;
+            for node in &mut run.nodes {
+                if node.state != State::Held { continue; }
+                if let Some(receipt) = node.receipt.take() { node.history.push(receipt); }
+                if node.history.len() > 2 { let excess = node.history.len() - 2; node.history.drain(..excess); }
+                node.request_key = None;
+                node.state = State::Pending;
+                retried = true;
+            }
+            if !retried { return Err(fail("This mission has no held card to retry")); }
+            run.grant = None;
+            run.paused = false;
+        },
         "stopped" if run.cancelled => {
             for node in &mut run.nodes {
                 if matches!(node.state, State::Running | State::Reserved | State::Held) {
@@ -288,6 +304,36 @@ mod tests {
         assert_eq!(stopped.nodes[1].state, State::Cancelled);
         assert!(control(&mut data, "qa", "run-two", "resume").is_err());
     }
+    #[test]
+    fn a_held_card_can_be_retried_and_keeps_its_failed_attempt() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aiTemp").canonicalize().unwrap();
+        let mut data: AppData = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),"tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{"id":"goal","workspace_id":"qa","title":"Retry","description":"","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
+        })).unwrap();
+        let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+        let team: Team = serde_json::from_value(json!({"id":"team","workspace_id":"qa","name":"T","revision":0,"nodes":[
+            {"id":"lead","task_id":"","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":web},
+            {"id":"worker","task_id":"","role":"worker","parents":["lead"],"x":0,"y":1,"state":"pending","route":web},
+            {"id":"review","task_id":"","role":"reviewer","parents":["worker"],"x":0,"y":2,"state":"pending","route":web}
+        ]})).unwrap();
+        save(&mut data, "qa", 0, team).unwrap();
+        create_run(&mut data, "qa", "run".into(), "goal".into(), 1, 1, 2).unwrap();
+        assert!(control(&mut data, "qa", "run", "retry").is_err(), "nothing is held yet");
+        {
+            let run = data.ao_runs.iter_mut().find(|run| run.id == "run").unwrap();
+            run.nodes[0].state = State::Held;
+            run.nodes[0].request_key = Some("one".into());
+            run.nodes[0].receipt = Some(serde_json::from_value(json!({"request_key":"one","status":"held","error":"send not confirmed","route":web})).unwrap());
+        }
+        let retried = control(&mut data, "qa", "run", "retry").unwrap();
+        assert_eq!(retried.nodes[0].state, State::Pending);
+        assert!(retried.nodes[0].receipt.is_none() && retried.nodes[0].request_key.is_none());
+        assert_eq!(retried.nodes[0].history.len(), 1);
+        assert!(retried.grant.is_none() && !retried.paused);
+        ao::validate(Some(&data), &retried).unwrap();
+    }
+
     #[test]
     fn role_settings_and_limits_are_bounded_without_changing_credentials() {
         assert_eq!(Limits::default().max_workers, 3);

@@ -757,3 +757,122 @@ test("a saved codex.exe removed by a Codex update falls back to the installed on
   await chosen.call("chat_send", { workspaceId: "ws-1", message: "hi", executable: "D:/tools/codex.exe" });
   assert.deepEqual(kept, ["D:/tools/codex.exe"], "an existing chosen executable is kept");
 });
+
+function startableChatWorld() {
+  const world = chatWorld();
+  const base = world.requestHeadless;
+  world.controls = [];
+  world.requestHeadless = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: { id: body.run_id, workspace_id: "ws-1" }, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/control") { world.controls.push(body.action); return { ok: true, run: { id: body.run_id, workspace_id: "ws-1", nodes: [] } }; }
+    return base(endpoint, body, options);
+  };
+  return world;
+}
+
+async function until(check) {
+  for (let i = 0; i < 100 && !check(); i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+test("once its run starts, a 'New task' chat is renamed after what was asked", async () => {
+  const world = startableChatWorld();
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: world.requestHeadless,
+    findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url) => ({ ok: true, json: async () => (String(url).endsWith("/v1/models")
+      ? { data: [{ id: "gpt-6-luna" }] }
+      : { choices: [{ message: { content: "\"Fix unread email dots\"\n" } }] }) }),
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }),
+  });
+  const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "the unread dots in email are wrong" });
+  assert.equal(sent.status, "running");
+  await until(() => world.edits.length > 0);
+  assert.deepEqual(world.edits.map((edit) => [edit.title, edit.description]), [["Fix unread email dots", "the unread dots in email are wrong"]]);
+});
+
+test("a chat the user named keeps its name, and without CPA the message names it", async () => {
+  const named = startableChatWorld();
+  const options = (world) => ({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  await createAgentOrchestratorWorkflow(options(named)).call("chat_send", { workspaceId: "ws-1", title: "Mine", message: "do it" });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(named.edits, []);
+
+  const plain = startableChatWorld();
+  await createAgentOrchestratorWorkflow(options(plain)).call("chat_send", { workspaceId: "ws-1", message: "add   dark mode to the settings page please now" });
+  await until(() => plain.edits.length > 0);
+  assert.equal(plain.edits[0].title, "add dark mode to the settings page please", "first 8 words");
+});
+
+test("starting a mission whose card is held retries that card first", async () => {
+  let held = true;
+  const controls = [];
+  const requestHeadless = async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read") return { ok: true, team: null, runs: [{ id: "r1", workspace_id: "ws-1", revision: 2, cancelled: false,
+      nodes: [{ id: "lead", state: held ? "held" : "pending", route: { model: "chatgpt-web/high" }, receipt: held ? { error: "did not confirm" } : null }] }] };
+    if (endpoint === "/api/v1/ao/control") { controls.push(body.action); held = false; return { ok: true, run: { id: "r1", workspace_id: "ws-1", nodes: [] } }; }
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: { id: "r1", workspace_id: "ws-1" }, grant: { executable_sha256: "a".repeat(64) } };
+    throw new Error(`unexpected ${endpoint}`);
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  const started = await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  assert.equal(started.status, "running");
+  assert.deepEqual(controls, ["retry"]);
+  await assert.rejects(workflow.call("control_run", { workspaceId: "ws-1", runId: "r1", action: "rewind" }), /Choose a mission control/);
+});
+
+function heldMissionWorld({ history = [], error = "ChatGPT did not confirm that the prompt was sent" } = {}) {
+  const world = { reads: 0, controls: [], grants: 0, held: false };
+  world.requestHeadless = async (endpoint, body) => {
+    if (endpoint === "/api/v1/ao/read") {
+      world.reads += 1;
+      // The first start sees a pending card; the loop then finds it held until a retry re-queues it.
+      if (world.reads === 2 && !world.controls.length) world.held = true;
+      return { ok: true, team: null, worker_capacity: { r1: 1 }, runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", revision: 2, cancelled: false,
+        nodes: [{ id: "lead", role: "planner", state: world.held ? "held" : "pending", route: { model: "chatgpt-web/high", provider_id: "chatgpt-web" },
+          history, receipt: world.held ? { error } : null }] }] };
+    }
+    if (endpoint === "/api/v1/ao/control") { world.controls.push(body.action); world.held = false; return { ok: true, run: { id: "r1", workspace_id: "ws-1", nodes: [] } }; }
+    if (endpoint === "/api/v1/ao/grant") { world.grants += 1; return { ok: true, run: { id: "r1", workspace_id: "ws-1" }, grant: { executable_sha256: "a".repeat(64) } }; }
+    if (endpoint === "/api/v1/tools/call") return { operation: { state: "completed", result: { ok: true, revision: 1, workspace_id: "ws-1", steps: [], task: { id: "task-1", title: "T", description: "d" } } } };
+    throw new Error(`stop at ${endpoint}`);
+  };
+  return world;
+}
+
+test("a held card is handed to the recovery helper, which retries it and restarts the mission", async () => {
+  const world = heldMissionWorld();
+  const asked = [];
+  const states = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna" }] }) };
+      asked.push(JSON.parse(init.body).messages[0].content);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"retry","reason":"The send timed out"}' } }] }) };
+    },
+    onRunState: (update) => states.push(update?.detail),
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => world.grants >= 2);
+  assert.deepEqual(world.controls, ["retry"]);
+  assert.equal(world.grants, 2, "the mission was started again after the retry");
+  assert.match(asked[0], /did not confirm that the prompt was sent/);
+});
+
+test("the helper stops retrying a card that already failed three times", async () => {
+  const world = heldMissionWorld({ history: [{}, {}] });
+  let asked = 0;
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    fetchImpl: async () => { asked += 1; throw new Error("no"); },
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }) });
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => world.reads >= 2);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const status = await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" });
+  assert.deepEqual(world.controls, []);
+  assert.equal(asked, 0);
+  assert.match(JSON.stringify(status), /failed 3 times/);
+});

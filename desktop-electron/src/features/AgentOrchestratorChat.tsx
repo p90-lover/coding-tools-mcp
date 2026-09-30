@@ -136,6 +136,15 @@ export function AgentOrchestratorChat({
               </div>
             </div>
           ) : null}
+          {latest && chat?.status === "attention" ? (
+            <div className="ao-msg ao-msg-approval tone-error">
+              <span className="ao-msg-meta">A step failed</span>
+              <p>{notice || "The recovery helper retries failed steps up to three times. Retry now, or send a follow-up once you stop this chat."}</p>
+              <div className="ao-msg-actions">
+                <button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry failed step</button>
+              </div>
+            </div>
+          ) : null}
           {approvals.map((approval) => (
             <div key={approval.approval_id} className="ao-msg ao-msg-approval">
               <span className="ao-msg-meta">Approval needed</span>

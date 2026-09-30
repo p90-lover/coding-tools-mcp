@@ -130,7 +130,7 @@
 .ao-canvas-controls button:hover { background: rgb(255 255 255 / 8%); }
 .ao-canvas-controls span { min-width: 38px; color: var(--ao-muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: center; }
 .ao-connect-hint { position: absolute; z-index: 3; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 6px 12px; border-radius: 14px; background: var(--color-bg-secondary); font-size: 12px; }
-.ao-fab { position: absolute; z-index: 3; right: 14px; bottom: 14px; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px 0 11px; border: 1px solid var(--ao-line); border-radius: 17px; background: var(--color-bg-secondary); color: var(--color-text-primary); font-size: 12px; box-shadow: 0 6px 18px rgb(0 0 0 / 30%); }
+.ao-fab { position: absolute; z-index: 3; left: 12px; top: 12px; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px 0 11px; border: 1px solid var(--ao-line); border-radius: 17px; background: var(--color-bg-secondary); color: var(--color-text-primary); font-size: 12px; box-shadow: 0 6px 18px rgb(0 0 0 / 30%); }
 .ao-fab:hover:not(:disabled) { background: color-mix(in srgb, var(--color-bg-secondary) 80%, white); }
 .ao-fab:disabled { opacity: .4; }
 

@@ -230,19 +230,20 @@
       "persistPlanOnFirstHeartbeat": true
     }
   },
-  "status": "blocked",
-  "currentStepId": "src8-4",
+  "status": "converged",
   "completedStepIds": [
     "context",
     "src8-1",
     "src8-2",
-    "src8-3"
+    "src8-3",
+    "src8-4",
+    "src8-5",
+    "src8-6",
+    "src8-7",
+    "src8-8"
   ],
   "skippedSteps": [],
-  "unresolvedItems": [
-    "Historical 2026-09-28 transport exception lacks a retained low-level socket/proxy code; current installed runtime successfully serves the model catalog, so no reproducing failure or justified product patch remains.",
-    "Parent directed read-only stop during separate package build; do not change source, app, proxy, or Codex session."
-  ],
+  "unresolvedItems": [],
   "evidence": [
     {
       "kind": "requirements",
@@ -297,6 +298,81 @@
       "stepId": "src8-2",
       "reference": ".gitnexus; mcp-probe code_insight",
       "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Reproduced live 2026-09-30 02:20-02:40Z: Coding Tools restarted at 02:20:03 while ProxyBridgeRewrite also restarted (PID 6840 -> 7552). browser.navigation_failed ERR_PROXY_CONNECTION_FAILED at 02:20:55; the relay logged browser.native_fetch_failed netError=ERR_PROXY_CONNECTION_FAILED at 02:21:02, 02:25:37, 02:30:12, 02:34:47, 02:36:33; the fresh daemon (pid 14580) recorded catalog requests #1-#19 as 502 (stage upstream when the relay answered 502 native_network_error; stage transport when the fetch to the relay was aborted at ~5 s or reset).",
+      "stepId": "src8-4",
+      "reference": "%APPDATA%/Coding Tools/logs/launcher.jsonl",
+      "verifiedAt": "2026-09-30T02:45:44.000Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Recovery without any code change: /healthz at 02:45:44Z shows pid 14580, 24 catalog requests, 5 successful, last #24 HTTP 200 at 02:45:38Z; curl through 127.0.0.1:17891 exits loc=US.",
+      "stepId": "src8-4",
+      "reference": "http://127.0.0.1:17841/healthz",
+      "verifiedAt": "2026-09-30T02:45:44.000Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Mechanism: startCatalogVerificationMonitor publishes the FIRST failed catalog result of a daemon with successful_model_catalog_requests < 1 as publishOperation({name: catalog-verification, status: failed}). When a later request succeeds it sets codexCatalogVerified but never publishes a replacement operation, so lastOperation stays failed; App.tsx re-raises any failed snapshot.operation as an error banner on every renderer load.",
+      "stepId": "src8-4",
+      "reference": "desktop-electron/electron/main.cjs startCatalogVerificationMonitor; desktop-electron/src/App.tsx snapshot effect",
+      "verifiedAt": "2026-09-30T02:50:00.000Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Root cause: because the catalog monitor reports the first failed catalog request of a fresh daemon as a final failure and never clears it once a later request succeeds, a transient outage of the launcher's route to chatgpt.com at startup (ProxyBridge restarting -> ERR_PROXY_CONNECTION_FAILED, or the relay endpoint changing across a launcher restart -> transport) leaves Setup reporting 'model catalog loading failed: HTTP 502' even after the catalog loads and sign-in/smoke pass. Ruled out: catalog augmentation/parsing (same code returns 200 once the route is up); ChatGPT sign-in path (green throughout); the 2026-09-30 control-server change (relay failed before headers with a net error, not a stream error).",
+      "stepId": "src8-4",
+      "reference": "rootCauseAnalysis",
+      "verifiedAt": "2026-09-30T02:50:00.000Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Countermeasure chosen: when startCatalogVerificationMonitor marks the catalog verified and the last published operation is the catalog-verification failure, publish {name: catalog-verification, status: completed} so the stale failure stops re-raising as an error banner. Effective: removes the misleading Setup failure once any catalog request succeeds. Feasible: one hunk in main.cjs; the installed main.cjs monitor is byte-identical to source. Regression risk: low; only replaces an operation of the same name, never a different running/failed operation. Rejected for now: a startup grace period before reporting (larger change, hides real failures longer). Out of scope: ProxyBridge restarts themselves (external).",
+      "stepId": "src8-5",
+      "reference": "desktop-electron/electron/main.cjs startCatalogVerificationMonitor",
+      "verifiedAt": "2026-09-30T02:55:00.000Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "startCatalogVerificationMonitor publishes {name: catalog-verification, status: completed} when it marks the catalog verified and lastOperation is the catalog-verification failure.",
+      "stepId": "src8-6",
+      "reference": "desktop-electron/electron/main.cjs",
+      "revision": "cc16f6fa",
+      "verifiedAt": "2026-09-30T02:52:58.106Z"
+    },
+    {
+      "kind": "test",
+      "summary": "renderer-wiring 'catalog verification reports a failed request ... then recovers' now asserts the recovery replaces the failure (lastOperation completed). Fails without the fix (expected 2 operations, got 1), passes with it. Full desktop suite: 56 failures before and after, none new.",
+      "stepId": "src8-7",
+      "reference": "node --test desktop-electron/tests/renderer-wiring.test.cjs",
+      "revision": "cc16f6fa",
+      "verifiedAt": "2026-09-30T02:52:58.106Z"
+    },
+    {
+      "kind": "review",
+      "summary": "Reviewed cc16f6fa. Finding: it fixes the stale failure on renderer reload, but a banner already raised in a live session stayed until dismissed because onOperation only ever set errors. Fixed in 88180ff9: a completed operation clears only the error raised by the same operation's earlier failure. Also checked: the completed operation is published only when lastOperation is the catalog-verification failure, so it never replaces a different running or failed operation. renderer-wiring tests pass apart from the pre-existing Agent Orchestrator sidebar failure.",
+      "stepId": "src8-8",
+      "reference": "desktop-electron/src/App.tsx onOperation; desktop-electron/electron/main.cjs startCatalogVerificationMonitor",
+      "revision": "88180ff9",
+      "verifiedAt": "2026-09-30T02:55:52.720Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Correction to the src8-4 evidence: of the model_catalog_failed lines logged 02:20-02:46Z, 1558 were old daemon stderr replayed at startup (inner 'at' hours older than the log time); only 19 were live (#1-#19, 02:21:02-02:37:07), all during browser.native_fetch_failed ERR_PROXY_CONNECTION_FAILED. The 'relay endpoint changing across a launcher restart' path has no live evidence; the root cause rests on the proxy outage alone. The fix does not depend on that path.",
+      "stepId": "src8-4",
+      "reference": "%APPDATA%/Coding Tools/logs/launcher.jsonl (compare outer at vs inner at)",
+      "revision": "88180ff9",
+      "verifiedAt": "2026-09-30T03:13:03.810Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Deployed with the user's approval: installed app.asar now carries the monitor fix in main.cjs (monitor identical to source cc16f6fa) and the renderer from 88180ff9 (bundle index-DR01tDDD.js, sha256 prefix 6240758632d89eab). After the relaunch the fresh daemon pid 50400 reported 2/2 catalog requests HTTP 200 at 03:12:11Z.",
+      "stepId": "src8-8",
+      "reference": "C:/Users/simon/AppData/Local/Programs/Coding Tools/resources/app.asar; http://127.0.0.1:17841/healthz",
+      "revision": "88180ff9",
+      "verifiedAt": "2026-09-30T03:13:03.810Z"
     }
   ],
   "declaredScope": {
@@ -305,17 +381,65 @@
     "analysisMode": "src8"
   },
   "artifacts": [],
-  "memoryCandidates": [],
+  "memoryCandidates": [
+    {
+      "id": "catalog-502-transient-proxy",
+      "summary": "Setup 'model catalog loading failed: HTTP 502 transport/upstream' on the installed app is usually the launcher's route to chatgpt.com being down at daemon start (ProxyBridge restarting -> ERR_PROXY_CONNECTION_FAILED in browser.native_fetch_failed). Check /healthz successful_model_catalog_requests before debugging catalog code.",
+      "status": "validated",
+      "evidence": [
+        "launcher.jsonl 2026-09-30 02:20-02:45Z",
+        "healthz #24 HTTP 200 at 02:45:38Z"
+      ],
+      "payload": {
+        "summary": "Setup 'model catalog loading failed: HTTP 502 transport/upstream' on the installed app is usually the launcher's route to chatgpt.com being down at daemon start (ProxyBridge restarting -> ERR_PROXY_CONNECTION_FAILED in browser.native_fetch_failed). Check /healthz successful_model_catalog_requests before debugging catalog code."
+      },
+      "recordedAt": "2026-09-30T02:52:58.106Z"
+    }
+  ],
   "architectureCandidates": [],
-  "acceptanceResults": [],
+  "acceptanceResults": [
+    {
+      "gateId": "failing-test-turns-green",
+      "passed": true,
+      "summary": "Monitor test fails on the pre-fix main.cjs and passes on cc16f6fa.",
+      "reference": "desktop-electron/tests/renderer-wiring.test.cjs",
+      "verifiedAt": "2026-09-30T03:05:00.000Z"
+    },
+    {
+      "gateId": "no-regressions",
+      "passed": true,
+      "summary": "Full desktop-electron suite has the same 56 pre-existing failures with and without the change.",
+      "reference": "node --test desktop-electron/tests/*.test.cjs",
+      "verifiedAt": "2026-09-30T03:05:00.000Z"
+    }
+  ],
   "runtimeEvidence": [
     {
       "kind": "installed-runtime",
       "summary": "Installed bundle SHA256 4AB002541ECFD6AFD18E4714A79DE379F7C341D6445239C9F695B166D955AE39; latest catalog request #882 HTTP 200.",
       "reference": "Coding Tools resources/app.asar; /healthz",
       "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "installed-runtime",
+      "summary": "Installed asar with catalog fix + renderer fix; daemon pid 50400 catalog 2/2 OK at 2026-09-30T03:12:11Z.",
+      "reference": "Coding Tools resources/app.asar; /healthz",
+      "verifiedAt": "2026-09-30T03:12:12.000Z"
     }
   ],
+  "lastConvergence": {
+    "checkedAt": "2026-09-30T03:13:09.205Z",
+    "passed": true,
+    "blockers": [],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "requiredQualityGates": [],
+    "missingQualityGates": []
+  },
   "createdAt": "2026-09-28T09:59:39.881Z",
-  "updatedAt": "2026-09-29T16:15:12.771Z"
+  "updatedAt": "2026-09-30T03:13:09.205Z"
 }

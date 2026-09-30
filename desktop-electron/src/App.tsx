@@ -754,6 +754,7 @@ function LauncherShell({
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
+                <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
                 <SidebarItem
                   active={surface === "instant-mcp"}
@@ -764,7 +765,6 @@ function LauncherShell({
                 <SidebarItem active={surface === "workspace-auth"} icon="mcp" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
                 <SidebarItem active={surface === "native-codex"} icon="orchestrator" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
                 <SidebarItem active={surface === "oauth"} icon="providers" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
-                <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Agent Orchestrator" onClick={() => navigateSurface("agent-orchestrator")} />
 
 
               </SidebarGroup>
