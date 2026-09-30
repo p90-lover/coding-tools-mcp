@@ -10,7 +10,7 @@ import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
 import { chatList } from "./ao-chat";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
-  harnessLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
+  harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import { pageHidden } from "./page-visibility";
@@ -485,7 +485,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   }, [workspaceId, selectedRunId, activeNodeIds, autoStatus, setError]);
 
   const taskName = (id: string) => board?.tasks.find((task) => task.id === id)?.title ?? id;
-  const describeNode = (node: CanvasNode) => node.route.model === "chatgpt-web/high" ? "WebGPT High"
+  const describeNode = (node: CanvasNode) => node.route.model.startsWith("chatgpt-web/") ? modelLabel(node.route.model)
     : `${harnessLabel(node.route.harness_id || NATIVE_HARNESS, harnesses)} · ${node.route.model}`;
   const moveCard = async (positions: { id: string; x: number; y: number }[], parentId?: string) => {
     if (!selectedRun || busy) throw new Error("Wait for the current graph change");

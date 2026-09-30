@@ -135,6 +135,8 @@ const COMMANDCODE_PLUGINS = [
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
   { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
+  // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
+  { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.1.dll", sha256: "57fbdce4ad770499e604a7d3654bc7b700532e0572c0980ff040818a83117cb7" },
 ];
 
 function installBundledCommandCodePlugin(state) {
@@ -209,6 +211,9 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "      enabled: true",
     `      data_dir: ${yamlString(path.join(state, "cpa-helper-data"))}`,
     "      keeper_enabled: false",
+    // CPA leaves a plugin without a configs entry unregistered.
+    "    grok-login-provider:",
+    "      enabled: true",
     "debug: false",
     "request-log: false",
     "logging-to-file: true",

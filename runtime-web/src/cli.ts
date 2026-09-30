@@ -570,7 +570,10 @@ async function main(): Promise<void> {
     });
     if (bundled.status !== 0) throw new Error("Selected Codex bundled catalog is unavailable");
     const catalog = augmentNativeModelCatalog(JSON.parse(bundled.stdout), loadConfig());
-    const model = (catalog.models as Array<{ slug?: string }>).find((entry) => entry.slug === "chatgpt-web/high");
+    // A Luna-only (Free/Go) account lists no Sol tiers; its Luna row is then the AO template.
+    const entries = catalog.models as Array<{ slug?: string }>;
+    const model = entries.find((entry) => entry.slug === "chatgpt-web/high")
+      ?? entries.find((entry) => entry.slug === "chatgpt-web/luna");
     if (!model) throw new Error("Selected Codex has no AO WebGPT model template");
     stdout.write(`${JSON.stringify({ models: [model] })}\n`);
   }
