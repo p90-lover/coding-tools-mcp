@@ -504,4 +504,3 @@ func jsonStringEquals(raw json.RawMessage, want string) bool {
 	var value string
 	return json.Unmarshal(raw, &value) == nil && strings.EqualFold(strings.TrimSpace(value), want)
 }
-
