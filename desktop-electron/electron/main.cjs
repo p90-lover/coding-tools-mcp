@@ -2368,7 +2368,7 @@ async function start() {
           throw new Error("AO WebGPT catalog is unavailable");
         }
         if (model === "chatgpt-web/high") return catalog;
-        if (!/^chatgpt-web/[a-z-]{1,32}$/.test(model)) throw new Error("AO WebGPT model is invalid");
+        if (!/^chatgpt-web\/[a-z-]{1,32}$/.test(model)) throw new Error("AO WebGPT model is invalid");
         const tier = model.slice("chatgpt-web/".length).split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
         return { models: [{ ...catalog.models[0], slug: model, display_name: `ChatGPT Web — ${tier}` }] };
       },
