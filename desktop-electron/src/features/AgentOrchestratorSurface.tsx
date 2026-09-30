@@ -5,6 +5,8 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
+import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
+import { chatList } from "./ao-chat";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
   harnessLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
@@ -33,16 +35,16 @@ type AoApproval = { nodeId: string; approval_id: string; kind?: string; path?: s
 type Sheet = "" | "mission" | "worker" | "settings";
 
 const words = {
-  en: { title: "Agent Orchestrator", workspace: "Workspace", mission: "Mission", newMission: "New mission", canvas: "Mission tab", board: "Mission board",
+  en: { title: "Agent Orchestrator", workspace: "Workspace", mission: "Mission", newMission: "New mission", canvas: "Mission tab", structure: "Structure", board: "Mission board",
     start: "Start", resume: "Resume", pause: "Pause", stop: "Stop", settings: "Settings", refresh: "Refresh", addWorker: "Worker",
     noMissions: "No missions yet", noWorkspace: "Add a workspace to begin", create: "Create", add: "Add", cancel: "Cancel" },
-  "zh-CN": { title: "代理编排", workspace: "工作区", mission: "任务", newMission: "新任务", canvas: "任务页", board: "任务看板",
+  "zh-CN": { title: "代理编排", workspace: "工作区", mission: "任务", newMission: "新任务", canvas: "任务页", structure: "结构", board: "任务看板",
     start: "开始", resume: "继续", pause: "暂停", stop: "停止", settings: "设置", refresh: "刷新", addWorker: "工作者",
     noMissions: "尚无任务", noWorkspace: "先添加工作区", create: "创建", add: "添加", cancel: "取消" },
-  "zh-TW": { title: "代理編排", workspace: "工作區", mission: "任務", newMission: "新任務", canvas: "任務分頁", board: "任務看板",
+  "zh-TW": { title: "代理編排", workspace: "工作區", mission: "任務", newMission: "新任務", canvas: "任務分頁", structure: "結構", board: "任務看板",
     start: "開始", resume: "繼續", pause: "暫停", stop: "停止", settings: "設定", refresh: "重新整理", addWorker: "工作者",
     noMissions: "尚無任務", noWorkspace: "先新增工作區", create: "建立", add: "新增", cancel: "取消" },
-  ja: { title: "エージェント編成", workspace: "ワークスペース", mission: "ミッション", newMission: "新規ミッション", canvas: "ミッション", board: "ミッションボード",
+  ja: { title: "エージェント編成", workspace: "ワークスペース", mission: "ミッション", newMission: "新規ミッション", canvas: "ミッション", structure: "構成", board: "ミッションボード",
     start: "開始", resume: "再開", pause: "一時停止", stop: "停止", settings: "設定", refresh: "更新", addWorker: "ワーカー",
     noMissions: "ミッションはまだありません", noWorkspace: "ワークスペースを追加してください", create: "作成", add: "追加", cancel: "キャンセル" },
 } satisfies Record<Language, Record<string, string>>;
@@ -188,7 +190,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [workspaceId, setWorkspaceId] = useState(() => { try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
-  const [view, setView] = useState<"board" | "team">("team");
+  // "chat" is the Mission tab; "team" is the structure editor (canvas) for one run.
+  const [view, setView] = useState<"chat" | "board" | "team">("chat");
+  // null until the workspace's runs load; "" means a new, unsent chat.
+  const [chatTaskId, setChatTaskId] = useState<string | null>(null);
   const [sheet, setSheet] = useState<Sheet>("");
   const stageRef = useRef<HTMLDivElement>(null);
   const closeSheet = useCallback(() => setSheet(""), []);
@@ -328,6 +333,34 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setWorkspacePath(""); setWorkspaceName("");
     setSheet("");
   });
+
+  useEffect(() => { setChatTaskId(null); }, [workspaceId]);
+  useEffect(() => {
+    if (chatTaskId !== null || !board) return;
+    const latest = chatList(missions, board.tasks)[0];
+    setChatTaskId(latest?.taskId ?? "");
+    if (latest) setSelectedRunId(latest.latestRunId);
+  }, [chatTaskId, missions, board]);
+  // Keep other chats' statuses and newly created runs current while the chat view is open.
+  useEffect(() => {
+    if (view !== "chat" || !workspaceId) return;
+    let live = true;
+    const timer = setInterval(() => {
+      void moduleCall("runs", { workspaceId }).then((current) => {
+        if (live && Array.isArray(current.runs)) setMissions(current.runs as AoMission[]);
+      }).catch(() => {});
+    }, 5000);
+    return () => { live = false; clearInterval(timer); };
+  }, [view, workspaceId]);
+  const selectChat = (taskId: string) => {
+    setChatTaskId(taskId);
+    const latest = chatList(missions, board?.tasks ?? []).find((entry) => entry.taskId === taskId);
+    if (latest) setSelectedRunId(latest.latestRunId);
+  };
+  const loadDescription = useCallback(async (taskId: string) => {
+    const detail = await moduleCall("board", { workspaceId, taskId }) as unknown as Board;
+    return detail.task?.description ?? "";
+  }, [workspaceId]);
 
   const selectedRun = missions.find((mission) => mission.id === selectedRunId);
   const inspectedNode = selectedRun?.nodes.find(node => node.id === inspectedId);
@@ -565,6 +598,33 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
 
+  const sendChat = (input: { taskId?: string; title?: string; message: string }) => new Promise<void>((resolve, reject) => {
+    // run() skips its action while another one is in flight; never leave the chat waiting on it.
+    if (busy) { reject(new Error("Another action is still running")); return; }
+    void run("chat", async () => {
+      try {
+        if (!workspaceId) throw new Error("Add a workspace first");
+        if (!team) {
+          const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: 0,
+            team: defaultTeam(workspaceId, workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL)) as unknown as JsonObject } });
+          setTeam(saved.team as AoTeam);
+        }
+        const result = await moduleCall("chat_send", { workspaceId, message: input.message,
+          ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
+          ...(executable.trim() ? { executable: executable.trim() } : {}) });
+        await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
+        setChatTaskId(String(result.taskId));
+        setSelectedRunId(String(result.runId));
+        setAutoStatus(typeof result.status === "string" ? result.status : "running");
+        resolve();
+      } catch (cause) { reject(cause); throw cause; }
+    });
+  });
+  const stopChatRun = (runId: string) => void run("stop", async () => {
+    await moduleCall("control_run", { workspaceId, runId, action: "stop" });
+    await loadMissions(workspaceId);
+  });
+
   const approve = (approval: AoApproval, allow: boolean) => void run("approval", async () => {
     if (!selectedRun) return;
     const result = await moduleCall("approve_harness", { workspaceId, runId: selectedRun.id,
@@ -589,14 +649,16 @@ export function AgentOrchestratorSurface({ language, setError }: {
         </label>
         <div className="ao-rail-field" title={copy.mission}><span aria-hidden="true">🎯</span>
           <select className="ao-select" aria-label={copy.mission} value={selectedRunId} disabled={Boolean(busy) || !missions.length}
-            onChange={(event) => setSelectedRunId(event.target.value)}>
+            onChange={(event) => { setSelectedRunId(event.target.value); const picked = missions.find((mission) => mission.id === event.target.value); if (picked) setChatTaskId(picked.project_id); }}>
             {!missions.length ? <option value="">{copy.noMissions}</option> : null}
             {missions.map((mission) => <option key={mission.id} value={mission.id}>{taskName(mission.project_id)}</option>)}
           </select>
-          <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission"} onClick={() => openSheet("mission")} />
+          <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission" || (view === "chat" && chatTaskId === "")}
+            onClick={() => { if (view === "chat") { setSheet(""); setChatTaskId(""); } else openSheet("mission"); }} />
         </div>
         <div className="ao-rail-nav" role="tablist" aria-label="View" aria-orientation="vertical">
-          <button type="button" role="tab" aria-selected={view === "team"} onClick={() => setView("team")}><span aria-hidden="true">🧭</span>{copy.canvas}</button>
+          <button type="button" role="tab" aria-selected={view === "chat"} onClick={() => { setSheet(""); setView("chat"); }}><span aria-hidden="true">💬</span>{copy.canvas}</button>
+          <button type="button" role="tab" aria-selected={view === "team"} onClick={() => setView("team")}><span aria-hidden="true">🧭</span>{copy.structure}</button>
           <button type="button" role="tab" aria-selected={view === "board"} onClick={() => { setSheet(""); setView("board"); }}><span aria-hidden="true">📋</span>{copy.board}</button>
         </div>
         <span className="ao-rail-spacer" />
@@ -701,6 +763,18 @@ export function AgentOrchestratorSurface({ language, setError }: {
             {selectedRun && board ? <details className="ao-set-more"><summary><span aria-hidden="true">🔮</span> Next prompt</summary><pre>{aoPreviewText(selectedRun, board.tasks)}</pre></details> : null}
           </div>
         </FloatingSheet> : null}
+
+        {view === "chat" ? (
+          !workspaceId && workspaceReady
+            ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
+            : <AgentOrchestratorChat
+                runs={missions} tasks={board?.tasks ?? []} selectedTaskId={chatTaskId ?? ""} onSelectTask={selectChat}
+                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} stop={stopChatRun}
+                openStructure={(runId) => { setSelectedRunId(runId); setView("team"); }}
+                approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
+                approve={approve}
+                describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
+        ) : null}
 
         {view === "board" && workspaceReady && workspaceId && !sheet ? <div className="ao-workspace-board">
           <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("team")} />

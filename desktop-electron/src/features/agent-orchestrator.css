@@ -170,3 +170,55 @@
   .ao-card-handle:active, .ao-tool:active { transform: none; }
   .ao-workflow .ao-set-toggle input, .ao-workflow .ao-set-toggle input::before { transition: none; }
 }
+
+/* Chat-first Mission tab: chats | conversation | structure. */
+.ao-chat { display: grid; flex: 1 1 auto; grid-template-columns: 220px minmax(0, 1fr); min-width: 0; min-height: 0; }
+.ao-chat.with-structure { grid-template-columns: 220px minmax(0, 1fr) 240px; }
+.ao-chat-list { display: flex; flex-direction: column; gap: 6px; min-height: 0; padding: 10px 8px; border-right: 1px solid var(--ao-line); overflow-y: auto; }
+.ao-chat-list ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.ao-chat-new, .ao-chat-list li button { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--ao-muted); font-size: 12px; text-align: left; cursor: pointer; }
+.ao-chat-new { color: var(--color-text-primary); }
+.ao-chat-new[aria-pressed="true"], .ao-chat-list li button[aria-current="true"] { background: rgb(255 255 255 / 7%); color: var(--color-text-primary); }
+.ao-chat-list li button:hover, .ao-chat-new:hover { background: rgb(255 255 255 / 5%); }
+.ao-chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-chat-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); opacity: .8; }
+.ao-chat-dot.status-running, .ao-chat-dot.status-queued, .ao-chat-dot.state-running, .ao-chat-dot.state-reserved { background: var(--ao-green); animation: ao-pulse 1.4s ease-in-out infinite; }
+.ao-chat-dot.status-paused { background: var(--ao-amber); }
+.ao-chat-dot.status-attention, .ao-chat-dot.state-held, .ao-chat-dot.status-stopped, .ao-chat-dot.state-cancelled { background: var(--ao-red); }
+.ao-chat-dot.status-done, .ao-chat-dot.state-finished { background: var(--ao-blue); }
+
+.ao-chat-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ao-chat-head { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 16px; border-bottom: 1px solid var(--ao-line); }
+.ao-chat-head h2 { margin: 0; overflow: hidden; font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ao-chat-name { flex: 0 1 320px; height: 28px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 6px; background: transparent; color: var(--color-text-primary); font-size: 13px; }
+.ao-chat-head .ao-pill.status-done { color: var(--ao-blue); }
+.ao-chat-head .ao-pill.status-attention { color: var(--ao-red); }
+.ao-chat-head .ao-pill.status-queued { color: var(--ao-green); }
+.ao-chat-scroll { display: flex; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding: 16px; overflow-y: auto; }
+.ao-chat-empty { margin: auto; color: var(--ao-muted); font-size: 13px; text-align: center; }
+.ao-msg { max-width: min(760px, 92%); font-size: 13px; line-height: 1.5; }
+.ao-msg p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ao-msg-meta { display: block; margin-bottom: 3px; color: var(--ao-muted); font-size: 11px; }
+.ao-msg-user { align-self: flex-end; padding: 8px 12px; border-radius: 12px; background: rgb(88 166 255 / 14%); }
+.ao-msg-agent { align-self: flex-start; padding: 8px 12px; border: 1px solid var(--ao-line); border-radius: 12px; background: var(--color-bg-secondary); }
+.ao-msg-agent.tone-error { border-color: rgb(248 81 73 / 45%); }
+.ao-msg-agent.tone-verdict { border-color: rgb(88 166 255 / 40%); }
+.ao-msg-status { align-self: flex-start; color: var(--ao-muted); font-size: 12px; }
+.ao-msg-status.state-running::before, .ao-msg-status.state-reserved::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--ao-green); animation: ao-pulse 1.4s ease-in-out infinite; }
+.ao-msg-status.state-held, .ao-msg-status.state-cancelled { color: var(--ao-red); }
+.ao-msg-approval { align-self: stretch; max-width: none; padding: 10px 12px; border: 1px solid rgb(210 153 34 / 45%); border-radius: 10px; }
+.ao-msg-approval pre { margin: 6px 0; overflow-x: auto; font-size: 12px; }
+.ao-msg-actions { display: flex; gap: 8px; margin-top: 6px; }
+.ao-chat-composer { display: flex; align-items: flex-end; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--ao-line); }
+.ao-chat-composer textarea { flex: 1 1 auto; min-height: 44px; max-height: 200px; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-secondary); color: var(--color-text-primary); font: inherit; font-size: 13px; resize: vertical; }
+
+.ao-chat-structure { display: flex; flex-direction: column; gap: 8px; min-height: 0; padding: 12px; border-left: 1px solid var(--ao-line); overflow-y: auto; }
+.ao-chat-structure h3 { margin: 0; color: var(--ao-muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.ao-chat-structure ol { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ao-chat-structure li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 12px; }
+.ao-chat-node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-chat-node-meta { color: var(--ao-muted); font-size: 11px; }
+@media (max-width: 900px) {
+  .ao-chat, .ao-chat.with-structure { grid-template-columns: 170px minmax(0, 1fr); }
+  .ao-chat-structure { display: none; }
+}
