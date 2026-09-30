@@ -87,6 +87,20 @@ const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high"
 const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
 
+// The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
+// account that has no Sol tiers. Any tier reuses that row under its own slug; the bridge picks
+// the ChatGPT mode from the slug, not from this entry.
+function aoWebCatalogForModel(catalog, model) {
+  if (!/^chatgpt-web\/[a-z-]{1,32}$/.test(model)) throw new Error("AO WebGPT model is invalid");
+  const template = Array.isArray(catalog?.models) && catalog.models.length === 1 ? catalog.models[0] : null;
+  if (typeof template?.slug !== "string" || !/^chatgpt-web\/[a-z-]{1,32}$/.test(template.slug)) {
+    throw new Error("AO WebGPT catalog is unavailable");
+  }
+  if (template.slug === model) return catalog;
+  const tier = model.slice("chatgpt-web/".length).split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+  return { models: [{ ...template, slug: model, display_name: `ChatGPT Web — ${tier}` }] };
+}
+
 function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null }) {
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
   // chosen executable that no longer exists falls back to the currently installed one.
@@ -181,10 +195,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default")] };
     }
     if (harness === "codex-native") {
-      // Native Codex may use every WebGPT tier or any model in the shared CPA pool.
+      // Native Codex may use every WebGPT tier (Luna and Think included) or any CPA pool model.
       let cpa = [];
       try { cpa = (await models()).models; } catch { /* CPA not running: WebGPT only. */ }
-      return { ok: true, harness, models: [...WEB_TIERS, ...cpa.filter(id => !webModel(id))] };
+      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa.filter(id => !webModel(id))] };
     }
     const { baseUrl, key } = connection();
     const response = await fetchImpl(`${baseUrl}/v1/models`, {
@@ -931,4 +945,4 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   return Object.freeze({ call });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable };
+module.exports = { createAgentOrchestratorWorkflow, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, aoWebCatalogForModel };
