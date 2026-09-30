@@ -5,7 +5,8 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
-import { AgentOrchestratorChat } from "./AgentOrchestratorChat";
+import { AgentOrchestratorChat, ChatListPane } from "./AgentOrchestratorChat";
+import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
 import { chatList } from "./ao-chat";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
@@ -32,7 +33,7 @@ export type AoNode = {
 };
 export type AoMission = { id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean; nodes: AoNode[]; team?: AoTeam; worker_limit?: number };
 type AoApproval = { nodeId: string; approval_id: string; kind?: string; path?: string; reason?: string; command?: string; cwd?: string; permissions?: Record<string, unknown>; seconds_remaining?: number };
-type Sheet = "" | "mission" | "worker" | "settings";
+type Sheet = "" | "mission" | "worker" | "settings" | "team";
 
 const words = {
   en: { title: "Agent Orchestrator", workspace: "Workspace", mission: "Mission", newMission: "New mission", canvas: "Mission tab", structure: "Structure", board: "Mission board",
@@ -194,6 +195,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [view, setView] = useState<"chat" | "board" | "team">("chat");
   // null until the workspace's runs load; "" means a new, unsent chat.
   const [chatTaskId, setChatTaskId] = useState<string | null>(null);
+  // Why a chat's latest run could not start, by task id; cleared once it starts.
+  const [chatNotices, setChatNotices] = useState<Record<string, string>>({});
   const [sheet, setSheet] = useState<Sheet>("");
   const stageRef = useRef<HTMLDivElement>(null);
   const closeSheet = useCallback(() => setSheet(""), []);
@@ -613,12 +616,39 @@ export function AgentOrchestratorSurface({ language, setError }: {
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
           ...(executable.trim() ? { executable: executable.trim() } : {}) });
         await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
-        setChatTaskId(String(result.taskId));
+        const taskId = String(result.taskId);
+        setChatTaskId(taskId);
         setSelectedRunId(String(result.runId));
-        setAutoStatus(typeof result.status === "string" ? result.status : "running");
+        setChatNotices((current) => ({ ...current, [taskId]: result.status === "failed" ? String(result.detail || "The run could not start") : "" }));
+        setAutoStatus(result.status === "failed" ? "idle" : typeof result.status === "string" ? result.status : "running");
         resolve();
       } catch (cause) { reject(cause); throw cause; }
     });
+  });
+  const retryChatStart = (runId: string) => void run("start-run", async () => {
+    const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
+    try {
+      const result = await moduleCall("start_run", { workspaceId, runId, ...(executable.trim() ? { executable: executable.trim() } : {}) });
+      setChatNotices((current) => ({ ...current, [taskId]: "" }));
+      setAutoStatus(typeof result.status === "string" ? result.status : "running");
+    } catch (cause) {
+      setChatNotices((current) => ({ ...current, [taskId]: cause instanceof Error ? cause.message : String(cause) }));
+    }
+    await loadMissions(workspaceId);
+  });
+  const openTeam = () => void run("team", async () => {
+    if (!team && workspaceId) {
+      const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: 0,
+        team: defaultTeam(workspaceId, workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL)) as unknown as JsonObject } });
+      setTeam(saved.team as AoTeam);
+    }
+    setSheet("team");
+  });
+  const saveTeam = (next: AoTeam) => void run("team", async () => {
+    const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: team?.revision ?? 0,
+      team: next as unknown as JsonObject } });
+    setTeam(saved.team as AoTeam);
+    setSheet("");
   });
   const stopChatRun = (runId: string) => void run("stop", async () => {
     await moduleCall("control_run", { workspaceId, runId, action: "stop" });
@@ -725,6 +755,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
           </div>
         </form></FloatingSheet> : null}
 
+        {sheet === "team" && team ? <FloatingSheet stage={stageRef} title="👥 Team" onClose={closeSheet}>
+          <AgentOrchestratorTeam team={team} harnesses={harnesses} loadModels={loadModels} busy={Boolean(busy)} save={saveTeam} close={closeSheet} />
+        </FloatingSheet> : null}
+
         {sheet === "settings" ? <FloatingSheet stage={stageRef} title={`⚙️ ${copy.settings}`} onClose={closeSheet}>
           <div className="ao-settings">
             <label className="ao-set-row" title="Native Codex executable: runs the WebGPT orchestrator/reviewer and Native Codex workers">
@@ -773,6 +807,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 openStructure={(runId) => { setSelectedRunId(runId); setView("team"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
                 approve={approve}
+                notice={chatTaskId ? chatNotices[chatTaskId] || undefined : undefined}
+                retryStart={retryChatStart} openTeam={openTeam}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
         ) : null}
 
@@ -780,7 +816,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
           <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("team")} />
         </div> : null}
 
-        <div hidden={view !== "team"} className="ao-team-view">
+        <div hidden={view !== "team"} className="ao-team-view ao-structure-view">
+          <ChatListPane chats={chatList(missions, board?.tasks ?? [])} selectedTaskId={selectedRun?.project_id ?? ""}
+            onSelect={selectChat} />
+          <div className="ao-structure-canvas">
           {!workspaceId && workspaceReady ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : !selectedRun ? <div className="ao-empty-state"><p>{copy.noMissions}</p><button className="button-primary" type="button" disabled={!board} onClick={() => openSheet("mission")}>{copy.newMission}</button></div>
             : <AgentOrchestratorCanvas key={selectedRun.id}
@@ -805,6 +844,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             node={inspectedNode} mission={selectedRun} draft={draftTeam} harnesses={harnesses} loadModels={loadModels} busy={Boolean(busy)}
             change={setDraftTeam} apply={applyTeam} discard={() => setDraftTeam(teamForMission(selectedRun, team))}
             close={() => setInspectedId("")} taskName={taskName} /> : null}
+          </div>
         </div>
       </div>
       </div>

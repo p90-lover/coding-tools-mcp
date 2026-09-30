@@ -89,16 +89,19 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     }
   };
   const schedule = () => { if (!frame.current) frame.current = requestAnimationFrame(draw); };
+  // Returns false when the viewport cannot be measured yet (e.g. the view is still hidden):
+  // fitting a 0×0 box would pin the scale to its minimum and centre the graph on nothing.
   const fit = () => {
     const box = viewport.current?.getBoundingClientRect();
     const points = [...positions.current.values()];
-    if (!box || !points.length) return;
+    if (!box || !points.length || box.width < 120 || box.height < 160) return false;
     const left = Math.min(...points.map(p => p.x)), top = Math.min(...points.map(p => p.y));
     const w = Math.max(...points.map(p => p.x)) + width - left;
     const h = Math.max(...[...positions.current].map(([id, p]) => p.y + (heights.current.get(id) || height))) - top;
     const scale = Math.max(.3, Math.min(1.25, (box.width - 80) / w, (box.height - 120) / h));
     camera.current = { x: (box.width - w * scale) / 2 - left * scale, y: (box.height - h * scale) / 2 - top * scale, scale };
     schedule();
+    return true;
   };
   const zoom = (factor: number, x = viewport.current!.clientWidth / 2, y = viewport.current!.clientHeight / 2) => {
     const before = camera.current, scale = Math.max(.3, Math.min(2, before.scale * factor));
@@ -114,8 +117,22 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       if (point) next.set(id, point);
     }
     positions.current = next;
-    if (!initialized.current) { initialized.current = true; fit(); } else schedule();
+    if (!initialized.current) initialized.current = fit(); else schedule();
   }, [nodes, levels]);
+
+  // Fit once the canvas first gets a real size, and again each time it comes back from hidden.
+  useLayoutEffect(() => {
+    const surface = viewport.current;
+    if (!surface || typeof ResizeObserver === "undefined") return;
+    let wasHidden = surface.clientWidth === 0 || surface.clientHeight === 0;
+    const observer = new ResizeObserver(() => {
+      const hidden = surface.clientWidth === 0 || surface.clientHeight === 0;
+      if (!hidden && (wasHidden || !initialized.current)) initialized.current = fit() || initialized.current;
+      wasHidden = hidden;
+    });
+    observer.observe(surface);
+    return () => observer.disconnect();
+  }, []);
 
   useLayoutEffect(() => {
     const surface = viewport.current!;

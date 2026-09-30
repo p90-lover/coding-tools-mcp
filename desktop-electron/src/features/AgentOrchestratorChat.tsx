@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatNodeName, chatNodeOrder, chatTranscript,
-  type ChatMessage, type ChatRun, type ChatStatus,
+  type ChatMessage, type ChatRun, type ChatStatus, type ChatSummary,
 } from "./ao-chat";
 
 type ChatApproval = { nodeId: string; approval_id: string; reason?: string; path?: string; cwd?: string; command?: string; kind?: string };
@@ -10,9 +10,31 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
   queued: "Starting", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
 };
 
+/** The workspace's chats, newest first. Shared by the chat and the Structure view. */
+export function ChatListPane({ chats, selectedTaskId, onSelect, onNew }: {
+  chats: ChatSummary[]; selectedTaskId: string; onSelect: (taskId: string) => void; onNew?: () => void;
+}) {
+  return (
+    <aside className="ao-chat-list" aria-label="Chats">
+      {onNew ? <button type="button" className="ao-chat-new" aria-pressed={!selectedTaskId} onClick={onNew}>＋ New chat</button> : null}
+      <ul>
+        {chats.map((entry) => (
+          <li key={entry.taskId}>
+            <button type="button" aria-current={entry.taskId === selectedTaskId} onClick={() => onSelect(entry.taskId)}>
+              <span className={`ao-chat-dot status-${entry.status}`} aria-label={STATUS_LABEL[entry.status]} title={STATUS_LABEL[entry.status]} />
+              <span className="ao-chat-title">{entry.title}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {!chats.length && !onNew ? <p className="ao-chat-empty">No chats yet</p> : null}
+    </aside>
+  );
+}
+
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, onSelectTask, busy, loadDescription, send, stop, openStructure,
-  approvals, approve, describeRoute,
+  approvals, approve, describeRoute, notice, retryStart, openTeam,
 }: {
   runs: ChatRun[];
   tasks: { id: string; title: string }[];
@@ -27,6 +49,10 @@ export function AgentOrchestratorChat({
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, allow: boolean) => void;
   describeRoute: (nodeId: string, runId: string) => string;
+  /** Why this chat's latest run could not start, if it could not. */
+  notice?: string;
+  retryStart: (runId: string) => void;
+  openTeam: () => void;
 }) {
   const chats = useMemo(() => chatList(runs, tasks), [runs, tasks]);
   const chat = chats.find((entry) => entry.taskId === selectedTaskId);
@@ -69,19 +95,7 @@ export function AgentOrchestratorChat({
 
   return (
     <div className={`ao-chat${showStructure && latest ? " with-structure" : ""}`}>
-      <aside className="ao-chat-list" aria-label="Chats">
-        <button type="button" className="ao-chat-new" aria-pressed={!selectedTaskId} onClick={() => onSelectTask("")}>＋ New chat</button>
-        <ul>
-          {chats.map((entry) => (
-            <li key={entry.taskId}>
-              <button type="button" aria-current={entry.taskId === selectedTaskId} onClick={() => onSelectTask(entry.taskId)}>
-                <span className={`ao-chat-dot status-${entry.status}`} aria-label={STATUS_LABEL[entry.status]} title={STATUS_LABEL[entry.status]} />
-                <span className="ao-chat-title">{entry.title}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </aside>
+      <ChatListPane chats={chats} selectedTaskId={selectedTaskId} onSelect={onSelectTask} onNew={() => onSelectTask("")} />
 
       <section className="ao-chat-main" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="ao-chat-head">
@@ -93,6 +107,7 @@ export function AgentOrchestratorChat({
           <span className="ao-rail-spacer" />
           {latest && !chatAcceptsMessage(chat?.status)
             ? <button type="button" className="button-secondary" disabled={busy} onClick={() => stop(latest.id)}>Stop</button> : null}
+          <button type="button" className="button-secondary" onClick={openTeam}>Team</button>
           {latest ? <button type="button" className="button-secondary" aria-pressed={showStructure}
             onClick={() => setShowStructure((value) => !value)}>Structure</button> : null}
         </header>
@@ -112,6 +127,15 @@ export function AgentOrchestratorChat({
                   <p>{message.text}</p>
                 </div>
               : <div key={message.key} className={`ao-msg ao-msg-status state-${message.state}`}>{message.text}</div>)}
+          {notice && latest && chat?.status === "queued" ? (
+            <div className="ao-msg ao-msg-approval tone-error">
+              <span className="ao-msg-meta">The run could not start</span>
+              <p>{notice}</p>
+              <div className="ao-msg-actions">
+                <button className="button-primary" type="button" disabled={busy} onClick={() => retryStart(latest.id)}>Retry</button>
+              </div>
+            </div>
+          ) : null}
           {approvals.map((approval) => (
             <div key={approval.approval_id} className="ao-msg ao-msg-approval">
               <span className="ao-msg-meta">Approval needed</span>

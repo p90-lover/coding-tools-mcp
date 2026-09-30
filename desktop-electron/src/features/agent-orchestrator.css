@@ -222,3 +222,15 @@
   .ao-chat, .ao-chat.with-structure { grid-template-columns: 170px minmax(0, 1fr); }
   .ao-chat-structure { display: none; }
 }
+
+/* Structure view: the same chat list beside the canvas; team settings sheet. */
+.ao-structure-view:not([hidden]) { display: grid; grid-template-columns: 220px minmax(0, 1fr); flex: 1 1 auto; min-width: 0; min-height: 0; }
+.ao-structure-canvas { position: relative; display: flex; min-width: 0; min-height: 0; }
+.ao-structure-canvas > * { flex: 1 1 auto; }
+.ao-team-sheet { max-height: min(78vh, 760px); overflow-y: auto; }
+.ao-team-role { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid var(--ao-line); border-radius: 10px; }
+.ao-team-role legend { display: flex; align-items: center; gap: 10px; padding: 0 4px; font-size: 12px; font-weight: 600; }
+.ao-team-role textarea { width: 100%; resize: vertical; }
+.ao-link { padding: 0; border: 0; background: none; color: var(--ao-red); font-size: 11px; cursor: pointer; }
+.ao-msg-approval.tone-error { border-color: rgb(248 81 73 / 50%); }
+@media (max-width: 900px) { .ao-structure-view:not([hidden]) { grid-template-columns: 170px minmax(0, 1fr); } }
