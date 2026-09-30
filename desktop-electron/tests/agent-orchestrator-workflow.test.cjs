@@ -741,7 +741,7 @@ test("a follow-up waits for the chat's run, then extends the same task and start
 test("without an installed Codex a chat send explains what to set", async () => {
   const world = chatWorld();
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => null });
-  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "hi" }), /Codex desktop app was not found/);
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "hi" }), /Codex CLI was not found; install it with npm install -g @openai\/codex/);
   assert.equal(world.tasks.length, 0, "nothing is created when the run could not start");
 });
 
@@ -880,4 +880,33 @@ test("the helper stops retrying a card that already failed three times", async (
   assert.deepEqual(world.controls, []);
   assert.equal(asked, 0);
   assert.match(JSON.stringify(status), /failed 3 times/);
+});
+
+test("missions run on the Codex CLI; the desktop app's bundled codex is only a fallback", () => {
+  const { findInstalledCodexExecutable } = require("../electron/agent-orchestrator-workflow.cjs");
+  const root = path.resolve(__dirname, "../../aiTemp/codex-cli-discovery", `${process.pid}-${crypto.randomUUID()}`);
+  const env = { APPDATA: path.join(root, "Roaming"), LOCALAPPDATA: path.join(root, "Local") };
+  const desktop = path.join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin", "build1", "codex.exe");
+  fs.mkdirSync(path.dirname(desktop), { recursive: true });
+  fs.writeFileSync(desktop, "MZ desktop");
+  if (process.platform === "win32") assert.equal(findInstalledCodexExecutable(env), desktop, "desktop copy only when no CLI");
+  const arch = process.arch === "arm64" ? ["codex-win32-arm64", "aarch64-pc-windows-msvc"] : ["codex-win32-x64", "x86_64-pc-windows-msvc"];
+  const cli = path.join(env.APPDATA, "npm", "node_modules", "@openai", "codex", "node_modules", "@openai", arch[0], "vendor", arch[1], "bin", "codex.exe");
+  fs.mkdirSync(path.dirname(cli), { recursive: true });
+  fs.writeFileSync(cli, "MZ cli");
+  if (process.platform === "win32") assert.equal(findInstalledCodexExecutable(env), cli, "the CLI wins once installed");
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a saved desktop-app codex.exe gives way to the Codex CLI, but another chosen codex.exe is kept", async () => {
+  const local = process.env.LOCALAPPDATA || "C:/Users/test/AppData/Local";
+  const desktop = path.join(local, "OpenAI", "Codex", "bin", "build1", "codex.exe");
+  const cli = "C:/Users/test/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.exe";
+  const seen = [];
+  const make = () => createAgentOrchestratorWorkflow({ requestHeadless: chatWorld().requestHeadless,
+    findCodexExecutable: () => cli, exists: () => true,
+    resolveHarness: async (input) => { seen.push(input.executable); throw new Error("stop"); } });
+  await make().call("chat_send", { workspaceId: "ws-1", message: "hi", executable: desktop });
+  await make().call("chat_send", { workspaceId: "ws-1", message: "hi", executable: "D:/tools/codex.exe" });
+  assert.deepEqual(seen, [cli, "D:/tools/codex.exe"]);
 });

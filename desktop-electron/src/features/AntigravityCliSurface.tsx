@@ -3,6 +3,7 @@ import { getCodingToolsClient } from "../api/client";
 import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import { AgentOrchestratorOriginalSurface, type AoTerminalView } from "./AgentOrchestratorOriginalSurface";
 import "./antigravity-cli.css";
+import { pageHidden } from "./page-visibility";
 
 type Account = { name: string; email: string | null; status: string; disabled: boolean; error: string | null };
 type Sweep = { at: string; refreshed: string[]; signIn: string[]; failed: string[]; error?: string };
@@ -57,7 +58,7 @@ export function AntigravityCliSurface({ setError, openNetwork }: { setError: (er
     void getCodingToolsClient().workspaces.list({ cursor: 0, limit: 100 })
       .then(page => { setWorkspaces([...page.items]); setWorkspaceId(page.items[0]?.id ?? ""); })
       .catch(() => undefined);
-    const timer = setInterval(() => void refreshStatus(), 15_000);
+    const timer = setInterval(() => { if (!pageHidden()) void refreshStatus(); }, 15_000);
     return () => clearInterval(timer);
   }, [refreshStatus]);
 

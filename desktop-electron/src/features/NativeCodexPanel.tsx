@@ -4,6 +4,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Copy } from "../i18n";
 import type { Language } from "../types";
 import "./workspace-auth.css";
+import { pageHidden } from "./page-visibility";
 
 interface NativeCodexPanelProps {
   copy: Copy;
@@ -77,7 +78,7 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
       }
     };
     void refresh();
-    const timer = setInterval(() => { void refresh(); }, 3000);
+    const timer = setInterval(() => { if (!pageHidden()) void refresh(); }, 3000);
     return () => { current = false; clearInterval(timer); };
   }, [workspaceId, setError]);
 

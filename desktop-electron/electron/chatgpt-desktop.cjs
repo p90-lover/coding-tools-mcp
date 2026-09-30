@@ -23,6 +23,8 @@ const {
 } = require("./chatgpt-desktop-sync.cjs");
 
 const WINDOW_WAIT_MS = 60_000;
+// Background starts are not waited on by anyone, so a slow disk gets longer before giving up.
+const BACKGROUND_WINDOW_WAIT_MS = 5 * 60_000;
 // ChatGPT treats WM_CLOSE as "hide to background" at times; give it a moment to flush its
 // profile, then end the tree.
 const CLOSE_WAIT_MS = 3_000;
@@ -451,17 +453,25 @@ function createChatGptDesktopHost({
     return found?.pid ? { slotId, pid: found.pid, hwnd: Number(found.hwnd) || 0 } : null;
   }
 
-  async function waitForWindow(slotId) {
-    const deadline = Date.now() + WINDOW_WAIT_MS;
+  // The window is hidden the moment it exists: it is only ever shown docked in the ChatGPT tab.
+  // A start that never produces a window is ended, so no stray ChatGPT window appears later.
+  async function waitForWindow(slotId, timeoutMs = WINDOW_WAIT_MS) {
+    const deadline = Date.now() + timeoutMs;
+    let pid = 0;
     while (Date.now() < deadline) {
       const found = await findInstance(slotId);
-      if (found?.hwnd) return found;
+      if (found?.hwnd) {
+        await helper.call("hide", { hwnd: found.hwnd }).catch(() => {});
+        return found;
+      }
+      if (found?.pid) pid = found.pid;
       await sleep(750);
     }
-    throw new Error("ChatGPT did not open a window within a minute");
+    if (pid) await helper.call("kill-tree", { pid }).catch(() => {});
+    throw new Error(`ChatGPT did not open a window within ${Math.round(timeoutMs / 60_000)} minute(s)`);
   }
 
-  async function launchInstance(slotId) {
+  async function launchInstance(slotId, { background = false } = {}) {
     const pkg = await resolvePackage();
     if (!pkg) throw new Error("The ChatGPT desktop app is not installed (Microsoft Store package OpenAI.Codex)");
     const paths = slotPaths(dataRoot, slotId);
@@ -497,12 +507,14 @@ function createChatGptDesktopHost({
       env.push(["HTTPS_PROXY", proxy.url], ["HTTP_PROXY", proxy.url], ["ALL_PROXY", proxy.url], ["NO_PROXY", noProxy]);
       switches = ` --proxy-server="${proxy.url}"${proxy.bypass.length ? ` --proxy-bypass-list="${proxy.bypass.join(";")}"` : ""}`;
     }
-    const argumentsText = `/d /c ${env.map(([key, value]) => `set "${key}=${value}"&& `).join("")}start "" "${pkg.exe}"${switches}`;
+    // Background starts open minimized (never taking focus) and are hidden as soon as they exist.
+    const minimized = background ? " /min" : "";
+    const argumentsText = `/d /c ${env.map(([key, value]) => `set "${key}=${value}"&& `).join("")}start ""${minimized} "${pkg.exe}"${switches}`;
     await helper.call("launch", { family: pkg.family, command, arguments: argumentsText }, 45_000);
     logger?.info?.("chatgpt_desktop.instance_launched", {
-      slotId, signedIn: fs.existsSync(paths.auth), proxied: Boolean(proxy),
+      slotId, signedIn: fs.existsSync(paths.auth), proxied: Boolean(proxy), background,
     });
-    return await waitForWindow(slotId);
+    return await waitForWindow(slotId, background ? BACKGROUND_WINDOW_WAIT_MS : WINDOW_WAIT_MS);
   }
 
   async function stopInstance(slotId = state.active) {
@@ -684,7 +696,7 @@ function createChatGptDesktopHost({
           if (instances.has(account.slotId) || instances.size >= MAX_RUNNING_INSTANCES) return;
           if (!autoStartCandidates().some((entry) => entry.slotId === account.slotId)) return;
           try {
-            await adopt(await launchInstance(account.slotId));
+            await adopt(await launchInstance(account.slotId, { background: true }));
             logger?.info?.("chatgpt_desktop.auto_started", { slotId: account.slotId });
           } catch (error) {
             logger?.warn?.("chatgpt_desktop.auto_start_failed", { slotId: account.slotId, message: error.message });

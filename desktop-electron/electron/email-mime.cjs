@@ -145,8 +145,9 @@ function stripDangerous(html) {
 }
 
 // The element/attribute allowlist decides which formatting SURVIVES after the safety floor —
-// a genuine policy choice with several valid answers (text-only vs. rich formatting).
-// TODO(human): define ALLOWED_TAGS and ALLOWED_ATTRS below.
+// a genuine policy choice with several valid answers (text-only vs. rich formatting). It is
+// empty on purpose: the safety floor plus the preview's script-free sandbox keep full
+// formatting (tables, styled buttons, links) working. Add entries only to narrow that.
 const ALLOWED_TAGS = new Set([]);
 const ALLOWED_ATTRS = new Set([]);
 
