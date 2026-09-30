@@ -286,6 +286,9 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
         ),
     );
 
+    if method.starts_with("events/") {
+        return events_post(&state, &method, request_id, &body).await;
+    }
     let mcp = state.mcp.clone();
     // Control availability must not depend on all ordinary execution slots being
     // free. This exact method allowlist cannot dispatch a tool or auto-bootstrap.
@@ -406,6 +409,50 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
 
         response
     }, recorder).await
+}
+
+/// MCP Events never dispatch a tool: they only manage webhook subscriptions owned by
+/// this authenticated listener. Subscribe verifies the callback over the network, so it
+/// runs on the async runtime with its own small budget instead of a tool worker slot.
+async fn events_post(state: &ListenerState, method: &str, request_id: Value, body: &Value) -> Response {
+    static EVENTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let Ok(_permit) = EVENTS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+        .try_acquire_owned()
+    else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"jsonrpc":"2.0","id":request_id,
+            "error":{"code":-32009,"message":"Event subscription capacity reached; retry later"}}))).into_response();
+    };
+    let hub = match crate::mcp::events::global() {
+        Ok(hub) => hub,
+        Err(error) => {
+            append_profile_log(&state.workspace_id, "stderr.log", &format!("[events] store unavailable: {error}"));
+            return Json(json!({"jsonrpc":"2.0","id":request_id,
+                "error":{"code":-32603,"message":"MCP event subscriptions are unavailable"}})).into_response();
+        }
+    };
+    let response = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        crate::mcp::server::handle_events_request(&hub, &state.workspace_id, body),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => json!({"jsonrpc":"2.0","id":request_id,"error":{"code":crate::mcp::events::CALLBACK_ENDPOINT_ERROR,
+            "message":"Callback verification timed out","data":{"reason":"timeout"}}}),
+    };
+    append_profile_log(
+        &state.workspace_id,
+        "mcp-requests.log",
+        &format!(
+            "[events] method={} ok={} error_code={}",
+            json!(method),
+            response.get("error").is_none(),
+            response.pointer("/error/code").cloned().unwrap_or(Value::Null)
+        ),
+    );
+    Json(response).into_response()
 }
 
 #[cfg(test)]
@@ -666,6 +713,71 @@ mod live_permission_protocol_test {
             .unwrap()
             .unwrap();
         println!("PASS: same HTTP listener + same bearer token + unchanged tool schemas; live read-only deny then workspace-write allow; no restart or relink");
+    }
+}
+
+#[cfg(test)]
+mod events_http_test {
+    use super::*;
+    use crate::tools::ToolContext;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_are_advertised_and_served_behind_listener_authentication() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context =
+            ToolContext::for_test(root.path().to_path_buf(), root.path().join("harness")).unwrap();
+        context.auth.auth_type = "bearer".into();
+        let ctx = Arc::new(context);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = ListenerState {
+            mcp: ctx.clone(),
+            auth: ctx.auth.clone(),
+            workspace_id: uuid::Uuid::new_v4().to_string(),
+            bind_port: port,
+            configured_public_url: String::new(),
+            bearer_token: Some("events-fixture-token-not-a-real-secret".into()),
+            oauth: None,
+            oauth_client_secret: None,
+        };
+        let (stop, shutdown) = oneshot::channel();
+        let worker = tokio::spawn(async move { serve(listener, port, state, shutdown).await.unwrap() });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let endpoint = format!("http://127.0.0.1:{port}/mcp");
+        let modern = |id: u64, method: &str| {
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities":{}
+            }}})
+        };
+        let send = |body: Value, token: Option<&'static str>| {
+            let method = body["method"].as_str().unwrap().to_string();
+            let mut request = client
+                .post(&endpoint)
+                .header("Accept", "application/json, text/event-stream")
+                .header("Mcp-Protocol-Version", "2026-07-28")
+                .header("Mcp-Method", method)
+                .json(&body);
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            request.send()
+        };
+        let token = Some("events-fixture-token-not-a-real-secret");
+        let discovered: Value = send(modern(1, "server/discover"), token).await.unwrap().json().await.unwrap();
+        assert_eq!(discovered["result"]["capabilities"]["events"], json!({}), "{discovered}");
+        let listed: Value = send(modern(2, "events/list"), token).await.unwrap().json().await.unwrap();
+        assert_eq!(listed["result"]["events"].as_array().unwrap().len(), 4, "{listed}");
+        assert_eq!(listed["result"]["resultType"], "complete");
+        let unauthenticated = send(modern(3, "events/list"), None).await.unwrap();
+        assert_eq!(unauthenticated.status().as_u16(), 401);
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), worker).await.unwrap().unwrap();
     }
 }
 

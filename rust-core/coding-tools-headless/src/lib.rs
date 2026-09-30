@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
-use coding_tools_core::{integrations, tools, AoCodexConnection, AoCodexHub, CoreState};
+use coding_tools_core::{integrations, mcp_events, tools, AoCodexConnection, AoCodexHub, CoreState};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -3611,6 +3611,106 @@ async fn operation_read(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventEmitRequest {
+    event: String,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    data: Value,
+    /// Mark an earlier incident recovered instead of announcing a new one.
+    #[serde(default)]
+    resolve: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventConfigRequest {
+    proxy: Option<String>,
+}
+
+/// The desktop reports incidents here; the process-wide MCP event hub fans them out to
+/// the webhook subscriptions ChatGPT created through the workspace MCP listeners.
+async fn events_emit(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<EventEmitRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "events_emit") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    if body
+        .workspace_id
+        .as_deref()
+        .is_some_and(|id| id.is_empty() || id.len() > 128)
+    {
+        return json_error(StatusCode::BAD_REQUEST, "INVALID_EVENT", "workspace_id is invalid");
+    }
+    let hub = match mcp_events::global() {
+        Ok(hub) => hub,
+        Err(error) => return json_error(StatusCode::SERVICE_UNAVAILABLE, "EVENTS_UNAVAILABLE", error),
+    };
+    if body.resolve {
+        let Some(incident) = body.data.get("incident_id").and_then(Value::as_str) else {
+            return json_error(StatusCode::BAD_REQUEST, "INVALID_EVENT", "incident_id is required");
+        };
+        return Json(json!({"ok": true, "resolved": hub.resolve(&body.event, incident)})).into_response();
+    }
+    match hub.emit(mcp_events::EmittedEvent {
+        name: body.event,
+        workspace_id: body.workspace_id,
+        data: body.data,
+    }) {
+        Ok(outcome) => Json(json!({
+            "ok": true,
+            "deduplicated": outcome.deduplicated,
+            "deliveries": outcome.deliveries
+        }))
+        .into_response(),
+        Err(error) => json_error(StatusCode::BAD_REQUEST, "INVALID_EVENT", error),
+    }
+}
+
+async fn events_config(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Json(body): Json<EventConfigRequest>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "events_config") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    let hub = match mcp_events::global() {
+        Ok(hub) => hub,
+        Err(error) => return json_error(StatusCode::SERVICE_UNAVAILABLE, "EVENTS_UNAVAILABLE", error),
+    };
+    match hub.set_proxy(body.proxy) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(error) => json_error(StatusCode::BAD_REQUEST, "INVALID_PROXY", error),
+    }
+}
+
+async fn events_status(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    let _lease = match admit(&state, "events_status") {
+        Ok(lease) => lease,
+        Err(response) => return *response,
+    };
+    match mcp_events::global() {
+        Ok(hub) => Json(json!({"ok": true, "events": hub.status()})).into_response(),
+        Err(error) => json_error(StatusCode::SERVICE_UNAVAILABLE, "EVENTS_UNAVAILABLE", error),
+    }
+}
+
 fn valid_request_id(value: &str) -> bool {
     (1..=128).contains(&value.len())
         && value
@@ -3802,6 +3902,9 @@ fn router(state: ServiceState) -> Router {
         .route("/api/v1/tools/catalog", get(tool_catalog))
         .route("/api/v1/tools/call", post(tool_call))
         .route("/api/v1/operations/{request_id}", get(operation_read))
+        .route("/api/v1/events/emit", post(events_emit))
+        .route("/api/v1/events/config", post(events_config))
+        .route("/api/v1/events/status", get(events_status))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state)
 }
@@ -3836,6 +3939,11 @@ impl HeadlessService {
         core: Arc<CoreState>,
     ) -> Result<Self, String> {
         fs::create_dir_all(&config.app_data_dir).map_err(text_error)?;
+        // MCP event subscriptions live beside the other private service state so they
+        // survive restarts. A broken store disables events, never the service.
+        if let Err(error) = mcp_events::init_global(config.app_data_dir.join("mcp-events")) {
+            eprintln!("MCP events unavailable: {error}");
+        }
         let auth = ControlAuth::generate();
         let token_file = std::env::var_os("CODING_TOOLS_CONTROL_TOKEN_FILE")
             .map(PathBuf::from)
