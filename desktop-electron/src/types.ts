@@ -557,6 +557,8 @@ export interface ChatGptDesktopStatus {
   running: boolean;
   activeSlotId: string | null;
   runningSlotId: string | null;
+  /** Every account whose instance is running, including hidden background ones. */
+  runningSlotIds?: string[];
   busy: "launching" | "switching" | "clearing" | "stopping" | null;
   error: string | null;
   accounts: ChatGptDesktopAccount[];

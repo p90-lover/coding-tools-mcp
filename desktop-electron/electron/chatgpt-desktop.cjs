@@ -30,6 +30,25 @@ const PLACEMENT_INTERVAL_MS = 500;
 const SYNC_INTERVAL_MS = 60_000;
 const SYNC_DEBOUNCE_MS = 800;
 const ACCOUNT_POLL_MS = 15_000;
+// Each instance is a full ChatGPT app (Electron plus its Codex backend); past this many, the
+// least recently used background account is closed to make room.
+const MAX_RUNNING_INSTANCES = 4;
+// Background (hidden) instances are checked for exit every this many placement ticks (~5s).
+const BACKGROUND_CHECK_EVERY = 10;
+// A background (hidden) account nobody has looked at for this long is closed to free memory.
+// The account shown in the pane is never closed automatically.
+const IDLE_CLOSE_MS = 20 * 60_000;
+const SEED_SANDBOX_MODE = "unelevated";
+const GLOBAL_STATE_FILE = ".codex-global-state.json";
+const PERSISTED_ATOMS = "electron-persisted-atom-state";
+const ONBOARDED_BY_ACCOUNT = "electron:onboarding-conversational-completed-by-account-id";
+const ONBOARDING_FLAGS = [
+  "electron:onboarding-projectless-completed",
+  "chatgpt-migration-announcement-completed-v1",
+  "electron:onboarding-welcome-v2-role-state",
+  "electron:conversational-onboarding-workflow",
+  "electron:onboarding-hide-first-new-thread-promos",
+];
 const SLOT_ID = /^(cpa|local)-[a-z0-9]{6,32}$/;
 // cmd.exe expands or splits on these even inside quotes, so slot paths must not contain them.
 const CMD_UNSAFE = /["%^&|<>!\r\n]/;
@@ -82,6 +101,9 @@ function createChatGptDesktopHost({
   helper = createWin32Helper({ logger }),
   platform = process.platform,
   getProxyRoute = proxyRouteFromEnvironment,
+  homeDir = require("node:os").homedir(),
+  autoStart = true,
+  idleCloseMs = IDLE_CLOSE_MS,
 }) {
   const statePath = path.join(dataRoot, "state.json");
   let state = { active: null, local: [] };
@@ -98,7 +120,10 @@ function createChatGptDesktopHost({
   }
 
   let packageInfo;
-  let instance = null; // { slotId, pid, hwnd }
+  // Every account keeps its own instance running once started, so switching only swaps which
+  // window is docked instead of closing one app and cold-starting another.
+  const instances = new Map(); // slotId -> { slotId, pid, hwnd, lastActiveAt }
+  const activeInstance = () => (state.active ? instances.get(state.active) ?? null : null);
   let owner = null;
   let ownerVisible = true;
   let surfaceActive = false;
@@ -108,7 +133,8 @@ function createChatGptDesktopHost({
   let queue = Promise.resolve();
   let placementTimer = null;
   let placementRunning = false;
-  let sync = null; // { slotId, watchers, timer, debounce }
+  const syncs = new Map(); // slotId -> { watchers, timer, debounce }
+  let autoStartQueued = false;
 
   function persist() {
     writeJson(statePath, state);
@@ -153,6 +179,7 @@ function createChatGptDesktopHost({
         if (next === current.signature) return;
         current.signature = next;
         emit();
+        scheduleAutoStart();
       }, SYNC_DEBOUNCE_MS);
     };
     if (current.directory) {
@@ -260,9 +287,10 @@ function createChatGptDesktopHost({
       supported: platform === "win32",
       installed: Boolean(packageInfo),
       version: packageInfo?.version ?? null,
-      running: Boolean(instance),
+      running: Boolean(activeInstance()),
       activeSlotId: state.active,
-      runningSlotId: instance?.slotId ?? null,
+      runningSlotId: activeInstance()?.slotId ?? null,
+      runningSlotIds: [...instances.keys()],
       busy,
       error: lastError,
       accounts: accountList(),
@@ -290,20 +318,25 @@ function createChatGptDesktopHost({
     }
   }
 
-  function stopSync() {
-    if (!sync) return;
-    for (const watcher of sync.watchers) { try { watcher.close(); } catch {} }
-    clearInterval(sync.timer);
-    clearTimeout(sync.debounce);
-    sync = null;
+  function stopSync(slotId) {
+    const current = syncs.get(slotId);
+    if (!current) return;
+    for (const watcher of current.watchers) { try { watcher.close(); } catch {} }
+    clearInterval(current.timer);
+    clearTimeout(current.debounce);
+    syncs.delete(slotId);
+  }
+
+  function stopAllSync() {
+    for (const slotId of [...syncs.keys()]) stopSync(slotId);
   }
 
   function startSync(slotId) {
-    stopSync();
+    stopSync(slotId);
     const account = cpaAccounts().find((entry) => entry.slotId === slotId);
     if (!account) return;
     const paths = slotPaths(dataRoot, slotId);
-    const current = { slotId, watchers: [], timer: null, debounce: null };
+    const current = { watchers: [], timer: null, debounce: null };
     const schedule = () => {
       clearTimeout(current.debounce);
       current.debounce = setTimeout(() => {
@@ -325,12 +358,90 @@ function createChatGptDesktopHost({
     // fs.watch can miss atomic renames; a slow sweep keeps both sides converged regardless.
     current.timer = setInterval(schedule, SYNC_INTERVAL_MS);
     current.timer.unref?.();
-    sync = current;
+    syncs.set(slotId, current);
   }
 
   function finalSync(slotId) {
     const account = cpaAccounts().find((entry) => entry.slotId === slotId);
     if (account) syncNow(account, slotPaths(dataRoot, slotId));
+  }
+
+  // --- first-run profile ----------------------------------------------------------------
+  // Every slot is a fresh ChatGPT profile, so without this each account would stop on the
+  // Windows sandbox prompt and replay the "personalize your experience" onboarding. Only missing
+  // settings are added; anything the app or the user already chose is left alone.
+
+  function seedSandboxMode(paths) {
+    const file = path.join(paths.codexHome, "config.toml");
+    let text = "";
+    try { text = fs.readFileSync(file, "utf8"); } catch {}
+    if (/^\s*\[windows\]\s*$/m.test(text)) return;
+    // "unelevated" needs no one-time administrator (UAC) setup, unlike "elevated".
+    const section = `[windows]\nsandbox = "${SEED_SANDBOX_MODE}"\n`;
+    fs.writeFileSync(file, text ? `${text.replace(/\s*$/, "\n")}\n${section}` : section);
+  }
+
+  // Onboarding answers from a profile that already finished it: another slot first, then the
+  // user's own Codex home. Only the allowlisted UI flags are read.
+  function onboardingTemplate() {
+    const candidates = [];
+    try {
+      for (const name of fs.readdirSync(path.join(dataRoot, "slots"))) {
+        candidates.push(path.join(dataRoot, "slots", name, "codex-home", GLOBAL_STATE_FILE));
+      }
+    } catch {}
+    candidates.push(path.join(homeDir, ".codex", GLOBAL_STATE_FILE));
+    for (const file of candidates) {
+      let atoms;
+      try { atoms = readJson(file)?.[PERSISTED_ATOMS]; } catch { continue; }
+      if (atoms?.["electron:onboarding-welcome-v2-role-state"]?.completedConversationalOnboarding === true) {
+        return Object.fromEntries(ONBOARDING_FLAGS.filter((key) => key in atoms).map((key) => [key, atoms[key]]));
+      }
+    }
+    return {
+      "electron:onboarding-projectless-completed": true,
+      "chatgpt-migration-announcement-completed-v1": true,
+      "electron:onboarding-welcome-v2-role-state": { completedConversationalOnboarding: true },
+    };
+  }
+
+  function seedOnboarding(paths, accountId) {
+    const file = path.join(paths.codexHome, GLOBAL_STATE_FILE);
+    let saved = {};
+    try { saved = readJson(file) ?? {}; } catch {}
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return; // unreadable: leave it
+    const atoms = { ...(saved[PERSISTED_ATOMS] ?? {}) };
+    let changed = false;
+    for (const [key, value] of Object.entries(onboardingTemplate())) {
+      if (key in atoms) continue;
+      atoms[key] = value;
+      changed = true;
+    }
+    if (!atoms.last_completed_onboarding) {
+      atoms.last_completed_onboarding = Math.floor(Date.now() / 1000);
+      changed = true;
+    }
+    if (accountId) {
+      const done = { ...(atoms[ONBOARDED_BY_ACCOUNT] ?? {}) };
+      if (done[accountId] !== true) {
+        done[accountId] = true;
+        atoms[ONBOARDED_BY_ACCOUNT] = done;
+        changed = true;
+      }
+    }
+    if (changed) writeJson(file, { ...saved, [PERSISTED_ATOMS]: atoms });
+  }
+
+  function prepareProfile(slotId, paths) {
+    const account = cpaAccounts().find((entry) => entry.slotId === slotId);
+    let accountId = null;
+    try { accountId = account ? readJson(account.file)?.account_id ?? null : null; } catch {}
+    try {
+      seedSandboxMode(paths);
+      seedOnboarding(paths, typeof accountId === "string" ? accountId : null);
+    } catch (error) {
+      logger?.warn?.("chatgpt_desktop.profile_seed_failed", { slotId, message: error.message });
+    }
   }
 
   // --- process and window ---------------------------------------------------------------
@@ -364,6 +475,7 @@ function createChatGptDesktopHost({
 
     const existing = await findInstance(slotId);
     if (existing?.hwnd) return existing;
+    prepareProfile(slotId, paths);
 
     const command = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
     const env = [
@@ -393,13 +505,13 @@ function createChatGptDesktopHost({
     return await waitForWindow(slotId);
   }
 
-  async function stopInstance() {
-    const current = instance;
+  async function stopInstance(slotId = state.active) {
+    const current = slotId ? instances.get(slotId) : null;
     if (!current) return;
-    instance = null;
-    stopPlacementLoop();
-    finalSync(current.slotId);
-    stopSync();
+    instances.delete(slotId);
+    if (!instances.size) stopPlacementLoop();
+    finalSync(slotId);
+    stopSync(slotId);
     try {
       if (current.hwnd) await helper.call("close", { hwnd: current.hwnd });
       const deadline = Date.now() + CLOSE_WAIT_MS;
@@ -408,58 +520,94 @@ function createChatGptDesktopHost({
     } catch (error) {
       logger?.warn?.("chatgpt_desktop.stop_failed", { message: error.message });
     }
-    logger?.info?.("chatgpt_desktop.instance_stopped", { slotId: current.slotId });
+    logger?.info?.("chatgpt_desktop.instance_stopped", { slotId });
+  }
+
+  async function stopAllInstances() {
+    for (const slotId of [...instances.keys()]) await stopInstance(slotId);
+  }
+
+  // Past the cap, close the least recently used background account (never the active one).
+  async function makeRoom() {
+    while (instances.size >= MAX_RUNNING_INSTANCES) {
+      const idle = [...instances.values()]
+        .filter((entry) => entry.slotId !== state.active)
+        .sort((a, b) => a.lastActiveAt - b.lastActiveAt)[0];
+      if (!idle) return;
+      await stopInstance(idle.slotId);
+    }
   }
 
   async function adopt(found) {
-    instance = found;
+    const previous = instances.get(found.slotId);
+    instances.set(found.slotId, {
+      ...found,
+      startedAt: previous?.startedAt ?? Date.now(),
+      lastActiveAt: found.slotId === state.active ? Date.now() : previous?.lastActiveAt ?? 0,
+    });
     if (owner) await helper.call("dock", { hwnd: found.hwnd, owner });
     startSync(found.slotId);
     startPlacementLoop();
-    await placeNow();
+    await placeNow({ hideOthers: true });
   }
 
   function shouldShow() {
-    return Boolean(instance?.hwnd && owner && surfaceActive && ownerVisible && bounds
+    return Boolean(activeInstance()?.hwnd && owner && surfaceActive && ownerVisible && bounds
       && bounds.width >= 80 && bounds.height >= 80);
   }
 
-  async function placeNow() {
-    if (!instance?.hwnd) return;
+  // Only the active account's window is ever shown; the other instances keep running hidden.
+  async function placeNow({ hideOthers = false } = {}) {
+    const active = activeInstance();
+    if (hideOthers) {
+      for (const entry of instances.values()) {
+        if (entry !== active && entry.hwnd) await helper.call("hide", { hwnd: entry.hwnd });
+      }
+    }
+    if (!active?.hwnd) return;
     if (shouldShow()) {
       await helper.call("place", {
-        hwnd: instance.hwnd,
+        hwnd: active.hwnd,
         x: Math.round(bounds.x),
         y: Math.round(bounds.y),
         width: Math.round(bounds.width),
         height: Math.round(bounds.height),
       });
     } else {
-      await helper.call("hide", { hwnd: instance.hwnd });
+      await helper.call("hide", { hwnd: active.hwnd });
     }
   }
 
+  let placementTicks = 0;
+
   async function placementTick() {
-    if (placementRunning || !instance) return;
+    if (placementRunning || !instances.size) return;
     placementRunning = true;
     try {
-      if (!await helper.call("alive", { hwnd: instance.hwnd })) {
+      // The docked window every tick; background instances only every few seconds.
+      const everyone = placementTicks++ % BACKGROUND_CHECK_EVERY === 0;
+      for (const entry of [...instances.values()]) {
+        if (!everyone && entry.slotId !== state.active) continue;
+        if (await helper.call("alive", { hwnd: entry.hwnd })) continue;
         // The app can replace its window (sign-in, crash recovery); follow it or notice it exited.
-        const again = await findInstance(instance.slotId);
+        const again = await findInstance(entry.slotId);
         if (again?.hwnd) {
-          instance = again;
+          instances.set(entry.slotId, { ...again, startedAt: entry.startedAt, lastActiveAt: entry.lastActiveAt });
           if (owner) await helper.call("dock", { hwnd: again.hwnd, owner });
+          if (entry.slotId !== state.active) await helper.call("hide", { hwnd: again.hwnd });
         } else {
-          const ended = instance;
-          instance = null;
-          stopPlacementLoop();
-          finalSync(ended.slotId);
-          stopSync();
-          logger?.info?.("chatgpt_desktop.instance_exited", { slotId: ended.slotId });
+          instances.delete(entry.slotId);
+          finalSync(entry.slotId);
+          stopSync(entry.slotId);
+          logger?.info?.("chatgpt_desktop.instance_exited", { slotId: entry.slotId });
           emit();
-          return;
         }
       }
+      if (!instances.size) {
+        stopPlacementLoop();
+        return;
+      }
+      if (everyone) closeIdleInstances();
       if (shouldShow()) await placeNow();
     } catch (error) {
       logger?.warn?.("chatgpt_desktop.placement_failed", { message: error.message });
@@ -478,12 +626,73 @@ function createChatGptDesktopHost({
     placementTimer = null;
   }
 
+  function idleSince(entry) {
+    return Math.max(entry.lastActiveAt || 0, entry.startedAt || 0);
+  }
+
+  // Queued like any other operation, so an idle close never races a switch to that account.
+  function closeIdleInstances(now = Date.now()) {
+    for (const entry of instances.values()) {
+      if (entry.slotId === state.active || now - idleSince(entry) < idleCloseMs) continue;
+      const { slotId } = entry;
+      queue = queue.then(async () => {
+        const current = instances.get(slotId);
+        if (!current || slotId === state.active || Date.now() - idleSince(current) < idleCloseMs) return;
+        await stopInstance(slotId);
+        logger?.info?.("chatgpt_desktop.idle_closed", { slotId });
+        emit();
+      }).catch(() => {});
+    }
+  }
+
   async function openSlot(slotId) {
-    if (instance && instance.slotId !== slotId) await stopInstance();
+    // Leaving an account is its last use; the idle clock starts now.
+    const leaving = activeInstance();
+    if (leaving && leaving.slotId !== slotId) leaving.lastActiveAt = Date.now();
     state.active = slotId;
     persist();
-    if (instance?.slotId === slotId) return;
+    // Hide whatever was docked right away, even if the new account still has to start.
+    await placeNow({ hideOthers: true });
+    const ready = instances.get(slotId);
+    if (ready) {
+      ready.lastActiveAt = Date.now();
+      await placeNow();
+      return;
+    }
+    await makeRoom();
     await adopt(await launchInstance(slotId));
+  }
+
+  // --- auto-start -----------------------------------------------------------------------
+  // CPA accounts that can sign in start hidden in the background, so picking one is instant.
+  // One queued job per account keeps the user's own clicks able to run in between.
+
+  function autoStartCandidates() {
+    return cpaAccounts()
+      .filter((account) => !account.disabled && !instances.has(account.slotId))
+      .sort((a, b) => Number(b.slotId === state.active) - Number(a.slotId === state.active));
+  }
+
+  function scheduleAutoStart() {
+    if (!autoStart || !packageInfo || autoStartQueued) return;
+    autoStartQueued = true;
+    queue = queue.then(async () => {
+      autoStartQueued = false;
+      for (const account of autoStartCandidates()) {
+        queue = queue.then(async () => {
+          // Re-check: the user may have opened it, or the cap filled, while this waited.
+          if (instances.has(account.slotId) || instances.size >= MAX_RUNNING_INSTANCES) return;
+          if (!autoStartCandidates().some((entry) => entry.slotId === account.slotId)) return;
+          try {
+            await adopt(await launchInstance(account.slotId));
+            logger?.info?.("chatgpt_desktop.auto_started", { slotId: account.slotId });
+          } catch (error) {
+            logger?.warn?.("chatgpt_desktop.auto_start_failed", { slotId: account.slotId, message: error.message });
+          }
+          emit();
+        }).catch(() => {});
+      }
+    }).catch(() => { autoStartQueued = false; });
   }
 
   function newLocalSlot() {
@@ -511,13 +720,16 @@ function createChatGptDesktopHost({
         lastError = error.message;
         packageInfo = undefined;
       });
-      // Re-adopt an instance that survived a Coding Tools restart.
-      if (packageInfo && state.active) {
-        const found = await findInstance(state.active).catch(() => null);
-        if (found?.hwnd) await adopt(found).catch(() => {});
+      // Re-adopt every account's instance that survived a Coding Tools restart.
+      if (packageInfo) {
+        for (const account of accountList()) {
+          const found = await findInstance(account.slotId).catch(() => null);
+          if (found?.hwnd) await adopt(found).catch(() => {});
+        }
       }
       watchAccounts();
       emit();
+      scheduleAutoStart();
       return status();
     },
     status,
@@ -525,7 +737,7 @@ function createChatGptDesktopHost({
       if (typeof slotId !== "string" || !knownSlot(slotId)) throw new Error("Unknown ChatGPT desktop account");
       const account = accountList().find((entry) => entry.slotId === slotId);
       if (account.disabled) throw new Error("This CPA account is disabled; enable it in CPA first");
-      return exclusive(instance ? "switching" : "launching", () => openSlot(slotId)).then(status);
+      return exclusive(instances.size ? "switching" : "launching", () => openSlot(slotId)).then(status);
     },
     newSignIn() {
       return exclusive("launching", async () => openSlot(newLocalSlot())).then(status);
@@ -535,7 +747,7 @@ function createChatGptDesktopHost({
       return exclusive("clearing", async () => {
         const slotId = state.active;
         if (!slotId) throw new Error("No ChatGPT desktop account is active");
-        if (instance) await stopInstance();
+        await stopInstance(slotId);
         finalSync(slotId);
         trashSlot(slotId);
         state.local = state.local.filter((entry) => entry.id !== slotId);
@@ -551,7 +763,12 @@ function createChatGptDesktopHost({
     setOwner(hwnd) {
       if (!Number.isSafeInteger(hwnd) || hwnd <= 0 || hwnd === owner) return;
       owner = hwnd;
-      if (instance?.hwnd) void helper.call("dock", { hwnd: instance.hwnd, owner }).then(placeNow).catch(() => {});
+      void (async () => {
+        for (const entry of instances.values()) {
+          if (entry.hwnd) await helper.call("dock", { hwnd: entry.hwnd, owner });
+        }
+        await placeNow({ hideOthers: true });
+      })().catch(() => {});
     },
     setOwnerVisible(visible) {
       ownerVisible = visible === true;
@@ -568,7 +785,7 @@ function createChatGptDesktopHost({
     async shutdown() {
       stopPlacementLoop();
       stopWatchingAccounts();
-      try { await stopInstance(); } finally { stopSync(); helper.dispose(); }
+      try { await stopAllInstances(); } finally { stopAllSync(); helper.dispose(); }
     },
   };
 }

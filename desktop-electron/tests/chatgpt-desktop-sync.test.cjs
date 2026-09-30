@@ -213,3 +213,144 @@ test("an account added in CPA reaches the picker without a restart", async () =>
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// A fake of the win32 helper: launched processes get a window, keyed by the slot's APPDATA.
+function fakeDesktopWorld(root) {
+  const location = path.join(root, "pkg");
+  fs.mkdirSync(path.join(location, "app"), { recursive: true });
+  fs.writeFileSync(path.join(location, "app", "ChatGPT.exe"), "");
+  const windows = new Map(); // hwnd -> { pid, marker, visible }
+  const log = [];
+  let next = 100;
+  const helper = {
+    dispose() {},
+    call: async (op, input = {}) => {
+      log.push(op);
+      switch (op) {
+        case "package": return { location, family: "OpenAI.Codex_test", version: "1" };
+        case "launch": {
+          const marker = /set "APPDATA=([^"]+)"/.exec(input.arguments)[1];
+          const hwnd = next++;
+          windows.set(hwnd, { pid: hwnd + 1000, marker, visible: true });
+          return null;
+        }
+        case "find": {
+          for (const [hwnd, w] of windows) if (w.marker === input.marker) return { pid: w.pid, hwnd };
+          return null;
+        }
+        case "alive": return windows.has(input.hwnd);
+        case "hide": if (windows.has(input.hwnd)) windows.get(input.hwnd).visible = false; return null;
+        case "place": if (windows.has(input.hwnd)) windows.get(input.hwnd).visible = true; return null;
+        case "close": windows.delete(input.hwnd); return null;
+        case "running": return [...windows.values()].some((w) => w.pid === input.pid);
+        default: return null;
+      }
+    },
+  };
+  const visibleMarkers = () => [...windows.values()].filter((w) => w.visible).map((w) => w.marker);
+  return { helper, windows, log, launches: () => log.filter((op) => op === "launch").length, visibleMarkers };
+}
+
+function cpaFolder(root, accounts) {
+  const authDir = path.join(root, "auth");
+  fs.mkdirSync(authDir, { recursive: true });
+  for (const [email, id] of accounts) {
+    fs.writeFileSync(path.join(authDir, `${email}.json`),
+      JSON.stringify({ type: "codex", email, account_id: id, refresh_token: "r" }));
+  }
+  return authDir;
+}
+
+async function until(check, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+test("a new account's profile skips the sandbox prompt and onboarding, keeping earlier choices", async () => {
+  const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-seed-"));
+  const world = fakeDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"], ["b@x.com", "acct-b"]]);
+  const dataRoot = path.join(root, "data");
+  // b@x.com already chose a sandbox mode; that choice must survive.
+  const bHome = path.join(dataRoot, "slots", cpaSlotId("acct-b", "b@x.com"), "codex-home");
+  fs.mkdirSync(bHome, { recursive: true });
+  fs.writeFileSync(path.join(bHome, "config.toml"), 'model = "x"\n\n[windows]\nsandbox = "elevated"\n');
+  const host = createChatGptDesktopHost({
+    dataRoot, resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
+    getProxyRoute: () => null, homeDir: path.join(root, "home"), autoStart: false,
+  });
+  try {
+    await host.initialize();
+    for (const [email, id] of [["a@x.com", "acct-a"], ["b@x.com", "acct-b"]]) await host.open(cpaSlotId(id, email));
+    const aHome = path.join(dataRoot, "slots", cpaSlotId("acct-a", "a@x.com"), "codex-home");
+    assert.match(fs.readFileSync(path.join(aHome, "config.toml"), "utf8"), /\[windows\]\nsandbox = "unelevated"/);
+    assert.match(fs.readFileSync(path.join(bHome, "config.toml"), "utf8"), /sandbox = "elevated"/);
+    assert.doesNotMatch(fs.readFileSync(path.join(bHome, "config.toml"), "utf8"), /unelevated/);
+    const atoms = JSON.parse(fs.readFileSync(path.join(aHome, ".codex-global-state.json"), "utf8"))["electron-persisted-atom-state"];
+    assert.equal(atoms["electron:onboarding-welcome-v2-role-state"].completedConversationalOnboarding, true);
+    assert.deepEqual(atoms["electron:onboarding-conversational-completed-by-account-id"], { "acct-a": true });
+    assert.equal(typeof atoms.last_completed_onboarding, "number");
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detected accounts start hidden, and switching between them never relaunches", async () => {
+  const { createChatGptDesktopHost, cpaSlotId, slotPaths } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-switch-"));
+  const world = fakeDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"], ["b@x.com", "acct-b"]]);
+  const dataRoot = path.join(root, "data");
+  const host = createChatGptDesktopHost({
+    dataRoot, resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
+    getProxyRoute: () => null, homeDir: path.join(root, "home"),
+  });
+  const a = cpaSlotId("acct-a", "a@x.com");
+  const b = cpaSlotId("acct-b", "b@x.com");
+  try {
+    await host.initialize();
+    assert.ok(await until(() => host.status().runningSlotIds.length === 2), "both accounts auto-started");
+    assert.deepEqual(world.visibleMarkers(), [], "auto-started windows stay hidden");
+    host.setOwner(1);
+    host.setSurfaceActive(true);
+    host.setBounds({ x: 0, y: 0, width: 800, height: 600 });
+    await host.open(a);
+    await host.open(b);
+    await host.open(a);
+    assert.equal(world.launches(), 2, "no relaunch on switch");
+    assert.ok(await until(() => world.visibleMarkers().length === 1));
+    assert.deepEqual(world.visibleMarkers(), [slotPaths(dataRoot, a).roaming]);
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a background account nobody uses is closed when idle; the shown one stays", async () => {
+  const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-idle-"));
+  const world = fakeDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"], ["b@x.com", "acct-b"]]);
+  const host = createChatGptDesktopHost({
+    dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper,
+    platform: "win32", getProxyRoute: () => null, homeDir: path.join(root, "home"), idleCloseMs: 200,
+  });
+  const a = cpaSlotId("acct-a", "a@x.com");
+  try {
+    await host.initialize();
+    await host.open(a);
+    assert.ok(await until(() => host.status().runningSlotIds.length === 2));
+    assert.ok(await until(() => host.status().runningSlotIds.length === 1, 8_000), "idle background account closed");
+    assert.deepEqual(host.status().runningSlotIds, [a]);
+    assert.equal(host.status().running, true);
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
