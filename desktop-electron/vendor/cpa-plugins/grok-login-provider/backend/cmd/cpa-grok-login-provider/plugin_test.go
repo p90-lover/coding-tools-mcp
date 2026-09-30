@@ -278,7 +278,11 @@ func TestLoginPageGuardsPosts(t *testing.T) {
 		value.Email = "me@example.com"
 		return value, nil
 	}
-	defer func() { resolveSSOAccount = func(ctx context.Context, rt *grokRuntime, value grokStorage) (grokStorage, error) { return resolveSSO(ctx, rt, value) } }()
+	defer func() {
+		resolveSSOAccount = func(ctx context.Context, rt *grokRuntime, value grokStorage) (grokStorage, error) {
+			return resolveSSO(ctx, rt, value)
+		}
+	}()
 	server := httptest.NewServer(nil)
 	defer server.Close()
 	server.Config.Handler = session.routes(ctx, server.URL)
