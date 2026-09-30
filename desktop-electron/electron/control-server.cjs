@@ -89,8 +89,10 @@ function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, g
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, fetchNative, getCodingToolsWorkspaces, callReadOnlyAppTool, callNativeCodexTool, callAgentOrchestrator }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, fetchNative, getCodingToolsWorkspaces, callReadOnlyAppTool, callNativeCodexTool, callAgentOrchestrator, onTurnEvent }) {
     this.logger = logger;
+    // Observes turn lifecycle and native network failures for MCP event incidents.
+    this.onTurnEvent = onTurnEvent;
     this.getBrowserHost = getBrowserHost;
     this.getPreferences = getPreferences;
     this.resolveProxy = resolveProxy;
@@ -138,6 +140,16 @@ class BrowserControlServer {
     });
     this.logger.info("browser.control_started", { port: this.port });
     return this;
+  }
+
+  reportTurnEvent(event) {
+    if (!this.onTurnEvent) return;
+    // An observer must never change the outcome of a turn request.
+    try { this.onTurnEvent(event); } catch (error) {
+      this.logger.debug?.("browser.turn_event_observer_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   descriptor() {
@@ -329,6 +341,7 @@ class BrowserControlServer {
             traceId: body.traceId,
             reused: lease.reused,
           });
+          this.reportTurnEvent({ type: "start", traceId: body.traceId, conversationKey: body.conversationKey, manual: true });
           writeJson(response, 200, { ok: true, ...lease });
           return;
         }
@@ -393,6 +406,7 @@ class BrowserControlServer {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) {
           throw new Error("manual turn status is invalid");
         }
+        this.reportTurnEvent({ type: "end", traceId: body.traceId, status: body.status, conversationKey: body.conversationKey, manual: true });
         const release = host.endManualTurn(
           body.traceId,
           body.helperPid,
@@ -415,15 +429,21 @@ class BrowserControlServer {
           body.requireRetainedConversation === true,
         );
         this.logger.info("browser.turn_started", { traceId: body.traceId });
+        this.reportTurnEvent({ type: "start", traceId: body.traceId, conversationKey: body.conversationKey, manual: false });
         writeJson(response, 200, { ok: true, ...lease });
         return;
       } else if (request.url === "/v1/turn/heartbeat") {
         host.heartbeatTurn(body.traceId, body.helperPid, body.refreshViewport === true);
+        this.reportTurnEvent({ type: "heartbeat", traceId: body.traceId });
         this.logger.debug?.("browser.turn_heartbeat", { traceId: body.traceId });
         writeJson(response, 200, { ok: true });
         return;
       } else {
         if (!['completed', 'failed', 'aborted'].includes(body.status)) throw new Error("turn status is invalid");
+        this.reportTurnEvent({
+          type: "end", traceId: body.traceId, status: body.status, conversationKey: body.conversationKey,
+          message: typeof body.message === "string" ? body.message : undefined, manual: false,
+        });
         const release = await host.endTurn(
           body.traceId,
           body.helperPid,
@@ -528,12 +548,14 @@ class BrowserControlServer {
         code: typeof error?.code === "string" ? error.code : "network_error",
         ...(netError ? { netError } : {}),
       });
+      this.reportTurnEvent({ type: "native_fetch_failed", netError });
       writeJson(response, 502, {
         error: netError ? `Native Codex network request failed (${netError})` : "Native Codex network request failed",
         code: "native_network_error",
       });
       return;
     }
+    this.reportTurnEvent({ type: "native_fetch_ok" });
     const outgoing = {};
     const excludedResponse = new Set([
       "content-length", "content-encoding", "set-cookie", "connection", "transfer-encoding",

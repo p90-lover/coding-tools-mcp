@@ -682,6 +682,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "glob",
+ "hmac",
  "image",
  "jsonwebtoken",
  "libc",

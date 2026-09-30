@@ -9,8 +9,8 @@
 use std::sync::Mutex;
 
 pub use coding_tools_mcp_desktop_lib::{
-    data, error, integrations, runtime, tools, validate_redirect_uris, AoCodexConnection,
-    AoCodexHub, SecretStore,
+    data, error, integrations, mcp_events, runtime, tools, validate_redirect_uris,
+    AoCodexConnection, AoCodexHub, SecretStore,
 };
 
 use data::{AppData, DataStore};

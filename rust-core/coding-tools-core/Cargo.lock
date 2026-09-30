@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "coding-tools-mcp-desktop"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -695,6 +695,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "glob",
+ "hmac",
  "image",
  "jsonwebtoken",
  "libc",

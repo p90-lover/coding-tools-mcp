@@ -1,3 +1,4 @@
+pub mod events;
 mod listener;
 pub(crate) mod operation_store;
 pub(crate) mod request_log;

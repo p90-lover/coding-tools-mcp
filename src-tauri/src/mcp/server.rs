@@ -18,7 +18,7 @@ fn server_info() -> Value {
     json!({"name":"coding-tools-mcp","title":"Coding Tools MCP","version":env!("CARGO_PKG_VERSION")})
 }
 fn instructions() -> &'static str {
-    "After an HTTP timeout, use mcp_operation_status with the returned operation_id (include_result=true), the original request_id, or no selector for recent records. Never rerun the original operation just to inspect it. Receipts/results are runtime-local and bounded; missing records are unknown, not proof of nonexecution. Completed means RPC dispatch returned; inspect any returned command/task handle separately. Use these tools only for local coding operations inside the configured workspace. When the client supplies _meta.openai/session, the server automatically creates or resumes the matching bounded history session before the first non-history tool call and reports the stable target under history_session. The same conversation identifier resumes the same Markdown archive after a server restart. history_session_bootstrap remains available for clients without session metadata and whenever verbatim initial_user_input must be captured. Use history_session_search followed by history_session_read only when exact earlier context is needed; follow next_cursor with the returned content hash until the relevant archive page is complete. Preserve session_key and current_path, then pass them unchanged as session_key and expected_path to history_session_checkpoint. After completing each user-requested task, call history_session_checkpoint before the final response and pass that user's verbatim request as raw_user_input. Only state that progress was saved after checkpoint returns ok=true with the same target. The server cannot access ChatGPT transcript text that was not provided as a tool argument, so per-turn checkpoint text remains model-mediated rather than automatic background persistence. Every tool result also includes the bounded project_instructions selected from the addressed workspace or linked-project path."
+    "After an HTTP timeout, use mcp_operation_status with the returned operation_id (include_result=true), the original request_id, or no selector for recent records. Never rerun the original operation just to inspect it. Receipts/results are runtime-local and bounded; missing records are unknown, not proof of nonexecution. Completed means RPC dispatch returned; inspect any returned command/task handle separately. Use these tools only for local coding operations inside the configured workspace. When the client supplies _meta.openai/session, the server automatically creates or resumes the matching bounded history session before the first non-history tool call and reports the stable target under history_session. The same conversation identifier resumes the same Markdown archive after a server restart. history_session_bootstrap remains available for clients without session metadata and whenever verbatim initial_user_input must be captured. Use history_session_search followed by history_session_read only when exact earlier context is needed; follow next_cursor with the returned content hash until the relevant archive page is complete. Preserve session_key and current_path, then pass them unchanged as session_key and expected_path to history_session_checkpoint. After completing each user-requested task, call history_session_checkpoint before the final response and pass that user's verbatim request as raw_user_input. Only state that progress was saved after checkpoint returns ok=true with the same target. The server cannot access ChatGPT transcript text that was not provided as a tool argument, so per-turn checkpoint text remains model-mediated rather than automatic background persistence. Every tool result also includes the bounded project_instructions selected from the addressed workspace or linked-project path. When an MCP event (coding_tools.*) wakes you, call server_info and check mcp_events.open_incidents before acting; an incident missing from that list has already recovered. Follow the event's next_step: tool approvals and mission resume require the local user in Coding Tools, so ask them rather than retrying."
 }
 fn request_protocol(body: &Value) -> Option<&str> {
     body.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
@@ -105,6 +105,12 @@ fn handle_current_request(state: &SharedState, body: &Value) -> Value {
             }
         }
         "ping" => Ok(json!({})),
+        "events/list" => Ok(json!({"events": crate::mcp::events::catalog::definitions()})),
+        // Subscriptions verify their callback over the network; the HTTP listener
+        // routes them to handle_events_request instead of this synchronous path.
+        "events/subscribe" | "events/unsubscribe" => Err(
+            json!({"code":-32603,"message":"MCP event subscriptions require the HTTP MCP listener"}),
+        ),
         "tools/list" => Ok(json!({"tools":list_tools_for_profile(&state.tool_profile)})),
         "tools/call" => handle_tools_call(state, &params),
         _ => Err(json!({"code":-32601,"message":format!("Method not found: {method}")})),
@@ -140,10 +146,33 @@ fn discover_result() -> Value {
         "server/discover",
         json!({
             "supportedVersions":SUPPORTED_PROTOCOLS,
-            "capabilities":{"tools":{"listChanged":false},"logging":{}},
+            "capabilities":{"tools":{"listChanged":false},"logging":{},"events":{}},
             "instructions":instructions()
         }),
     )
+}
+
+/// `events/*` over the HTTP listener: same envelope and protocol checks as
+/// handle_request, but asynchronous because subscribe verifies the callback URL.
+/// `principal` is the workspace profile of the authenticated listener.
+pub async fn handle_events_request(
+    hub: &crate::mcp::events::EventHub,
+    principal: &str,
+    body: &Value,
+) -> Value {
+    let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+    let id = body.get("id").cloned().unwrap_or(Value::Null);
+    let params = body.get("params").cloned().unwrap_or(Value::Null);
+    let modern = match validate_request_protocol(body) {
+        Ok(value) => value,
+        Err(error) => return json!({"jsonrpc":"2.0","id":id,"error":error}),
+    };
+    match hub.dispatch(principal, method, &params).await {
+        Ok(result) => {
+            json!({"jsonrpc":"2.0","id":id,"result":if modern {modernize_result(method,result)} else {result}})
+        }
+        Err(error) => json!({"jsonrpc":"2.0","id":id,"error":error}),
+    }
 }
 
 fn handle_tools_call(state: &SharedState, params: &Value) -> Result<Value, Value> {
@@ -319,6 +348,7 @@ mod tests {
         assert!(instructions.contains("checkpoint returns ok=true"));
         assert!(instructions.contains("model-mediated"));
         assert!(instructions.contains("project_instructions"));
+        assert!(instructions.contains("mcp_events.open_incidents"));
     }
 
     #[test]
@@ -345,6 +375,74 @@ mod tests {
             .iter()
             .any(|v| v == "2025-11-25"));
         assert_eq!(result["capabilities"]["tools"]["listChanged"], false);
+        assert_eq!(result["capabilities"]["events"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn events_methods_share_the_modern_rpc_envelope() {
+        let dir = tempfile::tempdir().expect("event store");
+        let hub = crate::mcp::events::EventHub::open(
+            dir.path().to_path_buf(),
+            crate::mcp::events::HubOptions::default(),
+        )
+        .expect("event hub");
+        let meta = json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        let listed = super::handle_events_request(
+            &hub,
+            "workspace",
+            &json!({"jsonrpc":"2.0","id":1,"method":"events/list","params":{"_meta":meta}}),
+        )
+        .await;
+        assert_eq!(listed["result"]["resultType"], "complete");
+        let events = listed["result"]["events"].as_array().expect("events");
+        assert_eq!(events.len(), 4);
+        assert!(events.iter().all(|event| event["delivery"] == json!(["webhook"])));
+
+        let unsubscribed = super::handle_events_request(
+            &hub,
+            "workspace",
+            &json!({"jsonrpc":"2.0","id":2,"method":"events/unsubscribe","params":{
+                "_meta": meta,
+                "name":"coding_tools.bridge.down","arguments":{},
+                "delivery":{"mode":"webhook","url":"https://example.test/hook"}
+            }}),
+        )
+        .await;
+        assert_eq!(unsubscribed["result"]["resultType"], "complete");
+
+        let rejected = super::handle_events_request(
+            &hub,
+            "workspace",
+            &json!({"jsonrpc":"2.0","id":3,"method":"events/subscribe","params":{
+                "_meta": meta,
+                "name":"coding_tools.bridge.down",
+                "delivery":{"mode":"webhook","url":"http://example.test/hook","secret":"whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD"}
+            }}),
+        )
+        .await;
+        assert_eq!(rejected["error"]["code"], -32602);
+
+        let context = Arc::new(
+            ToolContext::for_test(dir.path().to_path_buf(), dir.path().join("harness"))
+                .expect("tool context"),
+        );
+        let synchronous = handle_request(
+            &context,
+            &json!({"jsonrpc":"2.0","id":4,"method":"events/list"}),
+        );
+        assert_eq!(synchronous["result"]["events"].as_array().unwrap().len(), 4);
+
+        // server_info is the read-only recovery entry point named in event payloads.
+        let info = handle_request(
+            &context,
+            &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"server_info","arguments":{}}}),
+        );
+        let events = &info["result"]["structuredContent"]["mcp_events"];
+        assert_eq!(events["events"].as_array().unwrap().len(), 4, "{info}");
+        assert!(events["open_incidents"].is_array());
     }
 
     #[test]

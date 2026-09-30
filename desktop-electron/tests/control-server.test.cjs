@@ -600,3 +600,55 @@ test("browser control server rejects malformed retained-conversation contracts",
     await server.close();
   }
 });
+
+test("turn lifecycle and native proxy failures reach the MCP event observer without changing responses", async () => {
+  const observed = [];
+  const host = {
+    browserInteractionMode: () => "automatic",
+    beginTurn: () => ({ surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1", reused: false, connectorBound: false }),
+    heartbeatTurn: () => {},
+    endTurn: () => ({ cancelledByUser: false }),
+  };
+  let failNative = true;
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getBrowserHost: () => host,
+    getPreferences: () => ({}),
+    fetchNative: async () => {
+      if (failNative) throw new Error("net::ERR_PROXY_CONNECTION_FAILED");
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    },
+    onTurnEvent: (event) => {
+      observed.push(event);
+      if (event.type === "heartbeat") throw new Error("observer failures are ignored");
+    },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const post = (path, body) => fetch(`${endpoint}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const native = () => fetch(`${endpoint}/v1/network/native-fetch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models",
+      "x-native-authorization": "Bearer native-test-token", "x-native-method": "GET" },
+  });
+  try {
+    const key = "b".repeat(64);
+    assert.equal((await post("/v1/turn/start", { traceId: "trace_event_1", helperPid: process.pid, conversationKey: key })).status, 200);
+    assert.equal((await post("/v1/turn/heartbeat", { traceId: "trace_event_1", helperPid: process.pid })).status, 200);
+    assert.equal((await post("/v1/turn/end", { traceId: "trace_event_1", helperPid: process.pid, status: "failed", message: "Upstream error" })).status, 200);
+    assert.equal((await post("/v1/turn/end", { traceId: "trace_event_1", helperPid: process.pid, status: "bogus" })).status, 400);
+    assert.equal((await native()).status, 502);
+    failNative = false;
+    assert.equal((await native()).status, 200);
+    assert.deepEqual(observed, [
+      { type: "start", traceId: "trace_event_1", conversationKey: key, manual: false },
+      { type: "heartbeat", traceId: "trace_event_1" },
+      { type: "end", traceId: "trace_event_1", status: "failed", conversationKey: undefined, message: "Upstream error", manual: false },
+      { type: "native_fetch_failed", netError: "ERR_PROXY_CONNECTION_FAILED" },
+      { type: "native_fetch_ok" },
+    ]);
+  } finally { await server.close(); }
+});

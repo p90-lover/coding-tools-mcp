@@ -19,6 +19,7 @@ pub mod error;
 pub mod harness;
 mod health;
 mod mcp;
+pub use mcp::events as mcp_events;
 mod platform;
 pub mod runtime;
 mod secret;
