@@ -134,3 +134,47 @@ test("CPA Codex accounts are found by type, with or without the codex- file pref
     ]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("the proxy route is read from the environment and never carries credentials", () => {
+  const { proxyRouteFromEnvironment } = require("../electron/chatgpt-desktop.cjs");
+  assert.deepEqual(
+    proxyRouteFromEnvironment({ HTTPS_PROXY: "http://127.0.0.1:17891", NO_PROXY: "localhost, 127.0.0.1,,::1" }),
+    { url: "http://127.0.0.1:17891", bypass: ["localhost", "127.0.0.1", "::1"] },
+  );
+  assert.equal(proxyRouteFromEnvironment({}), null);
+  assert.equal(proxyRouteFromEnvironment({ HTTPS_PROXY: "http://user:pw@proxy:8080" }), null);
+});
+
+test("a launched ChatGPT instance inherits Coding Tools' proxy route", async () => {
+  const { createChatGptDesktopHost } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-proxy-"));
+  const location = path.join(root, "pkg");
+  fs.mkdirSync(path.join(location, "app"), { recursive: true });
+  fs.writeFileSync(path.join(location, "app", "ChatGPT.exe"), "");
+  const calls = [];
+  const helper = {
+    dispose() {},
+    call: async (op, input) => {
+      calls.push({ op, input });
+      if (op === "package") return { location, family: "OpenAI.Codex_test", version: "1" };
+      if (op === "find") return calls.some((c) => c.op === "launch") ? { pid: 42, hwnd: 7 } : null;
+      return null;
+    },
+  };
+  try {
+    const host = createChatGptDesktopHost({
+      dataRoot: path.join(root, "data"),
+      resolveCpaAuthDir: () => path.join(root, "no-cpa"),
+      helper,
+      platform: "win32",
+      getProxyRoute: () => ({ url: "http://127.0.0.1:17891", bypass: ["localhost", "::1"] }),
+    });
+    await host.initialize();
+    await host.newSignIn();
+    const launch = calls.find((c) => c.op === "launch").input.arguments;
+    assert.match(launch, /set "HTTPS_PROXY=http:\/\/127\.0\.0\.1:17891"&& /);
+    assert.match(launch, /set "NO_PROXY=localhost,::1"&& /);
+    assert.match(launch, /ChatGPT\.exe" --proxy-server="http:\/\/127\.0\.0\.1:17891" --proxy-bypass-list="localhost;::1"$/);
+    await host.shutdown?.();
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

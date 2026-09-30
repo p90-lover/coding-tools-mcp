@@ -53,6 +53,21 @@ function cpaSlotId(accountId, email) {
   return `cpa-${digest.slice(0, 16)}`;
 }
 
+// Coding Tools' global proxy routing publishes its route in this process's environment
+// (provider-network applyGlobalRouting). The ChatGPT instance is a separate program that inherits
+// none of it; launched without it, it reaches chatgpt.com directly, where a region block answers
+// every account lookup with 403 and the app falls back to its sign-in screen.
+function proxyRouteFromEnvironment(env = process.env) {
+  const url = env.HTTPS_PROXY || env.HTTP_PROXY || env.ALL_PROXY;
+  if (!url) return null;
+  let parsed;
+  try { parsed = new URL(url); } catch { return null; }
+  // A command line is visible to every local process, so credentials never go on it.
+  if (parsed.username || parsed.password) return null;
+  const bypass = String(env.NO_PROXY || "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  return { url, bypass };
+}
+
 function planFromFileName(fileName, email) {
   const stem = fileName.replace(/^codex-/, "").replace(/\.json$/i, "");
   return email && stem.startsWith(`${email}-`) ? stem.slice(email.length + 1) || null : null;
@@ -65,6 +80,7 @@ function createChatGptDesktopHost({
   onChange = () => {},
   helper = createWin32Helper({ logger }),
   platform = process.platform,
+  getProxyRoute = proxyRouteFromEnvironment,
 }) {
   const statePath = path.join(dataRoot, "state.json");
   let state = { active: null, local: [] };
@@ -246,7 +262,7 @@ function createChatGptDesktopHost({
       try {
         current.watchers.push(fs.watch(directory, (_event, changed) => {
           const name = changed ? String(changed) : "";
-          if (fileName ? name === fileName : /^codex-.*\.json$/i.test(name)) schedule();
+          if (fileName ? name === fileName : /\.json$/i.test(name)) schedule();
         }));
       } catch (error) {
         logger?.warn?.("chatgpt_desktop.watch_failed", { message: error.message });
@@ -302,9 +318,24 @@ function createChatGptDesktopHost({
       ["LOCALAPPDATA", paths.local],
       ["CODEX_ELECTRON_DISABLE_QUIT_CONFIRMATION", "1"],
     ];
-    const argumentsText = `/d /c ${env.map(([key, value]) => `set "${key}=${value}"&& `).join("")}start "" "${pkg.exe}"`;
+    // The app's Rust backend reads the *_PROXY variables; its Electron window ignores them on
+    // Windows and needs Chromium's own switches.
+    let proxy = getProxyRoute();
+    if (proxy && [proxy.url, ...proxy.bypass].some((value) => CMD_UNSAFE.test(value) || /\s/.test(value))) {
+      logger?.warn?.("chatgpt_desktop.proxy_not_passed", { reason: "unsafe_characters" });
+      proxy = null;
+    }
+    let switches = "";
+    if (proxy) {
+      const noProxy = proxy.bypass.join(",");
+      env.push(["HTTPS_PROXY", proxy.url], ["HTTP_PROXY", proxy.url], ["ALL_PROXY", proxy.url], ["NO_PROXY", noProxy]);
+      switches = ` --proxy-server="${proxy.url}"${proxy.bypass.length ? ` --proxy-bypass-list="${proxy.bypass.join(";")}"` : ""}`;
+    }
+    const argumentsText = `/d /c ${env.map(([key, value]) => `set "${key}=${value}"&& `).join("")}start "" "${pkg.exe}"${switches}`;
     await helper.call("launch", { family: pkg.family, command, arguments: argumentsText }, 45_000);
-    logger?.info?.("chatgpt_desktop.instance_launched", { slotId, signedIn: fs.existsSync(paths.auth) });
+    logger?.info?.("chatgpt_desktop.instance_launched", {
+      slotId, signedIn: fs.existsSync(paths.auth), proxied: Boolean(proxy),
+    });
     return await waitForWindow(slotId);
   }
 
@@ -486,4 +517,5 @@ function createChatGptDesktopHost({
   };
 }
 
-module.exports = { createChatGptDesktopHost, cpaSlotId, planFromFileName, slotPaths };
+module.exports = {
+  proxyRouteFromEnvironment, createChatGptDesktopHost, cpaSlotId, planFromFileName, slotPaths };
