@@ -1262,7 +1262,7 @@ mod workspace_auth_tests {
         let home = app_data.join("ao-homes/planner");
         let catalog =
             serde_json::json!({"models":[{"slug":"chatgpt-web/high","visibility":"list"}]});
-        prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog).unwrap();
+        prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/high").unwrap();
         let config = fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(config.contains("model = \"chatgpt-web/high\""));
         assert!(config.contains("env_key = \"CODING_TOOLS_AO_WEB_KEY\""));
@@ -1276,12 +1276,12 @@ mod workspace_auth_tests {
             catalog
         );
         assert!(
-            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog).is_ok()
+            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/high").is_ok()
         );
         assert!(
-            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17842/v1", &catalog).is_err()
+            prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17842/v1", &catalog, "chatgpt-web/high").is_err()
         );
-        assert!(prepare_ao_web_home(&home, &app_data, "http://example.com/v1", &catalog).is_err());
+        assert!(prepare_ao_web_home(&home, &app_data, "http://example.com/v1", &catalog, "chatgpt-web/high").is_err());
     }
 
     #[test]
@@ -1313,6 +1313,9 @@ mod workspace_auth_tests {
             parents: vec!["planner".into()],
             x: 0,
             y: 1,
+            positioned: false,
+            settings: Default::default(),
+            template_role_id: None,
             state: integrations::ao::State::Pending,
             route: integrations::ao::Route {
                 harness_id: "codex-native".into(),
@@ -1323,6 +1326,7 @@ mod workspace_auth_tests {
             },
             request_key: None,
             receipt: None,
+            history: vec![],
         };
         let mut connection = AoCodexConnection {
             executable: PathBuf::from("codex"),
@@ -1367,6 +1371,30 @@ mod workspace_auth_tests {
         connection.model = "chatgpt-web/high".into();
         assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
         assert_eq!(ao_connect_policy(&node, &connection, None).unwrap(), false);
+        // The orchestrator may run on another WebGPT tier, or on a CPA model with the pool key.
+        node.route.model = "chatgpt-web/extra-high".into();
+        connection.model = node.route.model.clone();
+        assert_eq!(ao_connect_policy(&node, &connection, None).unwrap(), false);
+        node.route.provider_id = "cliproxyapi-antigravity".into();
+        node.route.account_id = "shared-cpa-pool".into();
+        node.route.model = "claude-sonnet-4-6".into();
+        connection.model = node.route.model.clone();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).unwrap());
+    }
+
+    #[test]
+    fn ao_web_home_writes_the_selected_tier_and_refuses_a_mismatched_catalog() {
+        let app_data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../aiTemp/ao-web-home-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let home = app_data.join("ao-homes/worker");
+        let catalog =
+            serde_json::json!({"models":[{"slug":"chatgpt-web/extra-high","visibility":"list"}]});
+        assert!(prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/high").is_err());
+        prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/extra-high").unwrap();
+        let config = fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(config.contains("model = \"chatgpt-web/extra-high\""));
+        assert!(prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/x\"y").is_err());
     }
 
     #[test]
@@ -2226,7 +2254,14 @@ fn prepare_ao_web_home(
     app_data_dir: &Path,
     base_url: &str,
     catalog: &Value,
+    model: &str,
 ) -> Result<(), String> {
+    if !model.starts_with("chatgpt-web/")
+        || model.len() > 128
+        || model.bytes().any(|byte| byte == b'"' || byte == b'\\' || byte.is_ascii_control())
+    {
+        return Err("AO WebGPT model is invalid".into());
+    }
     let url = url::Url::parse(base_url).map_err(|_| "AO WebGPT bridge URL is invalid")?;
     if url.scheme() != "http"
         || url.host_str() != Some("127.0.0.1")
@@ -2244,7 +2279,7 @@ fn prepare_ao_web_home(
         .and_then(Value::as_array)
         .ok_or("AO WebGPT catalog is invalid")?;
     if models.len() != 1
-        || models[0].get("slug").and_then(Value::as_str) != Some("chatgpt-web/high")
+        || models[0].get("slug").and_then(Value::as_str) != Some(model)
     {
         return Err("AO WebGPT catalog must contain only the selected model".into());
     }
@@ -2254,10 +2289,11 @@ fn prepare_ao_web_home(
     }
     let catalog_path = home.join("models.json");
     let config_bytes = format!(
-        "model = \"chatgpt-web/high\"\nmodel_provider = \"coding_tools_ao_web\"\nmodel_catalog_json = {}\n\
+        "model = {}\nmodel_provider = \"coding_tools_ao_web\"\nmodel_catalog_json = {}\n\
 [model_providers.coding_tools_ao_web]\nname = \"Coding Tools AO WebGPT\"\nbase_url = {}\n\
 env_key = \"CODING_TOOLS_AO_WEB_KEY\"\nrequires_openai_auth = false\nwire_api = \"responses\"\n\
 supports_websockets = false\n",
+        serde_json::to_string(model).map_err(text_error)?,
         serde_json::to_string(&catalog_path.to_string_lossy().as_ref()).map_err(text_error)?,
         serde_json::to_string(base_url).map_err(text_error)?,
     );
@@ -2311,9 +2347,9 @@ fn ao_connect_policy(
     {
         return Err("AO selected route or read-only limits do not match".into());
     }
-    // The route's provider decides the connection, not the role: any worker may use
-    // WebGPT or any model in the shared CPA pool. Planner/reviewer routes are still
-    // pinned to WebGPT by run validation.
+    // The route's provider decides the connection, not the role: any card may use any
+    // WebGPT tier or any model in the shared CPA pool (run validation keeps the planner
+    // and reviewer on Native Codex).
     let cpa_model = |model: &str| {
         (1..=128).contains(&model.len())
             && model
@@ -2321,10 +2357,15 @@ fn ao_connect_policy(
                 .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-@+".contains(&byte))
     };
     match node.route.provider_id.as_str() {
-        "chatgpt-web" if node.route.model == "chatgpt-web/high" && private_key.is_none() => Ok(false),
+        "chatgpt-web"
+            if node.route.model.starts_with("chatgpt-web/")
+                && cpa_model(&node.route.model)
+                && private_key.is_none() =>
+        {
+            Ok(false)
+        }
         "cliproxyapi-antigravity"
-            if node.role == integrations::ao::Role::Worker
-                && node.route.account_id == "shared-cpa-pool"
+            if node.route.account_id == "shared-cpa-pool"
                 && cpa_model(&node.route.model)
                 && private_key.is_some_and(|key| {
                     (32..=512).contains(&key.len()) && !key.chars().any(char::is_control)
@@ -2547,6 +2588,7 @@ async fn ao_harness_connect(
             app_data_dir,
             web_base_url.as_deref().unwrap(),
             web_catalog.as_ref().unwrap(),
+            &node.route.model,
         )
         .is_err()
         {

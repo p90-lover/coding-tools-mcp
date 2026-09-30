@@ -136,6 +136,28 @@ pub fn external_harness(route: &Route) -> Option<&str> {
     })
 }
 
+/// The automatic tiers the WebGPT bridge serves (runtime-web chatgpt-web-models.ts); the
+/// bridge itself falls back to a lower tier when the account lacks the chosen one.
+const WEB_TIERS: &[&str] = &["light", "medium", "high", "extra-high", "pro", "luna", "think"];
+
+/// WebGPT-on-Codex at any tier the bridge serves.
+fn web_route_valid(route: &Route) -> bool {
+    route.harness_id == "codex-native"
+        && route.provider_id == "chatgpt-web"
+        && route
+            .model
+            .strip_prefix("chatgpt-web/")
+            .is_some_and(|tier| WEB_TIERS.contains(&tier))
+}
+
+/// Any model in the shared CPA pool, run by Native Codex.
+fn cpa_route_valid(route: &Route) -> bool {
+    route.harness_id == "codex-native"
+        && route.provider_id == "cliproxyapi-antigravity"
+        && route.account_id == "shared-cpa-pool"
+        && (1..=128).contains(&route.model.len())
+}
+
 fn external_route_valid(route: &Route) -> bool {
     external_harness(route).is_some()
         && route.provider_id == EXTERNAL_PROVIDER
@@ -298,14 +320,12 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                 }
             }
             Role::Worker => {
-                // Workers may run on any route; a WebGPT worker must use the exact bridge route.
+                // Workers may run on any route; a WebGPT worker must use the bridge on Native Codex.
                 if (node.route.provider_id == "chatgpt-web"
                     || node.route.model.starts_with("chatgpt-web/"))
-                    && (node.route.harness_id != "codex-native"
-                        || node.route.provider_id != "chatgpt-web"
-                        || node.route.model != "chatgpt-web/high")
+                    && !web_route_valid(&node.route)
                 {
-                    return Err(fail("AO WebGPT worker requires the exact WebGPT-on-Codex route"));
+                    return Err(fail("AO WebGPT worker requires a WebGPT-on-Codex route"));
                 }
                 if node.route.harness_id.starts_with("ao:") && !external_route_valid(&node.route) {
                     return Err(fail("AO harness worker route is invalid"));
@@ -349,13 +369,14 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         {
             return Err(fail("AO reviewer must depend on every worker"));
         }
+        // The run loop drives external harnesses only as workers, so the orchestrator and
+        // reviewer stay on Native Codex, with any WebGPT tier or any CPA model.
         if matches!(node.role, Role::Planner | Role::Reviewer)
-            && (node.route.harness_id != "codex-native"
-                || node.route.provider_id != "chatgpt-web"
-                || node.route.model != "chatgpt-web/high")
+            && !web_route_valid(&node.route)
+            && !cpa_route_valid(&node.route)
         {
             return Err(fail(
-                "AO planner and reviewer require the exact WebGPT-on-Codex route",
+                "AO planner and reviewer run on Native Codex with WebGPT or a CPA model",
             ));
         }
     }
@@ -959,6 +980,32 @@ mod tests {
             "account_id":"chatgpt-web","model":"chatgpt-web/other","permission_profile":":read-only"}))).is_err());
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
             "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
+        // Every WebGPT tier the bridge serves is allowed, but only on Native Codex.
+        assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/extra-high","permission_profile":":read-only"}))).is_ok());
+        assert!(validate(None, &run(json!({"harness_id":"ao:codex","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/pro","permission_profile":":read-only"}))).is_err());
+    }
+
+    #[test]
+    fn ao_orchestrator_and_reviewer_may_use_any_webgpt_tier_or_cpa_model_on_native_codex() {
+        let worker = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+        let run = |lead: serde_json::Value| -> Run {
+            serde_json::from_value(json!({"id":"run","workspace_id":"qa","project_id":"p","revision":0,"nodes":[
+                {"id":"planner","task_id":"t","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":lead},
+                {"id":"worker","task_id":"t","role":"worker","parents":["planner"],"x":0,"y":1,"state":"pending","route":worker},
+                {"id":"reviewer","task_id":"t","role":"reviewer","parents":["worker"],"x":0,"y":2,"state":"pending","route":lead}
+            ]})).unwrap()
+        };
+        assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/medium","permission_profile":":read-only"}))).is_ok());
+        assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
+            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
+        assert!(validate(None, &run(json!({"harness_id":"ao:claude-code","provider_id":EXTERNAL_PROVIDER,
+            "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":EXTERNAL_PERMISSION}))).is_err());
+        assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/other","permission_profile":":read-only"}))).is_err());
     }
 
     #[test]

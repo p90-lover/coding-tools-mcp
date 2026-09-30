@@ -583,7 +583,8 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.equal(calls.filter((item) => item.endpoint.startsWith("/api/v1/ao/harness/")).length, 0);
 });
 
-test("any worker can pick WebGPT or any CPA pool model on Native Codex", async () => {
+test("Native Codex offers every WebGPT tier and any CPA pool model", async () => {
+  const WEB = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
@@ -591,12 +592,12 @@ test("any worker can pick WebGPT or any CPA pool model on Native Codex", async (
     confirm: async () => true,
   });
   assert.deepEqual((await workflow.call("models", { harness: "codex-native" })).models,
-    ["chatgpt-web/high", "gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-5.5"]);
+    [...WEB, "gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-5.5"]);
   const offline = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
     cpaConnection: () => null, confirm: async () => true,
   });
-  assert.deepEqual((await offline.call("models", { harness: "codex-native" })).models, ["chatgpt-web/high"]);
+  assert.deepEqual((await offline.call("models", { harness: "codex-native" })).models, WEB);
 });
 
 // A fake headless service holding one workspace's board, runs and team.
@@ -637,7 +638,11 @@ test("a first chat message creates 'New task' and starts a team run on it with t
     findCodexExecutable: () => "C:\Codex\codex.exe",
     resolveHarness: async (input) => { seen.push(input.executable); throw new Error("stop before the background loop"); },
   });
-  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the email dots" }), /stop before the background loop/);
+  const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the email dots" });
+  // A failed start still returns the chat, so the UI can open it and show why.
+  assert.equal(sent.taskId, "task-1");
+  assert.equal(sent.status, "failed");
+  assert.match(sent.detail, /stop before the background loop/);
   assert.deepEqual(world.tasks.map((task) => [task.title, task.description]), [["New task", "fix the email dots"]]);
   assert.equal(world.updates.length, 1);
   assert.equal(world.updates[0].operation, "create_from_team");
@@ -658,7 +663,7 @@ test("a follow-up waits for the chat's run, then extends the same task and start
   const done = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: done.requestHeadless, findCodexExecutable: () => "C:\c.exe",
     resolveHarness: async () => { throw new Error("stop before the background loop"); } });
-  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "also add tests" }), /stop before/);
+  assert.equal((await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "also add tests" })).status, "failed");
   assert.equal(done.edits.length, 1);
   assert.equal(done.edits[0].title, "Fix auth");
   assert.match(done.edits[0].description, /^first ask\n\nFollow-up \([0-9-]+ [0-9:]+ UTC\):\nalso add tests$/);
@@ -670,4 +675,22 @@ test("without an installed Codex a chat send explains what to set", async () => 
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => null });
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "hi" }), /Codex desktop app was not found/);
   assert.equal(world.tasks.length, 0, "nothing is created when the run could not start");
+});
+
+test("a saved codex.exe removed by a Codex update falls back to the installed one", async () => {
+  const world = chatWorld();
+  const seen = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: world.requestHeadless,
+    findCodexExecutable: () => "C:/Codex/bin/new/codex.exe",
+    exists: (file) => !file.includes("old"),
+    resolveHarness: async (input) => { seen.push(input.executable); throw new Error("stop"); },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", message: "hi", executable: "C:/Codex/bin/old/codex.exe" });
+  assert.deepEqual(seen, ["C:/Codex/bin/new/codex.exe"]);
+  const kept = [];
+  const chosen = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld().requestHeadless, findCodexExecutable: () => "C:/x.exe",
+    exists: () => true, resolveHarness: async (input) => { kept.push(input.executable); throw new Error("stop"); } });
+  await chosen.call("chat_send", { workspaceId: "ws-1", message: "hi", executable: "D:/tools/codex.exe" });
+  assert.deepEqual(kept, ["D:/tools/codex.exe"], "an existing chosen executable is kept");
 });

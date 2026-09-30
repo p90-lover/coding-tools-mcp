@@ -2355,7 +2355,9 @@ async function start() {
         }
         return { baseUrl: `http://127.0.0.1:${config.port}/v1` };
       },
-      webModelCatalog: async ({ executable }) => {
+      // The runtime returns Codex's WebGPT High entry; other tiers reuse it under their own slug
+      // (the bridge picks the effort from the slug, not from this entry).
+      webModelCatalog: async ({ executable, model = "chatgpt-web/high" }) => {
         const result = await runtimeHost.run("ao-web-model-catalog", ["catalog", "ao-web", "--codex", executable], {
           embedded: true, timeoutMs: 20_000, message: "Checking the AO WebGPT model",
           successMessage: "AO WebGPT model checked",
@@ -2365,7 +2367,10 @@ async function start() {
           || catalog.models[0]?.slug !== "chatgpt-web/high") {
           throw new Error("AO WebGPT catalog is unavailable");
         }
-        return catalog;
+        if (model === "chatgpt-web/high") return catalog;
+        if (!/^chatgpt-web/[a-z-]{1,32}$/.test(model)) throw new Error("AO WebGPT model is invalid");
+        const tier = model.slice("chatgpt-web/".length).split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
+        return { models: [{ ...catalog.models[0], slug: model, display_name: `ChatGPT Web — ${tier}` }] };
       },
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,

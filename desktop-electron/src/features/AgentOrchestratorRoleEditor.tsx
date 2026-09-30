@@ -20,8 +20,14 @@ export function workerRoute(harness: string, model: string): AoRoute {
   if (harness.startsWith("ao:")) {
     return { harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model: model || "default", permission_profile: ":ao-default" };
   }
-  if (model === WEB_ROUTE.model) return { ...WEB_ROUTE };
+  if (model.startsWith("chatgpt-web/")) return { ...WEB_ROUTE, model };
   return { harness_id: NATIVE_HARNESS, provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model, permission_profile: ":read-only" };
+}
+
+/** "chatgpt-web/extra-high" -> "WebGPT Extra High"; other model ids are shown as-is. */
+export function modelLabel(model: string): string {
+  if (!model.startsWith("chatgpt-web/")) return model;
+  return `WebGPT ${model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
 }
 
 export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string {
@@ -85,7 +91,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(workerRoute(route.harness_id, event.target.value))}>
       {models && !models.includes(route.model) ? <option value={route.model}>{route.model || "Choose"} (unverified)</option> : null}
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
-      {(models ?? []).map(model => <option key={model} value={model}>{model === WEB_ROUTE.model ? "WebGPT High" : model}</option>)}
+      {(models ?? []).map(model => <option key={model} value={model}>{modelLabel(model)}</option>)}
     </select></label>
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
   </>;

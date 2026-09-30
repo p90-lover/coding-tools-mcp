@@ -73,12 +73,22 @@ function findInstalledCodexExecutable(env = process.env) {
 
 const CHAT_TASK_TITLE = "New task";
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable }) {
+// The WebGPT tiers the bridge serves; it runs a tier the account lacks at the nearest lower one.
+const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
+const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
+const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
+
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file) }) {
+  // A saved path goes stale when the Codex app updates itself (it replaces bin<build>), so a
+  // chosen executable that no longer exists falls back to the currently installed one.
   function codexExecutable(chosen) {
-    if (typeof chosen === "string" && chosen.trim()) return clean(chosen, 1024);
+    const picked = typeof chosen === "string" && chosen.trim() ? clean(chosen, 1024) : "";
+    if (picked && exists(picked)) return picked;
     const found = findCodexExecutable();
-    if (!found) throw new Error("The Codex desktop app was not found; choose its codex.exe in AO settings");
-    return found;
+    if (found) return found;
+    throw new Error(picked
+      ? `The saved codex.exe no longer exists (${picked}) and no installed Codex app was found`
+      : "The Codex desktop app was not found; choose its codex.exe in AO settings");
   }
   const backgroundRuns = new Map();
   const dispatching = new Set();
@@ -151,10 +161,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default")] };
     }
     if (harness === "codex-native") {
-      // A Native Codex worker may use WebGPT or any model in the shared CPA pool.
+      // Native Codex may use every WebGPT tier or any model in the shared CPA pool.
       let cpa = [];
       try { cpa = (await models()).models; } catch { /* CPA not running: WebGPT only. */ }
-      return { ok: true, harness, models: ["chatgpt-web/high", ...cpa.filter(id => id !== "chatgpt-web/high")] };
+      return { ok: true, harness, models: [...WEB_TIERS, ...cpa.filter(id => !webModel(id))] };
     }
     const { baseUrl, key } = connection();
     const response = await fetchImpl(`${baseUrl}/v1/models`, {
@@ -318,15 +328,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     let webBridge;
     if (externalAgent(node)) throw new Error("AO harness workers run as AO sessions and need no Codex connection");
     if (worker) {
-      if (node.role !== "worker" || route.harness_id !== "codex-native"
-        || route.account_id !== "shared-cpa-pool" || !route.model) {
-        throw new Error("AO worker requires the saved shared-CPA route");
+      if (route.harness_id !== "codex-native" || route.account_id !== "shared-cpa-pool" || !route.model) {
+        throw new Error("AO card requires the saved shared-CPA route");
       }
       const catalog = await models();
       if (!catalog.models.includes(route.model)) throw new Error("Exact AO worker model is absent from CPA catalog");
     } else if (!["planner", "reviewer", "worker"].includes(node.role)
       || route.harness_id !== "codex-native" || route.provider_id !== "chatgpt-web"
-      || route.model !== "chatgpt-web/high") {
+      || !webModel(route.model)) {
       throw new Error("AO WebGPT route does not match the saved card");
     } else {
       const baseUrl = webBridgeConnection?.()?.baseUrl;
@@ -749,8 +758,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       expected_board_revision: current.revision, team_revision: team.revision,
       worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
     } });
-    const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
-    return { ok: true, taskId: task, runId, status: started.status };
+    // The chat exists from here on: report a failed start inside it instead of losing the chat.
+    try {
+      const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
+      return { ok: true, taskId: task, runId, status: started.status };
+    } catch (error) {
+      return { ok: true, taskId: task, runId, status: "failed", detail: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async function call(operation, args = {}) {

@@ -71,6 +71,17 @@ const COMPOSER_SELECTOR = [
   '[contenteditable="true"][role="textbox"]',
   "textarea",
 ].join(", ");
+// Pages built for OpenAI's desktop shell (chatgpt.com's Codex UI) mark their fixed header as a
+// window drag region. Inside this window Electron honours that, so the page's top row would move
+// the window instead of taking clicks. An embedded page never owns the window frame.
+const PAGE_NO_DRAG_CSS = "*, *::before, *::after { -webkit-app-region: no-drag !important; }";
+
+function keepPageOutOfWindowFrame(contents) {
+  contents.on("dom-ready", () => {
+    if (!contents.isDestroyed()) void contents.insertCSS(PAGE_NO_DRAG_CSS, { cssOrigin: "user" }).catch(() => {});
+  });
+}
+
 const CHATGPT_VIEWPORT_CSS = `
   html,
   body {
@@ -405,6 +416,7 @@ class BrowserHost {
         backgroundThrottling: true,
       },
     });
+    keepPageOutOfWindowFrame(this.view.webContents);
     window.contentView.addChildView(this.view);
     this.windowVisibilityListener = () => this.syncViewVisibility();
     for (const event of WINDOW_VISIBILITY_EVENTS) {
@@ -548,6 +560,7 @@ class BrowserHost {
         backgroundThrottling: false,
       },
     });
+    keepPageOutOfWindowFrame(view.webContents);
     const tab = {
       id,
       surfaceId,
@@ -620,6 +633,7 @@ class BrowserHost {
         backgroundThrottling: true,
       },
     });
+    keepPageOutOfWindowFrame(view.webContents);
     const tab = {
       id: randomBytes(12).toString("base64url"),
       traceId: null,
@@ -675,6 +689,7 @@ class BrowserHost {
         backgroundThrottling: false,
       },
     });
+    keepPageOutOfWindowFrame(view.webContents);
     const tab = {
       id,
       surfaceId: null,
