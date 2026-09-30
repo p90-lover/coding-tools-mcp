@@ -73,7 +73,7 @@ function findInstalledCodexExecutable(env = process.env) {
 
 const CHAT_TASK_TITLE = "New task";
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, onRunState = null }) {
   function codexExecutable(chosen) {
     if (typeof chosen === "string" && chosen.trim()) return clean(chosen, 1024);
     const found = findCodexExecutable();
@@ -81,6 +81,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return found;
   }
   const backgroundRuns = new Map();
+  // Background-run observations for MCP event incidents (stall, held, approval waits).
+  // An observer failure must never affect the run it watches.
+  function reportRun(workspaceId, runId, state, mission, attention = null) {
+    if (!onRunState) return;
+    try {
+      onRunState({
+        workspaceId, runId, status: state.status, detail: state.detail, stopped: state.stopped === true, attention,
+        ...(mission ? { fingerprint: (mission.nodes ?? []).map((node) => `${node.id}:${node.state}`).join(",") } : {}),
+      });
+    } catch { /* observational only */ }
+  }
   const dispatching = new Set();
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
   const externalAgent = (node) => node?.role === "worker" && typeof node.route?.harness_id === "string"
@@ -501,6 +512,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       current.status = action === "pause" ? "paused" : "held";
       current.stopped = action === "stop";
       current.detail = action === "pause" ? "Paused; already-sent turns may finish" : "Stopped by you";
+      reportRun(id, run, current, null);
     }
     return result;
   }
@@ -510,29 +522,34 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     state.driving = true;
     try {
       for (;;) {
-        if (state.stopped) return;
+        if (state.stopped) { reportRun(workspaceId, runId, state, null); return; }
         let saved = await runs({ workspaceId, runId });
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed AO service does not report worker capacity; update the matching runtime");
         const active = mission.nodes.filter(node => node.state === "running");
+        let attention = null;
         if (active.length) {
           const observed = await Promise.all(active.map(node => observe({ workspaceId, runId, nodeId: node.id })));
-          state.detail = observed.some(result => result.pending_approvals?.length) ? "Waiting for your tool approval"
-            : observed.some(result => result.needs_input) ? "An AO worker needs input on the Board" : undefined;
+          attention = observed.some(result => result.pending_approvals?.length) ? "pending_approval"
+            : observed.some(result => result.needs_input) ? "needs_input" : null;
+          state.detail = attention === "pending_approval" ? "Waiting for your tool approval"
+            : attention === "needs_input" ? "An AO worker needs input on the Board" : undefined;
           saved = await runs({ workspaceId, runId });
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
         }
+        reportRun(workspaceId, runId, state, mission, attention);
         const running = mission.nodes.some(node => node.state === "running");
         if (mission.cancelled || mission.nodes.some(node => ["held", "cancelled", "archived", "reserved"].includes(node.state))) {
           if (running) { state.detail = "Finishing already-sent turns; no more work will start"; await pause(); continue; }
           state.status = "held";
           state.detail = "Run stopped; inspect the saved cards";
+          reportRun(workspaceId, runId, state, mission, state.stopped ? null : "stopped");
           return;
         }
         if (mission.nodes.every(node => node.state === "finished")) {
-          state.status = "finished"; state.detail = undefined; return;
+          state.status = "finished"; state.detail = undefined; reportRun(workspaceId, runId, state, mission); return;
         }
         if (mission.paused) { state.status = "paused"; state.detail = "Paused; queued work will not start"; await pause(); continue; }
         const capacity = Number(saved.worker_capacity?.[runId] ?? 0);
@@ -569,6 +586,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       state.status = "held";
       state.detail = String(error?.message || "AO stage outcome is uncertain; inspect the saved run before retrying")
         .replace(/Bearer\\s+\\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]").slice(0, 500);
+      reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
     } finally { state.driving = false; }
   }
   async function startRun(input = {}) {

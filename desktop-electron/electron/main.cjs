@@ -30,6 +30,7 @@ const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector } = require("./mcp-connector-setup.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
+const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
@@ -2238,6 +2239,38 @@ async function start() {
     },
   });
   const providerServices = createAppsProviderServices({ providerNetworkReady });
+  // MCP Events: incidents detected here are delivered by the headless service's event hub
+  // to the webhook subscriptions ChatGPT created on the workspace MCP listeners. Reports
+  // wait for an already-running headless service; they never start one.
+  let mcpEventProxyPushed = null;
+  const runningHeadless = () => {
+    if (!headlessHost?.control) throw new Error("Local execution service is not running");
+    return headlessHost;
+  };
+  const mcpEventMonitor = createMcpEventMonitor({
+    logger,
+    report: (entry) => runningHeadless().request("/api/v1/events/emit", entry, { timeout: 10_000 }),
+    configure: async (proxy) => {
+      const service = runningHeadless();
+      const pushed = `${service.control.endpoint}|${proxy ?? ""}`;
+      if (pushed === mcpEventProxyPushed) return;
+      await service.request("/api/v1/events/config", { proxy }, { timeout: 10_000 });
+      mcpEventProxyPushed = pushed;
+    },
+    bridgeHealthUrl: () => {
+      // Probe the Codex bridge only while this launcher owns or adopted it.
+      if (!runtimeSupervisor?.daemon || !runtimeHost) return null;
+      try {
+        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const config = snapshot.config;
+        if (!snapshot.configured || config?.host !== "127.0.0.1" || !Number.isInteger(config.port)) return null;
+        return `http://127.0.0.1:${config.port}/healthz`;
+      } catch {
+        return null;
+      }
+    },
+  });
+  if (!LAUNCHER_SMOKE_TEST) mcpEventMonitor.start();
   const confirmAoAction = async ({ message, detail }) => {
     if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
       throw new Error("Use the focused Coding Tools window to approve workflow changes");
@@ -2370,6 +2403,7 @@ async function start() {
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
       confirm: confirmAoAction,
+      onRunState: (update) => mcpEventMonitor.runState(update),
     });
     try {
       appsHost = createCodingToolsAppsHost({
@@ -2507,6 +2541,11 @@ async function start() {
     callReadOnlyAppTool: (tool) => appsMcp.callTool(tool, {}),
     callNativeCodexTool: (body) => headlessHost.request("/api/v1/tools/call", body, { timeout: 80_000 }),
     callAgentOrchestrator: (operation, args) => appsHost.call("agent-orchestrator", operation, args),
+    onTurnEvent: (event) => {
+      if (event.type === "native_fetch_failed") mcpEventMonitor.nativeFetchFailed(event);
+      else if (event.type === "native_fetch_ok") mcpEventMonitor.nativeFetchSucceeded();
+      else mcpEventMonitor.turnEvent(event);
+    },
   }).start();
   runtimeSupervisor = new RuntimeSupervisor({
     app,

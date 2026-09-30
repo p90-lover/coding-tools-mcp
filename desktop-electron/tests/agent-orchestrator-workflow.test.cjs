@@ -524,6 +524,69 @@ test("AO background waits for an explicit tool decision without approving it", a
   assert.equal(calls.filter((endpoint) => endpoint === "/api/v1/ao/harness/execute").length, 1);
 });
 
+test("AO background runs report progress, approval waits and errors to the MCP event observer", async () => {
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+    model: "chatgpt-web/high", permission_profile: ":read-only" };
+  const nodes = [
+    { id: "planner", role: "planner", state: "finished", parents: [], route },
+    { id: "reviewer", role: "reviewer", state: "pending", parents: ["planner"], route },
+  ];
+  const run = { id: "run-1", workspace_id: "ws-1", revision: 5, nodes };
+  let toolAnswered = false;
+  const reports = [];
+  const make = (overrides = {}) => createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "run-1": 3 }, ...overrides.read };
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: structuredClone(run), grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: false } };
+      if (endpoint === "/api/v1/ao/harness/connect") return { ok: true, status: { model: route.model } };
+      if (endpoint === "/api/v1/ao/harness/execute") { nodes[1].state = "running"; run.revision += 1; return { ok: true, run: structuredClone(run) }; }
+      if (endpoint === "/api/v1/ao/harness/observe") {
+        if (toolAnswered) nodes[1].state = "finished";
+        return { ok: true, run: structuredClone(run), pending_approvals: toolAnswered ? [] : [{ approval_id: "approval-1" }] };
+      }
+      throw new Error(`Unexpected ${endpoint}`);
+    },
+    resolveHarness: async ({ model }) => ({ executable: "C:\\codex.exe", expected_sha256: "a".repeat(64),
+      model, allow_model_usage: true, allow_command_execution: false, permission_profile: ":read-only" }),
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webModelCatalog: async () => ({ models: [{ slug: "chatgpt-web/high" }] }),
+    confirm: async () => true,
+    onRunState: (update) => {
+      reports.push(update);
+      throw new Error("observer failures never affect the run");
+    },
+  });
+  const input = { workspaceId: "ws-1", runId: "run-1", executable: "C:\\codex.exe" };
+  const workflow = make();
+  await workflow.call("start_run", input);
+  for (let attempt = 0; attempt < 40 && !reports.some((r) => r.attention === "pending_approval"); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const waiting = reports.find((r) => r.attention === "pending_approval");
+  assert.equal(waiting.workspaceId, "ws-1");
+  assert.equal(waiting.runId, "run-1");
+  assert.equal(waiting.status, "running");
+  assert.equal(waiting.fingerprint, "planner:finished,reviewer:running");
+  toolAnswered = true;
+  for (let attempt = 0; attempt < 70 && reports.at(-1)?.status !== "finished"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(reports.at(-1).status, "finished");
+  assert.equal(reports.at(-1).attention, null);
+
+  reports.length = 0;
+  nodes[1].state = "pending";
+  const broken = make({ read: { worker_capacity: undefined } });
+  await broken.call("start_run", input);
+  for (let attempt = 0; attempt < 40 && !reports.length; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(reports[0].attention, "error");
+  assert.equal(reports[0].status, "held");
+  assert.match(reports[0].detail, /worker capacity/);
+});
+
 test("AO harness workers run as AO sessions and return their answer as the card receipt", async () => {
   const calls = [];
   const spawned = [];
