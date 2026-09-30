@@ -125,7 +125,9 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
   const updateSettings = (patch: Partial<RoleSettings>) => updateRole({ settings: { ...settings, ...patch } });
   const changeKind = (kind: AoNode["role"]) => {
     if (!role) return;
-    updateRole({ role: kind, route: kind === "worker" ? workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL) : WEB_ROUTE });
+    // The orchestrator and reviewer stay on Native Codex; a Native Codex route they already have is kept.
+    updateRole({ role: kind, route: kind === "worker" ? workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL)
+      : role.route.harness_id === NATIVE_HARNESS ? role.route : WEB_ROUTE });
   };
   return <aside className="ao-role-inspector" aria-label="Role inspector">
     <div className="ao-inspector-header">
@@ -144,9 +146,10 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
           <option value="planner">Orchestrator</option><option value="worker">Worker</option><option value="reviewer">Reviewer</option>
         </select></label>
       </div>
-      {role.role === "worker" ? <div className="ao-field-row">
-        <HarnessPicker route={role.route} harnesses={harnesses} loadModels={loadModels} onChange={route => updateRole({ route })} />
-      </div> : <p className="ao-chip-line"><span className="ao-chip">WebGPT High</span><span className="ao-chip">Native Codex</span></p>}
+      <div className="ao-field-row">
+        <HarnessPicker route={role.route} harnesses={role.role === "worker" ? harnesses : harnesses.filter(item => item.id === NATIVE_HARNESS)}
+          loadModels={loadModels} onChange={route => updateRole({ route })} />
+      </div>
       <label>Focus<select value={settings.specialty} onChange={event => updateSettings({ specialty: event.target.value })}>
         <option value="">Custom</option>{SPECIALTIES.map(value => <option key={value} value={value}>{value}</option>)}
       </select></label>

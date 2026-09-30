@@ -219,6 +219,63 @@ test("AO WebGPT connect uses the selected Codex bundled catalog without a CPA ke
   assert.equal(calls[0].private_proxy_api_key, undefined);
 });
 
+test("AO WebGPT catalog serves Luna from a Luna-only account's template and renames any tier", () => {
+  const { aoWebCatalogForModel } = require("../electron/agent-orchestrator-workflow.cjs");
+  // A Free/Go (Luna-only) account's runtime has no High row; its Luna row is the template.
+  const luna = { slug: "chatgpt-web/luna", display_name: "ChatGPT Web — Luna", context_window: 1050000 };
+  assert.deepEqual(aoWebCatalogForModel({ models: [luna] }, "chatgpt-web/luna"), { models: [luna] });
+  assert.deepEqual(aoWebCatalogForModel({ models: [luna] }, "chatgpt-web/think").models[0],
+    { ...luna, slug: "chatgpt-web/think", display_name: "ChatGPT Web — Think" });
+  const high = { slug: "chatgpt-web/high", display_name: "ChatGPT Web — High" };
+  assert.deepEqual(aoWebCatalogForModel({ models: [high] }, "chatgpt-web/luna").models[0],
+    { ...high, slug: "chatgpt-web/luna", display_name: "ChatGPT Web — Luna" });
+  assert.deepEqual(aoWebCatalogForModel({ models: [high] }, "chatgpt-web/extra-high").models[0].display_name, "ChatGPT Web — Extra High");
+  assert.throws(() => aoWebCatalogForModel({ models: [high] }, "gpt-5.5"), /invalid/);
+  assert.throws(() => aoWebCatalogForModel({ models: [{ slug: "gpt-5.5" }] }, "chatgpt-web/luna"), /unavailable/);
+  assert.throws(() => aoWebCatalogForModel({ models: [high, luna] }, "chatgpt-web/luna"), /unavailable/);
+});
+
+test("the desktop main process builds the AO WebGPT catalog through the shared tier helper", () => {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  assert.match(main, /aoWebCatalogForModel\(JSON\.parse\(result\.stdout\), model\)/);
+  assert.doesNotMatch(main, /catalog\.models\[0\]\?\.slug !== "chatgpt-web\/high"/);
+  const cli = fs.readFileSync(path.join(__dirname, "../../runtime-web/src/cli.ts"), "utf8");
+  assert.match(cli, /"chatgpt-web\/luna"/, "a Luna-only account still yields an AO WebGPT template");
+});
+
+test("a Luna orchestrator card connects on the Luna tier", async () => {
+  const calls = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
+        id: "run-1", workspace_id: "ws-1", nodes: [{ id: "planner", role: "planner", state: "pending",
+          route: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+            model: "chatgpt-web/luna", permission_profile: ":read-only" } }],
+      }] };
+      calls.push(body);
+      return { ok: true, owned: true, status: { model: "chatgpt-web/luna" } };
+    },
+    webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+    webModelCatalog: async ({ model }) => ({ models: [{ slug: model }] }),
+    resolveHarness: async ({ model, permissionProfile }) => ({ executable: "C:\\codex.exe", expected_sha256: "0".repeat(64),
+      codex_home: "C:\\ao-home", model, allow_model_usage: true,
+      allow_command_execution: false, permission_profile: permissionProfile, request_limit: 2, lifetime_seconds: 120 }),
+    confirm: async () => true,
+  });
+  const result = await workflow.call("connect_harness", { workspaceId: "ws-1", runId: "run-1", nodeId: "planner", executable: "C:\\codex.exe" });
+  assert.equal(result.status.model, "chatgpt-web/luna");
+  assert.equal(calls[0].connection.model, "chatgpt-web/luna");
+  assert.deepEqual(calls[0].web_model_catalog, { models: [{ slug: "chatgpt-web/luna" }] });
+});
+
+test("the role inspector lets the orchestrator and reviewer choose their model", () => {
+  const editor = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorRoleEditor.tsx"), "utf8");
+  assert.doesNotMatch(editor, /<span className="ao-chip">WebGPT High<\/span>/, "no fixed WebGPT High chip for non-workers");
+  assert.match(editor, /harnesses=\{role\.role === "worker" \? harnesses : harnesses\.filter\(item => item\.id === NATIVE_HARNESS\)\}/);
+  const surface = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.doesNotMatch(surface, /node\.route\.model === "chatgpt-web\/high" \? "WebGPT High"/, "cards name the chosen tier");
+});
+
 test("AO native resolver pins an executable and a distinct unopened home per node", async () => {
   const root = path.resolve(__dirname, "../../aiTemp/ao-native-resolver-tests", `${process.pid}-${crypto.randomUUID()}`);
   fs.mkdirSync(root, { recursive: true });
@@ -651,8 +708,9 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.equal(calls.filter((item) => item.endpoint.startsWith("/api/v1/ao/harness/")).length, 0);
 });
 
-test("Native Codex offers every WebGPT tier and any CPA pool model", async () => {
-  const WEB = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
+test("Native Codex offers every WebGPT tier, Luna included, and any CPA pool model", async () => {
+  const WEB = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro",
+    "chatgpt-web/luna", "chatgpt-web/think"];
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
