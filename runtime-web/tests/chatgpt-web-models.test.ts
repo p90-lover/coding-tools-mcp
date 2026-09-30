@@ -47,33 +47,35 @@ describe("fixed ChatGPT Web model routes", () => {
     expect(CHATGPT_WEB_MODEL_ROUTES[0]?.displayName).toBe("ChatGPT Web — Instant");
   });
 
-  test("exposes only Plus-eligible routes without the Pro account capability", () => {
-    expect(availableChatGptWebModelRoutes(plus).map(route => route.slug)).toEqual([
-      "chatgpt-web/light",
-      "chatgpt-web/medium",
-      "chatgpt-web/high",
-    ]);
+  test("lists every Sol tier and runs Pro-only tiers at High without the Pro capability", () => {
+    expect(availableChatGptWebModelRoutes(plus)).toEqual(CHATGPT_WEB_MODEL_ROUTES);
     expect(availableChatGptWebModelRoutes({ solAvailable: true, proAvailable: true }))
       .toEqual(CHATGPT_WEB_MODEL_ROUTES);
-    expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", plus))
-      .toThrow("Extra High is not available for this account");
-    expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
-      .toThrow("Pro is not available for this account");
+    expect(requireChatGptWebModelRoute("chatgpt-web/extra-high", plus).slug).toBe("chatgpt-web/high");
+    expect(requireChatGptWebModelRoute("chatgpt-web/pro", plus).slug).toBe("chatgpt-web/high");
+    expect(requireChatGptWebModelRoute("chatgpt-web/medium", plus).slug).toBe("chatgpt-web/medium");
   });
 
-  test("exposes Luna and Think when the authenticated account has no Sol selector", () => {
+  test("keeps Extra High and Pro as chosen when the account has Pro", () => {
+    const pro = { solAvailable: true, proAvailable: true };
+    expect(requireChatGptWebModelRoute("chatgpt-web/extra-high", pro).adapterEffort).toBe("xhigh");
+    expect(requireChatGptWebModelRoute("chatgpt-web/pro", pro).adapterEffort).toBe("max");
+  });
+
+  test("maps between Sol tiers and Luna/Think by the account's selector", () => {
     const free = { solAvailable: false, proAvailable: false };
     expect(availableChatGptWebModelRoutes(free)).toEqual(CHATGPT_WEB_LUNA_MODEL_ROUTES);
     expect(requireChatGptWebModelRoute("chatgpt-web/luna", free).backendModel)
       .toBe(CHATGPT_WEB_LUNA_BACKEND_MODEL);
     expect(requireChatGptWebModelRoute("chatgpt-web/think", free))
       .toBe(CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE);
-    expect(() => requireChatGptWebModelRoute("chatgpt-web/light", free))
-      .toThrow("Luna-only account");
-    expect(() => requireChatGptWebModelRoute("chatgpt-web/luna", {
-      solAvailable: true,
-      proAvailable: false,
-    })).toThrow("only available for Luna-only accounts");
+    // A Sol tier on a Luna-only account: Instant/Medium run as Luna, anything higher as Think.
+    expect(requireChatGptWebModelRoute("chatgpt-web/light", free)).toBe(CHATGPT_WEB_LUNA_MODEL_ROUTE);
+    expect(requireChatGptWebModelRoute("chatgpt-web/pro", free)).toBe(CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE);
+    // A Luna route on a Sol account runs as the matching Sol tier.
+    expect(requireChatGptWebModelRoute("chatgpt-web/luna", plus).slug).toBe("chatgpt-web/light");
+    expect(requireChatGptWebModelRoute("chatgpt-web/think", plus).slug).toBe("chatgpt-web/high");
+    expect(() => requireChatGptWebModelRoute("chatgpt-web/unknown", plus)).toThrow("not enabled");
   });
 
   test("Zero Risk exposes one generic route independent of account capabilities", () => {

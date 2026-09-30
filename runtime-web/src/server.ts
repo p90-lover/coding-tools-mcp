@@ -366,8 +366,17 @@ export interface ResponseRequestOptions {
   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
 }
 
+// A tier the account lacks runs at the nearest tier it has; say so rather than substitute silently.
+function logChatGptWebModelFallback(requested: string, route: ChatGptWebModelRoute): void {
+  if (route.slug === requested) return;
+  try {
+    console.warn(`[codex-chatgpt-web] model_fallback ${JSON.stringify({ requested, served: route.slug })}`);
+  } catch { /* Logging must not fail the turn. */ }
+}
+
 export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppConfig): ChatGptWebModelRoute {
   const route = requireChatGptWebModelRoute(parsed.modelId, config);
+  logChatGptWebModelFallback(parsed.modelId, route);
   parsed.modelId = route.backendModel;
   // Zero Risk preserves a distinct backend identity. Its immutable Codex effort is only a
   // protocol/catalog value; the manual adapter must never reinterpret it as a ChatGPT selection.
@@ -729,6 +738,7 @@ export async function compactRequest(
   let route: ChatGptWebModelRoute;
   try {
     route = requireChatGptWebModelRoute(raw.model, config);
+    logChatGptWebModelFallback(raw.model, route);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
