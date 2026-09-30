@@ -73,5 +73,35 @@
         "size": 810496
       }
     }
+  },
+  "grok": {
+    "id": "grok-login-provider",
+    "provider": "grok",
+    "version": "0.1.0-codingtools.1",
+    "source": {
+      "repository": "https://github.com/chenyme/grok2api",
+      "commit": "7c889a960e2638341b4dae9a5c81af0e0f38c87f",
+      "license": "MIT",
+      "path": "desktop-electron/vendor/cpa-plugins/grok-login-provider"
+    },
+    "changes": [
+      "grok2api Build, Web and Console provider adapters behind the CPA v8 plugin ABI",
+      "xAI OAuth device login and SSO cookie login through a loopback page",
+      "Grok credential import detection for untyped auth files",
+      "grok2api anti-downgrade quality guard as a retryable CPA 503",
+      "SSO to Build conversion sends the consent+jwt with the accounts.x.ai Origin"
+    ],
+    "build": {
+      "go": "1.26.8",
+      "cCompiler": "Zig 0.16.0",
+      "mode": "c-shared"
+    },
+    "platforms": {
+      "win32/x64": {
+        "path": "windows/amd64/grok-login-provider-v0.1.0-codingtools.1.dll",
+        "sha256": "57fbdce4ad770499e604a7d3654bc7b700532e0572c0980ff040818a83117cb7",
+        "size": 24915456
+      }
+    }
   }
 }

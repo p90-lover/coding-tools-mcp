@@ -40,3 +40,6 @@ target/
 !/desktop-electron/vendor/bundled/paseo/BUNDLE.json
 /desktop-electron/vendor/bundled/anneal/**
 !/desktop-electron/vendor/bundled/anneal/BUNDLE.json
+
+# Portable build toolchains (Go, Zig) for CPA plugin builds
+.tools/

@@ -51,13 +51,15 @@ test("CPA config follows the selected authenticated global profile", () => {
   assert.match(config, /^    cpa-helper:$/m);
   assert.ok(config.includes(`      data_dir: ${JSON.stringify(path.join(root, "cpa", "cpa-helper-data"))}`));
   assert.match(config, /^      keeper_enabled: false$/m);
+  // CPA skips a plugin that has no configs entry, so the Grok provider must be listed.
+  assert.match(config, /^    grok-login-provider:\r?\n      enabled: true$/m);
   if (process.platform === "win32" && process.arch === "x64") {
     const platformDir = path.join(pluginDirectory, "windows", "amd64");
     fs.mkdirSync(platformDir, { recursive: true });
     fs.writeFileSync(path.join(platformDir, "commandcode-go-v0.9.0.dll"), "old plugin");
     fs.writeFileSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll"), "old plugin");
     const installed = installBundledCommandCodePlugin(path.join(root, "cpa"));
-    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [12_664_320, 14_896_640, 810_496]);
+    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [12_664_320, 14_896_640, 810_496, 24_915_456]);
     assert.equal(fs.existsSync(path.join(platformDir, "commandcode-go-v0.9.0.dll")), false);
     assert.equal(fs.existsSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll")), false);
     assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 2);
