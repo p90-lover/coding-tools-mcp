@@ -29,6 +29,7 @@ const CLOSE_WAIT_MS = 3_000;
 const PLACEMENT_INTERVAL_MS = 500;
 const SYNC_INTERVAL_MS = 60_000;
 const SYNC_DEBOUNCE_MS = 800;
+const ACCOUNT_POLL_MS = 15_000;
 const SLOT_ID = /^(cpa|local)-[a-z0-9]{6,32}$/;
 // cmd.exe expands or splits on these even inside quotes, so slot paths must not contain them.
 const CMD_UNSAFE = /["%^&|<>!\r\n]/;
@@ -115,6 +116,59 @@ function createChatGptDesktopHost({
 
   function emit() {
     try { onChange(status()); } catch {}
+  }
+
+  // --- account discovery ----------------------------------------------------------------
+  // Accounts added, removed or disabled in CPA must reach the picker without a restart: the
+  // pane stays mounted, so nothing else would ever re-read the list.
+
+  let accountWatch = null; // { directory, watcher, timer, debounce, signature }
+
+  function accountSignature() {
+    return JSON.stringify(accountList().map((a) => [a.slotId, a.email, a.plan, a.disabled, a.signedIn]));
+  }
+
+  function currentCpaAuthDir() {
+    try { return resolveCpaAuthDir(); } catch { return null; }
+  }
+
+  function stopWatchingAccounts() {
+    if (!accountWatch) return;
+    try { accountWatch.watcher?.close(); } catch {}
+    clearInterval(accountWatch.timer);
+    clearTimeout(accountWatch.debounce);
+    accountWatch = null;
+  }
+
+  function watchAccounts() {
+    stopWatchingAccounts();
+    const current = { directory: currentCpaAuthDir(), watcher: null, timer: null, debounce: null, signature: accountSignature() };
+    const check = () => {
+      clearTimeout(current.debounce);
+      current.debounce = setTimeout(() => {
+        if (accountWatch !== current) return;
+        // CPA's auth-dir setting can move; follow it.
+        if (currentCpaAuthDir() !== current.directory) { watchAccounts(); emit(); return; }
+        const next = accountSignature();
+        if (next === current.signature) return;
+        current.signature = next;
+        emit();
+      }, SYNC_DEBOUNCE_MS);
+    };
+    if (current.directory) {
+      try {
+        current.watcher = fs.watch(current.directory, (_event, name) => {
+          if (!name || /\.json$/i.test(String(name))) check();
+        });
+      } catch (error) {
+        // Missing folder (no CPA account yet) or a watch failure: the slow re-check still covers it.
+        if (error?.code !== "ENOENT") logger?.warn?.("chatgpt_desktop.account_watch_failed", { message: error.message });
+      }
+    }
+    // fs.watch can miss atomic renames and cannot watch a folder that does not exist yet.
+    current.timer = setInterval(check, ACCOUNT_POLL_MS);
+    current.timer.unref?.();
+    accountWatch = current;
   }
 
   function exclusive(label, action) {
@@ -462,6 +516,7 @@ function createChatGptDesktopHost({
         const found = await findInstance(state.active).catch(() => null);
         if (found?.hwnd) await adopt(found).catch(() => {});
       }
+      watchAccounts();
       emit();
       return status();
     },
@@ -512,6 +567,7 @@ function createChatGptDesktopHost({
     },
     async shutdown() {
       stopPlacementLoop();
+      stopWatchingAccounts();
       try { await stopInstance(); } finally { stopSync(); helper.dispose(); }
     },
   };

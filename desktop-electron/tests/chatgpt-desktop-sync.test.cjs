@@ -178,3 +178,38 @@ test("a launched ChatGPT instance inherits Coding Tools' proxy route", async () 
     await host.shutdown?.();
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("an account added in CPA reaches the picker without a restart", async () => {
+  const { createChatGptDesktopHost } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-watch-"));
+  const authDir = path.join(root, "auth");
+  fs.mkdirSync(authDir);
+  const write = (name, body) => fs.writeFileSync(path.join(authDir, name), JSON.stringify(body));
+  write("a@x.com.json", { type: "codex", email: "a@x.com", account_id: "1", refresh_token: "r" });
+  const seen = [];
+  const host = createChatGptDesktopHost({
+    dataRoot: path.join(root, "data"),
+    resolveCpaAuthDir: () => authDir,
+    helper: { call: async () => null, dispose() {} },
+    platform: "linux",
+    onChange: (status) => seen.push(status.accounts.map((a) => a.email)),
+  });
+  try {
+    await host.initialize();
+    const before = seen.length;
+    write("b@x.com.json", { type: "codex", email: "b@x.com", account_id: "2", refresh_token: "r" });
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !seen.slice(before).some((emails) => emails.includes("b@x.com"))) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepEqual(seen.at(-1), ["a@x.com", "b@x.com"]);
+    // An unrelated rewrite with the same accounts does not re-emit.
+    const settled = seen.length;
+    write("b@x.com.json", { type: "codex", email: "b@x.com", account_id: "2", refresh_token: "r2" });
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(seen.length, settled);
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
