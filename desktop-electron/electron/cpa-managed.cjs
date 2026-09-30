@@ -133,6 +133,8 @@ function yamlString(value) {
 const COMMANDCODE_PLUGINS = [
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.1.dll", sha256: "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
+  // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
+  { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
 ];
 
 function installBundledCommandCodePlugin(state) {
@@ -203,6 +205,10 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "      enabled: true",
     "    auth-commandcode:",
     "      enabled: true",
+    "    cpa-helper:",
+    "      enabled: true",
+    `      data_dir: ${yamlString(path.join(state, "cpa-helper-data"))}`,
+    "      keeper_enabled: false",
     "debug: false",
     "request-log: false",
     "logging-to-file: true",

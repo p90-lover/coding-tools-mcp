@@ -24,7 +24,12 @@ function clausesFrom(value) {
   }));
 }
 
-async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executable, model, userData }) {
+// Codex's own permission profiles: read-only, or workspace (create, edit and delete inside the
+// workspace; anything else is asked for). Native standalone command execution stays off.
+const AO_PERMISSION_PROFILES = [":read-only", ":workspace"];
+
+async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executable, model, permissionProfile = ":read-only", userData }) {
+  if (!AO_PERMISSION_PROFILES.includes(permissionProfile)) throw new Error("Choose read-only or workspace permission for this card");
   if (!path.isAbsolute(executable) || !path.isAbsolute(userData)) {
     throw new Error("Select absolute native Codex executable and application-data paths");
   }
@@ -48,9 +53,13 @@ async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executabl
     executable: resolved, expected_sha256: hash.digest("hex"),
     codex_home: path.join(userData, "headless", "ao-homes", nodeHash),
     allow_model_usage: true, allow_command_execution: false,
-    permission_profile: ":read-only", model: clean(model, 128),
+    permission_profile: permissionProfile, model: clean(model, 128),
     request_limit: 3, lifetime_seconds: 900,
   };
+}
+
+function permissionText(profile) {
+  return profile === ":workspace" ? "workspace (create, edit and delete inside the workspace)" : "read-only";
 }
 
 // The installed Codex desktop app keeps its CLI at %LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe;
@@ -358,14 +367,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       webBridge = { baseUrl };
     }
     const selected = await resolveHarness({ workspaceId, runId, nodeId, executable,
-      model: route.model, providerId: route.provider_id, accountId: route.account_id });
-    if (!selected || selected.model !== route.model || selected.permission_profile !== ":read-only"
+      model: route.model, providerId: route.provider_id, accountId: route.account_id, permissionProfile: route.permission_profile });
+    if (!selected || selected.model !== route.model || selected.permission_profile !== route.permission_profile
+      || !AO_PERMISSION_PROFILES.includes(selected.permission_profile)
       || selected.allow_model_usage !== true || selected.allow_command_execution !== false) {
-      throw new Error("AO native connection does not match the saved read-only route");
+      throw new Error("AO native connection does not match the saved route and permission");
     }
     if (!granted && !await confirm({
       message: "Connect this AO-owned Codex session?",
-      detail: `Workspace: ${workspaceId}\nRun: ${runId}\nNode: ${nodeId}\nProvider: ${route.provider_id}\nAccount policy: ${route.account_id}\nModel: ${route.model}\nExecutable: ${selected.executable}\nSHA-256: ${selected.expected_sha256}\nPermission: :read-only; standalone commands: off`.slice(0, 1200),
+      detail: `Workspace: ${workspaceId}\nRun: ${runId}\nNode: ${nodeId}\nProvider: ${route.provider_id}\nAccount policy: ${route.account_id}\nModel: ${route.model}\nExecutable: ${selected.executable}\nSHA-256: ${selected.expected_sha256}\nPermission: ${permissionText(route.permission_profile)}; standalone commands: off`.slice(0, 1200),
     })) return { ok: false, cancelled: true };
     if (!worker) {
       const catalog = await webModelCatalog?.({ executable: selected.executable, model: route.model });
@@ -478,7 +488,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
     if (!await confirm({
       message: "Run this AO card?",
-      detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nRole: ${ready.role}\nModel: ${ready.route.model}\nPermission: :read-only; no automatic tool approval`.slice(0, 1200),
+      detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nRole: ${ready.role}\nModel: ${ready.route.model}\nPermission: ${permissionText(ready.route.permission_profile)}; other tool requests ask you`.slice(0, 1200),
     })) return { ok: false, cancelled: true };
     const response = await requestHeadless("/api/v1/ao/harness/execute", {
       workspace_id: id, run_id: run, node_id: ready.id,

@@ -1,7 +1,16 @@
 const { createServer } = require("node:http");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
-const { randomBytes, timingSafeEqual } = require("node:crypto");
+const { createHash, randomBytes, timingSafeEqual } = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+
+// Codex asks for its model catalog right at startup and gives up after about five seconds,
+// often before the ChatGPT browser session is ready. The last good catalog per account is
+// kept on disk and served when the live request is slow or fails; the live request still
+// finishes in the background and refreshes it.
+const MODELS_CACHE_WAIT_MS = 3_500;
+const MODELS_CACHE_MAX_BYTES = 4 * 1024 * 1024;
 const { releaseRetainedConversation } = require("./retained-turn-release.cjs");
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -89,8 +98,10 @@ function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, g
 }
 
 class BrowserControlServer {
-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, fetchNative, getCodingToolsWorkspaces, callReadOnlyAppTool, callNativeCodexTool, callAgentOrchestrator, onTurnEvent }) {
+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, fetchNative, getCodingToolsWorkspaces, callReadOnlyAppTool, callNativeCodexTool, callAgentOrchestrator, onTurnEvent, modelsCacheDir = null, modelsCacheWaitMs = MODELS_CACHE_WAIT_MS }) {
     this.logger = logger;
+    this.modelsCacheDir = modelsCacheDir;
+    this.modelsCacheWaitMs = modelsCacheWaitMs;
     // Observes turn lifecycle and native network failures for MCP event incidents.
     this.onTurnEvent = onTurnEvent;
     this.getBrowserHost = getBrowserHost;
@@ -531,6 +542,10 @@ class BrowserControlServer {
       if (bytes > 64 * 1024 * 1024) throw new Error("Native Codex request body is too large");
       chunks.push(chunk);
     }
+    if (method === "GET" && this.modelsCacheDir) {
+      await this.forwardModels(url, headers, authorization, response);
+      return;
+    }
     const abort = new AbortController();
     response.on("close", () => { if (!response.writableEnded) abort.abort(); });
     let upstream;
@@ -585,6 +600,77 @@ class BrowserControlServer {
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  modelsCacheFile(authorization, search) {
+    const key = createHash("sha256").update(`${authorization}\n${search}`).digest("hex");
+    return path.join(this.modelsCacheDir, `${key}.json`);
+  }
+
+  readModelsCache(file) {
+    try {
+      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+      return typeof saved?.body === "string" && typeof saved?.contentType === "string" ? saved : null;
+    } catch { return null; }
+  }
+
+  writeModelsCache(file, contentType, body) {
+    try {
+      fs.mkdirSync(this.modelsCacheDir, { recursive: true });
+      const temporary = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(temporary, JSON.stringify({ contentType, body, savedAt: new Date().toISOString() }), { mode: 0o600 });
+      fs.renameSync(temporary, file);
+    } catch (error) {
+      this.logger.warn("browser.native_models_cache_write_failed", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // The live catalog request races a short timer; the cache answers whichever comes first
+  // only when the live answer is late or not a success. Without a cache it behaves as before.
+  async forwardModels(url, headers, authorization, response) {
+    const file = this.modelsCacheFile(authorization, url.search);
+    const cached = this.readModelsCache(file);
+    const live = (async () => {
+      const upstream = await this.fetchNative(url.href, { method: "GET", headers, credentials: "omit", redirect: "manual",
+        signal: AbortSignal.timeout(60_000) });
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      const contentType = upstream.headers.get("content-type") || "application/json";
+      if (upstream.status === 200 && buffer.length <= MODELS_CACHE_MAX_BYTES) this.writeModelsCache(file, contentType, buffer.toString("utf8"));
+      return { status: upstream.status, buffer, headers: [...upstream.headers] };
+    })();
+    live.catch(() => undefined);
+    const serveCache = (reason) => {
+      this.logger.info("browser.native_models_cache_served", { reason });
+      response.writeHead(200, { "content-type": cached.contentType, "x-coding-tools-models-cache": reason });
+      response.end(cached.body);
+    };
+    let timer;
+    const late = cached ? new Promise((resolve) => { timer = setTimeout(() => resolve("late"), this.modelsCacheWaitMs); }) : new Promise(() => {});
+    let outcome;
+    try {
+      outcome = await Promise.race([live, late]);
+    } catch (error) {
+      clearTimeout(timer);
+      if (response.destroyed) return;
+      if (cached) { serveCache("failed"); return; }
+      const netError = /^net::(ERR_[A-Z0-9_]+)$/.exec(String(error?.message ?? ""))?.[1] ?? null;
+      this.logger.warn("browser.native_fetch_failed", { code: typeof error?.code === "string" ? error.code : "network_error", ...(netError ? { netError } : {}) });
+      this.reportTurnEvent({ type: "native_fetch_failed", netError });
+      writeJson(response, 502, {
+        error: netError ? `Native Codex network request failed (${netError})` : "Native Codex network request failed",
+        code: "native_network_error",
+      });
+      return;
+    }
+    clearTimeout(timer);
+    if (response.destroyed) return;
+    if (outcome === "late") { serveCache("late"); return; }
+    if (outcome.status !== 200 && cached) { serveCache(`http_${outcome.status}`); return; }
+    this.reportTurnEvent({ type: "native_fetch_ok" });
+    const dropped = new Set(["content-length", "content-encoding", "set-cookie", "connection", "transfer-encoding",
+      "keep-alive", "te", "trailer", "upgrade", "proxy-authenticate", "proxy-authorization"]);
+    response.writeHead(outcome.status, Object.fromEntries(outcome.headers.filter(([name]) => !dropped.has(name))));
+    response.end(outcome.buffer);
   }
 
   async close() {

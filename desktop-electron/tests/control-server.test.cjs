@@ -652,3 +652,60 @@ test("turn lifecycle and native proxy failures reach the MCP event observer with
     ]);
   } finally { await server.close(); }
 });
+
+test("the Codex model catalog is served from the last good copy when the live request is slow or fails", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const os = require("node:os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-models-"));
+  let mode = "ok";
+  let release;
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getBrowserHost: () => null,
+    getPreferences: () => ({}),
+    modelsCacheDir: dir,
+    modelsCacheWaitMs: 50,
+    fetchNative: async () => {
+      if (mode === "fail") throw new Error("net::ERR_PROXY_CONNECTION_FAILED");
+      if (mode === "slow") await new Promise((resolve) => { release = resolve; });
+      return new Response(JSON.stringify({ models: [mode] }), { headers: { "content-type": "application/json", etag: `"${mode}"` } });
+    },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const ask = (account = "Bearer account-a") => fetch(`${endpoint}/v1/network/native-fetch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models?client_version=1",
+      "x-native-authorization": account, "x-native-method": "GET" },
+  });
+  try {
+    // No copy yet: a live failure is still a 502, exactly as before.
+    mode = "fail";
+    assert.equal((await ask()).status, 502);
+    // A live success is passed through with its headers and saved.
+    mode = "ok";
+    const live = await ask();
+    assert.equal(live.status, 200);
+    assert.equal(live.headers.get("etag"), '"ok"');
+    assert.deepEqual(await live.json(), { models: ["ok"] });
+    // Failing or slow live requests are answered from the saved copy.
+    mode = "fail";
+    const failed = await ask();
+    assert.equal(failed.headers.get("x-coding-tools-models-cache"), "failed");
+    assert.deepEqual(await failed.json(), { models: ["ok"] });
+    mode = "slow";
+    const late = await ask();
+    assert.equal(late.headers.get("x-coding-tools-models-cache"), "late");
+    assert.deepEqual(await late.json(), { models: ["ok"] });
+    // The slow request still finishes and refreshes the copy for next time.
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    mode = "fail";
+    assert.deepEqual(await (await ask()).json(), { models: ["slow"] });
+    // Each account has its own copy.
+    assert.equal((await ask("Bearer account-b")).status, 502);
+  } finally {
+    await server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -667,13 +667,20 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const statusText = selectedRun?.cancelled ? "stopped" : autoStatus;
   const visibleNodes = selectedRun?.nodes.filter(node => showInactive || !["cancelled", "archived"].includes(node.state)) ?? [];
   const workers = selectedRun?.nodes.filter(node => node.role === "worker") ?? [];
+  const chooseWorkspace = (id: string) => {
+    setWorkspaceId(id);
+    setChatTaskId(null);
+    try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
+  };
+  const chatTree = { workspaces, workspaceId, onWorkspace: chooseWorkspace };
 
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
       <nav className="ao-rail" aria-label={copy.title}>
-        <label className="ao-rail-field" title={copy.workspace}><span aria-hidden="true">📁</span>
+        {/* Chat and Structure pick the workspace in their list, as Codex does; the Board keeps this. */}
+        <label className="ao-rail-field" title={copy.workspace} hidden={view !== "board"}><span aria-hidden="true">📁</span>
           <select className="ao-select" aria-label={copy.workspace} value={workspaceId} disabled={Boolean(busy)}
-            onChange={(event) => { setWorkspaceId(event.target.value); try { localStorage.setItem("coding-tools:ao:workspace", event.target.value); } catch { /* Selection still works for this session. */ } }}>
+            onChange={(event) => chooseWorkspace(event.target.value)}>
             {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
           </select>
         </label>
@@ -808,7 +815,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || undefined : undefined}
-                retryStart={retryChatStart} openTeam={openTeam}
+                retryStart={retryChatStart} openTeam={openTeam} tree={chatTree}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
         ) : null}
 
@@ -818,7 +825,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
         <div hidden={view !== "team"} className="ao-team-view ao-structure-view">
           <ChatListPane chats={chatList(missions, board?.tasks ?? [])} selectedTaskId={selectedRun?.project_id ?? ""}
-            onSelect={selectChat} />
+            onSelect={selectChat} tree={chatTree} />
           <div className="ao-structure-canvas">
           {!workspaceId && workspaceReady ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : !selectedRun ? <div className="ao-empty-state"><p>{copy.noMissions}</p><button className="button-primary" type="button" disabled={!board} onClick={() => openSheet("mission")}>{copy.newMission}</button></div>

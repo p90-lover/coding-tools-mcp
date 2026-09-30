@@ -47,13 +47,17 @@ test("CPA config follows the selected authenticated global profile", () => {
   assert.equal(fs.statSync(pluginDirectory).isDirectory(), true);
   assert.match(config, /^    commandcode-go:$/m);
   assert.match(config, /^    auth-commandcode:$/m);
+  // CPA Helper keeps its data under CPA's state, never in CPA's working directory.
+  assert.match(config, /^    cpa-helper:$/m);
+  assert.ok(config.includes(`      data_dir: ${JSON.stringify(path.join(root, "cpa", "cpa-helper-data"))}`));
+  assert.match(config, /^      keeper_enabled: false$/m);
   if (process.platform === "win32" && process.arch === "x64") {
     const platformDir = path.join(pluginDirectory, "windows", "amd64");
     fs.mkdirSync(platformDir, { recursive: true });
     fs.writeFileSync(path.join(platformDir, "commandcode-go-v0.9.0.dll"), "old plugin");
     fs.writeFileSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll"), "old plugin");
     const installed = installBundledCommandCodePlugin(path.join(root, "cpa"));
-    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [12_664_320, 14_896_640]);
+    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [12_664_320, 14_896_640, 810_496]);
     assert.equal(fs.existsSync(path.join(platformDir, "commandcode-go-v0.9.0.dll")), false);
     assert.equal(fs.existsSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll")), false);
     assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 2);

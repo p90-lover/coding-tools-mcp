@@ -138,7 +138,7 @@ pub fn external_harness(route: &Route) -> Option<&str> {
 
 /// The automatic tiers the WebGPT bridge serves (runtime-web chatgpt-web-models.ts); the
 /// bridge itself falls back to a lower tier when the account lacks the chosen one.
-const WEB_TIERS: &[&str] = &["light", "medium", "high", "extra-high", "pro", "luna", "think"];
+pub(crate) const WEB_TIERS: &[&str] = &["light", "medium", "high", "extra-high", "pro", "luna", "think"];
 
 /// WebGPT-on-Codex at any tier the bridge serves.
 fn web_route_valid(route: &Route) -> bool {

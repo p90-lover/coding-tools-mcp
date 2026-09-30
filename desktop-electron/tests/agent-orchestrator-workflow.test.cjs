@@ -237,6 +237,11 @@ test("AO native resolver pins an executable and a distinct unopened home per nod
   assert.equal(fs.existsSync(first.codex_home), false, "inspection must not create an AO home before approval");
   assert.equal(first.permission_profile, ":read-only");
   assert.equal(first.allow_command_execution, false);
+  // A card saved with Codex's workspace profile connects with it; nothing wider is accepted.
+  const writable = await resolveAoNativeConnection({ ...input, permissionProfile: ":workspace" });
+  assert.equal(writable.permission_profile, ":workspace");
+  assert.equal(writable.allow_command_execution, false);
+  await assert.rejects(resolveAoNativeConnection({ ...input, permissionProfile: ":danger-full-access" }), /read-only or workspace/);
   await assert.rejects(resolveAoNativeConnection({ ...input, executable: "relative-codex.exe" }), /absolute/i);
 });
 

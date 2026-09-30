@@ -11,31 +11,62 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 
 /** The workspace's chats, newest first. Shared by the chat and the Structure view. */
-export function ChatListPane({ chats, selectedTaskId, onSelect, onNew }: {
+export type ChatWorkspaces = {
+  workspaces: { id: string; name: string }[];
+  workspaceId: string;
+  onWorkspace: (workspaceId: string) => void;
+};
+
+/**
+ * Like Codex's sidebar: workspaces first, each opening to its chats. Only the current workspace
+ * is expanded (its chats are the ones loaded); choosing another workspace switches to it.
+ */
+export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
   chats: ChatSummary[]; selectedTaskId: string; onSelect: (taskId: string) => void; onNew?: () => void;
+  tree?: ChatWorkspaces;
 }) {
+  const chatItems = (
+    <ul className="ao-chat-items">
+      {onNew ? <li><button type="button" className="ao-chat-new" aria-pressed={!selectedTaskId} onClick={onNew}>＋ New chat</button></li> : null}
+      {chats.map((entry) => (
+        <li key={entry.taskId}>
+          <button type="button" aria-current={entry.taskId === selectedTaskId} onClick={() => onSelect(entry.taskId)}>
+            <span className={`ao-chat-dot status-${entry.status}`} aria-label={STATUS_LABEL[entry.status]} title={STATUS_LABEL[entry.status]} />
+            <span className="ao-chat-title">{entry.title}</span>
+          </button>
+        </li>
+      ))}
+      {!chats.length && !onNew ? <li><p className="ao-chat-empty">No chats yet</p></li> : null}
+    </ul>
+  );
   return (
-    <aside className="ao-chat-list" aria-label="Chats">
-      {onNew ? <button type="button" className="ao-chat-new" aria-pressed={!selectedTaskId} onClick={onNew}>＋ New chat</button> : null}
-      <ul>
-        {chats.map((entry) => (
-          <li key={entry.taskId}>
-            <button type="button" aria-current={entry.taskId === selectedTaskId} onClick={() => onSelect(entry.taskId)}>
-              <span className={`ao-chat-dot status-${entry.status}`} aria-label={STATUS_LABEL[entry.status]} title={STATUS_LABEL[entry.status]} />
-              <span className="ao-chat-title">{entry.title}</span>
-            </button>
-          </li>
-        ))}
-      </ul>
-      {!chats.length && !onNew ? <p className="ao-chat-empty">No chats yet</p> : null}
+    <aside className="ao-chat-list" aria-label={tree ? "Workspaces and chats" : "Chats"}>
+      {tree ? (
+        <ul className="ao-chat-tree">
+          {tree.workspaces.map((workspace) => {
+            const open = workspace.id === tree.workspaceId;
+            return (
+              <li key={workspace.id} className={open ? "is-open" : undefined}>
+                <button type="button" className="ao-chat-workspace" aria-expanded={open} title={workspace.name}
+                  onClick={() => { if (!open) tree.onWorkspace(workspace.id); }}>
+                  <span aria-hidden="true">{open ? "▾" : "▸"}</span><span aria-hidden="true">📁</span>
+                  <span className="ao-chat-title">{workspace.name}</span>
+                </button>
+                {open ? chatItems : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : chatItems}
     </aside>
   );
 }
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, onSelectTask, busy, loadDescription, send, stop, openStructure,
-  approvals, approve, describeRoute, notice, retryStart, openTeam,
+  approvals, approve, describeRoute, notice, retryStart, openTeam, tree,
 }: {
+  tree?: ChatWorkspaces;
   runs: ChatRun[];
   tasks: { id: string; title: string }[];
   /** "" for a new, unsent chat. */
@@ -95,7 +126,7 @@ export function AgentOrchestratorChat({
 
   return (
     <div className={`ao-chat${showStructure && latest ? " with-structure" : ""}`}>
-      <ChatListPane chats={chats} selectedTaskId={selectedTaskId} onSelect={onSelectTask} onNew={() => onSelectTask("")} />
+      <ChatListPane chats={chats} selectedTaskId={selectedTaskId} onSelect={onSelectTask} onNew={() => onSelectTask("")} tree={tree} />
 
       <section className="ao-chat-main" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="ao-chat-head">

@@ -16,13 +16,20 @@ export const SPECIALTIES = ["planning", "research", "frontend", "backend", "impl
  * Any worker may use any harness and model: Native Codex runs WebGPT or any model in the
  * shared CPA pool; every other harness runs as an AO worker session.
  */
-export function workerRoute(harness: string, model: string): AoRoute {
+export function workerRoute(harness: string, model: string, permission: NativePermission = ":workspace"): AoRoute {
   if (harness.startsWith("ao:")) {
     return { harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model: model || "default", permission_profile: ":ao-default" };
   }
-  if (model.startsWith("chatgpt-web/")) return { ...WEB_ROUTE, model };
-  return { harness_id: NATIVE_HARNESS, provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model, permission_profile: ":read-only" };
+  if (model.startsWith("chatgpt-web/")) return { ...WEB_ROUTE, model, permission_profile: permission };
+  return { harness_id: NATIVE_HARNESS, provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model, permission_profile: permission };
 }
+
+/**
+ * Native Codex cards use Codex's own profiles: workspace (create, edit and delete inside the
+ * workspace; anything else is asked for) or read-only. Workers default to workspace.
+ */
+export type NativePermission = ":workspace" | ":read-only";
+export const nativePermission = (route: AoRoute): NativePermission => route.permission_profile === ":workspace" ? ":workspace" : ":read-only";
 
 /** "chatgpt-web/extra-high" -> "WebGPT Extra High"; other model ids are shown as-is. */
 export function modelLabel(model: string): string {
@@ -82,17 +89,22 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   }, [harness, loadModels]);
   const known = harnesses.some(item => item.id === harness);
   return <>
-    <label>Harness<select value={harness} disabled={disabled} onChange={event => onChange(workerRoute(event.target.value, event.target.value === NATIVE_HARNESS ? DEFAULT_WORKER_MODEL : "default"))}>
+    <label>Harness<select value={harness} disabled={disabled} onChange={event => onChange(workerRoute(event.target.value, event.target.value === NATIVE_HARNESS ? DEFAULT_WORKER_MODEL : "default", nativePermission(route)))}>
       {!known ? <option value={harness}>{harnessLabel(harness, harnesses)}</option> : null}
       {harnesses.map(item => <option key={item.id} value={item.id} disabled={!item.runnable}>
         {item.label}{!item.runnable ? " · not installed" : item.authStatus === "unauthorized" ? " · sign in" : item.chat === false ? " · terminal" : ""}
       </option>)}
     </select></label>
-    <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(workerRoute(route.harness_id, event.target.value))}>
+    <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(workerRoute(route.harness_id, event.target.value, nativePermission(route)))}>
       {models && !models.includes(route.model) ? <option value={route.model}>{route.model || "Choose"} (unverified)</option> : null}
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
       {(models ?? []).map(model => <option key={model} value={model}>{modelLabel(model)}</option>)}
     </select></label>
+    {harness === NATIVE_HARNESS ? <label>Permission<select value={nativePermission(route)} disabled={disabled}
+      onChange={event => onChange({ ...route, permission_profile: event.target.value })}>
+      <option value=":workspace">Workspace: create, edit and delete in this workspace</option>
+      <option value=":read-only">Read only</option>
+    </select></label> : null}
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
   </>;
 }

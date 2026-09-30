@@ -394,6 +394,22 @@ fn reserve(
     }
 }
 
+/// AO children run like Codex: read-only, or the built-in workspace profile (create, edit
+/// and delete inside the workspace; anything else goes to the user as an approval). Native
+/// command execution stays a separate, off switch.
+fn ao_permission_allowed(options: &Connection) -> bool {
+    matches!(options.permission_profile.as_str(), ":read-only" | ":workspace")
+        && !options.allow_command_execution
+}
+
+fn developer_instructions(profile: &str) -> &'static str {
+    if profile == ":workspace" {
+        "Work only on the explicitly requested task. You may create, edit and delete files inside the working directory; never modify anything outside it, and use aiTemp for temporary files. Do not change permissions or use unsandboxed fallbacks. Explain evidence and uncertainty. Do not launch extra agents unless explicitly requested."
+    } else {
+        "Work only on the explicitly requested task. Never delete files; use Trash for unwanted files and aiTemp for temporary files. Do not change permissions or use unsandboxed fallbacks. Explain evidence and uncertainty. Do not launch extra agents unless explicitly requested."
+    }
+}
+
 fn native_child_command(
     options: &Connection,
     temp: &Path,
@@ -403,7 +419,10 @@ fn native_child_command(
     let mut command = Command::new(&options.executable);
     #[cfg(windows)]
     if options.permission_profile == ":workspace" {
-        command.arg("-c").arg("windows.sandbox=elevated");
+        // AO cards each get a fresh CODEX_HOME; the elevated sandbox needs a one-time admin
+        // setup per home, so AO children use Codex's unelevated Windows sandbox instead.
+        let ao_child = private_cpa_key.is_some() || ao_web;
+        command.arg("-c").arg(if ao_child { "windows.sandbox=unelevated" } else { "windows.sandbox=elevated" });
     }
     command
         .arg("app-server")
@@ -461,17 +480,17 @@ impl Hub {
         if key.len() < 32 || key.len() > 512 || key.chars().any(char::is_control) {
             return Err("AO CPA proxy key is unavailable or invalid".into());
         }
-        if options.permission_profile != ":read-only" || options.allow_command_execution {
-            return Err("AO CPA child must remain read-only".into());
+        if !ao_permission_allowed(&options) {
+            return Err("AO CPA child must use a read-only or workspace profile".into());
         }
         self.connect_inner(root, options, Some(key), false)
     }
     pub fn connect_ao_web(&self, root: &Path, options: Connection) -> Result<()> {
-        if options.model != "chatgpt-web/high"
-            || options.permission_profile != ":read-only"
-            || options.allow_command_execution
+        let tier = options.model.strip_prefix("chatgpt-web/");
+        if !tier.is_some_and(|tier| crate::integrations::ao::WEB_TIERS.contains(&tier))
+            || !ao_permission_allowed(&options)
         {
-            return Err("AO WebGPT child must use the selected read-only route".into());
+            return Err("AO WebGPT child must use a served tier and a read-only or workspace profile".into());
         }
         self.connect_inner(root, options, None, true)
     }
@@ -501,7 +520,8 @@ impl Hub {
         let bridge = Arc::new(Bridge {
             root: root.to_path_buf(),
             options,
-            ao_worker_command_approvals: private_cpa_key.is_some(),
+            // Every AO child routes its command approvals to the local approval queue.
+            ao_worker_command_approvals: private_cpa_key.is_some() || ao_web,
             started: Instant::now(),
             live: AtomicBool::new(true),
             ready: AtomicBool::new(false),
@@ -1039,7 +1059,7 @@ impl Bridge {
             let profile = self.options.permission_profile.as_str();
             let value = self.rpc("thread/start", json!({"cwd":self.root,"model":self.options.model,
                 "permissions":profile,"approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,
-                "developerInstructions":"Work only on the explicitly requested task. Never delete files; use Trash for unwanted files and aiTemp for temporary files. Do not change permissions or use unsandboxed fallbacks. Explain evidence and uncertainty. Do not launch extra agents unless explicitly requested."}))?;
+                "developerInstructions":developer_instructions(profile)}))?;
             if value["activePermissionProfile"]["id"].as_str() != Some(profile) {
                 self.stop("native_permission_profile_mismatch");
                 return Err("Native runtime did not confirm the locally selected permission profile; no turn submitted".into());
@@ -1477,6 +1497,41 @@ mod tests {
             Some(std::ffi::OsStr::new("loopback-ao-web"))
         );
         assert!(!web.get_envs().any(|(name, _)| name == key));
+    }
+
+    #[test]
+    fn ao_children_may_use_the_workspace_profile_without_an_admin_sandbox() {
+        let mut options = Connection {
+            executable: PathBuf::from("codex"),
+            expected_sha256: "0".repeat(64),
+            codex_home: PathBuf::from("ao-home"),
+            allow_model_usage: true,
+            allow_command_execution: false,
+            permission_profile: ":workspace".into(),
+            model: "chatgpt-web/extra-high".into(),
+            request_limit: 1,
+            lifetime_seconds: 30,
+        };
+        assert!(ao_permission_allowed(&options));
+        options.allow_command_execution = true;
+        assert!(!ao_permission_allowed(&options));
+        options.allow_command_execution = false;
+        options.permission_profile = ":danger-full-access".into();
+        assert!(!ao_permission_allowed(&options));
+        options.permission_profile = ":workspace".into();
+        let sandbox = |command: &Command| command.get_args().map(|arg| arg.to_string_lossy().into_owned())
+            .find(|arg| arg.starts_with("windows.sandbox="));
+        #[cfg(windows)]
+        {
+            // Each AO card has its own CODEX_HOME, so AO children never need the admin setup.
+            assert_eq!(sandbox(&native_child_command(&options, Path::new("aiTemp"), None, true)).as_deref(), Some("windows.sandbox=unelevated"));
+            assert_eq!(sandbox(&native_child_command(&options, Path::new("aiTemp"), Some("K"), false)).as_deref(), Some("windows.sandbox=unelevated"));
+            assert_eq!(sandbox(&native_child_command(&options, Path::new("aiTemp"), None, false)).as_deref(), Some("windows.sandbox=elevated"));
+        }
+        options.permission_profile = ":read-only".into();
+        assert_eq!(sandbox(&native_child_command(&options, Path::new("aiTemp"), None, true)), None);
+        assert!(developer_instructions(":workspace").contains("delete files inside the working directory"));
+        assert!(developer_instructions(":read-only").contains("Never delete files"));
     }
 
     #[test]

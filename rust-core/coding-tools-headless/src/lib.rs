@@ -1345,6 +1345,20 @@ mod workspace_auth_tests {
             true
         );
         assert!(ao_connect_policy(&node, &connection, None).is_err());
+        // Codex's workspace profile is allowed when the saved card chose it; the connection
+        // must match the card, and no other profile or standalone commands are accepted.
+        node.route.permission_profile = ":workspace".into();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
+        connection.permission_profile = ":workspace".into();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).unwrap());
+        connection.allow_command_execution = true;
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
+        connection.allow_command_execution = false;
+        node.route.permission_profile = ":danger-full-access".into();
+        connection.permission_profile = ":danger-full-access".into();
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
+        node.route.permission_profile = ":read-only".into();
+        connection.permission_profile = ":read-only".into();
         // Any CPA pool model is allowed for a worker, but not a model name with config syntax.
         node.route.model = "claude-sonnet-4-6".into();
         connection.model = node.route.model.clone();
@@ -2336,16 +2350,18 @@ fn ao_connect_policy(
     connection: &AoCodexConnection,
     private_key: Option<&str>,
 ) -> Result<bool, String> {
+    // Codex's own profiles: read-only, or workspace (create, edit and delete inside the
+    // registered workspace; everything else is asked for). The card's saved route decides.
     if node.route.harness_id != "codex-native"
-        || node.route.permission_profile != ":read-only"
+        || !matches!(node.route.permission_profile.as_str(), ":read-only" | ":workspace")
         || connection.model != node.route.model
-        || connection.permission_profile != ":read-only"
+        || connection.permission_profile != node.route.permission_profile
         || !connection.allow_model_usage
         || connection.allow_command_execution
         || connection.request_limit == 0
         || connection.lifetime_seconds == 0
     {
-        return Err("AO selected route or read-only limits do not match".into());
+        return Err("AO selected route or permission limits do not match".into());
     }
     // The route's provider decides the connection, not the role: any card may use any
     // WebGPT tier or any model in the shared CPA pool (run validation keeps the planner
@@ -2528,6 +2544,16 @@ async fn ao_harness_connect(
         Ok(worker) => worker,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_ROUTE_MISMATCH", error),
     };
+    // As with a native Codex session: a writable card needs a workspace-write workspace.
+    if node.route.permission_profile == ":workspace"
+        && !state.context(&body.workspace_id).is_ok_and(|context| context.permission_mode == "workspace-write")
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "AO_WORKSPACE_READ_ONLY",
+            "Set this workspace to workspace-write before running a card that edits files",
+        );
+    }
     if worker == web_base_url.is_some() || worker == web_catalog.is_some() {
         return json_error(
             StatusCode::BAD_REQUEST,

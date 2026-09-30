@@ -2523,6 +2523,8 @@ async function start() {
   }, { logger });
   browserControl = await new BrowserControlServer({
     logger,
+    // Last good Codex model catalog per account, served when the live startup request is slow.
+    modelsCacheDir: path.join(app.getPath("userData"), "native-models-cache"),
     getBrowserHost: () => browserHost,
     getPreferences: () => stateStore.read(),
     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),

@@ -49,5 +49,29 @@
         "size": 14896640
       }
     }
+  },
+  "helper": {
+    "id": "cpa-helper",
+    "version": "0.1.0",
+    "source": {
+      "repository": "https://github.com/p90-lover/cpa-helper-plugin",
+      "commit": "1a0724b",
+      "license": "MIT",
+      "upstream": "https://github.com/walkingddd/CPA-Helper"
+    },
+    "changes": [
+      "Rewritten in std-only Rust as a CPA cdylib plugin (no Go/Python runtime)"
+    ],
+    "build": {
+      "rust": "stable",
+      "mode": "cdylib"
+    },
+    "platforms": {
+      "win32/x64": {
+        "path": "windows/amd64/cpa-helper-v0.1.0.dll",
+        "sha256": "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c",
+        "size": 810496
+      }
+    }
   }
 }

@@ -180,6 +180,11 @@
 .ao-chat-new { color: var(--color-text-primary); }
 .ao-chat-new[aria-pressed="true"], .ao-chat-list li button[aria-current="true"] { background: rgb(255 255 255 / 7%); color: var(--color-text-primary); }
 .ao-chat-list li button:hover, .ao-chat-new:hover { background: rgb(255 255 255 / 5%); }
+/* Workspaces first, each opening to its chats (Codex sidebar). */
+.ao-chat-list .ao-chat-workspace { font-weight: 600; color: var(--color-text-primary); }
+.ao-chat-list .ao-chat-workspace > span[aria-hidden] { flex: none; width: 12px; font-size: 11px; opacity: .7; }
+.ao-chat-list .ao-chat-items { padding-left: 14px; margin: 2px 0 6px; border-left: 1px solid var(--ao-line); margin-left: 14px; }
+.ao-chat-list .ao-chat-tree > li + li { margin-top: 2px; }
 .ao-chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-chat-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); opacity: .8; }
 .ao-chat-dot.status-running, .ao-chat-dot.status-queued, .ao-chat-dot.state-running, .ao-chat-dot.state-reserved { background: var(--ao-green); animation: ao-pulse 1.4s ease-in-out infinite; }
