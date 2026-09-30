@@ -60,6 +60,7 @@ export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
+  const lastOperationRef = useRef<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
@@ -106,6 +107,7 @@ export function App() {
       setBrowser(next.browser);
       setLogs(next.logs);
       setOperation(next.operation);
+      lastOperationRef.current = next.operation ?? null;
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
         setError(next.operation.message);
       }
@@ -122,6 +124,13 @@ export function App() {
     });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeOperation = api.onOperation((next) => {
+      // A completed operation retires the error its own earlier failure raised (for example the
+      // catalog check recovering once the proxy is back); any other error on screen stays.
+      const previous = lastOperationRef.current;
+      if (next.status === "completed" && previous?.status === "failed" && previous.name === next.name) {
+        setError((current) => (current === previous.message ? null : current));
+      }
+      lastOperationRef.current = next;
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
     });

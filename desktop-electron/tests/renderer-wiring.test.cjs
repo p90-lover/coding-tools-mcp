@@ -460,6 +460,14 @@ test("catalog verification reports a failed request instead of requesting anothe
   assert.equal(context.lastOperation.status, "completed");
 });
 
+test("a completed operation clears only the error its own earlier failure raised", () => {
+  assert.match(
+    appSource,
+    /next\.status === "completed" && previous\?\.status === "failed" && previous\.name === next\.name\)[\s\S]{0,80}setError\(\(current\) => \(current === previous\.message \? null : current\)\)/,
+  );
+  assert.match(appSource, /lastOperationRef\.current = next\.operation \?\? null/);
+});
+
 test("settings expose an opt-in existing MCP auto-connect without provisioning credentials", () => {
   assert.match(typesSource, /autoConnectExistingMcp:\s*boolean/);
   assert.match(
