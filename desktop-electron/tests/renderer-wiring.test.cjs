@@ -421,16 +421,18 @@ test("catalog verification reports a failed request instead of requesting anothe
   const events = [];
   let tick;
   let payload = { pid: 10, successful_model_catalog_requests: 0, model_catalog_requests: 0, last_model_catalog_result: null };
-  vm.runInNewContext(source + "\nstartCatalogVerificationMonitor({ logger, stateStore });", {
+  const context = {
     catalogVerificationInFlight: false, catalogVerificationTimer: null, lastOperation: null,
     stopCatalogVerificationMonitor() {},
     runtimeSupervisor: { readConfig: () => ({}), proxyHealthPayload: async () => payload },
     stateStore: { read: () => state, update: patch => Object.assign(state, patch) },
     setInterval: callback => { tick = callback; return { unref() {} }; },
     logger: { info: (...args) => events.push(args), warn: (...args) => events.push(args), debug() {} },
-    send() {}, publishOperation: op => operations.push(op),
+    // Like the real publishOperation, the last one published is what a renderer load re-reads.
+    send() {}, publishOperation: op => { operations.push(op); context.lastOperation = op; },
     nativeCopyFor: () => ({ catalogFailure: "Catalog failed (HTTP {status}; {reason})." }),
-  });
+  };
+  vm.runInNewContext(source + "\nstartCatalogVerificationMonitor({ logger, stateStore });", context);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(operations.length, 0);
   assert.equal(state.codexRestartRequired, true);
@@ -452,6 +454,10 @@ test("catalog verification reports a failed request instead of requesting anothe
   assert.equal(state.codexCatalogVerified, true);
   assert.equal(state.codexRestartRequired, false);
   assert.ok(events.some(([event]) => event === "codex.model_catalog_verified"));
+  // The recovery replaces the earlier failure, so a renderer load no longer re-raises it.
+  assert.equal(operations.length, 2);
+  assert.equal(context.lastOperation.name, "catalog-verification");
+  assert.equal(context.lastOperation.status, "completed");
 });
 
 test("settings expose an opt-in existing MCP auto-connect without provisioning credentials", () => {

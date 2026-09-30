@@ -454,6 +454,12 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
         at: health.last_successful_model_catalog_request_at,
       });
       send("launcher:state-changed", state);
+      // A failure reported before the catalog came up (for example while the proxy was
+      // restarting) is kept as lastOperation and re-raised as an error on every renderer load;
+      // it must not outlive the recovery.
+      if (lastOperation?.name === "catalog-verification" && lastOperation.status === "failed") {
+        publishOperation({ name: "catalog-verification", status: "completed", message: "Codex model catalog loaded" });
+      }
       }
       if (await autoConnectExistingMcpIfReady({ logger, stateStore, health })) return;
       stopCatalogVerificationMonitor();
