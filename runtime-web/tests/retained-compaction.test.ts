@@ -226,7 +226,7 @@ test("active compaction delivers the current result and converts every later MCP
     broker.completeTool(token, request!.callId, {
       content: [{ type: "text", text: "current result" }],
     });
-    await expect(current).resolves.toMatchObject({
+    expect(await current).toMatchObject({
       content: [{ type: "text", text: "current result" }],
     });
     await expect(callTurnBroker(broker.socketPath, {
@@ -275,7 +275,7 @@ test("active compaction drains an MCP call already queued without an outer Codex
       isError: true,
     });
     expect(interrupted).toBe(1);
-    await expect(invocation).resolves.toMatchObject({
+    expect(await invocation).toMatchObject({
       content: [{ type: "text", text: "compact instead" }],
       isError: true,
     });
@@ -442,7 +442,7 @@ test("a rejected exact compaction run is evicted while a successful run remains 
     return "recovered checkpoint";
   });
   expect(runStructuredCompactionOnce(key, owner, async () => "must not start")).toBe(retry);
-  await expect(retry).resolves.toBe("recovered checkpoint");
+  expect(await retry).toBe("recovered checkpoint");
   await expect(existingStructuredCompactionRun(key)).resolves.toBe("recovered checkpoint");
   expect(starts).toBe(2);
 });
@@ -538,7 +538,10 @@ test("a completed exact compaction remains replayable after a later native inter
     nativeTurnId: `turn-${key}`,
   };
   const completed = runStructuredCompactionOnce(key, owner, async () => "canonical checkpoint");
-  await expect(completed).resolves.toBe("canonical checkpoint");
+  expect(await completed).toBe("canonical checkpoint");
+  // A run stays active until its physical settlement (none here) is recorded a few microtasks
+  // after its result; the interruption below must arrive after that, as in a real later turn.
+  await new Promise(resolve => setImmediate(resolve));
 
   const cancellation = cancelStructuredCompactionNativeTurn(
     owner.nativeThreadId,
@@ -554,7 +557,7 @@ test("a completed exact compaction remains replayable after a later native inter
     return "must not replace canonical checkpoint";
   });
   expect(replay).toBe(completed);
-  await expect(replay).resolves.toBe("canonical checkpoint");
+  expect(await replay).toBe("canonical checkpoint");
   expect(restarted).toBeFalse();
 });
 
@@ -1356,7 +1359,7 @@ test("cancel-all waits for physical settlement of a fresh compaction fallback", 
     expect(cancelObserved).toBeTrue();
     expect(cancellationSettled).toBeFalse();
     releasePhysical();
-    await expect(cancellation).resolves.toBe(1);
+    expect(await cancellation).toBe(1);
     await adapterRun;
   } finally {
     releasePhysical();

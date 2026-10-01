@@ -915,7 +915,7 @@ test("missing-assistant expiry checks fresh DOM after a delayed wake while prese
         scenario === "turn-deadline" ? now + CHATGPT_RESPONSE_DOM_GRACE_MS : undefined,
       );
       if (scenario === "appeared") {
-        await expect(result).resolves.toMatchObject({ identity: "conversation-turn-assistant", locator: assistantLocator });
+        expect(await result).toMatchObject({ identity: "conversation-turn-assistant", locator: assistantLocator });
       } else {
         await expect(result).rejects.toThrow(scenario === "missing"
           ? "ChatGPT accepted the message but did not expose its assistant turn in the DOM"
