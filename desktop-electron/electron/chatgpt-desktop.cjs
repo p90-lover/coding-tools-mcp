@@ -24,7 +24,7 @@ const {
 
 const WINDOW_WAIT_MS = 60_000;
 // Background starts are not waited on by anyone, so a slow disk gets longer before giving up.
-const BACKGROUND_WINDOW_WAIT_MS = 5 * 60_000;
+const BACKGROUND_WAIT_FACTOR = 5;
 // ChatGPT treats WM_CLOSE as "hide to background" at times; give it a moment to flush its
 // profile, then end the tree.
 const CLOSE_WAIT_MS = 3_000;
@@ -110,7 +110,6 @@ function createChatGptDesktopHost({
   autoStart = true,
   idleCloseMs = IDLE_CLOSE_MS,
   windowWaitMs = WINDOW_WAIT_MS,
-  backgroundWindowWaitMs = BACKGROUND_WINDOW_WAIT_MS,
   autoStartRetryMs = AUTO_START_RETRY_MS,
 }) {
   const statePath = path.join(dataRoot, "state.json");
@@ -461,21 +460,19 @@ function createChatGptDesktopHost({
   }
 
   // The window is hidden the moment it exists: it is only ever shown docked in the ChatGPT tab.
-  // A start that never produces a window is ended, so no stray ChatGPT window appears later.
+  // A start that is still slow is left running (never started twice); a later auto-start finds
+  // its window and adopts it, hidden.
   async function waitForWindow(slotId, timeoutMs = windowWaitMs) {
     const deadline = Date.now() + timeoutMs;
-    let pid = 0;
     while (Date.now() < deadline) {
       const found = await findInstance(slotId);
       if (found?.hwnd) {
         await helper.call("hide", { hwnd: found.hwnd }).catch(() => {});
         return found;
       }
-      if (found?.pid) pid = found.pid;
       await sleep(750);
     }
-    if (pid) await helper.call("kill-tree", { pid }).catch(() => {});
-    throw new Error(`ChatGPT did not open a window within ${Math.round(timeoutMs / 60_000)} minute(s)`);
+    throw new Error(`ChatGPT did not open a window within ${Math.max(1, Math.round(timeoutMs / 1000))} seconds`);
   }
 
   async function launchInstance(slotId, { background = false } = {}) {
@@ -494,7 +491,7 @@ function createChatGptDesktopHost({
     // run the same account twice and, on every account change, pile up more of them.
     const existing = await findInstance(slotId);
     if (existing?.hwnd) return existing;
-    if (existing?.pid) return await waitForWindow(slotId);
+    if (existing?.pid) return await waitForWindow(slotId, background ? windowWaitMs * BACKGROUND_WAIT_FACTOR : windowWaitMs);
     prepareProfile(slotId, paths);
 
     const command = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
@@ -524,7 +521,7 @@ function createChatGptDesktopHost({
     logger?.info?.("chatgpt_desktop.instance_launched", {
       slotId, signedIn: fs.existsSync(paths.auth), proxied: Boolean(proxy), background,
     });
-    return await waitForWindow(slotId, background ? backgroundWindowWaitMs : windowWaitMs);
+    return await waitForWindow(slotId, background ? windowWaitMs * BACKGROUND_WAIT_FACTOR : windowWaitMs);
   }
 
   async function stopInstance(slotId = state.active) {

@@ -420,6 +420,19 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
     if (sameSources && previous.stats && keys.every((relative) => sameStat(previous.stats[relative], stats[relative]))) {
       return destination;
     }
+    // The launcher rewrites external-services.json with the same content on every start, so a
+    // newer mtime alone does not mean a change. The small live files are compared by content
+    // (retired state never is); when only their mtimes moved, the stats are refreshed in place
+    // instead of hard-linking every retired file into yet another snapshot.
+    const sameLiveContent = (relative) => {
+      if (relative.startsWith("integrations/state/")) return false;
+      try { return fs.readFileSync(sources[relative]).equals(fs.readFileSync(path.join(destination, relative))); } catch { return false; }
+    };
+    if (sameSources && previous.stats
+        && keys.every((relative) => sameStat(previous.stats[relative], stats[relative]) || sameLiveContent(relative))) {
+      writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources, stats }, null, 2));
+      return destination;
+    }
     if (sameSources && !previous.stats
         && keys.every((relative) => fs.readFileSync(sources[relative]).equals(fs.readFileSync(path.join(destination, relative))))) {
       // A manifest from before stats were recorded: confirm by content once, then record them.
