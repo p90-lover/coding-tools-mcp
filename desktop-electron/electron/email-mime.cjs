@@ -146,9 +146,20 @@ function stripDangerous(html) {
 
 // The element/attribute allowlist decides which formatting SURVIVES after the safety floor —
 // a genuine policy choice with several valid answers (text-only vs. rich formatting).
-// TODO(human): define ALLOWED_TAGS and ALLOWED_ATTRS below.
-const ALLOWED_TAGS = new Set([]);
-const ALLOWED_ATTRS = new Set([]);
+// Rich formatting: the preview iframe is sandboxed without scripts and its CSP allows no
+// network loads (img-src data: only), so inline style and layout markup are safe to keep.
+// Forms, SVG/MathML, and unknown elements go; class/id are dropped since no stylesheet survives.
+const ALLOWED_TAGS = new Set([
+  "a", "abbr", "address", "b", "bdi", "bdo", "big", "blockquote", "br", "caption", "center", "cite",
+  "code", "col", "colgroup", "dd", "del", "details", "dfn", "div", "dl", "dt", "em", "figcaption",
+  "figure", "font", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "ins", "kbd", "li", "mark",
+  "ol", "p", "pre", "q", "s", "samp", "small", "span", "strike", "strong", "sub", "summary", "sup",
+  "table", "tbody", "td", "tfoot", "th", "thead", "tr", "tt", "u", "ul", "var",
+]);
+const ALLOWED_ATTRS = new Set([
+  "href", "src", "alt", "title", "width", "height", "style", "align", "valign", "bgcolor", "border",
+  "cellpadding", "cellspacing", "colspan", "rowspan", "color", "face", "size", "dir", "lang", "start", "type",
+]);
 
 function applyAllowlist(html) {
   if (ALLOWED_TAGS.size === 0) return html; // no allowlist yet: safety floor still applied above
