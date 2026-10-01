@@ -40,7 +40,8 @@ test("packaged renderer selects Provider Hub and project-scoped update copy", ()
   const bundle = fs.readFileSync(bundlePath, "utf8");
   assert.match(bundle, /data-provider-account-summary/, `Provider Hub summary missing from ${bundlePath}`);
   assert.match(bundle, /Refresh accounts/, `account refresh control missing from ${bundlePath}`);
-  assert.match(bundle, /Coding Tools v/, `project-scoped update copy missing from ${bundlePath}`);
+  // GUI-only updates (9f48df77) replaced the old "Coding Tools v…" banner.
+  assert.match(bundle, /Update GUI /, `GUI update copy missing from ${bundlePath}`);
   assert.doesNotMatch(
     bundle,
     /coding-tools-provider-instances-v1/,

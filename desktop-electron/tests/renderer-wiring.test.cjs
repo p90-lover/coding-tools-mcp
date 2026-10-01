@@ -15,10 +15,12 @@ const aoSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "Age
 const servicesSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "ExternalServicesSurface.tsx"), "utf8");
 const proxySource = fs.readFileSync(path.join(launcherRoot, "src", "features", "NetworkProxySurface.tsx"), "utf8");
 
-test("both AO sidebar destinations mount the original UI and Runtime selects its mission board", () => {
-  assert.match(appSource, /surface === "agent-orchestrator" \? \(\s*<AgentOrchestratorOriginalSurface\s+projectBoard\s+openMissions=\{\(\) => navigateSurface\("agent-orchestrator-original"\)\}/);
-  assert.match(appSource, /surface === "agent-orchestrator-original" \? \(\s*<AgentOrchestratorOriginalSurface\s+openMissions=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
-  assert.doesNotMatch(appSource, /<AgentOrchestratorSurface\b/);
+// Since the Chat redesign (2574a6bd) the "Chat" entry mounts the Coding Tools AO surface; the
+// original upstream AO UI keeps its own destination and links back to Chat.
+test("Chat mounts the AO chat surface and the original AO UI links back to it", () => {
+  assert.match(appSource, /keepAlive\("agent-orchestrator", \(\) => \(\s*<AgentOrchestratorSurface language=\{language\} setError=\{setError\} \/>/);
+  assert.match(appSource, /keepAlive\("agent-orchestrator-original", \(\) => \(\s*<AgentOrchestratorOriginalSurface openMissions=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
+  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
 });
 
 test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", async () => {
