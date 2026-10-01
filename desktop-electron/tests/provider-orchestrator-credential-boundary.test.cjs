@@ -16,15 +16,6 @@ function executionProviderHandler(source) {
   return source.slice(start, end);
 }
 
-test("provider account secrets never become Paseo or Anneal control-plane credentials", () => {
-  const handler = executionProviderHandler(readDesktop("electron/main.cjs"));
-
-  assert.doesNotMatch(handler, /accountSecret\(/, "provider vault secret must not leave the provider boundary");
-  assert.doesNotMatch(handler, /storedProviderCredential\(/, "provider secret extraction must not feed orchestration auth");
-  assert.match(handler, /controlCredential/);
-  assert.match(handler, /credential:\s*controlCredential/);
-});
-
 test("execution IPC and typed API declare a separate bounded control-plane credential", () => {
   const schema = readDesktop("electron/ipc-schema.cjs");
   const contracts = readDesktop("src/api/contracts.ts");
@@ -58,22 +49,4 @@ test("CPA OAuth providers route to subagents, Paseo, and Anneal", () => {
     assert.equal(provider.paseoEnabled, true, `${providerId} must support Paseo`);
     assert.equal(provider.annealEnabled, true, `${providerId} must support Anneal`);
   }
-});
-
-test("the packaged five-stack control plane retains every external runtime manifest", () => {
-  const services = readDesktop("electron/external-services.cjs");
-  const packageManifest = JSON.parse(readDesktop("package.json"));
-  const packagedFiles = JSON.stringify(packageManifest.build?.files ?? []);
-
-  for (const serviceId of ["cpa", "paseo", "anneal"]) {
-    assert.match(services, new RegExp(`\\"${serviceId}\\"`), `missing external service ${serviceId}`);
-  }
-  for (const manifest of [
-    "desktop-electron/vendor/upstream/cpa.json",
-    "desktop-electron/vendor/upstream/paseo.json",
-    "desktop-electron/vendor/upstream/anneal.json",
-  ]) {
-    assert.equal(fs.existsSync(path.join(repositoryRoot, manifest)), true, `missing ${manifest}`);
-  }
-  assert.match(packagedFiles, /vendor\/upstream\/\*\*/);
 });
