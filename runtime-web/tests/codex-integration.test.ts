@@ -61,8 +61,24 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+// Windows creates symlinks only with Developer Mode or elevation (EPERM otherwise). The two
+// symlink tests below need one; elsewhere they always run.
+const canCreateSymlinks = (() => {
+  const probeRoot = join(tmpdir(), `codex-chatgpt-web-symlink-probe-${process.pid}-${Date.now()}`);
+  try {
+    mkdirSync(probeRoot, { recursive: true });
+    writeFileSync(join(probeRoot, "target"), "x");
+    symlinkSync(join(probeRoot, "target"), join(probeRoot, "link"));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+})();
+
 describe("reversible native Codex route integration", () => {
-  test("route install, update, switching and removal preserve a symlinked shared Codex config", () => {
+  test.skipIf(!canCreateSymlinks)("route install, update, switching and removal preserve a symlinked shared Codex config", () => {
     const { root, codexHome } = fixture();
     const shared = join(root, "shared");
     mkdirSync(shared, { mode: 0o750 });
@@ -96,7 +112,7 @@ describe("reversible native Codex route integration", () => {
     expect(readFileSync(target, "utf8")).toBe(original);
   });
 
-  test("config compensation preserves the link and refuses redirected or invalid targets", () => {
+  test.skipIf(!canCreateSymlinks)("config compensation preserves the link and refuses redirected or invalid targets", () => {
     const { root, codexHome } = fixture();
     const alias = join(codexHome, "config.toml");
     const target = join(root, "shared.toml");
