@@ -55,8 +55,12 @@ async function main() {
   run(process.execPath, ["node_modules/vite/bin/vite.js", "build", "--config", "vite.renderer.config.ts", "--outDir", path.join(outputRoot, "renderer")], frontendRoot, {
     VITE_NO_ELECTRON: "0", VITE_CODING_TOOLS_EMBEDDED: "1", VITE_AO_POSTHOG_KEY: "", VITE_AO_SENTRY_DSN: "",
   });
-  const portableGo = path.join(projectRoot, "aiTemp", "ao-go-toolchain-1.27.1", "go", "bin", "go.exe");
-  const goExecutable = process.env.CODING_TOOLS_GO || (fs.existsSync(portableGo) ? portableGo : "go");
+  // The daemon needs Go 1.27.1; keep the portable toolchain in .tools (aiTemp is cleared as scratch).
+  const portableGo = [
+    path.join(projectRoot, ".tools", "go1.27.1", "bin", "go.exe"),
+    path.join(projectRoot, "aiTemp", "ao-go-toolchain-1.27.1", "go", "bin", "go.exe"),
+  ].find((candidate) => fs.existsSync(candidate));
+  const goExecutable = process.env.CODING_TOOLS_GO || portableGo || "go";
   const daemonPath = path.join(outputRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
   run(goExecutable, ["build", "-trimpath", "-ldflags", "-X=github.com/aoagents/agent-orchestrator/backend/internal/config.CodingToolsLocalOnly=1", "-o", daemonPath, "./cmd/ao"], path.join(sourceRoot, "backend"), {
     GOWORK: "off", GOTOOLCHAIN: "local",

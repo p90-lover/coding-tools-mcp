@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 fn fail(message: &str) -> AppError {
     AppError::Message(message.into())
@@ -19,8 +19,29 @@ fn text(value: &str, max: usize) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Planner,
+    /// Command approver: checks the plan's commands before any worker starts.
+    Approver,
     Worker,
+    /// The main reviewer's first pass: splits the review across the sub-reviewers.
+    ReviewSplit,
+    /// Checks one part of the finished work and reports PART_OK or PART_FAILED.
+    SubReviewer,
+    /// The main reviewer's final pass: APPROVED, or CHANGES_REQUIRED with the workers to redo.
     Reviewer,
+}
+
+/// Rework rounds a mission allows by default, and the most it may allow.
+pub const DEFAULT_REVIEW_ROUNDS: u8 = 3;
+pub const MAX_REVIEW_ROUNDS: u8 = 10;
+/// Times a command approver may send the plan back before a person must decide.
+pub const MAX_PLAN_ROUNDS: u8 = 2;
+/// Most sub-reviewers one mission may have.
+pub const MAX_SUB_REVIEWERS: usize = 8;
+/// Earlier attempts kept per card.
+pub(crate) const HISTORY_LIMIT: usize = 12;
+
+pub fn default_review_rounds() -> u8 {
+    DEFAULT_REVIEW_ROUNDS
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +81,9 @@ pub struct Receipt {
     #[serde(default)]
     pub settings: Option<super::ao_team::RoleSettings>,
     pub route: Route,
+    /// Tool requests the command approver decided during this attempt ("allowed · reason · request").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +134,34 @@ pub struct Run {
     pub worker_limit: u8,
     #[serde(default)]
     pub review_rounds: u8,
+    /// Each worker's part of the plan, keyed by worker card id; parsed from the planner's answer.
+    #[serde(default)]
+    pub assignments: BTreeMap<String, Assignment>,
+    /// Rework rounds the main reviewer may request before the mission holds for a person.
+    #[serde(default = "default_review_rounds")]
+    pub max_review_rounds: u8,
+    /// Times the command approver has sent the plan back.
+    #[serde(default)]
+    pub plan_rounds: u8,
+    /// Each sub-reviewer's part of the review, keyed by card id; parsed from the split pass.
+    #[serde(default)]
+    pub review_parts: BTreeMap<String, ReviewPart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewPart {
+    pub workers: Vec<String>,
+    #[serde(default)]
+    pub check: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Assignment {
+    pub task: String,
+    #[serde(default)]
+    pub acceptance: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,12 +310,17 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         || !text(&run.project_id, 128)
         || !(3..=24).contains(&run.nodes.len())
         || !(1..=24).contains(&run.worker_limit)
-        || run.review_rounds > 2
+        || !(1..=MAX_REVIEW_ROUNDS).contains(&run.max_review_rounds)
+        || run.review_rounds > run.max_review_rounds
+        || run.plan_rounds > MAX_PLAN_ROUNDS
     {
         return Err(fail("Invalid AO run identity or size"));
     }
     let mut ids = HashSet::new();
     let mut planner = None;
+    let mut approver = None;
+    let mut split = None;
+    let mut sub_reviewers = Vec::new();
     let mut reviewer = None;
     let mut workers = Vec::new();
     for node in &run.nodes {
@@ -286,8 +343,8 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
             return Err(fail("Invalid AO node or route"));
         }
         node.settings.validate()?;
-        if node.history.len() > 2 {
-            return Err(fail("AO attempt history exceeds two rework rounds"));
+        if node.history.len() > HISTORY_LIMIT {
+            return Err(fail("AO attempt history is too long"));
         }
         if node
             .template_role_id
@@ -310,10 +367,12 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                     .answer
                     .as_ref()
                     .is_some_and(|answer| answer.len() > 12_000)
-                || receipt
-                    .verdict
-                    .as_deref()
-                    .is_some_and(|verdict| !matches!(verdict, "APPROVED" | "CHANGES_REQUIRED"))
+                || receipt.verdict.as_deref().is_some_and(|verdict| {
+                    !matches!(
+                        verdict,
+                        "APPROVED" | "CHANGES_REQUIRED" | "PART_OK" | "PART_FAILED"
+                    )
+                })
             {
                 return Err(fail("Invalid AO receipt"));
             }
@@ -352,18 +411,56 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                 }
                 workers.push(node.id.as_str());
             }
+            Role::Approver => {
+                if approver.replace(node.id.as_str()).is_some() {
+                    return Err(fail("AO allows one command approver"));
+                }
+            }
+            Role::ReviewSplit => {
+                if split.replace(node.id.as_str()).is_some() {
+                    return Err(fail("AO allows one main-reviewer split pass"));
+                }
+            }
+            Role::SubReviewer => sub_reviewers.push(node.id.as_str()),
             Role::Reviewer => {
                 if reviewer.replace(node.id.as_str()).is_some() {
-                    return Err(fail("AO requires one reviewer"));
+                    return Err(fail("AO requires one main reviewer"));
                 }
             }
         }
     }
-    let (Some(planner), Some(reviewer)) = (planner, reviewer) else {
+    let (Some(planner), Some(_)) = (planner, reviewer) else {
         return Err(fail("AO requires a planner and reviewer"));
     };
     if workers.is_empty() {
         return Err(fail("AO requires at least one worker"));
+    }
+    if sub_reviewers.len() > MAX_SUB_REVIEWERS || split.is_some() != !sub_reviewers.is_empty() {
+        return Err(fail(
+            "Sub-reviewers need the main reviewer's split pass, and at most eight of them",
+        ));
+    }
+    if run.review_parts.iter().any(|(id, part)| {
+        !sub_reviewers.contains(&id.as_str())
+            || part.check.len() > 2_000
+            || part.workers.len() > 24
+            || part
+                .workers
+                .iter()
+                .any(|worker| !workers.contains(&worker.as_str()))
+    }) {
+        return Err(fail(
+            "AO review part is outside this mission's sub-reviewers or workers",
+        ));
+    }
+    if run
+        .assignments
+        .iter()
+        .any(|(id, item)| !workers.contains(&id.as_str()) || !assignment_valid(item))
+    {
+        return Err(fail(
+            "AO assignment is outside this mission's workers or invalid",
+        ));
     }
     let by_id: HashMap<&str, &Node> = run
         .nodes
@@ -379,24 +476,35 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         }) {
             return Err(fail("AO has a duplicate, self, or foreign dependency"));
         }
-        if node.role == Role::Worker && !node.parents.iter().any(|parent| parent == planner) {
-            return Err(fail("AO worker must depend on its planner"));
+        let depends_on = |id: &str| node.parents.iter().any(|parent| parent == id);
+        let wired = match node.role {
+            Role::Planner => true,
+            Role::Approver => node.parents.len() == 1 && depends_on(planner),
+            Role::Worker => depends_on(planner) && approver.is_none_or(|id| depends_on(id)),
+            Role::ReviewSplit => workers.iter().all(|worker| depends_on(worker)),
+            Role::SubReviewer => split.is_some_and(|id| depends_on(id)),
+            Role::Reviewer if sub_reviewers.is_empty() => {
+                workers.iter().all(|worker| depends_on(worker))
+            }
+            Role::Reviewer => sub_reviewers.iter().all(|sub| depends_on(sub)),
+        };
+        if !wired {
+            return Err(fail(match node.role {
+                Role::Worker => "AO worker must depend on its planner and command approver",
+                Role::Approver => "AO command approver must depend only on the planner",
+                Role::ReviewSplit => "AO review split must depend on every worker",
+                Role::SubReviewer => "AO sub-reviewer must depend on the main reviewer's split pass",
+                _ => "AO reviewer must depend on every worker, or on every sub-reviewer when there are any",
+            }));
         }
-        if node.id == reviewer
-            && workers
-                .iter()
-                .any(|worker| !node.parents.iter().any(|parent| parent == worker))
-        {
-            return Err(fail("AO reviewer must depend on every worker"));
-        }
-        // The run loop drives external harnesses only as workers, so the orchestrator and
-        // reviewer stay on Native Codex, with any WebGPT tier or any CPA model.
-        if matches!(node.role, Role::Planner | Role::Reviewer)
+        // Any role may run on any harness: WebGPT or a CPA model on Native Codex, or an AO harness.
+        if node.role != Role::Worker
             && !web_route_valid(&node.route)
             && !cpa_route_valid(&node.route)
+            && !external_route_valid(&node.route)
         {
             return Err(fail(
-                "AO planner and reviewer run on Native Codex with WebGPT or a CPA model",
+                "AO roles need WebGPT or a CPA model on Native Codex, or an AO harness",
             ));
         }
     }
@@ -461,8 +569,9 @@ pub fn grant_valid(
         || grant.executable_sha256 != executable_sha256
         || grant.graph_sha256 != graph_sha256(data, run)?
         || grant.max_turns == 0
-        || grant.max_turns > 72
-        || grant.max_turns as usize > run.nodes.len() * 3
+        || grant.max_turns as usize
+            > run.nodes.len()
+                * (usize::from(run.max_review_rounds) + usize::from(MAX_PLAN_ROUNDS) + 1)
         || grant
             .expires_at_ms
             .checked_sub(grant.granted_at_ms)
@@ -512,17 +621,25 @@ pub fn grant_run(
         return Err(fail("AO run has no bounded pending turns"));
     }
     let fingerprint = graph_sha256(data, run)?;
-    let remaining_reworks = 2usize.saturating_sub(usize::from(run.review_rounds));
+    let remaining_reworks = usize::from(run.max_review_rounds.saturating_sub(run.review_rounds));
+    // The planner and approver re-run only when the approver sends the plan back.
+    let replans = if run.nodes.iter().any(|node| node.role == Role::Approver) {
+        usize::from(MAX_PLAN_ROUNDS.saturating_sub(run.plan_rounds))
+    } else {
+        0
+    };
     let max_turns: usize = run
         .nodes
         .iter()
         .map(|node| match (&node.role, &node.state) {
-            (Role::Planner, State::Pending) => 1,
-            (Role::Planner, _) | (Role::Reviewer, State::Finished) => 0,
+            (Role::Planner | Role::Approver, State::Pending) => 1 + replans,
+            (Role::Planner | Role::Approver, _) => replans,
+            (Role::Reviewer, State::Finished) => 0,
             (_, State::Pending) => 1 + remaining_reworks,
             _ => remaining_reworks,
         })
         .sum();
+    let max_turns = max_turns.min(usize::from(u8::MAX));
     let run = &mut data.ao_runs[index];
     run.grant = Some(RunGrant {
         graph_sha256: fingerprint,
@@ -534,6 +651,370 @@ pub fn grant_run(
     });
     run.revision += 1;
     Ok(run.clone())
+}
+
+const ASSIGNMENTS_FENCE: &str = "```assignments";
+
+/// At most `max` characters, cut on a character boundary.
+fn clip(value: &str, max: usize) -> String {
+    match value.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &value[..end]),
+        None => value.to_owned(),
+    }
+}
+
+fn assignment_valid(item: &Assignment) -> bool {
+    let clean = |value: &str| {
+        !value
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    };
+    !item.task.trim().is_empty()
+        && item.task.len() <= 4_000
+        && item.acceptance.len() <= 2_000
+        && clean(&item.task)
+        && clean(&item.acceptance)
+}
+
+/// The worker cards the planner splits the mission across, and the answer format it must use.
+fn planner_roster(run: &Run) -> String {
+    let mut roster =
+        String::from("\nWorker cards (assign each one a distinct part; use the card id):\n");
+    for worker in run.nodes.iter().filter(|node| node.role == Role::Worker) {
+        let name = if worker.settings.name.is_empty() {
+            "Worker"
+        } else {
+            &worker.settings.name
+        };
+        let specialty = if worker.settings.specialty.is_empty() {
+            "general"
+        } else {
+            &worker.settings.specialty
+        };
+        roster.push_str(&format!(
+            "- id `{}` · {name} · specialty {specialty} · {} / {}\n",
+            worker.id, worker.route.harness_id, worker.route.model
+        ));
+    }
+    roster.push_str(&format!("\nEnd your answer with exactly one block in this form, giving every worker card its own part:\n\
+{ASSIGNMENTS_FENCE}\n[{{\"worker\":\"<card id>\",\"task\":\"what this worker must do\",\"acceptance\":\"how to tell it is done\"}}]\n```\n"));
+    roster
+}
+
+/// Reads the planner's `assignments` block. Workers are matched by card id or by their name.
+pub(crate) fn parse_assignments(
+    answer: &str,
+    run: &Run,
+) -> Result<BTreeMap<String, Assignment>, &'static str> {
+    #[derive(Deserialize)]
+    struct Planned {
+        worker: String,
+        task: String,
+        #[serde(default)]
+        acceptance: String,
+    }
+    let start = answer
+        .rfind(ASSIGNMENTS_FENCE)
+        .ok_or("The plan has no ```assignments block for the worker cards")?;
+    let body = &answer[start + ASSIGNMENTS_FENCE.len()..];
+    let end = body
+        .find("```")
+        .ok_or("The plan's ```assignments block is not closed")?;
+    let planned: Vec<Planned> = serde_json::from_str(body[..end].trim()).map_err(|_| {
+        "The plan's ```assignments block is not a JSON list of {worker, task, acceptance}"
+    })?;
+    let mut assignments = BTreeMap::new();
+    for item in planned {
+        let wanted = item.worker.trim().trim_matches('`');
+        let worker = run
+            .nodes
+            .iter()
+            .filter(|node| node.role == Role::Worker)
+            .find(|node| {
+                node.id == wanted
+                    || (!node.settings.name.is_empty()
+                        && node.settings.name.eq_ignore_ascii_case(wanted))
+            })
+            .ok_or("The plan assigns work to a card that is not a worker in this mission")?;
+        let assignment = Assignment {
+            task: item.task.trim().to_owned(),
+            acceptance: item.acceptance.trim().to_owned(),
+        };
+        if !assignment_valid(&assignment) {
+            return Err("A planned assignment is empty or too long");
+        }
+        if assignments.insert(worker.id.clone(), assignment).is_some() {
+            return Err("The plan assigns the same worker twice");
+        }
+    }
+    if assignments.is_empty() {
+        return Err("The plan assigned no work to the worker cards");
+    }
+    Ok(assignments)
+}
+
+const REVIEW_PARTS_FENCE: &str = "```review-parts";
+const REWORK_FENCE: &str = "```rework";
+
+/// What each specialty concentrates on; added to that card's prompt.
+pub fn specialty_guidance(specialty: &str) -> Option<&'static str> {
+    Some(match specialty {
+        "planning" => "break the goal into independent parts with clear owners, order and acceptance checks.",
+        "research" => "find and cite the facts the work depends on (docs, code, versions) before anyone builds on them.",
+        "architecture" => "decide the structure, interfaces and data flow first, and note the trade-offs.",
+        "frontend" => "build the user interface, check it renders and behaves at the sizes it is used, and keep it accessible.",
+        "backend" => "implement server logic and APIs with input validation, error handling and tests.",
+        "database" => "design schema and queries, keep migrations reversible, and check data integrity.",
+        "api" => "define and implement the contract (requests, responses, errors) and keep it backward compatible.",
+        "devops" => "handle build, CI, packaging and deployment; make every step repeatable and say how to roll back.",
+        "security" => "check input handling, authentication, secrets and permissions, and report every risk you find.",
+        "testing" => "write and run the tests, and report the exact commands and their results.",
+        "performance" => "measure before and after, and change only what the numbers show is slow.",
+        "debugging" => "reproduce the failure, find the root cause with evidence, then fix it and show it is fixed.",
+        "refactor" => "improve structure without changing behaviour, and prove behaviour is unchanged with tests.",
+        "docs" => "write accurate, concise documentation for the people who will use or maintain this.",
+        "ui-ux" => "make the flow clear and consistent, and check states such as empty, loading and error.",
+        "mobile" => "check small screens, touch input and platform conventions.",
+        "data-ml" => "validate the data and the model's results, and report the metrics you used.",
+        "implementation" => "make the change completely and cleanly, and show it works.",
+        "qa" => "exercise the finished feature like a user, including edge cases, and report what you verified.",
+        "review" => "check correctness, completeness against each assignment, and evidence; do not edit the work.",
+        "delivery" => "make sure everything is integrated, documented and ready to hand over.",
+        _ => return None,
+    })
+}
+
+/// The latest answer a card of this role gave in an earlier round.
+fn last_answer(run: &Run, role: Role) -> Option<&str> {
+    run.nodes
+        .iter()
+        .find(|node| node.role == role)
+        .and_then(|node| node.history.last())
+        .and_then(|receipt| receipt.answer.as_deref())
+}
+
+fn card_name(run: &Run, id: &str) -> String {
+    run.nodes
+        .iter()
+        .find(|node| node.id == id)
+        .map(|node| {
+            if node.settings.name.is_empty() {
+                id.to_owned()
+            } else {
+                format!("{} ({id})", node.settings.name)
+            }
+        })
+        .unwrap_or_else(|| id.to_owned())
+}
+
+/// What each worker was asked to do, for the approver and reviewers.
+fn assignment_summary(run: &Run) -> String {
+    if run.assignments.is_empty() {
+        return String::new();
+    }
+    let mut summary = String::from("\nWhat each worker was asked to do:\n");
+    for (worker_id, item) in &run.assignments {
+        summary.push_str(&format!(
+            "- {}: {} / done when: {}\n",
+            card_name(run, worker_id),
+            clip(&item.task, 600),
+            clip(&item.acceptance, 300)
+        ));
+    }
+    summary
+}
+
+/// The sub-reviewers the split pass assigns, and the answer format it must use.
+fn review_split_roster(run: &Run) -> String {
+    let mut roster = String::from(
+        "\nSub-reviewer cards (give each a part; together they must cover every worker):\n",
+    );
+    for sub in run
+        .nodes
+        .iter()
+        .filter(|node| node.role == Role::SubReviewer)
+    {
+        let specialty = if sub.settings.specialty.is_empty() {
+            "review"
+        } else {
+            &sub.settings.specialty
+        };
+        roster.push_str(&format!(
+            "- id `{}` · {} · specialty {specialty}\n",
+            sub.id,
+            if sub.settings.name.is_empty() {
+                "Sub-reviewer"
+            } else {
+                &sub.settings.name
+            }
+        ));
+    }
+    roster.push_str("Worker cards: ");
+    roster.push_str(
+        &run.nodes
+            .iter()
+            .filter(|node| node.role == Role::Worker)
+            .map(|node| format!("`{}`", node.id))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    roster.push_str(&format!("\n\nEnd your answer with exactly one block in this form:\n{REVIEW_PARTS_FENCE}\n[{{\"sub_reviewer\":\"<card id>\",\"workers\":[\"<worker card id>\"],\"check\":\"what to verify\"}}]\n```\n"));
+    roster
+}
+
+/// One sub-reviewer's part: the workers it checks, what they were asked to do, and their output.
+fn sub_review_part(run: &Run, sub_id: &str) -> String {
+    let part = run.review_parts.get(sub_id);
+    let workers: Vec<&Node> = run
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.role == Role::Worker && part.is_none_or(|part| part.workers.contains(&node.id))
+        })
+        .collect();
+    let mut text = String::from("\nYour part of the review:\n");
+    if let Some(check) = part
+        .map(|part| part.check.as_str())
+        .filter(|check| !check.is_empty())
+    {
+        text.push_str(&format!("Check: {check}\n"));
+    }
+    let budget = (10_000 / workers.len().max(1)).max(1_000);
+    for worker in workers {
+        text.push_str(&format!("\nWorker {}:\n", card_name(run, &worker.id)));
+        if let Some(item) = run.assignments.get(&worker.id) {
+            text.push_str(&format!(
+                "Asked to: {} / done when: {}\n",
+                clip(&item.task, 600),
+                clip(&item.acceptance, 300)
+            ));
+        }
+        let output = worker
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.answer.as_deref())
+            .unwrap_or("(no output)");
+        text.push_str(&format!("Output:\n{}\n", clip(output, budget)));
+    }
+    text
+}
+
+/// Reads the split pass's `review-parts` block. Sub-reviewers and workers match by id or name.
+pub(crate) fn parse_review_parts(
+    answer: &str,
+    run: &Run,
+) -> Result<BTreeMap<String, ReviewPart>, &'static str> {
+    #[derive(Deserialize)]
+    struct Planned {
+        sub_reviewer: String,
+        workers: Vec<String>,
+        #[serde(default)]
+        check: String,
+    }
+    let start = answer
+        .rfind(REVIEW_PARTS_FENCE)
+        .ok_or("The review split has no ```review-parts block for the sub-reviewers")?;
+    let body = &answer[start + REVIEW_PARTS_FENCE.len()..];
+    let end = body
+        .find("```")
+        .ok_or("The ```review-parts block is not closed")?;
+    let planned: Vec<Planned> = serde_json::from_str(body[..end].trim()).map_err(|_| {
+        "The ```review-parts block is not a JSON list of {sub_reviewer, workers, check}"
+    })?;
+    let card = |wanted: &str, role: Role| {
+        run.nodes
+            .iter()
+            .filter(|node| node.role == role)
+            .find(|node| {
+                node.id == wanted
+                    || (!node.settings.name.is_empty()
+                        && node.settings.name.eq_ignore_ascii_case(wanted))
+            })
+            .map(|node| node.id.clone())
+    };
+    let mut parts = BTreeMap::new();
+    for item in planned {
+        let sub = card(
+            item.sub_reviewer.trim().trim_matches('`'),
+            Role::SubReviewer,
+        )
+        .ok_or("The review split names a card that is not a sub-reviewer")?;
+        let workers = item
+            .workers
+            .iter()
+            .map(|worker| card(worker.trim().trim_matches('`'), Role::Worker))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("The review split names a card that is not a worker")?;
+        if workers.is_empty() || item.check.len() > 2_000 {
+            return Err("A review part has no workers or is too long");
+        }
+        if parts
+            .insert(
+                sub,
+                ReviewPart {
+                    workers,
+                    check: item.check.trim().to_owned(),
+                },
+            )
+            .is_some()
+        {
+            return Err("The review split assigns the same sub-reviewer twice");
+        }
+    }
+    let covered: HashSet<&String> = parts
+        .values()
+        .flat_map(|part| part.workers.iter())
+        .collect();
+    if run
+        .nodes
+        .iter()
+        .any(|node| node.role == Role::Worker && !covered.contains(&node.id))
+    {
+        return Err("The review split leaves a worker unchecked");
+    }
+    Ok(parts)
+}
+
+/// Workers the main reviewer asked to redo; empty means every worker.
+pub(crate) fn parse_rework_targets(answer: &str, run: &Run) -> Vec<String> {
+    let Some(start) = answer.rfind(REWORK_FENCE) else {
+        return Vec::new();
+    };
+    let body = &answer[start + REWORK_FENCE.len()..];
+    let Some(end) = body.find("```") else {
+        return Vec::new();
+    };
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(body[..end].trim()) else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    for item in items {
+        let wanted = item
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| {
+                item.get("worker")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        let wanted = wanted.trim().trim_matches('`');
+        if let Some(worker) = run
+            .nodes
+            .iter()
+            .filter(|node| node.role == Role::Worker)
+            .find(|node| {
+                node.id == wanted
+                    || (!node.settings.name.is_empty()
+                        && node.settings.name.eq_ignore_ascii_case(wanted))
+            })
+        {
+            if !targets.contains(&worker.id) {
+                targets.push(worker.id.clone());
+            }
+        }
+    }
+    targets
 }
 
 pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<String> {
@@ -549,14 +1030,28 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
         .find(|task| task.id == node.task_id && task.workspace_id == run.workspace_id)
         .ok_or_else(|| fail("AO task not found"))?;
     let responsibility = match node.role {
-        Role::Planner => "Plan and delegate the mission. Do not simulate worker results or the reviewer's approval.",
+        Role::Planner => "Plan the mission and split it across the worker cards listed below. Coding Tools runs every worker on its own harness and model. \
+Do not use your own sub-agent, spawn or delegation tools, and do not do the workers' work yourself. Do not simulate worker results or the reviewer's approval.",
+        Role::Approver => "You are the command approver. Before any worker starts, check the plan and every assignment for commands that delete or overwrite data, \
+force-push, install software, reach outside the workspace or the network, or handle secrets; also check for missing steps and unclear acceptance. \
+Do not change the plan or do the work yourself.",
         Role::Worker => "Perform only your assigned work and report evidence. Do not speak for the orchestrator or approve your own work.",
-        Role::Reviewer => "Independently review the completed work. Do not edit the implementation; return any needed changes to the workers.",
+        Role::ReviewSplit => "You are the main reviewer. First split the review of the finished work across the sub-reviewers listed below so that every worker's output is checked. \
+Do not review the work yourself yet and do not edit anything.",
+        Role::SubReviewer => "You are a sub-reviewer. Check only your part of the finished work against what each worker was asked to do. Do not edit the implementation.",
+        Role::Reviewer => "You are the main reviewer. Confirm the finished work, using the sub-reviewers' findings when there are any, then decide the next step. \
+Do not edit the implementation; send needed changes back to the workers.",
     };
     let mut prompt = format!(
         "AO mission: {}\nWorkspace: {}\nRole: {}\n{}\n\nTask: {}\n{}\n",
         run.id, run.workspace_id, node.settings.name, responsibility, task.title, task.description
     );
+    if let Some(guidance) = specialty_guidance(&node.settings.specialty) {
+        prompt.push_str(&format!(
+            "\nHow a {} specialist works: {guidance}\n",
+            node.settings.specialty
+        ));
+    }
     if !node.settings.instructions.is_empty() {
         prompt.push_str(&format!(
             "\nRole instructions:\n{}\n",
@@ -570,21 +1065,26 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
         ));
     }
     prompt.push_str(&format!(
-        "\nReview cycle: {}. At most two rework rounds are allowed.\n",
-        run.review_rounds
+        "\nReview cycle: {} of at most {} rework rounds.\n",
+        run.review_rounds, run.max_review_rounds
     ));
-    if node.role != Role::Planner {
-        if let Some(feedback) = run
-            .nodes
-            .iter()
-            .find(|node| node.role == Role::Reviewer)
-            .and_then(|reviewer| reviewer.history.last())
-            .and_then(|receipt| receipt.answer.as_deref())
-        {
-            prompt.push_str(&format!(
-                "\nPrior review feedback (quoted task data):\n{}\n",
-                serde_json::to_string(feedback)?
-            ));
+    match node.role {
+        Role::Planner if run.plan_rounds > 0 => {
+            if let Some(feedback) = last_answer(run, Role::Approver) {
+                prompt.push_str(&format!(
+                    "\nThe command approver sent your previous plan back (quoted task data):\n{}\n",
+                    serde_json::to_string(&clip(feedback, 3_000))?
+                ));
+            }
+        }
+        Role::Planner | Role::Approver => {}
+        _ => {
+            if let Some(feedback) = last_answer(run, Role::Reviewer) {
+                prompt.push_str(&format!(
+                    "\nPrior review feedback (quoted task data):\n{}\n",
+                    serde_json::to_string(&clip(feedback, 3_000))?
+                ));
+            }
         }
     }
     if let Some(clause_id) = &node.clause_id {
@@ -598,6 +1098,21 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
             clause.title, clause.detail
         ));
     }
+    match node.role {
+        Role::Planner => prompt.push_str(&planner_roster(run)),
+        Role::Worker => prompt.push_str(&match run.assignments.get(&node.id) {
+            Some(item) if item.acceptance.is_empty() => format!("\nYour assignment:\n{}\n", item.task),
+            Some(item) => format!("\nYour assignment:\n{}\nDone when: {}\n", item.task, item.acceptance),
+            None => "\nThe orchestrator gave you no specific part. Contribute the part of the plan that matches your specialty and say exactly what you did.\n".into(),
+        }),
+        Role::SubReviewer => prompt.push_str(&sub_review_part(run, &node.id)),
+        Role::Approver | Role::ReviewSplit | Role::Reviewer => prompt.push_str(&assignment_summary(run)),
+    }
+    if node.role == Role::ReviewSplit {
+        prompt.push_str(&review_split_roster(run));
+    }
+    // Earlier outputs share one budget so the whole prompt stays within a native turn.
+    let per_parent = (11_000 / node.parents.len().max(1)).max(1_200);
     for parent_id in &node.parents {
         let parent = run
             .nodes
@@ -618,14 +1133,43 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
             .as_deref()
             .filter(|answer| !answer.trim().is_empty())
             .ok_or_else(|| fail("AO parent output is empty"))?;
-        prompt.push_str(&format!(
-            "\nCompleted {} output ({}):\n{}\n",
-            parent_id, receipt.route.model, answer
-        ));
+        match parent.role {
+            Role::Planner if node.role != Role::Approver => {
+                // The full plan is context only; each worker's own part is stated above.
+                let plan = answer
+                    .rfind(ASSIGNMENTS_FENCE)
+                    .map_or(answer, |start| &answer[..start]);
+                prompt.push_str(&format!(
+                    "\nMission plan from the orchestrator (context):\n{}\n",
+                    clip(plan.trim(), 4_000)
+                ));
+            }
+            Role::Approver => prompt.push_str(&format!(
+                "\nCommand approver's note on the plan:\n{}\n",
+                clip(answer, 1_500)
+            )),
+            // A sub-reviewer's part (above) already says which work to check.
+            Role::ReviewSplit => {}
+            _ => prompt.push_str(&format!(
+                "\nCompleted {} output ({}):\n{}\n",
+                parent
+                    .settings
+                    .name
+                    .as_str()
+                    .is_empty()
+                    .then_some(parent_id.as_str())
+                    .unwrap_or(&parent.settings.name),
+                receipt.route.model,
+                clip(answer, per_parent)
+            )),
+        }
     }
-    if node.role == Role::Reviewer {
-        prompt.push_str("\nReview the completed worker outputs. Reply with APPROVED or CHANGES_REQUIRED, then a concise reason.\n");
-    }
+    prompt.push_str(match node.role {
+        Role::Approver => "\nReply with APPROVED or CHANGES_REQUIRED first, then a concise reason. With CHANGES_REQUIRED, say exactly what the orchestrator must change.\n",
+        Role::SubReviewer => "\nReply with PART_OK or PART_FAILED first, then your findings with evidence (files, commands, results).\n",
+        Role::Reviewer => "\nReply with APPROVED or CHANGES_REQUIRED first, then a concise reason. With CHANGES_REQUIRED, end with a ```rework block listing the worker card ids that must redo their work, for example:\n```rework\n[\"<card id>\"]\n```\n",
+        _ => "",
+    });
     if prompt.trim().is_empty() || prompt.len() > 16_000 {
         return Err(fail("AO prompt exceeds native turn limit"));
     }
@@ -700,17 +1244,41 @@ pub fn update_graph(
                 .nodes
                 .iter()
                 .any(|existing| existing.role == Role::Worker && existing.route == node.route);
-            extra_turns = 1 + 2u8.saturating_sub(next.review_rounds);
+            extra_turns = 1 + next.max_review_rounds.saturating_sub(next.review_rounds);
             super::ao_team::attach_worker_role(&mut next, &mut node);
-            let reviewer = next
-                .nodes
-                .iter_mut()
-                .find(|existing| existing.role == Role::Reviewer)
-                .ok_or_else(|| fail("AO reviewer is missing"))?;
-            if reviewer.state != State::Pending {
+            if next.nodes.iter().any(|existing| {
+                matches!(
+                    existing.role,
+                    Role::ReviewSplit | Role::SubReviewer | Role::Reviewer
+                ) && existing.state != State::Pending
+            }) {
                 return Err(fail("AO review has already started"));
             }
-            reviewer.parents.push(node.id.clone());
+            // The new worker feeds the review: the split pass when there are sub-reviewers, else the reviewer.
+            if let Some(approver) = next
+                .nodes
+                .iter()
+                .find(|existing| existing.role == Role::Approver)
+            {
+                if !node.parents.contains(&approver.id) {
+                    node.parents.push(approver.id.clone());
+                }
+            }
+            let review_entry = if next
+                .nodes
+                .iter()
+                .any(|existing| existing.role == Role::ReviewSplit)
+            {
+                Role::ReviewSplit
+            } else {
+                Role::Reviewer
+            };
+            next.nodes
+                .iter_mut()
+                .find(|existing| existing.role == review_entry)
+                .ok_or_else(|| fail("AO reviewer is missing"))?
+                .parents
+                .push(node.id.clone());
             next.nodes.push(*node);
         }
         GraphChange::MoveNode { node_id, x, y } => {
@@ -840,6 +1408,7 @@ pub fn reserve(
         answer: None,
         verdict: None,
         route: node.route.clone(),
+        approvals: Vec::new(),
     });
     if grant_now_ms.is_some() {
         run.grant.as_mut().unwrap().turns_started += 1;
@@ -906,6 +1475,26 @@ pub fn record_terminal(
         .iter_mut()
         .find(|run| run.id == run_id && run.workspace_id == workspace_id)
         .ok_or_else(|| fail("AO run not found"))?;
+    // A finished plan must split the work across the workers, and a finished review split
+    // must split the review across the sub-reviewers; otherwise the card holds.
+    enum Split {
+        Plan(BTreeMap<String, Assignment>),
+        Review(BTreeMap<String, ReviewPart>),
+    }
+    let plan = match run
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .map(|node| &node.role)
+    {
+        Some(Role::Planner) if completed => {
+            answer.map(|answer| parse_assignments(answer, run).map(Split::Plan))
+        }
+        Some(Role::ReviewSplit) if completed => {
+            answer.map(|answer| parse_review_parts(answer, run).map(Split::Review))
+        }
+        _ => None,
+    };
     let node = run
         .nodes
         .iter_mut()
@@ -918,21 +1507,21 @@ pub fn record_terminal(
             receipt.status == "submitted" && receipt.thread_id.as_deref() == Some(thread_id)
         })
         .ok_or_else(|| fail("AO native thread identity changed"))?;
-    let verdict = if node.role == Role::Reviewer {
-        answer
-            .and_then(|answer| {
-                answer
-                    .split_whitespace()
-                    .next()
-                    .map(|word| word.trim_matches(['*', '`', ':']))
-            })
-            .and_then(|word| match word {
-                "APPROVED" => Some("APPROVED"),
-                "CHANGES_REQUIRED" | "CHANGES\\_REQUIRED" => Some("CHANGES_REQUIRED"),
-                _ => None,
-            })
-    } else {
-        None
+    let first_word = answer
+        .and_then(|answer| answer.split_whitespace().next())
+        .map(|word| word.trim_matches(['*', '`', ':', '.']).replace("\\_", "_"));
+    let verdict = match (&node.role, first_word.as_deref()) {
+        (Role::Reviewer | Role::Approver, Some("APPROVED")) => Some("APPROVED"),
+        (Role::Reviewer | Role::Approver, Some("CHANGES_REQUIRED")) => Some("CHANGES_REQUIRED"),
+        (Role::SubReviewer, Some("PART_OK")) => Some("PART_OK"),
+        (Role::SubReviewer, Some("PART_FAILED")) => Some("PART_FAILED"),
+        _ => None,
+    };
+    // Gates finish only on approval; a sub-reviewer finishes on either finding.
+    let verdict_ok = match node.role {
+        Role::Reviewer | Role::Approver => verdict == Some("APPROVED"),
+        Role::SubReviewer => verdict.is_some(),
+        _ => true,
     };
     receipt.turn_id = turn_id
         .filter(|id| text(id, 128) && !id.contains('/'))
@@ -941,24 +1530,39 @@ pub fn record_terminal(
         && !failure.is_some_and(|message| message.starts_with("Native approval declined"))
         && turn_id.is_some_and(|id| text(id, 128) && !id.contains('/'))
         && answer.is_some_and(|value| !value.trim().is_empty() && value.len() <= 12_000)
-        && (node.role != Role::Reviewer || verdict == Some("APPROVED"))
+        && verdict_ok
+        && !matches!(plan, Some(Err(_)))
     {
         receipt.turn_id = turn_id.map(str::to_owned);
         receipt.answer = answer.map(str::to_owned);
         receipt.verdict = verdict.map(str::to_owned);
         receipt.status = "completed".into();
         node.state = State::Finished;
+        match plan {
+            Some(Ok(Split::Plan(assignments))) => run.assignments = assignments,
+            Some(Ok(Split::Review(parts))) => run.review_parts = parts,
+            _ => {}
+        }
     } else {
         if answer.is_some_and(|value| !value.trim().is_empty() && value.len() <= 12_000) {
             receipt.answer = answer.map(str::to_owned);
             receipt.verdict = verdict.map(str::to_owned);
         }
         receipt.status = "held".into();
+        let plan_error = match plan {
+            Some(Err(message)) => Some(message),
+            _ => None,
+        };
         let mut error = failure
             .filter(|value| !value.trim().is_empty())
+            .or(plan_error)
             .unwrap_or_else(|| {
-                if verdict == Some("CHANGES_REQUIRED") {
+                if verdict == Some("CHANGES_REQUIRED") && node.role == Role::Approver {
+                    "Command approver sent the plan back"
+                } else if verdict == Some("CHANGES_REQUIRED") {
                     "Reviewer requested changes"
+                } else if completed && node.role == Role::SubReviewer {
+                    "Sub-reviewer gave no PART_OK or PART_FAILED verdict"
                 } else if completed {
                     "Native turn returned no verifiable final answer"
                 } else {
@@ -972,6 +1576,71 @@ pub fn record_terminal(
     }
     run.revision += 1;
     Ok(run.clone())
+}
+
+/// Records the command approver's decision on a running card's tool request, before it is
+/// answered. Only a mission whose background grant is valid and whose approver has approved
+/// the plan may decide this way; allowing also needs the approver's auto-decide setting.
+pub fn record_approver_decision(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: &str,
+    node_id: &str,
+    allow: bool,
+    reason: &str,
+    request: &str,
+    now_ms: u64,
+) -> AppResult<()> {
+    let index = data
+        .ao_runs
+        .iter()
+        .position(|run| run.id == run_id && run.workspace_id == workspace_id)
+        .ok_or_else(|| fail("AO run not found"))?;
+    let executable = data.ao_runs[index]
+        .grant
+        .as_ref()
+        .ok_or_else(|| fail("Automatic approval needs a running background grant"))?
+        .executable_sha256
+        .clone();
+    grant_valid(data, &data.ao_runs[index], now_ms, &executable)?;
+    let run = &mut data.ao_runs[index];
+    let approver = run
+        .nodes
+        .iter()
+        .find(|node| {
+            node.role == Role::Approver
+                && node.state == State::Finished
+                && node
+                    .receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.verdict.as_deref())
+                    == Some("APPROVED")
+        })
+        .ok_or_else(|| fail("This mission has no command approver that approved the plan"))?;
+    if allow && !approver.settings.auto_decide {
+        return Err(fail(
+            "The command approver only recommends; turn on auto-decide to let it allow requests",
+        ));
+    }
+    let receipt = run
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == node_id && node.state == State::Running)
+        .and_then(|node| node.receipt.as_mut())
+        .ok_or_else(|| fail("AO node has no active turn"))?;
+    if receipt.approvals.len() >= 100 {
+        receipt.approvals.remove(0);
+    }
+    let mut entry = format!(
+        "{} · {} · {}",
+        if allow { "allowed" } else { "denied" },
+        clip(reason.trim(), 300),
+        clip(request.trim(), 300)
+    );
+    crate::tools::history::redact_text(&mut entry);
+    receipt.approvals.push(entry);
+    run.revision += 1;
+    Ok(())
 }
 
 pub fn cancel(
@@ -1019,6 +1688,59 @@ mod tests {
         assert_eq!(stored["settings"]["name"], "Backend");
         assert_eq!(stored["settings"]["working_directory"], "src");
         assert_eq!(stored["template_role_id"], "backend");
+    }
+
+    #[test]
+    fn ao_planner_assignments_map_each_worker_card_once() {
+        let route = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
+            "account_id":"shared-cpa-pool","model":"luna","permission_profile":":workspace"});
+        let mut run: Run = serde_json::from_value(json!({"id":"run","workspace_id":"qa","project_id":"p","revision":0,"nodes":[
+            {"id":"planner","task_id":"t","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":route},
+            {"id":"w1","task_id":"t","role":"worker","parents":["planner"],"x":0,"y":1,"state":"pending","route":route,
+                "settings":{"name":"Frontend","specialty":"frontend"}},
+            {"id":"w2","task_id":"t","role":"worker","parents":["planner"],"x":1,"y":1,"state":"pending","route":route},
+            {"id":"reviewer","task_id":"t","role":"reviewer","parents":["w1","w2"],"x":0,"y":2,"state":"pending","route":route}
+        ]})).unwrap();
+        let block = |items: &str| format!("Plan.\n```assignments\n{items}\n```\nDone.");
+        // Cards are matched by id or by name; text before and after the block is ignored.
+        let parsed = parse_assignments(&block(r#"[{"worker":"Frontend","task":"Build the page","acceptance":"Renders"},{"worker":"`w2`","task":"Write tests"}]"#), &run).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed["w1"].acceptance, "Renders");
+        assert_eq!(parsed["w2"].task, "Write tests");
+        assert!(parse_assignments("No block here", &run).is_err());
+        assert!(
+            parse_assignments("```assignments\n[{\"worker\":\"w1\",\"task\":\"x\"}]", &run)
+                .is_err(),
+            "unclosed block"
+        );
+        assert!(
+            parse_assignments(&block(r#"[{"worker":"planner","task":"x"}]"#), &run).is_err(),
+            "only workers take assignments"
+        );
+        assert!(
+            parse_assignments(
+                &block(r#"[{"worker":"w1","task":"a"},{"worker":"w1","task":"b"}]"#),
+                &run
+            )
+            .is_err(),
+            "duplicate worker"
+        );
+        assert!(
+            parse_assignments(&block(r#"[{"worker":"w1","task":"  "}]"#), &run).is_err(),
+            "empty task"
+        );
+        assert!(parse_assignments(&block("[]"), &run).is_err());
+        // Stored assignments must stay inside this mission's workers.
+        run.assignments = parsed;
+        assert!(validate(None, &run).is_ok());
+        run.assignments.insert(
+            "ghost".into(),
+            Assignment {
+                task: "x".into(),
+                acceptance: String::new(),
+            },
+        );
+        assert!(validate(None, &run).is_err());
     }
 
     #[test]
@@ -1092,8 +1814,17 @@ mod tests {
             "account_id":"chatgpt-web","model":"chatgpt-web/medium","permission_profile":":read-only"}))).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
             "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
+        // The orchestrator and reviewer may also run on an AO harness such as Claude Code.
         assert!(validate(None, &run(json!({"harness_id":"ao:claude-code","provider_id":EXTERNAL_PROVIDER,
-            "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":EXTERNAL_PERMISSION}))).is_err());
+            "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":EXTERNAL_PERMISSION}))).is_ok());
+        assert!(validate(
+            None,
+            &run(
+                json!({"harness_id":"ao:claude-code","provider_id":EXTERNAL_PROVIDER,
+            "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":":read-only"})
+            )
+        )
+        .is_err());
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/other","permission_profile":":read-only"}))).is_err());
     }
@@ -1119,7 +1850,7 @@ mod tests {
         let worker = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
             "account_id":"shared-cpa-pool","model":"gemini-3.8-flash-high","permission_profile":":read-only"});
         let run: Run = serde_json::from_value(json!({
-            "id":"run","workspace_id":"qa","project_id":"project","revision":0,
+            "id":"run","workspace_id":"qa","project_id":"project","revision":0,"max_review_rounds":2,
             "nodes":[
                 {"id":"planner","task_id":"task","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":web},
                 {"id":"worker","task_id":"task","role":"worker","parents":["planner"],"x":0,"y":1,"state":"pending","route":worker},
@@ -1270,8 +2001,16 @@ mod tests {
             denied.nodes[0].receipt.as_ref().unwrap().answer.as_deref(),
             Some("The requested tool could not run.")
         );
-        let run = record_terminal(
-            &mut data,
+        // The planner is told the worker roster and must not clone itself.
+        let planner_prompt = prompt_for_node(&data, &data.ao_runs[0], "planner").unwrap();
+        assert!(
+            planner_prompt.contains("id `worker`") && planner_prompt.contains("```assignments")
+        );
+        assert!(planner_prompt.contains("Do not use your own sub-agent"));
+        // A plan that does not split the work across the workers holds instead of finishing.
+        let mut unsplit = data.clone();
+        let unsplit = record_terminal(
+            &mut unsplit,
             "qa",
             "run",
             "planner",
@@ -1282,10 +2021,33 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(parents_finished(&run, "worker"));
-        assert!(prompt_for_node(&data, &run, "worker")
+        assert_eq!(unsplit.nodes[0].state, State::Held);
+        assert!(unsplit.nodes[0]
+            .receipt
+            .as_ref()
             .unwrap()
-            .contains("Plan answer"));
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("assignments"));
+        let run = record_terminal(
+            &mut data,
+            "qa",
+            "run",
+            "planner",
+            "thread-one",
+            Some("turn-one"),
+            Some("Plan answer\n```assignments\n[{\"worker\":\"worker\",\"task\":\"Write the short answer\",\"acceptance\":\"One sentence\"}]\n```"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(parents_finished(&run, "worker"));
+        assert_eq!(run.assignments["worker"].task, "Write the short answer");
+        let worker_prompt = prompt_for_node(&data, &run, "worker").unwrap();
+        assert!(worker_prompt
+            .contains("Your assignment:\nWrite the short answer\nDone when: One sentence"));
+        assert!(worker_prompt.contains("Plan answer") && !worker_prompt.contains("```assignments"));
         let run = reserve(
             &mut data,
             "qa",
@@ -1500,7 +2262,7 @@ mod tests {
             .error
             .as_ref()
             .unwrap()
-            .contains("two rework rounds"));
+            .contains("after 2 rework rounds"));
         assert_eq!(held.grant.as_ref().unwrap().turns_started, 7);
         let run = record_terminal(
             &mut approved,
@@ -1515,5 +2277,296 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.nodes[2].state, State::Finished);
+    }
+
+    #[test]
+    fn ao_approver_and_review_hierarchy_send_back_only_what_needs_redoing() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aiTemp")
+            .canonicalize()
+            .unwrap();
+        let mut data: AppData = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),
+                "tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{"id":"task","workspace_id":"qa","title":"Ship it",
+                "description":"Build and test","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
+        })).unwrap();
+        let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+        let cpa = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
+            "account_id":"shared-cpa-pool","model":"luna","permission_profile":":workspace"});
+        let node = |id: &str, role: &str, route: &serde_json::Value, name: &str| {
+            json!({"id":id,"task_id":"task","role":role,
+            "parents":[],"x":0,"y":0,"state":"pending","route":route,"settings":{"name":name}})
+        };
+        // The team lists roles only; the wiring (approver, split pass) is generated.
+        let mut nodes: Vec<Node> = serde_json::from_value(json!([
+            node("lead", "planner", &web, "Orchestrator"),
+            node("gate", "approver", &cpa, "Command approver"),
+            node("front", "worker", &cpa, "Frontend"),
+            node("tests", "worker", &cpa, "Testing"),
+            node("sub-a", "sub_reviewer", &cpa, "UI check"),
+            node("sub-b", "sub_reviewer", &cpa, "Test check"),
+            node("main", "reviewer", &web, "Main reviewer"),
+        ]))
+        .unwrap();
+        crate::integrations::ao_team::normalize_roles(&mut nodes);
+        let split_id = nodes
+            .iter()
+            .find(|node| node.role == Role::ReviewSplit)
+            .expect("split pass generated")
+            .id
+            .clone();
+        assert_eq!(
+            nodes
+                .iter()
+                .find(|node| node.id == "front")
+                .unwrap()
+                .parents,
+            vec!["lead", "gate"]
+        );
+        assert_eq!(
+            nodes.iter().find(|node| node.id == "main").unwrap().parents,
+            vec!["sub-a", "sub-b"]
+        );
+        let mut run: Run = serde_json::from_value(
+            json!({"id":"run","workspace_id":"qa","project_id":"project","revision":0,"nodes":[]}),
+        )
+        .unwrap();
+        run.nodes = nodes;
+        assert_eq!(run.max_review_rounds, DEFAULT_REVIEW_ROUNDS);
+        create(&mut data, 1, run).unwrap();
+        let sha = "a".repeat(64);
+        let granted = grant_run(&mut data, "qa", "run", 1, &sha, 1_000).unwrap();
+        // planner 1+2, approver 1+2, 2 workers x(1+3), split, 2 subs, reviewer x(1+3) = 30
+        assert_eq!(granted.grant.as_ref().unwrap().max_turns, 30);
+        let mut key = 0;
+        let mut turn = |data: &mut AppData, id: &str, answer: &str| -> Run {
+            key += 1;
+            let revision = data.ao_runs[0].revision;
+            reserve(
+                data,
+                "qa",
+                "run",
+                id,
+                revision,
+                format!("k{key}"),
+                Some(1_001),
+            )
+            .unwrap();
+            record_submission(
+                data,
+                "qa",
+                "run",
+                id,
+                &format!("k{key}"),
+                Some(&format!("t{key}")),
+            )
+            .unwrap();
+            record_terminal(
+                data,
+                "qa",
+                "run",
+                id,
+                &format!("t{key}"),
+                Some(&format!("turn{key}")),
+                Some(answer),
+                true,
+                None,
+            )
+            .unwrap()
+        };
+        let plan = "Plan\n```assignments\n[{\"worker\":\"front\",\"task\":\"Build the page\"},{\"worker\":\"Testing\",\"task\":\"Test it\"}]\n```";
+        turn(&mut data, "lead", plan);
+        assert!(prompt_for_node(&data, &data.ao_runs[0], "gate")
+            .unwrap()
+            .contains("Build the page"));
+        // The approver sends the plan back once; the planner sees why and plans again.
+        let held = turn(
+            &mut data,
+            "gate",
+            "CHANGES_REQUIRED: do not run rm -rf on the build folder",
+        );
+        assert_eq!(held.nodes[1].state, State::Held);
+        let request = held.nodes[1].receipt.as_ref().unwrap().request_key.clone();
+        let replanned = crate::integrations::ao_team::queue_rework(
+            &mut data, "qa", "run", "gate", &request, 1_001,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replanned.plan_rounds, 1);
+        assert!(prompt_for_node(&data, &replanned, "lead")
+            .unwrap()
+            .contains("rm -rf"));
+        turn(&mut data, "lead", plan);
+        turn(&mut data, "gate", "APPROVED: safe");
+        assert!(prompt_for_node(&data, &data.ao_runs[0], "front")
+            .unwrap()
+            .contains("Command approver's note"));
+        // While a worker runs, the approver may deny on its own but allows only with auto-decide on.
+        let revision = data.ao_runs[0].revision;
+        reserve(
+            &mut data,
+            "qa",
+            "run",
+            "front",
+            revision,
+            "front-key".into(),
+            Some(1_001),
+        )
+        .unwrap();
+        record_submission(
+            &mut data,
+            "qa",
+            "run",
+            "front",
+            "front-key",
+            Some("front-thread"),
+        )
+        .unwrap();
+        record_approver_decision(
+            &mut data,
+            "qa",
+            "run",
+            "front",
+            false,
+            "Touches .env",
+            "cat .env token=sk-test-123456789012345678",
+            1_001,
+        )
+        .unwrap();
+        assert!(
+            record_approver_decision(
+                &mut data, "qa", "run", "front", true, "safe", "npm test", 1_001
+            )
+            .is_err(),
+            "recommend-only approver cannot allow"
+        );
+        // Changing the approver's settings re-fingerprints the grant, as applying a team does.
+        data.ao_runs[0]
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "gate")
+            .unwrap()
+            .settings
+            .auto_decide = true;
+        let fingerprint = graph_sha256(&data, &data.ao_runs[0]).unwrap();
+        data.ao_runs[0].grant.as_mut().unwrap().graph_sha256 = fingerprint;
+        record_approver_decision(
+            &mut data,
+            "qa",
+            "run",
+            "front",
+            true,
+            "Runs the tests",
+            "npm test",
+            1_001,
+        )
+        .unwrap();
+        let log = &data.ao_runs[0]
+            .nodes
+            .iter()
+            .find(|node| node.id == "front")
+            .unwrap()
+            .receipt
+            .as_ref()
+            .unwrap()
+            .approvals;
+        assert_eq!(log.len(), 2);
+        assert!(
+            log[0].starts_with("denied · Touches .env") && !log[0].contains("sk-test-1234567890"),
+            "secrets are redacted: {}",
+            log[0]
+        );
+        assert!(log[1].starts_with("allowed · Runs the tests"));
+        assert!(
+            record_approver_decision(&mut data, "qa", "run", "tests", false, "x", "y", 1_001)
+                .is_err(),
+            "only running cards"
+        );
+        record_terminal(
+            &mut data,
+            "qa",
+            "run",
+            "front",
+            "front-thread",
+            Some("front-turn"),
+            Some("Built the page"),
+            true,
+            None,
+        )
+        .unwrap();
+        turn(&mut data, "tests", "Tests fail on Safari");
+        // The split pass must cover every worker; then each sub-reviewer sees only its part.
+        let parts = "Split\n```review-parts\n[{\"sub_reviewer\":\"sub-a\",\"workers\":[\"front\"],\"check\":\"layout\"},{\"sub_reviewer\":\"Test check\",\"workers\":[\"tests\"]}]\n```";
+        let split = turn(&mut data, &split_id, parts);
+        assert_eq!(split.review_parts["sub-a"].workers, vec!["front"]);
+        let sub_a = prompt_for_node(&data, &split, "sub-a").unwrap();
+        assert!(
+            sub_a.contains("Built the page")
+                && !sub_a.contains("Tests fail on Safari")
+                && sub_a.contains("PART_OK")
+        );
+        turn(&mut data, "sub-a", "PART_OK layout matches");
+        let sub_b = turn(&mut data, "sub-b", "**PART_FAILED** Safari tests fail");
+        assert_eq!(
+            sub_b
+                .nodes
+                .iter()
+                .find(|node| node.id == "sub-b")
+                .unwrap()
+                .receipt
+                .as_ref()
+                .unwrap()
+                .verdict
+                .as_deref(),
+            Some("PART_FAILED")
+        );
+        // The main reviewer sends back only the testing worker, plus the review chain.
+        let reviewed = turn(
+            &mut data,
+            "main",
+            "CHANGES_REQUIRED: Safari\n```rework\n[\"tests\"]\n```",
+        );
+        let request = reviewed
+            .nodes
+            .iter()
+            .find(|node| node.id == "main")
+            .unwrap()
+            .receipt
+            .as_ref()
+            .unwrap()
+            .request_key
+            .clone();
+        let rework = crate::integrations::ao_team::queue_rework(
+            &mut data, "qa", "run", "main", &request, 1_001,
+        )
+        .unwrap()
+        .unwrap();
+        let state = |id: &str| {
+            rework
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .unwrap()
+                .state
+                .clone()
+        };
+        assert_eq!(state("tests"), State::Pending);
+        assert_eq!(
+            state("front"),
+            State::Finished,
+            "untargeted workers keep their finished work"
+        );
+        assert_eq!(state("lead"), State::Finished);
+        assert_eq!(state("gate"), State::Finished);
+        for id in [split_id.as_str(), "sub-a", "sub-b", "main"] {
+            assert_eq!(state(id), State::Pending);
+        }
+        assert_eq!(rework.review_rounds, 1);
+        assert!(rework.review_parts.is_empty());
+        assert!(prompt_for_node(&data, &rework, "tests")
+            .unwrap()
+            .contains("Prior review feedback"));
     }
 }

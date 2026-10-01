@@ -239,3 +239,8 @@
 .ao-link { padding: 0; border: 0; background: none; color: var(--ao-red); font-size: 11px; cursor: pointer; }
 .ao-msg-approval.tone-error { border-color: rgb(248 81 73 / 50%); }
 @media (max-width: 900px) { .ao-structure-view:not([hidden]) { grid-template-columns: 170px minmax(0, 1fr); } }
+/* The command approver's recommendation on a pending tool request. */
+.ao-approver-advice { flex-basis: 100%; margin: 0; padding: 6px 8px; border-radius: 6px; background: rgb(255 255 255 / 4%); font-size: 12px; }
+.ao-approver-advice.is-allow { color: var(--ao-green); }
+.ao-approver-advice.is-deny { color: var(--ao-red); }
+.ao-approver-advice.is-ask { color: var(--ao-amber); }

@@ -268,10 +268,13 @@ test("a Luna orchestrator card connects on the Luna tier", async () => {
   assert.deepEqual(calls[0].web_model_catalog, { models: [{ slug: "chatgpt-web/luna" }] });
 });
 
-test("the role inspector lets the orchestrator and reviewer choose their model", () => {
+test("the role inspector lets every role choose any harness and model", () => {
   const editor = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorRoleEditor.tsx"), "utf8");
   assert.doesNotMatch(editor, /<span className="ao-chip">WebGPT High<\/span>/, "no fixed WebGPT High chip for non-workers");
-  assert.match(editor, /harnesses=\{role\.role === "worker" \? harnesses : harnesses\.filter\(item => item\.id === NATIVE_HARNESS\)\}/);
+  assert.match(editor, /<HarnessPicker route=\{role\.route\} harnesses=\{harnesses\}/, "orchestrator and reviewer see every harness");
+  assert.doesNotMatch(editor, /item\.id === NATIVE_HARNESS\)/, "no role is limited to Native Codex");
+  const team = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorTeam.tsx"), "utf8");
+  assert.doesNotMatch(team, /nativeOnly/, "the team editor offers every harness too");
   const surface = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
   assert.doesNotMatch(surface, /node\.route\.model === "chatgpt-web\/high" \? "WebGPT High"/, "cards name the chosen tier");
 });

@@ -681,6 +681,11 @@ struct AoHarnessApprovalRequest {
     approval_id: String,
     allow: bool,
     confirm: bool,
+    /// Set when the mission's command approver answers instead of a person.
+    #[serde(default)]
+    approver_reason: Option<String>,
+    #[serde(default)]
+    approver_request: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1244,6 +1249,14 @@ mod workspace_auth_tests {
         assert!(saved.contains("base_url = \"http://127.0.0.1:8317/v1\""));
         assert!(saved.contains("env_key = \"CODING_TOOLS_AO_CPA_KEY\""));
         assert!(!saved.contains("SENTINEL_KEY_DO_NOT_LOG"));
+        assert!(
+            saved.contains("[features]\nmulti_agent = false"),
+            "cards must not spawn Codex sub-agents"
+        );
+        prepare_ao_cpa_home(&home, &app_data).unwrap();
+        assert_eq!(fs::read_to_string(&config).unwrap(), saved);
+        // A card home from before sub-agents were switched off is upgraded once, not refused.
+        fs::write(&config, AO_CPA_CONFIG_V1).unwrap();
         prepare_ao_cpa_home(&home, &app_data).unwrap();
         assert_eq!(fs::read_to_string(&config).unwrap(), saved);
         fs::write(&config, "unexpected provider config").unwrap();
@@ -1268,6 +1281,25 @@ mod workspace_auth_tests {
         assert!(config.contains("env_key = \"CODING_TOOLS_AO_WEB_KEY\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:17841/v1\""));
         assert!(!config.contains("SENTINEL_KEY_DO_NOT_LOG"));
+        assert!(
+            config.ends_with("[features]\nmulti_agent = false\n"),
+            "cards must not spawn Codex sub-agents"
+        );
+        let legacy = config.trim_end_matches("\n[features]\nmulti_agent = false\n");
+        fs::write(home.join("config.toml"), legacy).unwrap();
+        prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://127.0.0.1:17841/v1",
+            &catalog,
+            "chatgpt-web/high",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            config,
+            "the previous config is upgraded once"
+        );
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(
                 &fs::read(home.join("models.json")).unwrap()
@@ -2181,13 +2213,27 @@ fn ao_background_granted(
         .is_ok()
 }
 
-const AO_CPA_CONFIG: &str = "model_provider = \"coding_tools_ao_cpa\"\n\
+macro_rules! ao_cpa_provider {
+    () => {
+        "model_provider = \"coding_tools_ao_cpa\"\n\
 [model_providers.coding_tools_ao_cpa]\n\
 name = \"Coding Tools AO CPA\"\n\
 base_url = \"http://127.0.0.1:8317/v1\"\n\
 env_key = \"CODING_TOOLS_AO_CPA_KEY\"\n\
 requires_openai_auth = false\n\
-wire_api = \"responses\"\n";
+wire_api = \"responses\"\n"
+    };
+}
+/// Mission cards are coordinated by Coding Tools, so Codex's own sub-agent tools stay off;
+/// otherwise a card answers "delegate" by spawning copies of itself on the same model.
+macro_rules! ao_card_features {
+    () => {
+        "\n[features]\nmulti_agent = false\n"
+    };
+}
+const AO_CPA_CONFIG: &str = concat!(ao_cpa_provider!(), ao_card_features!());
+/// The previous card config (sub-agents on); recognised so it is upgraded once, not refused.
+const AO_CPA_CONFIG_V1: &str = ao_cpa_provider!();
 
 fn prepare_ao_home(root: &Path, requested: &Path) -> Result<PathBuf, String> {
     let parent = root.parent().ok_or("AO app data is unavailable")?;
@@ -2245,15 +2291,19 @@ fn prepare_ao_cpa_home(home: &Path, app_data_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(home).map_err(text_error)?;
     let config = home.join("config.toml");
     if config.exists() {
+        let current = fs::read(&config).map_err(text_error)?;
         if fs::symlink_metadata(&config)
             .map_err(text_error)?
             .file_type()
             .is_symlink()
-            || fs::read(&config).map_err(text_error)? != AO_CPA_CONFIG.as_bytes()
+            || (current != AO_CPA_CONFIG.as_bytes() && current != AO_CPA_CONFIG_V1.as_bytes())
         {
             return Err("AO CPA provider config changed; inspect before reconnecting".into());
         }
-        return Ok(());
+        if current == AO_CPA_CONFIG.as_bytes() {
+            return Ok(());
+        }
+        // The known previous version is replaced below; the old file is retained in Trash.
     }
     write_private_file(
         &config,
@@ -2302,7 +2352,7 @@ fn prepare_ao_web_home(
         return Err("AO WebGPT catalog is too large".into());
     }
     let catalog_path = home.join("models.json");
-    let config_bytes = format!(
+    let legacy_config_bytes = format!(
         "model = {}\nmodel_provider = \"coding_tools_ao_web\"\nmodel_catalog_json = {}\n\
 [model_providers.coding_tools_ao_web]\nname = \"Coding Tools AO WebGPT\"\nbase_url = {}\n\
 env_key = \"CODING_TOOLS_AO_WEB_KEY\"\nrequires_openai_auth = false\nwire_api = \"responses\"\n\
@@ -2311,20 +2361,31 @@ supports_websockets = false\n",
         serde_json::to_string(&catalog_path.to_string_lossy().as_ref()).map_err(text_error)?,
         serde_json::to_string(base_url).map_err(text_error)?,
     );
+    let config_bytes = format!("{legacy_config_bytes}{}", ao_card_features!());
     let config_path = home.join("config.toml");
-    for (path, expected) in [
-        (&catalog_path, catalog_bytes.as_slice()),
-        (&config_path, config_bytes.as_bytes()),
+    let mut upgrade_config = false;
+    for (path, expected, legacy) in [
+        (&catalog_path, catalog_bytes.as_slice(), None),
+        (
+            &config_path,
+            config_bytes.as_bytes(),
+            Some(legacy_config_bytes.as_bytes()),
+        ),
     ] {
-        if path.exists()
-            && (fs::symlink_metadata(path)
-                .map_err(text_error)?
-                .file_type()
-                .is_symlink()
-                || fs::read(path).map_err(text_error)? != expected)
+        if !path.exists() {
+            continue;
+        }
+        let current = fs::read(path).map_err(text_error)?;
+        let is_legacy = legacy.is_some_and(|legacy| current == legacy);
+        if fs::symlink_metadata(path)
+            .map_err(text_error)?
+            .file_type()
+            .is_symlink()
+            || (current != expected && !is_legacy)
         {
             return Err("AO WebGPT provider config changed; inspect before reconnecting".into());
         }
+        upgrade_config |= is_legacy;
     }
     if !catalog_path.exists() {
         write_private_file(
@@ -2334,7 +2395,7 @@ supports_websockets = false\n",
             "ao-web-catalog",
         )?;
     }
-    if !config_path.exists() {
+    if !config_path.exists() || upgrade_config {
         write_private_file(
             &config_path,
             config_bytes.as_bytes(),
@@ -3120,17 +3181,17 @@ fn ao_external_node(
     run_id: &str,
     node_id: &str,
 ) -> Result<integrations::ao::Node, Response> {
+    // Any role (orchestrator, worker or reviewer) may run on an AO harness.
     match ao_target(state, workspace_id, run_id, node_id) {
         Ok((_root, node, _cancelled))
-            if node.role == integrations::ao::Role::Worker
-                && integrations::ao::external_harness(&node.route).is_some() =>
+            if integrations::ao::external_harness(&node.route).is_some() =>
         {
             Ok(node)
         }
         _ => Err(json_error(
             StatusCode::BAD_REQUEST,
             "AO_EXTERNAL_SCOPE_FAILED",
-            "AO harness worker unavailable",
+            "AO harness card unavailable",
         )),
     }
 }
@@ -3267,7 +3328,11 @@ async fn ao_external_terminal(
     if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
         return response;
     }
-    let node_id = body.node_id.clone();
+    let (workspace_id, run_id, node_id) = (
+        body.workspace_id.clone(),
+        body.run_id.clone(),
+        body.node_id.clone(),
+    );
     let saved = tokio::task::spawn_blocking(move || {
         coding_tools_core::data::DataStore::update_file(|data| {
             integrations::ao::record_terminal(
@@ -3286,8 +3351,18 @@ async fn ao_external_terminal(
     })
     .await;
     match saved {
-        Ok(Ok(run)) => {
-            let receipt = run.nodes.iter().find(|node| node.id == node_id).and_then(|node| node.receipt.clone());
+        Ok(Ok(mut run)) => {
+            let receipt = run
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .and_then(|node| node.receipt.clone());
+            // A reviewer on an AO harness sends work back exactly like a Native Codex reviewer.
+            if let Some(reworked) = receipt.as_ref().and_then(|receipt| {
+                queue_rework_after_review(&workspace_id, &run_id, &node_id, receipt)
+            }) {
+                run = reworked;
+            }
             Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
         }
         _ => json_error(
@@ -3296,6 +3371,30 @@ async fn ao_external_terminal(
             "AO receipt changed; refresh before retrying",
         ),
     }
+}
+
+/// After a reviewer asks for changes, queue the rework round (or hold when rounds are used up).
+fn queue_rework_after_review(
+    workspace_id: &str,
+    run_id: &str,
+    node_id: &str,
+    receipt: &integrations::ao::Receipt,
+) -> Option<integrations::ao::Run> {
+    if receipt.verdict.as_deref() != Some("CHANGES_REQUIRED") {
+        return None;
+    }
+    coding_tools_core::data::DataStore::update_file(|data| {
+        integrations::ao_team::queue_rework(
+            data,
+            workspace_id,
+            run_id,
+            node_id,
+            &receipt.request_key,
+            now_ms(),
+        )
+    })
+    .ok()
+    .flatten()
 }
 
 async fn ao_harness_approval(
@@ -3310,7 +3409,49 @@ async fn ao_harness_approval(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    if !body.confirm || !local_ui_authorized(&headers, &state) {
+    if let Some(reason) = body.approver_reason.as_deref() {
+        // The command approver answers within the mission's own grant; the decision is logged
+        // on the card, and allowing needs the approver's auto-decide setting.
+        let (workspace_id, run_id, node_id) = (
+            body.workspace_id.clone(),
+            body.run_id.clone(),
+            body.node_id.clone(),
+        );
+        let (allow, reason, request) = (
+            body.allow,
+            reason.to_owned(),
+            body.approver_request.clone().unwrap_or_default(),
+        );
+        let recorded = tokio::task::spawn_blocking(move || {
+            coding_tools_core::data::DataStore::update_file(|data| {
+                integrations::ao::record_approver_decision(
+                    data,
+                    &workspace_id,
+                    &run_id,
+                    &node_id,
+                    allow,
+                    &reason,
+                    &request,
+                    now_ms(),
+                )
+            })
+            .map_err(text_error)
+        })
+        .await;
+        match recorded {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                return json_error(StatusCode::FORBIDDEN, "AO_APPROVER_NOT_ALLOWED", message)
+            }
+            Err(_) => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "AO_APPROVER_UNKNOWN",
+                    "The approver decision could not be saved",
+                )
+            }
+        }
+    } else if !body.confirm || !local_ui_authorized(&headers, &state) {
         return json_error(
             StatusCode::FORBIDDEN,
             "AO_LOCAL_CONFIRMATION_REQUIRED",
