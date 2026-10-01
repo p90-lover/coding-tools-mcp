@@ -414,22 +414,36 @@ async fn mcp_post(State(state): State<ListenerState>, request: Request) -> Respo
 /// MCP Events never dispatch a tool: they only manage webhook subscriptions owned by
 /// this authenticated listener. Subscribe verifies the callback over the network, so it
 /// runs on the async runtime with its own small budget instead of a tool worker slot.
-async fn events_post(state: &ListenerState, method: &str, request_id: Value, body: &Value) -> Response {
+async fn events_post(
+    state: &ListenerState,
+    method: &str,
+    request_id: Value,
+    body: &Value,
+) -> Response {
     static EVENTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
     let Ok(_permit) = EVENTS
         .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
         .clone()
         .try_acquire_owned()
     else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"jsonrpc":"2.0","id":request_id,
-            "error":{"code":-32009,"message":"Event subscription capacity reached; retry later"}}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"jsonrpc":"2.0","id":request_id,
+            "error":{"code":-32009,"message":"Event subscription capacity reached; retry later"}})),
+        )
+            .into_response();
     };
     let hub = match crate::mcp::events::global() {
         Ok(hub) => hub,
         Err(error) => {
-            append_profile_log(&state.workspace_id, "stderr.log", &format!("[events] store unavailable: {error}"));
+            append_profile_log(
+                &state.workspace_id,
+                "stderr.log",
+                &format!("[events] store unavailable: {error}"),
+            );
             return Json(json!({"jsonrpc":"2.0","id":request_id,
-                "error":{"code":-32603,"message":"MCP event subscriptions are unavailable"}})).into_response();
+                "error":{"code":-32603,"message":"MCP event subscriptions are unavailable"}}))
+            .into_response();
         }
     };
     let response = match tokio::time::timeout(
@@ -439,8 +453,10 @@ async fn events_post(state: &ListenerState, method: &str, request_id: Value, bod
     .await
     {
         Ok(response) => response,
-        Err(_) => json!({"jsonrpc":"2.0","id":request_id,"error":{"code":crate::mcp::events::CALLBACK_ENDPOINT_ERROR,
-            "message":"Callback verification timed out","data":{"reason":"timeout"}}}),
+        Err(_) => {
+            json!({"jsonrpc":"2.0","id":request_id,"error":{"code":crate::mcp::events::CALLBACK_ENDPOINT_ERROR,
+            "message":"Callback verification timed out","data":{"reason":"timeout"}}})
+        }
     };
     append_profile_log(
         &state.workspace_id,
@@ -449,7 +465,10 @@ async fn events_post(state: &ListenerState, method: &str, request_id: Value, bod
             "[events] method={} ok={} error_code={}",
             json!(method),
             response.get("error").is_none(),
-            response.pointer("/error/code").cloned().unwrap_or(Value::Null)
+            response
+                .pointer("/error/code")
+                .cloned()
+                .unwrap_or(Value::Null)
         ),
     );
     Json(response).into_response()
@@ -742,7 +761,8 @@ mod events_http_test {
             oauth_client_secret: None,
         };
         let (stop, shutdown) = oneshot::channel();
-        let worker = tokio::spawn(async move { serve(listener, port, state, shutdown).await.unwrap() });
+        let worker =
+            tokio::spawn(async move { serve(listener, port, state, shutdown).await.unwrap() });
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -769,15 +789,36 @@ mod events_http_test {
             request.send()
         };
         let token = Some("events-fixture-token-not-a-real-secret");
-        let discovered: Value = send(modern(1, "server/discover"), token).await.unwrap().json().await.unwrap();
-        assert_eq!(discovered["result"]["capabilities"]["events"], json!({}), "{discovered}");
-        let listed: Value = send(modern(2, "events/list"), token).await.unwrap().json().await.unwrap();
-        assert_eq!(listed["result"]["events"].as_array().unwrap().len(), 4, "{listed}");
+        let discovered: Value = send(modern(1, "server/discover"), token)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            discovered["result"]["capabilities"]["events"],
+            json!({}),
+            "{discovered}"
+        );
+        let listed: Value = send(modern(2, "events/list"), token)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["result"]["events"].as_array().unwrap().len(),
+            4,
+            "{listed}"
+        );
         assert_eq!(listed["result"]["resultType"], "complete");
         let unauthenticated = send(modern(3, "events/list"), None).await.unwrap();
         assert_eq!(unauthenticated.status().as_u16(), 401);
         stop.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), worker).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
 

@@ -102,6 +102,8 @@ async fn restore_leases() {
     persist().await;
 }
 
+// Only the restore test still exercises the retired Paseo lease path.
+#[cfg(test)]
 fn retire_paseo_lease(lease: &mut lease::IntegrationLease) {
     retire_lease(lease, "Paseo");
 }

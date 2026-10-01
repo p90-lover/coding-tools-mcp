@@ -132,13 +132,23 @@ pub const EXTERNAL_PERMISSION: &str = ":ao-default";
 pub fn external_harness(route: &Route) -> Option<&str> {
     route.harness_id.strip_prefix("ao:").filter(|agent| {
         (1..=40).contains(&agent.len())
-            && agent.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && agent
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     })
 }
 
 /// The automatic tiers the WebGPT bridge serves (runtime-web chatgpt-web-models.ts); the
 /// bridge itself falls back to a lower tier when the account lacks the chosen one.
-pub(crate) const WEB_TIERS: &[&str] = &["light", "medium", "high", "extra-high", "pro", "luna", "think"];
+pub(crate) const WEB_TIERS: &[&str] = &[
+    "light",
+    "medium",
+    "high",
+    "extra-high",
+    "pro",
+    "luna",
+    "think",
+];
 
 /// WebGPT-on-Codex at any tier the bridge serves.
 fn web_route_valid(route: &Route) -> bool {
@@ -223,8 +233,10 @@ pub struct NodePosition {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GraphChange {
+    // Boxed: a full Node is far larger than the other variants (clippy::large_enum_variant).
+    // serde deserializes Box<Node> exactly like Node, so the API shape is unchanged.
     AddWorker {
-        node: Node,
+        node: Box<Node>,
     },
     MoveNode {
         node_id: String,
@@ -274,8 +286,16 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
             return Err(fail("Invalid AO node or route"));
         }
         node.settings.validate()?;
-        if node.history.len() > 2 { return Err(fail("AO attempt history exceeds two rework rounds")); }
-        if node.template_role_id.as_deref().is_some_and(|id| !text(id, 80)) { return Err(fail("Invalid reusable role identity")); }
+        if node.history.len() > 2 {
+            return Err(fail("AO attempt history exceeds two rework rounds"));
+        }
+        if node
+            .template_role_id
+            .as_deref()
+            .is_some_and(|id| !text(id, 80))
+        {
+            return Err(fail("Invalid reusable role identity"));
+        }
         if node.clause_id.as_deref().is_some_and(|id| !text(id, 128)) {
             return Err(fail("Invalid AO clause identity"));
         }
@@ -299,19 +319,19 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
             }
         }
         if let Some(data) = data {
-        let task = data
-            .control_board
-            .tasks
-            .iter()
-            .find(|task| task.id == node.task_id && task.workspace_id == run.workspace_id)
-            .ok_or_else(|| fail("AO task is outside this workspace"))?;
-        if node
-            .clause_id
-            .as_ref()
-            .is_some_and(|id| !task.clauses.iter().any(|clause| &clause.id == id))
-        {
-            return Err(fail("AO clause is outside the selected task"));
-        }
+            let task = data
+                .control_board
+                .tasks
+                .iter()
+                .find(|task| task.id == node.task_id && task.workspace_id == run.workspace_id)
+                .ok_or_else(|| fail("AO task is outside this workspace"))?;
+            if node
+                .clause_id
+                .as_ref()
+                .is_some_and(|id| !task.clauses.iter().any(|clause| &clause.id == id))
+            {
+                return Err(fail("AO clause is outside the selected task"));
+            }
         }
         match node.role {
             Role::Planner => {
@@ -473,7 +493,8 @@ pub fn grant_run(
         .position(|run| run.id == run_id && run.workspace_id == workspace_id)
         .ok_or_else(|| fail("AO run not found"))?;
     let run = &data.ao_runs[index];
-    if run.cancelled || run.paused
+    if run.cancelled
+        || run.paused
         || run.revision != expected_revision
         || run
             .nodes
@@ -492,12 +513,16 @@ pub fn grant_run(
     }
     let fingerprint = graph_sha256(data, run)?;
     let remaining_reworks = 2usize.saturating_sub(usize::from(run.review_rounds));
-    let max_turns: usize = run.nodes.iter().map(|node| match (&node.role, &node.state) {
-        (Role::Planner, State::Pending) => 1,
-        (Role::Planner, _) | (Role::Reviewer, State::Finished) => 0,
-        (_, State::Pending) => 1 + remaining_reworks,
-        _ => remaining_reworks,
-    }).sum();
+    let max_turns: usize = run
+        .nodes
+        .iter()
+        .map(|node| match (&node.role, &node.state) {
+            (Role::Planner, State::Pending) => 1,
+            (Role::Planner, _) | (Role::Reviewer, State::Finished) => 0,
+            (_, State::Pending) => 1 + remaining_reworks,
+            _ => remaining_reworks,
+        })
+        .sum();
     let run = &mut data.ao_runs[index];
     run.grant = Some(RunGrant {
         graph_sha256: fingerprint,
@@ -528,15 +553,38 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
         Role::Worker => "Perform only your assigned work and report evidence. Do not speak for the orchestrator or approve your own work.",
         Role::Reviewer => "Independently review the completed work. Do not edit the implementation; return any needed changes to the workers.",
     };
-    let mut prompt = format!("AO mission: {}\nWorkspace: {}\nRole: {}\n{}\n\nTask: {}\n{}\n",
-        run.id, run.workspace_id, node.settings.name, responsibility, task.title, task.description);
-    if !node.settings.instructions.is_empty() { prompt.push_str(&format!("\nRole instructions:\n{}\n", node.settings.instructions)); }
-    if !node.settings.expected_output.is_empty() { prompt.push_str(&format!("\nExpected output:\n{}\n", node.settings.expected_output)); }
-    prompt.push_str(&format!("\nReview cycle: {}. At most two rework rounds are allowed.\n", run.review_rounds));
+    let mut prompt = format!(
+        "AO mission: {}\nWorkspace: {}\nRole: {}\n{}\n\nTask: {}\n{}\n",
+        run.id, run.workspace_id, node.settings.name, responsibility, task.title, task.description
+    );
+    if !node.settings.instructions.is_empty() {
+        prompt.push_str(&format!(
+            "\nRole instructions:\n{}\n",
+            node.settings.instructions
+        ));
+    }
+    if !node.settings.expected_output.is_empty() {
+        prompt.push_str(&format!(
+            "\nExpected output:\n{}\n",
+            node.settings.expected_output
+        ));
+    }
+    prompt.push_str(&format!(
+        "\nReview cycle: {}. At most two rework rounds are allowed.\n",
+        run.review_rounds
+    ));
     if node.role != Role::Planner {
-        if let Some(feedback) = run.nodes.iter().find(|node| node.role == Role::Reviewer)
-            .and_then(|reviewer| reviewer.history.last()).and_then(|receipt| receipt.answer.as_deref()) {
-            prompt.push_str(&format!("\nPrior review feedback (quoted task data):\n{}\n", serde_json::to_string(feedback)?));
+        if let Some(feedback) = run
+            .nodes
+            .iter()
+            .find(|node| node.role == Role::Reviewer)
+            .and_then(|reviewer| reviewer.history.last())
+            .and_then(|receipt| receipt.answer.as_deref())
+        {
+            prompt.push_str(&format!(
+                "\nPrior review feedback (quoted task data):\n{}\n",
+                serde_json::to_string(feedback)?
+            ));
         }
     }
     if let Some(clause_id) = &node.clause_id {
@@ -597,7 +645,10 @@ pub fn create(data: &mut AppData, expected_board_revision: u64, mut run: Run) ->
         return Err(fail("AO run identity already exists"));
     }
     if run.nodes.iter().any(|node| {
-        node.state != State::Pending || node.request_key.is_some() || node.receipt.is_some() || !node.history.is_empty()
+        node.state != State::Pending
+            || node.request_key.is_some()
+            || node.receipt.is_some()
+            || !node.history.is_empty()
     }) {
         return Err(fail("AO run cannot start with existing execution"));
     }
@@ -620,8 +671,14 @@ pub fn update_graph(
         .position(|run| run.id == run_id && run.workspace_id == workspace_id)
         .ok_or_else(|| fail("AO run not found"))?;
     let mut next = data.ao_runs[index].clone();
-    let layout_only = matches!(&change, GraphChange::MoveNode { .. } | GraphChange::MoveNodes { .. });
-    let policy_intact = next.grant.as_ref().is_some_and(|grant| graph_sha256(data, &next).ok().as_ref() == Some(&grant.graph_sha256));
+    let layout_only = matches!(
+        &change,
+        GraphChange::MoveNode { .. } | GraphChange::MoveNodes { .. }
+    );
+    let policy_intact = next
+        .grant
+        .as_ref()
+        .is_some_and(|grant| graph_sha256(data, &next).ok().as_ref() == Some(&grant.graph_sha256));
     let mut same_scope = true;
     let mut extra_turns = 0;
     if next.revision != expected_revision || (next.cancelled && !layout_only) {
@@ -639,7 +696,10 @@ pub fn update_graph(
             {
                 return Err(fail("AO worker card is invalid or already exists"));
             }
-            same_scope = next.nodes.iter().any(|existing| existing.role == Role::Worker && existing.route == node.route);
+            same_scope = next
+                .nodes
+                .iter()
+                .any(|existing| existing.role == Role::Worker && existing.route == node.route);
             extra_turns = 1 + 2u8.saturating_sub(next.review_rounds);
             super::ao_team::attach_worker_role(&mut next, &mut node);
             let reviewer = next
@@ -651,7 +711,7 @@ pub fn update_graph(
                 return Err(fail("AO review has already started"));
             }
             reviewer.parents.push(node.id.clone());
-            next.nodes.push(node);
+            next.nodes.push(*node);
         }
         GraphChange::MoveNode { node_id, x, y } => {
             let node = next
@@ -672,7 +732,10 @@ pub fn update_graph(
                 if !ids.insert(position.node_id.clone()) {
                     return Err(fail("Duplicate AO card in layout change"));
                 }
-                let node = next.nodes.iter_mut().find(|node| node.id == position.node_id)
+                let node = next
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id == position.node_id)
                     .ok_or_else(|| fail("AO node not found"))?;
                 node.x = position.x;
                 node.y = position.y;
@@ -699,7 +762,9 @@ pub fn update_graph(
             let grant = next.grant.as_mut().unwrap();
             grant.graph_sha256 = fingerprint;
             grant.max_turns = grant.max_turns.saturating_add(extra_turns);
-        } else { next.grant = None; }
+        } else {
+            next.grant = None;
+        }
     }
     next.revision += 1;
     data.ao_runs[index] = next.clone();
@@ -734,7 +799,8 @@ pub fn reserve(
     }
     let worker_capacity = super::ao_team::available_workers(data, &data.ao_runs[index]);
     let run = &mut data.ao_runs[index];
-    if run.cancelled || run.paused
+    if run.cancelled
+        || run.paused
         || run.revision != expected_revision
         || !parents_finished(run, node_id)
             && run
@@ -745,11 +811,13 @@ pub fn reserve(
     {
         return Err(fail("AO node is not ready or run revision changed"));
     }
-    if run
-        .nodes
-        .iter()
-        .any(|node| node.request_key.as_deref() == Some(&request_key) || node.history.iter().any(|receipt| receipt.request_key == request_key))
-    {
+    if run.nodes.iter().any(|node| {
+        node.request_key.as_deref() == Some(&request_key)
+            || node
+                .history
+                .iter()
+                .any(|receipt| receipt.request_key == request_key)
+    }) {
         return Err(fail("AO request key already belongs to a node"));
     }
     let node = run
@@ -819,6 +887,9 @@ pub fn record_submission(
     Ok(run.clone())
 }
 
+// One terminal receipt names its run, node and turn plus the outcome fields; keeping them as
+// explicit parameters matches the other AO receipt recorders.
+#[allow(clippy::too_many_arguments)]
 pub fn record_terminal(
     data: &mut AppData,
     workspace_id: &str,
@@ -851,7 +922,6 @@ pub fn record_terminal(
         answer
             .and_then(|answer| {
                 answer
-                    .trim_start()
                     .split_whitespace()
                     .next()
                     .map(|word| word.trim_matches(['*', '`', ':']))
@@ -864,7 +934,9 @@ pub fn record_terminal(
     } else {
         None
     };
-    receipt.turn_id = turn_id.filter(|id| text(id, 128) && !id.contains('/')).map(str::to_owned);
+    receipt.turn_id = turn_id
+        .filter(|id| text(id, 128) && !id.contains('/'))
+        .map(str::to_owned);
     if completed
         && !failure.is_some_and(|message| message.starts_with("Native approval declined"))
         && turn_id.is_some_and(|id| text(id, 128) && !id.contains('/'))
@@ -877,17 +949,23 @@ pub fn record_terminal(
         receipt.status = "completed".into();
         node.state = State::Finished;
     } else {
-        if answer.is_some_and(|value| !value.trim().is_empty() && value.len() <= 12_000)
-        {
+        if answer.is_some_and(|value| !value.trim().is_empty() && value.len() <= 12_000) {
             receipt.answer = answer.map(str::to_owned);
             receipt.verdict = verdict.map(str::to_owned);
         }
         receipt.status = "held".into();
-        let mut error = failure.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| {
-            if verdict == Some("CHANGES_REQUIRED") { "Reviewer requested changes" }
-            else if completed { "Native turn returned no verifiable final answer" }
-            else { "Native turn failed before a final answer" }
-        }).to_owned();
+        let mut error = failure
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                if verdict == Some("CHANGES_REQUIRED") {
+                    "Reviewer requested changes"
+                } else if completed {
+                    "Native turn returned no verifiable final answer"
+                } else {
+                    "Native turn failed before a final answer"
+                }
+            })
+            .to_owned();
         crate::tools::history::redact_text(&mut error);
         receipt.error = Some(error.chars().take(2048).collect());
         node.state = State::Held;
@@ -947,10 +1025,22 @@ mod tests {
     fn ao_harness_workers_need_the_exact_external_route() {
         let route = |harness: &str, provider: &str, permission: &str| -> Route {
             serde_json::from_value(json!({"harness_id":harness,"provider_id":provider,
-                "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":permission})).unwrap()
+                "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":permission}))
+            .unwrap()
         };
-        assert_eq!(external_harness(&route("ao:claude-code", EXTERNAL_PROVIDER, EXTERNAL_PERMISSION)), Some("claude-code"));
-        assert!(external_route_valid(&route("ao:opencode", EXTERNAL_PROVIDER, EXTERNAL_PERMISSION)));
+        assert_eq!(
+            external_harness(&route(
+                "ao:claude-code",
+                EXTERNAL_PROVIDER,
+                EXTERNAL_PERMISSION
+            )),
+            Some("claude-code")
+        );
+        assert!(external_route_valid(&route(
+            "ao:opencode",
+            EXTERNAL_PROVIDER,
+            EXTERNAL_PERMISSION
+        )));
         for bad in [
             route("ao:", EXTERNAL_PROVIDER, EXTERNAL_PERMISSION),
             route("ao:Claude", EXTERNAL_PROVIDER, EXTERNAL_PERMISSION),
@@ -1068,14 +1158,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(started.grant.as_ref().unwrap().turns_started, 1);
-        let moved_active = update_graph(&mut granted, "qa", "run", started.revision,
-            GraphChange::MoveNode { node_id: "planner".into(), x: 320, y: 80 }).unwrap();
+        let moved_active = update_graph(
+            &mut granted,
+            "qa",
+            "run",
+            started.revision,
+            GraphChange::MoveNode {
+                node_id: "planner".into(),
+                x: 320,
+                y: 80,
+            },
+        )
+        .unwrap();
         assert_eq!(moved_active.nodes[0].state, State::Reserved);
         assert!(grant_valid(&granted, &moved_active, 1_002, &sha).is_ok());
         let group_move = serde_json::from_value(json!({"operation":"move_nodes","positions":[
             {"node_id":"planner","x":400,"y":100}, {"node_id":"worker","x":400,"y":300}
-        ]})).unwrap();
-        let grouped = update_graph(&mut granted, "qa", "run", moved_active.revision, group_move).unwrap();
+        ]}))
+        .unwrap();
+        let grouped =
+            update_graph(&mut granted, "qa", "run", moved_active.revision, group_move).unwrap();
         assert_eq!((grouped.nodes[0].x, grouped.nodes[1].x), (400, 400));
         assert_eq!(grouped.revision, moved_active.revision + 1);
         assert!(grant_valid(&granted, &grouped, 1_002, &sha).is_ok());
@@ -1085,7 +1187,9 @@ mod tests {
             json!([{"node_id":"worker","x":0,"y":0},{"node_id":"worker","x":1,"y":0}]),
             json!([{"node_id":"planner","x":10001,"y":0}]),
         ] {
-            let change = serde_json::from_value(json!({"operation":"move_nodes","positions":positions})).unwrap();
+            let change =
+                serde_json::from_value(json!({"operation":"move_nodes","positions":positions}))
+                    .unwrap();
             assert!(update_graph(&mut granted, "qa", "run", grouped.revision, change).is_err());
             assert_eq!(granted.ao_runs[0].revision, grouped.revision);
             assert_eq!(granted.ao_runs[0].nodes[0].x, 400);
@@ -1118,14 +1222,54 @@ mod tests {
         assert!(reserve(&mut data, "qa", "run", "worker", 2, "three".into(), None).is_err());
         record_submission(&mut data, "qa", "run", "planner", "one", Some("thread-one")).unwrap();
         let mut failed = data.clone();
-        let failed_run = record_terminal(&mut failed, "qa", "run", "planner", "thread-one", Some("failed-turn"), None, false, Some("407: Bearer private-test-token")).unwrap();
-        assert_eq!(failed_run.nodes[0].receipt.as_ref().unwrap().turn_id.as_deref(), Some("failed-turn"));
-        assert_eq!(failed_run.nodes[0].receipt.as_ref().unwrap().error.as_deref(), Some("407: Bearer [REDACTED]"));
+        let failed_run = record_terminal(
+            &mut failed,
+            "qa",
+            "run",
+            "planner",
+            "thread-one",
+            Some("failed-turn"),
+            None,
+            false,
+            Some("407: Bearer private-test-token"),
+        )
+        .unwrap();
+        assert_eq!(
+            failed_run.nodes[0]
+                .receipt
+                .as_ref()
+                .unwrap()
+                .turn_id
+                .as_deref(),
+            Some("failed-turn")
+        );
+        assert_eq!(
+            failed_run.nodes[0]
+                .receipt
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("407: Bearer [REDACTED]")
+        );
         let mut denied = data.clone();
-        let denied = record_terminal(&mut denied, "qa", "run", "planner", "thread-one", Some("denied-turn"),
-            Some("The requested tool could not run."), true, Some("Native approval declined (unsupported request)")).unwrap();
+        let denied = record_terminal(
+            &mut denied,
+            "qa",
+            "run",
+            "planner",
+            "thread-one",
+            Some("denied-turn"),
+            Some("The requested tool could not run."),
+            true,
+            Some("Native approval declined (unsupported request)"),
+        )
+        .unwrap();
         assert_eq!(denied.nodes[0].state, State::Held);
-        assert_eq!(denied.nodes[0].receipt.as_ref().unwrap().answer.as_deref(), Some("The requested tool could not run."));
+        assert_eq!(
+            denied.nodes[0].receipt.as_ref().unwrap().answer.as_deref(),
+            Some("The requested tool could not run.")
+        );
         let run = record_terminal(
             &mut data,
             "qa",
@@ -1241,34 +1385,122 @@ mod tests {
         );
         let mut rework = successful.clone();
         let fingerprint = graph_sha256(&rework, &rework.ao_runs[0]).unwrap();
-        rework.ao_runs[0].grant = Some(RunGrant { graph_sha256: fingerprint, executable_sha256: sha.clone(),
-            granted_at_ms: 1000, expires_at_ms: 3_601_000, max_turns: 7, turns_started: 3 });
+        rework.ao_runs[0].grant = Some(RunGrant {
+            graph_sha256: fingerprint,
+            executable_sha256: sha.clone(),
+            granted_at_ms: 1000,
+            expires_at_ms: 3_601_000,
+            max_turns: 7,
+            turns_started: 3,
+        });
         let mut unknown = rework.clone();
-        unknown.ao_runs[0].nodes[2].receipt.as_mut().unwrap().turn_id = None;
-        assert!(crate::integrations::ao_team::queue_rework(&mut unknown, "qa", "run", "reviewer", "four", 1001).unwrap().is_none());
+        unknown.ao_runs[0].nodes[2]
+            .receipt
+            .as_mut()
+            .unwrap()
+            .turn_id = None;
+        assert!(crate::integrations::ao_team::queue_rework(
+            &mut unknown,
+            "qa",
+            "run",
+            "reviewer",
+            "four",
+            1001
+        )
+        .unwrap()
+        .is_none());
         for round in 1..=2 {
-            let key = rework.ao_runs[0].nodes[2].receipt.as_ref().unwrap().request_key.clone();
-            let queued = crate::integrations::ao_team::queue_rework(&mut rework, "qa", "run", "reviewer", &key, 1001).unwrap().unwrap();
+            let key = rework.ao_runs[0].nodes[2]
+                .receipt
+                .as_ref()
+                .unwrap()
+                .request_key
+                .clone();
+            let queued = crate::integrations::ao_team::queue_rework(
+                &mut rework,
+                "qa",
+                "run",
+                "reviewer",
+                &key,
+                1001,
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(queued.review_rounds, round);
             assert_eq!(queued.nodes[1].state, State::Pending);
             assert_eq!(queued.nodes[1].history.len(), usize::from(round));
-            assert!(prompt_for_node(&rework, &queued, "worker").unwrap().contains("review feedback"));
-            assert!(reserve(&mut rework, "qa", "run", "worker", queued.revision, "three".into(), Some(1001)).is_err());
+            assert!(prompt_for_node(&rework, &queued, "worker")
+                .unwrap()
+                .contains("review feedback"));
+            assert!(reserve(
+                &mut rework,
+                "qa",
+                "run",
+                "worker",
+                queued.revision,
+                "three".into(),
+                Some(1001)
+            )
+            .is_err());
             for role in ["worker", "reviewer"] {
                 let revision = rework.ao_runs[0].revision;
                 let key = format!("rework-{round}-{role}");
                 let thread = format!("thread-{key}");
-                reserve(&mut rework, "qa", "run", role, revision, key.clone(), Some(1001)).unwrap();
+                reserve(
+                    &mut rework,
+                    "qa",
+                    "run",
+                    role,
+                    revision,
+                    key.clone(),
+                    Some(1001),
+                )
+                .unwrap();
                 record_submission(&mut rework, "qa", "run", role, &key, Some(&thread)).unwrap();
-                record_terminal(&mut rework, "qa", "run", role, &thread, Some(&format!("turn-{key}")),
-                    Some(if role == "worker" { "Revised work" } else { "**CHANGES_REQUIRED**: verify once more" }), true, None).unwrap();
+                record_terminal(
+                    &mut rework,
+                    "qa",
+                    "run",
+                    role,
+                    &thread,
+                    Some(&format!("turn-{key}")),
+                    Some(if role == "worker" {
+                        "Revised work"
+                    } else {
+                        "**CHANGES_REQUIRED**: verify once more"
+                    }),
+                    true,
+                    None,
+                )
+                .unwrap();
             }
         }
-        let key = rework.ao_runs[0].nodes[2].receipt.as_ref().unwrap().request_key.clone();
-        let held = crate::integrations::ao_team::queue_rework(&mut rework, "qa", "run", "reviewer", &key, 1001).unwrap().unwrap();
+        let key = rework.ao_runs[0].nodes[2]
+            .receipt
+            .as_ref()
+            .unwrap()
+            .request_key
+            .clone();
+        let held = crate::integrations::ao_team::queue_rework(
+            &mut rework,
+            "qa",
+            "run",
+            "reviewer",
+            &key,
+            1001,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(held.review_rounds, 2);
         assert_eq!(held.nodes[2].state, State::Held);
-        assert!(held.nodes[2].receipt.as_ref().unwrap().error.as_ref().unwrap().contains("two rework rounds"));
+        assert!(held.nodes[2]
+            .receipt
+            .as_ref()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("two rework rounds"));
         assert_eq!(held.grant.as_ref().unwrap().turns_started, 7);
         let run = record_terminal(
             &mut approved,

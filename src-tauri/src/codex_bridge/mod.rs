@@ -77,8 +77,18 @@ struct NativeApproval {
 impl NativeApproval {
     fn target_is_current(&self, root: &Path, commands_allowed: bool) -> bool {
         self.expires_at > Instant::now()
-            && std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| !metadata.file_type().is_symlink()
-                && if self.command.is_some() { metadata.is_dir() && commands_allowed && root.canonicalize().is_ok_and(|root| self.path.starts_with(root)) } else { metadata.is_file() })
+            && std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+                !metadata.file_type().is_symlink()
+                    && if self.command.is_some() {
+                        metadata.is_dir()
+                            && commands_allowed
+                            && root
+                                .canonicalize()
+                                .is_ok_and(|root| self.path.starts_with(root))
+                    } else {
+                        metadata.is_file()
+                    }
+            })
             && self.path.canonicalize().ok().as_ref() == Some(&self.canonical)
     }
     fn reply(&self, approved: bool) -> Value {
@@ -94,26 +104,55 @@ impl NativeApproval {
     }
 }
 
-fn command_approval_details(root: &Path, params: &Value) -> Option<(PathBuf, String, Option<Value>)> {
+fn command_approval_details(
+    root: &Path,
+    params: &Value,
+) -> Option<(PathBuf, String, Option<Value>)> {
     let root = root.canonicalize().ok()?;
     if params.get("kind").is_some_and(|kind| kind != "command")
         || (!params["environmentId"].is_null() && params["environmentId"] != "local")
         || !params["itemId"].as_str().is_some_and(token)
-        || params.get("availableDecisions").filter(|value| !value.is_null())
-            .is_some_and(|value| !value.as_array().is_some_and(|items| items.iter().any(|item| item == "accept")))
-    { return None; }
+        || params
+            .get("availableDecisions")
+            .filter(|value| !value.is_null())
+            .is_some_and(|value| {
+                !value
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item == "accept"))
+            })
+    {
+        return None;
+    }
     let command = params["command"].as_str()?;
-    if command.trim().is_empty() || command.len() > 4096
-        || command.chars().any(|c| (c.is_control() && !matches!(c, '\n' | '\r' | '\t')) || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
-    { return None; }
+    if command.trim().is_empty()
+        || command.len() > 4096
+        || command.chars().any(|c| {
+            (c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+                || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+    {
+        return None;
+    }
     let cwd = Path::new(params["cwd"].as_str()?).canonicalize().ok()?;
-    if !cwd.starts_with(&root) || !cwd.is_dir() { return None; }
+    if !cwd.starts_with(&root) || !cwd.is_dir() {
+        return None;
+    }
     let extra = &params["additionalPermissions"];
     let network = &params["networkApprovalContext"];
-    if (!extra.is_null() && !extra.is_object()) || (!network.is_null() && !network.is_object()) { return None; }
-    let permissions = if extra.is_null() && network.is_null() { None }
-        else { Some(json!({"additionalPermissions":extra,"networkApprovalContext":network})) };
-    if permissions.as_ref().is_some_and(|value| value.to_string().len() > 4096) { return None; }
+    if (!extra.is_null() && !extra.is_object()) || (!network.is_null() && !network.is_object()) {
+        return None;
+    }
+    let permissions = if extra.is_null() && network.is_null() {
+        None
+    } else {
+        Some(json!({"additionalPermissions":extra,"networkApprovalContext":network}))
+    };
+    if permissions
+        .as_ref()
+        .is_some_and(|value| value.to_string().len() > 4096)
+    {
+        return None;
+    }
     Some((cwd, command.into(), permissions))
 }
 struct LedgerEntry {
@@ -398,8 +437,10 @@ fn reserve(
 /// and delete inside the workspace; anything else goes to the user as an approval). Native
 /// command execution stays a separate, off switch.
 fn ao_permission_allowed(options: &Connection) -> bool {
-    matches!(options.permission_profile.as_str(), ":read-only" | ":workspace")
-        && !options.allow_command_execution
+    matches!(
+        options.permission_profile.as_str(),
+        ":read-only" | ":workspace"
+    ) && !options.allow_command_execution
 }
 
 fn developer_instructions(profile: &str) -> &'static str {
@@ -422,7 +463,11 @@ fn native_child_command(
         // AO cards each get a fresh CODEX_HOME; the elevated sandbox needs a one-time admin
         // setup per home, so AO children use Codex's unelevated Windows sandbox instead.
         let ao_child = private_cpa_key.is_some() || ao_web;
-        command.arg("-c").arg(if ao_child { "windows.sandbox=unelevated" } else { "windows.sandbox=elevated" });
+        command.arg("-c").arg(if ao_child {
+            "windows.sandbox=unelevated"
+        } else {
+            "windows.sandbox=elevated"
+        });
     }
     command
         .arg("app-server")
@@ -490,7 +535,10 @@ impl Hub {
         if !tier.is_some_and(|tier| crate::integrations::ao::WEB_TIERS.contains(&tier))
             || !ao_permission_allowed(&options)
         {
-            return Err("AO WebGPT child must use a served tier and a read-only or workspace profile".into());
+            return Err(
+                "AO WebGPT child must use a served tier and a read-only or workspace profile"
+                    .into(),
+            );
         }
         self.connect_inner(root, options, None, true)
     }
@@ -686,10 +734,16 @@ impl Hub {
         bridge.enqueue(request.reply(approved))?;
         if let Some(thread) = lock(&bridge.memory)?.threads.get_mut(&request.thread_id) {
             if thread.turn_id.as_deref() == Some(&request.turn_id) {
-                thread.notice = if approved { None } else { Some("Native approval declined (denied, expired, or no longer in scope). The mission requires local review before another attempt.".into()) };
+                thread.notice = if approved {
+                    None
+                } else {
+                    Some("Native approval declined (denied, expired, or no longer in scope). The mission requires local review before another attempt.".into())
+                };
             }
         }
-        Ok(json!({"ok":true,"approved":approved,"scope":if !approved {"none"} else if request.command.is_some() {"once"} else {"turn"}}))
+        Ok(
+            json!({"ok":true,"approved":approved,"scope":if !approved {"none"} else if request.command.is_some() {"once"} else {"turn"}}),
+        )
     }
     pub fn read(&self, id: &str) -> Result<Value> {
         let bridge = self.bridge()?;
@@ -698,9 +752,14 @@ impl Hub {
             .threads
             .get(id)
             .ok_or("Thread is not owned by this listener connection")?;
-        let mut value = serde_json::to_value(thread).map_err(|_| "Cannot serialize native thread state")?;
-        if bridge.ao_worker_command_approvals && lock(&bridge.approvals)?.values().any(|request|
-            request.thread_id == id && thread.turn_id.as_deref() == Some(&request.turn_id) && request.expires_at <= Instant::now())
+        let mut value =
+            serde_json::to_value(thread).map_err(|_| "Cannot serialize native thread state")?;
+        if bridge.ao_worker_command_approvals
+            && lock(&bridge.approvals)?.values().any(|request| {
+                request.thread_id == id
+                    && thread.turn_id.as_deref() == Some(&request.turn_id)
+                    && request.expires_at <= Instant::now()
+            })
         {
             value["notice"] = json!("Native approval declined (local command approval expired). The mission requires local review before another attempt.");
         }
@@ -910,16 +969,34 @@ impl Bridge {
         self.queue_local_approval(value, path, None, None)
     }
     fn queue_command_approval(&self, value: &Value) -> bool {
-        if !self.ao_worker_command_approvals || !self.live.load(Ordering::SeqCst) { return false; }
-        let Some((cwd, command, permissions)) = command_approval_details(&self.root, &value["params"]) else { return false; };
+        if !self.ao_worker_command_approvals || !self.live.load(Ordering::SeqCst) {
+            return false;
+        }
+        let Some((cwd, command, permissions)) =
+            command_approval_details(&self.root, &value["params"])
+        else {
+            return false;
+        };
         self.queue_local_approval(value, cwd, Some(command), permissions)
     }
-    fn queue_local_approval(&self, value: &Value, path: PathBuf, command: Option<String>, permissions: Option<Value>) -> bool {
+    fn queue_local_approval(
+        &self,
+        value: &Value,
+        path: PathBuf,
+        command: Option<String>,
+        permissions: Option<Value>,
+    ) -> bool {
         let rpc_id = &value["id"];
-        if !rpc_id.is_i64() && !rpc_id.as_str().is_some_and(token) { return false; }
+        if !rpc_id.is_i64() && !rpc_id.as_str().is_some_and(token) {
+            return false;
+        }
         let params = &value["params"];
-        let Some(thread_id) = params["threadId"].as_str().filter(|id| token(id)) else { return false; };
-        let Some(turn_id) = params["turnId"].as_str().filter(|id| token(id)) else { return false; };
+        let Some(thread_id) = params["threadId"].as_str().filter(|id| token(id)) else {
+            return false;
+        };
+        let Some(turn_id) = params["turnId"].as_str().filter(|id| token(id)) else {
+            return false;
+        };
         let active = self.memory.lock().ok().and_then(|memory| {
             memory.threads.get(thread_id).map(|thread| {
                 thread.turn_id.as_deref() == Some(turn_id) && thread.status == "inProgress"
@@ -944,7 +1021,9 @@ impl Bridge {
         let Ok(mut approvals) = self.approvals.lock() else {
             return false;
         };
-        if approvals.values().any(|request| request.rpc_id == *rpc_id) { return true; }
+        if approvals.values().any(|request| request.rpc_id == *rpc_id) {
+            return true;
+        }
         if approvals.len() >= 4 {
             return false;
         }
@@ -960,11 +1039,17 @@ impl Bridge {
         let retain_expired = self.ao_worker_command_approvals;
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(120));
-            let expired = approvals
-                .lock()
-                .ok()
-                .and_then(|mut pending| if retain_expired { pending.get(&approval_id).map(|request| request.reply(false)) }
-                    else { pending.remove(&approval_id).map(|request| request.reply(false)) });
+            let expired = approvals.lock().ok().and_then(|mut pending| {
+                if retain_expired {
+                    pending
+                        .get(&approval_id)
+                        .map(|request| request.reply(false))
+                } else {
+                    pending
+                        .remove(&approval_id)
+                        .map(|request| request.reply(false))
+                }
+            });
             if let Some(reply) = expired {
                 let _ = outgoing.send(reply);
             }
@@ -988,7 +1073,9 @@ impl Bridge {
             if method == "permissions/requestApproval" && self.queue_file_approval(&value) {
                 return;
             }
-            if method == "item/commandExecution/requestApproval" && self.queue_command_approval(&value) {
+            if method == "item/commandExecution/requestApproval"
+                && self.queue_command_approval(&value)
+            {
                 return;
             }
             if value.get("id").is_some() {
@@ -1009,15 +1096,42 @@ impl Bridge {
                     (params["threadId"].as_str(), self.memory.lock())
                 {
                     if let Some(thread) = memory.threads.get_mut(id) {
-                        let kind = match params["kind"].as_str() { None => "default", Some("command") => "command", Some("writeStdin") => "writeStdin", _ => "other" };
-                        let environment = match params["environmentId"].as_str() { None => "default", Some("local") => "local", Some("default") => "default-id", _ => "other" };
+                        let kind = match params["kind"].as_str() {
+                            None => "default",
+                            Some("command") => "command",
+                            Some("writeStdin") => "writeStdin",
+                            _ => "other",
+                        };
+                        let environment = match params["environmentId"].as_str() {
+                            None => "default",
+                            Some("local") => "local",
+                            Some("default") => "default-id",
+                            _ => "other",
+                        };
                         let method = match method {
-                            "item/commandExecution/requestApproval" | "permissions/requestApproval" | "item/fileChange/requestApproval" | "execCommandApproval" | "applyPatchApproval" => method,
+                            "item/commandExecution/requestApproval"
+                            | "permissions/requestApproval"
+                            | "item/fileChange/requestApproval"
+                            | "execCommandApproval"
+                            | "applyPatchApproval" => method,
                             _ => "unsupported-request",
                         };
-                        let cwd_ok = params["cwd"].as_str().and_then(|cwd| Path::new(cwd).canonicalize().ok())
-                            .is_some_and(|cwd| self.root.canonicalize().is_ok_and(|root| cwd.starts_with(root)));
-                        let decisions_ok = params.get("availableDecisions").filter(|value| !value.is_null()).is_none_or(|value| value.as_array().is_some_and(|items| items.iter().any(|item| item == "accept")));
+                        let cwd_ok = params["cwd"]
+                            .as_str()
+                            .and_then(|cwd| Path::new(cwd).canonicalize().ok())
+                            .is_some_and(|cwd| {
+                                self.root
+                                    .canonicalize()
+                                    .is_ok_and(|root| cwd.starts_with(root))
+                            });
+                        let decisions_ok = params
+                            .get("availableDecisions")
+                            .filter(|value| !value.is_null())
+                            .is_none_or(|value| {
+                                value
+                                    .as_array()
+                                    .is_some_and(|items| items.iter().any(|item| item == "accept"))
+                            });
                         thread.notice = Some(format!("Native approval declined (method={method}; kind={kind}; environment={environment}; cwd_in_workspace={cwd_ok}; command_present={}; item_valid={}; accept_available={decisions_ok}; worker_controls={}). No command, token or credential was logged.",
                             params["command"].as_str().is_some(), params["itemId"].as_str().is_some_and(token), self.ao_worker_command_approvals));
                     }
@@ -1519,18 +1633,58 @@ mod tests {
         options.permission_profile = ":danger-full-access".into();
         assert!(!ao_permission_allowed(&options));
         options.permission_profile = ":workspace".into();
-        let sandbox = |command: &Command| command.get_args().map(|arg| arg.to_string_lossy().into_owned())
-            .find(|arg| arg.starts_with("windows.sandbox="));
+        let sandbox = |command: &Command| {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .find(|arg| arg.starts_with("windows.sandbox="))
+        };
         #[cfg(windows)]
         {
             // Each AO card has its own CODEX_HOME, so AO children never need the admin setup.
-            assert_eq!(sandbox(&native_child_command(&options, Path::new("aiTemp"), None, true)).as_deref(), Some("windows.sandbox=unelevated"));
-            assert_eq!(sandbox(&native_child_command(&options, Path::new("aiTemp"), Some("K"), false)).as_deref(), Some("windows.sandbox=unelevated"));
-            assert_eq!(sandbox(&native_child_command(&options, Path::new("aiTemp"), None, false)).as_deref(), Some("windows.sandbox=elevated"));
+            assert_eq!(
+                sandbox(&native_child_command(
+                    &options,
+                    Path::new("aiTemp"),
+                    None,
+                    true
+                ))
+                .as_deref(),
+                Some("windows.sandbox=unelevated")
+            );
+            assert_eq!(
+                sandbox(&native_child_command(
+                    &options,
+                    Path::new("aiTemp"),
+                    Some("K"),
+                    false
+                ))
+                .as_deref(),
+                Some("windows.sandbox=unelevated")
+            );
+            assert_eq!(
+                sandbox(&native_child_command(
+                    &options,
+                    Path::new("aiTemp"),
+                    None,
+                    false
+                ))
+                .as_deref(),
+                Some("windows.sandbox=elevated")
+            );
         }
         options.permission_profile = ":read-only".into();
-        assert_eq!(sandbox(&native_child_command(&options, Path::new("aiTemp"), None, true)), None);
-        assert!(developer_instructions(":workspace").contains("delete files inside the working directory"));
+        assert_eq!(
+            sandbox(&native_child_command(
+                &options,
+                Path::new("aiTemp"),
+                None,
+                true
+            )),
+            None
+        );
+        assert!(developer_instructions(":workspace")
+            .contains("delete files inside the working directory"));
         assert!(developer_instructions(":read-only").contains("Never delete files"));
     }
 
@@ -1604,28 +1758,50 @@ mod tests {
 
     #[test]
     fn ao_command_approval_is_bounded_and_always_a_single_decision() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../aiTemp/ao-command-approval-test");
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../aiTemp/ao-command-approval-test");
         std::fs::create_dir_all(&root).unwrap();
         let root = root.canonicalize().unwrap();
         let params = json!({"itemId":"command-1","command":"Get-Content tool-check.txt","cwd":root,
             "kind":"command","availableDecisions":["accept","acceptForSession","decline"],"additionalPermissions":null});
         let (cwd, command, permissions) = command_approval_details(&root, &params).unwrap();
-        let mut local = params.clone(); local["environmentId"] = json!("local");
+        let mut local = params.clone();
+        local["environmentId"] = json!("local");
         assert!(command_approval_details(&root, &local).is_some());
-        let mut request = NativeApproval { rpc_id: json!(0), path: cwd.clone(), canonical: cwd,
-            command: Some(command), permissions, thread_id: "thread-one".into(), turn_id: "turn-one".into(),
-            reason: "Read fixture".into(), expires_at: Instant::now() + Duration::from_secs(120) };
-        assert_eq!(request.reply(true), json!({"id":0,"result":{"decision":"accept"}}));
-        assert_eq!(request.reply(false), json!({"id":0,"result":{"decision":"decline"}}));
+        let mut request = NativeApproval {
+            rpc_id: json!(0),
+            path: cwd.clone(),
+            canonical: cwd,
+            command: Some(command),
+            permissions,
+            thread_id: "thread-one".into(),
+            turn_id: "turn-one".into(),
+            reason: "Read fixture".into(),
+            expires_at: Instant::now() + Duration::from_secs(120),
+        };
+        assert_eq!(
+            request.reply(true),
+            json!({"id":0,"result":{"decision":"accept"}})
+        );
+        assert_eq!(
+            request.reply(false),
+            json!({"id":0,"result":{"decision":"decline"}})
+        );
         assert!(request.target_is_current(&root, true));
         assert!(!request.target_is_current(&root, false));
         assert!(!request.target_is_current(&root.join("another-workspace"), true));
         request.expires_at = Instant::now() - Duration::from_secs(1);
         assert!(!request.target_is_current(&root, true));
-        for (key, value) in [("kind",json!("writeStdin")), ("cwd",json!(root.parent().unwrap())),
-            ("environmentId",json!("remote-env")), ("availableDecisions",json!(["acceptForSession"])),
-            ("command",json!("x".repeat(4097))), ("command",json!("bad\u{1b}command"))] {
-            let mut bad = params.clone(); bad[key] = value;
+        for (key, value) in [
+            ("kind", json!("writeStdin")),
+            ("cwd", json!(root.parent().unwrap())),
+            ("environmentId", json!("remote-env")),
+            ("availableDecisions", json!(["acceptForSession"])),
+            ("command", json!("x".repeat(4097))),
+            ("command", json!("bad\u{1b}command")),
+        ] {
+            let mut bad = params.clone();
+            bad[key] = value;
             assert!(command_approval_details(&root, &bad).is_none());
         }
     }
@@ -1633,15 +1809,35 @@ mod tests {
     #[test]
     fn native_bridge_keeps_safe_failed_turn_notice() {
         let mut memory = Memory::default();
-        memory.threads.insert("owned".into(), ThreadState {
-            id: "owned".into(), status: "inProgress".into(), turn_id: Some("t".into()), ..Default::default()
-        });
-        apply_notification(&mut memory, "turn/completed", &json!({"threadId":"owned",
-            "turn":{"id":"t","status":"failed","error":{"message":"Proxy returned 407; Bearer private-test-token"}}}));
-        assert_eq!(memory.threads["owned"].notice.as_deref(), Some("Proxy returned 407; Bearer [REDACTED]"));
-        apply_notification(&mut memory, "turn/completed", &json!({"threadId":"owned",
-            "turn":{"id":"foreign","status":"failed","error":{"message":"Wrong turn"}}}));
-        assert_eq!(memory.threads["owned"].notice.as_deref(), Some("Proxy returned 407; Bearer [REDACTED]"));
+        memory.threads.insert(
+            "owned".into(),
+            ThreadState {
+                id: "owned".into(),
+                status: "inProgress".into(),
+                turn_id: Some("t".into()),
+                ..Default::default()
+            },
+        );
+        apply_notification(
+            &mut memory,
+            "turn/completed",
+            &json!({"threadId":"owned",
+            "turn":{"id":"t","status":"failed","error":{"message":"Proxy returned 407; Bearer private-test-token"}}}),
+        );
+        assert_eq!(
+            memory.threads["owned"].notice.as_deref(),
+            Some("Proxy returned 407; Bearer [REDACTED]")
+        );
+        apply_notification(
+            &mut memory,
+            "turn/completed",
+            &json!({"threadId":"owned",
+            "turn":{"id":"foreign","status":"failed","error":{"message":"Wrong turn"}}}),
+        );
+        assert_eq!(
+            memory.threads["owned"].notice.as_deref(),
+            Some("Proxy returned 407; Bearer [REDACTED]")
+        );
     }
 
     #[test]
