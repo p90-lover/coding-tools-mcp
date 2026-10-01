@@ -64,7 +64,26 @@ function permissionText(profile) {
 
 // The installed Codex desktop app keeps its CLI at %LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe;
 // the newest build wins. A chat send or a Start/Resume without a chosen executable uses it.
+// The Codex CLI (npm install -g @openai/codex) ships its native binary inside the package.
+function codexCliExecutable(env = process.env, arch = process.arch) {
+  if (process.platform !== "win32" || !env.APPDATA) return null;
+  const [pkg, triple] = arch === "arm64"
+    ? ["codex-win32-arm64", "aarch64-pc-windows-msvc"] : ["codex-win32-x64", "x86_64-pc-windows-msvc"];
+  const file = path.join(env.APPDATA, "npm", "node_modules", "@openai", "codex", "node_modules", "@openai", pkg, "vendor", triple, "bin", "codex.exe");
+  try { return fs.statSync(file).isFile() ? file : null; } catch { return null; }
+}
+
+// Missions run on the Codex CLI harness; the copy bundled with the Codex desktop app is only
+// a fallback when the CLI is not installed.
+function isDesktopBundledCodex(file, env = process.env) {
+  if (!env.LOCALAPPDATA || typeof file !== "string") return false;
+  const root = path.join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin").toLowerCase() + path.sep;
+  return path.resolve(file).toLowerCase().startsWith(root);
+}
+
 function findInstalledCodexExecutable(env = process.env) {
+  const cli = codexCliExecutable(env);
+  if (cli) return cli;
   if (process.platform !== "win32" || !env.LOCALAPPDATA) return null;
   const root = path.join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin");
   let best = null;
@@ -106,12 +125,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // chosen executable that no longer exists falls back to the currently installed one.
   function codexExecutable(chosen) {
     const picked = typeof chosen === "string" && chosen.trim() ? clean(chosen, 1024) : "";
-    if (picked && exists(picked)) return picked;
     const found = findCodexExecutable();
+    // A saved desktop-app copy (the old default) gives way to the Codex CLI when it is installed.
+    if (picked && exists(picked) && !(found && isDesktopBundledCodex(picked) && !isDesktopBundledCodex(found))) return picked;
     if (found) return found;
     throw new Error(picked
-      ? `The saved codex.exe no longer exists (${picked}) and no installed Codex app was found`
-      : "The Codex desktop app was not found; choose its codex.exe in AO settings");
+      ? `The saved codex.exe no longer exists (${picked}) and no Codex CLI was found`
+      : "The Codex CLI was not found; install it with npm install -g @openai/codex, or choose a codex.exe in AO settings");
   }
   const backgroundRuns = new Map();
   // Background-run observations for MCP event incidents (stall, held, approval waits).
@@ -215,7 +235,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
   async function harnesses() {
-    const native = { id: "codex-native", label: "Native Codex", runnable: true, installed: true, authStatus: "configured" };
+    const native = { id: "codex-native", label: "Codex CLI", runnable: true, installed: true, authStatus: "configured" };
     try {
       const catalog = await harnessService().catalog();
       return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
@@ -945,4 +965,4 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   return Object.freeze({ call });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, aoWebCatalogForModel };
+module.exports = { createAgentOrchestratorWorkflow, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

@@ -402,7 +402,7 @@ test("an account whose auto-start failed is not retried on every account change"
   const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
   const host = createChatGptDesktopHost({
     dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
-    getProxyRoute: () => null, homeDir: path.join(root, "home"), windowWaitMs: 200, autoStartRetryMs: 60_000,
+    getProxyRoute: () => null, homeDir: path.join(root, "home"), windowWaitMs: 200, backgroundWindowWaitMs: 200, autoStartRetryMs: 60_000,
   });
   try {
     await host.initialize();
@@ -421,4 +421,25 @@ test("an account whose auto-start failed is not retried on every account change"
     await host.shutdown();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("unclear cases leave both sides alone; a missing refresh time falls back to access-token expiry", () => {
+  const same = "2026-09-05T00:00:00Z";
+  // Same refresh time but different tokens: no safe winner.
+  assert.equal(chooseSyncDirection(
+    fromDesktop(desktopAuthFromCpa(cpaFile({ refresh: "rt-a", lastRefresh: same }))),
+    fromCpa(cpaFile({ refresh: "rt-b", lastRefresh: same })),
+  ), null);
+  // One refresh time missing: the access token that expires later was issued later.
+  const later = fromDesktop(desktopAuthFromCpa(cpaFile({ refresh: "rt-new", access: fakeJwt({ exp: 2_000_000_500 }), lastRefresh: same })));
+  const earlierNoTime = fromCpa(cpaFile({ refresh: "rt-old", access: fakeJwt({ exp: 2_000_000_000 }) }));
+  assert.equal(earlierNoTime.lastRefresh, null);
+  assert.equal(chooseSyncDirection(later, earlierNoTime), "to-cpa");
+  assert.equal(chooseSyncDirection(fromDesktop(desktopAuthFromCpa(cpaFile({ refresh: "rt-old", access: fakeJwt({ exp: 2_000_000_000 }), lastRefresh: same }))),
+    fromCpa(cpaFile({ refresh: "rt-new", access: fakeJwt({ exp: 2_000_000_500 }) }))), "to-desktop");
+  // No refresh time and no readable expiry: nothing moves.
+  assert.equal(chooseSyncDirection(
+    fromDesktop(desktopAuthFromCpa(cpaFile({ refresh: "rt-a", access: "opaque", lastRefresh: same }))),
+    fromCpa(cpaFile({ refresh: "rt-b", access: "opaque" })),
+  ), null);
 });

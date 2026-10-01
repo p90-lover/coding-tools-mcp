@@ -3,6 +3,7 @@ import { getCodingToolsClient } from "../api/client";
 import type { JsonObject } from "../api/contracts";
 import "./original-ui.css";
 import "./agent-orchestrator-original.css";
+import { pageHidden } from "./page-visibility";
 
 async function callUpstream(operation: string, args: JsonObject = {}) {
   const response = await getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation, arguments: args });
@@ -53,7 +54,7 @@ export function AgentOrchestratorOriginalSurface({ openMissions, projectBoard = 
     observer.observe(panel.current!);
     window.addEventListener("resize", resize);
     const timer = setInterval(() => {
-      if (ready) void callUpstream("upstream_status").then((result) => {
+      if (ready && !pageHidden()) void callUpstream("upstream_status").then((result) => {
         if (!disposed) setState(String(result.state));
       }).catch((cause) => {
         if (disposed) return;
