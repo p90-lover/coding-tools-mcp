@@ -354,3 +354,71 @@ test("a background account nobody uses is closed when idle; the shown one stays"
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// An instance that starts but has not shown its window yet: the helper finds its process
+// (pid) but no window (hwnd 0) until reveal() is called.
+function slowDesktopWorld(root) {
+  const world = fakeDesktopWorld(root);
+  const pending = new Map(); // marker -> pid
+  const call = world.helper.call;
+  world.helper.call = async (op, input = {}) => {
+    if (op === "launch") {
+      world.log.push(op);
+      const marker = /set "APPDATA=([^"]+)"/.exec(input.arguments)[1];
+      pending.set(marker, 5000 + pending.size);
+      return null;
+    }
+    if (op === "find" && pending.has(input.marker)) return { pid: pending.get(input.marker), hwnd: 0 };
+    return call(op, input);
+  };
+  return { ...world, pendingCount: () => pending.size };
+}
+
+test("a slot whose instance is still starting is not launched a second time", async () => {
+  const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-slow-"));
+  const world = slowDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
+  const host = createChatGptDesktopHost({
+    dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
+    getProxyRoute: () => null, homeDir: path.join(root, "home"), autoStart: false, windowWaitMs: 200,
+  });
+  try {
+    await host.initialize();
+    const slotId = cpaSlotId("acct-a", "a@x.com");
+    await assert.rejects(host.open(slotId), /did not open a window/);
+    await assert.rejects(host.open(slotId), /did not open a window/);
+    assert.equal(world.launches(), 1, "the second open must wait for the running instance, not start another");
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an account whose auto-start failed is not retried on every account change", async () => {
+  const { createChatGptDesktopHost } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-backoff-"));
+  const world = slowDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
+  const host = createChatGptDesktopHost({
+    dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
+    getProxyRoute: () => null, homeDir: path.join(root, "home"), windowWaitMs: 200, autoStartRetryMs: 60_000,
+  });
+  try {
+    await host.initialize();
+    const waitFor = async (predicate) => {
+      for (let i = 0; i < 100 && !predicate(); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    };
+    await waitFor(() => world.launches() >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 400)); // let a@x.com's window wait time out
+    // A CPA token refresh rewrites auth files; adding b@x.com changes the account list the same way.
+    cpaFolder(root, [["b@x.com", "acct-b"]]);
+    await waitFor(() => world.pendingCount() >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal(world.pendingCount(), 2, "b@x.com is new and starts");
+    assert.equal(world.launches(), 2, "a@x.com failed recently and must not be launched again");
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
