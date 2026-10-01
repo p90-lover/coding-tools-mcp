@@ -1,0 +1,3 @@
+# Patch files carry diff syntax: context lines start with a space, so "space before tab"
+# and lone-space lines are part of the format, not whitespace errors.
+*.patch -whitespace
