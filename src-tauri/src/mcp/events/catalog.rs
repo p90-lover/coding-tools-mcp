@@ -7,7 +7,12 @@ pub const WEB_TURN_FAILED: &str = "coding_tools.web_turn.failed";
 pub const RUN_STALLED: &str = "coding_tools.run.stalled";
 pub const MISSION_NEEDS_ATTENTION: &str = "coding_tools.mission.needs_attention";
 pub const BRIDGE_DOWN: &str = "coding_tools.bridge.down";
-pub const EVENT_NAMES: &[&str] = &[WEB_TURN_FAILED, RUN_STALLED, MISSION_NEEDS_ATTENTION, BRIDGE_DOWN];
+pub const EVENT_NAMES: &[&str] = &[
+    WEB_TURN_FAILED,
+    RUN_STALLED,
+    MISSION_NEEDS_ATTENTION,
+    BRIDGE_DOWN,
+];
 
 const MAX_STRING: usize = 1000;
 
@@ -130,7 +135,9 @@ pub fn definitions() -> Vec<Value> {
 }
 
 pub fn definition(name: &str) -> Option<Value> {
-    definitions().into_iter().find(|event| event["name"] == name)
+    definitions()
+        .into_iter()
+        .find(|event| event["name"] == name)
 }
 
 /// Validate subscription filter arguments against the event's inputSchema.
@@ -165,7 +172,9 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<Map<String, V
 
 /// A subscription matches when every filter it set equals the event field of the same name.
 pub fn matches_filters(filters: &Map<String, Value>, data: &Value) -> bool {
-    filters.iter().all(|(key, expected)| data.get(key) == Some(expected))
+    filters
+        .iter()
+        .all(|(key, expected)| data.get(key) == Some(expected))
 }
 
 /// Remove credentials that may appear in upstream error text.
@@ -195,7 +204,11 @@ fn clamp_text(value: &str, max: usize) -> String {
     if redacted.chars().count() <= max {
         return redacted;
     }
-    redacted.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    redacted
+        .chars()
+        .take(max.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 fn sanitize_value(schema: &Value, value: &Value) -> Option<Value> {
@@ -208,7 +221,10 @@ fn sanitize_value(schema: &Value, value: &Value) -> Option<Value> {
         Value::String(text) => {
             let cleaned = clamp_text(text, max);
             if let Some(allowed) = schema["enum"].as_array() {
-                return allowed.iter().any(|entry| entry == &cleaned).then_some(Value::String(cleaned));
+                return allowed
+                    .iter()
+                    .any(|entry| entry == &cleaned)
+                    .then_some(Value::String(cleaned));
             }
             Some(Value::String(cleaned))
         }
@@ -238,7 +254,10 @@ pub fn sanitize_payload(name: &str, data: &Value) -> Result<Value, String> {
     let mut output = Map::new();
     if let Some(properties) = schema["properties"].as_object() {
         for (key, property) in properties {
-            if let Some(value) = data.get(key).and_then(|value| sanitize_value(property, value)) {
+            if let Some(value) = data
+                .get(key)
+                .and_then(|value| sanitize_value(property, value))
+            {
                 output.insert(key.clone(), value);
             }
         }
@@ -273,10 +292,16 @@ mod tests {
             let payload = &event["payloadSchema"];
             assert_eq!(payload["type"], "object");
             for key in ["incident_id", "occurred_at", "reason_code", "next_step"] {
-                assert!(payload["required"].as_array().unwrap().iter().any(|v| v == key));
+                assert!(payload["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v == key));
             }
             for required in payload["required"].as_array().unwrap() {
-                assert!(payload["properties"].get(required.as_str().unwrap()).is_some());
+                assert!(payload["properties"]
+                    .get(required.as_str().unwrap())
+                    .is_some());
             }
         }
     }
@@ -322,7 +347,13 @@ mod tests {
     fn filters_match_on_exact_payload_fields() {
         let filters = validate_arguments(RUN_STALLED, &json!({"run_kind":"web_turn"})).unwrap();
         assert!(matches_filters(&filters, &json!({"run_kind":"web_turn"})));
-        assert!(!matches_filters(&filters, &json!({"run_kind":"orchestrator_run"})));
-        assert!(matches_filters(&Map::new(), &json!({"run_kind":"orchestrator_run"})));
+        assert!(!matches_filters(
+            &filters,
+            &json!({"run_kind":"orchestrator_run"})
+        ));
+        assert!(matches_filters(
+            &Map::new(),
+            &json!({"run_kind":"orchestrator_run"})
+        ));
     }
 }

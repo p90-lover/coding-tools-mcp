@@ -73,7 +73,10 @@ impl SubscriptionFile {
             subscriptions: subscriptions.to_vec(),
         })
         .map_err(|error| error.to_string())?;
-        let temp = directory.join(format!(".{FILE_NAME}.{}.tmp", uuid::Uuid::new_v4().simple()));
+        let temp = directory.join(format!(
+            ".{FILE_NAME}.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
         let written = (|| -> std::io::Result<()> {
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true);
@@ -89,7 +92,9 @@ impl SubscriptionFile {
         })();
         if let Err(error) = written.and_then(|_| fs::rename(&temp, &self.path)) {
             let _ = fs::remove_file(&temp);
-            return Err(format!("MCP event subscriptions could not be saved: {error}"));
+            return Err(format!(
+                "MCP event subscriptions could not be saved: {error}"
+            ));
         }
         Ok(())
     }
@@ -137,7 +142,14 @@ mod tests {
         assert_eq!(store.load().unwrap(), vec![sample("sub_2")]);
         let leftovers = fs::read_dir(dir.path().join("mcp-events"))
             .unwrap()
-            .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
             .count();
         assert_eq!(leftovers, 0);
     }

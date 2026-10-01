@@ -357,3 +357,74 @@ test("runtimeEnvironment exposes the shared in-app loopback mesh without OPENAI_
   assert.equal(fs.existsSync(path.join(directory, "loopback-mesh.json")), true);
   controller.dispose();
 });
+
+// Retired services never run again, so their archived state cannot change. Every launch used to
+// re-read all of it (about a gigabyte of Paseo state on a real install) before the window opened.
+test("an unchanged retired-services archive is confirmed without reading state contents", () => {
+  const directory = temporaryDirectory();
+  const dataRoot = path.join(directory, "integrations");
+  const statePath = path.join(dataRoot, "state", "paseo", "big.bin");
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, Buffer.alloc(64 * 1024, 7));
+  const options = {
+    filePath: path.join(directory, "external-services.json"),
+    keyPath: path.join(directory, "external-services.key"),
+    archiveDataRoot: dataRoot,
+  };
+  createExternalServicesController(options).dispose();
+  const archive = path.join(directory, "archives", "retired-services");
+  const snapshotsBefore = fs.existsSync(path.join(archive, "snapshots")) ? fs.readdirSync(path.join(archive, "snapshots")).length : 0;
+
+  const readFileSync = fs.readFileSync;
+  const reads = [];
+  fs.readFileSync = function spy(file, ...rest) { reads.push(String(file)); return readFileSync.call(this, file, ...rest); };
+  try {
+    createExternalServicesController(options).dispose();
+  } finally {
+    fs.readFileSync = readFileSync;
+  }
+  assert.deepEqual(reads.filter((file) => file.endsWith("big.bin")), [], "state contents must not be re-read");
+  const snapshotsAfter = fs.existsSync(path.join(archive, "snapshots")) ? fs.readdirSync(path.join(archive, "snapshots")).length : 0;
+  assert.equal(snapshotsAfter, snapshotsBefore, "no new snapshot for unchanged state");
+});
+
+test("a new snapshot links unchanged retired state instead of copying it again", () => {
+  const directory = temporaryDirectory();
+  const dataRoot = path.join(directory, "integrations");
+  const statePath = path.join(dataRoot, "state", "paseo", "big.bin");
+  const filePath = path.join(directory, "external-services.json");
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, Buffer.alloc(64 * 1024, 7));
+  const options = { filePath, keyPath: path.join(directory, "external-services.key"), archiveDataRoot: dataRoot };
+  createExternalServicesController(options).dispose();
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: {} }));
+  createExternalServicesController(options).dispose();
+  const archive = path.join(directory, "archives", "retired-services");
+  const latest = JSON.parse(fs.readFileSync(path.join(archive, "latest.json"), "utf8")).relative;
+  const linked = path.join(archive, latest, "integrations", "state", "paseo", "big.bin");
+  assert.deepEqual(fs.readFileSync(linked), fs.readFileSync(statePath));
+  assert.ok(fs.statSync(linked).nlink >= 2, "unchanged state should be a hard link to the previous snapshot");
+});
+
+test("archived retired state is not walked again on later launches", () => {
+  const directory = temporaryDirectory();
+  const dataRoot = path.join(directory, "integrations");
+  const stateDir = path.join(dataRoot, "state", "codex-router", "python");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "lib.py"), "x");
+  const options = {
+    filePath: path.join(directory, "external-services.json"),
+    keyPath: path.join(directory, "external-services.key"),
+    archiveDataRoot: dataRoot,
+  };
+  createExternalServicesController(options).dispose();
+  const readdirSync = fs.readdirSync;
+  const walked = [];
+  fs.readdirSync = function spy(dir, ...rest) { walked.push(String(dir)); return readdirSync.call(this, dir, ...rest); };
+  try {
+    createExternalServicesController(options).dispose();
+  } finally {
+    fs.readdirSync = readdirSync;
+  }
+  assert.deepEqual(walked.filter((dir) => dir.includes(path.join("state", "codex-router"))), [], "frozen retired state must not be walked");
+});

@@ -35,8 +35,7 @@ fn prepare_fixture(name: &str, symlink_escape: bool) -> FixtureWorkspace {
     let outside_secret = parent.join("outside-secret.txt");
     fs::write(
         &outside_secret,
-        fs::read_to_string(fixtures_root().join("outside-secret.txt"))
-        .expect("outside-secret.txt"),
+        fs::read_to_string(fixtures_root().join("outside-secret.txt")).expect("outside-secret.txt"),
     )
     .expect("write outside secret");
     materialize_runtime_files(&root, &outside_secret, name);

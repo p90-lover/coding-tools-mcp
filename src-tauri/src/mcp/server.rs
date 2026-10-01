@@ -399,7 +399,9 @@ mod tests {
         assert_eq!(listed["result"]["resultType"], "complete");
         let events = listed["result"]["events"].as_array().expect("events");
         assert_eq!(events.len(), 4);
-        assert!(events.iter().all(|event| event["delivery"] == json!(["webhook"])));
+        assert!(events
+            .iter()
+            .all(|event| event["delivery"] == json!(["webhook"])));
 
         let unsubscribed = super::handle_events_request(
             &hub,

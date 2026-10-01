@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Page } from "playwright-core";
 import { ChatGptBrowserWorker } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR } from "../src/chatgpt-session";
 
 test("an already-ready effort control has no unconditional pre-activation delay", async () => {
   const neverVisible = new Promise<void>(() => {});
@@ -73,7 +74,8 @@ test("an already-ready effort control has no unconditional pre-activation delay"
         return hiddenSurface;
       }
       if (selector === '[id="effort-menu"]') return effortMenu;
-      if (selector === '[data-model-reasoning-effort-slider]') return sliderContainer;
+      // The worker accepts both the reasoning-effort slider and the newer model-picker power slider.
+      if (selector === CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR) return sliderContainer;
       throw new Error(`Unexpected locator: ${selector}`);
     },
     keyboard: {

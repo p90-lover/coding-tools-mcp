@@ -46,7 +46,8 @@ impl WebhookSecret {
         mac.update(timestamp.to_string().as_bytes());
         mac.update(b".");
         mac.update(body.as_bytes());
-        let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         format!("v1,{signature}")
     }
 
@@ -54,7 +55,10 @@ impl WebhookSecret {
     pub fn fingerprint(&self) -> String {
         use sha2::Digest;
         let digest = Sha256::digest(&self.key);
-        digest[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -70,7 +74,10 @@ pub fn signed_headers(
         ("content-type", "application/json".to_string()),
         ("webhook-id", message_id.to_string()),
         ("webhook-timestamp", timestamp.to_string()),
-        ("webhook-signature", secret.sign(message_id, timestamp, body)),
+        (
+            "webhook-signature",
+            secret.sign(message_id, timestamp, body),
+        ),
         ("x-mcp-subscription-id", subscription_id.to_string()),
     ]
 }
@@ -118,10 +125,20 @@ mod tests {
     fn signed_headers_carry_the_subscription_and_message_identity() {
         let secret = WebhookSecret::parse("whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD").unwrap();
         let headers = signed_headers(&secret, "evt_1", "sub_1", 1649367553, "{}");
-        let get = |name: &str| headers.iter().find(|(key, _)| *key == name).unwrap().1.clone();
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| *key == name)
+                .unwrap()
+                .1
+                .clone()
+        };
         assert_eq!(get("webhook-id"), "evt_1");
         assert_eq!(get("webhook-timestamp"), "1649367553");
         assert_eq!(get("x-mcp-subscription-id"), "sub_1");
-        assert_eq!(get("webhook-signature"), secret.sign("evt_1", 1649367553, "{}"));
+        assert_eq!(
+            get("webhook-signature"),
+            secret.sign("evt_1", 1649367553, "{}")
+        );
     }
 }

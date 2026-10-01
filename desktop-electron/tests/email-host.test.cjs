@@ -165,3 +165,13 @@ test("a 3xx redirect from the mail API is treated as an error, not followed", as
   });
   await assert.rejects(() => host.connect({ origin: "https://mail.example.com", adminAuth: "x" }), /redirect/);
 });
+
+test("sanitizeHtml keeps email formatting and drops forms, svg and unknown attributes", () => {
+  const html = sanitizeHtml('<table border="1" class="x"><tr><td style="color:red" id="c">Hi <b>there</b></td></tr></table>'
+    + '<form action="https://evil.example"><input name="pw"></form><svg><circle r="1"/></svg>'
+    + '<a href="https://example.com" onclick="steal()">link</a><img src="data:image/png;base64,AA" alt="logo">');
+  assert.ok(html.includes('<table border="1"><tr><td style="color:red">Hi <b>there</b></td></tr></table>'), html);
+  assert.ok(html.includes('<a href="https://example.com">link</a>'), html);
+  assert.ok(html.includes('<img src="data:image/png;base64,AA" alt="logo">'), html);
+  assert.doesNotMatch(html, /<form|<input|<svg|<circle|class=|id=|onclick/);
+});

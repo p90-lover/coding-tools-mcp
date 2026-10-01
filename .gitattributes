@@ -1,0 +1,6 @@
+# Patch files carry diff syntax: context lines start with a space, so "space before tab"
+# and lone-space lines are part of the format, not whitespace errors.
+*.patch -whitespace
+
+# Pinned third-party releases are verified by SHA-256; checkouts must keep their exact bytes.
+desktop-electron/assets/keysmith/** -text

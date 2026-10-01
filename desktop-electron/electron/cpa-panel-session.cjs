@@ -3,6 +3,27 @@
 const { randomBytes } = require("node:crypto");
 
 const CPA_ORIGIN = "http://127.0.0.1:8317";
+// Bundled CPA Helper plugin (web/app.js KEY_STORE): CPAMC shows its page in a
+// same-origin iframe and it sends this raw localStorage value as a Bearer token.
+const CPA_HELPER_KEY_STORE = "cpaHelper.managementKey";
+const CPA_HELPER_RESOURCE_PREFIX = "/v0/resource/plugins/cpa-helper/";
+const CPA_HELPER_API_PREFIX = "/v0/management/cpa-helper/";
+
+// localStorage entries seeded into the managed CPA origin. Values carry only the
+// opaque session marker; the real key is swapped in by the main-process header hook.
+function panelStorageEntries(origin, marker) {
+  return [
+    ["cli-proxy-auth", JSON.stringify({
+      state: { apiBase: origin, managementKey: marker, rememberPassword: true }, version: 0,
+    })],
+    // CPA may persist its empty store after the first asynchronous restore.
+    // Its legacy keys survive that write and migrate on reload.
+    ["apiBase", JSON.stringify(origin)],
+    ["managementKey", JSON.stringify(marker)],
+    ["isLoggedIn", "true"],
+    [CPA_HELPER_KEY_STORE, marker],
+  ];
+}
 
 function installCpaPanelSession({ webContents, webFrameMain, getConnection, logger, origin = CPA_ORIGIN }) {
   const endpoint = new URL(origin);
@@ -29,6 +50,24 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
     }
   }
 
+  // CPA Helper's page is a direct child iframe of the managed panel and may only
+  // exchange its marker on its own plugin API routes.
+  function isCpaHelperRequest(frame, url) {
+    if (!frame || frame.isDestroyed() || webContents.isDestroyed()) return false;
+    try {
+      const location = new URL(frame.url);
+      const target = new URL(url);
+      return isManagedPanel(frame.parent)
+        && location.origin === origin
+        && location.pathname.startsWith(CPA_HELPER_RESOURCE_PREFIX)
+        && !location.username && !location.password
+        && target.origin === origin
+        && target.pathname.startsWith(CPA_HELPER_API_PREFIX);
+    } catch {
+      return false;
+    }
+  }
+
   browserSession.webRequest.onBeforeSendHeaders({
     urls: [`${origin}/v0/management/*`],
   }, (details, callback) => {
@@ -47,7 +86,8 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
         markerMatches: Boolean(header) && headers[header] === `Bearer ${sessionMarker}`,
       });
     }
-    if (details.webContentsId !== webContents.id || !isManagedPanel(details.frame)) {
+    if (details.webContentsId !== webContents.id
+      || !(isManagedPanel(details.frame) || isCpaHelperRequest(details.frame, details.url))) {
       callback({ requestHeaders: headers });
       return;
     }
@@ -81,14 +121,9 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
         if (location.origin !== ${JSON.stringify(origin)} || location.pathname !== '/management.html') return false;
         const marker = ${JSON.stringify(sessionMarker)};
         if (sessionStorage.getItem('coding-tools-cpa-session') === marker) return false;
-        localStorage.setItem('cli-proxy-auth', JSON.stringify({
-          state: { apiBase: location.origin, managementKey: marker, rememberPassword: true }, version: 0
-        }));
-        // CPA may persist its empty store after the first asynchronous restore.
-        // Its legacy keys survive that write and migrate on reload.
-        localStorage.setItem('apiBase', JSON.stringify(location.origin));
-        localStorage.setItem('managementKey', JSON.stringify(marker));
-        localStorage.setItem('isLoggedIn', 'true');
+        for (const [key, value] of ${JSON.stringify(panelStorageEntries(origin, sessionMarker))}) {
+          localStorage.setItem(key, value);
+        }
         sessionStorage.setItem('coding-tools-cpa-session', marker);
         return true;
       })()`);
@@ -109,4 +144,4 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
   });
 }
 
-module.exports = { installCpaPanelSession };
+module.exports = { installCpaPanelSession, panelStorageEntries, CPA_HELPER_KEY_STORE };
