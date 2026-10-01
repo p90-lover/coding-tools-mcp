@@ -39,19 +39,26 @@ export function chatGptConversationKey(
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
     compaction: compactionEpoch(raw?.input),
+    // Changed Codex instructions start a new conversation, which receives them in full.
+    instructions: createHash("sha256").update(JSON.stringify(parsed.context.systemPrompt ?? [])).digest("hex"),
   })).digest("hex");
 }
 
-/** Full history remains canonical; a retained epoch receives only the suffix after its last assistant reply. */
+/**
+ * Full history remains canonical; a retained epoch receives only the suffix after its last
+ * assistant reply. The retained ChatGPT conversation already holds the Codex instructions from
+ * its first turn, and the conversation key changes if they change, so they are not re-sent.
+ */
 export function retainedConversationResumeRequest(
   parsed: CodexParsedRequest,
 ): CodexParsedRequest | undefined {
   const lastAssistant = parsed.context.messages.findLastIndex(message => message.role === "assistant");
   if (lastAssistant < 0 || lastAssistant === parsed.context.messages.length - 1) return undefined;
+  const { systemPrompt: _sentWithTheFirstTurn, ...context } = parsed.context;
   return {
     ...parsed,
     context: {
-      ...parsed.context,
+      ...context,
       messages: parsed.context.messages.slice(lastAssistant + 1),
     },
   };
