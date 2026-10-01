@@ -1,0 +1,2 @@
+# Pinned third-party releases must retain their verified byte content.
+desktop-electron/assets/keysmith/** -text

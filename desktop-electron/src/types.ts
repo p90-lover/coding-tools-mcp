@@ -650,8 +650,9 @@ export interface LauncherApi {
   clearEmailInbox(input: { id: number }): Promise<{ clearedMailboxId: number }>;
   removeEmailMailbox(input: { id: number }): Promise<{ removedMailboxId: number }>;
   keysmithStatus(): Promise<KeysmithCommandResult>;
+  keysmithInstall?(): Promise<KeysmithCommandResult>;
   keysmithSelectFile(): Promise<KeysmithSelectedFile | null>;
-  keysmithPreview(): Promise<KeysmithCommandResult>;
+  keysmithPreview(useBundled?: boolean): Promise<KeysmithCommandResult>;
   keysmithApply(): Promise<KeysmithCommandResult>;
   keysmithPreviewRemoval(): Promise<KeysmithCommandResult>;
   keysmithRemove(): Promise<KeysmithCommandResult>;
