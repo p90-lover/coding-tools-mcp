@@ -215,6 +215,51 @@ async function waitForPackagedRuntimeSource({
   throw new Error(`Packaged runtime did not fully materialize within ${timeoutMs}ms: ${detail}`);
 }
 
+function directoryInUse(error) {
+  return ["EBUSY", "EPERM", "EACCES"].includes(error?.code);
+}
+
+// Removes a directory only after renaming it succeeded, which proves no process holds it open;
+// a recursive delete of a directory in use could strip files from under a running runtime.
+function retireDirectory(directory) {
+  const doomed = `${directory}.retired-${process.pid}-${Date.now()}`;
+  try { fs.renameSync(directory, doomed); } catch { return false; }
+  try { fs.rmSync(doomed, { recursive: true, force: true }); } catch {}
+  return true;
+}
+
+function retireSideBundles(versionsRoot, baseName) {
+  let entries = [];
+  try { entries = fs.readdirSync(versionsRoot); } catch { return; }
+  for (const name of entries) {
+    if (name.startsWith(`${baseName}-`) && /^[0-9a-f]{12}$/.test(name.slice(baseName.length + 1))) {
+      retireDirectory(path.join(versionsRoot, name));
+    }
+  }
+}
+
+// Moves a validated side bundle into the version directory. Returns null (keep using the side
+// bundle) when either directory is still in use; the previous release is restored in that case.
+function promoteSideBundle(side, destination, expectedIdentity) {
+  const previous = `${destination}.previous-${process.pid}-${Date.now()}`;
+  const hadDestination = fs.existsSync(destination);
+  if (hadDestination) {
+    try { renameAtomicFile(destination, previous); } catch (error) {
+      if (directoryInUse(error)) return null;
+      throw error;
+    }
+  }
+  try {
+    renameAtomicFile(side, destination);
+  } catch (error) {
+    if (hadDestination) renameAtomicFile(previous, destination);
+    if (directoryInUse(error)) return null;
+    throw error;
+  }
+  if (hadDestination) retireDirectory(previous);
+  return validateRuntimeBundle(destination, expectedIdentity);
+}
+
 function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
   if (!app.isPackaged) return null;
   const identity = {
@@ -230,13 +275,26 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     versionsRoot,
     `${identity.version}-${identity.platform}-${identity.arch}`,
   );
+  // A same-version release with different files cannot replace the version directory while the
+  // persistent core (bridge, MCP, CPA) still runs from it: Windows refuses to rename an open
+  // directory. That release then lives beside it, named by its bundle id, until a later launch
+  // finds the version directory free and promotes it.
+  const side = `${destination}-${String(sourceBundle.manifest.bundleId).slice(0, 12)}`;
   if (fs.existsSync(destination)) {
     try {
-      return validateRuntimeBundle(destination, expectedIdentity);
+      const root = validateRuntimeBundle(destination, expectedIdentity);
+      retireSideBundles(versionsRoot, path.basename(destination));
+      return root;
     } catch {
       // A terminated installer or external cleanup can leave a version directory present but
       // incomplete. Rebuild the launcher-owned bundle transactionally from the signed package.
     }
+  }
+  if (fs.existsSync(side)) {
+    let sideRoot = null;
+    try { sideRoot = validateRuntimeBundle(side, expectedIdentity); } catch {}
+    if (sideRoot) return promoteSideBundle(side, destination, expectedIdentity) ?? sideRoot;
+    retireDirectory(side);
   }
 
   fs.mkdirSync(versionsRoot, { recursive: true, mode: 0o700 });
@@ -252,7 +310,13 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
     });
     validateRuntimeBundle(temporary, expectedIdentity);
     if (fs.existsSync(destination)) {
-      renameAtomicFile(destination, previous);
+      try {
+        renameAtomicFile(destination, previous);
+      } catch (error) {
+        if (!directoryInUse(error)) throw error;
+        renameAtomicFile(temporary, side);
+        return validateRuntimeBundle(side, expectedIdentity);
+      }
       previousMoved = true;
     }
     try {

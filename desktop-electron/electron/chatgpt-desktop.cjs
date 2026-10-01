@@ -23,6 +23,8 @@ const {
 } = require("./chatgpt-desktop-sync.cjs");
 
 const WINDOW_WAIT_MS = 60_000;
+// Background starts are not waited on by anyone, so a slow disk gets longer before giving up.
+const BACKGROUND_WAIT_FACTOR = 5;
 // ChatGPT treats WM_CLOSE as "hide to background" at times; give it a moment to flush its
 // profile, then end the tree.
 const CLOSE_WAIT_MS = 3_000;
@@ -457,17 +459,23 @@ function createChatGptDesktopHost({
     return found?.pid ? { slotId, pid: found.pid, hwnd: Number(found.hwnd) || 0 } : null;
   }
 
-  async function waitForWindow(slotId) {
-    const deadline = Date.now() + windowWaitMs;
+  // The window is hidden the moment it exists: it is only ever shown docked in the ChatGPT tab.
+  // A start that is still slow is left running (never started twice); a later auto-start finds
+  // its window and adopts it, hidden.
+  async function waitForWindow(slotId, timeoutMs = windowWaitMs) {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const found = await findInstance(slotId);
-      if (found?.hwnd) return found;
+      if (found?.hwnd) {
+        await helper.call("hide", { hwnd: found.hwnd }).catch(() => {});
+        return found;
+      }
       await sleep(750);
     }
-    throw new Error("ChatGPT did not open a window within a minute");
+    throw new Error(`ChatGPT did not open a window within ${Math.max(1, Math.round(timeoutMs / 1000))} seconds`);
   }
 
-  async function launchInstance(slotId) {
+  async function launchInstance(slotId, { background = false } = {}) {
     const pkg = await resolvePackage();
     if (!pkg) throw new Error("The ChatGPT desktop app is not installed (Microsoft Store package OpenAI.Codex)");
     const paths = slotPaths(dataRoot, slotId);
@@ -483,7 +491,7 @@ function createChatGptDesktopHost({
     // run the same account twice and, on every account change, pile up more of them.
     const existing = await findInstance(slotId);
     if (existing?.hwnd) return existing;
-    if (existing?.pid) return await waitForWindow(slotId);
+    if (existing?.pid) return await waitForWindow(slotId, background ? windowWaitMs * BACKGROUND_WAIT_FACTOR : windowWaitMs);
     prepareProfile(slotId, paths);
 
     const command = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
@@ -506,12 +514,14 @@ function createChatGptDesktopHost({
       env.push(["HTTPS_PROXY", proxy.url], ["HTTP_PROXY", proxy.url], ["ALL_PROXY", proxy.url], ["NO_PROXY", noProxy]);
       switches = ` --proxy-server="${proxy.url}"${proxy.bypass.length ? ` --proxy-bypass-list="${proxy.bypass.join(";")}"` : ""}`;
     }
-    const argumentsText = `/d /c ${env.map(([key, value]) => `set "${key}=${value}"&& `).join("")}start "" "${pkg.exe}"${switches}`;
+    // Background starts open minimized (never taking focus) and are hidden as soon as they exist.
+    const minimized = background ? " /min" : "";
+    const argumentsText = `/d /c ${env.map(([key, value]) => `set "${key}=${value}"&& `).join("")}start ""${minimized} "${pkg.exe}"${switches}`;
     await helper.call("launch", { family: pkg.family, command, arguments: argumentsText }, 45_000);
     logger?.info?.("chatgpt_desktop.instance_launched", {
-      slotId, signedIn: fs.existsSync(paths.auth), proxied: Boolean(proxy),
+      slotId, signedIn: fs.existsSync(paths.auth), proxied: Boolean(proxy), background,
     });
-    return await waitForWindow(slotId);
+    return await waitForWindow(slotId, background ? windowWaitMs * BACKGROUND_WAIT_FACTOR : windowWaitMs);
   }
 
   async function stopInstance(slotId = state.active) {
@@ -694,7 +704,7 @@ function createChatGptDesktopHost({
           if (instances.has(account.slotId) || instances.size >= MAX_RUNNING_INSTANCES) return;
           if (!autoStartCandidates().some((entry) => entry.slotId === account.slotId)) return;
           try {
-            await adopt(await launchInstance(account.slotId));
+            await adopt(await launchInstance(account.slotId, { background: true }));
             autoStartBackoff.delete(account.slotId);
             logger?.info?.("chatgpt_desktop.auto_started", { slotId: account.slotId });
           } catch (error) {

@@ -42,17 +42,23 @@ public static class CgdWin {
   public static long MainWindow(uint pid) {
     PerMonitor();
     IntPtr best = IntPtr.Zero; long bestArea = -1;
+    // Background accounts are kept hidden; after a restart their main window is the largest
+    // titled hidden one, used only when no visible or minimized window exists.
+    IntPtr hidden = IntPtr.Zero; long hiddenArea = 0;
     EnumWindows((hwnd, l) => {
       uint owner;
       GetWindowThreadProcessId(hwnd, out owner);
       if (owner != pid || GetWindowTextLength(hwnd) == 0) return true;
-      if (!IsWindowVisible(hwnd) && !IsIconic(hwnd)) return true;
       RECT r; GetWindowRect(hwnd, out r);
       long area = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
+      if (!IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+        if (area > hiddenArea) { hidden = hwnd; hiddenArea = area; }
+        return true;
+      }
       if (area > bestArea) { best = hwnd; bestArea = area; }
       return true;
     }, IntPtr.Zero);
-    return best.ToInt64();
+    return (best != IntPtr.Zero ? best : hidden).ToInt64();
   }
 
   public static bool Alive(long hwnd) { return IsWindow(new IntPtr(hwnd)); }

@@ -25,6 +25,7 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { createChatGptDesktopHost } = require("./chatgpt-desktop.cjs");
+const { createGptBrowserHost } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
@@ -131,6 +132,7 @@ let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
 let chatgptDesktop = null;
+let gptBrowser = null;
 let emailHost = null;
 const chatgptDesktopOwners = new WeakSet();
 let runtimeHost = null;
@@ -234,6 +236,35 @@ function getChatGptDesktop(logger) {
   }
   watchChatGptDesktopOwner(mainWindow);
   return chatgptDesktop;
+}
+
+// GPT Browser account partitions take the same route as the main browser (Global Routing
+// publishes it in HTTPS_PROXY/NO_PROXY); chatgpt.com refuses this machine's direct route.
+async function routeGptBrowserSession(browserSession) {
+  const route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+  if (!route) {
+    await browserSession.setProxy({ mode: "direct" });
+    return;
+  }
+  await browserSession.setProxy({ mode: "fixed_servers", proxyRules: route, proxyBypassRules: process.env.NO_PROXY || "" });
+}
+
+function getGptBrowser(logger) {
+  if (gptBrowser) return gptBrowser;
+  gptBrowser = createGptBrowserHost({
+    logger,
+    dataRoot: path.join(CORE_HOME, "gpt-browser"),
+    sessionFor: (partition) => session.fromPartition(partition),
+    prepareSession: routeGptBrowserSession,
+    createView: (partition) => new WebContentsView({
+      webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: true },
+    }),
+    attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
+    detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
+    openExternal: (url) => openWebUrl(url),
+    onChange: (status) => send("launcher:gpt-browser-changed", status),
+  });
+  return gptBrowser;
 }
 
 function getEmailHost(logger) {
@@ -1563,6 +1594,42 @@ function registerIpc({ logger, stateStore }) {
     const host = getChatGptDesktop(logger);
     await host.ready;
     return host.stop();
+  });
+  // Workspace -> GPT Browser. Every change needs the focused main window; status is read-only.
+  handle("launcher:gpt-browser-status", () => getGptBrowser(logger).status());
+  handle("launcher:gpt-browser-add", (event) => {
+    assertFocusedMainWindow(event, true);
+    return getGptBrowser(logger).addAccount();
+  });
+  handle("launcher:gpt-browser-switch", (event, id) => {
+    assertFocusedMainWindow(event, true);
+    return getGptBrowser(logger).switchTo(id);
+  });
+  handle("launcher:gpt-browser-open-url", (event, url) => {
+    assertFocusedMainWindow(event, true);
+    return getGptBrowser(logger).openUrl(url);
+  });
+  handle("launcher:gpt-browser-navigate", (event, action) => {
+    assertFocusedMainWindow(event, false);
+    return getGptBrowser(logger).navigate(action);
+  });
+  handle("launcher:gpt-browser-rename", (event, input) => {
+    assertFocusedMainWindow(event, true);
+    return getGptBrowser(logger).rename(input?.id, input?.label);
+  });
+  handle("launcher:gpt-browser-remove", (event, id) => {
+    assertFocusedMainWindow(event, true);
+    return getGptBrowser(logger).remove(id);
+  });
+  handle("launcher:gpt-browser-surface-active", (_event, active) => getGptBrowser(logger).setSurfaceActive(active === true));
+  handle("launcher:gpt-browser-bounds", (event, bounds) => {
+    const rect = validateBounds(bounds);
+    const zoom = event.sender.getZoomFactor();
+    getGptBrowser(logger).setBounds({
+      x: Math.round(rect.x * zoom), y: Math.round(rect.y * zoom),
+      width: Math.round(rect.width * zoom), height: Math.round(rect.height * zoom),
+    });
+    return true;
   });
   handle("launcher:chatgpt-desktop-surface-active", (_event, active) => {
     getChatGptDesktop(logger).setSurfaceActive(active === true);

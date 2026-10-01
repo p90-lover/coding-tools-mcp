@@ -8,6 +8,7 @@ import type {
 } from "../types";
 import { Icon } from "../icons";
 import "./email.css";
+import { pageHidden } from "./page-visibility";
 
 // A surface-local boundary: a render error here shows a message instead of unmounting the app.
 class EmailBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
@@ -212,6 +213,7 @@ function EmailSurfaceInner({ api, setError }: { api: LauncherApi; setError: (e: 
   useEffect(() => {
     if (!hasView) return;
     const timer = setInterval(() => {
+      if (pageHidden()) return;
       const token = loadToken.current;
       void api.listEmailMessages({ address: viewAddress, limit: PAGE_SIZE, offset: 0 })
         .then(({ messages: newest, count }) => {

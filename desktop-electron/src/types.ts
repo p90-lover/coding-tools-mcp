@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "gpt-browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -550,6 +550,18 @@ export interface ChatGptDesktopAccount {
   active: boolean;
 }
 
+export interface GptBrowserAccount {
+  id: string;
+  label: string;
+  email: string | null;
+}
+
+export interface GptBrowserStatus {
+  accounts: GptBrowserAccount[];
+  activeId: string | null;
+  page: { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean } | null;
+}
+
 export interface ChatGptDesktopStatus {
   supported: boolean;
   installed: boolean;
@@ -630,6 +642,16 @@ export interface KeysmithSelectedFile {
 
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
+  gptBrowserStatus(): Promise<GptBrowserStatus>;
+  addGptBrowserAccount(): Promise<GptBrowserStatus>;
+  switchGptBrowserAccount(id: string): Promise<GptBrowserStatus>;
+  openGptBrowserUrl(url: string): Promise<GptBrowserStatus>;
+  navigateGptBrowser(action: "back" | "forward" | "reload" | "home"): Promise<GptBrowserStatus>;
+  renameGptBrowserAccount(id: string, label: string): Promise<GptBrowserStatus>;
+  removeGptBrowserAccount(id: string): Promise<GptBrowserStatus>;
+  setGptBrowserSurfaceActive(active: boolean): Promise<GptBrowserStatus>;
+  setGptBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
+  onGptBrowserChanged(listener: (status: GptBrowserStatus) => void): () => void;
   chatGptDesktopStatus(): Promise<ChatGptDesktopStatus>;
   openChatGptDesktop(slotId: string): Promise<ChatGptDesktopStatus>;
   newChatGptDesktopSignIn(): Promise<ChatGptDesktopStatus>;

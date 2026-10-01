@@ -1960,3 +1960,21 @@ server.listen(config.port, config.host);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a new daemon's log relay starts where the shared daemon log ended, not at its old history", async () => {
+  const { LogTail } = require("../electron/runtime-supervisor.cjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "daemon-log-"));
+  const file = path.join(dir, "daemon.log");
+  fs.writeFileSync(file, "old failure 1\nold failure 2\n");
+  const start = fs.statSync(file).size;
+  const seen = [];
+  const tail = new LogTail(file, (line) => seen.push(line), { offset: start, pollMs: 20 });
+  try {
+    fs.appendFileSync(file, "new daemon listening\n");
+    for (let i = 0; i < 50 && !seen.length; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(seen, ["new daemon listening"]);
+  } finally {
+    tail.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

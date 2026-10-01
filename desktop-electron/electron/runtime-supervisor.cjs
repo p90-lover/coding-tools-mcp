@@ -144,13 +144,13 @@ class AdoptedProcess extends EventEmitter {
 
 /** Follows a file-backed child log so a detached daemon's output still reaches the launcher log. */
 class LogTail {
-  constructor(filePath, onLine, { fromEnd = true, pollMs = 500 } = {}) {
+  constructor(filePath, onLine, { fromEnd = true, offset = null, pollMs = 500 } = {}) {
     this.filePath = filePath;
     this.onLine = onLine;
     this.buffered = "";
     let size = 0;
     try { size = fs.statSync(filePath).size; } catch {}
-    this.offset = fromEnd ? size : 0;
+    this.offset = Number.isInteger(offset) && offset >= 0 ? offset : fromEnd ? size : 0;
     this.timer = setInterval(() => this.read(), pollMs);
     this.timer.unref?.();
   }
@@ -579,6 +579,9 @@ class RuntimeSupervisor {
     );
     const persistent = name === "daemon" && this.persistentBridge;
     const logFd = persistent ? this.openDaemonLog() : null;
+    // The daemon log is appended across launches; only this daemon's output is relayed, never the
+    // history before it (which re-logged thousands of old lines on every start).
+    const logStart = logFd !== null ? fs.fstatSync(logFd).size : 0;
     let child;
     try {
       child = spawn(invocation.executable, invocation.args, {
@@ -595,7 +598,7 @@ class RuntimeSupervisor {
     } finally {
       if (logFd !== null) fs.closeSync(logFd);
     }
-    if (persistent) this.followDaemonLog(false);
+    if (persistent) this.followDaemonLog({ offset: logStart });
     this[name] = child;
     this.lastChildFailure[name] = null;
     this.lastChildOutput[name] = null;
@@ -655,12 +658,12 @@ class RuntimeSupervisor {
     return fs.openSync(this.daemonLogPath, "a", 0o600);
   }
 
-  followDaemonLog(fromEnd) {
+  followDaemonLog(position) {
     this.daemonTail?.stop();
     this.daemonTail = new LogTail(this.daemonLogPath, (line) => {
       this.lastChildOutput.daemon = redactText(line).slice(0, 1_000);
       this.logger.warn("runtime.daemon_stderr", { line });
-    }, { fromEnd });
+    }, position);
   }
 
   /**
@@ -698,7 +701,7 @@ class RuntimeSupervisor {
       this.logger[expected ? "info" : "error"]("runtime.daemon_exited", { adopted: true });
       if (!expected && restartable && statePersisted) this.scheduleRecovery("daemon");
     });
-    this.followDaemonLog(true);
+    this.followDaemonLog({ fromEnd: true });
     this.logger.info("runtime.daemon_adopted", { pid: state.daemonPid, previousOwner: state.ownerPid });
     return true;
   }
@@ -2365,6 +2368,7 @@ module.exports = {
   TUNNEL_MONITOR_FAILURE_THRESHOLD,
   TUNNEL_MONITOR_INTERVAL_MS,
   TUNNEL_START_TIMEOUT_MS,
+  LogTail,
   RuntimeSupervisor,
   managedTunnelConnectArgs,
   validateConfig,

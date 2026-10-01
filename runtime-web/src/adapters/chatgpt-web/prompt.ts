@@ -10,6 +10,7 @@ import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
+import { withTrimmedOldToolResults } from "./prompt-budget";
 import {
   CHATGPT_LUNA_CHECKPOINT_MARKER,
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
@@ -656,6 +657,9 @@ export function compileChatGptWebPrompt(
   };
 
   let sourceMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
+  // Ordinary turns re-send all history; old large tool outputs keep only their start and end.
+  // Compaction turns summarize the full history and keep their own budget below.
+  if (!parsed._compactionRequest) sourceMessages = withTrimmedOldToolResults(sourceMessages);
   const initialMessageCount = sourceMessages.length;
   let compiled = build(sourceMessages);
   if (!parsed._compactionRequest) return compiled;

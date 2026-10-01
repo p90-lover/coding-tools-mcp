@@ -13,6 +13,7 @@ import {
   harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
+import { pageHidden } from "./page-visibility";
 
 type Clause = { id: string; title: string; detail?: string; state: string };
 type PlanTask = {
@@ -181,7 +182,7 @@ export function aoPreviewText(run: Pick<AoMission, "cancelled" | "nodes">, tasks
   return `${node.role}: ${task?.title ?? node.task_id}\n${task?.description ?? ""}`.trim();
 }
 
-const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", runnable: true, installed: true };
+const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Codex CLI", runnable: true, installed: true };
 
 export function AgentOrchestratorSurface({ language, setError }: {
   language: Language;
@@ -349,6 +350,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (view !== "chat" || !workspaceId) return;
     let live = true;
     const timer = setInterval(() => {
+      if (pageHidden()) return;
       void moduleCall("runs", { workspaceId }).then((current) => {
         if (live && Array.isArray(current.runs)) setMissions(current.runs as AoMission[]);
       }).catch(() => {});
@@ -396,7 +398,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     let disposed = false;
     let reading = false;
     const pollSelection = async () => {
-      if (reading) return;
+      if (reading || pageHidden()) return;
       reading = true;
       let accepted = false;
       try {
@@ -425,7 +427,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     let live = true;
     let reading = false;
     const refresh = async () => {
-      if (reading) return;
+      if (reading || pageHidden()) return;
       reading = true;
       try {
         const status = await moduleCall("run_status", { workspaceId, runId: selectedRunId });
@@ -454,7 +456,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     let live = true;
     let reading = false;
     const refresh = async () => {
-      if (reading) return;
+      if (reading || pageHidden()) return;
       reading = true;
       try {
         const results = await Promise.all(ids.map(async nodeId => ({

@@ -39,7 +39,7 @@ export function modelLabel(model: string): string {
 
 export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string {
   return harnesses.find(item => item.id === harnessId)?.label
-    ?? (harnessId === NATIVE_HARNESS ? "Native Codex" : harnessId.replace(/^ao:/, ""));
+    ?? (harnessId === NATIVE_HARNESS ? "Codex CLI" : harnessId.replace(/^ao:/, ""));
 }
 
 export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam {

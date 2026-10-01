@@ -351,3 +351,39 @@ test("packaged runtime replaces stale files when a release is refreshed under th
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a same-version release whose directory is in use runs beside it, then is promoted once free", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-runtime-busy-"));
+  const resourcesPath = runtimeFixture(root, "0.2.0");
+  const coreHome = path.join(root, "core-home");
+  const app = { isPackaged: true, getVersion: () => "0.2.0" };
+  const rename = fs.renameSync;
+  try {
+    const installed = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    const source = path.join(resourcesPath, "runtime");
+    fs.writeFileSync(path.join(source, "app", "cli.js"), "new cli");
+    writeRuntimeManifest(source);
+
+    // The persistent core still runs from the version directory: Windows refuses to move it.
+    fs.renameSync = function busy(from, to) {
+      if (path.resolve(from) === path.resolve(installed)) throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+      return rename.call(this, from, to);
+    };
+    const beside = ensurePackagedRuntime({ app, coreHome, resourcesPath });
+    assert.notEqual(beside, installed);
+    assert.equal(path.dirname(beside), path.dirname(installed));
+    assert.equal(fs.readFileSync(path.join(beside, "app", "cli.js"), "utf8"), "new cli");
+    assert.notEqual(fs.readFileSync(path.join(installed, "app", "cli.js"), "utf8"), "new cli", "the running release is left untouched");
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), beside, "a busy launch reuses the side bundle without copying again");
+
+    // The core has restarted: the side bundle takes the version directory's place.
+    fs.renameSync = rename;
+    assert.equal(ensurePackagedRuntime({ app, coreHome, resourcesPath }), installed);
+    assert.equal(fs.readFileSync(path.join(installed, "app", "cli.js"), "utf8"), "new cli");
+    assert.equal(fs.existsSync(beside), false);
+    assert.deepEqual(fs.readdirSync(path.dirname(installed)), [path.basename(installed)]);
+  } finally {
+    fs.renameSync = rename;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

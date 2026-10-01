@@ -355,6 +355,29 @@ test("a background account nobody uses is closed when idle; the shown one stays"
   }
 });
 
+test("unclear cases leave both sides alone; a missing refresh time falls back to access-token expiry", () => {
+  const same = "2026-09-05T00:00:00Z";
+  // Same refresh time but different tokens: no safe winner.
+  assert.equal(chooseSyncDirection(
+    fromDesktop(desktopAuthFromCpa(cpaFile({ refresh: "rt-a", lastRefresh: same }))),
+    fromCpa(cpaFile({ refresh: "rt-b", lastRefresh: same })),
+  ), null);
+  // One refresh time missing: the access token that expires later was issued later.
+  const later = fromDesktop(desktopAuthFromCpa(cpaFile({ refresh: "rt-new", access: fakeJwt({ exp: 2_000_000_500 }), lastRefresh: same })));
+  const earlierNoTime = fromCpa(cpaFile({ refresh: "rt-old", access: fakeJwt({ exp: 2_000_000_000 }) }));
+  assert.equal(earlierNoTime.lastRefresh, null);
+  assert.equal(chooseSyncDirection(later, earlierNoTime), "to-cpa");
+  assert.equal(chooseSyncDirection(fromDesktop(desktopAuthFromCpa(cpaFile({ refresh: "rt-old", access: fakeJwt({ exp: 2_000_000_000 }), lastRefresh: same }))),
+    fromCpa(cpaFile({ refresh: "rt-new", access: fakeJwt({ exp: 2_000_000_500 }) }))), "to-desktop");
+  // No readable expiry: a side with a refresh time wins over one without; neither moves nothing.
+  assert.equal(chooseSyncDirection(
+    fromDesktop(desktopAuthFromCpa(cpaFile({ refresh: "rt-a", access: "opaque", lastRefresh: same }))),
+    fromCpa(cpaFile({ refresh: "rt-b", access: "opaque" })),
+  ), "to-cpa");
+  const noTime = (refresh) => { const side = fromCpa(cpaFile({ refresh, access: "opaque" })); assert.equal(side.lastRefresh, null); return side; };
+  assert.equal(chooseSyncDirection(noTime("rt-a"), noTime("rt-b")), null);
+});
+
 // An instance that starts but has not shown its window yet: the helper finds its process
 // (pid) but no window (hwnd 0) until reveal() is called.
 function slowDesktopWorld(root) {
