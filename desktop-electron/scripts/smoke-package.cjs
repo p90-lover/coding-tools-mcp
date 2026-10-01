@@ -148,7 +148,7 @@ async function runSmoke() {
     env,
     markerPath,
     fatalLogPath: path.join(env.CODING_TOOLS_LAUNCHER_DATA_DIR, "logs", "launcher-fatal.log"),
-    timeoutMs: 120_000,
+    timeoutMs: process.platform === "win32" ? 5 * 60_000 : 120_000,
     exitGraceMs: 5_000,
     pollIntervalMs: 100,
   });

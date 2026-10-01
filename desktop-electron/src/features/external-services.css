@@ -1,5 +1,5 @@
 .external-services-surface {
-  height: calc(100vh - var(--titlebar-height));
+  height: calc(100vh - var(--height-titlebar));
   overflow: auto;
   padding: 34px clamp(22px, 4vw, 52px) 72px;
   background:

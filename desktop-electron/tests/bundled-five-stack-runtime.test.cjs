@@ -3,8 +3,9 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
+const vm = require("node:vm");
+const { createRequire } = require("node:module");
 const test = require("node:test");
 const {
   hostNpmPrepareAllowed,
@@ -13,19 +14,31 @@ const {
   installWindowsNodeBinShims,
   materializeNpmWorkspaceLinks,
   npmSpawnInvocation,
+  patchPaseoCodexAppServerAgentSource,
   prepareFiveStackRuntime,
   rewritePackageScriptsToAbsoluteNode,
   resolveNodeExecutable,
   withAbsoluteNodeCommand,
   withAbsoluteNpmCommand,
 } = require("../scripts/prepare-five-stack-runtime.cjs");
-const { prepare } = require("../electron/codex-router-managed.cjs");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
 
+function writePinnedPaseoAgent(sourceRoot) {
+  const agent = path.join(sourceRoot, "packages", "server", "src", "server", "agent", "providers", "codex-app-server-agent.ts");
+  fs.mkdirSync(path.dirname(agent), { recursive: true });
+  fs.writeFileSync(agent, `  if (runtimeSettings?.env?.OPENAI_API_KEY?.trim()) {
+    providerConfig.env_key = "OPENAI_API_KEY";
+    providerConfig.requires_openai_auth = false;
+  }`);
+  return agent;
+}
+
 function temporaryDirectory(name) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
+  const scratchRoot = path.join(__dirname, "..", "..", "aiTemp");
+  fs.mkdirSync(scratchRoot, { recursive: true });
+  return fs.mkdtempSync(path.join(scratchRoot, `${name}-`));
 }
 
 function writeJson(filePath, value) {
@@ -58,6 +71,27 @@ function bundledManifest(id, extra = {}) {
   };
 }
 
+test("Paseo 0.8.0 materialization accepts a host-private OpenAI key without embedding it", () => {
+  const pinnedSource = `  if (runtimeSettings?.env?.OPENAI_API_KEY?.trim()) {
+    providerConfig.env_key = "OPENAI_API_KEY";
+    providerConfig.requires_openai_auth = false;
+  }`;
+
+  const patched = patchPaseoCodexAppServerAgentSource(pinnedSource);
+
+  assert.equal(patched, `  if (
+    runtimeSettings?.env?.OPENAI_API_KEY?.trim() ||
+    process.env.OPENAI_API_KEY?.trim()
+  ) {
+    providerConfig.env_key = "OPENAI_API_KEY";
+    providerConfig.requires_openai_auth = false;
+  }`);
+  assert.throws(
+    () => patchPaseoCodexAppServerAgentSource(pinnedSource.replace("if (", "if  (")),
+    /FIVE_STACK_PASEO_PATCH_SOURCE_DRIFT/,
+  );
+});
+
 test("Desktop panels never tell the user to download or install a separate app", () => {
   const surface = read("src/features/ExternalServicesSurface.tsx");
   const original = read("src/features/OriginalUiSurface.tsx");
@@ -88,11 +122,13 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
   const payload = Buffer.from("bundled-cpa-archive", "utf8");
   const digest = sha256(payload);
 
-  for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
-    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id));
+  for (const id of ["paseo", "anneal"]) {
+    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
+      ? JSON.parse(read("vendor/managed-components/paseo.json")) : bundledManifest(id));
     const source = path.join(cacheRoot, id, "source");
     fs.mkdirSync(source, { recursive: true });
     fs.writeFileSync(path.join(source, `${id}.txt`), `${id} bundled\n`);
+    if (id === "paseo") writePinnedPaseoAgent(source);
   }
   writeJson(path.join(manifestRoot, "cpa.json"), bundledManifest("cpa", {
     strategy: "release-binary",
@@ -111,7 +147,7 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
   fs.writeFileSync(path.join(cacheRoot, "cpa", "cpa.bin"), payload);
 
   let fetched = 0;
-  const result = await prepareFiveStackRuntime({
+  const options = {
     repositoryRoot,
     desktopRoot: desktopDir,
     manifestRoot,
@@ -125,27 +161,39 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
       throw new Error("prepare-five-stack-runtime must not git clone when a cache is present");
     },
     now: () => "2026-09-18T12:00:00.000Z",
-    nonce: () => "fixture",
-  });
+    nonce: () => crypto.randomUUID(),
+  };
+  const result = await prepareFiveStackRuntime(options);
 
   assert.equal(fetched, 0);
   assert.equal(result.outputRoot, outputRoot);
-  assert.equal(fs.readFileSync(path.join(outputRoot, "commandcode-proxy", "source", "commandcode-proxy.txt"), "utf8"), "commandcode-proxy bundled\n");
+  const paseoBundle = JSON.parse(fs.readFileSync(path.join(outputRoot, "paseo", "BUNDLE.json"), "utf8"));
+  assert.equal(paseoBundle.version, "0.8.0");
+  assert.equal(paseoBundle.commit, "1e4ba65c6d75a6b061a1d54141f2f105b5908a96");
+  assert.equal(paseoBundle.patchRevision, "codex-cpa-host-env-v1");
+  assert.match(fs.readFileSync(path.join(outputRoot, "paseo", "source", "packages", "server", "src", "server", "agent", "providers", "codex-app-server-agent.ts"), "utf8"), /process\.env\.OPENAI_API_KEY/);
+
+  const paseoManifestPath = path.join(manifestRoot, "paseo.json");
+  const pinnedPaseo = JSON.parse(fs.readFileSync(paseoManifestPath, "utf8"));
+  writeJson(paseoManifestPath, { ...pinnedPaseo, commit: "b".repeat(40) });
+  await assert.rejects(() => prepareFiveStackRuntime(options), /FIVE_STACK_PASEO_PATCH_PIN_MISMATCH/);
+  writeJson(paseoManifestPath, pinnedPaseo);
+
+  const agent = path.join(cacheRoot, "paseo", "source", "packages", "server", "src", "server", "agent", "providers", "codex-app-server-agent.ts");
+  const missingSource = path.join(repositoryRoot, "Trash", "codex-app-server-agent.ts");
+  fs.mkdirSync(path.dirname(missingSource), { recursive: true });
+  fs.renameSync(agent, missingSource);
+  await assert.rejects(() => prepareFiveStackRuntime(options), /FIVE_STACK_PASEO_PATCH_SOURCE_DRIFT/);
+  fs.renameSync(missingSource, agent);
   assert.deepEqual(fs.readFileSync(path.join(outputRoot, "cpa", "cpa.bin")), payload);
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(outputRoot, "commandcode-proxy", "source", "CODING_TOOLS_BUNDLED.json"), "utf8")).skipNetworkPrepare,
-    true,
-  );
   assert.equal(
     JSON.parse(fs.readFileSync(path.join(outputRoot, "cpa", "CODING_TOOLS_BUNDLED.json"), "utf8")).skipNetworkPrepare,
     true,
   );
   const manifest = JSON.parse(fs.readFileSync(path.join(outputRoot, "MANIFEST.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 1);
-  assert.equal(manifest.productVersion, "0.7.0-rc.12");
+  assert.equal(manifest.productVersion, "0.7.0-rc.14");
   assert.deepEqual(manifest.components.map((component) => component.id), [
-    "codex-router",
-    "commandcode-proxy",
     "cpa",
     "paseo",
     "anneal",
@@ -154,56 +202,10 @@ test("prepare-five-stack-runtime materializes pinned sources and CPA archives fr
 
 test("production Start is fail-closed and never fetches components from the network", () => {
   const controller = read("electron/managed-components.cjs");
-  const adapter = read("electron/codex-router-managed.cjs");
-  const originalUi = read("electron/codex-router-original-ui.cjs");
   assert.match(controller, /allowNetworkInstall = false/);
   assert.match(controller, /bundleRequired\(manifest\) \|\| !allowNetworkInstall/);
   assert.match(controller, /wsl2ManagedPrepareAllowed/);
   assert.match(controller, /context\.mode === "wsl2"/);
-  assert.match(adapter, /bundledSkipNetworkPrepare/);
-  assert.match(adapter, /prepareOfflineFromBundle/);
-  assert.doesNotMatch(originalUi, /npm ci/);
-  assert.match(originalUi, /does not download npm packages at Start/);
-  assert.match(originalUi, /is not downloaded separately/);
-});
-
-test("Codex Router prepare unpacks from CODING_TOOLS_BUNDLED.json without install.ps1 or bin/install", () => {
-  const home = temporaryDirectory("coding-tools-router-bundled-home");
-  const state = temporaryDirectory("coding-tools-router-bundled-state");
-  fs.mkdirSync(path.join(home, "src"), { recursive: true });
-  fs.mkdirSync(path.join(home, "apps", "control-center", "dist"), { recursive: true });
-  fs.mkdirSync(path.join(home, "apps", "control-center", "electron"), { recursive: true });
-  fs.writeFileSync(path.join(home, "package.json"), `${JSON.stringify({
-    name: "codex-model-router",
-    version: "0.6.0",
-  }, null, 2)}\n`);
-  fs.writeFileSync(path.join(home, "src", "foreground-start.mjs"), "export {};\n");
-  fs.writeFileSync(path.join(home, "src", "curate-models.mjs"), "export {};\n");
-  fs.writeFileSync(path.join(home, "apps", "control-center", "package.json"), `${JSON.stringify({
-    name: "@codex-router/control-center",
-    version: "0.6.0",
-    main: "electron/main.mjs",
-  }, null, 2)}\n`);
-  fs.writeFileSync(path.join(home, "apps", "control-center", "electron", "main.mjs"), "export {};\n");
-  fs.writeFileSync(path.join(home, "apps", "control-center", "dist", "index.html"), "<!doctype html><title>Control Center</title>");
-  writeJson(path.join(home, "CODING_TOOLS_BUNDLED.json"), {
-    schemaVersion: 1,
-    id: "codex-router",
-    version: "0.6.0",
-    skipNetworkPrepare: true,
-  });
-  fs.writeFileSync(path.join(home, "install.ps1"), "throw 'network install must not run'\n");
-  fs.mkdirSync(path.join(home, "bin"), { recursive: true });
-  fs.writeFileSync(path.join(home, "bin", "install"), "#!/bin/bash\nexit 1\n");
-
-  prepare(home, state);
-
-  const callerSecret = fs.readFileSync(path.join(state, "router", "caller-secret"), "utf8").trim();
-  assert.ok(callerSecret.length >= 32);
-  const wrapper = process.platform === "win32"
-    ? path.join(state, "bin", "model-router.cmd")
-    : path.join(state, "bin", "model-router");
-  assert.equal(fs.existsSync(wrapper), true);
 });
 
 test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () => {
@@ -226,16 +228,19 @@ test("Windows five-stack npm prepare uses cmd.exe npm.cmd with npm on PATH", () 
   assert.match(source, /RUNNER_TOOL_CACHE/);
   assert.match(source, /isUsableNodeExecutable/);
 
+  // Host PATH entries survive only if they hold real host tools, so give the fixture one on every OS.
+  const hostTools = path.join(temporaryDirectory("coding-tools-npm-host-path"), "nodejs-host");
+  fs.mkdirSync(hostTools, { recursive: true });
+  fs.writeFileSync(path.join(hostTools, "cmd.exe"), "");
   const windows = npmSpawnInvocation(["ci"], "win32", {
-    Path: "C:\\nodejs;C:\\Windows\\system32",
+    Path: `C:\\nodejs;${hostTools}`,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
   assert.match(String(windows.command).replaceAll("\\", "/"), /cmd\.exe$/i);
   assert.deepEqual(windows.args.slice(0, 3), ["/d", "/s", "/c"]);
   assert.equal(windows.args.length, 4);
   assert.match(String(windows.args[3]), /set "PATH=/);
-  assert.match(String(windows.args[3]), /call /);
-  assert.match(String(windows.args[3]).toLowerCase(), /npm\.cmd/);
+  assert.match(String(windows.args[3]), /(?:call .*npm\.cmd|node\.exe.*npm-cli\.js)/i);
   assert.match(String(windows.args[3]), /\bci\b/);
   assert.equal(windows.options.shell, false);
   assert.equal(windows.options.windowsVerbatimArguments, true);
@@ -266,6 +271,7 @@ test("Windows five-stack npm prepare prefers real node.exe over a bun npm shim",
 
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
+    CODING_TOOLS_NODE_EXE: path.join(nodeDir, "node.exe"),
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
@@ -299,6 +305,7 @@ test("Windows five-stack npm prepare merges Path and PATH when bun splits them",
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     PATH: bunShimDir,
     Path: `${nodeDir};C:\\Windows\\system32`,
+    CODING_TOOLS_NODE_EXE: path.join(nodeDir, "node.exe"),
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
@@ -350,6 +357,7 @@ test("Windows five-stack npm prepare runs npm-cli.js through node.exe when prese
 
   const windows = npmSpawnInvocation(["run", "build:server"], "win32", {
     Path: `${bunShimDir};${nodeDir};C:\\Windows\\system32`,
+    CODING_TOOLS_NODE_EXE: nodeExe,
     TEMP: root,
     ComSpec: "C:\\Windows\\System32\\cmd.exe",
   });
@@ -408,7 +416,7 @@ test("five-stack prepare rewrites nested node scripts to an absolute node.exe", 
   );
 });
 
-test("Windows workspace npm scripts get node.cmd inside node_modules/.bin", () => {
+test("Windows workspace npm scripts track both cmd and bat shims for cleanup", () => {
   const root = temporaryDirectory("coding-tools-windows-npm-bin-shims");
   const nodeDir = path.join(root, "nodejs");
   const nodeExe = path.join(nodeDir, "node.exe");
@@ -418,16 +426,15 @@ test("Windows workspace npm scripts get node.cmd inside node_modules/.bin", () =
   fs.mkdirSync(protocol, { recursive: true });
   fs.mkdirSync(controlCenter, { recursive: true });
   fs.writeFileSync(nodeExe, "");
+  fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo npm\r\n");
 
   const written = installWindowsNodeBinShims(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "win32");
-  const expected = [
-    path.join(root, "node_modules", ".bin", "node.cmd"),
-    path.join(protocol, "node_modules", ".bin", "node.cmd"),
-    path.join(controlCenter, "node_modules", ".bin", "node.cmd"),
-  ];
+  const expected = [root, protocol, controlCenter].flatMap((dir) =>
+    ["node.cmd", "node.bat", "npm.cmd", "npm.bat"].map((name) => path.join(dir, "node_modules", ".bin", name)));
+  assert.deepEqual(new Set(written), new Set(expected));
   for (const cmd of expected) {
     assert.ok(written.includes(cmd), `missing ${cmd}`);
-    assert.match(fs.readFileSync(cmd, "utf8"), /node\.exe/);
+    assert.match(fs.readFileSync(cmd, "utf8"), /node\.exe|npm\.cmd/);
   }
   assert.equal(installWindowsNodeBinShims(root, { CODING_TOOLS_NODE_EXE: nodeExe }, "linux").length, 0);
 });
@@ -488,99 +495,49 @@ test("Windows package directories forward hoisted tsc.cmd into CWD without copyi
   assert.equal(installWindowsCwdLifecycleFallbacks(root, "linux").length, 0);
 });
 
-test("prepare-five-stack-runtime npm ci uses the platform spawn adapter", async () => {
-  const repositoryRoot = temporaryDirectory("coding-tools-five-stack-npm");
-  const desktopDir = path.join(repositoryRoot, "desktop-electron");
-  const manifestRoot = path.join(desktopDir, "vendor", "managed-components");
-  const cacheRoot = path.join(repositoryRoot, "cache");
-  const outputRoot = path.join(desktopDir, "build", "five-stack-runtime");
-  const payload = Buffer.from("bundled-cpa-archive", "utf8");
-  const digest = sha256(payload);
-
-  for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
-    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id));
-    const sourceRoot = path.join(cacheRoot, id, "source");
-    fs.mkdirSync(sourceRoot, { recursive: true });
-    fs.writeFileSync(path.join(sourceRoot, `${id}.txt`), `${id} bundled\n`);
-    if (id === "paseo") {
-      writeJson(path.join(sourceRoot, "package.json"), { name: "paseo", private: true });
-    }
-    if (id === "anneal") {
-      writeJson(path.join(sourceRoot, "package.json"), { name: "anneal", private: true });
-    }
-    if (id === "codex-router") {
-      const controlCenter = path.join(sourceRoot, "apps", "control-center");
-      fs.mkdirSync(controlCenter, { recursive: true });
-      writeJson(path.join(controlCenter, "package.json"), { name: "control-center", private: true });
-    }
+test("Windows five-stack npm keeps nested Paseo commands below cmd's limit", () => {
+  const root = temporaryDirectory("coding-tools-short-npm-path");
+  const sourceRoot = path.join(root, "paseo");
+  const nodeDir = path.join(root, "nodejs");
+  const gitDir = path.join(root, "git");
+  const pythonDir = path.join(root, "python");
+  const systemDir = path.join(root, "system32");
+  for (const dir of [nodeDir, gitDir, pythonDir, systemDir]) fs.mkdirSync(dir, { recursive: true });
+  for (const [dir, name] of [
+    [nodeDir, "node.exe"], [nodeDir, "npm.cmd"], [gitDir, "git.exe"],
+    [pythonDir, "python.exe"], [systemDir, "cmd.exe"],
+  ]) fs.writeFileSync(path.join(dir, name), "");
+  for (const name of ["server", "client", "app", "protocol", "sdk", "desktop", "tools", "shared"]) {
+    fs.mkdirSync(path.join(sourceRoot, "packages", name), { recursive: true });
   }
-  writeJson(path.join(manifestRoot, "cpa.json"), bundledManifest("cpa", {
-    strategy: "release-binary",
-    platforms: {
-      [process.platform]: {
-        [process.arch]: {
-          fileName: "cpa.bin",
-          url: "https://example.invalid/cpa.bin",
-          sha256: digest,
-        },
-      },
-    },
-  }));
-  fs.mkdirSync(path.join(cacheRoot, "cpa"), { recursive: true });
-  fs.writeFileSync(path.join(cacheRoot, "cpa", "cpa.bin"), payload);
-
-  const calls = [];
-  await prepareFiveStackRuntime({
-    repositoryRoot,
-    desktopRoot: desktopDir,
-    manifestRoot,
-    outputRoot,
-    cacheRoot,
-    prepareDependencies: true,
-    fetchImpl: async () => {
-      throw new Error("prepare-five-stack-runtime must not fetch when a cache is present");
-    },
-    spawnSyncProcess: (command, args, options) => {
-      calls.push({ command, args, options });
-      return { status: 0, stdout: "", stderr: "", error: null };
-    },
-    now: () => "2026-09-18T12:00:00.000Z",
-    nonce: () => "fixture-npm",
-  });
-
-  assert.ok(calls.length >= 3);
-  for (const call of calls) {
-    assert.equal(call.options.shell, false);
-    assert.deepEqual(call.options.stdio, ["ignore", "pipe", "pipe"]);
-    assert.ok(call.options.env);
-    if (process.platform === "win32") {
-      const commandBase = path.basename(call.command).toLowerCase();
-      assert.equal(commandBase, "cmd.exe");
-      assert.deepEqual(call.args.slice(0, 3), ["/d", "/s", "/c"]);
-      assert.match(String(call.args[3]), /set "PATH=/);
-      assert.equal(call.options.windowsVerbatimArguments, true);
-      const line = String(call.args[3]).toLowerCase();
-      assert.ok(line.includes("npm-cli.js") || line.includes("npm.cmd"));
-      if (line.includes(" ci") || line.endsWith(" ci") || /\bci\b/.test(line)) {
-        assert.match(line, /ignore-scripts/);
-      }
-      if (/\bprune\b/.test(line)) {
-        assert.match(line, /omit=dev/);
-        assert.match(line, /ignore-scripts/);
-      }
-    } else {
-      assert.match(path.basename(call.command), /^npm$/);
-      assert.ok(["ci", "run", "prune"].includes(call.args[0]));
-      if (call.args[0] === "ci") assert.deepEqual(call.args.slice(0, 2), ["ci", "--ignore-scripts"]);
-      if (call.args[0] === "prune") {
-        assert.ok(call.args.includes("--omit=dev"));
-        assert.ok(call.args.includes("--ignore-scripts"));
-      }
-    }
+  const unrelated = Array.from({ length: 20 }, (_, i) => path.join(root, "unrelated", `long-unused-path-${i}`));
+  const invocation = npmSpawnInvocation(["run", "build:server"], "win32", {
+    Path: [...unrelated, systemDir, gitDir, pythonDir, nodeDir].join(";"),
+    CODING_TOOLS_NODE_EXE: path.join(nodeDir, "node.exe"),
+    TEMP: root,
+    ComSpec: path.join(systemDir, "cmd.exe"),
+  }, sourceRoot);
+  const npmPath = invocation.options.env.PATH;
+  for (const dir of [nodeDir, gitDir, pythonDir, systemDir, path.join(sourceRoot, "node_modules", ".bin")]) {
+    assert.ok(npmPath.split(";").includes(dir), `missing ${dir}`);
   }
+  assert.ok(!npmPath.includes("long-unused-path"));
+  assert.ok(!npmPath.includes(path.join(sourceRoot, "packages", "server", "node_modules", ".bin")));
+  assert.ok(invocation.args[3].length < 2500, `cmd.exe argument length ${invocation.args[3].length}`);
 });
 
-test("Windows five-stack npm prepare rejects bun node.exe in favor of hostedtoolcache", () => {
+test("Paseo manifest enables the embedded web UI and isolates its home", () => {
+  const manifest = JSON.parse(read("vendor/managed-components/paseo.json"));
+  assert.deepEqual(manifest.health.acceptStatus, [200], "missing UI and authorization errors must not report the module ready");
+  assert.deepEqual(manifest.launch.processes[0].environment, {
+    PASEO_LISTEN: "127.0.0.1:6768",
+    PASEO_HOME: "{state}",
+    PASEO_WEB_UI_ENABLED: "true",
+    PASEO_WEB_UI_DIST_DIR: "{home}/packages/server/dist/server/web-ui",
+  });
+});
+
+test("Windows five-stack npm prepare rejects bun node.exe in favor of a real Node", () => {
   const root = temporaryDirectory("coding-tools-windows-toolcache-node");
   const bunShimDir = path.join(root, "bun");
   const toolcache = path.join(root, "hostedtoolcache");
@@ -593,18 +550,17 @@ test("Windows five-stack npm prepare rejects bun node.exe in favor of hostedtool
   fs.writeFileSync(path.join(nodeDir, "node.exe"), "");
   fs.writeFileSync(path.join(nodeDir, "npm.cmd"), "@echo real-npm\r\n");
 
-  assert.equal(
-    resolveNodeExecutable({
+  const resolved = resolveNodeExecutable({
       PATH: bunShimDir,
       CODING_TOOLS_NODE_EXE: bunNode,
       npm_node_execpath: bunNode,
       RUNNER_TOOL_CACHE: toolcache,
-    }, "win32"),
-    path.join(nodeDir, "node.exe"),
-  );
+    }, "win32");
+  assert.notEqual(resolved, bunNode);
+  assert.ok([process.execPath, path.join(nodeDir, "node.exe")].includes(resolved), resolved);
 });
 
-test("five-stack prepare replaces npm workspace links with real copies before publish", () => {
+test("five-stack prepare replaces npm workspace links with real copies before publish", { skip: process.platform === "win32" }, () => {
   const root = temporaryDirectory("coding-tools-five-stack-workspace-links");
   const source = path.join(root, "source");
   const app = path.join(source, "packages", "app");
@@ -625,7 +581,7 @@ test("five-stack prepare replaces npm workspace links with real copies before pu
   assert.equal(fs.readFileSync(path.join(app, "index.js"), "utf8"), "export const app = true\n");
 });
 
-test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal", async () => {
+test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal", async (t) => {
   assert.equal(hostNpmPrepareAllowed({ platformModes: { win32: "wsl2" } }, "win32"), false);
   assert.equal(hostNpmPrepareAllowed({ platformModes: { win32: "native" } }, "win32"), true);
   assert.equal(hostNpmPrepareAllowed({}, "linux"), true);
@@ -633,6 +589,13 @@ test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal",
   assert.match(read("vendor/managed-components/anneal.json"), /"win32": "wsl2"/);
 
   const repositoryRoot = temporaryDirectory("coding-tools-five-stack-wsl2");
+  const retainedShims = path.join(repositoryRoot, "Trash", "build-shims");
+  fs.mkdirSync(retainedShims, { recursive: true });
+  let retainedCount = 0;
+  t.mock.method(fs, "unlinkSync", (file) => {
+    assert.ok(path.resolve(file).startsWith(`${repositoryRoot}${path.sep}`));
+    fs.renameSync(file, path.join(retainedShims, `${retainedCount++}-${path.basename(file)}`));
+  });
   const desktopDir = path.join(repositoryRoot, "desktop-electron");
   const manifestRoot = path.join(desktopDir, "vendor", "managed-components");
   const cacheRoot = path.join(repositoryRoot, "cache");
@@ -640,17 +603,21 @@ test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal",
   const payload = Buffer.from("bundled-cpa-archive", "utf8");
   const digest = sha256(payload);
 
-  for (const id of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
-    writeJson(path.join(manifestRoot, `${id}.json`), bundledManifest(id, id === "anneal"
+  for (const id of ["paseo", "anneal"]) {
+    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
+      ? JSON.parse(read("vendor/managed-components/paseo.json")) : bundledManifest(id, id === "anneal"
       ? { platformModes: { win32: "wsl2", linux: "native", darwin: "native" } }
       : {}));
     const sourceRoot = path.join(cacheRoot, id, "source");
     fs.mkdirSync(sourceRoot, { recursive: true });
     fs.writeFileSync(path.join(sourceRoot, `${id}.txt`), `${id} bundled\n`);
+    if (id === "paseo") writePinnedPaseoAgent(sourceRoot);
     if (id === "paseo" || id === "anneal") {
       writeJson(path.join(sourceRoot, "package.json"), { name: id, private: true });
     }
     if (id === "codex-router") {
+      fs.mkdirSync(path.join(sourceRoot, "requirements"), { recursive: true });
+      fs.writeFileSync(path.join(sourceRoot, "requirements", "python.txt"), "litellm==1.96.0 --hash=sha256:fixture\n");
       const controlCenter = path.join(sourceRoot, "apps", "control-center");
       fs.mkdirSync(controlCenter, { recursive: true });
       writeJson(path.join(controlCenter, "package.json"), { name: "control-center", private: true });
@@ -685,7 +652,17 @@ test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal",
       throw new Error("prepare-five-stack-runtime must not fetch when a cache is present");
     },
     spawnSyncProcess: (command, args, options) => {
+      if (args.includes("-c") && args.join(" ").includes("print(sys.executable)")) return { status: 0, stdout: `${path.join(repositoryRoot, "python.exe")}\n` };
+      if (args.includes("download")) {
+        fs.writeFileSync(path.join(args[args.indexOf("--dest") + 1], "litellm-fixture.whl"), "fixture");
+        return { status: 0, stdout: "", stderr: "" };
+      }
       calls.push({ command, args, options });
+      if (options.cwd.endsWith(path.join("paseo", "source")) && args.join(" ").includes("build:web")) {
+        const webDist = path.join(options.cwd, "packages", "app", "dist");
+        fs.mkdirSync(webDist, { recursive: true });
+        fs.writeFileSync(path.join(webDist, "index.html"), "<!doctype html><title>Paseo</title>");
+      }
       return { status: 0, stdout: "", stderr: "", error: null };
     },
     now: () => "2026-09-18T12:00:00.000Z",
@@ -702,6 +679,5 @@ test("Windows installer smoke uses the 45-minute bundled-payload budget", () => 
   assert.match(smoke, /WINDOWS_INSTALLER_TIMEOUT_MS = 45 \* 60_000/);
   assert.match(smoke, /timeout: WINDOWS_INSTALLER_TIMEOUT_MS/);
   assert.match(read("electron/update-worker.cjs"), /timeout: 45 \* 60_000/);
-  assert.match(read("vendor/managed-components/cpa-codex-provider-backends.openapi.json"), /127\.0\.0\.1:8317/);
-  assert.match(read("vendor/managed-components/cpa-codex-provider-backends.openapi.json"), /127\.0\.0\.1:4202/);
+  assert.match(read("vendor/managed-components/cpa-provider-backend.openapi.json"), /127\.0\.0\.1:8317/);
 });

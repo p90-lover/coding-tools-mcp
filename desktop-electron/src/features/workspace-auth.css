@@ -1,0 +1,75 @@
+.workspace-auth-form {
+  display: grid;
+  gap: 14px;
+  max-width: 720px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.workspace-auth-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.workspace-auth-form input,
+.workspace-auth-form select,
+.workspace-auth-form textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  background: var(--color-background-control);
+  color: var(--color-text-primary);
+}
+
+.workspace-auth-form textarea {
+  resize: vertical;
+  font-family: var(--font-mono);
+}
+
+.workspace-auth-path,
+.workspace-auth-endpoint {
+  color: var(--color-text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.workspace-auth-form .workspace-auth-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.workspace-auth-check input {
+  width: 16px;
+  min-height: 16px;
+}
+
+.workspace-listener {
+  display: grid;
+  gap: 8px;
+  padding: 14px 0;
+  border-top: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.workspace-listener strong {
+  color: var(--color-text-primary);
+  font-size: 12px;
+}
+
+.workspace-listener p {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.workspace-auth-note {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+}

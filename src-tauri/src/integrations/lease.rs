@@ -1,4 +1,4 @@
-//! Durable keep-alive leases for Paseo, Anneal and CommandCode Proxy.
+//! Durable keep-alive leases for Paseo and Anneal; retired credentials are retained in saved data.
 use super::{err, now};
 use crate::error::AppResult;
 use serde::{Deserialize, Serialize};
@@ -81,23 +81,6 @@ pub struct IntegrationLeases {
     pub anneal: IntegrationLease,
     #[serde(default)]
     pub commandcode: IntegrationLease,
-}
-
-impl IntegrationLeases {
-    pub fn get(&self, key: &str) -> &IntegrationLease {
-        match key {
-            "paseo" => &self.paseo,
-            "anneal" => &self.anneal,
-            _ => &self.commandcode,
-        }
-    }
-    pub fn get_mut(&mut self, key: &str) -> &mut IntegrationLease {
-        match key {
-            "paseo" => &mut self.paseo,
-            "anneal" => &mut self.anneal,
-            _ => &mut self.commandcode,
-        }
-    }
 }
 
 pub fn backoff_delay(attempts: u32) -> Duration {

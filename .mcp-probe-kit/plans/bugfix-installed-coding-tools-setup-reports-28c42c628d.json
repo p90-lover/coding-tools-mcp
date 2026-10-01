@@ -1,0 +1,445 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "bugfix-installed-coding-tools-setup-reports-28c42c628d",
+  "plan": {
+    "planId": "bugfix-installed-coding-tools-setup-reports-28c42c628d",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "bugfix",
+    "workflowVersion": "4.0.0",
+    "objective": "定位真因并修复 Bug：Installed Coding Tools Setup reports Codex model catalog loading failed: HTTP 502 transport after launcher reached; ChatGPT sign-in and smoke test green.",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：如果旧项目没有 graph-insights/latest.*，先补齐图谱初始化再进入 bug 收敛",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "src8-1",
+        "action": "SRC-1 明确差距（PLAN）：写清理想行为、实际行为、可观察 gap；禁止只有情绪无差距",
+        "outputs": [
+          "BugAnalysis.tbp.phenomenon",
+          "BugAnalysis.summary"
+        ],
+        "note": "写入 structuredContent.bugfixInput.phenomenon；反模式：「坏了/卡了」",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.tbp.phenomenon",
+          "BugAnalysis.summary"
+        ]
+      },
+      {
+        "id": "src8-2",
+        "tool": "code_insight",
+        "when": "边界/调用链不清，或需收敛影响面",
+        "args": {
+          "mode": "auto",
+          "query": "Installed Coding Tools Setup reports Codex model catalog loading failed: HTTP 502 transport after launcher reached; ChatGPT sign-in and smoke test green.",
+          "project_root": "C:\\Users\\simon\\Documents\\ChatGPT\\coding-tools-mcp"
+        },
+        "outputs": [
+          "BugAnalysis.tbp.boundary",
+          "BugAnalysis.tbp.timeline"
+        ],
+        "dependsOn": [
+          "src8-1"
+        ],
+        "note": "图谱缺失时先执行 init_project_context；再读本步输出收敛边界",
+        "type": "tool",
+        "expectedOutputs": [
+          "BugAnalysis.tbp.boundary",
+          "BugAnalysis.tbp.timeline"
+        ]
+      },
+      {
+        "id": "src8-3",
+        "action": "SRC-3 验收契约（PLAN）：定义 SMART 验收（failing test 变绿 / repro 命令 / 明确手动步骤）",
+        "outputs": [
+          "BugAnalysis.testPlan"
+        ],
+        "dependsOn": [
+          "src8-1"
+        ],
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.testPlan"
+        ]
+      },
+      {
+        "id": "src8-4",
+        "action": "SRC-4 把握真因（PLAN）：按 rootCauseWorksheet 完成 4a~4e，输出 rootCauseAnalysis 与因果句",
+        "outputs": [
+          "rootCauseAnalysis",
+          "BugAnalysis.rootCause",
+          "BugAnalysis.tbp.rootCauseStatement",
+          "BugAnalysis.tbp.ruledOut"
+        ],
+        "dependsOn": [
+          "src8-1",
+          "src8-2",
+          "src8-3"
+        ],
+        "note": "硬门禁：本步闭合前禁止改代码；见 structuredContent.rootCauseWorksheet",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "rootCauseAnalysis",
+          "BugAnalysis.rootCause",
+          "BugAnalysis.tbp.rootCauseStatement",
+          "BugAnalysis.tbp.ruledOut"
+        ]
+      },
+      {
+        "id": "src8-5",
+        "action": "SRC-5 制定对策（PLAN）：最小 patch，评估有效性/可行性/回归风险",
+        "outputs": [
+          "BugAnalysis.fixPlan",
+          "BugAnalysis.tbp.repair"
+        ],
+        "dependsOn": [
+          "src8-4"
+        ],
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.fixPlan",
+          "BugAnalysis.tbp.repair"
+        ]
+      },
+      {
+        "id": "src8-6",
+        "action": "SRC-6 贯彻修复（DO）：复现门禁通过后改代码，改动仅限 Bug 范围",
+        "when": "rootCauseWorksheet 已闭合且复现/failing test 已就绪",
+        "outputs": [
+          "BugAnalysis.affectedFiles",
+          "代码补丁"
+        ],
+        "dependsOn": [
+          "src8-5"
+        ],
+        "note": "三次修复仍失败 → 回 src8-2 或 src8-4，不得盲试",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "BugAnalysis.affectedFiles",
+          "代码补丁"
+        ]
+      },
+      {
+        "id": "src8-7",
+        "tool": "gentest",
+        "when": "SRC-6 代码已修改",
+        "args": {
+          "code": "[修复后的代码]",
+          "framework": "[按项目上下文选择 vitest/jest/mocha]",
+          "project_root": "C:\\Users\\simon\\Documents\\ChatGPT\\coding-tools-mcp"
+        },
+        "outputs": [
+          "回归测试代码"
+        ],
+        "dependsOn": [
+          "src8-6"
+        ],
+        "note": "SRC-7 评价双轨（结果轨）：对照 Step 3 验收契约",
+        "type": "tool",
+        "expectedOutputs": [
+          "回归测试代码"
+        ]
+      },
+      {
+        "id": "src8-8",
+        "action": "SRC-8 巩固传播（ACT）：准备成功/失败/证伪/回归记忆候选",
+        "when": "验证通过",
+        "args": {
+          "type": "[bugfix | failed_approach | false_root_cause | regression_case]",
+          "tags": "[bugfix,root-cause 或 negative-memory]",
+          "summary": "[关键词] Installed Coding Tools Setup reports Codex model catalog loading failed: HTTP 50",
+          "content": "【现象】【根因】【修复】【验证】",
+          "evidence": [
+            "[测试、日志、反例或监控证据]"
+          ],
+          "applicability": "[适用条件、边界和不适用场景]"
+        },
+        "outputs": [
+          "待收敛的 MemoryCandidate"
+        ],
+        "dependsOn": [
+          "src8-7"
+        ],
+        "note": "只准备候选并写入 plan_heartbeat 证据；converge passed=true 后再调用 memorize_asset；候选面向跨仓库共享：勿填 source_project/source_path；name/summary 抽象化，路径仅放 content 末尾【来源参考】",
+        "type": "agent_action",
+        "expectedOutputs": [
+          "待收敛的 MemoryCandidate"
+        ]
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "未完成 SRC-8 真因收敛前不得直接实施猜测性修复",
+      "Agent 必须使用宿主能力完成真实代码修改和测试执行",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "修复完成必须包含回归验证与防复发措施",
+      "历史记忆仅作为候选证据，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "真因能够解释全部关键现象并排除主要竞争假设",
+      "修复方案作用于原因层而不是仅隐藏症状",
+      "回归测试与关联规格闸门通过",
+      "可复用的成功或失败经验已评估是否沉淀",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "analysisMode": "src8"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "converged",
+  "completedStepIds": [
+    "context",
+    "src8-1",
+    "src8-2",
+    "src8-3",
+    "src8-4",
+    "src8-5",
+    "src8-6",
+    "src8-7",
+    "src8-8"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "Observed Setup catalog HTTP 502 transport while sign-in and smoke test rows are green.",
+      "stepId": "context",
+      "verifiedAt": "2026-09-28T09:59:39.881Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "Setup screenshot: catalog load HTTP 502 transport; sign-in and smoke test green.",
+      "stepId": "src8-1",
+      "verifiedAt": "2026-09-28T10:00:12.387Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Read AGENTS.md and docs/project-context.md; graph-insights/latest.md exists but is dated 2026-07-13 and explicitly stale.",
+      "stepId": "context",
+      "reference": "docs/graph-insights/latest.md",
+      "verifiedAt": "2026-09-28T10:00:12.387Z"
+    },
+    {
+      "kind": "requirements",
+      "summary": "Expected: Codex GET /backend-api/codex/models returns augmented catalog and successful_model_catalog_requests increments. Actual: installed Setup observed HTTP 502 classified transport while browser login and smoke test pass.",
+      "stepId": "src8-1",
+      "reference": "desktop-electron/electron/main.cjs:326-345; runtime-web/src/server.ts:390-425",
+      "verifiedAt": "2026-09-28T10:05:37.633Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Source trace: modelsRequest calls forwardNativeCodexRequest; after dispatch starts, a thrown fetch is classified transport and returned as HTTP 502.",
+      "stepId": "src8-2",
+      "reference": "runtime-web/src/server.ts:399-406; runtime-web/src/native-network.ts:33-54",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Historical installed daemon result request #1 at 2026-09-28T09:49:56.565Z was 502, transport, elapsed 128 ms, with no failure code; launcher logged the toast at 09:50:08.127Z.",
+      "stepId": "src8-2",
+      "reference": "%APPDATA%/Coding Tools/logs/launcher.jsonl",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Current installed loopback /healthz: runtime 5.0.6 PID 48076; 882 catalog requests, 843 successes, latest request #882 HTTP 200 at 2026-09-29T16:10:18.486Z. Launcher logged catalog verified on Sep 29.",
+      "stepId": "src8-3",
+      "reference": "http://127.0.0.1:17841/healthz; %APPDATA%/Coding Tools/logs/launcher.jsonl",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Graph CLI index bound to coding-tools-mcp but status/query hung; code_insight degraded to lexical source evidence.",
+      "stepId": "src8-2",
+      "reference": ".gitnexus; mcp-probe code_insight",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Reproduced live 2026-09-30 02:20-02:40Z: Coding Tools restarted at 02:20:03 while ProxyBridgeRewrite also restarted (PID 6840 -> 7552). browser.navigation_failed ERR_PROXY_CONNECTION_FAILED at 02:20:55; the relay logged browser.native_fetch_failed netError=ERR_PROXY_CONNECTION_FAILED at 02:21:02, 02:25:37, 02:30:12, 02:34:47, 02:36:33; the fresh daemon (pid 14580) recorded catalog requests #1-#19 as 502 (stage upstream when the relay answered 502 native_network_error; stage transport when the fetch to the relay was aborted at ~5 s or reset).",
+      "stepId": "src8-4",
+      "reference": "%APPDATA%/Coding Tools/logs/launcher.jsonl",
+      "verifiedAt": "2026-09-30T02:45:44.000Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Recovery without any code change: /healthz at 02:45:44Z shows pid 14580, 24 catalog requests, 5 successful, last #24 HTTP 200 at 02:45:38Z; curl through 127.0.0.1:17891 exits loc=US.",
+      "stepId": "src8-4",
+      "reference": "http://127.0.0.1:17841/healthz",
+      "verifiedAt": "2026-09-30T02:45:44.000Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Mechanism: startCatalogVerificationMonitor publishes the FIRST failed catalog result of a daemon with successful_model_catalog_requests < 1 as publishOperation({name: catalog-verification, status: failed}). When a later request succeeds it sets codexCatalogVerified but never publishes a replacement operation, so lastOperation stays failed; App.tsx re-raises any failed snapshot.operation as an error banner on every renderer load.",
+      "stepId": "src8-4",
+      "reference": "desktop-electron/electron/main.cjs startCatalogVerificationMonitor; desktop-electron/src/App.tsx snapshot effect",
+      "verifiedAt": "2026-09-30T02:50:00.000Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Root cause: because the catalog monitor reports the first failed catalog request of a fresh daemon as a final failure and never clears it once a later request succeeds, a transient outage of the launcher's route to chatgpt.com at startup (ProxyBridge restarting -> ERR_PROXY_CONNECTION_FAILED, or the relay endpoint changing across a launcher restart -> transport) leaves Setup reporting 'model catalog loading failed: HTTP 502' even after the catalog loads and sign-in/smoke pass. Ruled out: catalog augmentation/parsing (same code returns 200 once the route is up); ChatGPT sign-in path (green throughout); the 2026-09-30 control-server change (relay failed before headers with a net error, not a stream error).",
+      "stepId": "src8-4",
+      "reference": "rootCauseAnalysis",
+      "verifiedAt": "2026-09-30T02:50:00.000Z"
+    },
+    {
+      "kind": "other",
+      "summary": "Countermeasure chosen: when startCatalogVerificationMonitor marks the catalog verified and the last published operation is the catalog-verification failure, publish {name: catalog-verification, status: completed} so the stale failure stops re-raising as an error banner. Effective: removes the misleading Setup failure once any catalog request succeeds. Feasible: one hunk in main.cjs; the installed main.cjs monitor is byte-identical to source. Regression risk: low; only replaces an operation of the same name, never a different running/failed operation. Rejected for now: a startup grace period before reporting (larger change, hides real failures longer). Out of scope: ProxyBridge restarts themselves (external).",
+      "stepId": "src8-5",
+      "reference": "desktop-electron/electron/main.cjs startCatalogVerificationMonitor",
+      "verifiedAt": "2026-09-30T02:55:00.000Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "startCatalogVerificationMonitor publishes {name: catalog-verification, status: completed} when it marks the catalog verified and lastOperation is the catalog-verification failure.",
+      "stepId": "src8-6",
+      "reference": "desktop-electron/electron/main.cjs",
+      "revision": "cc16f6fa",
+      "verifiedAt": "2026-09-30T02:52:58.106Z"
+    },
+    {
+      "kind": "test",
+      "summary": "renderer-wiring 'catalog verification reports a failed request ... then recovers' now asserts the recovery replaces the failure (lastOperation completed). Fails without the fix (expected 2 operations, got 1), passes with it. Full desktop suite: 56 failures before and after, none new.",
+      "stepId": "src8-7",
+      "reference": "node --test desktop-electron/tests/renderer-wiring.test.cjs",
+      "revision": "cc16f6fa",
+      "verifiedAt": "2026-09-30T02:52:58.106Z"
+    },
+    {
+      "kind": "review",
+      "summary": "Reviewed cc16f6fa. Finding: it fixes the stale failure on renderer reload, but a banner already raised in a live session stayed until dismissed because onOperation only ever set errors. Fixed in 88180ff9: a completed operation clears only the error raised by the same operation's earlier failure. Also checked: the completed operation is published only when lastOperation is the catalog-verification failure, so it never replaces a different running or failed operation. renderer-wiring tests pass apart from the pre-existing Agent Orchestrator sidebar failure.",
+      "stepId": "src8-8",
+      "reference": "desktop-electron/src/App.tsx onOperation; desktop-electron/electron/main.cjs startCatalogVerificationMonitor",
+      "revision": "88180ff9",
+      "verifiedAt": "2026-09-30T02:55:52.720Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Correction to the src8-4 evidence: of the model_catalog_failed lines logged 02:20-02:46Z, 1558 were old daemon stderr replayed at startup (inner 'at' hours older than the log time); only 19 were live (#1-#19, 02:21:02-02:37:07), all during browser.native_fetch_failed ERR_PROXY_CONNECTION_FAILED. The 'relay endpoint changing across a launcher restart' path has no live evidence; the root cause rests on the proxy outage alone. The fix does not depend on that path.",
+      "stepId": "src8-4",
+      "reference": "%APPDATA%/Coding Tools/logs/launcher.jsonl (compare outer at vs inner at)",
+      "revision": "88180ff9",
+      "verifiedAt": "2026-09-30T03:13:03.810Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Deployed with the user's approval: installed app.asar now carries the monitor fix in main.cjs (monitor identical to source cc16f6fa) and the renderer from 88180ff9 (bundle index-DR01tDDD.js, sha256 prefix 6240758632d89eab). After the relaunch the fresh daemon pid 50400 reported 2/2 catalog requests HTTP 200 at 03:12:11Z.",
+      "stepId": "src8-8",
+      "reference": "C:/Users/simon/AppData/Local/Programs/Coding Tools/resources/app.asar; http://127.0.0.1:17841/healthz",
+      "revision": "88180ff9",
+      "verifiedAt": "2026-09-30T03:13:03.810Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "analysisMode": "src8"
+  },
+  "artifacts": [],
+  "memoryCandidates": [
+    {
+      "id": "catalog-502-transient-proxy",
+      "summary": "Setup 'model catalog loading failed: HTTP 502 transport/upstream' on the installed app is usually the launcher's route to chatgpt.com being down at daemon start (ProxyBridge restarting -> ERR_PROXY_CONNECTION_FAILED in browser.native_fetch_failed). Check /healthz successful_model_catalog_requests before debugging catalog code.",
+      "status": "validated",
+      "evidence": [
+        "launcher.jsonl 2026-09-30 02:20-02:45Z",
+        "healthz #24 HTTP 200 at 02:45:38Z"
+      ],
+      "payload": {
+        "summary": "Setup 'model catalog loading failed: HTTP 502 transport/upstream' on the installed app is usually the launcher's route to chatgpt.com being down at daemon start (ProxyBridge restarting -> ERR_PROXY_CONNECTION_FAILED in browser.native_fetch_failed). Check /healthz successful_model_catalog_requests before debugging catalog code."
+      },
+      "recordedAt": "2026-09-30T02:52:58.106Z"
+    }
+  ],
+  "architectureCandidates": [],
+  "acceptanceResults": [
+    {
+      "gateId": "failing-test-turns-green",
+      "passed": true,
+      "summary": "Monitor test fails on the pre-fix main.cjs and passes on cc16f6fa.",
+      "reference": "desktop-electron/tests/renderer-wiring.test.cjs",
+      "verifiedAt": "2026-09-30T03:05:00.000Z"
+    },
+    {
+      "gateId": "no-regressions",
+      "passed": true,
+      "summary": "Full desktop-electron suite has the same 56 pre-existing failures with and without the change.",
+      "reference": "node --test desktop-electron/tests/*.test.cjs",
+      "verifiedAt": "2026-09-30T03:05:00.000Z"
+    }
+  ],
+  "runtimeEvidence": [
+    {
+      "kind": "installed-runtime",
+      "summary": "Installed bundle SHA256 4AB002541ECFD6AFD18E4714A79DE379F7C341D6445239C9F695B166D955AE39; latest catalog request #882 HTTP 200.",
+      "reference": "Coding Tools resources/app.asar; /healthz",
+      "verifiedAt": "2026-09-29T16:15:12.771Z"
+    },
+    {
+      "kind": "installed-runtime",
+      "summary": "Installed asar with catalog fix + renderer fix; daemon pid 50400 catalog 2/2 OK at 2026-09-30T03:12:11Z.",
+      "reference": "Coding Tools resources/app.asar; /healthz",
+      "verifiedAt": "2026-09-30T03:12:12.000Z"
+    }
+  ],
+  "lastConvergence": {
+    "checkedAt": "2026-09-30T03:13:09.205Z",
+    "passed": true,
+    "blockers": [],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "requiredQualityGates": [],
+    "missingQualityGates": []
+  },
+  "createdAt": "2026-09-28T09:59:39.881Z",
+  "updatedAt": "2026-09-30T03:13:09.205Z"
+}

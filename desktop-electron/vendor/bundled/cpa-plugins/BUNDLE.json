@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "id": "commandcode-go",
+  "version": "1.0.0-codingtools.1",
+  "source": {
+    "repository": "https://github.com/sperictao/cpa-plugin-commandcode-go",
+    "commit": "444ee977daaa96e6fa6ef5155b14cac3a6f9cdc3",
+    "license": "MIT"
+  },
+  "wireReference": {
+    "repository": "https://github.com/zahidhussaina2l/commandcode-proxy",
+    "commit": "c123a3ebe017415ef45e619600a1110198dea7f8"
+  },
+  "changes": [
+    "CPA auth-provider browser login and auth-file support",
+    "CPA-selected credential per request",
+    "native CPA provider routing instead of authless model-router"
+  ],
+  "build": {
+    "go": "1.26.8",
+    "cCompiler": "Zig 0.16.0",
+    "mode": "c-shared"
+  },
+  "platforms": {
+    "win32/x64": {
+      "path": "windows/amd64/commandcode-go-v1.0.0-codingtools.1.dll",
+      "sha256": "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c",
+      "size": 12664320
+    }
+  },
+  "studio": {
+    "id": "auth-commandcode",
+    "provider": "commandcode",
+    "version": "0.1.0-codingtools.1",
+    "source": {
+      "repository": "https://github.com/UNICKCHENG/cliproxyapi-plugins",
+      "commit": "7ead2c1df31472b9272910e733a94560dfa04815",
+      "license": "MIT"
+    },
+    "changes": [
+      "CPA browser login callback",
+      "Studio label",
+      "CPA 7.3.7 StatusCode host HTTP response"
+    ],
+    "platforms": {
+      "win32/x64": {
+        "path": "windows/amd64/auth-commandcode-v0.1.0-codingtools.1.dll",
+        "sha256": "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc",
+        "size": 14896640
+      }
+    }
+  },
+  "helper": {
+    "id": "cpa-helper",
+    "version": "0.1.0",
+    "source": {
+      "repository": "https://github.com/p90-lover/cpa-helper-plugin",
+      "commit": "1a0724b",
+      "license": "MIT",
+      "upstream": "https://github.com/walkingddd/CPA-Helper"
+    },
+    "changes": [
+      "Rewritten in std-only Rust as a CPA cdylib plugin (no Go/Python runtime)"
+    ],
+    "build": {
+      "rust": "stable",
+      "mode": "cdylib"
+    },
+    "platforms": {
+      "win32/x64": {
+        "path": "windows/amd64/cpa-helper-v0.1.0.dll",
+        "sha256": "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c",
+        "size": 810496
+      }
+    }
+  },
+  "grok": {
+    "id": "grok-login-provider",
+    "provider": "grok",
+    "version": "0.1.0-codingtools.1",
+    "source": {
+      "repository": "https://github.com/chenyme/grok2api",
+      "commit": "7c889a960e2638341b4dae9a5c81af0e0f38c87f",
+      "license": "MIT",
+      "path": "desktop-electron/vendor/cpa-plugins/grok-login-provider"
+    },
+    "changes": [
+      "grok2api Build, Web and Console provider adapters behind the CPA v8 plugin ABI",
+      "xAI OAuth device login and SSO cookie login through a loopback page",
+      "Grok credential import detection for untyped auth files",
+      "grok2api anti-downgrade quality guard as a retryable CPA 503",
+      "SSO to Build conversion sends the consent+jwt with the accounts.x.ai Origin"
+    ],
+    "build": {
+      "go": "1.26.8",
+      "cCompiler": "Zig 0.16.0",
+      "mode": "c-shared"
+    },
+    "platforms": {
+      "win32/x64": {
+        "path": "windows/amd64/grok-login-provider-v0.1.0-codingtools.1.dll",
+        "sha256": "57fbdce4ad770499e604a7d3654bc7b700532e0572c0980ff040818a83117cb7",
+        "size": 24915456
+      }
+    }
+  }
+}

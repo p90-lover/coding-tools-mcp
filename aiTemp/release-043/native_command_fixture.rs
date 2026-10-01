@@ -84,6 +84,7 @@ fn native_043_actual_commands_no_model_and_write_denial() {
             codex_home: home.canonicalize().unwrap(),
             allow_model_usage: false,
             allow_command_execution: true,
+            permission_profile: default_permission_profile(),
             model: "no-model".into(),
             request_limit: 1,
             lifetime_seconds: 120,

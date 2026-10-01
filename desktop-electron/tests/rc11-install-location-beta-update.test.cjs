@@ -56,19 +56,16 @@ test("silent Windows update pins NSIS to the running executable directory", () =
   );
 });
 
-test("a discovered prerelease prompts Install Now or Later before download", () => {
-  assert.match(mainSource, /async function promptForAvailableUpdate\(next, \{ logger, stateStore \}\)/);
-  assert.match(mainSource, /dialog\.showMessageBox\(mainWindow,/);
-  assert.match(mainSource, /buttons:\s*\[copy\.installNow, copy\.later\]/);
-  assert.match(mainSource, /Coding Tools beta update/);
-  assert.match(mainSource, /Coding Tools 測試版更新/);
-  assert.match(mainSource, /void promptForAvailableUpdate\(state, \{ logger, stateStore \}\)/);
-  assert.doesNotMatch(mainSource, /maybeInstallAutomaticUpdate/);
-
-  const promptStart = mainSource.indexOf("async function promptForAvailableUpdate");
-  const promptCall = mainSource.indexOf("dialog.showMessageBox", promptStart);
-  const installCall = mainSource.indexOf("updateController.beginInstall()", promptStart);
-  assert.ok(promptStart >= 0 && promptCall > promptStart && installCall > promptCall);
+test("desktop GUI updates reload the renderer without the full-installer quit path", () => {
+  assert.match(mainSource, /createGuiUpdateController/);
+  assert.match(mainSource, /reloadRenderer:\s*\(entry\) => mainWindow\.loadFile\(entry\)/);
+  const start = mainSource.indexOf('handle("launcher:update-install"');
+  const end = mainSource.indexOf('handle("launcher:window-state"', start);
+  assert.ok(start >= 0 && end > start);
+  const handler = mainSource.slice(start, end);
+  assert.match(handler, /return updateController\.beginInstall\(\)/);
+  assert.doesNotMatch(handler, /requestQuit|shutdown|restart|cancelInstall/);
+  assert.doesNotMatch(mainSource, /promptForAvailableUpdate|Install and restart/);
 });
 
 test("current prerelease discovery keeps a newer beta eligible", () => {

@@ -111,7 +111,7 @@ npm run desktop
 
 For a live-permission change, prioritize the same-listener HTTP regression, policy atomicity/revocation checks and local tool round trips. For a computer-use change, also run the isolated Windows input/capture fixture. A frontend preview alone does not verify native IPC, authorization or desktop input. Release gates inspect the actual packaged binary, version and bundled license notices and re-download assets for SHA-256 verification.
 
-The source is organized under `src/` (UI), `src-tauri/src/tools/` (shared execution), and `src-tauri/src/mcp/`, `actions/`, `tunnel/`, and `integrations/` for transports, connections and management adapters. `old/` preserves the pinned upstream snapshot. Previous README copies are retained under `aiTemp/Trash/readme-before-live-permissions/` as historical documentation, not current setup guidance.
+The source is organized under `src/` (UI), `src-tauri/src/tools/` (shared execution), and `src-tauri/src/mcp/`, `actions/`, `tunnel/`, and `integrations/` for transports, connections and management adapters. Previous README copies are retained under `aiTemp/Trash/readme-before-live-permissions/` as historical documentation, not current setup guidance.
 
 ## License and attribution
 

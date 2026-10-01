@@ -3,6 +3,7 @@ import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_MODEL_PREFIX,
+  requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -104,7 +105,9 @@ export function buildChatGptWebModel(
   if (!templateSlug || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) {
     throw new Error("ChatGPT Web model template must be a native Codex model");
   }
-  const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+  // A tier the account lacks runs as a lower one; advertise the window that tier really gets.
+  const served = route.interactionMode === "automatic" ? requireChatGptWebModelRoute(route.slug, config) : route;
+  const limits = resolveChatGptWebContextLimits(served.backendModel, served.adapterEffort, config);
   const multiAgentVersion = routedSubagentVersion(template, config);
   const priority = routedModelPriority(template, route, config);
   const model: JsonObject = {

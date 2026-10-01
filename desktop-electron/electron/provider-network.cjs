@@ -1,8 +1,6 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const http = require("node:http");
 const net = require("node:net");
-const os = require("node:os");
 const path = require("node:path");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
@@ -40,9 +38,6 @@ const ANTIGRAVITY_PROVIDER_ID = "cliproxyapi-antigravity";
 const DEFAULT_ANTIGRAVITY_BASE_URL = "http://127.0.0.1:8317";
 const DEFAULT_CPA_BASE_URL = DEFAULT_ANTIGRAVITY_BASE_URL;
 const COMMANDCODE_PROVIDER_ID = "commandcode-proxy";
-const DEFAULT_COMMANDCODE_PROXY_URL = "http://127.0.0.1:9090";
-const COMMANDCODE_API_URL = "https://api.commandcode.ai";
-const COMMANDCODE_LOGIN_URL = "https://commandcode.ai/studio/auth/cli";
 const DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_OAUTH_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_OAUTH_TIMEOUT_MS = 5 * 60_000;
@@ -509,6 +504,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     if (Array.isArray(input.models)) account.models = normalizeModels(input.models).sort();
     if (Object.hasOwn(input, "loginAdapterId")) account.loginAdapterId = optionalText(input.loginAdapterId, 160);
     if (Object.hasOwn(input, "credentialSource")) account.credentialSource = optionalText(input.credentialSource, 64);
+    if (input.credentialSource === "cpa" && (account.providerId === COMMANDCODE_PROVIDER_ID || account.providerId === "commandcode-studio")) account.auth = "oauth";
     account.error = optionalText(input.error, 500);
     account.updatedAt = now;
     if (account.status === "connected") {
@@ -710,12 +706,32 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   };
 }
 
-function proxyUrl(profile) {
+function proxyUrl(profile, credentials = null) {
   if (!profile) return null;
   const host = profile.endpoint.host.includes(":")
     ? `[${profile.endpoint.host.replace(/^\[|\]$/g, "")}]`
     : profile.endpoint.host;
-  return `${profile.endpoint.protocol}://${host}:${profile.endpoint.port}`;
+  const route = `${profile.endpoint.protocol}://${host}:${profile.endpoint.port}`;
+  if (!credentials?.username && !credentials?.password) return route;
+  const parsed = new URL(route);
+  if (parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase() !== host.replace(/^\[|\]$/g, "").toLowerCase()) {
+    throw new Error("Invalid proxy host");
+  }
+  parsed.username = credentials.username || "";
+  parsed.password = credentials.password || "";
+  return parsed.toString();
+}
+
+// A hostname with several addresses fails with an AggregateError whose message is empty;
+// report the per-address codes (for example "EACCES 1.2.3.4") so a blocked or refused
+// proxy is diagnosable from the Network Proxy test.
+function tcpErrorText(error) {
+  if (!(error instanceof Error)) return String(error);
+  const attempts = Array.isArray(error.errors)
+    ? error.errors.map((item) => [item?.code, item?.address].filter(Boolean).join(" ")).filter(Boolean)
+    : [];
+  if (attempts.length) return `Connection failed: ${attempts.join(", ")}`;
+  return error.message || error.code || "Connection failed";
 }
 
 function testTcpEndpoint(profile, timeoutMs = 7_000) {
@@ -732,10 +748,7 @@ function testTcpEndpoint(profile, timeoutMs = 7_000) {
     socket.setTimeout(timeoutMs);
     socket.once("connect", () => finish({ reachable: true, latencyMs: Date.now() - started }));
     socket.once("timeout", () => finish({ reachable: false, error: "Connection timed out" }));
-    socket.once("error", (error) => finish({
-      reachable: false,
-      error: error instanceof Error ? error.message : String(error),
-    }));
+    socket.once("error", (error) => finish({ reachable: false, error: tcpErrorText(error) }));
   });
 }
 
@@ -824,48 +837,6 @@ function providerModelIds(value) {
   }))].sort().slice(0, 128);
 }
 
-function commandCodeAuthFilePath(homeDirectory = os.homedir()) {
-  return path.join(homeDirectory, ".commandcode", "auth.json");
-}
-
-function commandCodeToken(value) {
-  const roots = [value, value?.auth, value?.data].filter((candidate) => (
-    candidate && typeof candidate === "object"
-  ));
-  for (const root of roots) {
-    for (const key of ["apiKey", "api_key", "token", "credential", "key"]) {
-      const candidate = root[key];
-      if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-    }
-  }
-  return "";
-}
-
-function commandCodeModelIds(value) {
-  const rows = Array.isArray(value)
-    ? value
-    : Array.isArray(value?.data)
-      ? value.data
-      : Array.isArray(value?.models)
-        ? value.models
-        : [];
-  return [...new Set(rows.flatMap((entry) => {
-    const id = typeof entry === "string"
-      ? entry
-      : entry && typeof entry === "object"
-        ? (entry.id ?? entry.name ?? entry.model)
-        : null;
-    return typeof id === "string" && id.trim() ? [id.trim()] : [];
-  }))].sort().slice(0, 128);
-}
-
-function commandCodeIdentity(value) {
-  for (const candidate of [value?.email, value?.user?.email, value?.username, value?.id, value?.user?.id]) {
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-  }
-  return undefined;
-}
-
 function createProviderNetworkController({
   app,
   browserPartition,
@@ -876,7 +847,6 @@ function createProviderNetworkController({
   session,
   shell,
   userData,
-  homeDirectory = os.homedir(),
   fetchImpl = globalThis.fetch,
   sleepImpl = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   oauthPollIntervalMs = DEFAULT_OAUTH_POLL_INTERVAL_MS,
@@ -1016,10 +986,12 @@ function createProviderNetworkController({
     "chatgpt-web": Object.freeze(["native-browser"]),
     "gemini-oauth": Object.freeze(["cpa-gemini"]),
     [ANTIGRAVITY_PROVIDER_ID]: Object.freeze(["cpa-antigravity"]),
-    [COMMANDCODE_PROVIDER_ID]: Object.freeze(["commandcode-oauth"]),
+    [COMMANDCODE_PROVIDER_ID]: Object.freeze(["cpa-commandcode-go"]),
+    "commandcode-studio": Object.freeze(["cpa-commandcode-studio"]),
   });
 
   function defaultLoginAdapter(account) {
+    if (account.loginAdapterId === "commandcode-oauth" && account.providerId === COMMANDCODE_PROVIDER_ID) return "cpa-commandcode-go";
     if (account.loginAdapterId) return account.loginAdapterId;
     if (account.providerId === "codex-oauth") {
       const managed = getCpaConnection?.();
@@ -1301,243 +1273,12 @@ function createProviderNetworkController({
     });
   }
 
-  function commandCodeConnection(account) {
-    const secret = store.accountSecret(account.id) || {};
-    const apiKey = commandCodeToken(secret);
-    if (!apiKey) throw new Error("Login with CommandCode or import ~/.commandcode/auth.json first");
-    const baseUrl = normalizeProviderBaseUrl(
-      account.endpoint || secret.baseUrl || DEFAULT_COMMANDCODE_PROXY_URL,
-    );
-    return { apiKey, baseUrl };
-  }
-
-  function commandCodeHeaders(apiKey) {
-    return {
-      Authorization: `Bearer ${apiKey}`,
-      "User-Agent": "cli",
-      "x-cli-environment": "cli",
-      "x-command-code-version": "coding-tools-rc7",
-    };
-  }
-
-  async function inspectCommandCodeSession(account) {
-    const { apiKey, baseUrl } = commandCodeConnection(account);
-    const headers = commandCodeHeaders(apiKey);
-    const identityPayload = await providerJson(
-      `${COMMANDCODE_API_URL}/alpha/whoami`,
-      { headers, label: "CommandCode session probe" },
-    );
-
-    let models = [];
-    let modelError;
-    try {
-      const catalogue = await providerJson(
-        new URL("/v1/models", `${baseUrl}/`).toString(),
-        { headers, label: "CommandCode reverse-proxy model discovery" },
-      );
-      models = commandCodeModelIds(catalogue);
-    } catch (localError) {
-      try {
-        const catalogue = await providerJson(
-          `${COMMANDCODE_API_URL}/provider/v1/models`,
-          { headers, label: "CommandCode model discovery" },
-        );
-        models = commandCodeModelIds(catalogue);
-      } catch (remoteError) {
-        modelError = remoteError instanceof Error
-          ? remoteError.message
-          : String(remoteError || localError);
-      }
-    }
-
-    return store.updateAccountConnection(account.id, {
-      status: "connected",
-      identity: commandCodeIdentity(identityPayload) ?? account.identity,
-      endpoint: baseUrl,
-      models: models.length > 0 ? models : account.models,
-      error: modelError,
-    });
-  }
-
-  async function importProviderSession(accountId) {
-    const account = accountRecord(accountId);
-    if (account.providerId !== COMMANDCODE_PROVIDER_ID) {
-      throw new Error("Session import is only configured for CommandCode Proxy");
-    }
-    const authPath = commandCodeAuthFilePath(homeDirectory);
-    let stat;
-    try {
-      stat = fs.lstatSync(authPath);
-    } catch {
-      throw new Error(`CommandCode CLI session was not found at ${authPath}`);
-    }
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 64 * 1024) {
-      throw new Error("CommandCode CLI session file is unsafe or invalid");
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(fs.readFileSync(authPath, "utf8"));
-    } catch {
-      throw new Error("CommandCode CLI session file is not valid JSON");
-    }
-    const apiKey = commandCodeToken(parsed);
-    if (!apiKey) throw new Error("CommandCode CLI session does not contain an API key");
-    const baseUrl = account.endpoint || DEFAULT_COMMANDCODE_PROXY_URL;
-    store.saveAccount({
-      ...account,
-      status: "pending",
-      secret: { apiKey, baseUrl },
-    });
-    return inspectCommandCodeSession(accountRecord(account.id));
-  }
-
-  async function commandCodeCallbackPayload(request, callbackBase) {
-    const requestUrl = new URL(request.url || "/", callbackBase);
-    const values = Object.fromEntries(requestUrl.searchParams.entries());
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      const chunks = [];
-      let size = 0;
-      for await (const chunk of request) {
-        size += chunk.length;
-        if (size > 64 * 1024) throw new Error("CommandCode login callback is too large");
-        chunks.push(chunk);
-      }
-      if (chunks.length > 0) {
-        const text = Buffer.concat(chunks).toString("utf8");
-        const contentType = String(request.headers["content-type"] || "").toLowerCase();
-        if (contentType.includes("application/json")) {
-          Object.assign(values, JSON.parse(text));
-        } else {
-          Object.assign(values, Object.fromEntries(new URLSearchParams(text).entries()));
-        }
-      }
-    }
-    return values;
-  }
-
-  async function startCommandCodeLogin(account) {
-    const state = crypto.randomBytes(24).toString("hex");
-    let settleCallback;
-    let rejectCallback;
-    const callback = new Promise((resolve, reject) => {
-      settleCallback = resolve;
-      rejectCallback = reject;
-    });
-    const server = http.createServer(async (request, response) => {
-      try {
-        const address = server.address();
-        if (!address || typeof address === "string") throw new Error("CommandCode callback server is unavailable");
-        const callbackBase = `http://127.0.0.1:${address.port}`;
-        const url = new URL(request.url || "/", callbackBase);
-        if (url.pathname !== "/commandcode/callback") {
-          response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-          response.end("Not found");
-          return;
-        }
-        const values = await commandCodeCallbackPayload(request, callbackBase);
-        if (String(values.state || "") !== state) throw new Error("CommandCode login state did not match");
-        const apiKey = commandCodeToken(values);
-        if (!apiKey) throw new Error("CommandCode login did not return an API key");
-        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        response.end("<!doctype html><title>CommandCode connected</title><h1>CommandCode connected</h1><p>You can close this window and return to Coding Tools.</p>");
-        settleCallback(apiKey);
-      } catch (error) {
-        response.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
-        response.end("CommandCode login failed. Return to Coding Tools for details.");
-        rejectCallback(error);
-      }
-    });
-
-    await new Promise((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
-    });
-    const address = server.address();
-    if (!address || typeof address === "string") {
-      server.close();
-      throw new Error("CommandCode callback server did not start");
-    }
-    const callbackUrl = `http://127.0.0.1:${address.port}/commandcode/callback`;
-    const loginUrl = new URL(COMMANDCODE_LOGIN_URL);
-    loginUrl.searchParams.set("callback", callbackUrl);
-    loginUrl.searchParams.set("state", state);
-    store.updateAccountConnection(account.id, { status: "pending", error: undefined });
-
-    let timer;
-    try {
-      await shell.openExternal(safeProviderLoginUrl(loginUrl.toString()));
-      const apiKey = await Promise.race([
-        callback,
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error("CommandCode authentication timed out")),
-            Math.max(1, oauthTimeoutMs),
-          );
-          timer.unref?.();
-        }),
-      ]);
-      const baseUrl = account.endpoint || DEFAULT_COMMANDCODE_PROXY_URL;
-      store.saveAccount({
-        ...account,
-        status: "pending",
-        secret: { apiKey, baseUrl },
-      });
-      return {
-        opened: true,
-        mode: "external",
-        state,
-        snapshot: await inspectCommandCodeSession(accountRecord(account.id)),
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const snapshot = store.updateAccountConnection(account.id, {
-        status: providerSessionFailureStatus(message),
-        error: message,
-      });
-      error.snapshot = snapshot;
-      throw error;
-    } finally {
-      if (timer) clearTimeout(timer);
-      await new Promise((resolve) => server.close(resolve));
-    }
-  }
-
-  async function reviveCommandCodeSessions() {
-    const snapshot = store.snapshot();
-    const accounts = snapshot.accounts.filter((account) => (
-      account.providerId === COMMANDCODE_PROVIDER_ID && !account.archivedAt
-    ));
-    for (const account of accounts) {
-      const secret = store.accountSecret(account.id) || {};
-      if (commandCodeToken(secret)) {
-        try {
-          await inspectCommandCodeSession(accountRecord(account.id));
-        } catch (error) {
-          store.updateAccountConnection(account.id, {
-            status: providerSessionFailureStatus(error instanceof Error ? error.message : String(error)),
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-        continue;
-      }
-      try {
-        await importProviderSession(account.id);
-      } catch {
-        // CLI auth.json is optional after crash; encrypted store is the durable source.
-      }
-    }
-    return store.snapshot();
-  }
-
   async function probeProviderAccount(accountId) {
     const account = accountRecord(accountId);
     try {
       const adapterId = defaultLoginAdapter(account);
       if (adapterId && CPA_LOGIN_ADAPTERS[adapterId]) {
         return await inspectCpaProviderAccount(account, adapterId);
-      }
-      if (account.providerId === COMMANDCODE_PROVIDER_ID) {
-        return await inspectCommandCodeSession(account);
       }
       if (adapterId === "native-browser") {
         const browserHost = typeof getBrowserHost === "function" ? getBrowserHost() : null;
@@ -1596,14 +1337,6 @@ function createProviderNetworkController({
     if (adapterId === "native-browser") {
       return syncBrowserProviderAccount(account, adapterId);
     }
-    if (adapterId === "commandcode-oauth") {
-      const result = await startCommandCodeLogin(account);
-      const snapshot = store.updateAccountConnection(account.id, {
-        loginAdapterId: adapterId,
-        credentialSource: "commandcode",
-      });
-      return { ...result, adapterId, snapshot };
-    }
     throw new Error(`Provider login adapter is not configured: ${adapterId}`);
   }
 
@@ -1636,22 +1369,17 @@ function createProviderNetworkController({
     store,
     applyGlobalRouting,
     openProviderLogin,
-    importProviderSession,
     probeProviderAccount,
-    reviveCommandCodeSessions,
     testProxyProfile,
     handleProxyLogin,
   };
 }
 
 module.exports = {
+  tcpErrorText,
   ANTIGRAVITY_PROVIDER_ID,
   COMMANDCODE_PROVIDER_ID,
   DEFAULT_ANTIGRAVITY_BASE_URL,
-  DEFAULT_COMMANDCODE_PROXY_URL,
-  commandCodeAuthFilePath,
-  commandCodeModelIds,
-  commandCodeToken,
   DEFAULT_BYPASS,
   PROVIDER_LOGIN_URLS,
   createProviderNetworkController,

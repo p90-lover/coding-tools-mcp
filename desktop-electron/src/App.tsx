@@ -13,14 +13,19 @@ import { createPortal } from "react-dom";
 import { copyFor, localizeRuntimeMessage, type Copy } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
-import { PaseoOrchestratorSurface } from "./features/PaseoOrchestratorSurface";
-import { AnnealTasksSurface } from "./features/AnnealTasksSurface";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
-import { UpstreamToolSurface } from "./features/UpstreamToolSurface";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
 import { OriginalUiSurface } from "./features/OriginalUiSurface";
-import { McpLiveToolsPanel } from "./features/McpLiveToolsPanel";
-import { InProcessAppsPanel } from "./features/InProcessAppsPanel";
+import { WorkspacePanel } from "./features/WorkspacePanel";
+import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
+import { NativeCodexPanel } from "./features/NativeCodexPanel";
+import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOriginalSurface";
+import { AgentOrchestratorSurface } from "./features/AgentOrchestratorSurface";
+import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
+import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
+import { EmailSurface } from "./features/EmailSurface";
+import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
+
 import type {
   BrowserInteractionMode,
   BrowserState,
@@ -30,6 +35,7 @@ import type {
   LauncherState,
   LogRecord,
   OperationState,
+  RefreshPart,
   Surface,
 } from "./types";
 
@@ -54,6 +60,7 @@ export function App() {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null);
   const [browser, setBrowser] = useState<BrowserState | null>(null);
   const [operation, setOperation] = useState<OperationState | null>(null);
+  const lastOperationRef = useRef<OperationState | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const documentLanguage = snapshot?.state.language ?? "en";
@@ -100,6 +107,7 @@ export function App() {
       setBrowser(next.browser);
       setLogs(next.logs);
       setOperation(next.operation);
+      lastOperationRef.current = next.operation ?? null;
       if (next.operation?.status === "failed" && next.operation.name !== "mcp-verification") {
         setError(next.operation.message);
       }
@@ -116,6 +124,13 @@ export function App() {
     });
     const unsubscribeBrowser = api.onBrowserState(setBrowser);
     const unsubscribeOperation = api.onOperation((next) => {
+      // A completed operation retires the error its own earlier failure raised (for example the
+      // catalog check recovering once the proxy is back); any other error on screen stays.
+      const previous = lastOperationRef.current;
+      if (next.status === "completed" && previous?.status === "failed" && previous.name === next.name) {
+        setError((current) => (current === previous.message ? null : current));
+      }
+      lastOperationRef.current = next;
       setOperation(next);
       if (next.status === "failed" && next.name !== "mcp-verification") setError(next.message);
     });
@@ -407,27 +422,37 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
+  // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
+  // them. The MCP wizard is left out: it seeds its step from how it was opened.
+  const [visitedSurfaces, setVisitedSurfaces] = useState<ReadonlySet<Surface>>(() => new Set([surface]));
+  useEffect(() => {
+    setVisitedSurfaces((current) => (current.has(surface) ? current : new Set(current).add(surface)));
+  }, [surface]);
+  // A group of surfaces can share one pane (one mounted instance for all of them).
+  const keepAlive = (ids: Surface | readonly Surface[], render: () => ReactNode) => {
+    const group: readonly Surface[] = typeof ids === "string" ? [ids] : ids;
+    const current = group.includes(surface);
+    return current || group.some((id) => visitedSurfaces.has(id))
+      ? <div className="surface-pane" hidden={!current}>{render()}</div>
+      : null;
+  };
   const devProfile = snapshot.profile === "development";
   const compactAtMount = useRef(window.matchMedia(COMPACT_SIDEBAR_QUERY).matches).current;
   const [sidebarOpen, setSidebarOpen] = useState(compactAtMount ? false : snapshot.state.sidebarOpen !== false);
   const [sidebarWidth, setSidebarWidth] = useState(snapshot.state.sidebarWidth || 252);
   const extraSurfaceActive = surface === "providers"
+    || surface === "agent-orchestrator-original"
+    || surface === "antigravity-cli"
     || surface === "integrations"
     || surface === "cpa"
-    || surface === "codex-router"
-    || surface === "paseo"
-    || surface === "anneal"
+
     || surface === "network";
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
   const [sessionReminderDue, setSessionReminderDue] = useState(false);
   const [mcpTargetMode, setMcpTargetMode] = useState<BrowserInteractionMode | null>(null);
-  const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(
-    snapshot.state.browserInteractionMode === "automatic"
-      && snapshot.state.coreSetupComplete === true
-      && !snapshot.state.experimentalBiggerContext,
-  );
+  const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(false);
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const browserSurfaceActive = surface === "browser"
@@ -568,10 +593,14 @@ function LauncherShell({
   };
 
   const navigateSurface = (next: Surface) => {
+    if (["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(next)) {
+      setError(`${next} is retired and unavailable.`);
+      return;
+    }
     if (next !== "browser") {
       void api!.setBrowserSurfaceActive(false).catch((cause) => setError(messageOf(cause)));
     }
-    setSurface(next);
+    setSurface(next === "api-models" ? "providers" : next);
     if (compactSidebar) setSidebarOpen(false);
   };
 
@@ -637,6 +666,7 @@ function LauncherShell({
         copy={copy}
         devProfile={devProfile}
         draggable={surface !== "browser"}
+        setError={setError}
         sidebarOpen={sidebarOpen}
         toggleSidebar={toggleSidebar}
       />
@@ -691,6 +721,18 @@ function LauncherShell({
                   label={copy.browser}
                   onClick={() => navigateSurface("browser")}
                 />
+                <SidebarItem
+                  active={surface === "chatgpt-desktop"}
+                  icon="browser"
+                  label="ChatGPT Desktop"
+                  onClick={() => navigateSurface("chatgpt-desktop")}
+                />
+                <SidebarItem
+                  active={surface === "email"}
+                  icon="mail"
+                  label="Email"
+                  onClick={() => navigateSurface("email")}
+                />
               </SidebarGroup>
               <SidebarGroup label={copy.configuration}>
                 <SidebarItem
@@ -712,10 +754,34 @@ function LauncherShell({
                 />
               </SidebarGroup>
               <SidebarGroup label={copy.runtime}>
+                <SidebarItem active={surface === "agent-orchestrator"} icon="orchestrator" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
                 <SidebarItem active={surface === "activity"} icon="activity" label={copy.activity} onClick={() => navigateSurface("activity")} />
+                <SidebarItem
+                  active={surface === "instant-mcp"}
+                  icon="mcp"
+                  label={copy.liveMcpTools}
+                  onClick={() => navigateSurface("instant-mcp")}
+                />
+                <SidebarItem active={surface === "workspace-auth"} icon="mcp" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
+                <SidebarItem active={surface === "native-codex"} icon="orchestrator" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
+                <SidebarItem active={surface === "oauth"} icon="providers" label={copy.providerOAuth} onClick={() => navigateSurface("oauth")} />
+
+
               </SidebarGroup>
               <details className="sidebar-more" open={extraSurfaceActive}>
                 <summary>{copy.moreTools}</summary>
+                <SidebarItem
+                  active={surface === "agent-orchestrator-original"}
+                  icon="orchestrator"
+                  label="Agent Orchestrator"
+                  onClick={() => navigateSurface("agent-orchestrator-original")}
+                />
+                <SidebarItem
+                  active={surface === "antigravity-cli"}
+                  icon="setup"
+                  label="Antigravity CLI"
+                  onClick={() => navigateSurface("antigravity-cli")}
+                />
                 <SidebarItem
                   active={surface === "providers"}
                   icon="providers"
@@ -734,24 +800,7 @@ function LauncherShell({
                   label="CPA"
                   onClick={() => navigateSurface("cpa")}
                 />
-                <SidebarItem
-                  active={surface === "codex-router"}
-                  icon="orchestrator"
-                  label="Codex Router"
-                  onClick={() => navigateSurface("codex-router")}
-                />
-                <SidebarItem
-                  active={surface === "paseo"}
-                  icon="orchestrator"
-                  label={language === "zh-TW" ? "Paseo 協調器" : copy.paseoOrchestrator}
-                  onClick={() => navigateSurface("paseo")}
-                />
-                <SidebarItem
-                  active={surface === "anneal"}
-                  icon="activity"
-                  label={language === "zh-TW" ? "Anneal 任務" : copy.annealTasks}
-                  onClick={() => navigateSurface("anneal")}
-                />
+
                 <SidebarItem
                   active={surface === "network"}
                   icon="globe"
@@ -775,7 +824,7 @@ function LauncherShell({
                   active={false}
                   disabled={updateBusy || operation?.status === "running" || browser?.status === "running"}
                   icon="update"
-                  label={updateBusy ? copy.updating : `${copy.updateAvailable} Coding Tools v${updateVersion}`}
+                  label={updateBusy ? copy.updating : (language === "zh-TW" ? `更新 GUI ${updateVersion}` : `Update GUI ${updateVersion}`)}
                   onClick={() => void installUpdate()}
                   tone="update"
                 />
@@ -792,16 +841,8 @@ function LauncherShell({
       </motion.aside>
 
       <section className="workspace">
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.div
-            animate={{ opacity: 1 }}
-            className="surface-transition"
-            exit={{ opacity: 0 }}
-            initial={{ opacity: 0 }}
-            key={surface}
-            transition={{ duration: 0.16 }}
-          >
-            {surface === "browser" ? (
+        <div className="surface-transition">
+            {keepAlive("browser", () => (
               <BrowserSurface
                 browser={browser}
                 browserSlotRef={browserSlotRef}
@@ -811,8 +852,18 @@ function LauncherShell({
                 platform={snapshot.platform}
                 setError={setError}
               />
-            ) : null}
-            {surface === "setup" ? (
+            ))}
+            {keepAlive("chatgpt-desktop", () => (
+              <ChatGptDesktopSurface
+                active={surface === "chatgpt-desktop" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
+                api={api!}
+                setError={setError}
+              />
+            ))}
+            {keepAlive("email", () => (
+              <EmailSurface api={api!} setError={setError} />
+            ))}
+            {keepAlive("setup", () => (
               <SetupSurface
                 activateBrowser={activateBrowser}
                 browser={browser}
@@ -827,7 +878,7 @@ function LauncherShell({
                 snapshot={snapshot}
                 updateState={updateState}
               />
-            ) : null}
+            ))}
             {surface === "mcp" ? (
               <McpSurface
                 copy={copy}
@@ -844,49 +895,53 @@ function LauncherShell({
                 updateState={updateState}
               />
             ) : null}
-            {surface === "activity" ? (
+            {keepAlive("activity", () => (
               <ActivitySurface copy={copy} language={language} logs={logs} setError={setError} />
-            ) : null}
-            {surface === "providers" ? (
-              <ProviderCenterSurface language={language} setError={setError} />
-            ) : null}
-            {surface === "integrations" ? (
+            ))}
+            {keepAlive("instant-mcp", () => (
+              <InstantMcpToolsSurface copy={copy} language={language} setError={setError} />
+            ))}
+            {keepAlive("workspace-auth", () => (
+              <ContentSurface title={copy.workspaceAuth}><WorkspaceAuthPanel copy={copy} language={language} setError={setError} /></ContentSurface>
+            ))}
+            {keepAlive("native-codex", () => (
+              <ContentSurface title={copy.nativeCodex}><NativeCodexPanel copy={copy} language={language} setError={setError} /></ContentSurface>
+            ))}
+            {keepAlive("oauth", () => (
+              <OriginalUiSurface initialSection="auth-files" language={language} setError={setError} toolId="cpa" />
+            ))}
+            {keepAlive(["providers", "api-models"], () => (
+              <ProviderCenterSurface initialCategory={surface === "api-models" ? "api_key" : "all"} language={language} setError={setError} />
+            ))}
+            {keepAlive("agent-orchestrator", () => (
+              <AgentOrchestratorSurface language={language} setError={setError} />
+            ))}
+            {keepAlive("agent-orchestrator-original", () => (
+              <AgentOrchestratorOriginalSurface openMissions={() => navigateSurface("agent-orchestrator")} />
+            ))}
+            {keepAlive("antigravity-cli", () => (
+              <AntigravityCliSurface setError={setError} openNetwork={() => navigateSurface("network")} />
+            ))}
+            {keepAlive("integrations", () => (
               <ExternalServicesSurface
                 language={language}
-                openAnneal={() => navigateSurface("anneal")}
                 openCpa={() => navigateSurface("cpa")}
-                openCodexRouter={() => navigateSurface("codex-router")}
-                openPaseo={() => navigateSurface("paseo")}
                 openProviders={() => navigateSurface("providers")}
                 setError={setError}
               />
-            ) : null}
-            {surface === "cpa" ? (
+            ))}
+            {keepAlive("cpa", () => (
               <OriginalUiSurface language={language} setError={setError} toolId="cpa" />
+            ))}
+
+
+            {["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(surface) ? (
+              <ContentSurface title="Module retired"><p>This standalone module is retired and unavailable.</p></ContentSurface>
             ) : null}
-            {surface === "codex-router" ? (
-              <OriginalUiSurface language={language} setError={setError} toolId="codex-router" />
-            ) : null}
-            {surface === "paseo" ? (
-              <UpstreamToolSurface
-                language={language}
-                nativeControl={<PaseoOrchestratorSurface language={language} setError={setError} />}
-                setError={setError}
-                toolId="paseo"
-              />
-            ) : null}
-            {surface === "anneal" ? (
-              <UpstreamToolSurface
-                language={language}
-                nativeControl={<AnnealTasksSurface language={language} setError={setError} />}
-                setError={setError}
-                toolId="anneal"
-              />
-            ) : null}
-            {surface === "network" ? (
+            {keepAlive("network", () => (
               <NetworkProxySurface language={language} setError={setError} />
-            ) : null}
-            {surface === "settings" ? (
+            ))}
+            {keepAlive("settings", () => (
               <SettingsSurface
                 configureInteractionMode={(mode) => {
                   setMcpTargetMode(mode);
@@ -899,9 +954,8 @@ function LauncherShell({
                 snapshot={snapshot}
                 updateState={updateState}
               />
-            ) : null}
-          </motion.div>
-        </AnimatePresence>
+            ))}
+        </div>
       </section>
 
       <AnimatePresence>
@@ -930,16 +984,82 @@ function LauncherShell({
   );
 }
 
+const REFRESH_PARTS: readonly [RefreshPart, string][] = [
+  ["all", "Refresh all"],
+  ["ui", "UI only"],
+  ["bridge", "Codex bridge"],
+  ["mcp", "MCP tunnel"],
+  ["agent-orchestrator", "Agent Orchestrator"],
+  ["cpa", "CPA"],
+  ["headless", "Workspace service"],
+  ["backend", "Whole backend (keep app, bridge, MCP, CPA)"],
+  ["app", "Restart app (keep bridge, MCP, CPA)"],
+];
+
+/** One-click refresh for the UI and each separately running part. */
+function RefreshMenu({ setError }: { setError: (error: string | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<RefreshPart | "">("");
+  const menu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (event: MouseEvent) => {
+      if (menu.current && !menu.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const run = async (part: RefreshPart) => {
+    setOpen(false);
+    setBusy(part);
+    setError(null);
+    try {
+      const result = await api!.refreshPart(part);
+      const failed = result.results.filter((item) => !item.ok);
+      if (failed.length) setError(failed.map((item) => `${item.part}: ${item.message ?? "refresh failed"}`).join("; "));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <div className="refresh-menu" ref={menu}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={busy ? `Refreshing ${busy}` : "Refresh"}
+        className={`icon-button${busy ? " is-busy" : ""}`}
+        disabled={Boolean(busy)}
+        onClick={() => setOpen((value) => !value)}
+        title="Refresh the UI or a single part"
+        type="button"
+      >
+        <Icon name="reload" />
+      </button>
+      {open ? (
+        <div className="refresh-menu-list" role="menu">
+          {REFRESH_PARTS.map(([part, label]) => (
+            <button key={part} onClick={() => void run(part)} role="menuitem" type="button">{label}</button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TitleBar({
   copy,
   devProfile,
   draggable,
+  setError,
   sidebarOpen,
   toggleSidebar,
 }: {
   copy: Copy;
   devProfile: boolean;
   draggable: boolean;
+  setError: (error: string | null) => void;
   sidebarOpen: boolean;
   toggleSidebar: () => void;
 }) {
@@ -951,6 +1071,7 @@ function TitleBar({
           label={sidebarOpen ? copy.hideSidebar : copy.showSidebar}
           onClick={toggleSidebar}
         />
+        <RefreshMenu setError={setError} />
         {devProfile ? <span className="titlebar-dev-profile">{copy.devBadge}</span> : null}
       </div>
     </header>
@@ -1023,6 +1144,7 @@ function BrowserSurface({
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
+  const tabLimitReached = (browser?.tabs.filter(tab => tab.id !== "home").length ?? 0) >= (browser?.maxTabs ?? 5);
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
     && operation.status === "running"
@@ -1048,6 +1170,14 @@ function BrowserSurface({
     try {
       if (visible) await api!.hideBrowser();
       else await api!.showBrowser();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const createTab = async () => {
+    setError(null);
+    try {
+      await api!.createBrowserTab();
     } catch (cause) {
       setError(messageOf(cause));
     }
@@ -1128,6 +1258,16 @@ function BrowserSurface({
             ) : null}
           </div>
         ))}
+        <button
+          aria-label={copy.newTab}
+          className="browser-new-tab"
+          disabled={!browser || tabLimitReached || (!manualInteraction && !browser.authenticated)}
+          onClick={() => void createTab()}
+          title={copy.newTab}
+          type="button"
+        >
+          <Icon name="plus" />
+        </button>
         <div className="browser-tab-drag draggable" />
       </div>
       <div className="browser-toolbar">
@@ -1298,6 +1438,21 @@ function SetupSurface({
   updateState: (state: LauncherState) => void;
 }) {
   const [localBusy, setLocalBusy] = useState(false);
+  const [keysmithOpen, setKeysmithOpen] = useState(false);
+  const [keysmithInstalled, setKeysmithInstalled] = useState(false);
+  // A renderer can run on an installed preload that predates Keysmith; hide the step there
+  // rather than throw on a missing bridge method.
+  const keysmithAvailable = !devProfile && typeof api?.keysmithStatus === "function";
+  useEffect(() => {
+    if (!keysmithAvailable) return;
+    let active = true;
+    void api!.keysmithStatus().then((status) => {
+      if (active) setKeysmithInstalled(status.ok && status.managedByCodingTools === true && status.state === "active");
+    }).catch(() => {
+      if (active) setKeysmithInstalled(false);
+    });
+    return () => { active = false; };
+  }, [keysmithAvailable]);
   const manualInteraction = snapshot.state.browserInteractionMode === "manual";
   const busy = localBusy
     || operation?.status === "running"
@@ -1388,6 +1543,23 @@ function SetupSurface({
             />
           ) : undefined}
         />
+        {keysmithAvailable ? (
+          <>
+            <SetupRow
+              action={keysmithOpen ? copy.close : copy.keysmithConfigure}
+              complete={keysmithInstalled}
+              description={copy.keysmithStepBody}
+              disabled={false}
+              index={manualInteraction ? 2 : 4}
+              onAction={() => setKeysmithOpen((open) => !open)}
+              repeatable
+              title={copy.keysmithStep}
+            />
+            {keysmithOpen ? (
+              <KeysmithSetupPanel api={api!} copy={copy} onInstalledChange={setKeysmithInstalled} />
+            ) : null}
+          </>
+        ) : null}
       </div>
 
       {!devProfile && snapshot.state.codexRestartRequired ? (
@@ -1451,6 +1623,7 @@ function McpSurface({
   const [localBusy, setLocalBusy] = useState(false);
   const busy = localBusy || operation?.status === "running";
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
+  const [connectorResult, setConnectorResult] = useState<string | null>(null);
   const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
   const manualInteraction = interactionMode === "manual";
   const steps = useMemo(() => [
@@ -1507,6 +1680,22 @@ function McpSurface({
       setLocalBusy(false);
     }
   };
+  const createConnector = async () => {
+    if (busy) return;
+    setLocalBusy(true);
+    setError(null);
+    setConnectorResult(null);
+    try {
+      const result = await api!.createMcpConnector();
+      setConnectorResult(result.created ? copy.connectorCreated : copy.connectorAlreadyExists);
+      updateState((await api!.snapshot()).state);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setLocalBusy(false);
+    }
+  };
+
   const verify = async () => {
     if (busy) return;
     setLocalBusy(true);
@@ -1674,6 +1863,14 @@ function McpSurface({
                     {copy.openConnectors}
                   </SecondaryButton>
                 </div>
+                {!devProfile && !manualInteraction && !configuringInactiveMode ? (
+                  <div className="inline-actions">
+                    <SecondaryButton disabled={busy || !credentialsConfigured} onClick={() => void createConnector()}>
+                      {copy.autoCreateConnector}
+                    </SecondaryButton>
+                  </div>
+                ) : null}
+                {connectorResult ? <NoticeRow icon="check" tone="success">{connectorResult}</NoticeRow> : null}
                 {doctor ? <DoctorSummary copy={copy} language={language} report={doctor} /> : null}
               </div>
             ) : null}
@@ -1718,8 +1915,6 @@ function McpSurface({
           </>
         ) : null}
       </div>
-      <InProcessAppsPanel copy={copy} language={language} setError={setError} />
-      <McpLiveToolsPanel copy={copy} language={language} setError={setError} />
     </ContentSurface>
   );
 }
@@ -1768,6 +1963,22 @@ function ActivitySurface({
   );
 }
 
+function InstantMcpToolsSurface({
+  copy,
+  language,
+  setError,
+}: {
+  copy: Copy;
+  language: Language;
+  setError: (error: string | null) => void;
+}) {
+  return (
+    <ContentSurface title={copy.liveMcpTools}>
+      <WorkspacePanel copy={copy} language={language} setError={setError} />
+    </ContentSurface>
+  );
+}
+
 function SettingsSurface({
   configureInteractionMode,
   copy,
@@ -1790,6 +2001,7 @@ function SettingsSurface({
   const [turnsCancelled, setTurnsCancelled] = useState(false);
   const [integrationRemoved, setIntegrationRemoved] = useState(false);
   const [updateNotice, setUpdateNotice] = useState("");
+  const guiUpdating = ["checking", "downloading", "installing"].includes(snapshot.update.status);
 
   const updateLanguage = async (next: Language) => {
     try {
@@ -1844,18 +2056,13 @@ function SettingsSurface({
       setBusy(false);
     }
   };
-  const checkForUpdates = async () => {
+  const updateGui = async () => {
     setBusy(true);
     setError(null);
+    setUpdateNotice("");
     try {
-      const next = await api!.checkForUpdates();
-      setUpdateNotice(next.status === "available"
-        ? (language === "zh-TW" ? `已找到 Coding Tools v${next.version}` : `Coding Tools v${next.version} is available`)
-        : next.status === "up-to-date"
-          ? (language === "zh-TW" ? "目前已是最新版本。" : "Coding Tools is up to date.")
-          : next.status === "error"
-            ? next.message
-            : (language === "zh-TW" ? "正在檢查更新…" : "Checking for updates…"));
+      const updated = await api!.installUpdate();
+      if (!updated) setUpdateNotice(language === "zh-TW" ? "GUI 已是最新版本。" : "The GUI is up to date.");
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -1903,13 +2110,13 @@ function SettingsSurface({
         </SettingRow> : null}
         {!devProfile ? <SettingRow
           body={updateNotice || (language === "zh-TW"
-            ? "定期尋找完整而相容的 Coding Tools release；閒置時可自動安裝，亦可立即手動檢查。"
-            : "Periodically discover complete compatible Coding Tools releases, install while idle, or check immediately.")}
-          label={language === "zh-TW" ? "自動更新" : "Automatic updates"}
+            ? "自動檢查 GUI 更新；一鍵刷新介面。MCP、Codex Bridge 及 Proxy Bridge 持續執行。"
+            : "Automatically check for GUI updates. One click downloads and refreshes the interface while MCP, Codex Bridge and Proxy Bridge keep running.")}
+          label={language === "zh-TW" ? "GUI 更新" : "GUI updates"}
         >
           <div className="inline-actions">
-            <SecondaryButton disabled={busy} onClick={() => void checkForUpdates()}>
-              {language === "zh-TW" ? "立即檢查" : "Check now"}
+            <SecondaryButton disabled={busy || guiUpdating} onClick={() => void updateGui()}>
+              {guiUpdating ? (language === "zh-TW" ? "更新中…" : "Updating GUI…") : (language === "zh-TW" ? "更新 GUI" : "Update GUI")}
             </SecondaryButton>
             <Switch
               checked={snapshot.state.automaticUpdates}
@@ -1924,6 +2131,20 @@ function SettingsSurface({
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />
+        {!devProfile ? <SettingRow
+          body={copy.autoConnectExistingMcpBody}
+          label={copy.autoConnectExistingMcp}
+        >
+          <Switch
+            checked={snapshot.state.autoConnectExistingMcp}
+            disabled={snapshot.state.browserInteractionMode !== "automatic"
+              || snapshot.state.mcpRuntimeInstalled !== true
+              || !snapshot.mcpCredentialsConfigured}
+            onChange={(checked) => void api!.setPreference("autoConnectExistingMcp", checked)
+              .then(updateState)
+              .catch((cause) => setError(messageOf(cause)))}
+          />
+        </SettingRow> : null}
         <SettingRow body={devProfile ? copy.devKeepRunningBody : copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
           <Switch
             checked={snapshot.state.keepRunningOnClose}

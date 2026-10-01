@@ -19,6 +19,18 @@ const CPA_LOGIN_ADAPTERS = Object.freeze({
     route: "antigravity-auth-url",
     providers: Object.freeze(["antigravity"]),
   }),
+  "cpa-commandcode-go": Object.freeze({
+    id: "cpa-commandcode-go",
+    kind: "cpa_oauth",
+    route: "commandcode-go-auth-url",
+    providers: Object.freeze(["commandcode-go"]),
+  }),
+  "cpa-commandcode-studio": Object.freeze({
+    id: "cpa-commandcode-studio",
+    kind: "cpa_oauth",
+    route: "commandcode-auth-url",
+    providers: Object.freeze(["commandcode"]),
+  }),
   "cpa-gemini": Object.freeze({
     id: "cpa-gemini",
     kind: "cpa_auth_file",

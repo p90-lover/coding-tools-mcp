@@ -5,10 +5,121 @@ const path = require("node:path");
 
 const launcherRoot = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
+const typesSource = fs.readFileSync(path.join(launcherRoot, "src", "types.ts"), "utf8");
+const i18nSource = fs.readFileSync(path.join(launcherRoot, "src", "i18n.ts"), "utf8");
 const stylesSource = fs.readFileSync(path.join(launcherRoot, "src", "styles.css"), "utf8");
 const electronMain = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 const browserHostSource = fs.readFileSync(path.join(launcherRoot, "electron", "browser-host.cjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
+const aoSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "AgentOrchestratorSurface.tsx"), "utf8");
+const servicesSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "ExternalServicesSurface.tsx"), "utf8");
+const proxySource = fs.readFileSync(path.join(launcherRoot, "src", "features", "NetworkProxySurface.tsx"), "utf8");
+
+test("both AO sidebar destinations mount the original UI and Runtime selects its mission board", () => {
+  assert.match(appSource, /surface === "agent-orchestrator" \? \(\s*<AgentOrchestratorOriginalSurface\s+projectBoard\s+openMissions=\{\(\) => navigateSurface\("agent-orchestrator-original"\)\}/);
+  assert.match(appSource, /surface === "agent-orchestrator-original" \? \(\s*<AgentOrchestratorOriginalSurface\s+openMissions=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
+  assert.doesNotMatch(appSource, /<AgentOrchestratorSurface\b/);
+});
+
+test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", async () => {
+  const vm = require("node:vm");
+  const ts = require(require.resolve("typescript", { paths: [launcherRoot] }));
+  const source = fs.readFileSync(path.join(launcherRoot, "src", "features", "InProcessAppsPanel.tsx"), "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  const calls = [];
+  const state = [];
+  let hook = 0;
+  const jsx = (type, props) => ({ type, props });
+  const client = { apps: {
+    list: async () => ({ modules: [
+      { id: "paseo", operations: ["inspect"] },
+      { id: "cpa", operations: ["inspect"] },
+      { id: "anneal", operations: ["inspect"] },
+      { id: "agent-orchestrator", operations: ["inspect"] },
+      { id: "codex-router", operations: ["inspect"] },
+      { id: "commandcode-proxy", operations: ["inspect"] },
+    ] }),
+    call: async (args) => { calls.push(["call", args]); return {}; },
+    invoke: async (args) => { calls.push(["invoke", args]); return {}; },
+  } };
+  const exports = {};
+  vm.runInNewContext(compiled, {
+    exports,
+    require: (name) => name === "react"
+      ? {
+          useState: (initial) => {
+            const index = hook++;
+            if (!(index in state)) state[index] = initial;
+            return [state[index], (value) => { state[index] = typeof value === "function" ? value(state[index]) : value; }];
+          },
+          useMemo: (compute) => compute(),
+          useEffect: () => {},
+        }
+      : name === "react/jsx-runtime"
+        ? { jsx, jsxs: jsx }
+        : name === "../api/client"
+          ? { getCodingToolsClient: () => client }
+          : {},
+  });
+  const render = () => {
+    hook = 0;
+    return exports.InProcessAppsPanel({
+      copy: { inProcessApps: "Apps", refreshTools: "Refresh", inProcessAppsCall: "Call", inProcessAppsInvoke: "Invoke" },
+      language: "en",
+      setError: () => {},
+    });
+  };
+  const nodes = (tree, type) => {
+    if (!tree || typeof tree !== "object") return [];
+    const children = [tree.props?.children].flat(Infinity);
+    return [...(tree.type === type ? [tree] : []), ...children.flatMap((child) => nodes(child, type))];
+  };
+  nodes(render(), "button")[0].props.onClick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const tree = render();
+  assert.deepEqual(Array.from(nodes(tree, "li"), (item) => item.props.children[1].props.children), ["cpa", "agent-orchestrator"]);
+  assert.deepEqual(Array.from(nodes(tree, "option"), (item) => item.props.value).slice(0, 2), ["cpa", "agent-orchestrator"]);
+
+  state[1] = "paseo"; // A selection held by an event handler during an async catalog refresh.
+  const stale = render();
+  await nodes(stale, "button")[1].props.onClick();
+  await nodes(stale, "button")[2].props.onClick();
+  assert.equal(calls.length, 0);
+
+  state[1] = "cpa";
+  const current = render();
+  await nodes(current, "button")[1].props.onClick();
+  await nodes(current, "button")[2].props.onClick();
+  assert.deepEqual(calls.map(([mode, args]) => [mode, args.moduleId ?? args.handle]), [["call", "cpa"], ["invoke", "cpa"]]);
+});
+
+test("AO is the sole Runtime orchestrator and lets workers pick an AO harness", () => {
+  // The Runtime entry is named Chat and sits first, above Activity.
+  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>\s*<SidebarItem active=\{surface === "activity"\}/);
+  assert.doesNotMatch(appSource, /label=\{copy\.structuredOrchestrator\}|surface === "orchestrator"|surface === "paseo"|navigateSurface\("paseo"\)/);
+  assert.match(appSource, /setError\(`\$\{next\} is retired and unavailable\.`\)/);
+  assert.match(aoSource, /moduleCall\("harnesses"\)/);
+  assert.match(aoSource, /<HarnessPicker route=\{workerRouteDraft\}/);
+});
+
+test("retired standalone surfaces cannot navigate or start from Integrations", () => {
+  assert.match(appSource, /\["paseo", "anneal", "codex-router", "commandcode-proxy"\]\.includes\(next\)/);
+  assert.doesNotMatch(appSource, /<AnnealTasksSurface|toolId="anneal"|navigateSurface\("anneal"\)/);
+  assert.match(servicesSource, /serviceRows = services\.services\.filter\(\(service\) => service\.id === "cpa"\)/);
+  assert.doesNotMatch(servicesSource, /reconcileManagedBootstrap|openPaseo|openAnneal/);
+  assert.match(appSource, /<McpSurface|<AgentOrchestratorSurface|toolId="cpa"/);
+  assert.match(servicesSource, /CommandCode login is available in CPA Accounts/);
+});
+
+test("proxy scope picker omits retired standalone modules", () => {
+  const scopeOptions = proxySource.slice(proxySource.indexOf("const SCOPES"), proxySource.indexOf("const MODES"));
+  assert.doesNotMatch(scopeOptions, /"paseo"|"anneal"/);
+  const defaultDraft = proxySource.slice(proxySource.indexOf("function emptyDraft"), proxySource.indexOf("function fromProfile"));
+  assert.doesNotMatch(defaultDraft, /"paseo"|"anneal"/);
+  assert.match(scopeOptions, /"mcp"/);
+});
 
 test("embedded ChatGPT is measured only after its animated surface mounts", () => {
   assert.match(appSource, /const \[browserSlot, setBrowserSlot\] = useState<HTMLDivElement \| null>\(null\)/);
@@ -102,7 +213,7 @@ test("packaged runtime is verified before launcher browser surfaces can bind por
 
 test("DEV launcher exposes its profile and supervises only its Full-mode MCP runtime", () => {
   assert.match(electronMain, /profile:\s*LAUNCHER_PROFILE\.kind/);
-  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else void \(async \(\) => \{/);
+  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else runtimeStartupInFlight = \(async \(\) => \{/);
   assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
   assert.match(electronMain, /packaged:\s*app\.isPackaged && !IS_DEV_PROFILE/);
   assert.match(electronMain, /IS_DEV_PROFILE && !stateStore\.read\(\)\.onboardingComplete/);
@@ -129,12 +240,12 @@ test("macOS passkey sign-in is additive to the unchanged embedded login action",
   assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000\)[\s\S]*?runSessionInspection\(false\)/);
 });
 
-test("Bigger Context startup recommendation reuses the persisted setting and setup transaction", () => {
+test("Bigger Context stays in Settings without opening a startup recommendation", () => {
   assert.match(
     appSource,
-    /const \[biggerContextRecommendationOpen, setBiggerContextRecommendationOpen\] = useState\([\s\S]*?snapshot\.state\.browserInteractionMode === "automatic"[\s\S]*?snapshot\.state\.coreSetupComplete === true[\s\S]*?!snapshot\.state\.experimentalBiggerContext,/,
+    /const \[biggerContextRecommendationOpen, setBiggerContextRecommendationOpen\] = useState\(false\);/,
   );
-  assert.match(appSource, /&& !biggerContextRecommendationOpen;/);
+  assert.match(appSource, /label=\{copy\.biggerContext\}[\s\S]*?onChange=\{\(checked\) => void setBiggerContext\(checked\)\}/);
   assert.match(appSource, /updateState\(await api!\.setBiggerContext\(enabled\)\)/);
   assert.match(
     appSource,
@@ -221,34 +332,74 @@ test("MCP verification failures stay inside the structured setup report", () => 
   assert.match(electronMain, /report\.checks\.filter\(\(check\) => check\.id !== "connector"\)/);
   assert.match(electronMain, /mcp\.verification_requested/);
   assert.match(electronMain, /launcherFocused:\s*mainWindow\?\.isFocused\(\) === true/);
-  assert.match(electronMain, /rendererFocused:\s*event\.sender\.isFocused\(\)/);
+  const focusExpression = electronMain.match(/rendererFocused:\s*([^,\r\n]+)/)?.[1];
+  assert.ok(focusExpression, "verification must log the renderer focus state");
+  const vm = require("node:vm");
+  for (const [event, expected] of [
+    [undefined, false],
+    [{ sender: {} }, false],
+    [{ sender: { isFocused: () => false } }, false],
+    [{ sender: { isFocused: () => true } }, true],
+    [{ sender: { isFocused: () => 1 } }, false],
+  ]) {
+    assert.equal(vm.runInNewContext(focusExpression, { event }), expected);
+  }
 });
 
-test("MCP verification proves runtime health before checking the connector", () => {
-  const start = electronMain.indexOf('handle("launcher:mcp-verify"');
-  const end = electronMain.indexOf('handle("launcher:doctor"', start);
+test("MCP verification proves runtime health before checking the connector", async () => {
+  const start = electronMain.indexOf("const performMcpVerification = async (event) => {");
+  const end = electronMain.indexOf("  verifyMcpConnection = (event) => {", start);
   const handler = electronMain.slice(start, end);
 
   assert.ok(start >= 0 && end > start, "MCP verification handler must remain registered");
-  assert.match(
-    handler,
-    /Checking local runtime[\s\S]*?await runtimeHost\.doctor\(\)[\s\S]*?if \(!report\.ok\)[\s\S]*?return report;[\s\S]*?Checking ChatGPT connector[\s\S]*?await browserHost\.verifyConnector/,
-  );
-  assert.match(handler, /publishOperation\(\{ name: operationName, status: "completed"/);
+  assert.match(electronMain, /handle\("launcher:mcp-verify", event => verifyMcpConnection\(event\)\)/);
+  const vm = require("node:vm");
+  for (const dev of [false, true]) {
+    for (const healthy of [false, true]) {
+      const steps = [];
+      const report = { ok: healthy, checks: [] };
+      const state = { browserInteractionMode: "automatic" };
+      const context = {
+        IS_DEV_PROFILE: dev,
+        mainWindow: null,
+        browserHost: {
+          activeTraceId: null,
+          verifyConnector: async () => { steps.push("connector"); },
+        },
+        runtimeHost: {
+          devDoctor: async () => { steps.push("devDoctor"); return report; },
+          doctor: async () => { steps.push("doctor"); return report; },
+          mcpConnectorName: () => "test connector",
+        },
+        stateStore: { read: () => state, update: () => state },
+        logger: { info() {} },
+        publishOperation() {},
+        send() {},
+      };
+      vm.runInNewContext(handler + "\nthis.verify = performMcpVerification;", context);
+      const result = await context.verify();
+      assert.deepEqual(steps, healthy
+        ? [dev ? "devDoctor" : "doctor", "connector"]
+        : [dev ? "devDoctor" : "doctor"]);
+      assert.equal(result.ok, healthy);
+    }
+  }
   assert.match(appSource, /operation\?\.name === "mcp-verification"/);
 });
 
 test("saved ChatGPT authentication is refreshed before setup is presented", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
-  const productionStartup = electronMain.indexOf("} else void (async () => {");
+  const productionStartup = electronMain.indexOf("} else runtimeStartupInFlight = (async () => {");
   const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);
-  const routeConnect = electronMain.indexOf("runtimeHost.connectBridgeRoute()", runtimeStart);
+  const browserGate = electronMain.indexOf("browser?.authenticated !== true", runtimeStart);
+  const bridgeConnect = electronMain.indexOf("connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: \"startup\" })", runtimeStart);
   assert.ok(refreshBarrier > productionStartup, "production startup must wait for saved-session refresh");
   assert.ok(upgrade > refreshBarrier, "runtime upgrade must not inspect the browser before refresh settles");
   assert.ok(runtimeStart > upgrade, "configured runtime must start after any upgrade");
-  assert.ok(routeConnect > runtimeStart, "Codex route must connect only after the runtime is healthy");
+  assert.ok(browserGate > runtimeStart, "startup must check saved browser authentication after runtime health");
+  assert.ok(bridgeConnect > browserGate, "Codex route must wait for authenticated browser evidence");
   assert.match(appSource, /browser\?\.status === "loading" \? copy\.checkingSignIn/);
 });
 
@@ -258,5 +409,90 @@ test("completed model setup remains a repeatable capability probe", () => {
   assert.match(
     electronMain,
     /!setupState\.coreSetupComplete[\s\S]*?smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)/,
+  );
+});
+
+test("catalog verification reports a failed request instead of requesting another restart, then recovers", async () => {
+  const vm = require("node:vm");
+  const start = electronMain.indexOf("function startCatalogVerificationMonitor(");
+  const end = electronMain.indexOf("\nfunction ", start + 1);
+  const source = electronMain.slice(start, end);
+  const state = { coreSetupComplete: true, codexCatalogVerified: false, codexRestartRequired: true, language: "en" };
+  const operations = [];
+  const events = [];
+  let tick;
+  let payload = { pid: 10, successful_model_catalog_requests: 0, model_catalog_requests: 0, last_model_catalog_result: null };
+  const context = {
+    catalogVerificationInFlight: false, catalogVerificationTimer: null, lastOperation: null,
+    stopCatalogVerificationMonitor() {},
+    runtimeSupervisor: { readConfig: () => ({}), proxyHealthPayload: async () => payload },
+    stateStore: { read: () => state, update: patch => Object.assign(state, patch) },
+    setInterval: callback => { tick = callback; return { unref() {} }; },
+    logger: { info: (...args) => events.push(args), warn: (...args) => events.push(args), debug() {} },
+    // Like the real publishOperation, the last one published is what a renderer load re-reads.
+    send() {}, publishOperation: op => { operations.push(op); context.lastOperation = op; },
+    nativeCopyFor: () => ({ catalogFailure: "Catalog failed (HTTP {status}; {reason})." }),
+  };
+  vm.runInNewContext(source + "\nstartCatalogVerificationMonitor({ logger, stateStore });", context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(operations.length, 0);
+  assert.equal(state.codexRestartRequired, true);
+  payload = { ...payload, model_catalog_requests: 1, last_model_catalog_result: {
+    request: 1, at: "2026-09-16T10:00:00Z", status: 502, failure: { stage: "transport", code: "UnsupportedProxyProtocol" },
+  } };
+  await tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.codexCatalogVerified, false);
+  assert.equal(state.codexRestartRequired, false);
+  assert.equal(operations[0]?.status, "failed");
+  assert.match(operations[0].message, /502.*UnsupportedProxyProtocol/);
+  await tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(operations.length, 1, "polling must not repeat the same failure");
+  payload = { ...payload, successful_model_catalog_requests: 1, last_successful_model_catalog_request_at: "2026-09-16T10:01:00Z" };
+  await tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.codexCatalogVerified, true);
+  assert.equal(state.codexRestartRequired, false);
+  assert.ok(events.some(([event]) => event === "codex.model_catalog_verified"));
+  // The recovery replaces the earlier failure, so a renderer load no longer re-raises it.
+  assert.equal(operations.length, 2);
+  assert.equal(context.lastOperation.name, "catalog-verification");
+  assert.equal(context.lastOperation.status, "completed");
+});
+
+test("a completed operation clears only the error its own earlier failure raised", () => {
+  assert.match(
+    appSource,
+    /next\.status === "completed" && previous\?\.status === "failed" && previous\.name === next\.name\)[\s\S]{0,80}setError\(\(current\) => \(current === previous\.message \? null : current\)\)/,
+  );
+  assert.match(appSource, /lastOperationRef\.current = next\.operation \?\? null/);
+});
+
+test("settings expose an opt-in existing MCP auto-connect without provisioning credentials", () => {
+  assert.match(typesSource, /autoConnectExistingMcp:\s*boolean/);
+  assert.match(
+    typesSource,
+    /key:\s*"keepRunningOnClose"\s*\|\s*"showBrowserDuringTurns"\s*\|\s*"autoConnectExistingMcp"/,
+  );
+  assert.match(
+    appSource,
+    /body=\{copy\.autoConnectExistingMcpBody\}[\s\S]*?label=\{copy\.autoConnectExistingMcp\}[\s\S]*?checked=\{snapshot\.state\.autoConnectExistingMcp\}/,
+  );
+  assert.match(
+    appSource,
+    /disabled=\{snapshot\.state\.browserInteractionMode !== "automatic"[\s\S]*?snapshot\.state\.mcpRuntimeInstalled !== true[\s\S]*?!snapshot\.mcpCredentialsConfigured\}/,
+  );
+  assert.match(
+    appSource,
+    /api!\.setPreference\("autoConnectExistingMcp", checked\)/,
+  );
+  assert.match(
+    i18nSource,
+    /autoConnectExistingMcp:\s*"Auto-connect existing MCP harness"/,
+  );
+  assert.match(
+    i18nSource,
+    /autoConnectExistingMcpBody:\s*"After Codex reaches the ready bridge, verify and connect the saved MCP harness\. This never creates a connector, tunnel, or key\."/,
   );
 });

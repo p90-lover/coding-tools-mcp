@@ -153,6 +153,8 @@ export function selectBinding(
   providerId: string,
   model: string | null,
 ): ExecutionBinding | undefined {
+  const selectedModel = model?.trim();
+  if (!selectedModel) return undefined;
   const connected = executionBindings(value).filter((binding) => (
     binding.engine === engine
       && binding.enabled
@@ -160,9 +162,8 @@ export function selectBinding(
       && binding.currentScopeValid
   ));
   return connected.find((binding) => (
-    binding.provider === providerId && (!model || binding.model === model)
-  )) ?? connected.find((binding) => binding.provider === providerId)
-    ?? connected.find((binding) => !model || binding.model === model);
+    binding.provider === providerId && binding.model === selectedModel
+  ));
 }
 
 export function sanitizeIdentifier(value: string): string {

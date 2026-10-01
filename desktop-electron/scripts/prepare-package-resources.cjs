@@ -7,7 +7,7 @@ const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
 
-const PRODUCT_VERSION = "0.7.0-rc.12";
+const PRODUCT_VERSION = "0.7.0-rc.14";
 const PRODUCT_NAME = "Coding Tools";
 const APP_ID = "dev.codingtools.fullharness";
 const SOURCE_REPOSITORY = "p90-lover/coding-tools-mcp";
@@ -957,7 +957,46 @@ function copyFiveStackTree(sourceRoot, destinationRoot, seen = new Set(), relati
   }
 }
 
-function resolveFiveStackRuntimeRoot({ desktopRoot, explicit, required }) {
+function pinnedCpaSha256(desktopRoot, platform, arch) {
+  const manifest = readJson(path.join(desktopRoot, "vendor", "managed-components", "cpa.json"), "PACKAGE_CPA_SOURCE_MANIFEST_INVALID");
+  const digest = manifest.platforms?.[platform]?.[arch]?.sha256;
+  if (manifest.id !== "cpa" || !SHA256.test(String(digest || ""))) {
+    fail("PACKAGE_CPA_SOURCE_ASSET_INVALID", `${platform}/${arch}`);
+  }
+  return digest;
+}
+
+function validateCpaRuntime(runtimeRoot, platform, arch, expectedSha256) {
+  const manifest = readJson(path.join(runtimeRoot, "MANIFEST.json"), "PACKAGE_RESOURCE_FIVE_STACK_MANIFEST_INVALID");
+  const ids = manifest.components?.map((component) => component.id);
+  const entries = fs.readdirSync(runtimeRoot).sort(compareText);
+  if (JSON.stringify(ids) !== JSON.stringify(["cpa"])
+    || entries.some((entry) => !["MANIFEST.json", "cpa"].includes(entry))) {
+    fail("PACKAGE_RESOURCE_FIVE_STACK_RUNTIME_RETIRED", runtimeRoot);
+  }
+  if ((platform && manifest.platform !== platform) || (arch && manifest.arch !== arch)) {
+    fail("PACKAGE_RESOURCE_CPA_RUNTIME_PLATFORM", runtimeRoot);
+  }
+  regularDirectory(path.join(runtimeRoot, "cpa"), "CPA runtime");
+  const component = manifest.components[0];
+  const bundle = readJson(path.join(runtimeRoot, "cpa", "BUNDLE.json"), "PACKAGE_RESOURCE_CPA_RUNTIME_MANIFEST_INVALID");
+  const fileName = bundle.fileName;
+  if (bundle.id !== "cpa" || component.fileName !== fileName || component.sha256 !== bundle.sha256
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(fileName)
+    || !/^[a-f0-9]{64}$/.test(String(bundle.sha256 || ""))
+    || (expectedSha256 && bundle.sha256 !== expectedSha256)) {
+    fail("PACKAGE_RESOURCE_CPA_RUNTIME_INVALID", runtimeRoot);
+  }
+  const payloadPath = path.join(runtimeRoot, "cpa", fileName);
+  if (!fs.existsSync(payloadPath)) fail("PACKAGE_RESOURCE_CPA_RUNTIME_MISSING", payloadPath);
+  const payload = regularFile(payloadPath, "CPA runtime");
+  if (payload.metadata.size < 1 || sha256(fs.readFileSync(payload.path)) !== bundle.sha256) {
+    fail("PACKAGE_RESOURCE_CPA_RUNTIME_CHECKSUM", payload.path);
+  }
+  return { fileName, sha256: bundle.sha256 };
+}
+
+function resolveFiveStackRuntimeRoot({ desktopRoot, explicit, required, platform, arch }) {
   const candidates = [
     explicit,
     process.env.CODING_TOOLS_FIVE_STACK_RUNTIME,
@@ -968,6 +1007,7 @@ function resolveFiveStackRuntimeRoot({ desktopRoot, explicit, required }) {
     const resolved = path.resolve(candidate);
     const manifest = path.join(resolved, "MANIFEST.json");
     if (fs.existsSync(manifest) && fs.statSync(manifest).isFile() && fs.statSync(resolved).isDirectory()) {
+      validateCpaRuntime(resolved, platform, arch, pinnedCpaSha256(desktopRoot, platform, arch));
       return resolved;
     }
   }
@@ -1013,6 +1053,8 @@ function preparePackageResources(options = {}) {
     explicit: options.fiveStackRuntimeRoot,
     required: options.requireFiveStackRuntime === true
       || (options.requireFiveStackRuntime !== false && Boolean(options.requireMain)),
+    platform,
+    arch,
   });
   const paths = componentPaths(platform);
   const versions = componentVersions();
@@ -1163,6 +1205,9 @@ module.exports = {
   skipFiveStackPackageEntry,
   createRetentionSession,
   preparePackageResources,
+  pinnedCpaSha256,
+  resolveFiveStackRuntimeRoot,
+  validateCpaRuntime,
   readTunnelZip,
   validateTunnelArchive,
 };

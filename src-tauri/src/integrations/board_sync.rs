@@ -8,8 +8,24 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClauseDraft {
+    pub title: String,
+    #[serde(default)]
+    pub detail: String,
+}
+#[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Update {
+    AppendClauses {
+        id: String,
+        clauses: Vec<ClauseDraft>,
+    },
+    MoveClause {
+        id: String,
+        clause_id: String,
+        state: String,
+    },
     Create {
         title: String,
         #[serde(default)]
@@ -44,6 +60,8 @@ impl Update {
         match self {
             Self::Create { .. } => None,
             Self::Move { id, .. }
+            | Self::AppendClauses { id, .. }
+            | Self::MoveClause { id, .. }
             | Self::Edit { id, .. }
             | Self::Observe { id, .. }
             | Self::Archive { id }
@@ -141,6 +159,70 @@ pub fn apply_scoped(
             )?;
             id
         }
+        Update::AppendClauses { id, clauses } => {
+            if clauses.is_empty() || clauses.len() > 12 {
+                return Err(err("Add between one and twelve plan clauses"));
+            }
+            let task = draft
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == id && task.workspace_id == workspace)
+                .ok_or_else(|| err("Task changed"))?;
+            if task.state == "archived" {
+                return Err(err("Restore the task before adding clauses"));
+            }
+            if task.clauses.len() + clauses.len() > 12 {
+                return Err(err("Plan clause limit reached (12)"));
+            }
+            let stamp = now();
+            let additions = clauses
+                .into_iter()
+                .map(|clause| {
+                    Ok(board::Clause {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        title: text(&clause.title, 240, true)?,
+                        detail: text(&clause.detail, 8192, false)?,
+                        state: "backlog".into(),
+                        created_at: stamp,
+                        updated_at: stamp,
+                    })
+                })
+                .collect::<AppResult<Vec<_>>>()?;
+            task.clauses.extend(additions);
+            task.updated_at = stamp;
+            draft.revision = next;
+            id
+        }
+        Update::MoveClause {
+            id,
+            clause_id,
+            state,
+        } => {
+            if !matches!(
+                state.as_str(),
+                "backlog" | "in_progress" | "blocked" | "done"
+            ) {
+                return Err(err("Choose a supported clause state"));
+            }
+            let task = draft
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == id && task.workspace_id == workspace)
+                .ok_or_else(|| err("Task changed"))?;
+            if task.state == "archived" {
+                return Err(err("Restore the task before moving a clause"));
+            }
+            let clause = task
+                .clauses
+                .iter_mut()
+                .find(|clause| clause.id == clause_id)
+                .ok_or_else(|| err("Clause changed"))?;
+            clause.state = state;
+            clause.updated_at = now();
+            task.updated_at = clause.updated_at;
+            draft.revision = next;
+            id
+        }
         Update::Archive { id } => {
             board::apply(&mut draft, revision, Change::Archive { id: id.clone() })?;
             id
@@ -212,7 +294,7 @@ pub fn view(
         Ok(
             json!({"workspace_id":workspace,"revision":b.revision,"steps":board::STEPS,
             "task":{"id":t.id,"workspace_id":workspace,"title":t.title,"description":t.description,
-                "state":t.state,"step":t.step,"created_at":t.created_at,"updated_at":t.updated_at,"evidence":evidence},
+                "state":t.state,"step":t.step,"created_at":t.created_at,"updated_at":t.updated_at,"evidence":evidence,"clauses":t.clauses},
             "evidence_count":t.evidence.len(),"next_offset":if next<t.evidence.len(){Some(next)}else{None},
             "model_calls":false,"review_steps_require_human_attestation":true}),
         )
@@ -223,7 +305,7 @@ pub fn view(
             .filter(|t| t.workspace_id == workspace && (include_archived || t.state != "archived"))
             .collect::<Vec<_>>();
         let tasks=scoped.iter().skip(offset).take(limit).map(|t|json!({"id":t.id,"workspace_id":workspace,
-            "title":t.title,"state":t.state,"step":t.step,"updated_at":t.updated_at,"evidence_count":t.evidence.len()})).collect::<Vec<_>>();
+            "title":t.title,"state":t.state,"step":t.step,"updated_at":t.updated_at,"evidence_count":t.evidence.len(),"clauses":t.clauses.iter().map(|clause|json!({"id":clause.id,"title":clause.title,"state":clause.state})).collect::<Vec<_>>()})).collect::<Vec<_>>();
         let next = offset.saturating_add(tasks.len());
         Ok(
             json!({"workspace_id":workspace,"revision":b.revision,"steps":board::STEPS,"tasks":tasks,
@@ -236,6 +318,70 @@ mod tests {
     use super::*;
     fn update(b: &mut Board, w: &str, v: Value) -> AppResult<String> {
         apply_scoped(b, w, b.revision, serde_json::from_value(v).unwrap())
+    }
+    #[test]
+    fn clauses_preserve_old_plans_and_reject_foreign_or_partial_updates() {
+        let mut board: Board = serde_json::from_value(json!({"revision":0,"tasks":[{
+            "id":"old","workspace_id":"a","title":"Old plan","description":"",
+            "state":"backlog","step":0,"created_at":1,"updated_at":1,"evidence":[]
+        }]}))
+        .unwrap();
+        assert!(board.tasks[0].clauses.is_empty());
+        let foreign = update(
+            &mut board,
+            "b",
+            json!({"operation":"create","title":"Foreign"}),
+        )
+        .unwrap();
+        let before = serde_json::to_value(&board).unwrap();
+        assert!(update(
+            &mut board,
+            "a",
+            json!({"operation":"append_clauses","id":foreign,
+            "clauses":[{"title":"No access"}]})
+        )
+        .is_err());
+        let too_many = (0..13)
+            .map(|i| json!({"title":format!("Clause {i}")}))
+            .collect::<Vec<_>>();
+        assert!(update(
+            &mut board,
+            "a",
+            json!({"operation":"append_clauses","id":"old",
+            "clauses":too_many})
+        )
+        .is_err());
+        assert_eq!(serde_json::to_value(&board).unwrap(), before);
+        let revision = board.revision;
+        update(
+            &mut board,
+            "a",
+            json!({"operation":"append_clauses","id":"old",
+            "clauses":[{"title":"Plan","detail":"Check scope"},{"title":"Verify"}]}),
+        )
+        .unwrap();
+        assert_eq!(board.revision, revision + 1);
+        let clause = board.tasks[0].clauses[0].id.clone();
+        update(
+            &mut board,
+            "a",
+            json!({"operation":"move_clause","id":"old",
+            "clause_id":clause,"state":"done"}),
+        )
+        .unwrap();
+        assert_eq!(
+            view(&board, "a", Some("old"), 0, 50, false).unwrap()["task"]["clauses"][0]["state"],
+            "done"
+        );
+        let settled = serde_json::to_value(&board).unwrap();
+        assert!(update(
+            &mut board,
+            "a",
+            json!({"operation":"move_clause","id":"old",
+            "clause_id":"missing","state":"done"})
+        )
+        .is_err());
+        assert_eq!(serde_json::to_value(&board).unwrap(), settled);
     }
     #[test]
     fn workflow_043_scope_revision_and_observations_are_atomic() {

@@ -111,7 +111,7 @@ npm run desktop
 
 即時權限修改應優先驗證同一個 HTTP 服務上的權限切換、原子儲存／撤銷，以及本機工具往返；電腦操作修改還須執行隔離 Windows 鍵鼠／截圖測試。只預覽前端，不能驗證原生 IPC、認證或桌面輸入。發佈閘門會檢查安裝程式內的實際執行檔、版本與授權條款，並重新下載檔案核對 SHA-256。
 
-原始碼位於 `src/`（介面）、`src-tauri/src/tools/`（共用執行），以及 `src-tauri/src/` 之下的 `mcp/`、`actions/`、`tunnel/`、`integrations/`（傳輸、連線及管理介接器）。`old/` 保留固定上游快照。舊 README 保留於 `aiTemp/Trash/readme-before-live-permissions/`，只作歷史文件，不是現行設定指引。
+原始碼位於 `src/`（介面）、`src-tauri/src/tools/`（共用執行），以及 `src-tauri/src/` 之下的 `mcp/`、`actions/`、`tunnel/`、`integrations/`（傳輸、連線及管理介接器）。舊 README 保留於 `aiTemp/Trash/readme-before-live-permissions/`，只作歷史文件，不是現行設定指引。
 
 ## 授權與來源
 

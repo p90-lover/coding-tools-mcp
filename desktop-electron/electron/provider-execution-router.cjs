@@ -16,7 +16,8 @@ const PROVIDER_EXECUTION_CATALOG = Object.freeze([
   { id: "gemini-reverse-proxy", name: "Gemini Reverse Proxy", protocol: "gemini_native", priority: 60, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "aistudio-to-api", name: "AIStudioToAPI", protocol: "openai_chat", priority: 50, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "cliproxyapi-antigravity", name: "CLIProxyAPI / Antigravity", protocol: "openai_chat", priority: 40, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
-  { id: "commandcode-proxy", name: "CommandCode Proxy", protocol: "openai_chat", priority: 30, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
+  { id: "commandcode-proxy", name: "CommandCode Go (CPA)", protocol: "openai_chat", priority: 30, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
+  { id: "commandcode-studio", name: "CommandCode Studio (CPA)", protocol: "openai_chat", priority: 31, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "ollama", name: "Ollama", protocol: "openai_chat", priority: 20, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
   { id: "custom-openai-compatible", name: "Custom OpenAI Compatible", protocol: "openai_chat", priority: 10, subagentEnabled: true, paseoEnabled: true, annealEnabled: true },
 ]);

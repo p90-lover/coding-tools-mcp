@@ -1,5 +1,7 @@
 "use strict";
 
+const { randomUUID } = require("node:crypto");
+
 const MCP_STATES = new Set(["stopped", "starting", "running", "stopping", "error"]);
 
 function emptyPage() {
@@ -14,6 +16,10 @@ function text(value, fallback = "") {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
+function strings(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+
 function boundedMcpState(value) {
   return MCP_STATES.has(value) ? value : "stopped";
 }
@@ -24,16 +30,44 @@ function toWorkspaceSummary(workspace, index = 0) {
   const name = text(record.name, id);
   const pathValue = text(record.path, text(record.workspace_path));
   if (!id || !name || !pathValue) return null;
+  const linked = record.linkedProjects ?? record.linked_projects;
+  const linkedProjects = Array.isArray(linked) ? linked.flatMap((candidate) => {
+    const project = asRecord(candidate);
+    const alias = text(project.alias);
+    const path = text(project.path);
+    return alias && path ? [{ alias, name: text(project.name, alias), path, mode: text(project.mode, "read-only") }] : [];
+  }) : [];
   return {
     id,
     name,
     path: pathValue,
+    linkedProjects,
     mcpState: boundedMcpState(record.mcpState || record.mcp_state),
     policyRevision: Number.isInteger(record.policyRevision)
       ? record.policyRevision
       : Number.isInteger(record.policy_revision)
         ? record.policy_revision
         : index,
+    permissionMode: text(record.permissionMode, text(record.permission_mode, "unknown")),
+    approvalMode: text(record.approvalMode, text(record.approval_mode, "unknown")),
+    toolProfile: text(record.toolProfile, text(record.tool_profile, "unknown")),
+    mcpAuthType: text(record.mcpAuthType, text(record.mcp_auth_type, "unknown")),
+    actionsAuthType: text(record.actionsAuthType, text(record.actions_auth_type, "unknown")),
+    mcpLocalPort: Number.isInteger(record.mcpLocalPort) ? record.mcpLocalPort
+      : Number.isInteger(record.mcp_local_port) ? record.mcp_local_port : null,
+    actionsLocalPort: Number.isInteger(record.actionsLocalPort) ? record.actionsLocalPort
+      : Number.isInteger(record.actions_local_port) ? record.actions_local_port : null,
+    screenCaptureEnabled: typeof record.screenCaptureEnabled === "boolean" ? record.screenCaptureEnabled
+      : typeof record.screen_capture_enabled === "boolean" ? record.screen_capture_enabled : null,
+    mcpOAuthClientId: text(record.mcpOAuthClientId, text(record.mcp_oauth_client_id)),
+    mcpOAuthRedirectUris: strings(record.mcpOAuthRedirectUris ?? record.mcp_oauth_redirect_uris),
+    mcpUseSharedSecrets: typeof record.mcpUseSharedSecrets === "boolean" ? record.mcpUseSharedSecrets
+      : typeof record.mcp_use_shared_secrets === "boolean" ? record.mcp_use_shared_secrets : null,
+    actionsOAuthClientId: text(record.actionsOAuthClientId, text(record.actions_oauth_client_id)),
+    actionsOAuthRedirectUris: strings(record.actionsOAuthRedirectUris ?? record.actions_oauth_redirect_uris),
+    actionsOAuthScopes: text(record.actionsOAuthScopes, text(record.actions_oauth_scopes)),
+    actionsUseSharedSecrets: typeof record.actionsUseSharedSecrets === "boolean" ? record.actionsUseSharedSecrets
+      : typeof record.actions_use_shared_secrets === "boolean" ? record.actions_use_shared_secrets : null,
   };
 }
 
@@ -114,9 +148,41 @@ function createCodingToolsShellBridge({
       };
     },
 
-    async listTasks(event) {
+    async listTasks(event, input) {
       assertFocusedMainWindow(event, false);
-      return emptyPage();
+      const workspaceId = text(input.workspaceId);
+      if (!workspaceId) throw new Error("Workspace is required");
+      const offset = Number.isInteger(input.cursor) && input.cursor > 0 ? input.cursor : 0;
+      const limit = Number.isInteger(input.limit) && input.limit > 0 ? Math.min(input.limit, 100) : 25;
+      const payload = await requestHeadless("/api/v1/tools/call", {
+        request_id: `tasks-${randomUUID()}`,
+        workspace_id: workspaceId,
+        tool: "workflow_list",
+        arguments: { offset, limit, include_archived: false },
+      }, "POST");
+      const operation = asRecord(payload?.operation);
+      const result = asRecord(operation.result);
+      if (operation.state !== "completed" || result.ok !== true) {
+        throw new Error(text(operation.error, text(result.summary, "Task list is unavailable")));
+      }
+      if (!Array.isArray(result.tasks) || !Number.isInteger(result.revision)) {
+        throw new Error("Task list returned an invalid durable workflow page");
+      }
+      return {
+        items: result.tasks.flatMap((candidate) => {
+          const row = asRecord(candidate);
+          const id = text(row.id);
+          if (!id) return [];
+          return [{
+            id,
+            title: text(row.title, id),
+            description: text(row.description),
+            state: text(row.state, "unknown"),
+          }];
+        }),
+        nextCursor: Number.isInteger(result.next_offset) ? result.next_offset : null,
+        revision: result.revision,
+      };
     },
 
     async searchHistory(event) {
@@ -124,8 +190,12 @@ function createCodingToolsShellBridge({
       return emptyPage();
     },
 
-    async nativeCodexStatus(event) {
+    async nativeCodexStatus(event, input = {}) {
       assertFocusedMainWindow(event, false);
+      const workspaceId = text(input.workspaceId);
+      if (workspaceId) {
+        return requestHeadless("/api/v1/native-codex/status", { workspace_id: workspaceId }, "POST");
+      }
       const runtime = await this.runtimeStatus(event);
       return {
         available: runtime.ready === true,

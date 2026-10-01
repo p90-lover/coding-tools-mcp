@@ -29,8 +29,8 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
 
     (
         "harness_status",
-        "Harness status",
-        "Return durable task, workspace, capability, and recovery status.",
+        "Coding Tools task status",
+        "Read Coding Tools' durable task, workspace and recovery tracker. This is not the Codex agent harness; use codex_runtime_status for an opted-in native App Server session.",
         true,
         false,
         false,

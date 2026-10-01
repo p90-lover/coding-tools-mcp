@@ -6,10 +6,13 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
+  '[contenteditable="true"][role="textbox"]',
+  'textarea[name="prompt-textarea"]',
 ].join(", ");
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
   'button[aria-haspopup="menu"][data-tone="neutral"]',
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
+  'button[aria-label="Select ChatGPT model"][aria-haspopup="menu"]',
 ].join(", ");
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
@@ -17,20 +20,24 @@ export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
 ].join(", ");
 export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
-export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider]';
-export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
+export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider], [data-model-picker-power-slider]';
+export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"], [data-model-picker-power-slider] [role="slider"]';
 export const CHATGPT_EFFORT_SLIDER_MAX_OPTIONS = 5;
-export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"]';
-export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"]';
+export const CHATGPT_STOP_BUTTON_SELECTOR = '[data-testid="stop-button"], form button[aria-label="Stop"]';
+export const CHATGPT_COMPLETION_ACTION_SELECTOR = 'button[data-testid="copy-turn-action-button"], .turn-action-controls button[aria-label="Copy"]';
 export const CHATGPT_ASSISTANT_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="assistant"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="assistant"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="assistant"])',
+  // The new UI owns the whole exchange, including a thinking-only placeholder, here.
+  // Answer extraction still requires assistant Markdown and its completion control.
+  '[data-turn-key]',
 ].join(", ");
 export const CHATGPT_USER_TURN_SELECTOR = [
   '[data-testid^="conversation-turn-"][data-turn="user"]',
   '[data-testid^="conversation-turn-"][data-message-author-role="user"]',
   '[data-testid^="conversation-turn-"]:has([data-message-author-role="user"])',
+  '[data-turn-key]:has([data-user-message-bubble])',
 ].join(", ");
 
 export interface ChatGptEffortSliderState {
@@ -214,12 +221,8 @@ export async function detectChatGptAccountCapabilities(
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
   }
-  const menu = page.locator(CHATGPT_EFFORT_MENU_SELECTOR).last();
-  const menuVisible = await menu.isVisible().catch(() => false);
-  const menuExpanded = await effortButton.getAttribute("aria-expanded").catch(() => null);
-  if (!menuVisible && menuExpanded !== "true") await effortButton.press("Enter");
   try {
-    const { sliderContainer, slider } = chatGptEffortSlider(page);
+    const { menu, sliderContainer, slider } = await activateChatGptEffortMenu(page, effortButton);
     const timeout = options.selectorTimeoutMs ?? 70_000;
     // Model radio rows can hydrate before the effort control. They carry no evidence
     // of the account's reasoning range, so an absent slider must fail, not cache false.
@@ -236,7 +239,8 @@ export async function detectChatGptAccountCapabilities(
         { cause: new Error("ChatGPT effort slider exposed an invalid ARIA range") },
       );
     }
-    return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 };
+    const lockedAccess = await menu.getByText("Locked, opens access options", { exact: true }).count();
+    return { solAvailable: true, proAvailable: state.max - state.min + 1 >= 5 && lockedAccess === 0 };
   } finally {
     await page.keyboard.press("Escape").catch(() => {});
   }

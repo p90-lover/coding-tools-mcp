@@ -9,22 +9,16 @@ const test = require("node:test");
 const {
   BACKOFF_CAP_MS,
   CPA_LOGS_MAX_TOTAL_SIZE_MB,
-  EXECUTION_TIMEOUT_MS,
   HEALTH_POLL_MS,
-  LITELLM_REQUEST_TIMEOUT_SECONDS,
   WEEK_MS,
-  applyLongRunLiteLlmTimeout,
   attachCpaCodexLongRun,
   classifyObservation,
   cpaLongRunYamlLines,
   nextBackoffMs,
-  routerLongRunEnvironment,
   shouldAbandonLongRun,
   trimJournal,
 } = require("../electron/cpa-codex-long-run.cjs");
-const { createOriginalUiController } = require("../electron/original-ui.cjs");
 const { runtimeConfiguration } = require("../electron/cpa-managed.cjs");
-const { environment } = require("../electron/codex-router-managed.cjs");
 
 const root = path.resolve(__dirname, "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
@@ -68,7 +62,6 @@ test("week-long backoff caps at five minutes and never abandons a desired run", 
   assert.ok(delays.every((delay) => delay <= BACKOFF_CAP_MS));
   assert.equal(shouldAbandonLongRun({ elapsedMs: WEEK_MS, consecutiveCrashes: 10_000 }), false);
   assert.equal(HEALTH_POLL_MS, 45_000);
-  assert.ok(EXECUTION_TIMEOUT_MS > WEEK_MS);
 });
 
 test("a live PID health flap is a reconnectable blip, not a crash restart", () => {
@@ -100,28 +93,6 @@ test("CPA managed config keeps the original panel and turns on long-run keep-ali
   assert.match(yaml, new RegExp(`logs-max-total-size-mb: ${CPA_LOGS_MAX_TOTAL_SIZE_MB}`));
   assert.match(yaml, /request-log: false/);
   assert.equal(cpaLongRunYamlLines().includes("debug: false"), false);
-});
-
-test("Codex Router long-run environment outlasts a seven-day task instead of the 24h default", () => {
-  const env = routerLongRunEnvironment();
-  assert.equal(env.MODEL_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS, String(EXECUTION_TIMEOUT_MS));
-  assert.equal(env.CODEX_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS, String(EXECUTION_TIMEOUT_MS));
-  assert.equal(Number(env.CODEX_ROUTER_GATEWAY_RESTARTS) > 5, true);
-  const home = temporaryDirectory("coding-tools-router-home-");
-  const state = temporaryDirectory("coding-tools-router-state-");
-  const launched = environment(home, state);
-  assert.equal(launched.MODEL_ROUTER_REQUEST_EXECUTION_TIMEOUT_MS, String(EXECUTION_TIMEOUT_MS));
-  assert.equal(launched.CODEX_ROUTER_GROK_STREAM_STALL_MS, String(2 * 60 * 60_000));
-});
-
-test("prepare patches LiteLLM's 10-minute request_timeout so streams can last a week", () => {
-  const home = temporaryDirectory("coding-tools-litellm-");
-  const filePath = path.join(home, "src", "litellm-config.mjs");
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, "litellm_settings:\n request_timeout: 600\n");
-  assert.equal(applyLongRunLiteLlmTimeout(home), true);
-  assert.match(fs.readFileSync(filePath, "utf8"), new RegExp(`request_timeout: ${LITELLM_REQUEST_TIMEOUT_SECONDS}`));
-  assert.equal(applyLongRunLiteLlmTimeout(home), false);
 });
 
 test("supervisor reconnects after a crash, keeps desired run across durable state, and stops when asked", async () => {
@@ -233,43 +204,4 @@ test("health blips with a live PID do not kill the process, then a reconnect gen
   assert.equal(starts.length, 1);
   assert.equal(controller.snapshot().tools[0].longRun.reconnectGeneration, 1);
   controller.dispose();
-});
-
-test("original UI controller keeps CPA and Codex Router chrome and wires the long-run supervisor", async () => {
-  const controller = createOriginalUiController({
-    longRun: false,
-    sleep: async () => {},
-    externalServices: {
-      snapshot: () => ({
-        services: [{
-          id: "cpa",
-          endpoint: "http://127.0.0.1:8317/",
-          status: "ready",
-          pid: 1,
-          home: "/tmp/cpa",
-          managedInstall: { state: "installed" },
-        }],
-      }),
-      inspect: async () => {},
-      cpaConnection: () => ({ managementKey: "k".repeat(36), proxyApiKey: "p".repeat(36) }),
-    },
-  });
-  const opened = await controller.openEmbedded("cpa", "logs");
-  assert.equal(opened.embedded, true);
-  assert.equal(opened.originalWindow, false);
-  assert.equal(opened.api.via, "codingTools.apps");
-  assert.equal(opened.url, "http://127.0.0.1:8317/management.html#/logs");
-  assert.equal(opened.tool.originalChrome, true);
-  controller.dispose();
-
-  const main = read("electron/main.cjs");
-  const surface = read("src/features/OriginalUiSurface.tsx");
-  const pack = JSON.parse(read("package.json"));
-  assert.match(main, /cpa-codex-long-run\.json/);
-  assert.match(main, /powerSaveBlocker/);
-  assert.match(surface, /codingTools\?\.apps/);
-  assert.match(surface, /reconnectGeneration/);
-  assert.match(surface, /searchParams\.set\("lr"/);
-  assert.ok(pack.build.asarUnpack.includes("electron/cpa-codex-long-run.cjs"));
-  assert.doesNotMatch(read("src/features/ExternalServicesSurface.tsx"), /CPA Provider Hub/);
 });

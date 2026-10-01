@@ -14,7 +14,7 @@ pub struct FixtureWorkspace {
 }
 
 pub fn fixtures_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../old/tests/compliance/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 pub fn tiny_js_fixture() -> FixtureWorkspace {
@@ -35,11 +35,7 @@ fn prepare_fixture(name: &str, symlink_escape: bool) -> FixtureWorkspace {
     let outside_secret = parent.join("outside-secret.txt");
     fs::write(
         &outside_secret,
-        fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../old/tests/compliance/outside-secret.txt"),
-        )
-        .expect("outside-secret.txt"),
+        fs::read_to_string(fixtures_root().join("outside-secret.txt")).expect("outside-secret.txt"),
     )
     .expect("write outside secret");
     materialize_runtime_files(&root, &outside_secret, name);

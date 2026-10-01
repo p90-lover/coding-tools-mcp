@@ -1,3 +1,4 @@
+const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
@@ -10,7 +11,7 @@ const {
   processRunning,
   terminateOwnedProcessTree,
 } = require("./process-tree.cjs");
-const { runtimeInvocation } = require("./runtime-command.cjs");
+const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
 const MAX_RESTARTS_PER_WINDOW = 5;
@@ -29,6 +30,7 @@ const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 function collectLines(stream, onLine, onError) {
+  if (!stream) return;
   let buffered = "";
   stream.on("data", (chunk) => {
     buffered += chunk.toString("utf8");
@@ -107,10 +109,88 @@ function runtimeOwnershipPredatesCurrentBoot(state) {
   );
 }
 
+const DAEMON_LOG_ROTATE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Stand-in for a ChildProcess when the launcher adopts a bridge daemon that a
+ * previous launcher left running. It reports exit by polling the pid, which is
+ * all the supervisor's readiness, shutdown and recovery paths need.
+ */
+class AdoptedProcess extends EventEmitter {
+  constructor(pid, pollMs = 1_000) {
+    super();
+    this.pid = pid;
+    this.exitCode = null;
+    this.signalCode = null;
+    this.adopted = true;
+    this.timer = setInterval(() => {
+      if (processRunning(this.pid)) return;
+      clearInterval(this.timer);
+      this.exitCode = 0;
+      this.emit("exit", 0, null);
+      this.emit("close", 0, null);
+    }, pollMs);
+    this.timer.unref?.();
+  }
+
+  kill(signal = "SIGTERM") {
+    try { process.kill(this.pid, signal); return true; } catch { return false; }
+  }
+
+  release() {
+    clearInterval(this.timer);
+  }
+}
+
+/** Follows a file-backed child log so a detached daemon's output still reaches the launcher log. */
+class LogTail {
+  constructor(filePath, onLine, { fromEnd = true, pollMs = 500 } = {}) {
+    this.filePath = filePath;
+    this.onLine = onLine;
+    this.buffered = "";
+    let size = 0;
+    try { size = fs.statSync(filePath).size; } catch {}
+    this.offset = fromEnd ? size : 0;
+    this.timer = setInterval(() => this.read(), pollMs);
+    this.timer.unref?.();
+  }
+
+  read() {
+    let fd;
+    try {
+      const size = fs.statSync(this.filePath).size;
+      if (size < this.offset) this.offset = 0;
+      if (size === this.offset) return;
+      const length = Math.min(size - this.offset, 256 * 1024);
+      const chunk = Buffer.alloc(length);
+      fd = fs.openSync(this.filePath, "r");
+      fs.readSync(fd, chunk, 0, length, this.offset);
+      this.offset += length;
+      this.buffered += chunk.toString("utf8");
+      for (;;) {
+        const newline = this.buffered.indexOf("\n");
+        if (newline < 0) break;
+        const line = this.buffered.slice(0, newline).replace(/\r$/, "");
+        this.buffered = this.buffered.slice(newline + 1);
+        if (line) this.onLine(line);
+      }
+      if (this.buffered.length > 64 * 1024) this.buffered = this.buffered.slice(-64 * 1024);
+    } catch {
+      // The log may be rotating or not created yet; the next poll retries.
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+  }
+
+  stop() {
+    clearInterval(this.timer);
+  }
+}
+
 function runtimeOwnershipMayBeLive(state) {
   if (!state || runtimeOwnershipPredatesCurrentBoot(state)) return false;
   if (processRunning(state.daemonPid) || processRunning(state.tunnelPid)) return true;
-  return ["starting", "ready", "degraded", "stopping"].includes(state.status);
+  return ["starting", "ready", "degraded", "stopping", "detached"].includes(state.status);
 }
 
 function conciseTunnelLog(value) {
@@ -324,6 +404,7 @@ class RuntimeSupervisor {
     publishOperation,
     runtimeInvocationFactory = runtimeInvocation,
     getRuntimeEnvironment = () => ({}),
+    persistentBridge = false,
   }) {
     this.app = app;
     this.logger = logger;
@@ -361,6 +442,11 @@ class RuntimeSupervisor {
     this.restartableChildren = new WeakSet();
     this.lastChildFailure = { daemon: null, tunnel: null };
     this.lastChildOutput = { daemon: null, tunnel: null };
+    // A persistent bridge daemon runs detached with file-backed output, so it survives a
+    // launcher restart, crash or installer update and the next launcher adopts it.
+    this.persistentBridge = persistentBridge === true && launcherProfile === "production";
+    this.daemonLogPath = path.join(coreHome, "runtime", "daemon.log");
+    this.daemonTail = null;
   }
 
   readConfig() {
@@ -491,17 +577,25 @@ class RuntimeSupervisor {
         /^[A-Z][A-Z0-9_]*$/.test(key) && typeof value === "string" && value.length > 0
       )),
     );
-    const child = spawn(invocation.executable, invocation.args, {
-      cwd: invocation.cwd,
-      detached: DETACH_OWNED_CHILD,
-      env: {
-        ...process.env,
-        ...runtimeEnvironment,
-        CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    const persistent = name === "daemon" && this.persistentBridge;
+    const logFd = persistent ? this.openDaemonLog() : null;
+    let child;
+    try {
+      child = spawn(invocation.executable, invocation.args, {
+        cwd: invocation.cwd,
+        detached: persistent ? true : DETACH_OWNED_CHILD,
+        env: {
+          ...process.env,
+          ...runtimeEnvironment,
+          CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR: this.browserDescriptorPath,
+        },
+        stdio: persistent ? ["ignore", logFd, logFd] : ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+    } finally {
+      if (logFd !== null) fs.closeSync(logFd);
+    }
+    if (persistent) this.followDaemonLog(false);
     this[name] = child;
     this.lastChildFailure[name] = null;
     this.lastChildOutput[name] = null;
@@ -549,6 +643,121 @@ class RuntimeSupervisor {
     this.logger.info(`runtime.${name}_started`, { pid: child.pid });
     this.writeState("starting");
     return child;
+  }
+
+  openDaemonLog() {
+    fs.mkdirSync(path.dirname(this.daemonLogPath), { recursive: true });
+    try {
+      if (fs.statSync(this.daemonLogPath).size > DAEMON_LOG_ROTATE_BYTES) {
+        fs.renameSync(this.daemonLogPath, `${this.daemonLogPath}.1`);
+      }
+    } catch {}
+    return fs.openSync(this.daemonLogPath, "a", 0o600);
+  }
+
+  followDaemonLog(fromEnd) {
+    this.daemonTail?.stop();
+    this.daemonTail = new LogTail(this.daemonLogPath, (line) => {
+      this.lastChildOutput.daemon = redactText(line).slice(0, 1_000);
+      this.logger.warn("runtime.daemon_stderr", { line });
+    }, { fromEnd });
+  }
+
+  /**
+   * Adopt a healthy bridge daemon left running by a previous launcher instead of
+   * stopping it. Only a daemon whose live health matches the recorded pid, mode and
+   * this launcher's bundled bridge version is adopted; anything else keeps the
+   * existing stale-recovery path.
+   */
+  async adoptRunningDaemon(config) {
+    if (!this.persistentBridge || this.daemon || this.tunnel) return false;
+    let state;
+    try { state = this.readState(); } catch { return false; }
+    if (!state || runtimeOwnershipPredatesCurrentBoot(state)) return false;
+    if (!Number.isInteger(state.daemonPid) || !processRunning(state.daemonPid)) return false;
+    if (state.ownerPid !== process.pid && processRunning(state.ownerPid)) return false;
+    const health = await this.proxyHealthPayload(config);
+    if (health?.service !== "codex-chatgpt-web"
+      || health?.mode !== config.mode
+      || health?.version !== config.releaseVersion
+      || health?.pid !== state.daemonPid) {
+      return false;
+    }
+    const handle = new AdoptedProcess(state.daemonPid);
+    this.daemon = handle;
+    this.lastChildFailure.daemon = null;
+    handle.once("exit", () => {
+      const expected = this.stopping || this.expectedExits.has(handle);
+      this.expectedExits.delete(handle);
+      const restartable = this.restartableChildren.has(handle);
+      this.restartableChildren.delete(handle);
+      if (this.daemon === handle) this.daemon = null;
+      const detail = "adopted daemon exited";
+      this.lastChildFailure.daemon = detail;
+      const statePersisted = this.tryWriteState(expected ? "stopping" : "degraded", detail);
+      this.logger[expected ? "info" : "error"]("runtime.daemon_exited", { adopted: true });
+      if (!expected && restartable && statePersisted) this.scheduleRecovery("daemon");
+    });
+    this.followDaemonLog(true);
+    this.logger.info("runtime.daemon_adopted", { pid: state.daemonPid, previousOwner: state.ownerPid });
+    return true;
+  }
+
+  /**
+   * Leave the bridge and MCP tunnel running for the next launcher (app restart or
+   * update). Monitors stop, but no process is signalled.
+   */
+  async detach(reason = "launcher-restart") {
+    if (!this.persistentBridge) return { status: "not-persistent" };
+    const daemon = this.daemon;
+    this.stopping = true;
+    this.stopTunnelMonitor();
+    for (const name of ["daemon", "tunnel"]) {
+      if (this.restartTimers[name]) {
+        clearTimeout(this.restartTimers[name]);
+        this.restartTimers[name] = null;
+      }
+    }
+    if (daemon) this.expectedExits.add(daemon);
+    this.daemonTail?.stop();
+    daemon?.release?.();
+    daemon?.unref?.();
+    const state = this.writeState("detached", reason);
+    this.logger.info("runtime.detached", { daemonPid: state.daemonPid, tunnelPid: state.tunnelPid, reason });
+    return { status: "detached", daemonPid: state.daemonPid, tunnelPid: state.tunnelPid };
+  }
+
+  /** Restart only the bridge daemon, after its active turns drain. */
+  async restartDaemonOnly() {
+    const config = this.readConfig();
+    if (!config) throw new Error("Codex bridge is not configured");
+    if (this.launcherProfile === "development") throw new Error("The DEV profile has no Responses bridge");
+    let drained = false;
+    if (this.daemon) {
+      drained = await this.acquireDrain(config);
+      try {
+        await this.shutdownDaemon(config);
+      } catch (error) {
+        if (drained) await this.control(config, "resume").catch(() => undefined);
+        throw error;
+      }
+    }
+    this.stopping = false;
+    await this.startDaemon(config);
+    this.writeState("ready");
+    return { status: "restarted", pid: this.daemon?.pid ?? null };
+  }
+
+  /** Restart only the MCP tunnel. */
+  async restartTunnelOnly() {
+    const config = this.readConfig();
+    if (!config) throw new Error("MCP tunnel is not configured");
+    if (config.mode !== "full") throw new Error("MCP tunnel is not part of the browser-only setup");
+    if (this.tunnel) await this.stopTunnelGracefully(config);
+    this.stopping = false;
+    await this.startTunnel(config, "runtime-restart", { forceRestart: true });
+    this.writeState("ready");
+    return { status: "restarted", pid: this.tunnel?.pid ?? null };
   }
 
   runtimeCommand(args) {
@@ -1213,7 +1422,8 @@ class RuntimeSupervisor {
       this.clearState();
       return { status: "ready", daemonPid: null, tunnelPid: null };
     }
-    if (!tunnelOnly && config.releaseVersion !== this.app.getVersion()) {
+    const currentVersion = tunnelOnly ? this.app.getVersion() : runtimeReleaseVersion(this);
+    if (!tunnelOnly && config.releaseVersion !== currentVersion) {
       const ownershipState = this.readState();
       if ((!tunnelOnly && await this.proxyHealth(config)) || runtimeOwnershipMayBeLive(ownershipState)) {
         try {
@@ -1231,12 +1441,13 @@ class RuntimeSupervisor {
           return { status: "external", detail };
         }
       }
-      const detail = `Config requires ${config.releaseVersion}; launcher is ${this.app.getVersion()}`;
+      const detail = `Config requires bridge ${config.releaseVersion}; bundled bridge is ${currentVersion}`;
       this.writeState("needs-setup", detail);
       this.logger.warn("runtime.setup_required", { detail });
       return { status: "needs-setup", detail };
     }
-    if (!this.daemon && !this.tunnel) {
+    const adopted = !tunnelOnly && await this.adoptRunningDaemon(config);
+    if (!adopted && !this.daemon && !this.tunnel) {
       const healthyRuntime = tunnelOnly ? false : await this.proxyHealth(config);
       const ownershipState = this.readState();
       if (healthyRuntime || runtimeOwnershipMayBeLive(ownershipState)) {
@@ -1266,8 +1477,25 @@ class RuntimeSupervisor {
       message: tunnelOnly ? "Starting isolated DEV MCP runtime" : "Starting local runtime",
     });
     try {
-      await this.startTunnel(config, "runtime-start");
-      if (!tunnelOnly) await this.startDaemon(config);
+      if (this.persistentBridge && !tunnelOnly) {
+        // The Codex bridge comes up first and stays up on its own; a slow or failing MCP
+        // tunnel leaves the runtime degraded (the launcher watchdog retries it) instead of
+        // taking the bridge down with it.
+        await this.startDaemon(config);
+        try {
+          await this.startTunnel(config, "runtime-start");
+        } catch (error) {
+          const detail = `MCP tunnel is not ready yet: ${errorMessage(error)}`;
+          this.restartHistory.daemon = [];
+          this.tryWriteState("degraded", detail);
+          this.logger.warn("runtime.tunnel_deferred", { detail });
+          this.publishOperation?.({ name: "runtime-start", status: "warning", message: detail });
+          return { status: "degraded", daemonPid: this.daemon?.pid, tunnelPid: null, detail };
+        }
+      } else {
+        await this.startTunnel(config, "runtime-start");
+        if (!tunnelOnly) await this.startDaemon(config);
+      }
       this.restartHistory.daemon = [];
       this.restartHistory.tunnel = [];
       this.writeState("ready");
@@ -1524,6 +1752,7 @@ class RuntimeSupervisor {
       this.daemon = null;
       return;
     }
+    this.expectedExits.add(child);
     const result = await this.control(config, "shutdown");
     if (result.status !== "ok") throw new Error("daemon did not acknowledge graceful shutdown");
     await this.waitForChildExit("daemon", child, timeoutMs);
@@ -1800,6 +2029,34 @@ class RuntimeSupervisor {
     this.clearState();
     this.logger.info("runtime.stale_owner_recovered");
     return true;
+  }
+
+  async waitForIdleForSetup(operationName, timeoutMs = 600_000, pollIntervalMs = 500) {
+    const config = this.readConfig();
+    const pid = this.daemon?.pid;
+    if (!config || !Number.isInteger(pid)) return;
+    const deadline = Date.now() + timeoutMs;
+    let previousMessage = "";
+    for (;;) {
+      const health = await this.proxyHealthPayload(config);
+      if (health?.service !== "codex-chatgpt-web" || health.status !== "ok"
+        || health.pid !== pid || health.mode !== config.mode || health.version !== config.releaseVersion
+        || !Number.isInteger(health.active_http_turns) || health.active_http_turns < 0
+        || !Number.isInteger(health.active_browser_turns) || health.active_browser_turns < 0) {
+        throw new Error("Cannot verify bridge activity before setup; the running bridge was left untouched");
+      }
+      if (health.active_http_turns === 0 && health.active_browser_turns === 0) return;
+      const activity = `${health.active_http_turns} active HTTP turn(s) and ${health.active_browser_turns} active browser turn(s)`;
+      if (Date.now() >= deadline) {
+        throw new Error(`Still waiting for ${activity}. Finish the active Codex turns, then retry setup; the bridge is still running.`);
+      }
+      const message = `Waiting for ${activity} to finish before connecting MCP. Existing requests can continue.`;
+      if (message !== previousMessage) {
+        this.publishOperation?.({ name: operationName, status: "running", message });
+        previousMessage = message;
+      }
+      await sleep(Math.min(pollIntervalMs, Math.max(1, deadline - Date.now())));
+    }
   }
 
   async acquireDrain(config, timeoutMs = DRAIN_IDLE_TIMEOUT_MS) {

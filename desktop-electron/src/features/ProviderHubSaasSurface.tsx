@@ -17,6 +17,7 @@ import type {
 import "./provider-hub-saas.css";
 
 interface SurfaceProps {
+  initialCategory?: ProviderCategoryFilter;
   language: Language;
   setError: (error: string | null) => void;
 }
@@ -178,11 +179,18 @@ const PROVIDER_PRESENTATION: Readonly<Record<string, ProviderPresentation>> = {
     aliases: ["cliproxyapi", "antigravity", "gemini antigravity", "cli proxy api"],
   },
   "commandcode-proxy": {
-    english: "CommandCode Proxy",
-    traditionalChinese: "CommandCode 代理",
-    descriptionEnglish: "Connect one or more CommandCode reverse-proxy accounts for routed task execution.",
-    descriptionTraditionalChinese: "連接一個或多個 CommandCode 反向代理帳戶，用作任務路由執行。",
-    aliases: ["commandcode", "command code proxy", "reverse proxy"],
+    english: "CommandCode Go (CPA)",
+    traditionalChinese: "CommandCode Go（CPA）",
+    descriptionEnglish: "Connect a CommandCode Go account through the CPA OAuth plugin.",
+    descriptionTraditionalChinese: "透過 CPA OAuth 插件連接 CommandCode Go 帳戶。",
+    aliases: ["commandcode", "command code", "cpa"],
+  },
+  "commandcode-studio": {
+    english: "CommandCode Studio (CPA)",
+    traditionalChinese: "CommandCode Studio（CPA）",
+    descriptionEnglish: "Connect a CommandCode Studio account through the CPA OAuth plugin.",
+    descriptionTraditionalChinese: "透過 CPA OAuth 插件連接 CommandCode Studio 帳戶。",
+    aliases: ["commandcode", "studio", "cpa"],
   },
   openrouter: {
     english: "OpenRouter",
@@ -436,12 +444,14 @@ function normalizeSearch(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
-export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
+export function ProviderCenterSurface({ initialCategory = "all", language, setError }: SurfaceProps) {
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot>(EMPTY_SNAPSHOT);
   const [externalServices, setExternalServices] = useState<ExternalServicesSnapshot>(EMPTY_EXTERNAL_SERVICES);
   const [providerSearch, setProviderSearch] = useState("");
-  const [providerCategory, setProviderCategory] = useState<ProviderCategoryFilter>("all");
-  const [selectedProviderId, setSelectedProviderId] = useState(PROVIDER_CATALOG[0].id);
+  const [providerCategory, setProviderCategory] = useState<ProviderCategoryFilter>(initialCategory);
+  const [selectedProviderId, setSelectedProviderId] = useState(() =>
+    PROVIDER_CATALOG.find((provider) => initialCategory === "all" || provider.category === initialCategory)?.id ?? PROVIDER_CATALOG[0].id,
+  );
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [draft, setDraft] = useState<AccountDraft>(() => emptyDraft());
   const [secret, setSecret] = useState("");
@@ -727,12 +737,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
       loginAdapterId: adapter?.id,
       ...(secret.trim()
         ? {
-            secret: adapter?.kind === "commandcode_oauth"
-              ? {
-                  apiKey: secret.trim(),
-                  baseUrl: draft.endpoint.trim() || provider.baseUrl || "http://127.0.0.1:9090",
-                }
-              : adapter?.kind === "cpa_oauth" || adapter?.kind === "cpa_auth_file"
+            secret: adapter?.kind === "cpa_oauth" || adapter?.kind === "cpa_auth_file"
                 ? {
                     managementKey: secret.trim(),
                     baseUrl: draft.endpoint.trim() || provider.baseUrl || "http://127.0.0.1:8317",
@@ -794,27 +799,6 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
               ? "CPA 帳戶已匯入，模型清單亦已更新。"
               : "供應商工作階段已連線，模型清單亦已更新。")
           : "登入頁面已開啟。請完成供應商登入以繼續。",
-      ));
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const importCommandCodeSession = async () => {
-    const api = window.codexWebLauncher;
-    if (!api) return;
-    setBusy("provider-import");
-    setError(null);
-    try {
-      const saved = selectedAccount ?? await persistAccount();
-      const next = await api.importProviderSession(saved.id);
-      adoptSnapshot(next, saved.id);
-      setNotice(text(
-        language,
-        "CommandCode CLI session imported; identity and models were refreshed.",
-        "已匯入 CommandCode CLI 工作階段；身份及模型清單已更新。",
       ));
     } catch (cause) {
       setError(messageOf(cause));
@@ -1291,9 +1275,7 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                 <label className="provider-full-row">
                   <span>{selectedLoginAdapter?.kind === "cpa_oauth" || selectedLoginAdapter?.kind === "cpa_auth_file"
                     ? text(language, "CPA / CLIProxyAPI management key (encrypted)", "CPA／CLIProxyAPI 管理金鑰（已加密）")
-                    : selectedLoginAdapter?.kind === "commandcode_oauth"
-                      ? text(language, "CommandCode API key (or use login/import below)", "CommandCode API Key（或使用下方登入／匯入）")
-                      : text(language, "Credential (encrypted by Electron main process)", "憑證（由 Electron 主程序加密）")}</span>
+                    : text(language, "Credential (encrypted by Electron main process)", "憑證（由 Electron 主程序加密）")}</span>
                   <input
                     autoComplete="off"
                     placeholder={selectedAccount?.hasCredential
@@ -1345,26 +1327,16 @@ export function ProviderCenterSurface({ language, setError }: SurfaceProps) {
                 <div>
                   {selectedAccount && (
                     selectedAccount.loginAdapterId?.startsWith("cpa-")
-                    || selectedAccount.loginAdapterId === "commandcode-oauth"
                   ) ? (
                     <button className="provider-secondary-button" disabled={busy !== null} onClick={() => void testProviderConnection()} type="button">
                       {busy === "provider-probe" ? "…" : text(language, "Test connection", "測試連線")}
-                    </button>
-                  ) : null}
-                  {selectedProvider.loginMode === "commandcode_oauth" ? (
-                    <button className="provider-secondary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void importCommandCodeSession()} type="button">
-                      {busy === "provider-import"
-                        ? "…"
-                        : text(language, "Import CommandCode CLI session", "匯入 CommandCode CLI 工作階段")}
                     </button>
                   ) : null}
                   {supportsProviderLogin(selectedProvider) ? (
                     <button className="provider-secondary-button" disabled={busy !== null || Boolean(accountValidation)} onClick={() => void openLogin()} type="button">
                       {busy === "provider-login"
                         ? "…"
-                        : selectedLoginAdapter?.kind === "commandcode_oauth"
-                          ? text(language, "Login with CommandCode", "使用 CommandCode 登入")
-                          : selectedLoginAdapter?.kind === "cpa_auth_file"
+                        : selectedLoginAdapter?.kind === "cpa_auth_file"
                             ? text(language, "Import CPA account", "匯入 CPA 帳戶")
                             : selectedLoginAdapter?.kind === "cpa_oauth"
                               ? (selectedAccount?.status === "connected" || selectedAccount?.status === "expired"

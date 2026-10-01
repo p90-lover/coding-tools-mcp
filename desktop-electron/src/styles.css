@@ -502,6 +502,16 @@ code {
   height: 100%;
 }
 
+/* Each visited tab stays mounted; only the current one is laid out. */
+.surface-pane {
+  width: 100%;
+  height: 100%;
+}
+
+.surface-pane[hidden] {
+  display: none !important;
+}
+
 .state-dot {
   display: inline-block;
   width: 6px;
@@ -658,6 +668,27 @@ code {
   width: 12px;
   height: 12px;
 }
+
+.browser-new-tab {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--color-icon-secondary);
+  -webkit-app-region: no-drag;
+}
+
+.browser-new-tab:hover:not(:disabled) {
+  background: var(--color-background-control-hover);
+  color: var(--color-icon-primary);
+}
+
+.browser-new-tab:disabled { opacity: 0.4; }
+.browser-new-tab svg { width: 14px; height: 14px; }
 
 .browser-tab-drag {
   height: 100%;
@@ -1087,6 +1118,69 @@ code {
   border-color: rgb(64 201 119 / 34%);
   background: rgb(64 201 119 / 12%);
   color: var(--color-text-success);
+}
+
+.keysmith-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px 0 20px 42px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.keysmith-status,
+.keysmith-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.keysmith-status span,
+.keysmith-hint {
+  color: var(--color-text-secondary);
+}
+
+.keysmith-status small {
+  color: var(--color-text-tertiary);
+}
+
+.keysmith-file,
+.keysmith-preview {
+  min-width: 0;
+  max-height: 220px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+}
+
+.keysmith-file strong {
+  display: block;
+  padding: 10px 12px 0;
+  overflow-wrap: anywhere;
+}
+
+.keysmith-file pre,
+.keysmith-preview {
+  margin: 0;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.keysmith-error,
+.keysmith-remove {
+  color: var(--color-text-error);
+}
+
+.keysmith-notice {
+  color: var(--color-text-success);
+}
+
+@media (max-width: 720px) {
+  .keysmith-panel { padding-left: 0; }
 }
 
 .setup-row > div {
@@ -2873,3 +2967,11 @@ code {
     transition-duration: 0.01ms !important;
   }
 }
+
+.refresh-menu { position: relative; display: inline-flex; }
+.refresh-menu .icon-button.is-busy svg { animation: refresh-spin 0.9s linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
+.refresh-menu-list { position: absolute; z-index: 300; top: calc(100% + 4px); left: 0; display: grid; min-width: 230px; padding: 4px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 8px; background: var(--color-background-elevated); box-shadow: 0 12px 32px rgb(0 0 0 / 35%); }
+.refresh-menu-list button { padding: 7px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-primary); font-size: 12px; text-align: left; }
+.refresh-menu-list button:hover, .refresh-menu-list button:focus-visible { background: rgb(255 255 255 / 7%); }
+@media (prefers-reduced-motion: reduce) { .refresh-menu .icon-button.is-busy svg { animation: none; } }

@@ -338,7 +338,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   {
     slug: "chatgpt-web/extra-high",
     displayName: "ChatGPT Web — Extra High",
-    description: "Account-gated ChatGPT Web Extra High through the native Codex harness.",
+    description: "ChatGPT Web Extra High through the native Codex harness; runs as High on accounts without it.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "xhigh",
@@ -348,7 +348,7 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   {
     slug: "chatgpt-web/pro",
     displayName: "ChatGPT Web — Pro",
-    description: "Account-gated ChatGPT Pro through the native Codex harness.",
+    description: "ChatGPT Pro through the native Codex harness; runs at the best tier the account has without it.",
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     codexEffort: "ultra",
@@ -383,9 +383,35 @@ export function availableChatGptWebModelRoutes(
       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
   }
   if (!capabilities.solAvailable) return CHATGPT_WEB_LUNA_MODEL_ROUTES;
-  return capabilities.proAvailable
-    ? CHATGPT_WEB_MODEL_ROUTES
-    : CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
+  // Every Sol tier is listed; one the account lacks runs at the nearest lower tier instead
+  // (see requireChatGptWebModelRoute), so the list never hides a tier behind a stale capability.
+  return CHATGPT_WEB_MODEL_ROUTES;
+}
+
+// Codex keeps whichever model was last picked, while the account underneath can change (a new
+// sign-in, a lapsed Pro plan). A tier the account lacks therefore runs at the nearest tier it has
+// instead of failing the turn; callers see the substitution as route.slug !== the requested id.
+function bestSolRouteAtOrBelow(
+  route: ChatGptWebAutomaticModelRoute,
+  capabilities: ChatGptWebAccountCapabilities,
+): ChatGptWebAutomaticModelRoute {
+  for (let index = CHATGPT_WEB_MODEL_ROUTES.indexOf(route); index >= 0; index -= 1) {
+    const candidate = CHATGPT_WEB_MODEL_ROUTES[index]!;
+    if (!candidate.requiresPro || capabilities.proAvailable) return candidate;
+  }
+  return CHATGPT_WEB_MODEL_ROUTES[0]!;
+}
+
+function lunaRouteForSolTier(route: ChatGptWebModelRoute): ChatGptWebModelRoute {
+  return route.adapterEffort === "low" || route.adapterEffort === "medium"
+    ? CHATGPT_WEB_LUNA_MODEL_ROUTE
+    : CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE;
+}
+
+function solTierForLunaRoute(route: ChatGptWebModelRoute): ChatGptWebModelRoute {
+  return route === CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE
+    ? routesBySlug.get("chatgpt-web/high")!
+    : CHATGPT_WEB_MODEL_ROUTES[0]!;
 }
 
 export function requireChatGptWebModelRoute(
@@ -410,16 +436,8 @@ export function requireChatGptWebModelRoute(
     throw new Error(`${route.displayName} is only available while Zero Risk is enabled`);
   }
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
-    if (capabilities.solAvailable) {
-      throw new Error(`${route.displayName} is only available for Luna-only accounts`);
-    }
-    return route;
+    return capabilities.solAvailable ? solTierForLunaRoute(route) : route;
   }
-  if (!capabilities.solAvailable) {
-    throw new Error(`${route.displayName} is not available for this Luna-only account`);
-  }
-  if (route.requiresPro && !capabilities.proAvailable) {
-    throw new Error(`${route.displayName} is not available for this account`);
-  }
-  return route;
+  if (!capabilities.solAvailable) return lunaRouteForSolTier(route);
+  return bestSolRouteAtOrBelow(route as ChatGptWebAutomaticModelRoute, capabilities);
 }

@@ -7,6 +7,10 @@
   background: #fff;
 }
 
+.original-ui-surface[data-tool="cpa"] {
+  height: 100%;
+}
+
 .original-ui-hostbar {
   box-sizing: border-box;
   display: flex;

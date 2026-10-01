@@ -3,6 +3,106 @@ const assert = require("node:assert/strict");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
 
+test("native proxy resolution requires owner auth, restricts targets, and works without browser automation", async () => {
+  const resolved = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => { throw new Error("proxy resolution must not inspect browser contents"); },
+    getPreferences: () => { throw new Error("proxy resolution must not depend on integration mode"); },
+    resolveProxy: async url => { resolved.push(url); return "PROXY 127.0.0.1:7897"; },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = (url, authorization = `Bearer ${token}`) => fetch(`${endpoint}/v1/network/resolve-proxy`, {
+    method: "POST", headers: { authorization, "content-type": "application/json" }, body: JSON.stringify({ url }),
+  });
+  try {
+    const url = "https://chatgpt.com/backend-api/codex/models?client_version=0.153.4";
+    assert.equal((await send(url, "Bearer wrong")).status, 401);
+    for (const target of ["http://chatgpt.com/backend-api/codex/models", "https://example.com/", "https://secret@chatgpt.com/backend-api/codex/models", "https://chatgpt.com/backend-api/me"]) {
+      assert.equal((await send(target)).status, 400);
+    }
+    const response = await send(url);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { proxy: "PROXY 127.0.0.1:7897" });
+    assert.deepEqual(resolved, [url]);
+    server.resolveProxy = async () => { throw new Error("private PAC address"); };
+    const failure = await send(url);
+    assert.equal(failure.status, 400);
+    assert.deepEqual(await failure.json(), { error: "System proxy resolution failed" });
+  } finally { await server.close(); }
+});
+
+test("native relay restricts the backend and streams without cookies", async () => {
+  const calls = [];
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => { throw new Error("native relay must not inspect the browser DOM"); },
+    getPreferences: () => { throw new Error("native relay must not read preferences"); },
+    fetchNative: async (url, init) => {
+      calls.push({ url, method: init.method, credentials: init.credentials,
+        authorization: init.headers.get("authorization"), cookie: init.headers.get("cookie"),
+        secFetchMode: init.headers.get("sec-fetch-mode"),
+        body: await new Response(init.body).text() });
+      return new Response("data: NATIVE_RELAY_OK\n\ndata: [DONE]\n\n", {
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const send = (url, controlToken = token) => fetch(`${endpoint}/v1/network/native-fetch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${controlToken}`, "x-native-url": url,
+      "x-native-authorization": "Bearer native-test-token", "x-native-method": "POST",
+      "content-type": "application/json", cookie: "DO_NOT_FORWARD", "sec-fetch-mode": "cors" },
+    body: '{"model":"gpt-5.6-sol"}',
+  });
+  try {
+    const url = "https://chatgpt.com/backend-api/codex/responses";
+    assert.equal((await send(url, "wrong")).status, 401);
+    assert.equal((await send("https://example.com/backend-api/codex/responses")).status, 400);
+    const response = await send(url);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/event-stream");
+    assert.equal(await response.text(), "data: NATIVE_RELAY_OK\n\ndata: [DONE]\n\n");
+    assert.deepEqual(calls, [{ url, method: "POST", credentials: "omit",
+      authorization: "Bearer native-test-token", cookie: null, secFetchMode: null,
+      body: '{"model":"gpt-5.6-sol"}' }]);
+  } finally { await server.close(); }
+});
+
+test("native relay treats a caller hanging up mid-body as routine, not a second error response", async () => {
+  const logs = [];
+  const record = (level) => (event, detail) => logs.push({ level, event, detail });
+  let upstreamCancelled;
+  const cancelled = new Promise((resolve) => { upstreamCancelled = resolve; });
+  const server = await new BrowserControlServer({
+    logger: { info() {}, debug: record("debug"), warn: record("warn"), error: record("error") },
+    getBrowserHost: () => null,
+    getPreferences: () => ({}),
+    // Headers arrive at once, then the body stalls — like a slow /models body behind a proxy.
+    fetchNative: async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("{\"models\":[")); },
+      cancel() { upstreamCancelled(); },
+    }), { headers: { "content-type": "application/json" } }),
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const caller = new AbortController();
+  try {
+    const response = await fetch(`${endpoint}/v1/network/native-fetch`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models",
+        "x-native-authorization": "Bearer native-test-token", "x-native-method": "GET" },
+      signal: caller.signal,
+    });
+    assert.equal(response.status, 200);
+    caller.abort();
+    await cancelled;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(logs.filter((l) => l.level !== "debug"), []);
+    assert.deepEqual(logs.map((l) => l.event), ["browser.native_fetch_stream_closed"]);
+  } finally { await server.close(); }
+});
+
 test("browser control server authenticates and owns turn visibility", async () => {
   const calls = [];
   const logs = [];
@@ -498,5 +598,114 @@ test("browser control server rejects malformed retained-conversation contracts",
     assert.equal((await post({ connectorIdentity: "Codex Native2" })).status, 400);
   } finally {
     await server.close();
+  }
+});
+
+test("turn lifecycle and native proxy failures reach the MCP event observer without changing responses", async () => {
+  const observed = [];
+  const host = {
+    browserInteractionMode: () => "automatic",
+    beginTurn: () => ({ surfaceId: "launcher_surface_id_0123456789AB", tabId: "tab-1", reused: false, connectorBound: false }),
+    heartbeatTurn: () => {},
+    endTurn: () => ({ cancelledByUser: false }),
+  };
+  let failNative = true;
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getBrowserHost: () => host,
+    getPreferences: () => ({}),
+    fetchNative: async () => {
+      if (failNative) throw new Error("net::ERR_PROXY_CONNECTION_FAILED");
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    },
+    onTurnEvent: (event) => {
+      observed.push(event);
+      if (event.type === "heartbeat") throw new Error("observer failures are ignored");
+    },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const post = (path, body) => fetch(`${endpoint}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const native = () => fetch(`${endpoint}/v1/network/native-fetch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models",
+      "x-native-authorization": "Bearer native-test-token", "x-native-method": "GET" },
+  });
+  try {
+    const key = "b".repeat(64);
+    assert.equal((await post("/v1/turn/start", { traceId: "trace_event_1", helperPid: process.pid, conversationKey: key })).status, 200);
+    assert.equal((await post("/v1/turn/heartbeat", { traceId: "trace_event_1", helperPid: process.pid })).status, 200);
+    assert.equal((await post("/v1/turn/end", { traceId: "trace_event_1", helperPid: process.pid, status: "failed", message: "Upstream error" })).status, 200);
+    assert.equal((await post("/v1/turn/end", { traceId: "trace_event_1", helperPid: process.pid, status: "bogus" })).status, 400);
+    assert.equal((await native()).status, 502);
+    failNative = false;
+    assert.equal((await native()).status, 200);
+    assert.deepEqual(observed, [
+      { type: "start", traceId: "trace_event_1", conversationKey: key, manual: false },
+      { type: "heartbeat", traceId: "trace_event_1" },
+      { type: "end", traceId: "trace_event_1", status: "failed", conversationKey: undefined, message: "Upstream error", manual: false },
+      { type: "native_fetch_failed", netError: "ERR_PROXY_CONNECTION_FAILED" },
+      { type: "native_fetch_ok" },
+    ]);
+  } finally { await server.close(); }
+});
+
+test("the Codex model catalog is served from the last good copy when the live request is slow or fails", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const os = require("node:os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-models-"));
+  let mode = "ok";
+  let release;
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getBrowserHost: () => null,
+    getPreferences: () => ({}),
+    modelsCacheDir: dir,
+    modelsCacheWaitMs: 50,
+    fetchNative: async () => {
+      if (mode === "fail") throw new Error("net::ERR_PROXY_CONNECTION_FAILED");
+      if (mode === "slow") await new Promise((resolve) => { release = resolve; });
+      return new Response(JSON.stringify({ models: [mode] }), { headers: { "content-type": "application/json", etag: `"${mode}"` } });
+    },
+  }).start();
+  const { endpoint, token } = server.descriptor();
+  const ask = (account = "Bearer account-a") => fetch(`${endpoint}/v1/network/native-fetch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "x-native-url": "https://chatgpt.com/backend-api/codex/models?client_version=1",
+      "x-native-authorization": account, "x-native-method": "GET" },
+  });
+  try {
+    // No copy yet: a live failure is still a 502, exactly as before.
+    mode = "fail";
+    assert.equal((await ask()).status, 502);
+    // A live success is passed through with its headers and saved.
+    mode = "ok";
+    const live = await ask();
+    assert.equal(live.status, 200);
+    assert.equal(live.headers.get("etag"), '"ok"');
+    assert.deepEqual(await live.json(), { models: ["ok"] });
+    // Failing or slow live requests are answered from the saved copy.
+    mode = "fail";
+    const failed = await ask();
+    assert.equal(failed.headers.get("x-coding-tools-models-cache"), "failed");
+    assert.deepEqual(await failed.json(), { models: ["ok"] });
+    mode = "slow";
+    const late = await ask();
+    assert.equal(late.headers.get("x-coding-tools-models-cache"), "late");
+    assert.deepEqual(await late.json(), { models: ["ok"] });
+    // The slow request still finishes and refreshes the copy for next time.
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    mode = "fail";
+    assert.deepEqual(await (await ask()).json(), { models: ["slow"] });
+    // Each account has its own copy.
+    assert.equal((await ask("Bearer account-b")).status, 502);
+  } finally {
+    await server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

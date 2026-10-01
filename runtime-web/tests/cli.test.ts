@@ -335,7 +335,7 @@ test("DEV browser-only setup persists only the isolated harness profile", async 
       version: 3,
       purpose: "dev-harness",
       mode: "browser-only",
-      appName: "Codex Native2 DEV",
+      appName: "Coding Tools Native2 DEV",
       browserHost: "launcher",
       browserHostDescriptorPath: descriptorPath,
       solAvailable: true,

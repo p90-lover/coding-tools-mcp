@@ -17,26 +17,23 @@ test("upstream endpoints are restricted to explicit loopback hosts", () => {
   assert.throws(() => normalizeLoopbackEndpoint("file:///tmp/anneal"), /HTTP or HTTPS/);
 });
 
-test("controller exposes the exact pinned Paseo and Anneal manifests", () => {
+test("retired upstream catalog refuses endpoint changes before touching services", () => {
+  const calls = [];
   const controller = createUpstreamToolController({
     env: {},
-    now: () => "2026-09-17T00:00:00.000Z",
+    externalServices: {
+      configure: () => calls.push("configure"),
+      snapshot: () => { calls.push("snapshot"); return { services: [] }; },
+      upstreamConfiguration: () => { calls.push("configuration"); return null; },
+    },
   });
   const snapshot = controller.snapshot();
   assert.equal(snapshot.version, 1);
-  assert.deepEqual(snapshot.tools.map((tool) => tool.id), ["anneal", "paseo"]);
-
-  const anneal = snapshot.tools.find((tool) => tool.id === "anneal");
-  const paseo = snapshot.tools.find((tool) => tool.id === "paseo");
-  assert.equal(anneal.repository, "mosonlab/anneal");
-  assert.equal(anneal.license, "MIT");
-  assert.equal(anneal.commit, "e43b72b10ad389f090a0be18eea5d2bcef468f5e");
-  assert.equal(paseo.repository, "getpaseo/paseo");
-  assert.equal(paseo.license, "Apache-2.0");
-  assert.equal(paseo.commit, "1e4ba65c6d75a6b061a1d54141f2f105b5908a96");
-
-  const changed = controller.setEndpoint("paseo", "http://127.0.0.1:7777");
-  assert.equal(changed.endpoint, "http://127.0.0.1:7777/");
+  assert.deepEqual(snapshot.tools, []);
+  for (const id of ["paseo", "anneal"]) {
+    assert.throws(() => controller.setEndpoint(id, "http://127.0.0.1:7777"), /Unknown upstream tool/);
+  }
+  assert.deepEqual(calls, []);
   controller.dispose();
 });
 

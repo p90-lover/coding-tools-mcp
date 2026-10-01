@@ -30,7 +30,7 @@ function moduleEntries(payload: Record<string, unknown>): ModuleEntry[] {
   return raw.flatMap((entry) => {
     const record = asRecord(entry);
     const id = typeof record.id === "string" ? record.id : "";
-    if (!id) return [];
+    if (id !== "cpa" && id !== "agent-orchestrator") return [];
     const operations = Array.isArray(record.operations)
       ? record.operations.filter((name): name is string => typeof name === "string")
       : [];
@@ -86,7 +86,7 @@ export function InProcessAppsPanel({ copy, language, setError }: InProcessAppsPa
   }, []);
 
   const runCall = async (mode: "call" | "invoke") => {
-    if (!moduleId || !operation || busy) return;
+    if ((moduleId !== "cpa" && moduleId !== "agent-orchestrator") || !selected || !operation || busy) return;
     setBusy(mode);
     setError(null);
     try {
@@ -101,12 +101,12 @@ export function InProcessAppsPanel({ copy, language, setError }: InProcessAppsPa
       const client = getCodingToolsClient();
       const response = mode === "invoke"
         ? await client.apps.invoke({
-          handle: moduleId as "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal",
+          handle: moduleId,
           operation,
           arguments: parsed,
         })
         : await client.apps.call({
-          moduleId: moduleId as "cpa" | "codex-router" | "commandcode-proxy" | "paseo" | "anneal",
+          moduleId,
           operation,
           arguments: parsed,
         });

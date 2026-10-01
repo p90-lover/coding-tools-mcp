@@ -26,6 +26,8 @@ const LIFECYCLE = Object.freeze([
 ]);
 
 const EXPECTED_OPS = Object.freeze({
+  "agent-orchestrator": ["inspect", "board", "runs", "update_run"],
+  "antigravity-cli": ["inspect", "status", "install", "terminal_open", "terminal_close", "refresh", "sign_in", "sweep", "set_auto"],
   cpa: [
     ...LIFECYCLE,
     "health",
@@ -175,6 +177,7 @@ function createFixtureHost(overrides = {}) {
       linkProvider: async (input) => ({ ok: true, linked: true, provider: input?.provider || "test" }),
       unlinkProvider: async (input) => ({ ok: true, unlinked: true, provider: input?.provider || "test" }),
       providerStatus: async () => ({ ok: true, status: "unknown" }),
+      agentOrchestrator: async (operation) => ({ ok: true, status: "ready", operation }),
       ...overrides.services,
     },
     actUpstream: overrides.actUpstream || (async (input) => {
@@ -321,8 +324,8 @@ test("codingTools.apps list/catalog/call/invoke stay in-process and inspect does
     assert.equal(Array.isArray(catalog.modules), true);
     assert.equal(catalog.transport, "in-process");
 
-    const loopbackInspect = ["cpa", "codex-router"];
-    const bundledInspect = ["commandcode-proxy", "paseo", "anneal"];
+    const loopbackInspect = ["cpa"];
+    const bundledInspect = [];
     for (const moduleId of MODULE_IDS) {
       const viaCall = await apps.call({ moduleId, operation: "inspect" });
       assert.equal(viaCall.ok, true, `${moduleId} call inspect`);
@@ -346,14 +349,14 @@ test("codingTools.apps list/catalog/call/invoke stay in-process and inspect does
     assert.equal(
       calls.filter((entry) => entry[0] === "inspect").length,
       loopbackInspect.length * 2,
-      "CPA/Router inspect still uses the injected service; CC/Paseo/Anneal stay in-process",
+      "CPA inspect uses the injected service; AO stays in-process",
     );
   } finally {
     stub.restore();
   }
 });
 
-test("CPA, Router, and CommandCode key operations dispatch through the in-process host", async () => {
+test("CPA key operations dispatch through the in-process host", async () => {
   const { apps, calls } = createFixtureHost();
   const stub = stubLoopbackHttp((request) => {
     if (request.pathname === "/v1/models") {
@@ -415,142 +418,11 @@ test("CPA, Router, and CommandCode key operations dispatch through the in-proces
     });
     assert.equal(unlinked.ok, true);
 
-    const routerSync = await apps.invoke({ handle: "codex-router", operation: "sync" });
-    assert.equal(routerSync.ok, true);
-    assert.equal(routerSync.result.synced, true);
-
-    const banner = await apps.call({ moduleId: "commandcode-proxy", operation: "banner" });
-    assert.equal(banner.ok, true);
-    assert.equal(banner.result.listening, false);
-    assert.equal(banner.result.reachable, undefined);
-    const plan = await apps.invoke({
-      handle: "commandcode-proxy",
-      operation: "plan",
-      arguments: { baseUrl: "http://127.0.0.1:9090/" },
-    });
-    assert.equal(plan.ok, true);
-    const registrationPlan = await apps.call({
-      moduleId: "commandcode-proxy",
-      operation: "registration-plan",
-    });
-    assert.equal(registrationPlan.ok, true);
-    const apply = await apps.invoke({
-      handle: "commandcode-proxy",
-      operation: "applyPlan",
-      arguments: { provider: "commandcode" },
-    });
-    assert.equal(apply.ok, true);
-    const registrationApply = await apps.call({
-      moduleId: "commandcode-proxy",
-      operation: "registration-apply",
-      arguments: { provider: "commandcode" },
-    });
-    assert.equal(registrationApply.ok, true);
-
     assert.ok(stub.requests.some((entry) => entry.pathname === "/v1/models"));
     assert.ok(stub.requests.some((entry) => entry.pathname === "/v1/chat/completions"));
-    assert.ok(calls.some((entry) => entry[0] === "syncCodexRouter"));
-    assert.ok(calls.some((entry) => entry[0] === "commandCodeProxyPlan"));
-    assert.ok(calls.some((entry) => entry[0] === "applyCommandCodeProxyPlan"));
   } finally {
     stub.restore();
   }
-});
-
-test("Paseo protocol and five-stack operations are invokable by handle", async () => {
-  const { apps, calls, fiveStackCalls } = createFixtureHost();
-
-  for (const operation of PASEO_PROTOCOL) {
-    const result = await apps.invoke({
-      handle: "paseo",
-      operation,
-      arguments: { agentId: "agent-1", text: "ping" },
-    });
-    assert.equal(result.ok, true, `paseo ${operation}`);
-    assert.equal(result.result.op, operation);
-  }
-
-  for (const [operation, tool] of Object.entries(PASEO_FIVE_STACK)) {
-    const result = await apps.call({
-      moduleId: "paseo",
-      operation,
-      arguments: { workspaceId: "ws-1" },
-    });
-    assert.equal(result.ok, true, `paseo ${operation}`);
-    assert.equal(result.result.tool, tool);
-  }
-
-  assert.deepEqual(
-    calls.filter((entry) => entry[0] === "act").map((entry) => entry[2]),
-    [...PASEO_PROTOCOL],
-  );
-  assert.deepEqual(fiveStackCalls.map((entry) => entry[0]), Object.values(PASEO_FIVE_STACK));
-});
-
-test("Anneal board/task/inbox operations and postgres-down contract", async () => {
-  const stub = stubLoopbackHttp((request) => {
-    if (request.pathname === "/tasks") {
-      return { statusCode: 200, body: JSON.stringify([{ id: "task-1" }]) };
-    }
-    return { statusCode: 200, body: JSON.stringify({ ok: true }) };
-  });
-  try {
-    const { apps, calls, fiveStackCalls } = createFixtureHost();
-    const listed = await apps.call({ moduleId: "anneal", operation: "listTasks" });
-    assert.equal(listed.ok, true);
-    const board = await apps.invoke({ handle: "anneal", operation: "board" });
-    assert.equal(board.ok, true);
-
-    for (const [operation, op] of Object.entries(ANNEAL_ACT)) {
-      const result = await apps.invoke({
-        handle: "anneal",
-        operation,
-        arguments: { taskId: "task-1" },
-      });
-      assert.equal(result.ok, true, `anneal ${operation}`);
-      assert.equal(result.result.op, op, `anneal ${operation} maps to ${op}`);
-    }
-
-    const opened = await apps.call({
-      moduleId: "anneal",
-      operation: "openFromReview",
-      arguments: { taskId: "task-1" },
-    });
-    assert.equal(opened.ok, true);
-    assert.equal(opened.result.tool, "anneal_open_from_review");
-    assert.ok(calls.some((entry) => entry[0] === "act" && entry[1] === "anneal"));
-    assert.ok(fiveStackCalls.some((entry) => entry[0] === "anneal_open_from_review"));
-  } finally {
-    stub.restore();
-  }
-
-  const down = createFixtureHost({
-    actUpstream: async () => {
-      throw new Error("password authentication failed for user postgres");
-    },
-    getFiveStack: () => ({
-      ok: true,
-      value: {
-        callTool: async () => {
-          throw new Error("database connection refused 127.0.0.1:5432");
-        },
-      },
-    }),
-  });
-  for (const operation of ["startTask", "create", "retry", "hold", "resume", "archive", "inboxDecision"]) {
-    const result = await down.apps.call({
-      moduleId: "anneal",
-      operation,
-      arguments: { taskId: "task-1" },
-    });
-    assert.equal(result.ok, false, `anneal ${operation} postgres down`);
-    assert.equal(result.result.unavailable, true, `anneal ${operation} unavailable`);
-    assert.equal(result.result.dependency, "postgres", `anneal ${operation} dependency`);
-  }
-  const review = await down.apps.invoke({ handle: "anneal", operation: "openFromReview" });
-  assert.equal(review.ok, false);
-  assert.equal(review.result.unavailable, true);
-  assert.equal(review.result.dependency, "postgres");
 });
 
 test("preload invoke remaps handle onto coding-tools:apps:call and omits undefined optionals", async () => {
@@ -567,8 +439,8 @@ test("preload invoke remaps handle onto coding-tools:apps:call and omits undefin
   await api.apps.call({ moduleId: "cpa", operation: "inspect" });
   await api.apps.invoke({ handle: "cpa", operation: "inspect" });
   await api.apps.invoke({
-    handle: "paseo",
-    operation: "send",
+    handle: "agent-orchestrator",
+    operation: "board",
     requestId: "req-1",
     arguments: { agentId: "agent-1", text: "ping" },
   });
@@ -586,8 +458,8 @@ test("preload invoke remaps handle onto coding-tools:apps:call and omits undefin
   assert.equal(Object.hasOwn(invocations[3].payload, "requestId"), false);
   assert.equal(Object.hasOwn(invocations[3].payload, "arguments"), false);
   assert.deepEqual(invocations[4].payload, {
-    moduleId: "paseo",
-    operation: "send",
+    moduleId: "agent-orchestrator",
+    operation: "board",
     requestId: "req-1",
     arguments: { agentId: "agent-1", text: "ping" },
   });
@@ -619,4 +491,59 @@ test("app-handler tree does not add listen ports and IPC names stay list/catalog
   assert.match(schema, /channel: "coding-tools:apps:call"/);
   assert.match(preload, /invoke: \(input\) => invokeContract\(ipcRenderer, "apps.call"/);
   assert.match(main, /appsHost\.call\(input\.moduleId, input\.operation, input\.arguments/);
+});
+
+test("AO apps.call reaches the host while retired IDs fail before dispatch", async () => {
+  const ipcCalls = [];
+  const ipc = { invoke: async (channel, payload) => {
+    ipcCalls.push({ channel, payload });
+    return { ok: true };
+  } };
+  await invokeContract(ipc, "apps.call", { moduleId: "agent-orchestrator", operation: "board" });
+  assert.equal(ipcCalls.length, 1);
+  assert.equal(ipcCalls[0].payload.moduleId, "agent-orchestrator");
+
+  const retired = ["paseo", "codex-router", "commandcode-proxy", "anneal"];
+  const { api, invocations } = loadPreload();
+  for (const moduleId of retired) {
+    for (const call of [
+      () => invokeContract(ipc, "apps.call", { moduleId, operation: "inspect" }),
+      () => api.apps.call({ moduleId, operation: "inspect" }),
+    ]) {
+      await assert.rejects(call, (error) => {
+        assert.equal(error.code, "APP_MODULE_RETIRED");
+        assert.match(error.message, new RegExp(moduleId));
+        return true;
+      }, moduleId);
+    }
+  }
+  await assert.rejects(
+    invokeContract(ipc, "apps.call", { moduleId: "unknown", operation: "inspect" }),
+    /IPC_REQUEST_SCHEMA_INVALID/,
+  );
+  assert.equal(ipcCalls.length, 1, "retired IPC requests must never reach transport");
+  assert.equal(invocations.length, 0, "retired preload calls must never reach transport");
+
+  const dispatched = [];
+  const registry = {
+    has: () => true,
+    invoke: async (id) => { dispatched.push(id); return { ok: true }; },
+  };
+  const host = createCodingToolsAppsHost({ registry });
+  for (const moduleId of retired) {
+    await assert.rejects(host.call(moduleId, "inspect"), (error) => {
+      assert.equal(error.code, "APP_MODULE_RETIRED");
+      assert.match(error.message, /retired/i);
+      return true;
+    }, moduleId);
+  }
+  assert.deepEqual(dispatched, [], "no retired handler may run, even if registered");
+});
+
+test("app catalog and registry expose only CPA, AO and the Antigravity CLI tool", () => {
+  const host = createCodingToolsAppsHost();
+  assert.deepEqual(host.moduleIds, ["cpa", "agent-orchestrator", "antigravity-cli"]);
+  assert.deepEqual(host.list().modules.map((entry) => entry.id), host.moduleIds);
+  assert.deepEqual(host.catalog().modules.map((entry) => entry.id), host.moduleIds);
+  assert.deepEqual(defaultRegistry.ids().sort(), [...host.moduleIds].sort());
 });

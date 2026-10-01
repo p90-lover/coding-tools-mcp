@@ -1,5 +1,6 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
@@ -129,14 +130,62 @@ function yamlString(value) {
   return JSON.stringify(String(value));
 }
 
-function runtimeConfiguration(state, managementKey, proxyApiKey) {
+const COMMANDCODE_PLUGINS = [
+  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.1.dll", sha256: "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c" },
+  { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
+  // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
+  { id: "cpa-helper", file: "cpa-helper-v0.1.0.dll", sha256: "3e1c57168b1bef6f789041026a2437482e540d8be3b7c5e4a2b943011c1eb55c" },
+  // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
+  { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.1.dll", sha256: "57fbdce4ad770499e604a7d3654bc7b700532e0572c0980ff040818a83117cb7" },
+];
+
+function installBundledCommandCodePlugin(state) {
+  if (process.platform !== "win32" || process.arch !== "x64") return [];
+  const bundle = path.join(__dirname, "..", "vendor", "bundled", "cpa-plugins", "windows", "amd64");
+  const digest = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const sources = COMMANDCODE_PLUGINS.map((plugin) => ({
+    ...plugin, source: path.join(bundle, plugin.file),
+  }));
+  for (const plugin of sources) {
+    if (digest(plugin.source) !== plugin.sha256) throw new Error(`Bundled ${plugin.id} CPA plugin hash mismatch`);
+  }
+
+  const directory = path.join(state, "plugins", "windows", "amd64");
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return sources.map((plugin) => {
+    const target = path.join(directory, plugin.file);
+    const stat = fs.existsSync(target) ? fs.lstatSync(target) : null;
+    if (stat && !stat.isFile()) throw new Error(`${plugin.id} CPA plugin path is not a regular file`);
+    const current = stat && digest(target) === plugin.sha256;
+    const old = fs.readdirSync(directory).filter((name) => (
+      (name === `${plugin.id}.dll` || (name.startsWith(`${plugin.id}-v`) && name.endsWith(".dll")))
+      && (name !== plugin.file || !current)
+    ));
+    if (old.length) {
+      const archive = path.join(state, "Trash", "plugins", `${Date.now()}-${plugin.id}`);
+      fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
+      for (const name of old) {
+        const previous = path.join(directory, name);
+        if (!fs.lstatSync(previous).isFile()) throw new Error(`${plugin.id} CPA plugin path is not a regular file`);
+        fs.renameSync(previous, path.join(archive, name));
+      }
+    }
+    if (!current) fs.copyFileSync(plugin.source, target, fs.constants.COPYFILE_EXCL);
+    return target;
+  });
+}
+
+function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
   const authDirectory = path.join(state, "auth");
   const logDirectory = path.join(state, "logs");
+  const pluginDirectory = path.resolve(state, "plugins");
+  fs.mkdirSync(pluginDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(authDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(logDirectory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") {
     fs.chmodSync(authDirectory, 0o700);
     fs.chmodSync(logDirectory, 0o700);
+    fs.chmodSync(pluginDirectory, 0o700);
   }
   return [
     "host: \"127.0.0.1\"",
@@ -144,11 +193,27 @@ function runtimeConfiguration(state, managementKey, proxyApiKey) {
     `auth-dir: ${yamlString(authDirectory)}`,
     "api-keys:",
     `  - ${yamlString(proxyApiKey)}`,
+    ...(outboundProxyUrl ? [`proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
     "remote-management:",
     "  allow-remote: false",
     `  secret-key: ${yamlString(managementKey)}`,
     "  disable-control-panel: false",
     "  disable-auto-update-panel: true",
+    "plugins:",
+    "  enabled: true",
+    `  dir: ${yamlString(pluginDirectory)}`,
+    "  configs:",
+    "    commandcode-go:",
+    "      enabled: true",
+    "    auth-commandcode:",
+    "      enabled: true",
+    "    cpa-helper:",
+    "      enabled: true",
+    `      data_dir: ${yamlString(path.join(state, "cpa-helper-data"))}`,
+    "      keeper_enabled: false",
+    // CPA leaves a plugin without a configs entry unregistered.
+    "    grok-login-provider:",
+    "      enabled: true",
     "debug: false",
     "request-log: false",
     "logging-to-file: true",
@@ -173,10 +238,14 @@ function run(homeValue, stateValue) {
 
   fs.mkdirSync(state, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(state, 0o700);
+  installBundledCommandCodePlugin(state);
   const managementKey = requiredSecret("CODING_TOOLS_CPA_MANAGEMENT_KEY");
   const proxyApiKey = requiredSecret("CODING_TOOLS_CPA_PROXY_API_KEY");
   const configPath = path.join(state, "config.yaml");
-  writePrivateFileAtomic(configPath, runtimeConfiguration(state, managementKey, proxyApiKey));
+  writePrivateFileAtomic(configPath, runtimeConfiguration(
+    state, managementKey, proxyApiKey,
+    String(process.env.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL || ""),
+  ));
   if (process.platform !== "win32") fs.chmodSync(configPath, 0o600);
 
   const child = spawn(executable, ["--config", configPath, "--no-browser"], {
@@ -218,4 +287,5 @@ module.exports = {
   prepare,
   run,
   runtimeConfiguration,
+  installBundledCommandCodePlugin,
 };

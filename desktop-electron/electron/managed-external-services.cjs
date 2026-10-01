@@ -1,25 +1,79 @@
 "use strict";
 
-const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
+const { createProviderNetworkStore, proxyUrl } = require("./provider-network.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 
+const MANAGED_PROXY_COMPONENTS = new Set(["cpa", "antigravity-cli"]);
+const RETIRED_SERVICE_IDS = new Set(["paseo", "codex-router", "commandcode-proxy", "anneal"]);
+const LOCAL_PROXY_BYPASS = [
+  "localhost", "*.localhost", "127.0.0.1", "::1",
+  "10.0.0.0/8", "10.0.0.0-10.255.255.255",
+  "172.16.0.0/12", "172.16.0.0-172.31.255.255",
+  "192.168.0.0/16", "192.168.0.0-192.168.255.255",
+  "169.254.0.0/16", "169.254.0.0-169.254.255.255",
+].join(",");
+
 const SERVICE_ENDPOINTS = Object.freeze({
-  "codex-router": Object.freeze({ endpoint: "http://127.0.0.1:4202/" }),
-  "commandcode-proxy": Object.freeze({ endpoint: "http://127.0.0.1:9090/" }),
   cpa: Object.freeze({ endpoint: "http://127.0.0.1:8317/" }),
-  paseo: Object.freeze({
-    endpoint: "http://127.0.0.1:6768/",
-    executionEndpoint: "ws://127.0.0.1:6768/ws",
-  }),
-  anneal: Object.freeze({
-    endpoint: "http://127.0.0.1:5173/",
-    executionEndpoint: "http://127.0.0.1:3000/",
-  }),
 });
+
+function resolveCpaProxyRoute(dataRoot, safeStorage) {
+  const directory = path.join(path.dirname(dataRoot), "providers");
+  const filePath = path.join(directory, "provider-network.json");
+  let saved;
+  try { saved = JSON.parse(fs.readFileSync(filePath, "utf8")); }
+  catch (error) {
+    if (error?.code === "ENOENT") return { profileId: null, url: "" };
+    throw new Error("Saved proxy settings are unavailable; CPA was not started");
+  }
+  if (!saved || saved.version !== 1 || !saved.routing || typeof saved.routing !== "object") {
+    throw new Error("Saved proxy settings are invalid; CPA was not started");
+  }
+  const store = createProviderNetworkStore({
+    filePath, keyPath: path.join(directory, "provider-network.key"), safeStorage,
+  });
+  const routing = store.snapshot().routing;
+  if (!routing.globalEnabled) return { profileId: null, url: "" };
+  const profile = store.activeProxy(routing.globalProfileId);
+  if (!profile) throw new Error("Selected global proxy is unavailable; CPA was not started");
+  if (profile.endpoint.protocol === "socks4") {
+    throw new Error("CPA needs an HTTP, HTTPS or SOCKS5 proxy profile");
+  }
+  const credentials = store.proxySecret(profile.id);
+  if (profile.hasAuthentication && !credentials?.username && !credentials?.password) {
+    throw new Error("Saved proxy authentication is unavailable; CPA was not started");
+  }
+  const url = proxyUrl(profile, credentials);
+  const parsed = new URL(url);
+  if (parsed.hostname.replace(/^\[|\]$/g, "") !== profile.endpoint.host.replace(/^\[|\]$/g, "")) {
+    throw new Error("Invalid proxy host; CPA was not started");
+  }
+  return { profileId: profile.id, url };
+}
+
+function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage) {
+  if (!MANAGED_PROXY_COMPONENTS.has(componentId)) return {};
+  const route = resolveCpaProxyRoute(dataRoot, safeStorage);
+  if (!route.url) throw new Error(`Select a global network proxy before starting ${componentId}`);
+  const protocol = new URL(route.url).protocol;
+  if (componentId !== "cpa" && protocol !== "http:" && protocol !== "https:") {
+    throw new Error(`${componentId} needs an HTTP or HTTPS global proxy`);
+  }
+  const standardProxy = componentId === "cpa" && protocol === "socks5:" ? "" : route.url;
+  const environment = {
+    HTTP_PROXY: standardProxy, HTTPS_PROXY: standardProxy, ALL_PROXY: standardProxy,
+    http_proxy: standardProxy, https_proxy: standardProxy, all_proxy: standardProxy,
+    NO_PROXY: LOCAL_PROXY_BYPASS, no_proxy: LOCAL_PROXY_BYPASS,
+    NODE_USE_ENV_PROXY: "1",
+  };
+  if (componentId === "cpa") environment.CODING_TOOLS_CPA_OUTBOUND_PROXY_URL = route.url;
+  return environment;
+}
 
 function createManagedExternalServicesController({
   dataRoot,
@@ -42,14 +96,15 @@ function createManagedExternalServicesController({
 
   const meshPath = path.join(dataRoot, "loopback-mesh.json");
 
-  function persistMeshFromServices(services, targetId = null, commandCodeApiKey = "") {
+  function persistMeshFromServices(services, targetId = null) {
     const mesh = buildLoopbackMesh(services);
     persistLoopbackMesh(meshPath, mesh);
-    return loopbackMeshEnvironment(mesh, { targetId, commandCodeApiKey, meshPath });
+    return loopbackMeshEnvironment(mesh, { targetId, meshPath });
   }
 
   baseController = createExternalServicesController({
     ...options,
+    archiveDataRoot: dataRoot,
     loopbackMeshPath: meshPath,
     getHealthHeaders: (serviceId) => managedController?.healthHeaders(serviceId) || {},
     publish: publishCombined,
@@ -61,47 +116,26 @@ function createManagedExternalServicesController({
     safeStorage: options.safeStorage,
     env: options.env,
     logger: options.logger,
+    spawnProcess: options.spawnProcess,
+    terminateProcessTree: options.terminateProcessTree,
+    persistentComponents: options.persistentComponents,
     resolveRuntimeExecutable,
-    resolveCrossUseEnvironment: (componentId, context) => {
+    resolveCrossUseEnvironment: (componentId) => {
       const extra = peerEnvironmentFor(componentId, crossUseSecrets());
-      if (componentId === "codex-router" && context?.state) {
-        extra.CODING_TOOLS_INAPP_PROVIDERS_FILE = path.join(context.state, "router", "in-app-providers.json");
-      }
+      Object.assign(extra, resolveManagedProxyEnvironment(componentId, dataRoot, options.safeStorage));
       return extra;
     },
     publish: publishCombined,
-    peerEnvironment: (manifest) => {
-      let commandCodeApiKey = "";
-      try {
-        commandCodeApiKey = String(managedController.runtimeSecrets("commandcode-proxy").proxyApiKey || "");
-      } catch {}
-      // Mesh URLs come from the base service snapshot. combinedSnapshot() overlays
-      // runtimeConfiguration → commandSpec → peerEnv and would recurse forever.
-      return persistMeshFromServices(baseController.snapshot().services, manifest.id, commandCodeApiKey);
-    },
+    peerEnvironment: (manifest) => persistMeshFromServices(baseController.snapshot().services, manifest.id),
   });
 
   function crossUseSecrets() {
     let cpa = {};
-    let commandCode = {};
-    let callerKey = "";
     try { cpa = managedController.runtimeSecrets("cpa") || {}; } catch {}
-    try { commandCode = managedController.runtimeSecrets("commandcode-proxy") || {}; } catch {}
-    try {
-      callerKey = String(managedController.runtimeConfiguration("codex-router")?.callerKey || "").trim();
-    } catch {}
     return {
       cpaProxyApiKey: cpa.proxyApiKey,
-      commandCodeProxyApiKey: commandCode.proxyApiKey,
-      routerCallerKey: callerKey,
       urls: {
         cpaOrigin: SERVICE_ENDPOINTS.cpa.endpoint,
-        routerOrigin: SERVICE_ENDPOINTS["codex-router"].endpoint,
-        commandCodeOrigin: SERVICE_ENDPOINTS["commandcode-proxy"].endpoint,
-        paseoOrigin: SERVICE_ENDPOINTS.paseo.endpoint,
-        paseoExecution: SERVICE_ENDPOINTS.paseo.executionEndpoint,
-        annealWeb: SERVICE_ENDPOINTS.anneal.endpoint,
-        annealApi: SERVICE_ENDPOINTS.anneal.executionEndpoint,
       },
     };
   }
@@ -119,22 +153,54 @@ function createManagedExternalServicesController({
       ...(endpoints.executionEndpoint ? { executionEndpoint: endpoints.executionEndpoint } : {}),
       enabled: true,
       autoStart: true,
-      ...(serviceId === "codex-router" ? {
-        routerCli: installed.routerCli,
-        curateCli: installed.curateCli,
-        callerKey: installed.callerKey,
-      } : {}),
     };
+  }
+
+  function cpaProxyStatus(service) {
+    try {
+      const route = resolveCpaProxyRoute(dataRoot, options.safeStorage);
+      let configured = false;
+      try {
+        const config = fs.readFileSync(path.join(dataRoot, "state", "cpa", "config.yaml"), "utf8");
+        const line = config.match(/^proxy-url:\s*(.+)$/m);
+        const written = line ? JSON.parse(line[1]) : "";
+        configured = service.status === "ready" && written === route.url;
+      } catch {}
+      return { profileId: route.profileId, configMatches: configured, error: null };
+    } catch (error) {
+      return { profileId: null, configMatches: false, error: error instanceof Error ? error.message : "CPA proxy settings unavailable" };
+    }
+  }
+
+  function redactManagedError(serviceId, value) {
+    if (serviceId !== "cpa" || typeof value !== "string") return value;
+    let secrets = {};
+    try { secrets = managedController.runtimeSecrets("cpa") || {}; } catch {}
+    const secretValues = [secrets.proxyApiKey, secrets.managementKey]
+      .filter((secret) => typeof secret === "string" && secret)
+      .flatMap((secret) => [secret, encodeURIComponent(secret)])
+      .sort((a, b) => b.length - a.length);
+    for (const secret of secretValues) value = value.split(secret).join("[REDACTED]");
+    return value;
   }
 
   function mergeService(service) {
     const managed = managedController.project(service.id);
     const running = managed.processes.find((entry) => entry.running) || null;
-    const configuration = managed.installState === "installed"
-      ? managedConfiguration(service.id)
-      : null;
+    const redactError = (value) => redactManagedError(service.id, value);
+    let configuration = null;
+    let proxyError = null;
+    if (managed.installState === "installed") {
+      try { configuration = managedConfiguration(service.id); }
+      catch (error) {
+        proxyError = error instanceof Error ? error.message : "Managed proxy settings unavailable";
+      }
+    }
+    const outboundProxy = service.id === "cpa" ? cpaProxyStatus(service) : null;
     return {
       ...service,
+      error: redactError(service.error),
+      ...(outboundProxy ? { outboundProxy: { ...outboundProxy, error: redactError(outboundProxy.error) } } : {}),
       ...(configuration ? {
         home: configuration.home,
         stateDir: configuration.stateDir,
@@ -155,6 +221,8 @@ function createManagedExternalServicesController({
         pid: running.pid,
         owned: true,
       } : {}),
+      ...(managed.error ? { status: "error", error: redactError(managed.error) } : {}),
+      ...(proxyError ? { status: "error", error: redactError(proxyError) } : {}),
       managedInstall: {
         state: managed.installState,
         version: managed.version,
@@ -163,7 +231,7 @@ function createManagedExternalServicesController({
         home: managed.managedHome,
         installedAt: managed.installedAt,
         currentStep: managed.currentStep,
-        error: managed.error,
+        error: redactError(managed.error),
         platformMode: managed.platformMode,
         processes: managed.processes,
         missingCredentials: managed.missingCredentials,
@@ -197,9 +265,6 @@ function createManagedExternalServicesController({
     const configuration = managedConfiguration(serviceId);
     if (!configuration) throw new Error(`${serviceId} is not installed`);
     const patch = { ...configuration };
-    if (serviceId === "codex-router" && !configuration.callerKey) {
-      throw new Error("Managed Codex Router caller key is unavailable");
-    }
     baseController.configure(serviceId, patch);
     return configuration;
   }
@@ -211,6 +276,7 @@ function createManagedExternalServicesController({
   }
 
   async function installManagedComponent(serviceId) {
+    if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
     await managedController.installComponent(serviceId);
     applyManagedConfiguration(serviceId);
     await managedController.startComponent(serviceId);
@@ -220,6 +286,7 @@ function createManagedExternalServicesController({
   }
 
   async function repairManagedComponent(serviceId) {
+    if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
     try { await managedController.stopComponent(serviceId); } catch {}
     await managedController.repairComponent(serviceId);
     applyManagedConfiguration(serviceId);
@@ -230,6 +297,7 @@ function createManagedExternalServicesController({
   }
 
   async function start(serviceId) {
+    if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
     const managed = managedController.project(serviceId);
     if (managed.installState === "repair-required" || (managed.installState === "error" && managed.installedAt)) {
       return repairManagedComponent(serviceId);
@@ -259,6 +327,7 @@ function createManagedExternalServicesController({
   }
 
   async function restart(serviceId) {
+    if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
     const managed = managedController.project(serviceId);
     if (managed.installState === "installed") {
       applyManagedConfiguration(serviceId);
@@ -277,12 +346,6 @@ function createManagedExternalServicesController({
 
   function configure(serviceId, input) {
     return mergeService(baseController.configure(serviceId, input));
-  }
-
-  async function syncCodexRouter() {
-    const managed = managedController.project("codex-router");
-    if (managed.installState === "installed") applyManagedConfiguration("codex-router");
-    return baseController.syncCodexRouter();
   }
 
   function upstreamConfiguration(serviceId) {
@@ -306,20 +369,8 @@ function createManagedExternalServicesController({
     };
   }
 
-  function routerCallerKey() {
-    try {
-      const managed = managedController.runtimeConfiguration("codex-router");
-      const fromManaged = String(managed?.callerKey || "").trim();
-      if (fromManaged) return fromManaged;
-    } catch {}
-    try {
-      return String(baseController.runtimeEnvironment()?.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY || "").trim();
-    } catch {
-      return "";
-    }
-  }
-
   function loopbackRequest(serviceId) {
+    if (RETIRED_SERVICE_IDS.has(serviceId)) throw new Error(`${serviceId} service is retired`);
     if (serviceId === "cpa") {
       const origin = SERVICE_ENDPOINTS.cpa.endpoint;
       let headers = {};
@@ -355,33 +406,11 @@ function createManagedExternalServicesController({
         credentialReason,
       };
     }
-    if (serviceId === "codex-router") {
-      const origin = SERVICE_ENDPOINTS["codex-router"].endpoint;
-      const callerKey = routerCallerKey();
-      if (!callerKey) {
-        return {
-          origin,
-          headers: {},
-          modelsPath: "/v1/models",
-          chatPath: "/v1/chat/completions",
-          healthPath: "/",
-          credentialReason: "Codex Router caller secret is not configured",
-        };
-      }
-      const prefix = `/_codex-router/${encodeURIComponent(callerKey)}`;
-      return {
-        origin,
-        headers: {},
-        modelsPath: `${prefix}/v1/models`,
-        chatPath: `${prefix}/v1/chat/completions`,
-        healthPath: `${prefix}/v1/models`,
-      };
-    }
     return null;
   }
 
-  function dispose() {
-    managedController.dispose();
+  function dispose({ keepPersistent = false } = {}) {
+    managedController.dispose({ keepPersistent });
     baseController.dispose();
   }
 
@@ -392,7 +421,6 @@ function createManagedExternalServicesController({
     start,
     stop,
     restart,
-    syncCodexRouter,
     runtimeEnvironment: () => {
       const mesh = buildLoopbackMesh(combinedSnapshot().services);
       persistLoopbackMesh(meshPath, mesh);
@@ -408,9 +436,6 @@ function createManagedExternalServicesController({
         ...base,
         ...peerUrls,
         ...loopbackMeshEnvironment(mesh, { meshPath }),
-        ...(base.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY
-          ? { CODING_TOOLS_CODEX_ROUTER_CALLER_KEY: base.CODING_TOOLS_CODEX_ROUTER_CALLER_KEY }
-          : {}),
       });
     },
     loopbackMesh: () => buildLoopbackMesh(combinedSnapshot().services),
@@ -420,11 +445,22 @@ function createManagedExternalServicesController({
     installManagedComponent,
     repairManagedComponent,
     setManagedComponentCredential,
-    managedComponentsSnapshot: () => managedController.snapshot(),
+    managedComponentsSnapshot: () => {
+      const snapshot = managedController.snapshot();
+      return {
+        ...snapshot,
+        components: snapshot.components.map((component) => ({
+          ...component,
+          error: redactManagedError(component.id, component.error),
+        })),
+      };
+    },
     dispose,
   });
 }
 
 module.exports = {
   createManagedExternalServicesController,
+  resolveCpaProxyRoute,
+  resolveManagedProxyEnvironment,
 };

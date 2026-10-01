@@ -16,8 +16,12 @@ export const PROVIDER_DISPLAY_OVERRIDES = {
     categoryLabel: "OAuth",
   },
   "commandcode-proxy": {
-    displayName: "CommandCode Proxy",
-    categoryLabel: "Reverse Proxy",
+    displayName: "CommandCode Go (CPA)",
+    categoryLabel: "OAuth",
+  },
+  "commandcode-studio": {
+    displayName: "CommandCode Studio (CPA)",
+    categoryLabel: "OAuth",
   },
   "cliproxyapi-antigravity": {
     displayName: "Gemini Antigravity Reverse Proxy",

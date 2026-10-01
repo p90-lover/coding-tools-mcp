@@ -13,7 +13,7 @@ const {
   requireCurrentRuntimeConnectorName,
   validateConnectorName,
 } = require("./connector-identity.cjs");
-const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
+const { embeddedRuntimeInvocation, runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
@@ -1130,11 +1130,14 @@ class RuntimeHost {
     return { ...result, mode: current.mode, enabled: enabled === true };
   }
 
-  async upgradeManagedRuntime() {
-    this.assertProductionProfile("Managed Codex runtime upgrade");
-    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+  /** True when launch must run the (browser-probing) managed runtime upgrade before starting. */
+  managedRuntimeUpgradeRequired() {
+    return this.managedRuntimeUpgradePlan().required;
+  }
+
+  managedRuntimeUpgradePlan() {
     const existing = this.runtimeConfigSnapshot();
-    const currentVersion = this.app.getVersion();
+    const currentVersion = runtimeReleaseVersion(this);
     const connectorMigrationRequired = existing.mode === "full"
       && isLegacyConnectorName(validateConnectorName(existing.config?.appName));
     const interactionMode = existing.config?.browserInteractionMode ?? "automatic";
@@ -1155,10 +1158,18 @@ class RuntimeHost {
       || activeTunnel.alias !== expectedTunnelProfile
       || path.basename(activeTunnel.runtimeKeyFile) !== expectedKeyFile
     );
-    if (existing.owner !== "launcher"
-      || (existing.config?.releaseVersion === currentVersion
-        && !connectorMigrationRequired
-        && !tunnelProfileMigrationRequired)) {
+    const required = existing.owner === "launcher"
+      && (existing.config?.releaseVersion !== currentVersion
+        || connectorMigrationRequired
+        || tunnelProfileMigrationRequired);
+    return { required, existing, currentVersion, interactionMode, tunnelProfileMigrationRequired, connectorMigrationRequired };
+  }
+
+  async upgradeManagedRuntime() {
+    this.assertProductionProfile("Managed Codex runtime upgrade");
+    if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
+    const { required, existing, currentVersion, interactionMode, tunnelProfileMigrationRequired, connectorMigrationRequired } = this.managedRuntimeUpgradePlan();
+    if (!required) {
       return { updated: false };
     }
     const args = [
@@ -1350,6 +1361,9 @@ class RuntimeHost {
           successMessage: "Codex configuration is ready for setup",
           timeoutMs: Math.min(options.timeoutMs || 15_000, 15_000),
         });
+      }
+      if (previousRuntime.owner === "launcher") {
+        await this.supervisor.waitForIdleForSetup?.(name, options.timeoutMs);
       }
       runtimeTransitionStarted = true;
       if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();

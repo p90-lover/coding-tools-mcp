@@ -24,6 +24,7 @@ const {
   navigationErrorForLog,
   navigationOriginForLog,
 } = require("../electron/browser-host.cjs");
+const { BrowserHost: StandaloneBrowserHost } = require("../../runtime-web/launcher/electron/browser-host.cjs");
 
 test("manual prompt handoff keeps ordinary turns at thirty seconds and compaction at two minutes", () => {
   assert.equal(MANUAL_SUBMIT_TIMEOUT_MS, 30_000);
@@ -519,8 +520,7 @@ test("hidden turn tabs receive an explicit renderer viewport before moving offsc
   BrowserHost.prototype.syncViewVisibility.call(fixture);
 
   assert.deepEqual(events, [
-    ["home-bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
-    ["home-visible", true],
+    ["home-visible", false],
     ["emulate", {
       screenPosition: "desktop",
       screenSize: { width: 1120, height: 720 },
@@ -1722,6 +1722,30 @@ test("hard refresh accepts Chromium's completed loading cycle even without did-f
   assert.equal(contents.listenerCount("did-finish-load"), 0);
 });
 
+test("hard refresh resolves on a fresh main-frame DOM even when loading never stops", async () => {
+  const calls = [];
+  const contents = new EventEmitter();
+  contents.isDestroyed = () => false;
+  contents.reloadIgnoringCache = () => {
+    calls.push("reload");
+    queueMicrotask(() => {
+      contents.emit("did-navigate", {}, "https://chatgpt.com/?temporary-chat=true", 200, "OK");
+      contents.emit("dom-ready");
+    });
+  };
+  contents.stop = () => calls.push("stop");
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    view: { webContents: contents },
+    setState() {},
+  });
+
+  await fixture.hardRefreshHome(100);
+
+  assert.deepEqual(calls, ["reload"]);
+  assert.equal(contents.listenerCount("did-navigate"), 0);
+  assert.equal(contents.listenerCount("dom-ready"), 0);
+});
+
 test("hard refresh ignores an old loading stop before its own main-frame navigation", async () => {
   const calls = [];
   const contents = new EventEmitter();
@@ -1905,6 +1929,7 @@ test("selected home surface remains represented while task tabs are retained", (
     surfaceActive: true,
     activeView: () => ({ webContents }),
     selectedTurnTab: () => null,
+    selectedUserTab: () => null,
     tabSnapshot: (tab) => ({ id: tab.id, traceId: tab.traceId, active: false }),
   };
 
@@ -2292,6 +2317,178 @@ test("a required retained conversation fails before creating a browser tab", asy
       && /retained ChatGPT conversation is no longer available/.test(error.message),
   );
   assert.equal(created, false);
+});
+
+test("user browser tabs appear beside home and can be selected independently", () => {
+  const contents = (url, title) => ({
+    isDestroyed: () => false,
+    navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+    getURL: () => url,
+    getTitle: () => title,
+    isLoading: () => false,
+  });
+  const user = {
+    id: "user-tab", traceId: null, label: "ChatGPT 1", status: "ready",
+    loading: false, url: "https://chatgpt.com/?temporary-chat=true",
+    view: { webContents: contents("https://chatgpt.com/?temporary-chat=true", "Temporary Chat") },
+  };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    userTabs: new Map([[user.id, user]]),
+    turnTabs: new Map(),
+    selectedTabId: user.id,
+    view: { webContents: contents(IDLE_BROWSER_URL, "ChatGPT") },
+    state: { status: "ready", message: "", url: IDLE_BROWSER_URL, title: "ChatGPT", loading: false },
+    getBrowserInteractionMode: () => "automatic",
+    visible: false, surfaceActive: true,
+    syncViewVisibility() {}, writeDescriptor() {}, publishState() {},
+  });
+
+  assert.equal(host.activeView(), user.view);
+  assert.equal(host.snapshot().url, user.url);
+  assert.deepEqual(host.snapshot().tabs.map(tab => tab.id), ["home", user.id]);
+  assert.equal(host.selectTab("home").activeTabId, "home");
+  assert.equal(host.activeView(), host.view);
+  assert.deepEqual(host.snapshot().tabs.map(tab => tab.id), ["home", user.id]);
+});
+
+test("user browser tab visibility never hides a running Codex turn", () => {
+  const calls = [];
+  const user = { id: "user-tab", view: {
+    setBounds(bounds) { calls.push(["user-bounds", bounds]); },
+    setVisible(visible) { calls.push(["user-visible", visible]); },
+  } };
+  const turn = { id: "running-turn", status: "running" };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    selectedTabId: user.id,
+    userTabs: new Map([[user.id, user]]),
+    turnTabs: new Map([[turn.id, turn]]),
+    authView: null,
+    view: {},
+    window: { isVisible: () => true, isMinimized: () => false },
+    visible: true, surfaceActive: true, boundsReady: true,
+    bounds: { x: 1, y: 2, width: 800, height: 600 },
+    presentPrimaryView(value) { calls.push(["home-visible", value]); },
+    presentTurnView(tab, value) { calls.push([tab.id, value]); },
+  });
+
+  host.syncViewVisibility();
+
+  assert.deepEqual(calls, [
+    ["home-visible", false],
+    [turn.id, false],
+    ["user-bounds", host.bounds],
+    ["user-visible", true],
+  ]);
+});
+
+test("a later browser load restores descriptor and readiness in both launcher builds", async () => {
+  for (const Host of [BrowserHost, StandaloneBrowserHost]) {
+    const events = [];
+    const contents = new EventEmitter();
+    contents.setWindowOpenHandler = () => {};
+    contents.getURL = () => IDLE_BROWSER_URL;
+    const host = Object.assign(Object.create(Host.prototype), {
+      view: { webContents: contents },
+      manualOperation: null,
+      interactionModeOverride: null,
+      getBrowserInteractionMode: () => "automatic",
+      clearHomeNavigationTimeout() {},
+      setState() {},
+      applyViewportCss: async () => {},
+      markOwnedSurface: async () => { events.push("owned"); },
+      writeDescriptor: () => { events.push("descriptor"); },
+      probeAuthentication: async () => { events.push("probe"); },
+      logger: { info() {}, error() {}, warn() {} },
+    });
+    const failed = Promise.reject(new Error("idle timeout"));
+    failed.catch(() => {});
+    host.initializationReady = failed;
+    host.initializationFailed = true;
+    await assert.rejects(host.ready(), /idle timeout/);
+
+    Host.prototype.bindWebContents.call(host);
+    contents.emit("did-finish-load");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(events, ["owned", "descriptor", "probe"]);
+    await host.ready();
+    assert.equal(host.initializationFailed, false);
+  }
+});
+
+test("closing a user browser tab preserves a running Codex turn", async () => {
+  const calls = [];
+  const user = { id: "user-tab", view: { webContents: {
+    isDestroyed: () => false,
+    close: () => calls.push("close-user"),
+  } } };
+  const turn = { id: "running-turn", status: "running", traceId: "trace-running" };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    selectedTabId: user.id,
+    userTabs: new Map([[user.id, user]]),
+    turnTabs: new Map([[turn.id, turn]]),
+    window: { contentView: { removeChildView: () => calls.push("remove-user") } },
+    syncViewVisibility() {}, writeDescriptor() {}, publishState() {},
+    snapshot() { return { activeTabId: this.selectedTabId }; },
+    logger: { info() {} },
+    cancelTurn: async () => { throw new Error("Must not cancel a Codex turn"); },
+  });
+
+  assert.equal((await host.closeTab(user.id)).activeTabId, "home");
+  assert.deepEqual(calls, ["remove-user", "close-user"]);
+  assert.equal(host.userTabs.size, 0);
+  assert.equal(host.turnTabs.get(turn.id), turn);
+});
+
+test("user browser tab navigation remains available during a Codex turn", () => {
+  const calls = [];
+  const userContents = {
+    navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+    reload: () => calls.push("reload-user"),
+  };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    selectedTabId: "user-tab",
+    userTabs: new Map([["user-tab", { id: "user-tab", view: { webContents: userContents } }]]),
+    turnTabs: new Map([["task", { id: "task", status: "running", traceId: "trace-running" }]]),
+    authView: null,
+    view: { webContents: { reload: () => calls.push("reload-home") } },
+    manualOperation: null,
+    snapshot() { return { activeTabId: this.selectedTabId }; },
+  });
+
+  assert.equal(host.navigate("reload").activeTabId, "user-tab");
+  assert.deepEqual(calls, ["reload-user"]);
+});
+
+test("browser zoom applies to user tabs along with home and task tabs", () => {
+  const calls = [];
+  const contents = name => ({
+    isDestroyed: () => false,
+    setZoomFactor(value) { calls.push([name, value]); },
+  });
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    state: { zoomFactor: 1 },
+    view: { webContents: contents("home") },
+    turnTabs: new Map([["task", { view: { webContents: contents("task") } }]]),
+    userTabs: new Map([["user", { view: { webContents: contents("user") } }]]),
+    setState(patch) { this.state = { ...this.state, ...patch }; },
+    snapshot() { return { zoomFactor: this.state.zoomFactor }; },
+  });
+
+  assert.equal(host.zoom("in").zoomFactor, 1.1);
+  assert.deepEqual(calls, [["home", 1.1], ["task", 1.1], ["user", 1.1]]);
+});
+
+test("user and task browser tabs share the five additional-tab limit", async () => {
+  const userTabs = new Map([["user", { id: "user", ordinal: 5, status: "ready" }]]);
+  const turnTabs = new Map(Array.from({ length: 4 }, (_unused, index) => [
+    "turn-" + index, { id: "turn-" + index, ordinal: index + 1, status: "running" },
+  ]));
+  const host = Object.assign(Object.create(BrowserHost.prototype), { userTabs, turnTabs });
+
+  await assert.rejects(host.createTurnTab("trace_six", 444), /already has 5 browser tabs/);
+  assert.throws(() => host.createManualTurnTab("trace_six", 444, null, "prompt", 30_000), /already has 5 browser tabs/);
+  assert.throws(() => host.createUserTab(), /already has 5 browser tabs/);
 });
 
 test("five browser tabs are a hard account-safety limit", async () => {

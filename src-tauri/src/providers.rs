@@ -468,14 +468,25 @@ pub fn builtin_templates() -> Vec<ProviderProfile> {
         ),
         template(
             "commandcode-proxy",
-            "CommandCode Proxy",
-            ProviderCategory::ReverseProxy,
-            ProviderAuth::LocalProxy,
+            "CommandCode Go (CPA)",
+            ProviderCategory::OAuth,
+            ProviderAuth::OAuth,
             ProviderProtocol::OpenAiChat,
-            Some("http://127.0.0.1:3050/v1"),
+            Some("http://127.0.0.1:8317/v1"),
             Some("/models"),
             &[Text, Reasoning, Tools],
             120,
+        ),
+        template(
+            "commandcode-studio",
+            "CommandCode Studio (CPA)",
+            ProviderCategory::OAuth,
+            ProviderAuth::OAuth,
+            ProviderProtocol::OpenAiChat,
+            Some("http://127.0.0.1:8317/v1"),
+            Some("/models"),
+            &[Text, Reasoning, Tools, Vision],
+            121,
         ),
         template(
             "custom-compatible",
@@ -958,6 +969,7 @@ mod tests {
             "aistudio-to-api",
             "cliproxyapi-antigravity",
             "commandcode-proxy",
+            "commandcode-studio",
         ] {
             assert!(ids.contains(id), "missing provider template {id}");
         }

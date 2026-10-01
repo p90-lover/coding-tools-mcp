@@ -1,7 +1,8 @@
 export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
+export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "providers" | "integrations" | "cpa" | "codex-router" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-desktop" | "email" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "antigravity-cli" | "providers" | "integrations" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 export type ProviderAuth = "oauth" | "api_key" | "browser_session" | "local_proxy";
 export type ProviderAccountStatus = "pending" | "connected" | "expired" | "error" | "disabled";
@@ -170,7 +171,7 @@ export interface ProviderExecutionPlan {
   };
 }
 
-export type ExternalServiceId = "codex-router" | "commandcode-proxy" | "cpa" | "paseo" | "anneal";
+export type ExternalServiceId = "cpa" | "paseo" | "anneal";
 export type ExternalServiceStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 export type ManagedComponentInstallState =
   | "not-installed"
@@ -246,19 +247,6 @@ export interface ManagedBootstrapSnapshot {
   components: ManagedBootstrapComponentSnapshot[];
 }
 
-export interface CommandCodeProxyHealth {
-  status?: string;
-  proxy?: string;
-  version?: string;
-  endpoints?: Record<string, string>;
-  user?: {
-    id?: string;
-    email?: string;
-  };
-  credits?: number;
-  models?: string[];
-}
-
 export interface ExternalServiceSnapshot {
   id: ExternalServiceId;
   name: string;
@@ -282,13 +270,9 @@ export interface ExternalServiceSnapshot {
   error: string | null;
   secretConfigured: boolean;
   sourceConfigured: boolean;
-  routerCli?: string;
-  curateCli?: string;
-  webBaseUrl?: string;
   accountCount?: number;
   connectedAccountCount?: number;
   providerModelCount?: number;
-  health?: CommandCodeProxyHealth;
   banner?: {
     version: string | null;
     listen: string;
@@ -299,6 +283,11 @@ export interface ExternalServiceSnapshot {
   stale?: boolean;
   reconnectAttempts?: number;
   managedInstall: ManagedComponentInstallSnapshot;
+  outboundProxy?: {
+    profileId: string | null;
+    configMatches: boolean;
+    error: string | null;
+  };
 }
 
 export interface ExternalServicesSnapshot {
@@ -315,36 +304,6 @@ export interface ExternalServiceConfigurationInput {
   enabled?: boolean;
   autoStart?: boolean;
   keepAlive?: boolean;
-  callerKey?: string;
-  routerCli?: string;
-  curateCli?: string;
-  webBaseUrl?: string;
-}
-
-export interface CodexRouterSyncResult {
-  ok: boolean;
-  args: string[];
-  stdout: string;
-  stderr: string;
-}
-
-export interface CommandCodeProxyPlanResult {
-  text: string;
-  credentialPromptRequired: true;
-  provider: {
-    id: "commandcode-proxy";
-    name: string;
-    baseUrl: string;
-    adapter: string;
-    modelEndpoint: string;
-  };
-}
-
-export interface CommandCodeProxyApplyResult {
-  endpoint: string;
-  credentialPromptRequired: true;
-  steps: Array<{ name: string; ok: boolean; detail: string }>;
-  planText?: string;
 }
 
 export interface UpstreamToolActInput {
@@ -370,7 +329,7 @@ export interface UpstreamToolActResult {
 }
 
 export type UpstreamToolId = "anneal" | "paseo";
-export type OriginalUiId = "cpa" | "codex-router" | "paseo" | "anneal";
+export type OriginalUiId = "cpa" | "paseo" | "anneal";
 export type UpstreamToolStatus = "unknown" | "disabled" | "offline" | "starting" | "ready" | "error";
 
 export interface UpstreamToolSnapshot {
@@ -468,6 +427,7 @@ export interface LauncherState {
   githubOpened: boolean;
   xOpened: boolean;
   autoStart: boolean;
+  autoConnectExistingMcp: boolean;
   automaticUpdates: boolean;
   keepRunningOnClose: boolean;
   showBrowserDuringTurns: boolean;
@@ -580,8 +540,121 @@ export interface LauncherSnapshot {
   update: UpdateState;
 }
 
+export interface ChatGptDesktopAccount {
+  slotId: string;
+  source: "cpa" | "local";
+  email: string | null;
+  plan: string | null;
+  disabled: boolean;
+  signedIn: boolean;
+  active: boolean;
+}
+
+export interface ChatGptDesktopStatus {
+  supported: boolean;
+  installed: boolean;
+  version: string | null;
+  running: boolean;
+  activeSlotId: string | null;
+  runningSlotId: string | null;
+  /** Every account whose instance is running, including hidden background ones. */
+  runningSlotIds?: string[];
+  busy: "launching" | "switching" | "clearing" | "stopping" | null;
+  error: string | null;
+  accounts: ChatGptDesktopAccount[];
+}
+
+export interface EmailStatus {
+  configured: boolean;
+  origin: string | null;
+  encryptionAvailable: boolean;
+  capabilities: { version: string | null; domains: string[]; sendEnabled: boolean } | null;
+  lastRefresh: string | null;
+  error: string | null;
+}
+
+export interface EmailMailbox {
+  id: number;
+  address: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  mailCount: number | null;
+}
+
+export interface EmailMessageSummary {
+  id: number;
+  mailbox: string | null;
+  from: string | null;
+  subject: string | null;
+  receivedAt: string | null;
+  preview: string | null;
+}
+
+export interface EmailAttachment {
+  filename: string | null;
+  mimeType: string | null;
+  size: number | null;
+}
+
+export interface EmailMessage {
+  id: number;
+  from: string | null;
+  to: string | null;
+  subject: string | null;
+  receivedAt: string | null;
+  text: string | null;
+  html: string | null;
+  attachments: EmailAttachment[];
+}
+
+export interface KeysmithCommandResult {
+  ok: boolean;
+  installed?: boolean;
+  managedByCodingTools?: boolean;
+  state?: string;
+  pythonVersion?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  fileSha256?: string;
+  cancelled?: boolean;
+  error?: string;
+}
+
+export interface KeysmithSelectedFile {
+  path: string;
+  name: string;
+  content: string;
+  sha256: string;
+}
+
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
+  chatGptDesktopStatus(): Promise<ChatGptDesktopStatus>;
+  openChatGptDesktop(slotId: string): Promise<ChatGptDesktopStatus>;
+  newChatGptDesktopSignIn(): Promise<ChatGptDesktopStatus>;
+  clearChatGptDesktopAccount(): Promise<ChatGptDesktopStatus>;
+  stopChatGptDesktop(): Promise<ChatGptDesktopStatus>;
+  setChatGptDesktopSurfaceActive(active: boolean): Promise<boolean>;
+  setChatGptDesktopBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
+  onChatGptDesktopChanged(listener: (status: ChatGptDesktopStatus) => void): () => void;
+  onChatGptDesktopRemeasure(listener: () => void): () => void;
+  emailStatus(): Promise<EmailStatus>;
+  connectEmail(input: { origin: string; adminAuth: string }): Promise<EmailStatus>;
+  disconnectEmail(): Promise<EmailStatus>;
+  listEmailMailboxes(input: { limit?: number; offset?: number; query?: string }): Promise<{ mailboxes: EmailMailbox[]; count: number }>;
+  listEmailMessages(input: { address?: string; limit?: number; offset?: number }): Promise<{ messages: EmailMessageSummary[]; count: number }>;
+  getEmailMessage(input: { id: number }): Promise<{ message: EmailMessage | null }>;
+  createEmailAddress(input: { name: string; domain: string }): Promise<{ address: string }>;
+  deleteEmailMessage(input: { id: number }): Promise<{ deleted: number }>;
+  clearEmailInbox(input: { id: number }): Promise<{ clearedMailboxId: number }>;
+  removeEmailMailbox(input: { id: number }): Promise<{ removedMailboxId: number }>;
+  keysmithStatus(): Promise<KeysmithCommandResult>;
+  keysmithSelectFile(): Promise<KeysmithSelectedFile | null>;
+  keysmithPreview(): Promise<KeysmithCommandResult>;
+  keysmithApply(): Promise<KeysmithCommandResult>;
+  keysmithPreviewRemoval(): Promise<KeysmithCommandResult>;
+  keysmithRemove(): Promise<KeysmithCommandResult>;
   setLanguage(language: Language): Promise<LauncherState>;
   openSocial(target: "github" | "x"): Promise<LauncherState>;
   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
@@ -592,6 +665,7 @@ export interface LauncherApi {
   hideBrowser(): Promise<BrowserState>;
   navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
+  createBrowserTab(): Promise<BrowserState>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   copyManualPrompt(tabId: string): Promise<BrowserState>;
@@ -603,10 +677,12 @@ export interface LauncherApi {
   dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;
   verifyMcp(): Promise<DoctorReport>;
+  createMcpConnector(): Promise<{ created: boolean; name: string; href: string }>;
   doctor(): Promise<DoctorReport>;
   cancelTurns(): Promise<{ stdout: string }>;
   uninstallIntegration(): Promise<{ cancelled: true } | { cancelled: false; state: LauncherState }>;
   setupCore(): Promise<{ ok: boolean; stdout: string; restartRequired: boolean }>;
+  refreshPart(part: RefreshPart): Promise<{ ok: boolean; results: { part: string; ok: boolean; status?: string; message?: string }[] }>;
   setupMcp(input: {
     tunnelId?: string;
     runtimeKey?: string;
@@ -623,7 +699,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp",
     value: boolean,
   ): Promise<LauncherState>;
   setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
@@ -641,17 +717,6 @@ export interface LauncherApi {
   startExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   stopExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
   restartExternalService(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;
-  syncCodexRouter(): Promise<CodexRouterSyncResult>;
-  commandCodeProxyPlan(input?: {
-    baseUrl?: string;
-    routerCli?: string;
-    curateCli?: string;
-  }): Promise<CommandCodeProxyPlanResult>;
-  applyCommandCodeProxyPlan(input?: {
-    baseUrl?: string;
-    routerCli?: string;
-    curateCli?: string;
-  }): Promise<CommandCodeProxyApplyResult>;
   managedBootstrapSnapshot(): Promise<ManagedBootstrapSnapshot>;
   reconcileManagedBootstrap(input?: {
     reason?: string;
@@ -687,7 +752,6 @@ export interface LauncherApi {
     adapterId?: string;
     snapshot?: ProviderNetworkSnapshot;
   }>;
-  importProviderSession(accountId: string): Promise<ProviderNetworkSnapshot>;
   probeProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
   saveProxyProfile(input: ProxyProfileInput): Promise<ProviderNetworkSnapshot>;
   archiveProxyProfile(profileId: string): Promise<ProviderNetworkSnapshot>;

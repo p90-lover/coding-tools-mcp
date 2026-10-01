@@ -22,6 +22,8 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      autoConnectExistingMcp: false,
+      automaticUpdates: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -48,6 +50,8 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      autoConnectExistingMcp: false,
+      automaticUpdates: true,
       keepRunningOnClose: false,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -113,6 +117,8 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       githubOpened: false,
       xOpened: false,
       autoStart: true,
+      autoConnectExistingMcp: false,
+      automaticUpdates: true,
       keepRunningOnClose: true,
       showBrowserDuringTurns: true,
       browserInteractionMode: "automatic",
@@ -125,6 +131,21 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
       mcpGuideStep: 0,
       sessionRefreshReminderAt: null,
     });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("existing MCP auto-connect is opt-in and persists only booleans", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-auto-mcp-state-"));
+  const file = path.join(root, "state.json");
+  try {
+    const store = createStateStore(file);
+    assert.equal(store.read().autoConnectExistingMcp, false);
+    store.update({ autoConnectExistingMcp: true });
+    assert.equal(createStateStore(file).read().autoConnectExistingMcp, true);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, autoConnectExistingMcp: "yes" }));
+    assert.equal(createStateStore(file).read().autoConnectExistingMcp, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

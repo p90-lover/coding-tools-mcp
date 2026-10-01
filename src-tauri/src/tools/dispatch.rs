@@ -668,8 +668,22 @@ pub fn server_info(ctx: &ToolContext) -> Result<Value, WorkspaceError> {
         "local_tool_engine": {"implementation": "embedded_rust", "codex_agent": false, "model_calls": false, "os_sandbox": false},
         "tools": tools,
         "tool_count": tools.len(),
-        "tool_catalog": crate::tools::catalog::describe_current(ctx)
+        "tool_catalog": crate::tools::catalog::describe_current(ctx),
+        "mcp_events": mcp_events_summary(ctx)
     })))
+}
+
+/// Open incidents that MCP event webhooks announced, so an assistant woken by an event
+/// can confirm whether the problem is still current before acting.
+fn mcp_events_summary(ctx: &ToolContext) -> Value {
+    let open = crate::mcp::events::global()
+        .map(|hub| hub.recent_incidents(ctx.workspace_id.as_deref(), false, 10))
+        .unwrap_or_default();
+    json!({
+        "events": crate::mcp::events::catalog::EVENT_NAMES,
+        "delivery": ["webhook"],
+        "open_incidents": open
+    })
 }
 
 pub fn check_exec_environment(ctx: &ToolContext) -> Result<Value, WorkspaceError> {

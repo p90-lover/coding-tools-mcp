@@ -1,0 +1,15 @@
+{
+  "id": "agent-orchestrator",
+  "name": "Agent Orchestrator",
+  "kind": "source-integrated",
+  "transport": "in-process",
+  "source": {
+    "strategy": "adapted-source",
+    "repository": "Untrivial-ai/agent-orchestrator",
+    "commit": "73473d45f0c18f3a81f66f150868459e3098ca35",
+    "license": "Apache-2.0",
+    "path": "app-handler/agent-orchestrator",
+    "checkout": "module/agent-orchestrator"
+  },
+  "note": "More embeds the original source-built AO renderer with an owned loopback-only daemon. Runtime retains Coding Tools missions with WebGPT planning/review and CPA workers. Named APIs use this in-process handler; no separate AO desktop application is installed."
+}

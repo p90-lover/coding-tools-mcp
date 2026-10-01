@@ -1,5 +1,5 @@
 //! Keep-alive supervisor: reconnect with backoff, persist leases, expose live status.
-use super::{actions, commandcode, endpoint, lease, read, Snapshot, Source};
+use super::{actions, endpoint, lease, read, Snapshot, Source};
 use crate::data::DataStore;
 use crate::error::{AppError, AppResult};
 use futures_util::{SinkExt, StreamExt};
@@ -29,7 +29,7 @@ pub struct LiveStatus {
     pub reconnect_attempts: u32,
     pub web_ui_reachable: bool,
     pub snapshot: Option<Snapshot>,
-    pub banner: Option<commandcode::CommandCodeBanner>,
+    pub banner: Option<serde_json::Value>,
     pub health: Option<String>,
     pub model_count: Option<usize>,
     pub owned_process: bool,
@@ -43,7 +43,6 @@ struct Slot {
     snapshot: Option<Snapshot>,
     web_ui_reachable: bool,
     generation: u64,
-    banner: Option<commandcode::CommandCodeBanner>,
     health: Option<String>,
     model_count: Option<usize>,
     next_poll: Option<std::time::Instant>,
@@ -56,7 +55,7 @@ struct Slot {
 struct Hub {
     paseo: Slot,
     anneal: Slot,
-    commandcode: Slot,
+    legacy_commandcode: Slot,
 }
 
 impl Hub {
@@ -64,7 +63,7 @@ impl Hub {
         match key {
             "paseo" => &mut self.paseo,
             "anneal" => &mut self.anneal,
-            _ => &mut self.commandcode,
+            _ => &mut self.legacy_commandcode,
         }
     }
 }
@@ -76,13 +75,7 @@ pub fn start() {
     if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    tauri::async_runtime::spawn(async {
-        restore_leases().await;
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            tick().await;
-        }
-    });
+    tauri::async_runtime::spawn(restore_leases());
 }
 
 async fn restore_leases() {
@@ -90,43 +83,35 @@ async fn restore_leases() {
         return;
     };
     let mut hub = HUB.lock().await;
-    for (key, lease) in [
-        ("paseo", stored.paseo),
-        ("anneal", stored.anneal),
-        ("commandcode", stored.commandcode),
-    ] {
+    hub.legacy_commandcode.lease = stored.commandcode;
+    retire_lease(&mut hub.legacy_commandcode.lease, "CommandCode Proxy");
+    hub.legacy_commandcode.credential.clear();
+    for (key, lease) in [("paseo", stored.paseo), ("anneal", stored.anneal)] {
         let slot = hub.slot(key);
-        slot.lease = lease.clone();
-        if lease.keep_alive {
-            slot.generation += 1;
-            if let Some(secret) = DataStore::read_file(|d| {
-                Ok(d.app_secrets
-                    .get("integration")
-                    .and_then(|m| m.get(key))
-                    .cloned())
-            })
-            .ok()
-            .flatten()
-            {
-                slot.credential = secret;
-            } else if key != "commandcode" {
-                slot.credential_needed = true;
-                slot.lease.status = lease::LivePhase::Error.as_str().into();
-                slot.lease.last_error =
-                    Some("Keep-alive resume needs the daemon credential again.".into());
-            }
-        }
+        slot.lease = lease;
+        retire_lease(
+            &mut slot.lease,
+            if key == "paseo" { "Paseo" } else { "Anneal" },
+        );
+        slot.generation += 1;
+        slot.credential.clear();
+        slot.credential_needed = false;
+        slot.next_poll = None;
     }
-    let paseo_on = hub.paseo.lease.keep_alive && !hub.paseo.credential_needed;
-    let paseo_gen = hub.paseo.generation;
-    let paseo_ep = hub.paseo.lease.endpoint.clone();
-    let paseo_cred = hub.paseo.credential.clone();
-    let paseo_id = hub.paseo.lease.client_id.clone();
     drop(hub);
     persist().await;
-    if paseo_on && !paseo_ep.is_empty() {
-        tauri::async_runtime::spawn(paseo_loop(paseo_gen, paseo_ep, paseo_cred, paseo_id));
-    }
+}
+
+// Only the restore test still exercises the retired Paseo lease path.
+#[cfg(test)]
+fn retire_paseo_lease(lease: &mut lease::IntegrationLease) {
+    retire_lease(lease, "Paseo");
+}
+
+fn retire_lease(lease: &mut lease::IntegrationLease, name: &str) {
+    lease.keep_alive = false;
+    lease.status = lease::LivePhase::Error.as_str().into();
+    lease.last_error = Some(format!("{name} integration is retired"));
 }
 
 async fn persist() {
@@ -135,7 +120,7 @@ async fn persist() {
         lease::IntegrationLeases {
             paseo: hub.paseo.lease.clone(),
             anneal: hub.anneal.lease.clone(),
-            commandcode: hub.commandcode.lease.clone(),
+            commandcode: hub.legacy_commandcode.lease.clone(),
         }
     };
     let _ = DataStore::update_file(|data| {
@@ -152,15 +137,20 @@ pub async fn connect(
     keep_alive: bool,
     remember: bool,
 ) -> AppResult<LiveStatus> {
+    if source == "paseo" {
+        return Err(AppError::Message("Paseo integration is retired".into()));
+    }
+    if source == "anneal" {
+        return Err(AppError::Message("Anneal integration is retired".into()));
+    }
+    if source == "commandcode" {
+        return Err(AppError::Message(
+            "CommandCode Proxy integration is retired".into(),
+        ));
+    }
     match source {
-        "paseo" => {
-            endpoint(Source::Paseo, endpoint_raw)?;
-        }
         "anneal" => {
             endpoint(Source::Anneal, endpoint_raw)?;
-        }
-        "commandcode" => {
-            commandcode::parse_loopback_http(endpoint_raw)?;
         }
         _ => return Err(AppError::Message("Unknown integration source".into())),
     }
@@ -209,6 +199,20 @@ pub async fn connect(
 }
 
 pub async fn disconnect(source: &str) -> AppResult<LiveStatus> {
+    if source == "paseo" {
+        return Err(AppError::Message("Paseo integration is retired".into()));
+    }
+    if source == "anneal" {
+        return Err(AppError::Message("Anneal integration is retired".into()));
+    }
+    if source == "commandcode" {
+        return Err(AppError::Message(
+            "CommandCode Proxy integration is retired".into(),
+        ));
+    }
+    if source != "paseo" && source != "anneal" {
+        return Err(AppError::Message("Unknown integration source".into()));
+    }
     let mut hub = HUB.lock().await;
     let slot = hub.slot(source);
     slot.generation += 1;
@@ -223,14 +227,13 @@ pub async fn disconnect(source: &str) -> AppResult<LiveStatus> {
 }
 
 pub async fn all_status() -> Vec<LiveStatus> {
-    vec![
-        status_of("paseo").await,
-        status_of("anneal").await,
-        status_of("commandcode").await,
-    ]
+    vec![status_of("paseo").await, status_of("anneal").await]
 }
 
 pub async fn credential(source: &str) -> String {
+    if source != "paseo" && source != "anneal" {
+        return String::new();
+    }
     HUB.lock().await.slot(source).credential.clone()
 }
 
@@ -239,7 +242,7 @@ pub async fn status_of(source: &str) -> LiveStatus {
     let slot = match source {
         "paseo" => &hub.paseo,
         "anneal" => &hub.anneal,
-        _ => &hub.commandcode,
+        _ => &hub.legacy_commandcode,
     };
     let stale_after = if source == "paseo" {
         lease::PASEO_STALE_SECS
@@ -268,10 +271,10 @@ pub async fn status_of(source: &str) -> LiveStatus {
         reconnect_attempts: slot.lease.reconnect_attempts,
         web_ui_reachable: slot.web_ui_reachable,
         snapshot: slot.snapshot.clone(),
-        banner: slot.banner.clone(),
+        banner: None,
         health: slot.health.clone(),
         model_count: slot.model_count,
-        owned_process: commandcode::owned_running(),
+        owned_process: false,
         credential_needed: slot.credential_needed,
     }
 }
@@ -281,27 +284,6 @@ fn default_web_ui(source: &str) -> &'static str {
         "paseo" => "http://127.0.0.1:6768/sessions",
         "anneal" => "http://127.0.0.1:3000/#/tasks",
         _ => "",
-    }
-}
-
-async fn tick() {
-    let (anneal_due, commandcode_due) = {
-        let hub = HUB.lock().await;
-        let now = std::time::Instant::now();
-        let anneal = hub.anneal.lease.keep_alive
-            && !hub.anneal.lease.endpoint.is_empty()
-            && !hub.anneal.credential_needed
-            && hub.anneal.next_poll.map(|t| now >= t).unwrap_or(true);
-        let commandcode = hub.commandcode.lease.keep_alive
-            && !hub.commandcode.lease.endpoint.is_empty()
-            && hub.commandcode.next_poll.map(|t| now >= t).unwrap_or(true);
-        (anneal, commandcode)
-    };
-    if anneal_due {
-        refresh_once("anneal").await;
-    }
-    if commandcode_due {
-        refresh_once("commandcode").await;
     }
 }
 
@@ -338,44 +320,6 @@ async fn refresh_once(source: &str) {
                     mark_ok("anneal", Some(snap), web_ok, None, None).await;
                 }
                 Err(error) => mark_err("anneal", error.to_string()).await,
-            }
-        }
-        "commandcode" => {
-            let (ep, web) = {
-                let hub = HUB.lock().await;
-                (
-                    hub.commandcode.lease.endpoint.clone(),
-                    hub.commandcode.lease.web_ui.clone(),
-                )
-            };
-            if ep.is_empty() {
-                return;
-            }
-            match commandcode::status(&ep).await {
-                Ok(st) => {
-                    let web_ok = if web.is_empty() {
-                        false
-                    } else {
-                        actions::probe_web_ui(&web).await
-                    };
-                    if st.reachable {
-                        mark_ok(
-                            "commandcode",
-                            None,
-                            web_ok,
-                            st.health.clone(),
-                            st.model_count,
-                        )
-                        .await;
-                        let mut hub = HUB.lock().await;
-                        hub.commandcode.banner = st.banner.clone();
-                        hub.commandcode.health = st.health.clone();
-                        hub.commandcode.model_count = st.model_count;
-                    } else {
-                        mark_err("commandcode", "Proxy not reachable".into()).await;
-                    }
-                }
-                Err(error) => mark_err("commandcode", error.to_string()).await,
             }
         }
         "paseo" => {
@@ -612,5 +556,109 @@ async fn paseo_session(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+
+    #[test]
+    fn restored_paseo_keep_alive_is_held_without_losing_endpoint_or_client() {
+        let mut lease = lease::IntegrationLease {
+            endpoint: "ws://127.0.0.1:6768/ws".into(),
+            client_id: Some("old-client".into()),
+            keep_alive: true,
+            ..Default::default()
+        };
+        retire_paseo_lease(&mut lease);
+        assert!(!lease.keep_alive);
+        assert_eq!(lease.endpoint, "ws://127.0.0.1:6768/ws");
+        assert_eq!(lease.client_id.as_deref(), Some("old-client"));
+        assert_eq!(
+            lease.last_error.as_deref(),
+            Some("Paseo integration is retired")
+        );
+    }
+
+    #[test]
+    fn saved_paseo_keep_alive_does_not_reconnect_on_restore() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let anneal_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        anneal_listener.set_nonblocking(true).unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/paseo-rust-retirement")
+            .join(uuid::Uuid::new_v4().to_string());
+        let path = root.join("data/profiles.json");
+        crate::data::with_test_file(path, || {
+            let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+            DataStore::update_file(|data| {
+                data.integration_leases.paseo.endpoint = endpoint.clone();
+                data.integration_leases.paseo.client_id = Some("old-client".into());
+                data.integration_leases.paseo.keep_alive = true;
+                data.integration_leases.anneal.endpoint =
+                    format!("http://{}", anneal_listener.local_addr().unwrap());
+                data.integration_leases.anneal.keep_alive = true;
+                data.integration_leases.commandcode.keep_alive = true;
+                data.app_secrets
+                    .entry("integration".into())
+                    .or_default()
+                    .insert("paseo".into(), "fixture-token".into());
+                data.app_secrets
+                    .entry("integration".into())
+                    .or_default()
+                    .insert("anneal".into(), "fixture-token".into());
+                Ok(())
+            })
+            .unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(restore_leases());
+            runtime.block_on(async { tokio::time::sleep(Duration::from_millis(100)).await });
+            let status = runtime.block_on(status_of("paseo"));
+            assert!(!status.keep_alive);
+            assert_eq!(status.endpoint, endpoint);
+            let anneal = runtime.block_on(status_of("anneal"));
+            assert!(!anneal.keep_alive);
+            assert!(anneal
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("retired"));
+            let legacy = runtime.block_on(status_of("commandcode"));
+            assert!(!legacy.keep_alive);
+            assert!(legacy
+                .last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("retired"));
+            let before = DataStore::read_file(|d| Ok(serde_json::to_value(d).unwrap())).unwrap();
+            let error = runtime
+                .block_on(connect(
+                    "anneal",
+                    &anneal.endpoint,
+                    "",
+                    "new-credential",
+                    true,
+                    true,
+                ))
+                .unwrap_err();
+            assert!(error.to_string().contains("retired"), "{error}");
+            let after = DataStore::read_file(|d| Ok(serde_json::to_value(d).unwrap())).unwrap();
+            assert_eq!(after, before);
+            assert!(matches!(
+                anneal_listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+        });
     }
 }

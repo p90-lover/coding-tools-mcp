@@ -25,6 +25,7 @@ test("Provider Hub exposes every requested OAuth and reverse-proxy provider", ()
     "codex-oauth",
     "claude-oauth",
     "commandcode-proxy",
+    "commandcode-studio",
     "cliproxyapi-antigravity",
   ]) {
     assert.match(catalog, new RegExp(`id:\\s*["']${providerId}["']`));
@@ -34,11 +35,12 @@ test("Provider Hub exposes every requested OAuth and reverse-proxy provider", ()
   for (const providerName of [
     "Codex OAuth",
     "Claude OAuth",
-    "CommandCode Proxy",
+    "CommandCode Go (CPA)",
+    "CommandCode Studio (CPA)",
     "Gemini Antigravity Reverse Proxy",
   ]) {
-    assert.match(surface, new RegExp(providerName));
-    assert.match(metadata, new RegExp(providerName));
+    assert.ok(surface.includes(providerName));
+    assert.ok(metadata.includes(providerName));
   }
   assert.match(surface, /PROVIDER_CATALOG\.map|PROVIDER_CATALOG\.filter/);
 });

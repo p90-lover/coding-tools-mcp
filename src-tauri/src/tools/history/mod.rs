@@ -1,6 +1,7 @@
 mod markdown;
 mod model;
 mod storage;
+pub(crate) use markdown::redact_text;
 
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -20,8 +20,8 @@ function readInstallerInclude() {
   return fs.readFileSync(includePath, "utf8");
 }
 
-test("rc.12 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
-  assert.equal(manifest.version, "0.7.0-rc.12");
+test("rc.14 keeps the stable Electron installer identity and enables the NSIS migration include", () => {
+  assert.equal(manifest.version, "0.7.0-rc.14");
   assert.equal(manifest.build.appId, "dev.codingtools.fullharness");
   assert.equal(manifest.build.productName, "Coding Tools");
   assert.equal(manifest.build.nsis.guid, "3cb2ea96-3319-55b8-95a5-7f180a5f3ed4");
@@ -187,4 +187,14 @@ test("renderer verification uses an isolated aiTemp output before the package bu
     /run\('bun', \['run', 'build:renderer'\]/,
     "the release runner must not build desktop-electron/dist before package:win",
   );
+});
+
+test("an upgrade continues when the previous version could not remove all of its files", () => {
+  const include = readInstallerInclude();
+  const macro = include.match(/!macro customUnInstallCheck\r?\n([\s\S]*?)!macroend/);
+  assert.ok(macro, "installer.nsh overrides electron-builder's per-user uninstall result check");
+  assert.match(macro[1], /ClearErrors/);
+  assert.doesNotMatch(macro[1], /\b(Quit|Abort|SetErrorLevel)\b/, "a partial uninstall must not stop the upgrade");
+  const guarded = include.slice(0, include.lastIndexOf("!endif"));
+  assert.ok(guarded.includes("!macro customUnInstallCheck"), "the override is installer-only, inside the BUILD_UNINSTALLER guard");
 });

@@ -8,6 +8,7 @@ const MAX_LOG_STRING_CHARS = 16 * 1024;
 
 function redactText(value) {
   const redacted = value
+    .replace(/((?:https?|socks5):\/\/)[^\s/"'`<>]+@/gi, "$1[redacted]@")
     .replace(/tunnel_[a-f0-9]{32}/g, "[tunnel-id]")
     .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[runtime-key]")
     .replace(/\bBearer\s+[A-Za-z0-9._~-]{20,}\b/gi, "Bearer [redacted]");

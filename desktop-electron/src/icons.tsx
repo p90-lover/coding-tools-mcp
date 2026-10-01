@@ -15,6 +15,7 @@ export type IconName =
   | "globe"
   | "info"
   | "logs"
+  | "mail"
   | "mcp"
   | "providers"
   | "orchestrator"
@@ -45,6 +46,7 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
       {name === "globe" ? <><circle {...common} cx="12" cy="12" r="9" /><path {...common} d="M3 12h18M12 3c2.4 2.4 3.6 5.4 3.6 9S14.4 18.6 12 21c-2.4-2.4-3.6-5.4-3.6-9S9.6 5.4 12 3Z" /></> : null}
       {name === "info" ? <><circle {...common} cx="12" cy="12" r="9" /><path {...common} d="M12 10.5V17M12 7h.01" /></> : null}
       {name === "logs" ? <><path {...common} d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4" /></> : null}
+      {name === "mail" ? <><rect {...common} x="3" y="5" width="18" height="14" rx="2.5" /><path {...common} d="m4 7 8 6 8-6" /></> : null}
       {name === "mcp" ? <><path {...common} d="M8 7.5 12 4l4 3.5v5L12 16l-4-3.5v-5Z" /><path {...common} d="m8 12.5-3 2.7v3.3L8 21l3-2.5V16M16 12.5l3 2.7v3.3L16 21l-3-2.5V16" /></> : null}
       {name === "providers" ? <><rect {...common} x="3" y="5" width="8" height="6" rx="2" /><rect {...common} x="13" y="5" width="8" height="6" rx="2" /><rect {...common} x="8" y="14" width="8" height="6" rx="2" /><path {...common} d="M7 11v1.5h10V11M12 12.5V14" /></> : null}
       {name === "orchestrator" ? <><circle {...common} cx="5" cy="6" r="2" /><circle {...common} cx="19" cy="6" r="2" /><circle {...common} cx="12" cy="18" r="2" /><path {...common} d="M7 6h10M6.5 7.5 10.8 16M17.5 7.5 13.2 16" /></> : null}

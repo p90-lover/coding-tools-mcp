@@ -179,6 +179,33 @@ describe("reversible native Codex route integration", () => {
     expect(uninstallCodexIntegration()).toEqual({ changed: false });
   });
 
+  test("removes a self-identifying orphaned integration without touching unmarked user routing", () => {
+    const { codexHome } = fixture();
+    const configPath = join(codexHome, "config.toml");
+    const original = `model = "gpt-5.6-sol"\napproval_policy = "never"\n\n[features]\ngoals = true\n`;
+    writeFileSync(configPath, original);
+    installCodexIntegration(compatibilityV1Config("browser-only"));
+    rmSync(getCodexJournalPath(), { force: true });
+    rmSync(getCodexJournalRecoveryPath(), { force: true });
+
+    expect(uninstallCodexIntegration()).toEqual({ changed: true });
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+
+    const second = fixture();
+    const secondConfig = join(second.codexHome, "config.toml");
+    const userRouting = `model = "gpt-5.6-sol"\nopenai_base_url = "https://user.example/v1"\n`;
+    writeFileSync(secondConfig, userRouting);
+    expect(uninstallCodexIntegration()).toEqual({ changed: false });
+    expect(readFileSync(secondConfig, "utf8")).toBe(userRouting);
+
+    const third = fixture();
+    const thirdConfig = join(third.codexHome, "config.toml");
+    writeFileSync(thirdConfig, `${MANAGED_ROUTE_COMMENT}\n${userRouting}`);
+    expect(uninstallCodexIntegration()).toEqual({ changed: true });
+    expect(readFileSync(thirdConfig, "utf8")).toBe(userRouting);
+
+  });
+
   test("routes Codex without changing native compact or multi-agent feature flags", () => {
     const { codexHome } = fixture();
     const configPath = join(codexHome, "config.toml");

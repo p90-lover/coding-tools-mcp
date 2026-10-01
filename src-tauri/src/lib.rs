@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", allow(linker_messages))]
 
 mod codex_bridge;
+pub use codex_bridge::{Connection as AoCodexConnection, Hub as AoCodexHub};
 pub mod integrations;
 pub mod media;
 pub mod orchestrator_run;
@@ -10,6 +11,7 @@ pub mod providers;
 mod actions;
 mod app_state;
 mod auth;
+pub use auth::validate_redirect_uris;
 mod commands;
 pub mod config_compat;
 pub mod data;
@@ -17,9 +19,11 @@ pub mod error;
 pub mod harness;
 mod health;
 mod mcp;
+pub use mcp::events as mcp_events;
 mod platform;
 pub mod runtime;
 mod secret;
+pub use secret::SecretStore;
 mod settings;
 pub mod tools;
 mod tunnel;
@@ -29,8 +33,7 @@ mod workspace;
 use app_state::AppState;
 use commands::{
     check_app_update, codex_local_command, codex_local_connect, codex_local_control,
-    codex_local_disconnect, codex_local_read, codex_local_status, commandcode_proxy_apply,
-    commandcode_proxy_control, commandcode_proxy_status, computer_local_forget,
+    codex_local_disconnect, codex_local_read, codex_local_status, computer_local_forget,
     computer_local_pause, computer_local_permissions, computer_local_poll, computer_local_preview,
     computer_local_resume, computer_local_start, computer_local_stop, computer_local_targets,
     control_board_change, control_board_read, create_workspace, delete_frp_profile,
@@ -205,9 +208,6 @@ pub fn run() {
             integration_live_disconnect,
             integration_live_status,
             integration_act,
-            commandcode_proxy_status,
-            commandcode_proxy_apply,
-            commandcode_proxy_control,
             control_board_read,
             provider_config_preview,
             control_board_change,

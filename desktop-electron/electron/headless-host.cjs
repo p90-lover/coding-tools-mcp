@@ -34,7 +34,7 @@ function safeErrorMessage(error) {
   return message.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").slice(0, 500);
 }
 
-function requestJson({ endpoint, token, pathname, method = "POST", body = null, timeout = REQUEST_TIMEOUT_MS }) {
+function requestJson({ endpoint, token, localUiToken = null, pathname, method = "POST", body = null, timeout = REQUEST_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     const url = new URL(pathname, endpoint);
     if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password) {
@@ -50,6 +50,7 @@ function requestJson({ endpoint, token, pathname, method = "POST", body = null, 
       method,
       headers: {
         authorization: `Bearer ${token}`,
+        ...(localUiToken ? { "x-coding-tools-local-ui": localUiToken } : {}),
         accept: "application/json",
         ...(payload ? {
           "content-type": "application/json",
@@ -79,7 +80,12 @@ function requestJson({ endpoint, token, pathname, method = "POST", body = null, 
           return;
         }
         if ((response.statusCode || 500) < 200 || (response.statusCode || 500) >= 300) {
-          const message = value?.error?.message || "Headless service rejected the request";
+          // Keep the service's own reason, whichever error shape it used, so the UI is not left
+          // with a generic message; fall back to the HTTP status.
+          const message = value?.error?.message
+            || (typeof value?.error === "string" && value.error)
+            || (typeof value?.message === "string" && value.message)
+            || `Headless service rejected the request (HTTP ${response.statusCode || 500})`;
           reject(new Error(safeErrorMessage(message)));
           return;
         }
@@ -94,10 +100,12 @@ function requestJson({ endpoint, token, pathname, method = "POST", body = null, 
 }
 
 class HeadlessHost {
-  constructor({ app, logger, sourceRoot }) {
+  constructor({ app, logger, sourceRoot, binaryRoot = null }) {
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
+    // A swappable backend bundle carries its own headless executable under coding-tools/.
+    this.binaryRoot = binaryRoot;
     this.child = null;
     this.control = null;
     this.starting = null;
@@ -109,6 +117,7 @@ class HeadlessHost {
     const name = `coding-tools-headless${suffix}`;
     const candidates = [
       process.env.CODING_TOOLS_HEADLESS_BINARY,
+      this.binaryRoot ? path.join(this.binaryRoot, "coding-tools", name) : null,
       this.app.isPackaged ? path.join(process.resourcesPath, "coding-tools", name) : null,
       path.join(this.sourceRoot, "rust-core", "target", "debug", name),
       path.join(this.sourceRoot, "rust-core", "target", "release", name),
@@ -140,6 +149,7 @@ class HeadlessHost {
     const executable = this.binaryPath();
     const appDataDir = path.join(this.app.getPath("userData"), "headless");
     const id = `${process.pid}-${crypto.randomUUID()}`;
+    const uiToken = crypto.randomBytes(32).toString("base64url");
     const descriptorPath = path.join(appDataDir, "runtime", `control-${id}.json`);
     const tokenPath = path.join(appDataDir, "aiTemp", "headless-control", `token-${id}.txt`);
     fs.mkdirSync(path.dirname(descriptorPath), { recursive: true, mode: 0o700 });
@@ -150,13 +160,23 @@ class HeadlessHost {
       env: {
         ...process.env,
         CODING_TOOLS_APP_DATA_DIR: appDataDir,
+        ...(process.env.CODING_TOOLS_DEV_HOME ? { CODING_TOOLS_STATE_DIR: process.env.CODING_TOOLS_STATE_DIR || path.join(appDataDir, "state") } : {}),
         CODING_TOOLS_CONTROL_DESCRIPTOR_FILE: descriptorPath,
         CODING_TOOLS_CONTROL_TOKEN_FILE: tokenPath,
+        CODING_TOOLS_LOCAL_UI_STDIN: "1",
       },
-      stdio: "ignore",
+      stdio: ["pipe", "ignore", "ignore"],
       windowsHide: true,
     });
     this.child = child;
+    if (!child.stdin) {
+      child.kill();
+      throw new Error("Headless local UI channel unavailable");
+    }
+    child.stdin.on("error", (error) => {
+      this.logger.warn("headless.local_ui_channel_failed", { message: safeErrorMessage(error) });
+    });
+    child.stdin.end(uiToken + "\n");
     child.once("exit", (code, signal) => {
       const expected = this.stopping;
       this.control = null;
@@ -194,6 +214,7 @@ class HeadlessHost {
           this.control = Object.freeze({
             endpoint: descriptor.endpoint,
             token,
+            uiToken,
             descriptorPath,
             tokenPath,
           });
@@ -260,9 +281,11 @@ class HeadlessHost {
       return await requestJson({
         endpoint: control.endpoint,
         token: control.token,
+        localUiToken: options.localConfirmation === true ? control.uiToken : null,
         pathname,
         method,
         body,
+        timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
       });
     } catch (error) {
       throw new Error(safeErrorMessage(error));

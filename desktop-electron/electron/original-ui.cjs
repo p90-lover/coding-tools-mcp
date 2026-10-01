@@ -2,15 +2,15 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { pathToFileURL } = require("node:url");
+
 const { attachCpaCodexLongRun } = require("./cpa-codex-long-run.cjs");
 
-const TOOL_IDS = Object.freeze(["cpa", "codex-router", "paseo", "anneal"]);
-const IFRAME_TOOL_IDS = Object.freeze(["cpa", "paseo", "anneal"]);
+const TOOL_IDS = Object.freeze(["cpa"]);
+const IFRAME_TOOL_IDS = Object.freeze(["cpa"]);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 const READY_WAIT_MS = {
   cpa: 45_000,
-  "codex-router": 5 * 60_000,
+
   paseo: 90_000,
   anneal: 2 * 60_000,
 };
@@ -105,20 +105,6 @@ function annealVisualEndpoint() {
 }
 
 function embeddedVisualUrl(toolId, manifest, state, section) {
-  if (toolId === "codex-router") {
-    const home = state?.home;
-    if (!home) return "";
-    try {
-      const { rendererPath } = require("./codex-router-original-ui.cjs");
-      const file = rendererPath(home);
-      if (!fs.existsSync(file)) return "";
-      const url = pathToFileURL(file);
-      if (section) url.hash = section;
-      return url.toString();
-    } catch {
-      return "";
-    }
-  }
   if (toolId === "anneal") {
     return sectionUrl(manifest, annealVisualEndpoint(), section);
   }
@@ -134,7 +120,7 @@ function createOriginalUiCore({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const manifests = new Map(TOOL_IDS.map((toolId) => [toolId, loadManifest(toolId)]));
-  let controlCenterChild = null;
+
 
   function requireTool(toolId) {
     const manifest = manifests.get(toolId);
@@ -186,27 +172,6 @@ function createOriginalUiCore({
     return project(toolId);
   }
 
-  function stopControlCenter() {
-    const child = controlCenterChild;
-    controlCenterChild = null;
-    if (!child) return;
-    try {
-      if (child.exitCode == null && child.signalCode == null) child.kill();
-    } catch {}
-  }
-
-  function rememberControlCenter(child) {
-    if (!child) return;
-    if (controlCenterChild && controlCenterChild !== child && controlCenterChild.exitCode == null) {
-      child.once?.("exit", () => {});
-      return;
-    }
-    controlCenterChild = child;
-    child.once?.("exit", () => {
-      if (controlCenterChild === child) controlCenterChild = null;
-    });
-  }
-
   async function waitUntilReady(toolId) {
     const started = Date.now();
     while (true) {
@@ -246,7 +211,7 @@ function createOriginalUiCore({
 
   async function stop(toolId) {
     requireTool(toolId);
-    if (toolId === "codex-router") stopControlCenter();
+
     if (!externalServices?.stop) throw new Error(`${requireTool(toolId).name} lifecycle is unavailable`);
     await externalServices.stop(toolId);
     return inspect(toolId);
@@ -254,7 +219,7 @@ function createOriginalUiCore({
 
   async function restart(toolId) {
     requireTool(toolId);
-    if (toolId === "codex-router") stopControlCenter();
+
     if (!externalServices?.restart) throw new Error(`${requireTool(toolId).name} lifecycle is unavailable`);
     await externalServices.restart(toolId);
     return inspect(toolId);
@@ -281,7 +246,7 @@ function createOriginalUiCore({
         transport: "in-process",
       },
       unavailable: true,
-      dependency: classified?.dependency || (toolId === "anneal" ? "postgres" : null),
+      dependency: classified?.dependency || null,
       error: message,
     };
   }
@@ -292,6 +257,10 @@ function createOriginalUiCore({
     try {
       let state = await inspect(toolId);
       if (state.status !== "ready") {
+        if (state.status === "error" || ["not-installed", "repair-required", "error"].includes(state.installState)) {
+          return unavailableOpenResult(toolId, selected,
+            state.error || `${manifest.name} needs setup. Use Start or Repair; opening this page does not install it.`, state);
+        }
         await start(toolId);
         state = await waitUntilReady(toolId);
       }
@@ -336,9 +305,7 @@ function createOriginalUiCore({
     return { copied: true, length };
   }
 
-  function dispose() {
-    stopControlCenter();
-  }
+  function dispose() {}
 
   return Object.freeze({
     snapshot,

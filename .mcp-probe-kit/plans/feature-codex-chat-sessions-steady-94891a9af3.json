@@ -1,0 +1,237 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-codex-chat-sessions-steady-94891a9af3",
+  "plan": {
+    "planId": "feature-codex-chat-sessions-steady-94891a9af3",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "规划并实施新功能：codex-chat-sessions",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：即使已有旧版 project-context，只要缺少图谱文档，也要先补齐 docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/codex-chat-sessions/requirements.md",
+          "docs/specs/codex-chat-sessions/design.md",
+          "docs/specs/codex-chat-sessions/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/codex-chat-sessions/requirements.md",
+          "docs/specs/codex-chat-sessions/design.md",
+          "docs/specs/codex-chat-sessions/tasks.md"
+        ],
+        "note": "规格模板已经由 start_feature 内部生成；Agent 直接按内嵌草稿写入并补全占位"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks 落盘后、进入估算或实现前",
+        "args": {
+          "feature_name": "codex-chat-sessions",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "未通过则按报告补全后重跑；通过前不要写实现代码",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "实现 codex-chat-sessions 功能：Approved bounded read-only MCP Codex chat-session reader, for all user Codex projects. Reuse configured getCodexHome and claimed-turn authentication. Add discover/list/read by validated session ID, active/archived sources, bounded pagination, visible-message filtering and common-secret redaction. No arbitrary paths, transcript writes, model calls, new database, dependencies, worktrees, commits or pushes. Preserve existing AO and user changes. Test parser/path/auth boundaries and verify local MCP without printing private chat bodies.",
+          "code_context": "参考生成的 docs/specs/codex-chat-sessions/tasks.md\n如存在 docs/graph-insights/latest.md，请一并参考其中的模块依赖和调用链摘要"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/codex-chat-sessions/tasks.md"
+        ],
+        "expectedOutputs": [
+          "完成任务清单对应的生产代码与必要迁移"
+        ],
+        "completionEvidence": [
+          "实际变更文件与完成的任务条目",
+          "关键行为与规格一致"
+        ],
+        "outputs": [],
+        "note": "Agent 使用宿主文件与代码能力实施；不得把规划结果当成已完成实现"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "受影响测试、主链回归和必要静态检查结果"
+        ],
+        "completionEvidence": [
+          "真实测试命令、退出码和通过数量"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "变更范围代码审查结果与待处理问题"
+        ],
+        "completionEvidence": [
+          "高优先级问题已关闭或有明确阻断记录"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Agent 必须按步骤顺序调用 MCP，并使用宿主能力完成真实文件与代码操作",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "check_spec 未通过前不得进入实现阶段",
+      "不得把 delegated plan 的输出误认为代码已经实施",
+      "历史记忆仅作为参考，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "规格文档已生成并通过 check_spec",
+      "工作量与主要风险已完成评估",
+      "Agent 已按 tasks.md 完成实现、测试与代码审查",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "codex-chat-sessions",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "blocked",
+  "completedStepIds": [
+    "context",
+    "write-spec",
+    "check-spec",
+    "estimate",
+    "implement",
+    "test",
+    "review"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [
+    "Local implementation and installed MCP readback passed. Awaiting user approval before refreshing the existing ChatGPT connector tool list; remote ChatGPT call is not verified."
+  ],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "User approved bounded discover/list/read design and explicitly selected all Codex projects. Existing context and graph entry read; native CLI graph query verified active-turn reader flow. No product edits yet.",
+      "verifiedAt": "2026-09-27T22:59:15.706Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "Approved bounded all-project design documented; check_spec passed four FRs with no warnings. Read-only scope flag does not alter shared config parser. Estimation completed.",
+      "reference": "docs/specs/codex-chat-sessions/design.md",
+      "verifiedAt": "2026-09-27T23:11:21.059Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Read-only authenticated discover/list/read tool installed. Existing home resolver and auth lease reused; explicit all-project preference saved locally; source chats and all other settings preserved.",
+      "reference": "docs/specs/codex-chat-sessions/verification.md",
+      "revision": "166742f94b3e516c606b22561061bd9ad58fc58ddfbdd8bad3b2193f4aabb875",
+      "verifiedAt": "2026-09-28T00:31:49.723Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Native/safe MCP integration: 2 passed, 130 assertions; public contract test and typecheck passed. Installed local MCP listed 1809 sessions and read two real pages without printing bodies or invoking models.",
+      "reference": "aiTemp/work/codex-sessions/live-verification.json",
+      "verifiedAt": "2026-09-28T00:31:49.723Z"
+    },
+    {
+      "kind": "review",
+      "summary": "Inline review completed. No arbitrary path inputs; canonical metadata identity, local scope, auth, UTF-8/cursor bounds and secret filtering verified. Full source package CPA pin differs; scoped runtime update preserved the trusted installed CPA pin and all non-runtime components.",
+      "reference": "docs/specs/codex-chat-sessions/verification.md",
+      "verifiedAt": "2026-09-28T00:31:49.723Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "featureName": "codex-chat-sessions",
+    "specLayout": "flat"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-27T22:59:15.706Z",
+  "updatedAt": "2026-09-28T00:31:49.723Z"
+}

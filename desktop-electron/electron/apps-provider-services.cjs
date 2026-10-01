@@ -218,17 +218,6 @@ function createAppsProviderServices({ providerNetworkReady }) {
       }
       return { reason: "CPA /v1/models returned an empty catalog", summary: listed.summary };
     }
-    if (moduleId === "codex-router") {
-      if (probed.credentialReason || /caller secret/i.test(String(probed.reason || ""))) {
-        return { reason: probed.reason || "Codex Router caller secret is not configured", summary: listed.summary };
-      }
-      return {
-        reason: probed.reachable === false
-          ? (probed.reason || "Codex Router loopback is unreachable")
-          : "Codex Router catalog is empty; run sync after providers are linked",
-        summary: listed.summary,
-      };
-    }
     return { reason: probed.reason || "catalog is empty", summary: listed.summary };
   }
 

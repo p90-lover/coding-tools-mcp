@@ -1,0 +1,263 @@
+{
+  "schemaVersion": "1.0.0",
+  "planId": "feature-implement-the-approved-steady-8974e05bb3",
+  "plan": {
+    "planId": "feature-implement-the-approved-steady-8974e05bb3",
+    "mode": "delegated",
+    "contractVersion": "2.0.0",
+    "workflow": "feature",
+    "workflowVersion": "4.0.0",
+    "objective": "规划并实施新功能：implement-the-approved",
+    "steps": [
+      {
+        "id": "context",
+        "tool": "init_project_context",
+        "when": "缺少 AGENTS.md 或 docs/graph-insights/latest.md / docs/graph-insights/latest.json",
+        "args": {
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ],
+        "note": "兼容老项目：即使已有旧版 project-context，只要缺少图谱文档，也要先补齐 docs/graph-insights/latest.md",
+        "type": "tool",
+        "expectedOutputs": [
+          "AGENTS.md",
+          "docs/graph-insights/latest.md",
+          "docs/graph-insights/latest.json"
+        ]
+      },
+      {
+        "id": "write-spec",
+        "type": "agent_action",
+        "action": "write_embedded_feature_spec",
+        "requiredInputs": [
+          "structuredContent.metadata.specDraft"
+        ],
+        "expectedOutputs": [
+          "docs/specs/implement-the-approved/requirements.md",
+          "docs/specs/implement-the-approved/design.md",
+          "docs/specs/implement-the-approved/tasks.md"
+        ],
+        "outputs": [
+          "docs/specs/implement-the-approved/requirements.md",
+          "docs/specs/implement-the-approved/design.md",
+          "docs/specs/implement-the-approved/tasks.md"
+        ],
+        "note": "规格模板已经由 start_feature 内部生成；Agent 直接按内嵌草稿写入并补全占位"
+      },
+      {
+        "id": "check-spec",
+        "type": "tool",
+        "tool": "check_spec",
+        "when": "requirements/design/tasks 落盘后、进入估算或实现前",
+        "args": {
+          "feature_name": "implement-the-approved",
+          "docs_dir": "docs",
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp"
+        },
+        "outputs": [],
+        "note": "未通过则按报告补全后重跑；通过前不要写实现代码",
+        "expectedOutputs": []
+      },
+      {
+        "id": "estimate",
+        "type": "tool",
+        "tool": "estimate",
+        "args": {
+          "task_description": "实现 implement-the-approved 功能：Implement the approved Runtime AO company canvas from docs/superpowers/plans/2026-09-27-runtime-ao-company-canvas-draft.md: AO own workspace mission Board plus shared-state Team canvas, reusable editable role blocks with free positioning and animated connections, workspace-scoped instructions/models/harnesses, reviewer-only review with two bounded rework rounds, configurable global and per-mission worker caps, apply edits to queued tasks while preserving active snapshots. Reuse existing source integrations and persistence, no separate task database or extra git worktree; preserve CPA/MCP/native Codex and unrelated edits. Fix held WebGPT planner diagnostics/execution, verify a real WebGPT High -> CPA Gemini 3.8 Flash High -> independent WebGPT review mission; build/install/restart non-DEV Coding Tools with backups and keep Codex open. User explicitly approved design and implementation; do not repeat design approval questions.",
+          "code_context": "参考生成的 docs/specs/implement-the-approved/tasks.md\n如存在 docs/graph-insights/latest.md，请一并参考其中的模块依赖和调用链摘要"
+        },
+        "outputs": [],
+        "expectedOutputs": []
+      },
+      {
+        "id": "implement",
+        "type": "agent_action",
+        "action": "implement_feature_from_tasks",
+        "dependsOn": [
+          "check-spec",
+          "estimate"
+        ],
+        "requiredInputs": [
+          "docs/specs/implement-the-approved/tasks.md"
+        ],
+        "expectedOutputs": [
+          "完成任务清单对应的生产代码与必要迁移"
+        ],
+        "completionEvidence": [
+          "实际变更文件与完成的任务条目",
+          "关键行为与规格一致"
+        ],
+        "outputs": [],
+        "note": "Agent 使用宿主文件与代码能力实施；不得把规划结果当成已完成实现"
+      },
+      {
+        "id": "test",
+        "type": "agent_action",
+        "action": "run_affected_and_full_regression_tests",
+        "dependsOn": [
+          "implement"
+        ],
+        "expectedOutputs": [
+          "受影响测试、主链回归和必要静态检查结果"
+        ],
+        "completionEvidence": [
+          "真实测试命令、退出码和通过数量"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "review",
+        "type": "tool",
+        "tool": "code_review",
+        "dependsOn": [
+          "test"
+        ],
+        "args": {
+          "project_root": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+          "focus": "all"
+        },
+        "expectedOutputs": [
+          "变更范围代码审查结果与待处理问题"
+        ],
+        "completionEvidence": [
+          "高优先级问题已关闭或有明确阻断记录"
+        ],
+        "outputs": []
+      }
+    ],
+    "globalRules": [
+      "首次执行计划时调用 plan_heartbeat 并附完整 plan，建立本地检查点",
+      "每完成、跳过或阻塞一个步骤后调用 plan_heartbeat 更新证据与状态",
+      "会话中断或切换 Agent 后先调用 resume_plan，再继续未完成步骤",
+      "只有 converge 返回 passed=true 后，才能将本次结论正式写入长期记忆",
+      "Agent 必须按步骤顺序调用 MCP，并使用宿主能力完成真实文件与代码操作",
+      "首次执行前必须用完整 plan 建立 plan_heartbeat 检查点；每完成、跳过或阻断一步立即累计回写",
+      "check_spec 未通过前不得进入实现阶段",
+      "不得把 delegated plan 的输出误认为代码已经实施",
+      "历史记忆仅作为参考，当前项目事实与代码优先"
+    ],
+    "completionCriteria": [
+      "规格文档已生成并通过 check_spec",
+      "工作量与主要风险已完成评估",
+      "Agent 已按 tasks.md 完成实现、测试与代码审查",
+      "所有步骤状态与证据已通过 plan_heartbeat 写入检查点"
+    ],
+    "requiredEvidenceKinds": [
+      "requirements",
+      "spec",
+      "implementation",
+      "test",
+      "review"
+    ],
+    "qualityGates": [],
+    "declaredScope": {
+      "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+      "docsDir": "docs",
+      "featureName": "implement-the-approved",
+      "specLayout": "flat"
+    },
+    "memoryPolicy": {
+      "recallBeforeExecution": false,
+      "extractAfterValidation": false,
+      "writeOnlyReusableKnowledge": true,
+      "allowNegativeMemory": true
+    },
+    "executionStatePolicy": {
+      "heartbeatTool": "plan_heartbeat",
+      "resumeTool": "resume_plan",
+      "convergenceTool": "converge",
+      "heartbeatAfterEachStep": true,
+      "persistPlanOnFirstHeartbeat": true
+    }
+  },
+  "status": "blocked",
+  "currentStepId": "test",
+  "completedStepIds": [
+    "context",
+    "write-spec",
+    "check-spec",
+    "estimate"
+  ],
+  "skippedSteps": [],
+  "unresolvedItems": [
+    "v3 and v4 reached the approval UI but expired without an accepted native decision. User reports approving both; need to establish whether both app buttons were clicked or only the chat confirmation before another probe.",
+    "Remote WebGPT connector and computer/vision tool verification remain unresolved.",
+    "Arbitrary responsibility swaps remain constrained/unverified; no full-plan completion or push claim."
+  ],
+  "evidence": [
+    {
+      "kind": "requirements",
+      "summary": "Approved design Q1-Q6 recorded in docs/superpowers/plans/2026-09-27-runtime-ao-company-canvas-draft.md. Existing project context is available. Execute inline in current checkout because requested GPT-6 Sol subagent is unavailable.",
+      "verifiedAt": "2026-09-27T04:35:58.416Z"
+    },
+    {
+      "kind": "spec",
+      "summary": "Approved company-canvas plan recorded; docs/specs/implement-the-approved requirements/design/tasks written. check_spec passed all seven FRs with zero errors/warnings. Estimate completed; execution/projection/concurrency are the principal risks. Inline ledger is aiTemp/work/ao-company-canvas/progress.md.",
+      "verifiedAt": "2026-09-27T04:42:57.548Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Real installed WebGPT High > gemini-3.8-flash-high > WebGPT High review completed: run a6232272-4c82-43dc-886c-3723f032306f revision 11, reviewer APPROVED. Current ChatGPT selectors repaired with failed-then-passing regressions and installed bundle 9d8f44563854865c66c94faece2562414d54ac9f9270090315117cc1b21301bc. Company canvas implementation remains in progress.",
+      "verifiedAt": "2026-09-27T06:35:55.299Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Company Board/canvas, roles, capacity, rework and production-state isolation are installed. Current ledger: aiTemp/work/ao-company-canvas/progress.md. Multi-selection/atomic group layout gap is now implemented; final package validation pending.",
+      "verifiedAt": "2026-09-27T14:46:27.388Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Installed run c72022f3-2cfe-4ec0-8c20-c55fc8008668 completed exact WebGPT High -> gemini-3.8-flash-high -> WebGPT High with APPROVED review. Separate tool probe is held: native command approval intentionally unsupported, remote connector 404/429. Five AO Rust and five canvas checks pass; no tool/vision completion claim.",
+      "verifiedAt": "2026-09-27T14:46:27.388Z"
+    },
+    {
+      "kind": "implementation",
+      "summary": "Normal non-DEV company board/canvas, atomic group layout and one-time AO worker command approval controls installed. No automatic grants; exact local environment compatibility fixed.",
+      "reference": "docs/specs/implement-the-approved/verification.md",
+      "revision": "5e0629a01d999c4d9b60120601c7b00a22d4651326d0784b5fd340053df55c14",
+      "verifiedAt": "2026-09-27T16:34:16.847Z"
+    },
+    {
+      "kind": "test",
+      "summary": "Real exact-model text mission passed. Real Gemini command reached visible approval controls; expired unapproved, held without replay. Focused tests and packaged GUI evidence recorded.",
+      "reference": "docs/specs/implement-the-approved/verification.md",
+      "verifiedAt": "2026-09-27T16:34:16.847Z"
+    },
+    {
+      "kind": "review",
+      "summary": "Inline review preserved ownership/expiry/local confirmation and no session grants. CRITICAL shared approval impact was disclosed; Windows path comparison and local environment mismatch corrected. Outstanding tool and role-transition limits are explicit; no independent Sol review or push claimed.",
+      "reference": "docs/specs/implement-the-approved/verification.md",
+      "verifiedAt": "2026-09-27T16:34:16.847Z"
+    },
+    {
+      "kind": "test",
+      "summary": "User returned after the v3 one-time approval had expired. Confirmed v3 remains held and explicitly announced one fresh v4 probe, run 0a591e5a-bd54-4b70-a0d2-ab4a1fb06fc5; no old request was replayed and no approval was synthesized.",
+      "reference": "aiTemp/ao-live-mission-state-company-worker-approval-v4.json",
+      "verifiedAt": "2026-09-27T16:35:16.602Z"
+    },
+    {
+      "kind": "test",
+      "summary": "v4 expired and held without replay. Read-only UI check confirmed correct selected mission, no remaining pending approval and no visible error. Approval-path clarification is required.",
+      "reference": "docs/specs/implement-the-approved/verification.md",
+      "verifiedAt": "2026-09-27T16:41:24.962Z"
+    }
+  ],
+  "declaredScope": {
+    "projectRoot": "C:/Users/simon/Documents/ChatGPT/coding-tools-mcp",
+    "docsDir": "docs",
+    "featureName": "implement-the-approved",
+    "specLayout": "flat"
+  },
+  "artifacts": [],
+  "memoryCandidates": [],
+  "architectureCandidates": [],
+  "acceptanceResults": [],
+  "runtimeEvidence": [],
+  "createdAt": "2026-09-27T04:35:58.416Z",
+  "updatedAt": "2026-09-27T16:41:24.962Z"
+}

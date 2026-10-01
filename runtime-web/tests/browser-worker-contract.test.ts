@@ -6,6 +6,7 @@ import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
 import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptConnectorAttachmentMode, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
+import { observeChatGptMarkdown } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
@@ -30,6 +31,19 @@ function personalizedTemporaryChatRole(
   };
   return locator;
 }
+
+test("mutable exchange Markdown is emitted only after verified completion", () => {
+  const observed: unknown[] = [];
+  const buffer = { observe: (segments: unknown[]) => { observed.push(segments); return "final"; } };
+  const first = { mutableProjection: true, markdownSegments: [{ text: "Draft" }] };
+  const corrected = { mutableProjection: true, markdownSegments: [{ text: "Corrected answer" }] };
+  expect(observeChatGptMarkdown(buffer as never, first as never)).toBe("");
+  expect(observeChatGptMarkdown(buffer as never, corrected as never)).toBe("");
+  expect(observed).toHaveLength(0);
+  expect(observeChatGptMarkdown(buffer as never, corrected as never, true)).toBe("final");
+  expect(observed).toEqual([corrected.markdownSegments]);
+  expect(observeChatGptMarkdown(buffer as never, { ...first, mutableProjection: false } as never)).toBe("final");
+});
 
 test("conversation turn identity survives ChatGPT DOM virtualization", () => {
   expect(chatGptNewTurnIdentity(
@@ -68,7 +82,7 @@ test("submission DOM tracks logical identities and retains virtualized history i
     document: {
       documentElement: {},
       querySelectorAll: (selector: string) => {
-        if (selector === "[data-turn-id-container]") {
+        if (selector === "[data-turn-id-container], [data-turn-key]") {
           return turns.flatMap(turn => [element(turn, true), ...(turn.mounted ? [element(turn, false)] : [])]);
         }
         const role = selector.includes('="assistant"') ? "assistant" : selector.includes('="user"') ? "user" : undefined;
@@ -123,6 +137,33 @@ test("assistant tracking rebinds only one proven replacement after React detache
     "conversation-turn-2",
     ["conversation-turn-1", "conversation-turn-3", "conversation-turn-4"],
   )).toThrow("2 new conversation turns");
+});
+
+test("current ChatGPT exchange containers prove submission and bind only their assistant", async () => {
+  let phase = 0;
+  let notify = () => {};
+  const root = { getAttribute: (name: string) => name === "data-turn-key" ? "exchange-id" : null,
+    parentElement: { closest: () => null } };
+  const context = createContext({ performance: { timeOrigin: 1 }, document: {
+    documentElement: {}, querySelectorAll: (selector: string) => {
+      if (!phase) return [];
+      if (selector === "[data-turn-id-container], [data-turn-key]") return [root];
+      if (selector.includes('[data-turn-key]:has([data-user-message-bubble])')) return [root];
+      if (selector.includes('[data-turn-key]:has([data-conversation-role="assistant"])')) return phase >= 2 ? phase === 3 ? [root, root] : [root] : [];
+      if (selector.endsWith(', [data-turn-key]')) return phase === 3 ? [root, root] : [root];
+      return [];
+    },
+  }, MutationObserver: class { constructor(callback: () => void) { notify = callback; } observe() {} } });
+  const page = { evaluate: async (fn: Function, args: unknown) => runInContext(`(${fn.toString()})`, context)(args), locator: () => ({}) };
+  const worker = Object.create(ChatGptBrowserWorker.prototype);
+  const baseline = await worker.captureSubmissionBaseline(page);
+  phase = 1; notify();
+  expect(await worker.currentSubmissionEvidence(page, baseline)).toBe("user_turn");
+  expect([...(await worker.submissionDomState(page, baseline.domCache)).responseIdentities]).toEqual(["exchange-id"]);
+  phase = 2; notify();
+  expect([...(await worker.submissionDomState(page, baseline.domCache)).responseIdentities]).toEqual(["exchange-id"]);
+  phase = 3; notify();
+  await expect(worker.submissionDomState(page, baseline.domCache)).rejects.toThrow("duplicate");
 });
 
 test("a retained MCP conversation reuses its proven connector binding", () => {
@@ -194,7 +235,7 @@ test("browser configuration rejects the retired connector identity before openin
     adapter: "chatgpt-web",
     baseUrl: "browser://chatgpt",
     chatgptWeb: { appName: "Codex Native" },
-  })).toThrow(/requires a newly created connector named "Codex Native2".*do not rename or refresh/s);
+  })).toThrow(/requires a newly created connector named "Coding Tools Native2".*do not rename or refresh/s);
 });
 
 test("connector verification reports a legacy-only ChatGPT menu as a migration error", async () => {
@@ -207,16 +248,16 @@ test("connector verification reports a legacy-only ChatGPT menu as a migration e
   }, {}, 4);
 
   expect(message).toContain('Legacy ChatGPT connector "Codex Native" was found');
-  expect(message).toContain('newly created connector named "Codex Native2"');
+  expect(message).toContain('newly created connector named "Coding Tools Native2"');
   expect(message).toContain('do not rename or refresh "Codex Native"');
   expect(message).not.toContain("Another connector");
 
   const mixedMessage = await connectorMentionFailure.call({
     config: { appName: CHATGPT_CONNECTOR_NAME },
-    connectorMentionRowTitles: async () => ["Codex Native", "Codex Native2", "Private chat title"],
+    connectorMentionRowTitles: async () => ["Codex Native", "Coding Tools Native2", "Private chat title"],
   }, {}, 4);
   expect(mixedMessage).not.toContain("Legacy ChatGPT connector");
-  expect(mixedMessage).toContain('no row named "Codex Native2"');
+  expect(mixedMessage).toContain('no row named "Coding Tools Native2"');
   expect(mixedMessage).not.toContain("Private chat title");
 });
 
@@ -514,7 +555,7 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
     press: async () => { sendPresses += 1; },
   };
   const composer = {
-    locator: () => ({ getByTestId: () => sendButton }),
+    locator: () => ({ locator: () => sendButton }),
   };
   worker.activeComposer = async () => composer;
 
@@ -636,7 +677,7 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     },
   };
   worker.activeComposer = async () => ({
-    locator: () => ({ getByTestId: () => sendButton }),
+    locator: () => ({ locator: () => sendButton }),
   });
   worker.waitForSubmissionAcceptedWithRecovery = async () => "user_turn";
 
@@ -1201,14 +1242,14 @@ test("connector selection re-resolves the active composer after ChatGPT replaces
     ["fill", ""],
     ["fill", ""],
     ["focus"],
-    ["pressSequentially", "@codex"],
+    ["pressSequentially", "@Codex Native2"],
     ["waitForResult"],
     ["press"],
     ["waitForSelectedConnector"],
   ]);
 });
 
-test("connector selection moves highlight to the exact hidden-viewport row before Enter", async () => {
+test.each(["data-highlighted", "aria-current"])("connector selection moves %s highlight to the exact hidden-viewport row before Enter", async highlightAttribute => {
   const keys: string[] = [];
   let arrowCount = 0;
   let selected = false;
@@ -1216,7 +1257,8 @@ test("connector selection moves highlight to the exact hidden-viewport row befor
   const appResult = {
     waitFor: async () => {},
     count: async () => 1,
-    getAttribute: async () => arrowCount >= 2 ? "" : null,
+    getAttribute: async (name: string) => arrowCount >= 2 && name === highlightAttribute
+      ? highlightAttribute === "aria-current" ? "true" : "" : null,
   };
   const menuRows = {
     evaluateAll: async () => [],
@@ -1251,6 +1293,29 @@ test("connector selection moves highlight to the exact hidden-viewport row befor
     activeComposer: async () => selected ? selectedComposer : initialComposer,
   }, page)).resolves.toBe(selectedComposer);
   expect(keys).toEqual(["ArrowDown", "ArrowDown", "Enter"]);
+});
+
+test("current app mention chips are verified exactly and excluded from attached prompt text", async () => {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  const document = createDocument(`<div id="composer"><p><span contenteditable="false"
+    data-prompt-link-href="app://installed-plugin" data-prompt-link-label="$coding-tools-native2">Coding Tools Native2</span> Read this.</p></div>`);
+  const element = document.getElementById("composer")!;
+  const composer = {
+    locator: (selector: string) => ({ filter: (options: { hasText: string }) => ({
+      evaluateAll: async (fn: (nodes: Element[]) => unknown) => fn([...element.querySelectorAll(selector)].filter(node => node.textContent?.includes(options.hasText))),
+    }) }),
+    evaluate: async (fn: (node: Element, argument: unknown) => unknown, argument: unknown) => fn(element, argument),
+  };
+  const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { appName: "Coding Tools Native2" }, activeComposer: async () => composer,
+  });
+  expect(await worker.connectorIsSelected(composer)).toBeTrue();
+  expect(await worker.attachedPromptText({})).toBe("Read this.");
+  element.querySelector("span")!.textContent = "Coding Tools Native2 DEV";
+  expect(await worker.connectorIsSelected(composer)).toBeFalse();
+  element.querySelector("span")!.textContent = "Coding Tools Native2";
+  element.appendChild(element.querySelector("span")!.cloneNode(true));
+  await expect(worker.connectorIsSelected(composer)).rejects.toThrow("duplicate");
 });
 
 test("repeated connector verification reuses its selected pill before clearing the composer", async () => {
@@ -1307,7 +1372,7 @@ test("connector selection retriggers the complete mention after a fresh-page hyd
     fill: async () => { calls.push("clear"); },
     focus: async (_options?: { signal?: AbortSignal }) => { calls.push("focus"); },
     pressSequentially: async (value: string) => {
-      expect(value).toBe("@codex");
+      expect(value).toBe("@Codex Native2");
       calls.push("type");
     },
     press: async (key: string) => {
@@ -1741,7 +1806,7 @@ test("tool-capable prompts use the shared Playwright connector selection before 
     ["fill", ""],
     ["fill", ""],
     ["focus"],
-    ["type", "@codex"],
+    ["type", "@Codex Native2"],
     ["connectorMenu"],
     ["selectConnector"],
     ["selectedConnector"],
@@ -2109,8 +2174,8 @@ test("image attachment readiness uses exact file tiles and not localized remove-
         },
       };
     },
-    getByTestId: (testId: string) => {
-      expect(testId).toBe("send-button");
+    locator: (selector: string) => {
+      expect(selector).toContain('button[data-testid="send-button"]');
       return send;
     },
   };

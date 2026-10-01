@@ -16,6 +16,9 @@ fn prepare_snapshot_test_probe() {
     }
     let source = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo manifest"))
         .join("../aiTemp/completion/native_probe.cpp");
+    if !source.is_file() {
+        return;
+    }
     println!("cargo:rerun-if-changed={}", source.display());
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
     let exe = out.join("coding-tools-sandbox-test-probe.exe");

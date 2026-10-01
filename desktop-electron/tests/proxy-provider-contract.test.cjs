@@ -78,8 +78,10 @@ test("provider catalog contains every approved built-in surface", () => {
     "aistudio-to-api",
     "cliproxyapi-antigravity",
     "commandcode-proxy",
+    "commandcode-studio",
   ]);
   assert.equal(providers.DEFAULT_PROVIDERS.every((provider) => provider.paseoEnabled && provider.annealEnabled), true);
+  assert.deepEqual(providers.DEFAULT_PROVIDERS.find((provider) => provider.id === "chatgpt-web")?.models, ["chatgpt-web/high"]);
 });
 
 test("Traditional Chinese locale covers the rc.2 control center", () => {

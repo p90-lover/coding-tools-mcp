@@ -12,16 +12,16 @@ const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..");
 const read = (relativePath) => fs.readFileSync(path.join(desktopRoot, relativePath), "utf8");
 
-test("app-handler tree hosts CPA, Codex Router, CommandCode, Paseo, and Anneal", () => {
-  assert.deepEqual(MODULE_IDS, ["cpa", "codex-router", "commandcode-proxy", "paseo", "anneal"]);
+test("app-handler tree exposes CPA, the orchestrator and the Antigravity CLI tool", () => {
+  assert.deepEqual(MODULE_IDS, ["cpa", "agent-orchestrator", "antigravity-cli"]);
   assert.equal(MODULE_IDS.includes("commandcode"), false);
-  assert.deepEqual(FOREIGN_SLOTS, ["cpa", "codex-router"]);
+  assert.deepEqual(FOREIGN_SLOTS, ["cpa"]);
   const folderIds = fs.readdirSync(path.join(repoRoot, "app-handler"), { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(repoRoot, "app-handler", entry.name, "module.json")))
+    .filter((entry) => entry.isDirectory() && MODULE_IDS.includes(entry.name) && fs.existsSync(path.join(repoRoot, "app-handler", entry.name, "module.json")))
     .map((entry) => entry.name)
     .sort();
   assert.deepEqual([...MODULE_IDS].sort(), folderIds);
-  for (const id of MODULE_IDS) {
+  for (const id of MODULE_IDS.filter((id) => !["agent-orchestrator", "antigravity-cli"].includes(id))) {
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "handler.cjs")), true, id);
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "handlers.cjs")), true, id);
     assert.equal(fs.existsSync(path.join(repoRoot, "app-handler", id, "module.json")), true, id);
@@ -37,9 +37,6 @@ test("app-handler tree hosts CPA, Codex Router, CommandCode, Paseo, and Anneal",
   assert.match(readme, /codingTools\.apps/);
   assert.match(readme, /in-process/);
   assert.match(readme, /handler-registry\.cjs/);
-  assert.match(readme, /127\.0\.0\.1:17891/);
-  assert.match(readme, /apps_list/);
-  assert.match(readme, /apps_invoke/);
   assert.doesNotMatch(readme, /launch Control Center/i);
   assert.doesNotMatch(readme, /\/api\/v1\/apps/);
 });
@@ -50,7 +47,7 @@ test("apps host catalogs operations and drives modules in-process without listen
     services: {
       inspect: async (id) => {
         calls.push(["inspect", id]);
-        return { id, status: "ready", endpoint: `http://127.0.0.1:${id === "cpa" ? 8317 : 4202}/` };
+        return { id, status: "ready", endpoint: `http://127.0.0.1:${id === "cpa" ? 8317 : 6768}/` };
       },
       start: async (id) => { calls.push(["start", id]); return { id, status: "starting" }; },
     },
@@ -69,11 +66,6 @@ test("apps host catalogs operations and drives modules in-process without listen
   assert.ok(listed.modules.find((entry) => entry.id === "cpa").operations.includes("chatCompletions"));
   assert.ok(listed.modules.find((entry) => entry.id === "cpa").operations.includes("listProviders"));
   assert.ok(listed.modules.find((entry) => entry.id === "cpa").operations.includes("linkProvider"));
-  assert.ok(listed.modules.find((entry) => entry.id === "codex-router").operations.includes("sync"));
-  assert.ok(listed.modules.find((entry) => entry.id === "codex-router").operations.includes("chatCompletions"));
-  assert.ok(listed.modules.find((entry) => entry.id === "paseo").operations.includes("send"));
-  assert.ok(listed.modules.find((entry) => entry.id === "anneal").operations.includes("startTask"));
-  assert.ok(listed.modules.find((entry) => entry.id === "anneal").operations.includes("task-start"));
 
   const catalog = host.catalog();
   const cpaModels = catalog.modules.find((entry) => entry.id === "cpa")
@@ -95,15 +87,9 @@ test("apps host catalogs operations and drives modules in-process without listen
   assert.equal(host.isReadOnly("cpa", "start"), false);
 });
 
-test("Anneal module returns postgres unavailable instead of throwing", async () => {
-  const host = createCodingToolsAppsHost({
-    actUpstream: async () => {
-      throw new Error("password authentication failed for user postgres");
-    },
-  });
-  const result = await host.call("anneal", "startTask", { taskId: "task-1" });
-  assert.equal(result.result.unavailable, true);
-  assert.equal(result.result.dependency, "postgres");
+test("retired upstream app modules reject direct calls", async () => {
+  const host = createCodingToolsAppsHost();
+  await assert.rejects(() => host.call("anneal", "startTask", { taskId: "task-1" }), /Retired Coding Tools module/);
 });
 
 test("desktop shell wires codingTools.apps without constructing five-stack at bootstrap", () => {
@@ -115,12 +101,13 @@ test("desktop shell wires codingTools.apps without constructing five-stack at bo
   const host = fs.readFileSync(path.join(repoRoot, "app-handler/host.cjs"), "utf8");
 
   assert.match(main, /createCodingToolsAppsHost/);
-  assert.match(main, /requireAppHandler\("host\.cjs"\)/);
+  // The app modules load from the active backend bundle, or the installed app-handler root.
+  assert.match(main, /require\(path\.join\(appHandlerRoot \|\| resolveAppHandlerRoot\(\), "host\.cjs"\)\)/);
   assert.match(read("electron/app-handler-paths.cjs"), /path\.join\(__dirname, "\.\.", "app-handler"\)/);
   assert.match(main, /coding-tools:apps:list/);
   assert.match(main, /coding-tools:apps:catalog/);
   assert.match(main, /coding-tools:apps:call/);
-  assert.match(main, /createLazyFactory\(\(\) => createFiveStackControlPlane/);
+  assert.doesNotMatch(main, /createLazyFactory\(\(\) => createFiveStackControlPlane/);
   assert.match(preload, /"apps.list"/);
   assert.match(preload, /"apps.call"/);
   assert.match(preload, /invoke: \(input\) => invokeContract\(ipcRenderer, "apps.call"/);

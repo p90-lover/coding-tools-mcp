@@ -8,7 +8,7 @@ const test = require("node:test");
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const read = (relativePath) => fs.readFileSync(path.join(repositoryRoot, relativePath), "utf8");
 
-test("headless sidecar exposes the local Paseo and Anneal execution control plane", () => {
+test("headless sidecar keeps execution reads and retires standalone Paseo/Anneal execution writes", () => {
   const source = read("rust-core/coding-tools-headless/src/lib.rs");
   for (const route of ["read", "provider", "update"]) {
     assert.match(
@@ -17,8 +17,20 @@ test("headless sidecar exposes the local Paseo and Anneal execution control plan
       `missing authenticated /api/v1/execution/${route} route`,
     );
   }
+  const handler = (name) => {
+    const start = source.indexOf(`async fn ${name}(`);
+    assert.ok(start >= 0, `missing ${name} handler`);
+    return source.slice(start, source.indexOf("\nasync fn ", start + 1));
+  };
+  // Reads still report execution state; standalone execution writes are retired in favour of AO.
+  assert.match(handler("execution_read"), /execution::service::view\(/);
+  for (const retired of ["execution_provider", "execution_update"]) {
+    const body = handler(retired);
+    assert.match(body, /auth\(&headers, &state\)/, `${retired} stays authenticated`);
+    assert.match(body, /StatusCode::GONE,\s*"APP_MODULE_RETIRED"/, `${retired} answers 410 APP_MODULE_RETIRED`);
+  }
   for (const operation of ["configure", "reconnect", "disable", "change"]) {
-    assert.match(source, new RegExp(`execution::service::${operation}\\(`));
+    assert.doesNotMatch(source, new RegExp(`execution::service::${operation}\\(`), `retired ${operation} is not reachable`);
   }
 });
 
@@ -41,12 +53,10 @@ test("Electron registers typed execution IPC instead of exposing dead preload me
   assert.match(main, /assertFocusedMainWindow\(/);
 });
 
-test("provider API and OAuth secrets stay vault-only while control-plane auth stays separate", () => {
+test("retired provider contract rejects secret fields while keeping control auth distinct", async () => {
   const schema = read("desktop-electron/electron/ipc-schema.cjs");
   const contracts = read("desktop-electron/src/api/contracts.ts");
-  const surface = read("desktop-electron/src/features/ProviderOrchestratorSurfaces.tsx");
-  const main = read("desktop-electron/electron/main.cjs");
-  const bootstrap = read("desktop-electron/electron/provider-bootstrap.cjs");
+  const { invokeContract } = require("../electron/ipc-schema.cjs");
 
   assert.match(schema, /SENSITIVE_RESPONSE_KEYS[\s\S]*[\"']credential[\"']/);
   assert.match(schema, /rejectSensitiveKeys:\s*true/);
@@ -61,20 +71,28 @@ test("provider API and OAuth secrets stay vault-only while control-plane auth st
   assert.doesNotMatch(contractRequest[1], /readonly credential\??:/);
   assert.match(contractRequest[1], /readonly controlCredential\?: string/);
 
-  const connectBlock = surface.match(/const connectProvider = async \(\) => \{([\s\S]*?)\n  const addProvider/);
-  assert.ok(connectBlock, "provider connect handler is missing");
-  const providerCall = connectBlock[1].match(/api\.execution\.provider\(\{([\s\S]*?)\n      \}\);/);
-  assert.ok(providerCall, "provider execution call is missing");
-  assert.doesNotMatch(providerCall[1], /(?:^|\s)credential:\s*/m);
+  const calls = [];
+  const ipcRenderer = { invoke: async (channel, payload) => {
+    calls.push([channel, payload]);
+    return {};
+  } };
+  const input = {
+    workspaceId: "workspace-1", operation: "configure", confirm: true,
+    controlCredential: "control-only",
+  };
+  await assert.rejects(
+    invokeContract(ipcRenderer, "execution.provider", { ...input, credential: "provider-secret" }),
+    { code: "IPC_REQUEST_SCHEMA_INVALID" },
+  );
+  assert.equal(calls.length, 0, "provider secret must be rejected before IPC transport");
 
-  assert.match(bootstrap, /providerNetworkReady/);
-  const handler = main.match(/handle\("coding-tools:execution:provider"([\s\S]*?)\n  handle\("coding-tools:execution:update"/);
-  assert.ok(handler, "execution provider handler is missing");
-  assert.match(handler[1], /createProviderExecutionPlan/);
-  assert.match(handler[1], /providerNetworkReady/);
-  assert.doesNotMatch(handler[1], /accountSecret/);
-  assert.doesNotMatch(handler[1], /storedProviderCredential/);
-  assert.match(handler[1], /controlCredential/);
-  assert.match(handler[1], /credential:\s*controlCredential/);
-  assert.doesNotMatch(handler[1], /credential:\s*input\.credential/);
+  await invokeContract(ipcRenderer, "execution.provider", input);
+  assert.equal(calls[0][0], "coding-tools:execution:provider");
+  assert.equal(calls[0][1].controlCredential, "control-only");
+  assert.equal(Object.hasOwn(calls[0][1], "credential"), false);
+
+  await assert.rejects(
+    invokeContract({ invoke: async () => ({ credential: "provider-secret" }) }, "execution.provider", input),
+    { code: "IPC_RESPONSE_SCHEMA_INVALID" },
+  );
 });

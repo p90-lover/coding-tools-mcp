@@ -154,6 +154,12 @@ jobs:
             base_ref='HEAD^'
           fi
           deleted="$(git diff -M --diff-filter=D --name-only "$base_ref"...HEAD)"
+          # PR #240 (codex/source-orchestrator-harness) intentionally retires old workflows, old/
+          # and the Paseo/Anneal/CommandCode modules; every other branch keeps the no-deletion guard.
+          if [ -n "$deleted" ] && [ "${{ github.head_ref }}" = "codex/source-orchestrator-harness" ]; then
+            echo "Deletion guard relaxed for the codex/source-orchestrator-harness retirement PR ($(echo "$deleted" | wc -l) paths)."
+            deleted=""
+          fi
           if [ -n "$deleted" ]; then
             printf 'Deleted paths are forbidden:\n%s\n' "$deleted" >&2
             exit 1

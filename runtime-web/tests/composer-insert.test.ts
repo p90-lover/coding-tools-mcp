@@ -50,6 +50,23 @@ function harness(options: {
   return { composer: composer as unknown as HTMLElement, calls, selection, fakeDocument };
 }
 
+test("inserts into the fallback textarea without requiring a DOM Range", () => {
+  const calls: Array<{ command: string; value: string }> = [];
+  const composer = { tagName: "TEXTAREA", focus() { fakeDocument.activeElement = composer; } };
+  const fakeDocument = {
+    activeElement: null as unknown,
+    execCommand(command: string, _ui: boolean, value: string) {
+      calls.push({ command, value });
+      return true;
+    },
+  };
+  (globalThis as Record<string, unknown>).document = fakeDocument;
+  (globalThis as Record<string, unknown>).window = { getSelection() { throw new Error("Textarea does not use DOM Range"); } };
+
+  expect(insertPlainTextIntoComposer(composer as unknown as HTMLElement, "staged part")).toBeTrue();
+  expect(calls).toEqual([{ command: "insertText", value: "staged part" }]);
+});
+
 test("places the caret itself when focus has not yet produced one in the composer", () => {
   // A focusable composer may be ready before the browser has placed a caret inside it.
   const { composer, calls, selection } = harness({ focusable: true, caretInsideComposer: false });

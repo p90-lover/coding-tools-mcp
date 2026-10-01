@@ -40,6 +40,13 @@ pub async fn codex_local_connect(
                 "Enable bearer/OAuth authentication before native provider access".into(),
             ));
         }
+        if connection.permission_profile == ":workspace"
+            && snapshot.policy.canonical_permission_mode() != "workspace-write"
+        {
+            return Err(AppError::Message(
+                "Set this Coding Tools workspace to workspace-write before connecting a writable native session".into(),
+            ));
+        }
         {
             let _fence = snapshot
                 .policy_execution_guard()

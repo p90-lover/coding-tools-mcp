@@ -44,12 +44,13 @@ test("Provider Hub keeps provider and orchestrator credentials in separate bilin
   assert.doesNotMatch(source, /controlCredential:\s*secret/);
 });
 
-test("Codex Router, CPA Antigravity, and CommandCode route to subagents, Paseo, and Anneal", () => {
+test("CPA OAuth providers route to subagents, Paseo, and Anneal", () => {
   const router = require(path.join(desktopRoot, "electron", "provider-execution-router.cjs"));
   for (const providerId of [
     "codex-oauth",
     "cliproxyapi-antigravity",
     "commandcode-proxy",
+    "commandcode-studio",
   ]) {
     const provider = router.PROVIDER_EXECUTION_CATALOG.find((candidate) => candidate.id === providerId);
     assert.ok(provider, `missing routed provider ${providerId}`);
@@ -64,12 +65,11 @@ test("the packaged five-stack control plane retains every external runtime manif
   const packageManifest = JSON.parse(readDesktop("package.json"));
   const packagedFiles = JSON.stringify(packageManifest.build?.files ?? []);
 
-  for (const serviceId of ["codex-router", "commandcode-proxy", "paseo", "anneal"]) {
+  for (const serviceId of ["cpa", "paseo", "anneal"]) {
     assert.match(services, new RegExp(`\\"${serviceId}\\"`), `missing external service ${serviceId}`);
   }
   for (const manifest of [
-    "desktop-electron/vendor/upstream/codex-router.json",
-    "desktop-electron/vendor/upstream/commandcode-proxy.json",
+    "desktop-electron/vendor/upstream/cpa.json",
     "desktop-electron/vendor/upstream/paseo.json",
     "desktop-electron/vendor/upstream/anneal.json",
   ]) {

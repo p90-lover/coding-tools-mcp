@@ -8,6 +8,7 @@
   "repositoryUrl": "https://github.com/getpaseo/paseo.git",
   "commit": "1e4ba65c6d75a6b061a1d54141f2f105b5908a96",
   "version": "0.8.0",
+  "patchRevision": "codex-cpa-host-env-v1",
   "strategy": "bundled-source",
   "license": "Apache-2.0",
   "bundle": {
@@ -31,14 +32,17 @@
         "executable": "{npm}",
         "arguments": ["start"],
         "environment": {
-          "PASEO_LISTEN": "127.0.0.1:6768"
+          "PASEO_LISTEN": "127.0.0.1:6768",
+          "PASEO_HOME": "{state}",
+          "PASEO_WEB_UI_ENABLED": "true",
+          "PASEO_WEB_UI_DIST_DIR": "{home}/packages/server/dist/server/web-ui"
         }
       }
     ]
   },
   "health": {
     "endpoint": "http://127.0.0.1:6768/",
-    "acceptStatus": [200, 302, 401, 403, 404]
+    "acceptStatus": [200]
   },
   "executionEndpoint": "ws://127.0.0.1:6768/ws"
 }

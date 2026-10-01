@@ -50,7 +50,7 @@
         "executable": "bash",
         "arguments": [
           "-lc",
-          "set -euo pipefail; state=\"$ANNEAL_STATE_DIR\"; mkdir -p \"$state/config\"; if [ -f \"$state/config/.env\" ]; then ln -sfn \"$state/config/.env\" .env; elif [ -f .env.example ]; then cp .env.example \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; elif [ -n \"${GITHUB_READ_TOKEN:-}\" ]; then npm run setup:local; mv .env \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; else npm run setup:local; mv .env \"$state/config/.env\"; chmod 600 \"$state/config/.env\"; ln -sfn \"$state/config/.env\" .env; fi"
+          "set -euo pipefail; state=\"$ANNEAL_STATE_DIR\"; mkdir -p \"$state/config\"; config=\"$state/config/.env\"; if [ -e .env ] || [ -L .env ]; then [ -L .env ] && [ \"$(readlink .env)\" = \"$config\" ] || { echo 'Anneal checkout .env conflicts with managed config; refusing to replace it.' >&2; exit 42; }; fi; npm run setup:local -- --directory \"$state/config\"; [ -L .env ] || ln -s \"$config\" .env"
         ],
         "environment": {
           "ANNEAL_STATE_DIR": "{state}",
@@ -75,7 +75,7 @@
         "executable": "bash",
         "arguments": [
           "-lc",
-          "set -euo pipefail; state=\"$ANNEAL_STATE_DIR\"; project=coding-tools-anneal; export COMPOSE_PROJECT_NAME=\"$project\"; set -a; . ./.env; set +a; initialized=\"$state/database-v0.9.0.initialized\"; initializing=\"$state/database-v0.9.0.initializing\"; existing=\"$(docker volume ls --filter label=com.docker.compose.project=$project --filter label=com.docker.compose.volume=agentos_postgres_data -q)\"; if [ -n \"$existing\" ] && [ ! -f \"$initialized\" ]; then echo 'Anneal dedicated database exists without a completed Coding Tools initialization marker; refusing a fresh reset.' >&2; exit 42; fi; if [ -z \"$existing\" ]; then mkdir -p \"$state\"; printf 'started\\n' > \"$initializing\"; docker compose -p $project up -d --wait postgres; npm run db:migrate:release -- --fresh; printf 'complete\\n' > \"$initialized\"; else docker compose -p $project up -d --wait postgres; fi"
+          "set -euo pipefail; state=\"$ANNEAL_STATE_DIR\"; project=coding-tools-anneal; export COMPOSE_PROJECT_NAME=\"$project\"; set -a; . ./.env; set +a; initialized=\"$state/database-v0.9.0.initialized\"; initializing=\"$state/database-v0.9.0.initializing\"; existing=\"$(docker volume ls --filter label=com.docker.compose.project=$project --filter label=com.docker.compose.volume=agentos_postgres_data -q)\"; if [ -n \"$existing\" ] && [ ! -f \"$initialized\" ]; then echo 'Anneal dedicated database exists without a completed Coding Tools initialization marker; refusing a fresh reset.' >&2; exit 42; fi; if [ -z \"$existing\" ]; then mkdir -p \"$state\"; printf 'started\\n' > \"$initializing\"; docker compose -p $project up -d --wait --pull never postgres; npm run db:migrate:release -- --fresh; printf 'complete\\n' > \"$initialized\"; else docker compose -p $project up -d --wait --pull never postgres; fi"
         ],
         "environment": {
           "ANNEAL_STATE_DIR": "{state}"
@@ -103,6 +103,8 @@
           "up",
           "-d",
           "--wait",
+          "--pull",
+          "never",
           "postgres"
         ],
         "execution": "managed-mode"

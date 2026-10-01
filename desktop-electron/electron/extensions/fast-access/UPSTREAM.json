@@ -1,0 +1,7 @@
+{
+  "repository": "p90-lover/coding-tools-mcp-fast-access-extension",
+  "commit": "9f901df64f35fc50b3a35d3c05779d1d5e1236dd",
+  "version": "0.0.11",
+  "files": ["content.js"],
+  "usage": "Pinned connector-page and form helpers. The desktop adapter does not activate the Chrome message listener, legacy delete/recreate Sync, OAuth autofill, or recovery/HUD code. Connector settings come from the current desktop Configuration."
+}

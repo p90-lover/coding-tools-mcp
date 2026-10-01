@@ -10,9 +10,6 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 _tauri-scaffold
 
-# 已归档的旧版实现，仅保留本地参考
-/old/
-
 # Rust
 src-tauri/target
 
@@ -29,12 +26,20 @@ src-tauri/icons/logo-design.png
 docs/history-session/
 tmp-run
 
-# Electron migration temporary material; permanent scripts/evidence under aiTemp stay explicit.
-/aiTemp/vendor-import/
-/aiTemp/upstream-manifest-test/
+# Local scratch, recovery archives, and generated builds.
+# Fixtures already tracked under aiTemp/ (Rust #[path] modules, CI evidence scripts) stay tracked;
+# add new permanent fixtures with `git add -f`.
+aiTemp/
+Trash/
+target/
+/desktop-electron/build/
+/desktop-electron/artifacts/
 
 # Paseo/Anneal source trees are package-time extraResources; git keeps only BUNDLE.json.
 /desktop-electron/vendor/bundled/paseo/**
 !/desktop-electron/vendor/bundled/paseo/BUNDLE.json
 /desktop-electron/vendor/bundled/anneal/**
 !/desktop-electron/vendor/bundled/anneal/BUNDLE.json
+
+# Portable build toolchains (Go, Zig) for CPA plugin builds
+.tools/

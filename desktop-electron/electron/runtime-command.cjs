@@ -1,6 +1,22 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+function runtimeReleaseVersion({ app, sourceRoot, installedRuntimeRoot, runtimeRootProvider }) {
+  const root = runtimeRootProvider?.() || installedRuntimeRoot;
+  const packagePath = app.isPackaged
+    ? root && path.join(root, "app", "package.json")
+    : sourceRoot && path.join(sourceRoot, "package.json");
+  if (!packagePath || !fs.existsSync(packagePath)) {
+    if (app.isPackaged) throw new Error("Bundled bridge package metadata is missing");
+    return app.getVersion();
+  }
+  const metadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+  if (metadata.name !== "codex-chatgpt-web" || typeof metadata.version !== "string" || !metadata.version.trim()) {
+    throw new Error("Bundled bridge package metadata is invalid");
+  }
+  return metadata.version;
+}
+
 function runtimeBundlePaths(runtimeRoot, platform = process.platform) {
   return {
     runtimeRoot,
@@ -54,6 +70,7 @@ function embeddedRuntimeInvocation({ app, sourceRoot, args }) {
 }
 
 module.exports = {
+  runtimeReleaseVersion,
   embeddedRuntimeInvocation,
   packagedRuntimePaths,
   runtimeBundlePaths,

@@ -1,0 +1,24 @@
+.ao-original { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+/* The host bar shares the window title strip: stay draggable and clear the native window controls. */
+.ao-original .ao-hostbar {
+  flex: 0 0 auto; min-height: 46px; padding: 6px 12px;
+  padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 12px);
+  gap: 8px; border-bottom: 1px solid var(--color-border, rgb(255 255 255 / 8%));
+  -webkit-app-region: drag;
+}
+.ao-original .ao-hostbar button, .ao-original .ao-hostbar select { -webkit-app-region: no-drag; }
+.ao-original .ao-hostbar .ao-icon-button { min-width: 30px; padding: 4px 8px; }
+.ao-status-dot { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.ao-status-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #9ca3af; }
+.ao-status-dot.status-ready::before { background: #16a34a; }
+.ao-status-dot.status-starting::before, .ao-status-dot.status-stopping::before { background: #d97706; }
+.ao-status-dot.status-error::before { background: #dc2626; }
+.ao-original-viewport { flex: 1 1 auto; min-height: 200px; position: relative; }
+.ao-original .original-ui-frame-empty { height: 100%; padding: 24px; text-align: center; }
+.ao-original .original-ui-frame-empty p { max-width: 56ch; overflow-wrap: anywhere; }
+.ao-original button:focus-visible { outline: 2px solid var(--color-text-primary); outline-offset: 2px; }
+.ao-original.is-embedded { height: 100%; }
+@media (max-width: 760px) {
+  .ao-original .original-ui-hostbar { flex-wrap: wrap; gap: 8px; }
+  .ao-original .original-ui-hostbar-actions { flex-wrap: wrap; }
+}

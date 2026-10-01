@@ -5,11 +5,11 @@ const { defaultRegistry } = require("./handler-registry.cjs");
 
 const MODULE_IDS = Object.freeze([
   "cpa",
-  "codex-router",
-  "commandcode-proxy",
-  "paseo",
-  "anneal",
+  "agent-orchestrator",
+  "antigravity-cli",
 ]);
+
+const RETIRED_MODULE_IDS = new Set(["paseo", "codex-router", "commandcode-proxy", "anneal"]);
 
 function createCodingToolsAppsHost({
   services = null,
@@ -45,7 +45,12 @@ function createCodingToolsAppsHost({
 
   function requireId(moduleId) {
     const id = String(moduleId || "").trim();
-    if (!registry.has(id)) throw new Error(`Unknown Coding Tools module: ${id || "missing"}`);
+    if (RETIRED_MODULE_IDS.has(id)) {
+      const error = new Error(`Retired Coding Tools module: ${id}`);
+      error.code = "APP_MODULE_RETIRED";
+      throw error;
+    }
+    if (!MODULE_IDS.includes(id) || !registry.has(id)) throw new Error(`Unknown Coding Tools module: ${id || "missing"}`);
     return id;
   }
 

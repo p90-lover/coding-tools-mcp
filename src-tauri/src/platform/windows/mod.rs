@@ -4,11 +4,26 @@ pub(crate) mod process;
 
 use std::path::{Path, PathBuf};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::platform::paths as shared_paths;
 use crate::platform::Platform;
 
 pub struct WindowsPlatform;
+
+fn configured_state_dir(value: Option<std::ffi::OsString>) -> AppResult<Option<PathBuf>> {
+    match value {
+        None => Ok(None),
+        Some(value) => {
+            let directory = PathBuf::from(value);
+            if !directory.is_absolute() {
+                return Err(AppError::Message(
+                    "CODING_TOOLS_STATE_DIR must be an absolute directory".into(),
+                ));
+            }
+            Ok(Some(directory))
+        }
+    }
+}
 
 impl Platform for WindowsPlatform {
     fn os_name(&self) -> &'static str {
@@ -16,6 +31,9 @@ impl Platform for WindowsPlatform {
     }
 
     fn app_config_dir(&self) -> AppResult<PathBuf> {
+        if let Some(directory) = configured_state_dir(std::env::var_os("CODING_TOOLS_STATE_DIR"))? {
+            return Ok(directory);
+        }
         paths::roaming_app_data().map(|dir| dir.join("coding-tools-mcp-desktop"))
     }
 
@@ -53,5 +71,21 @@ impl Platform for WindowsPlatform {
 
     fn frpc_candidates(&self) -> Vec<PathBuf> {
         paths::frpc_candidates()
+    }
+}
+
+#[cfg(test)]
+mod state_directory_tests {
+    use super::*;
+    #[test]
+    fn explicit_test_state_directory_does_not_change_the_production_default() {
+        assert_eq!(configured_state_dir(None).unwrap(), None);
+        assert!(configured_state_dir(Some("relative-state".into())).is_err());
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aiTemp/isolated-state");
+        assert_eq!(
+            configured_state_dir(Some(root.clone().into_os_string())).unwrap(),
+            Some(root)
+        );
     }
 }

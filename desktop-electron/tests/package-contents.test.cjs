@@ -15,12 +15,11 @@ const {
   inspectExtractedApplication,
   findWindowsInstaller,
   forbiddenName,
-  bundledRouterVendorPath,
   bundledRuntimeVendorPath,
   bundledUpstreamSourcePath,
 } = require("../scripts/verify-package.cjs");
 
-const PRODUCT_VERSION = "0.7.0-rc.12";
+const PRODUCT_VERSION = "0.7.0-rc.14";
 const SOURCE_SHA = "a".repeat(40);
 
 function sha256(bytes) {
@@ -97,6 +96,25 @@ function createPackageFixture(label, mutate) {
   fs.mkdirSync(resourcesRoot, { recursive: true });
   writeFile(path.join(appRoot, "Coding Tools.exe"), Buffer.from("MZfixture-launcher"));
   createRuntime(resourcesRoot);
+  const cpaSource = require("../vendor/managed-components/cpa.json").platforms.win32.x64;
+  const cpaArchive = path.join(repositoryRoot, "aiTemp", cpaSource.fileName);
+  const cpaRoot = path.join(resourcesRoot, "five-stack-runtime");
+  const cpaComponent = { id: "cpa", fileName: cpaSource.fileName, sha256: cpaSource.sha256 };
+  writeFile(path.join(cpaRoot, "MANIFEST.json"), JSON.stringify({
+    schemaVersion: 1, platform: "win32", arch: "x64", components: [cpaComponent],
+  }));
+  writeFile(path.join(cpaRoot, "cpa", "BUNDLE.json"), JSON.stringify(cpaComponent));
+  fs.copyFileSync(cpaArchive, path.join(cpaRoot, "cpa", cpaSource.fileName));
+
+  const plugins = require("../vendor/bundled/cpa-plugins/BUNDLE.json");
+  const pluginSource = path.join(repositoryRoot, "desktop-electron", "vendor", "bundled", "cpa-plugins");
+  const pluginDestination = path.join(resourcesRoot, "app.asar.unpacked", "vendor", "bundled", "cpa-plugins");
+  writeFile(path.join(pluginDestination, "BUNDLE.json"), JSON.stringify(plugins));
+  for (const asset of [plugins.platforms["win32/x64"], plugins.studio.platforms["win32/x64"]]) {
+    const target = path.join(pluginDestination, ...asset.path.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(pluginSource, ...asset.path.split("/")), target);
+  }
 
   const componentBytes = new Map([
     ["coding-tools/coding-tools-headless.exe", Buffer.from("MZfixture-rust-headless")],
@@ -247,17 +265,12 @@ test("rejects credential-like files and never reports their contents", () => {
   );
 });
 
-test("allows bundled five-stack .env.example templates used for first-run setup", () => {
-  assert.equal(forbiddenName("resources/bundled-components/anneal/.env.example"), null);
-  assert.equal(forbiddenName("resources/five-stack-runtime/anneal/source/.env.example"), null);
-  assert.equal(forbiddenName("resources/bundled-components/paseo/packages/server/.env.example"), null);
+test("allows CPA .env.example templates used for first-run setup", () => {
+  assert.equal(forbiddenName("resources/coding-tools/.env.example"), null);
   assert.equal(forbiddenName("resources/coding-tools/.env"), "environment-file");
   assert.equal(forbiddenName("resources/coding-tools/.env.production"), "environment-file");
   const { appRoot } = createPackageFixture("env-example", ({ resourcesRoot }) => {
-    writeFile(path.join(resourcesRoot, "bundled-components", "anneal", ".env.example"), "GITHUB_TOKEN=\n");
-    writeFile(path.join(resourcesRoot, "bundled-components", "commandcode-proxy", ".env.example"), "PORT=9090\n");
-    writeFile(path.join(resourcesRoot, "bundled-components", "paseo", "packages", "server", ".env.example"), "PASEO_LISTEN=127.0.0.1:6768\n");
-    writeFile(path.join(resourcesRoot, "five-stack-runtime", "anneal", "source", ".env.example"), "GITHUB_TOKEN=\n");
+    writeFile(path.join(resourcesRoot, "coding-tools", ".env.example"), "CPA_API_KEY=\n");
   });
   const result = inspectExtractedApplication(appRoot, packageOptions());
   assert.equal(result.ok, true);
@@ -367,58 +380,9 @@ test("requires exactly one versioned Windows x64 installer", () => {
   assert.throws(() => findWindowsInstaller(root), /PACKAGE_INSTALLER_COUNT_MISMATCH/);
 });
 
-test("bundled five-stack and Codex Router vendor trees do not trip the package secret scanner", () => {
-  assert.equal(
-    bundledRouterVendorPath("resources/bundled-runtimes/codex-router/source/.venv/Lib/site-packages/certifi/cacert.pem"),
-    true,
-  );
-  assert.equal(
-    bundledRuntimeVendorPath("resources/five-stack-runtime/codex-router/source/apps/control-center/node_modules/dotenv/README.md"),
-    true,
-  );
-  assert.equal(
-    bundledRuntimeVendorPath("resources/five-stack-runtime/codex-router/source/src/foreground-start.mjs"),
-    false,
-  );
-  assert.equal(
-    bundledUpstreamSourcePath("resources/five-stack-runtime/codex-router/source/test/routing.test.mjs"),
-    true,
-  );
-  assert.equal(
-    bundledUpstreamSourcePath("vendor/bundled/commandcode-proxy/.env.example"),
-    true,
-  );
-  const fakeKey = "-----BEGIN PRIVATE KEY-----" + "A".repeat(80) + "-----END PRIVATE KEY-----";
-  const { appRoot } = createPackageFixture("bundled-runtime-vendor", ({ resourcesRoot }) => {
-    writeFile(
-      path.join(resourcesRoot, "bundled-runtimes/codex-router/source/.venv/Lib/site-packages/certifi/cacert.pem"),
-      "fixture-ca\n",
-    );
-    writeFile(
-      path.join(resourcesRoot, "five-stack-runtime/codex-router/source/apps/control-center/node_modules/dotenv/README.md"),
-      `${fakeKey}\n`,
-    );
-    writeFile(
-      path.join(resourcesRoot, "five-stack-runtime/paseo/source/node_modules/example/index.js"),
-      "const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';\n",
-    );
-    writeFile(
-      path.join(resourcesRoot, "five-stack-runtime/codex-router/source/test/routing.test.mjs"),
-      "const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';\n",
-    );
-    writeFile(
-      path.join(resourcesRoot, "five-stack-runtime/codex-router/source/scripts/verify-grok-service-tier.mjs"),
-      "const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';\n",
-    );
-  });
-  const result = inspectExtractedApplication(appRoot, packageOptions());
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.secretsFound, []);
-});
-
 test("live .env files still fail the package secret scanner after example templates are allowed", () => {
   const { appRoot } = createPackageFixture("live-env", ({ resourcesRoot }) => {
-    writeFile(path.join(resourcesRoot, "bundled-components/anneal/.env"), "GITHUB_READ_TOKEN=secret\n");
+    writeFile(path.join(resourcesRoot, "coding-tools/.env"), "CPA_API_KEY=secret\n");
   });
   assert.throws(
     () => inspectExtractedApplication(appRoot, packageOptions()),

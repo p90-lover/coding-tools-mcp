@@ -4,6 +4,7 @@
 //! a successful transport response means a reviewed task is complete.
 pub mod model;
 pub mod protocol;
+pub mod result;
 pub mod transport;
 
 pub mod book;

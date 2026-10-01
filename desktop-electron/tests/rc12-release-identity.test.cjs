@@ -14,12 +14,12 @@ test("rc.12 identity source reads stay LF-normalized on Windows checkouts", () =
   assert.match(workflow, /\n {2}push:\n {4}branches:\n {6}- main/);
 });
 
-test("rc.12 product and package identities are aligned", () => {
+test("current product and package identities are aligned at rc.14", () => {
   const manifest = JSON.parse(read("desktop-electron/package.json"));
-  assert.equal(manifest.version, "0.7.0-rc.12");
-  assert.match(read("desktop-electron/electron/product.cjs"), /version: "0\.7\.0-rc\.12"/);
-  assert.match(read("desktop-electron/scripts/prepare-package-resources.cjs"), /PRODUCT_VERSION = "0\.7\.0-rc\.12"/);
-  assert.match(read("desktop-electron/scripts/verify-package.cjs"), /version: "0\.7\.0-rc\.12"/);
+  assert.equal(manifest.version, "0.7.0-rc.14");
+  assert.match(read("desktop-electron/electron/product.cjs"), /version: "0\.7\.0-rc\.14"/);
+  assert.match(read("desktop-electron/scripts/prepare-package-resources.cjs"), /PRODUCT_VERSION = "0\.7\.0-rc\.14"/);
+  assert.match(read("desktop-electron/scripts/verify-package.cjs"), /version: "0\.7\.0-rc\.14"/);
 });
 
 test("rc.12 exact-source runner publishes a new tag without moving frozen rc.8, rc.9, rc.10, or rc.11 tags", () => {
