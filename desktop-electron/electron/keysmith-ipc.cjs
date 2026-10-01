@@ -16,6 +16,7 @@ function installKeysmithIpc({
   let previewHash = null;
   let removalReady = false;
   let writing = false;
+  let statusPending = null;
   const managed = () => host ??= createManaged({ scriptPath, pythonExecutable, codexDir });
   const currentWindow = () => typeof mainWindow === "function" ? mainWindow() : mainWindow;
 
@@ -39,7 +40,26 @@ function installKeysmithIpc({
 
   handle("launcher:keysmith-status", (event) => {
     assertFocusedMainWindow(event, false);
-    return managed().status();
+    if (writing) throw new Error("Another Keysmith change is pending");
+    return statusPending ??= managed().status().finally(() => { statusPending = null; });
+  });
+  handle("launcher:keysmith-install", (event) => {
+    assertFocusedMainWindow(event, true);
+    return write(async () => {
+      if (statusPending) await statusPending;
+      selectedFile = null;
+      previewHash = null;
+      removalReady = false;
+      const preview = await managed().preview();
+      if (!preview.ok) return preview;
+      const applied = await managed().apply({ confirmed: true, expectedFileSha256: preview.fileSha256 });
+      if (!applied.ok) return applied;
+      const status = await managed().status();
+      if (!status.ok || !status.managedByCodingTools || status.state !== "active") {
+        return { ok: false, error: "Keysmith installation could not be verified; check status before retrying" };
+      }
+      return status;
+    });
   });
   handle("launcher:keysmith-select-file", async (event) => {
     assertFocusedMainWindow(event, true);
@@ -70,11 +90,12 @@ function installKeysmithIpc({
     return { path: file, name: path.basename(file), content,
       sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
   });
-  handle("launcher:keysmith-preview", async (event) => {
+  handle("launcher:keysmith-preview", async (event, useBundled = false) => {
     assertFocusedMainWindow(event, false);
     if (writing) throw new Error("Another Keysmith change is pending");
-    if (!selectedFile) throw new Error("Choose a Markdown file before previewing Keysmith");
     previewHash = null;
+    if (typeof useBundled !== "boolean") throw new Error("Invalid Keysmith instruction source");
+    if (useBundled) selectedFile = null;
     const result = await managed().preview(selectedFile);
     if (result.ok) previewHash = result.fileSha256;
     removalReady = false;
@@ -82,10 +103,10 @@ function installKeysmithIpc({
   });
   handle("launcher:keysmith-apply", (event) => {
     assertFocusedMainWindow(event, true);
-    if (!selectedFile || !previewHash) throw new Error("Preview Keysmith changes before applying");
+    if (!previewHash) throw new Error("Preview Keysmith changes before applying");
     return write(async () => {
       const approved = await confirm("Apply Codex Keysmith instructions?",
-        `${path.basename(selectedFile)}\nCodex home: ${codexDir}\nChanges the global model_instructions_file setting. Existing hooks stay active. New chats use these instructions.`,
+        `${selectedFile ? path.basename(selectedFile) : "Bundled Keysmith v0.6.0"}\nCodex home: ${codexDir}\nChanges the global model_instructions_file setting. Existing hooks stay active. New chats use these instructions.`,
         "Apply instructions");
       if (!approved) return { ok: false, cancelled: true };
       const expectedFileSha256 = previewHash;
