@@ -531,6 +531,15 @@ test("package and runtime preparation use repository aiTemp retention without de
     assert.match(manifest.scripts[script], /build:package-resources/);
   }
   assert.deepEqual(manifest.build.extraResources, [
+    // The pinned Keysmith release (6f84f365) and the built Agent Orchestrator ship as their own resources.
+    {
+      from: "assets/keysmith",
+      to: "codex-keysmith",
+    },
+    {
+      from: "build/agent-orchestrator",
+      to: "agent-orchestrator",
+    },
     {
       from: "build/package-resources",
       to: ".",
