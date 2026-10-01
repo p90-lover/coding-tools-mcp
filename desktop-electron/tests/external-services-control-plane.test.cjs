@@ -428,3 +428,28 @@ test("archived retired state is not walked again on later launches", () => {
   }
   assert.deepEqual(walked.filter((dir) => dir.includes(path.join("state", "codex-router"))), [], "frozen retired state must not be walked");
 });
+
+test("rewriting the live service file with the same content does not snapshot retired state again", () => {
+  const directory = temporaryDirectory();
+  const dataRoot = path.join(directory, "integrations");
+  const statePath = path.join(dataRoot, "state", "codex-router", "lib.py");
+  const filePath = path.join(directory, "external-services.json");
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, "x");
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: {} }));
+  const options = { filePath, keyPath: path.join(directory, "external-services.key"), archiveDataRoot: dataRoot };
+  createExternalServicesController(options).dispose();
+  const archive = path.join(directory, "archives", "retired-services");
+  const snapshots = () => (fs.existsSync(path.join(archive, "snapshots")) ? fs.readdirSync(path.join(archive, "snapshots")).length : 0);
+  const before = snapshots();
+  // Same bytes, newer mtime: what every launch does to this file.
+  const later = new Date(Date.now() + 60_000);
+  fs.writeFileSync(filePath, fs.readFileSync(filePath));
+  fs.utimesSync(filePath, later, later);
+  createExternalServicesController(options).dispose();
+  assert.equal(snapshots(), before, "no new snapshot for an unchanged file");
+  // A real change still gets its own snapshot.
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, services: {}, secrets: { changed: true } }));
+  createExternalServicesController(options).dispose();
+  assert.equal(snapshots(), before + 1);
+});
