@@ -89,7 +89,13 @@ function desktopWithCpaTokens(desktop, cpa) {
 function chooseSyncDirection(desktop, cpa) {
   if (desktop.tokens.refresh_token === cpa.tokens.refresh_token
     && desktop.tokens.access_token === cpa.tokens.access_token) return null;
-  // TODO(human): pick the side whose tokens are newer.
+  // A refresh rotates the refresh token, so the side refreshed last holds the only one that
+  // still works. A side without a parseable refresh time loses to one with it; equal or
+  // unknown times stay put rather than risk overwriting the live token with a dead one.
+  const desktopAt = desktop.lastRefresh ?? -Infinity;
+  const cpaAt = cpa.lastRefresh ?? -Infinity;
+  if (desktopAt > cpaAt) return "to-cpa";
+  if (cpaAt > desktopAt) return "to-desktop";
   return null;
 }
 
