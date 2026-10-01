@@ -312,6 +312,33 @@ function staleWindowMs(id) {
   return id === "paseo" ? PASEO_STALE_MS : HTTP_STALE_MS;
 }
 
+// The retired-state entries (sources and stats) of the latest snapshot, or null when there is
+// no snapshot yet or it predates recorded stats.
+function archivedRetiredState(archiveRoot) {
+  try {
+    if (!fs.existsSync(path.join(archiveRoot, "manifest.json"))) return null;
+    let destination = archiveRoot;
+    const pointer = path.join(archiveRoot, "latest.json");
+    if (fs.existsSync(pointer)) {
+      const relative = JSON.parse(fs.readFileSync(pointer, "utf8")).relative;
+      if (typeof relative !== "string" || !/^snapshots\/[a-f0-9-]{36}$/.test(relative)) return null;
+      destination = path.join(archiveRoot, relative);
+    }
+    const manifest = JSON.parse(fs.readFileSync(path.join(destination, "manifest.json"), "utf8"));
+    if (!manifest?.stats) return null;
+    const sources = {};
+    const stats = {};
+    for (const [relative, source] of Object.entries(manifest.sources || {})) {
+      if (!relative.startsWith("integrations/state/") || !manifest.stats[relative]) continue;
+      sources[relative] = source;
+      stats[relative] = manifest.stats[relative];
+    }
+    return Object.keys(sources).length ? { sources, stats } : null;
+  } catch {
+    return null;
+  }
+}
+
 function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null }) {
   const privateRoot = path.dirname(filePath);
   if (archiveDataRoot) {
@@ -345,8 +372,16 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
   if (archiveDataRoot) {
     include(path.join(archiveDataRoot, "managed-components.secrets.json"), "integrations/managed-components.secrets.json");
     include(path.join(archiveDataRoot, "managed-components.key"), "integrations/managed-components.key");
-    for (const id of ["paseo", "codex-router", "commandcode-proxy", "anneal"]) {
-      include(path.join(archiveDataRoot, "state", id), `integrations/state/${id}`);
+    // Retired state is frozen: once a snapshot has recorded it with stats, reuse those entries
+    // instead of walking it again (codex-router alone holds a whole Python environment).
+    const archived = archivedRetiredState(path.join(privateRoot, "archives", "retired-services"));
+    if (archived) {
+      Object.assign(sources, archived.sources);
+      Object.assign(stats, archived.stats);
+    } else {
+      for (const id of ["paseo", "codex-router", "commandcode-proxy", "anneal"]) {
+        include(path.join(archiveDataRoot, "state", id), `integrations/state/${id}`);
+      }
     }
   }
   if (Object.keys(sources).length === 0) return null;

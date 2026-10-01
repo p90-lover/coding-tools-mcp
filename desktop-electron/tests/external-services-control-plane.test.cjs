@@ -405,3 +405,26 @@ test("a new snapshot links unchanged retired state instead of copying it again",
   assert.deepEqual(fs.readFileSync(linked), fs.readFileSync(statePath));
   assert.ok(fs.statSync(linked).nlink >= 2, "unchanged state should be a hard link to the previous snapshot");
 });
+
+test("archived retired state is not walked again on later launches", () => {
+  const directory = temporaryDirectory();
+  const dataRoot = path.join(directory, "integrations");
+  const stateDir = path.join(dataRoot, "state", "codex-router", "python");
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, "lib.py"), "x");
+  const options = {
+    filePath: path.join(directory, "external-services.json"),
+    keyPath: path.join(directory, "external-services.key"),
+    archiveDataRoot: dataRoot,
+  };
+  createExternalServicesController(options).dispose();
+  const readdirSync = fs.readdirSync;
+  const walked = [];
+  fs.readdirSync = function spy(dir, ...rest) { walked.push(String(dir)); return readdirSync.call(this, dir, ...rest); };
+  try {
+    createExternalServicesController(options).dispose();
+  } finally {
+    fs.readdirSync = readdirSync;
+  }
+  assert.deepEqual(walked.filter((dir) => dir.includes(path.join("state", "codex-router"))), [], "frozen retired state must not be walked");
+});
