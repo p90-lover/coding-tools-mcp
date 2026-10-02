@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
-import type { JsonObject, WorkspaceSummary } from "../api/contracts";
+import type { JsonObject } from "../api/contracts";
 import type { Copy } from "../i18n";
 import type { Language } from "../types";
-import "./workspace-auth.css";
 import { pageHidden } from "./page-visibility";
+import { Card, Field, Notice, Pill, Segmented, WorkspacePicker, errorText, useWorkspaces } from "./workspace-ui";
 
 interface NativeCodexPanelProps {
   copy: Copy;
@@ -12,185 +12,201 @@ interface NativeCodexPanelProps {
   setError: (error: string | null) => void;
 }
 
+type Profile = ":read-only" | ":workspace";
+type Remembered = { executable: string; codexHome: string; model: string };
+
+const STATUS_POLL_MS = 3000;
+// Only these non-secret paths and the model ID are remembered, per workspace, in this browser profile.
+const rememberKey = (workspaceId: string) => `native-codex:${workspaceId}`;
+function recall(workspaceId: string): Remembered {
+  try {
+    const saved = JSON.parse(localStorage.getItem(rememberKey(workspaceId)) || "{}") as Partial<Remembered>;
+    return { executable: saved.executable ?? "", codexHome: saved.codexHome ?? "", model: saved.model ?? "" };
+  } catch {
+    return { executable: "", codexHome: "", model: "" };
+  }
+}
+function remember(workspaceId: string, value: Remembered) {
+  try { localStorage.setItem(rememberKey(workspaceId), JSON.stringify(value)); } catch { /* storage unavailable */ }
+}
+
+const wholeNumber = (value: string) => /^(0|[1-9]\d*)$/.test(value);
+
 export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelProps) {
-  const [workspaces, setWorkspaces] = useState<readonly WorkspaceSummary[]>([]);
+  const { workspaces, loaded, loading, refresh } = useWorkspaces(setError);
   const [workspaceId, setWorkspaceId] = useState("");
   const [executable, setExecutable] = useState("");
   const [codexHome, setCodexHome] = useState("");
   const [model, setModel] = useState("");
-  const [permissionProfile, setPermissionProfile] = useState<":read-only" | ":workspace">(":read-only");
+  const [permissionProfile, setPermissionProfile] = useState<Profile>(":read-only");
   const [requestLimit, setRequestLimit] = useState("10");
   const [lifetimeSeconds, setLifetimeSeconds] = useState("600");
   const [allowModelUsage, setAllowModelUsage] = useState(false);
   const [allowCommandExecution, setAllowCommandExecution] = useState(false);
   const [status, setStatus] = useState<JsonObject | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [statusFailed, setStatusFailed] = useState(false);
+  const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState("");
   const selected = workspaces.find((workspace) => workspace.id === workspaceId);
   const connected = status?.connected === true;
-
-  const refreshWorkspaces = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const items: WorkspaceSummary[] = [];
-      let cursor: number | null = 0;
-      while (cursor !== null) {
-        const page = await getCodingToolsClient().workspaces.list({ cursor, limit: 100 });
-        items.push(...page.items);
-        cursor = page.nextCursor;
-      }
-      setWorkspaces(items);
-      const nextId = items.some((item) => item.id === workspaceId) ? workspaceId : items[0]?.id ?? "";
-      setWorkspaceId(nextId);
-      setStatus(nextId ? await getCodingToolsClient().nativeCodex.status({ workspaceId: nextId }) : null);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const busy = loading || working;
 
   useEffect(() => {
-    void refreshWorkspaces();
-    // Load once on mount; later refreshes are explicit.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!workspaces.some((workspace) => workspace.id === workspaceId)) setWorkspaceId(workspaces[0]?.id ?? "");
+  }, [workspaces, workspaceId]);
 
   useEffect(() => {
-    if (!workspaceId) {
-      setStatus(null);
-      return;
-    }
+    if (!workspaceId) return;
+    const saved = recall(workspaceId);
+    setExecutable(saved.executable);
+    setCodexHome(saved.codexHome);
+    setModel(saved.model);
+  }, [workspaceId]);
+
+  // Poll while visible. A failed read marks the status card instead of raising a toast every 3s.
+  useEffect(() => {
+    if (!workspaceId) { setStatus(null); return; }
     let current = true;
     let reading = false;
     setStatus(null);
-    const refresh = async () => {
+    setStatusFailed(false);
+    const read = async () => {
       if (reading) return;
       reading = true;
       try {
         const value = await getCodingToolsClient().nativeCodex.status({ workspaceId });
-        if (current) setStatus(value);
-      } catch (cause) {
-        if (current) setError(cause instanceof Error ? cause.message : String(cause));
+        if (current) { setStatus(value); setStatusFailed(false); }
+      } catch {
+        if (current) setStatusFailed(true);
       } finally {
         reading = false;
       }
     };
-    void refresh();
-    const timer = setInterval(() => { if (!pageHidden()) void refresh(); }, 3000);
+    void read();
+    const timer = setInterval(() => { if (!pageHidden()) void read(); }, STATUS_POLL_MS);
     return () => { current = false; clearInterval(timer); };
-  }, [workspaceId, setError]);
+  }, [workspaceId]);
+
+  const limitsValid = wholeNumber(requestLimit) && Number(requestLimit) <= 20 && wholeNumber(lifetimeSeconds)
+    && (Number(lifetimeSeconds) === 0 || (Number(lifetimeSeconds) >= 30 && Number(lifetimeSeconds) <= 900));
+  const ready = Boolean(executable.trim() && codexHome.trim() && model.trim()) && (allowModelUsage || allowCommandExecution) && limitsValid;
 
   const connect = async () => {
-    if (!selected || busy || connected) return;
-    const limit = Number(requestLimit);
-    const lifetime = Number(lifetimeSeconds);
-    if (!/^(0|[1-9]\d*)$/.test(requestLimit) || !Number.isInteger(limit) || limit > 20
-      || !/^(0|[1-9]\d*)$/.test(lifetimeSeconds) || !Number.isInteger(lifetime)
-      || (lifetime !== 0 && (lifetime < 30 || lifetime > 900))) {
-      setError(copy.nativeCodexLimits);
-      return;
-    }
-    setBusy(true);
+    if (!selected || busy || connected || !ready) return;
+    setWorking(true);
     setError(null);
     setNotice("");
     try {
+      const value = { executable: executable.trim(), codexHome: codexHome.trim(), model: model.trim() };
+      remember(selected.id, value);
       const result = await getCodingToolsClient().nativeCodex.connect({
-        workspaceId: selected.id,
-        executable: executable.trim(),
-        codexHome: codexHome.trim(),
-        model: model.trim(),
-        allowModelUsage,
-        allowCommandExecution,
-        permissionProfile,
-        requestLimit: limit,
-        lifetimeSeconds: lifetime,
+        workspaceId: selected.id, ...value, allowModelUsage, allowCommandExecution, permissionProfile,
+        requestLimit: Number(requestLimit), lifetimeSeconds: Number(lifetimeSeconds),
       });
-      if (result.cancelled === true) {
-        setNotice(copy.workspaceAuthCancelled);
-      } else if (result.connected === true) {
-        setStatus(result);
-        setNotice(copy.nativeCodexConnected);
-      } else {
-        throw new Error("Native Codex did not confirm a connected session");
-      }
+      if (result.cancelled === true) setNotice(copy.workspaceAuthCancelled);
+      else if (result.connected === true) { setStatus(result); setNotice(copy.nativeCodexConnected); }
+      else throw new Error("Native Codex did not confirm a connected session");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorText(cause));
     } finally {
-      setBusy(false);
+      setWorking(false);
     }
   };
 
   const stop = async () => {
     if (!selected || busy) return;
-    setBusy(true);
+    setWorking(true);
     setError(null);
     try {
-      const result = await getCodingToolsClient().nativeCodex.disconnect({ workspaceId: selected.id });
-      setStatus(result);
+      setStatus(await getCodingToolsClient().nativeCodex.disconnect({ workspaceId: selected.id }));
       setAllowModelUsage(false);
       setAllowCommandExecution(false);
       setNotice(copy.nativeCodexDisconnected);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorText(cause));
     } finally {
-      setBusy(false);
+      setWorking(false);
     }
   };
 
+  const locked = busy || connected;
   return (
-    <section aria-label={copy.nativeCodex} lang={language}>
-      <div className="section-heading">
-        <span>{copy.nativeCodex}</span>
-        <button className="button-secondary" disabled={busy} onClick={() => void refreshWorkspaces()} type="button">
-          {busy ? copy.running : copy.refreshTools}
-        </button>
-      </div>
-      <p>{copy.nativeCodexBody}</p>
-      {selected ? (
-        <form className="workspace-auth-form" onSubmit={(event) => { event.preventDefault(); void connect(); }}>
-          <label><span>{copy.selectWorkspace}</span>
-            <select disabled={busy} value={workspaceId} onChange={(event) => { setWorkspaceId(event.target.value); setNotice(""); }}>
-              {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
-            </select>
-          </label>
-          <code className="workspace-auth-path">{selected.path}</code>
-          <p role="status">{connected ? copy.nativeCodexConnected : copy.nativeCodexDisconnected}
-            {typeof status?.reason === "string" ? ` · ${status.reason}` : ""}
-            {typeof status?.model === "string" ? ` · ${status.model}` : ""}
-          </p>
-          <label><span>{copy.nativeCodexExecutable}</span>
-            <input autoComplete="off" disabled={busy || connected} onChange={(event) => setExecutable(event.target.value)} spellCheck={false} value={executable} />
-          </label>
-          <label><span>{copy.nativeCodexHome}</span>
-            <input autoComplete="off" disabled={busy || connected} onChange={(event) => setCodexHome(event.target.value)} spellCheck={false} value={codexHome} />
-          </label>
-          <label><span>{copy.nativeCodexModel}</span>
-            <input autoComplete="off" disabled={busy || connected} onChange={(event) => setModel(event.target.value)} spellCheck={false} value={model} />
-          </label>
-          <label><span>{copy.nativeCodexPermissionProfile}</span>
-            <select disabled={busy || connected} onChange={(event) => setPermissionProfile(event.target.value as ":read-only" | ":workspace")} value={permissionProfile}>
-              <option value=":read-only">:read-only</option>
-              <option value=":workspace">:workspace</option>
-            </select>
-          </label>
-          <label><span>{copy.nativeCodexRequestLimit}</span>
-            <input disabled={busy || connected} max={20} min={0} onChange={(event) => setRequestLimit(event.target.value)} type="number" value={requestLimit} />
-          </label>
-          <label><span>{copy.nativeCodexLifetime}</span>
-            <input disabled={busy || connected} max={900} min={0} onChange={(event) => setLifetimeSeconds(event.target.value)} type="number" value={lifetimeSeconds} />
-          </label>
-          <label className="workspace-auth-check"><input checked={allowModelUsage} disabled={busy || connected} onChange={(event) => setAllowModelUsage(event.target.checked)} type="checkbox" /><span>{copy.nativeCodexModelUse}</span></label>
-          <label className="workspace-auth-check"><input checked={allowCommandExecution} disabled={busy || connected} onChange={(event) => setAllowCommandExecution(event.target.checked)} type="checkbox" /><span>{copy.nativeCodexCommandUse}</span></label>
-          <p className="workspace-auth-note">{permissionProfile === ":workspace" ? copy.nativeCodexWorkspaceNote : copy.nativeCodexReadOnly}</p>
-          <div className="inline-actions">
-            <button className="button-primary" disabled={busy || connected || !executable.trim() || !codexHome.trim() || !model.trim() || (!allowModelUsage && !allowCommandExecution)} type="submit">{copy.nativeCodexConnect}</button>
-            <button className="button-secondary" disabled={busy || !workspaceId} onClick={() => void stop()} type="button">{copy.nativeCodexStop}</button>
+    <div className="wsx-page" lang={language} aria-label={copy.nativeCodex}>
+      <p className="wsx-intro">{copy.nativeCodexBody}</p>
+      {!loaded ? <div className="wsx-loading">{copy.wsLoading}</div>
+        : !selected ? <div className="surface-empty"><span>{copy.noWorkspaces}</span></div>
+        : <>
+          <div className="wsx-toolbar">
+            <WorkspacePicker workspaces={workspaces} value={workspaceId} label={copy.selectWorkspace} disabled={busy}
+              onChange={(id) => { setWorkspaceId(id); setNotice(""); }} />
+            <span className="wsx-spacer" />
+            <button className="button-secondary" disabled={busy} onClick={() => void refresh()} type="button">
+              {loading ? copy.running : copy.refreshTools}
+            </button>
           </div>
-          {notice ? <p role="status">{notice}</p> : null}
-        </form>
-      ) : <div className="surface-empty"><span>{copy.noWorkspaces}</span></div>}
-    </section>
+          <code className="wsx-mono">{selected.path}</code>
+
+          <Card title={copy.nativeCodex} aside={
+            statusFailed ? <Pill tone="error">{copy.ncStatusUnavailable}</Pill>
+              : status === null ? <Pill tone="busy">{copy.wsListenerChecking}</Pill>
+              : <Pill tone={connected ? "ok" : "idle"}>{connected ? copy.nativeCodexConnected : copy.nativeCodexDisconnected}</Pill>
+          }>
+            {typeof status?.model === "string" || typeof status?.reason === "string" ? (
+              <dl className="wsx-facts">
+                {typeof status?.model === "string" ? <><dt>{copy.nativeCodexModel}</dt><dd>{status.model}</dd></> : null}
+                {typeof status?.reason === "string" ? <><dt>{copy.workspaceListenerStatus}</dt><dd>{status.reason}</dd></> : null}
+              </dl>
+            ) : null}
+            <div className="wsx-actions">
+              <button className="button-secondary" disabled={busy || !connected} onClick={() => void stop()} type="button">{copy.nativeCodexStop}</button>
+            </div>
+            {notice ? <Notice>{notice}</Notice> : null}
+          </Card>
+
+          <Card title={copy.ncConnection}>
+            <form className="wsx-grid" onSubmit={(event) => { event.preventDefault(); void connect(); }}>
+              <Field label={copy.nativeCodexExecutable} wide>
+                <input autoComplete="off" disabled={locked} placeholder={copy.ncExePlaceholder} spellCheck={false}
+                  value={executable} onChange={(event) => setExecutable(event.target.value)} />
+              </Field>
+              <Field label={copy.nativeCodexHome}>
+                <input autoComplete="off" disabled={locked} placeholder={copy.ncHomePlaceholder} spellCheck={false}
+                  value={codexHome} onChange={(event) => setCodexHome(event.target.value)} />
+              </Field>
+              <Field label={copy.nativeCodexModel}>
+                <input autoComplete="off" disabled={locked} placeholder={copy.ncModelPlaceholder} spellCheck={false}
+                  value={model} onChange={(event) => setModel(event.target.value)} />
+              </Field>
+              <Field label={copy.ncPermissions} wide>
+                <Segmented<Profile> label={copy.nativeCodexPermissionProfile} value={permissionProfile} disabled={locked}
+                  options={[{ value: ":read-only", label: copy.ncProfileReadOnly }, { value: ":workspace", label: copy.ncProfileWorkspace }]}
+                  onChange={setPermissionProfile} />
+              </Field>
+              <Field label={copy.nativeCodexRequestLimit} hint={copy.ncRequestHint}>
+                <input disabled={locked} max={20} min={0} type="number" value={requestLimit} onChange={(event) => setRequestLimit(event.target.value)} />
+              </Field>
+              <Field label={copy.nativeCodexLifetime} hint={copy.ncLifetimeHint}>
+                <input disabled={locked} max={900} min={0} type="number" value={lifetimeSeconds} onChange={(event) => setLifetimeSeconds(event.target.value)} />
+              </Field>
+              <label className="wsx-check" style={{ gridColumn: "1 / -1" }}>
+                <input checked={allowModelUsage} disabled={locked} type="checkbox" onChange={(event) => setAllowModelUsage(event.target.checked)} />
+                {copy.nativeCodexModelUse}
+              </label>
+              <label className="wsx-check" style={{ gridColumn: "1 / -1" }}>
+                <input checked={allowCommandExecution} disabled={locked} type="checkbox" onChange={(event) => setAllowCommandExecution(event.target.checked)} />
+                {copy.nativeCodexCommandUse}
+              </label>
+              {!limitsValid ? <span className="wsx-field-hint" style={{ gridColumn: "1 / -1", color: "var(--color-text-error)" }}>{copy.nativeCodexLimits}</span> : null}
+              <div className="wsx-actions" style={{ gridColumn: "1 / -1" }}>
+                <button className="button-primary" disabled={locked || !ready} type="submit">{working ? copy.running : copy.nativeCodexConnect}</button>
+              </div>
+              <details className="wsx-details" style={{ gridColumn: "1 / -1" }}>
+                <summary>{copy.ncHowItWorks}</summary>
+                <p>{permissionProfile === ":workspace" ? copy.nativeCodexWorkspaceNote : copy.nativeCodexReadOnly}</p>
+              </details>
+            </form>
+          </Card>
+        </>}
+    </div>
   );
 }

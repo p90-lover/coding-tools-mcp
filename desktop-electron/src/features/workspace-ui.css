@@ -1,0 +1,85 @@
+/* Shared look for the Workspace, Workspace Authentication and Native Codex pages. */
+
+.wsx-page { display: grid; gap: 14px; }
+.wsx-intro { margin: 0; color: var(--color-text-secondary); font-size: var(--text-sm); line-height: 1.55; }
+.wsx-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.wsx-toolbar .wsx-spacer { flex: 1 1 auto; }
+.wsx-mono { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text-tertiary); overflow-wrap: anywhere; }
+.wsx-loading { padding: 28px 0; color: var(--color-text-tertiary); font-size: var(--text-sm); text-align: center; }
+
+.wsx-card {
+  display: grid; gap: 12px; padding: 16px;
+  border: 1px solid var(--color-border-light); border-radius: var(--radius-md);
+  background: var(--color-background-elevated);
+}
+.wsx-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 28px; }
+.wsx-card-head h2 { margin: 0; color: var(--color-text-primary); font-size: var(--text-base); font-weight: 600; }
+.wsx-card-aside { display: flex; align-items: center; gap: 8px; }
+.wsx-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+.wsx-pill {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px;
+  border-radius: var(--radius-round); background: var(--color-background-control);
+  color: var(--color-text-secondary); font-size: var(--text-xs); white-space: nowrap;
+}
+.wsx-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gray-400, #8a8a8a); flex: none; }
+.wsx-pill.is-ok { color: var(--color-text-success); }
+.wsx-pill.is-ok .wsx-dot { background: var(--green-300); }
+.wsx-pill.is-warn { color: var(--color-text-warning); }
+.wsx-pill.is-warn .wsx-dot { background: var(--orange-300); }
+.wsx-pill.is-error { color: var(--color-text-error); }
+.wsx-pill.is-error .wsx-dot { background: var(--red-300); }
+.wsx-pill.is-busy .wsx-dot { background: var(--color-text-accent); animation: wsx-pulse 1.2s var(--ease-enter, ease) infinite; }
+@keyframes wsx-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .wsx-pill.is-busy .wsx-dot { animation: none; } }
+
+.wsx-notice {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px; border-radius: var(--radius-sm); font-size: var(--text-sm);
+  border-left: 2px solid var(--green-300); background: var(--color-background-status-success); color: var(--color-text-primary);
+}
+.wsx-notice.is-warn { border-left-color: var(--orange-300); background: var(--color-background-status-warning); }
+
+.wsx-seg {
+  display: inline-flex; padding: 2px; gap: 2px;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-background-control);
+}
+.wsx-seg button {
+  height: 26px; padding: 0 12px; border: 0; border-radius: 5px; background: transparent;
+  color: var(--color-text-secondary); font-size: var(--text-sm); cursor: pointer;
+}
+.wsx-seg button.is-active { background: var(--color-background-control-active); color: var(--color-text-primary); }
+.wsx-seg button:disabled { cursor: default; opacity: .5; }
+
+.wsx-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; }
+.wsx-field { display: grid; gap: 5px; min-width: 0; }
+.wsx-field.is-wide { grid-column: 1 / -1; }
+.wsx-field-label { color: var(--color-text-secondary); font-size: var(--text-xs); }
+.wsx-field-hint { color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.wsx-select,
+.wsx-field input:not([type="checkbox"]),
+.wsx-field select,
+.wsx-field textarea {
+  width: 100%; min-height: var(--height-control); padding: 6px 10px;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-background-control); color: var(--color-text-primary); font-size: var(--text-sm);
+}
+.wsx-select { width: auto; min-width: 200px; }
+.wsx-field textarea { resize: vertical; font-family: var(--font-mono); font-size: var(--text-xs); }
+.wsx-field input:disabled, .wsx-field select:disabled { opacity: .6; }
+.wsx-check { display: flex; align-items: center; gap: 9px; color: var(--color-text-secondary); font-size: var(--text-sm); }
+.wsx-check input { width: 15px; height: 15px; margin: 0; }
+.wsx-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.wsx-actions .wsx-spacer { flex: 1 1 auto; }
+
+.wsx-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: var(--text-sm); }
+.wsx-facts dt { color: var(--color-text-tertiary); }
+.wsx-facts dd { margin: 0; color: var(--color-text-secondary); overflow-wrap: anywhere; }
+
+.wsx-details summary { color: var(--color-text-tertiary); font-size: var(--text-xs); cursor: pointer; }
+.wsx-details p { margin: 8px 0 0; color: var(--color-text-tertiary); font-size: var(--text-xs); line-height: 1.55; }
+
+@media (max-width: 760px) {
+  .wsx-grid { grid-template-columns: 1fr; }
+  .wsx-select { min-width: 0; width: 100%; }
+}
