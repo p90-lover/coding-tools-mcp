@@ -106,6 +106,10 @@ const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high"
 const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
 // AO harness models shown as "cpa/<model>" run that CPA pool model through the local gateway.
 const CPA_MODEL_PREFIX = "cpa/";
+// The CPA gateway reaches an agent only through the ANTHROPIC_* / OPENAI_* variables. These agents
+// read them; others (e.g. agy, which signs in with Google) ignore them and would sit on a model
+// they cannot run, so they get only their own models.
+const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
 
 // The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
@@ -218,7 +222,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // Every CPA pool model can also run on this agent through the local gateway ("cpa/<model>"),
       // except WebGPT, which only works through the bridge on Native Codex.
       let cpa = [];
-      try { cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/")).map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
+      if (GATEWAY_AGENTS.has(harness.slice(3))) {
+        try { cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/")).map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
+      }
       // An agent may report WebGPT from the user's Codex config; it cannot run it, so it is left out here.
       // "default" is not offered: it lets the agent pick, and silently change, its own model.
       return { ok: true, harness, models: [...items.map(item => item.id).filter(id => id !== "default" && !id.startsWith("chatgpt-web/")), ...cpa] };
@@ -271,6 +277,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let failure = null;
       try {
         const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
+        if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
+          throw new Error(`${node.settings?.name || "This card"}: ${agent} cannot use CPA models (${node.route.model}); choose one of its own models`);
+        }
         // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
         // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
         const agentModel = viaCpa && agent === "opencode" ? `openai/${viaCpa}` : viaCpa ?? node.route.model;

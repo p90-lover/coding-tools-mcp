@@ -745,6 +745,19 @@ test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA m
   assert.ok((await workflow.call("models", { harness: "codex-native" })).models.includes("chatgpt-web/high"));
 });
 
+test("agents that cannot reach the CPA gateway get only their own models", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gpt-5.5" }] }) }),
+    // agy signs in with Google and ignores the gateway's ANTHROPIC_* / OPENAI_* variables.
+    aoHarness: { catalog: async () => [], models: async () => [{ id: "gemini-3.8-flash-high" }] },
+    confirm: async () => true,
+  });
+  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models, ["gemini-3.8-flash-high"]);
+  assert.deepEqual((await workflow.call("models", { harness: "ao:claude-code" })).models, ["gemini-3.8-flash-high", "cpa/gpt-5.5"]);
+});
+
 // A fake headless service holding one workspace's board, runs and team.
 function chatWorld({ runs = [], tasks = [] } = {}) {
   const state = { revision: 3, tasks: tasks.map((task) => ({ ...task })), runs, updates: [], edits: [] };

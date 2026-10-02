@@ -546,6 +546,12 @@ test("package and runtime preparation use repository aiTemp retention without de
       to: "acp-runtime",
     },
     {
+      // electron-builder always drops a node_modules folder at the root of a copy source, so the
+      // adapter's packages ship as their own entry.
+      from: "build/acp-runtime/node_modules",
+      to: "acp-runtime/node_modules",
+    },
+    {
       from: "build/package-resources",
       to: ".",
     },
