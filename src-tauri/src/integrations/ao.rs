@@ -730,6 +730,49 @@ If the workers are needed, give every worker card its own part:\n\
     roster
 }
 
+/// The body of the last block labelled `label` in a card's answer, and where that block starts.
+/// Accepts the fenced form (```label … ```) and the form the ChatGPT web bridge flattens it to:
+/// the label alone on a line, then the body in backticks (`…` or ```…```) or as bare JSON.
+pub(crate) fn labelled_block<'a>(answer: &'a str, label: &str) -> Option<(usize, &'a str)> {
+    let fence = format!("```{label}");
+    let fenced = answer.rfind(&fence).and_then(|start| {
+        let body = &answer[start + fence.len()..];
+        body.find("```").map(|end| (start, body[..end].trim()))
+    });
+    let mut flattened = None;
+    let mut offset = 0;
+    for line in answer.split_inclusive('\n') {
+        if line.trim().eq_ignore_ascii_case(label) {
+            flattened = Some((offset, offset + line.len()));
+        }
+        offset += line.len();
+    }
+    let flattened = flattened.and_then(|(start, body_start)| {
+        let rest = answer[body_start..].trim_start();
+        let body = if let Some(inner) = rest.strip_prefix("```") {
+            // Skip an optional language tag on the opening line.
+            let inner = inner.split_once('\n').map_or(inner, |(_, after)| after);
+            inner.find("```").map(|end| inner[..end].trim())
+        } else if let Some(inner) = rest.strip_prefix('`') {
+            inner.find('`').map(|end| inner[..end].trim())
+        } else if rest.starts_with('[') || rest.starts_with('{') {
+            let mut values =
+                serde_json::Deserializer::from_str(rest).into_iter::<serde_json::Value>();
+            values
+                .next()
+                .and_then(Result::ok)
+                .map(|_| rest[..values.byte_offset()].trim())
+        } else {
+            None
+        };
+        body.map(|body| (start, body))
+    });
+    match (fenced, flattened) {
+        (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Reads the planner's `assignments` block. Workers are matched by card id or by their name.
 pub(crate) fn parse_assignments(
     answer: &str,
@@ -742,14 +785,9 @@ pub(crate) fn parse_assignments(
         #[serde(default)]
         acceptance: String,
     }
-    let start = answer
-        .rfind(ASSIGNMENTS_FENCE)
+    let (_, body) = labelled_block(answer, "assignments")
         .ok_or("The plan has no ```assignments block for the worker cards")?;
-    let body = &answer[start + ASSIGNMENTS_FENCE.len()..];
-    let end = body
-        .find("```")
-        .ok_or("The plan's ```assignments block is not closed")?;
-    let planned: Vec<Planned> = serde_json::from_str(body[..end].trim()).map_err(|_| {
+    let planned: Vec<Planned> = serde_json::from_str(body).map_err(|_| {
         "The plan's ```assignments block is not a JSON list of {worker, task, acceptance}"
     })?;
     let mut assignments = BTreeMap::new();
@@ -785,15 +823,17 @@ pub(crate) fn parse_assignments(
 /// True when the orchestrator ended with a ```solo block (and no assignments after it): it
 /// answered the mission itself.
 pub(crate) fn is_solo_answer(answer: &str) -> bool {
-    match (answer.rfind(SOLO_FENCE), answer.rfind(ASSIGNMENTS_FENCE)) {
-        (Some(solo), Some(plan)) => solo > plan,
+    match (
+        labelled_block(answer, "solo"),
+        labelled_block(answer, "assignments"),
+    ) {
+        (Some((solo, _)), Some((plan, _))) => solo > plan,
         (Some(_), None) => true,
         _ => false,
     }
 }
 
 const REVIEW_PARTS_FENCE: &str = "```review-parts";
-const REWORK_FENCE: &str = "```rework";
 
 /// What each specialty concentrates on; added to that card's prompt.
 pub fn specialty_guidance(specialty: &str) -> Option<&'static str> {
@@ -950,14 +990,9 @@ pub(crate) fn parse_review_parts(
         #[serde(default)]
         check: String,
     }
-    let start = answer
-        .rfind(REVIEW_PARTS_FENCE)
+    let (_, body) = labelled_block(answer, "review-parts")
         .ok_or("The review split has no ```review-parts block for the sub-reviewers")?;
-    let body = &answer[start + REVIEW_PARTS_FENCE.len()..];
-    let end = body
-        .find("```")
-        .ok_or("The ```review-parts block is not closed")?;
-    let planned: Vec<Planned> = serde_json::from_str(body[..end].trim()).map_err(|_| {
+    let planned: Vec<Planned> = serde_json::from_str(body).map_err(|_| {
         "The ```review-parts block is not a JSON list of {sub_reviewer, workers, check}"
     })?;
     let card = |wanted: &str, role: Role| {
@@ -1016,14 +1051,10 @@ pub(crate) fn parse_review_parts(
 
 /// Workers the main reviewer asked to redo; empty means every worker.
 pub(crate) fn parse_rework_targets(answer: &str, run: &Run) -> Vec<String> {
-    let Some(start) = answer.rfind(REWORK_FENCE) else {
+    let Some((_, body)) = labelled_block(answer, "rework") else {
         return Vec::new();
     };
-    let body = &answer[start + REWORK_FENCE.len()..];
-    let Some(end) = body.find("```") else {
-        return Vec::new();
-    };
-    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(body[..end].trim()) else {
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(body) else {
         return Vec::new();
     };
     let mut targets = Vec::new();
@@ -1177,9 +1208,8 @@ Do not edit the implementation; send needed changes back to the workers.",
         match parent.role {
             Role::Planner if node.role != Role::Approver => {
                 // The full plan is context only; each worker's own part is stated above.
-                let plan = answer
-                    .rfind(ASSIGNMENTS_FENCE)
-                    .map_or(answer, |start| &answer[..start]);
+                let plan = labelled_block(answer, "assignments")
+                    .map_or(answer, |(start, _)| &answer[..start]);
                 prompt.push_str(&format!(
                     "\nMission plan from the orchestrator (context):\n{}\n",
                     clip(plan.trim(), 4_000)
@@ -1907,6 +1937,34 @@ mod tests {
         assert_eq!(stored["settings"]["name"], "Backend");
         assert_eq!(stored["settings"]["working_directory"], "src");
         assert_eq!(stored["template_role_id"], "backend");
+    }
+
+    #[test]
+    fn labelled_blocks_are_read_when_the_web_bridge_flattens_code_fences() {
+        // Exactly what the WebGPT orchestrator returned in a live run: the ```solo fence came
+        // back as a bare "solo" line followed by inline code.
+        let live = "391\n\n17 multiplied by 23 equals 391.\n\nsolo\n\n`{\"difficulty\":\"simple\",\"reason\":\"arithmetic\"}`";
+        assert!(is_solo_answer(live));
+        let (_, body) = labelled_block(live, "solo").unwrap();
+        assert!(body.contains("\"simple\""));
+        // Fenced, flattened-with-fence, inline and bare JSON forms of a plan all read the same.
+        let list = r#"[{"worker":"w","task":"t"}]"#;
+        for form in [
+            format!("Plan\n```assignments\n{list}\n```"),
+            format!("Plan\nassignments\n```json\n{list}\n```"),
+            format!("Plan\nassignments\n\n`{list}`"),
+            format!("Plan\nassignments\n{list}\ntrailing words"),
+        ] {
+            assert_eq!(
+                labelled_block(&form, "assignments").unwrap().1,
+                list,
+                "{form}"
+            );
+            assert!(!is_solo_answer(&form));
+        }
+        // The word on its own inside prose is not a block without a body after it.
+        assert!(labelled_block("I chose solo\nbecause it is simple", "solo").is_none());
+        assert!(labelled_block("rework\n\n`[\"w\"]`", "rework").is_some());
     }
 
     #[test]

@@ -109,3 +109,9 @@ test("a simple mission answered by the orchestrator alone shows one clean answer
   assert.equal(transcript[1].text, "It has 3 files.");
   assert.match(transcript[2].text, /orchestrator answered alone/);
 });
+
+test("the flattened solo marker from the web bridge is hidden too", () => {
+  const live = "391\n\n17 multiplied by 23 equals 391.\n\nsolo\n\n`{\"difficulty\":\"simple\"}`";
+  assert.equal(chat.withoutSoloBlock(live), "391\n\n17 multiplied by 23 equals 391.");
+  assert.equal(chat.withoutSoloBlock("I went solo here.\nDone."), "I went solo here.\nDone.");
+});

@@ -119,9 +119,14 @@ export function chatNodeOrder(nodes: ChatNode[]): ChatNode[] {
   return [...nodes].sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || a.x - b.x);
 }
 
-/** The orchestrator's answer without the trailing ```solo marker block the engine reads. */
+/**
+ * The orchestrator's answer without the trailing solo marker block the engine reads, fenced
+ * (```solo) or as the web bridge flattens it (a bare "solo" line, then the body in backticks).
+ */
 export function withoutSoloBlock(answer: string): string {
-  const start = answer.lastIndexOf("```solo");
+  const fenced = answer.lastIndexOf("```solo");
+  const flattened = [...answer.matchAll(/(^|\n)[ \t]*solo[ \t]*\r?\n\s*[`{]/gi)].pop();
+  const start = Math.max(fenced, flattened?.index !== undefined ? flattened.index + flattened[1].length : -1);
   return start < 0 ? answer : answer.slice(0, start).trimEnd();
 }
 
