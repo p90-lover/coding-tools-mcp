@@ -227,6 +227,39 @@ pub fn normalize_roles(nodes: &mut Vec<Node>) {
     }
 }
 
+/// Gemini runs on Claude Code through the CPA gateway ("cpa/<model>"), not on Native Codex.
+/// A Native Codex card with a Gemini CPA model is moved there when a team is saved or a
+/// mission is created from it.
+pub fn normalize_routes(nodes: &mut [Node]) {
+    for node in nodes {
+        let route = &mut node.route;
+        if route.harness_id == "codex-native"
+            && route.provider_id == "cliproxyapi-antigravity"
+            && route.model.to_ascii_lowercase().starts_with("gemini")
+        {
+            route.model = format!("cpa/{}", route.model);
+            route.harness_id = "ao:claude-code".into();
+            route.provider_id = "agent-orchestrator".into();
+            route.account_id = "ao-local".into();
+            route.permission_profile = ":ao-default".into();
+        }
+    }
+}
+
+/// Every card must name its model. "default" lets an agent pick, and change, its own model.
+pub fn require_explicit_models(nodes: &[Node]) -> AppResult<()> {
+    match nodes
+        .iter()
+        .find(|node| node.route.model.trim().is_empty() || node.route.model == "default")
+    {
+        Some(node) => Err(fail(&format!(
+            "Choose a model for {} in Team settings: \"default\" lets the agent pick and change its own model",
+            if node.settings.name.is_empty() { node.id.as_str() } else { node.settings.name.as_str() }
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub fn save(
     data: &mut AppData,
     workspace_id: &str,
@@ -254,6 +287,8 @@ pub fn save(
         return Err(fail("Choose one to ten review rounds"));
     }
     normalize_roles(&mut team.nodes);
+    normalize_routes(&mut team.nodes);
+    require_explicit_models(&team.nodes)?;
     let existing = data
         .ao_teams
         .iter()
@@ -334,7 +369,7 @@ pub fn create_run(
         .iter()
         .map(|role| (role.id.clone(), uuid::Uuid::new_v4().to_string()))
         .collect();
-    let nodes = team
+    let mut nodes: Vec<Node> = team
         .nodes
         .iter()
         .map(|role| {
@@ -350,6 +385,9 @@ pub fn create_run(
             node
         })
         .collect();
+    // Older saved teams: move Gemini to Claude Code and refuse cards left on "default".
+    normalize_routes(&mut nodes);
+    require_explicit_models(&nodes)?;
     ao::create(
         data,
         expected_board_revision,
@@ -640,6 +678,42 @@ pub fn queue_rework(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_moves_to_claude_code_and_default_models_are_refused() {
+        let node = |route: serde_json::Value| -> Node {
+            serde_json::from_value(serde_json::json!({
+                "id": "w", "task_id": "", "role": "worker", "parents": [], "x": 0, "y": 0,
+                "state": "pending", "route": route, "settings": {"name": "Gemini worker"},
+            }))
+            .unwrap()
+        };
+        let mut nodes = vec![
+            node(
+                serde_json::json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
+                "account_id":"shared-cpa-pool","model":"gemini-3.8-flash-high","permission_profile":":workspace"}),
+            ),
+            node(
+                serde_json::json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
+                "account_id":"shared-cpa-pool","model":"gpt-6-luna","permission_profile":":workspace"}),
+            ),
+        ];
+        normalize_routes(&mut nodes);
+        assert_eq!(nodes[0].route.harness_id, "ao:claude-code");
+        assert_eq!(nodes[0].route.model, "cpa/gemini-3.8-flash-high");
+        assert_eq!(nodes[0].route.provider_id, "agent-orchestrator");
+        assert_eq!(
+            nodes[1].route.harness_id, "codex-native",
+            "OpenAI CPA models stay on Native Codex"
+        );
+        assert!(require_explicit_models(&nodes).is_ok());
+        nodes[1].route.model = "default".into();
+        let refused = require_explicit_models(&nodes).unwrap_err().to_string();
+        assert!(
+            refused.contains("Gemini worker") && refused.contains("default"),
+            "{refused}"
+        );
+    }
     use serde_json::json;
 
     #[test]

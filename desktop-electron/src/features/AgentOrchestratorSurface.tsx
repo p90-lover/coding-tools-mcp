@@ -9,7 +9,7 @@ import { AgentOrchestratorChat, ChatListPane } from "./AgentOrchestratorChat";
 import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
 import { chatList } from "./ao-chat";
 import {
-  AgentOrchestratorRoleEditor, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
+  AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
   harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
@@ -235,7 +235,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [missionLimit, setMissionLimit] = useState(3);
   const [harnesses, setHarnesses] = useState<AoHarness[]>([NATIVE_ENTRY]);
   const [harnessNotice, setHarnessNotice] = useState("");
-  const [workerRouteDraft, setWorkerRouteDraft] = useState<AoRoute>(() => workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL));
+  const [workerRouteDraft, setWorkerRouteDraft] = useState<AoRoute>(() => workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL));
   const [workerName, setWorkerName] = useState("Worker");
   const [workerSpecialty, setWorkerSpecialty] = useState("implementation");
   const [executable, setExecutable] = useState(() => {
@@ -578,7 +578,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     if (next === "mission") {
       setRunTaskId(""); setMissionLimit(team?.worker_limit || 3);
       const saved = team?.nodes.find(node => node.role === "worker")?.route;
-      setWorkerRouteDraft(saved ? { ...saved } : workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL));
+      setWorkerRouteDraft(saved ? { ...saved } : workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL));
     }
     if (next === "worker") {
       setRunTaskId(selectedRun?.project_id ?? ""); setWorkerParentId("");
@@ -669,7 +669,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         if (!workspaceId) throw new Error("Add a workspace first");
         if (!team) {
           const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: 0,
-            team: defaultTeam(workspaceId, workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL)) as unknown as JsonObject } });
+            team: defaultTeam(workspaceId, workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL)) as unknown as JsonObject } });
           setTeam(saved.team as AoTeam);
         }
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
@@ -699,7 +699,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const openTeam = () => void run("team", async () => {
     if (!team && workspaceId) {
       const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: 0,
-        team: defaultTeam(workspaceId, workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL)) as unknown as JsonObject } });
+        team: defaultTeam(workspaceId, workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL)) as unknown as JsonObject } });
       setTeam(saved.team as AoTeam);
     }
     setSheet("team");
@@ -912,7 +912,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               </aside> : null}
               <button type="button" className="ao-fab ao-canvas-overlay" title="Add worker"
                 disabled={selectedRun.cancelled || selectedRun.nodes.length >= 24 || selectedRun.nodes.some((node) => node.role === "reviewer" && node.state !== "pending") || Boolean(busy)}
-                onClick={() => { openSheet("worker"); setWorkerRouteDraft(workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL)); }}><Glyph name="worker" /><span>{copy.addWorker}</span></button>
+                onClick={() => { openSheet("worker"); setWorkerRouteDraft(workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL)); }}><Glyph name="worker" /><span>{copy.addWorker}</span></button>
             </AgentOrchestratorCanvas>}
           {selectedRun && inspectedNode && draftTeam ? <AgentOrchestratorRoleEditor key={inspectedNode.id}
             node={inspectedNode} mission={selectedRun} draft={draftTeam} harnesses={harnesses} loadModels={loadModels} busy={Boolean(busy)}

@@ -120,10 +120,25 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return { ok: response.ok, status: response.status, data };
   }
 
+  // AO's error envelope is { error: <kind>, code, message }; the message says what was wrong.
   function aoErrorMessage(result) {
-    const error = result.data?.error;
-    return String(error?.message || (typeof error === "string" && error) || result.data?.message
-      || `AO request failed (${result.status})`).slice(0, 300);
+    const data = result.data;
+    const message = data?.error?.message || data?.message || (typeof data?.error === "string" && data.error)
+      || `AO request failed (${result.status})`;
+    const code = typeof data?.code === "string" && data.code ? ` (${data.code})` : "";
+    return `${message}${code}`.slice(0, 300);
+  }
+  /** The longest prefix of `text` that is at most `maxBytes` of UTF-8 (AO limits prompts in bytes). */
+  function utf8Prefix(text, maxBytes) {
+    const value = String(text);
+    if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+    let end = Math.min(value.length, maxBytes);
+    while (end > 0 && Buffer.byteLength(value.slice(0, end), "utf8") > maxBytes) end = Math.floor(end * 0.95);
+    while (end < value.length && Buffer.byteLength(value.slice(0, end + 1), "utf8") <= maxBytes) end += 1;
+    // Never end on the first half of a surrogate pair.
+    const last = value.charCodeAt(end - 1);
+    if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+    return value.slice(0, end);
   }
 
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
@@ -170,7 +185,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // Chat-capable agents return their answer as a conversation turn. Every other
       // installed agent runs in its own terminal UI and hands back a result file.
       const chat = Array.isArray(settings?.chatHarnesses) && settings.chatHarnesses.includes(agentId(agent));
-      const brief = String(prompt).slice(0, 16384 - TUI_RESULT_INSTRUCTION.length - 2);
+      // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
+      const brief = utf8Prefix(prompt, 16384 - Buffer.byteLength(TUI_RESULT_INSTRUCTION, "utf8") - 2);
       const data = await internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode: chat ? "chat" : "tui",
         prompt: chat ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,

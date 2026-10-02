@@ -220,13 +220,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let cpa = [];
       try { cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/")).map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
       // An agent may report WebGPT from the user's Codex config; it cannot run it, so it is left out here.
-      return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default" && !id.startsWith("chatgpt-web/")), ...cpa] };
+      // "default" is not offered: it lets the agent pick, and silently change, its own model.
+      return { ok: true, harness, models: [...items.map(item => item.id).filter(id => id !== "default" && !id.startsWith("chatgpt-web/")), ...cpa] };
     }
     if (harness === "codex-native") {
-      // Native Codex may use every WebGPT tier (Luna and Think included) or any CPA pool model.
+      // Native Codex runs every WebGPT tier (Luna and Think included) and the CPA pool's models,
+      // except Gemini, which runs on Claude Code through the CPA gateway ("cpa/gemini-...").
       let cpa = [];
       try { cpa = (await models()).models; } catch { /* CPA not running: WebGPT only. */ }
-      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa.filter(id => !webModel(id))] };
+      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa.filter(id => !webModel(id) && !/^gemini/i.test(id))] };
     }
     const { baseUrl, key } = connection();
     const response = await fetchImpl(`${baseUrl}/v1/models`, {

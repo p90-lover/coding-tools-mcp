@@ -8,7 +8,11 @@ export type AoRoute = AoNode["route"];
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
 
 export const NATIVE_HARNESS = "codex-native";
-export const DEFAULT_WORKER_MODEL = "gemini-3.8-flash-high";
+/** New workers run Gemini through the CPA gateway on Claude Code (Native Codex is for OpenAI models). */
+export const DEFAULT_WORKER_HARNESS = "ao:claude-code";
+export const DEFAULT_WORKER_MODEL = "cpa/gemini-3.8-flash-high";
+/** "default" lets an AO agent pick (and change) its own model, so it is never offered or saved. */
+export const AGENT_DEFAULT_MODEL = "default";
 export const WEB_ROUTE: AoRoute = { harness_id: NATIVE_HARNESS, provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" };
 export const SPECIALTIES = ["planning", "research", "architecture", "frontend", "backend", "database", "api", "devops", "security",
   "testing", "performance", "debugging", "refactor", "docs", "ui-ux", "mobile", "data-ml", "implementation", "qa", "review", "delivery"];
@@ -100,14 +104,21 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   }, [harness, loadModels]);
   const known = harnesses.some(item => item.id === harness);
   return <>
-    <label>Harness<select value={harness} disabled={disabled} onChange={event => onChange(workerRoute(event.target.value, event.target.value === NATIVE_HARNESS ? DEFAULT_WORKER_MODEL : "default", nativePermission(route)))}>
+    <label>Harness<select value={harness} disabled={disabled} onChange={event => {
+      // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
+      const next = event.target.value;
+      const model = next === NATIVE_HARNESS ? WEB_ROUTE.model : next === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
+      onChange(workerRoute(next, model, nativePermission(route)));
+    }}>
       {!known ? <option value={harness}>{harnessLabel(harness, harnesses)}</option> : null}
       {harnesses.map(item => <option key={item.id} value={item.id} disabled={!item.runnable}>
         {item.label}{!item.runnable ? " · not installed" : item.authStatus === "unauthorized" ? " · sign in" : item.chat === false ? " · terminal" : ""}
       </option>)}
     </select></label>
     <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(workerRoute(route.harness_id, event.target.value, nativePermission(route)))}>
-      {models && !models.includes(route.model) ? <option value={route.model}>{route.model || "Choose"} (unverified)</option> : null}
+      {!route.model || route.model === AGENT_DEFAULT_MODEL
+        ? <option value={route.model} disabled>Choose a model{route.model ? " (\"default\" is not allowed)" : ""}</option>
+        : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (unverified)</option> : null}
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
       {(models ?? []).map(model => <option key={model} value={model}>
         {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex" : ""}
