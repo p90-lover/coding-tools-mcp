@@ -1127,7 +1127,7 @@ fn vision_schema(name: &str) -> Value {
         "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}
     }, "required": ["x", "y", "width", "height"], "additionalProperties": false});
     let mut properties = json!({
-        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 5242880, "default": 5242880},
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 5242880, "default": 163840, "description": "Encoded image budget; the image is resized/re-encoded to fit. Default 160 KiB (80 KiB with output=data_url) so results stay under the 256 KiB tool-result limit."},
         "max_width": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
         "max_height": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
         "auto_resize": {"type": "boolean", "default": true},

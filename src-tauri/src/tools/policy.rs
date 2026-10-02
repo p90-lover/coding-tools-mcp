@@ -101,13 +101,18 @@ pub struct PolicySettings {
     pub allow_screen_capture: bool,
 }
 
+/// Largest patch for MCP and native tools. Requests reach the headless service in bodies of at most
+/// 1 MiB, and JSON escaping grows a patch a little, so 800 KB leaves room. (It was 200 KB, which
+/// made creating a larger file impossible, since there is no separate write tool.)
+pub const DEFAULT_MAX_PATCH_BYTES: usize = 800_000;
+
 impl Default for PolicySettings {
     fn default() -> Self {
         Self {
             allowed_commands: default_allowed_command_set(),
             workspace_local_entries: true,
             workspace_script_extensions: default_workspace_script_extension_set(),
-            max_patch_bytes: 200_000,
+            max_patch_bytes: DEFAULT_MAX_PATCH_BYTES,
             permission_mode: "workspace-write".into(),
             approval_mode: "on-request".into(),
             allow_screen_capture: false,
@@ -123,7 +128,7 @@ impl PolicySettings {
             workspace_script_extensions: parse_workspace_script_extensions(
                 &runtime.workspace_script_extensions,
             ),
-            max_patch_bytes: 200_000,
+            max_patch_bytes: DEFAULT_MAX_PATCH_BYTES,
             permission_mode: SandboxMode::parse(&runtime.permission_mode)
                 .as_str()
                 .to_string(),
@@ -492,7 +497,11 @@ pub fn validate_patch(arguments: &Value, policy: &PolicySettings) -> Result<(), 
     }
 
     if patch.len() > policy.max_patch_bytes {
-        return Err(PolicyError("Patch is too large".into()));
+        return Err(PolicyError(format!(
+            "Patch is too large: {} bytes, limit {}. Split it into several apply_patch calls (one file or a few hunks each).",
+            patch.len(),
+            policy.max_patch_bytes
+        )));
     }
 
     Ok(())

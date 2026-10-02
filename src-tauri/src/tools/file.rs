@@ -425,9 +425,15 @@ pub fn list_files(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError>
 
     let mut files = Vec::new();
     let mut truncated = false;
+    // Skip ignored directories (node_modules, target, ...) whole instead of visiting every file.
     for entry in WalkDir::new(&resolved.path)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| {
+            entry.path() == resolved.path
+                || !entry.file_type().is_dir()
+                || !ws.is_ignored_path(entry.path(), include_hidden, include_ignored)
+        })
         .filter_map(Result::ok)
     {
         let p = entry.path();
@@ -563,9 +569,15 @@ pub fn search_text(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError
     if resolved.path.is_file() {
         let _ = consider_file(&resolved.path);
     } else {
+        // Ignored and hidden directories are pruned whole, matching the per-file rule below.
         for entry in WalkDir::new(&resolved.path)
             .follow_links(false)
             .into_iter()
+            .filter_entry(|entry| {
+                entry.path() == resolved.path
+                    || !entry.file_type().is_dir()
+                    || !ws.is_ignored_path(entry.path(), false, false)
+            })
             .filter_map(Result::ok)
         {
             if !entry.file_type().is_file() {

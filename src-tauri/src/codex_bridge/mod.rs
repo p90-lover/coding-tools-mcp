@@ -22,7 +22,10 @@ use std::{
 pub const PROTOCOL_SOURCE: &str = "721f46a07ab48f00b5e7cdbf2efb78b993d100de";
 /// One JSON-RPC line from the App Server. Larger lines are skipped (see `skip_oversized`), not fatal.
 const MAX_FRAME: usize = 4 * 1024 * 1024;
-const MAX_TEXT: usize = 64 * 1024;
+/// Stored answer per thread (at most MAX_THREADS threads). Reads return it in READ_PAGE pages.
+const MAX_TEXT: usize = 1024 * 1024;
+/// One codex_agent_read page of the answer; keeps the result well under the 256 KiB tool limit.
+const READ_PAGE: usize = 96 * 1024;
 const MAX_THREADS: usize = 4;
 const MAX_LEDGER: usize = 64;
 const LEDGER_RETENTION: Duration = Duration::from_secs(90 * 60);
@@ -752,7 +755,11 @@ impl Hub {
             json!({"ok":true,"approved":approved,"scope":if !approved {"none"} else if request.command.is_some() {"once"} else {"turn"}}),
         )
     }
+    /// The thread state with the first page of its answer.
     pub fn read(&self, id: &str) -> Result<Value> {
+        self.read_page(id, 0)
+    }
+    pub fn read_page(&self, id: &str, offset: usize) -> Result<Value> {
         let bridge = self.bridge()?;
         let memory = lock(&bridge.memory)?;
         let thread = memory
@@ -761,6 +768,18 @@ impl Hub {
             .ok_or("Thread is not owned by this listener connection")?;
         let mut value =
             serde_json::to_value(thread).map_err(|_| "Cannot serialize native thread state")?;
+        // Long answers are read in pages; answer_next_offset continues on a character boundary.
+        let answer = thread.answer.as_str();
+        let mut start = offset.min(answer.len());
+        while !answer.is_char_boundary(start) {
+            start += 1;
+        }
+        let page = bounded(&answer[start..], READ_PAGE);
+        let end = start + page.len();
+        value["answer"] = json!(page);
+        value["answer_offset"] = json!(start);
+        value["answer_total_bytes"] = json!(answer.len());
+        value["answer_next_offset"] = json!((end < answer.len()).then_some(end));
         if bridge.ao_worker_command_approvals
             && lock(&bridge.approvals)?.values().any(|request| {
                 request.thread_id == id
