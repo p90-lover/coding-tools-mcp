@@ -292,7 +292,7 @@ fn read_only_command_allowed(command: &str) -> bool {
         return false;
     }
 
-    let Ok(parts) = shell_words::split(command) else {
+    let Ok(parts) = split_command(command) else {
         return false;
     };
     let Some(executable) = parts.first() else {
@@ -418,8 +418,7 @@ pub fn validate_command_for_workspace(
         ));
     }
 
-    let parts =
-        shell_words::split(command).map_err(|_| PolicyError("Invalid command syntax".into()))?;
+    let parts = split_command(command).map_err(|_| PolicyError("Invalid command syntax".into()))?;
     if parts.is_empty() {
         return Err(PolicyError("Empty command".into()));
     }
@@ -808,5 +807,81 @@ mod release_hardening_checks {
                 "{value:?}"
             );
         }
+    }
+}
+
+/// Splits a command line into words for both the policy check and execution, so the two always
+/// see the same program and arguments. On Windows a backslash is a path separator, not an escape:
+/// `shell_words` would turn `python scripts\run.py` into `scriptsrun.py`. Quotes still group words.
+pub(crate) fn split_command(command: &str) -> Result<Vec<String>, shell_words::ParseError> {
+    if !cfg!(windows) {
+        return shell_words::split(command);
+    }
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        // As in Windows argument parsing, `\"` is a literal quote; any other backslash is literal.
+        if c == '\\' && chars.peek() == Some(&'"') && quote != Some('\'') {
+            chars.next();
+            word.push('"');
+            in_word = true;
+            continue;
+        }
+        match quote {
+            Some(open) if c == open => quote = None,
+            Some(_) => word.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            None if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            None => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err(shell_words::ParseError);
+    }
+    if in_word {
+        words.push(word);
+    }
+    Ok(words)
+}
+
+#[cfg(all(test, windows))]
+mod split_command_tests {
+    use super::split_command;
+
+    #[test]
+    fn windows_paths_keep_their_backslashes_and_quotes_group_words() {
+        assert_eq!(
+            split_command(r#"python scripts\run.py "C:\Program Files\x\a b.txt" 'it is'"#).unwrap(),
+            vec![
+                "python",
+                r"scripts\run.py",
+                r"C:\Program Files\x\a b.txt",
+                "it is"
+            ]
+        );
+        assert_eq!(
+            split_command(r#"cmd /c "x""y""#).unwrap(),
+            vec!["cmd", "/c", "xy"]
+        );
+        assert_eq!(
+            split_command(r#"python -c "print(\"hi\")""#).unwrap(),
+            vec!["python", "-c", r#"print("hi")"#]
+        );
+        assert!(split_command(r#"echo "unterminated"#).is_err());
+        assert!(split_command("   ").unwrap().is_empty());
     }
 }

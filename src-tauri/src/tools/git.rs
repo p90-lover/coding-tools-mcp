@@ -106,10 +106,7 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         .get("context_lines")
         .and_then(Value::as_u64)
         .unwrap_or(3);
-    let max_bytes = args
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(262_144) as usize;
+    let (offset, max_bytes) = page_args(args);
 
     let mut path_filters: Vec<String> = Vec::new();
     if let Some(p) = args.get("path").and_then(Value::as_str) {
@@ -146,18 +143,17 @@ pub fn git_diff(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     if !combined.is_empty() && !combined.ends_with('\n') {
         combined.push('\n');
     }
-    let truncated = combined.len() > max_bytes;
-    let diff_text = if truncated {
-        String::from_utf8_lossy(&combined.as_bytes()[..max_bytes]).into_owned()
-    } else {
-        combined
-    };
-    let files = parse_diff_files(&diff_text);
+    // Files come from the whole diff, so the list is complete even when the text is paged.
+    let files = parse_diff_files(&combined);
+    let page = page_text(&combined, offset, max_bytes);
     Ok(tool_ok(json!({
-        "diff": diff_text,
+        "diff": page.text,
         "files": files,
-        "truncated": truncated,
-        "warnings": if truncated { vec!["diff truncated"] } else { vec![] }
+        "truncated": page.next_offset.is_some(),
+        "offset": page.offset,
+        "next_offset": page.next_offset,
+        "total_bytes": combined.len(),
+        "warnings": if page.next_offset.is_some() { vec!["diff truncated; continue with next_offset"] } else { vec![] }
     })))
 }
 
@@ -258,10 +254,7 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         .get("context_lines")
         .and_then(Value::as_u64)
         .unwrap_or(3);
-    let max_bytes = args
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(262_144) as usize;
+    let (offset, max_bytes) = page_args(args);
     let include_diff = args
         .get("include_diff")
         .and_then(Value::as_bool)
@@ -300,21 +293,20 @@ pub fn git_show(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
         return Err(git_error(&completed.stderr));
     }
 
-    let truncated = completed.stdout.len() > max_bytes;
-    let content = if truncated {
-        String::from_utf8_lossy(&completed.stdout.as_bytes()[..max_bytes]).into_owned()
-    } else {
-        completed.stdout.clone()
-    };
-    let files = parse_diff_files(&content);
+    let files = parse_diff_files(&completed.stdout);
+    let page = page_text(&completed.stdout, offset, max_bytes);
+    let truncated = page.next_offset.is_some();
     Ok(tool_ok(json!({
         "is_repo": true,
         "rev": rev,
-        "content": content,
+        "output_bytes": page.text.len(),
+        "content": page.text,
         "files": files,
         "truncated": truncated,
-        "output_bytes": content.len(),
-        "warnings": if truncated { vec!["output truncated"] } else { Vec::<&str>::new() }
+        "offset": page.offset,
+        "next_offset": page.next_offset,
+        "total_bytes": completed.stdout.len(),
+        "warnings": if truncated { vec!["output truncated; continue with next_offset"] } else { Vec::<&str>::new() }
     })))
 }
 
@@ -491,16 +483,103 @@ fn run_git(
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
-    let output = cmd
-        .output()
+    // Never wait on a credential prompt or take repository locks for a read.
+    cmd.stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    let mut child = cmd
+        .spawn()
         .map_err(|e| git_error(&format!("git not available: {e}")))?;
-    let _ = limit;
+    let pipe = |reader: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut reader) = reader {
+                let _ = reader.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = pipe(
+        child
+            .stdout
+            .take()
+            .map(|r| Box::new(r) as Box<dyn std::io::Read + Send>),
+    );
+    let stderr = pipe(
+        child
+            .stderr
+            .take()
+            .map(|r| Box::new(r) as Box<dyn std::io::Read + Send>),
+    );
+    // Callers' 10 s limits were never enforced before and are too tight for large repositories on
+    // slow disks; 60 s still ends well before the 105 s MCP wait.
+    let limit = limit.max(Duration::from_secs(60));
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(git_error(&format!(
+                    "git {} timed out after {} s",
+                    args.first().copied().unwrap_or(""),
+                    limit.as_secs()
+                )));
+            }
+            Err(e) => return Err(git_error(&format!("git failed: {e}"))),
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
     Ok(GitOutput {
-        success: output.status.success(),
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        success: status.success(),
+        exit_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
+}
+
+/// Largest page of git output per call; see read_file for why it stays under 192 KiB.
+const MAX_GIT_PAGE_BYTES: u64 = 192 * 1024;
+
+fn page_args(args: &Value) -> (usize, usize) {
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let max_bytes = args
+        .get("max_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(128 * 1024)
+        .clamp(4, MAX_GIT_PAGE_BYTES) as usize;
+    (offset, max_bytes)
+}
+
+struct TextPage {
+    text: String,
+    offset: usize,
+    next_offset: Option<usize>,
+}
+
+/// One page of `text` starting at byte `offset`, cut on character boundaries at both ends.
+fn page_text(text: &str, offset: usize, max_bytes: usize) -> TextPage {
+    let mut start = offset.min(text.len());
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut end = (start + max_bytes).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == start && start < text.len() {
+        end = start + text[start..].chars().next().map_or(0, char::len_utf8);
+    }
+    TextPage {
+        text: text[start..end].to_string(),
+        offset: start,
+        next_offset: (end < text.len()).then_some(end),
+    }
 }
 
 fn run_git_diff(

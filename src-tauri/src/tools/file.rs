@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -10,11 +10,170 @@ use walkdir::WalkDir;
 
 use crate::tools::workspace::{tool_ok, Workspace, WorkspaceError};
 
-/// Default per-file cap for `search_text` to avoid loading multi-GB assets.
-const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
-/// Hard input cap for the text reader. `max_bytes` remains the response cap.
-const MAX_TEXT_READ_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+/// Default per-file cap for `search_text`. Files are scanned line by line, so this only keeps
+/// multi-GB assets out of a search; large logs and generated sources are searched.
+const DEFAULT_SEARCH_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const BINARY_PEEK_BYTES: usize = 8192;
+/// Largest `content` one read_file call returns. Tool results pass through the headless service,
+/// which keeps at most 256 KiB of serialized result, so a page stays under that even after JSON
+/// escaping. Larger files are read in pages with `next_offset`; there is no whole-file limit.
+const MAX_READ_PAGE_BYTES: u64 = 192 * 1024;
+const DEFAULT_READ_PAGE_BYTES: u64 = 128 * 1024;
+/// UTF-16 text is decoded whole (Windows tools often write it), so it keeps a size limit.
+const MAX_UTF16_READ_BYTES: u64 = 32 * 1024 * 1024;
+/// Counting every line of a very large file on each page would make paging through it quadratic.
+const MAX_LINE_COUNT_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_error(_: std::io::Error) -> WorkspaceError {
+    WorkspaceError::not_found("File could not be read")
+}
+
+/// One page of text taken from a reader positioned at the start of the content.
+struct ReadWindow {
+    content: Vec<u8>,
+    first_line: usize,
+    last_line: usize,
+    begin: u64,
+    end: u64,
+    truncated: bool,
+    cut_mid_line: bool,
+    next_line: usize,
+}
+
+/// Reads at most `max_bytes` starting either at byte `offset` or at line `start_line`, stopping
+/// after `end_line`. Memory stays bounded by `max_bytes` even for a single multi-gigabyte line.
+fn read_window<R: BufRead>(
+    mut reader: R,
+    skip: u64,
+    offset: Option<u64>,
+    start_line: usize,
+    end_line: Option<usize>,
+    max_bytes: usize,
+) -> std::io::Result<ReadWindow> {
+    let mut pos = 0u64;
+    let mut scratch = Vec::new();
+    // Skip a byte-order mark; it is not part of the text.
+    pos += std::io::copy(&mut (&mut reader).take(skip), &mut std::io::sink())?;
+    let first_line = if let Some(offset) = offset {
+        let mut newlines = 0usize;
+        let mut remaining = offset.saturating_sub(pos);
+        while remaining > 0 {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                break;
+            }
+            let take = available.len().min(remaining as usize);
+            newlines += available[..take]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count();
+            reader.consume(take);
+            pos += take as u64;
+            remaining -= take as u64;
+        }
+        // An offset inside a multi-byte character moves forward to the next character.
+        while reader
+            .fill_buf()?
+            .first()
+            .is_some_and(|byte| byte & 0b1100_0000 == 0b1000_0000)
+        {
+            reader.consume(1);
+            pos += 1;
+        }
+        newlines + 1
+    } else {
+        let mut line = 1;
+        while line < start_line {
+            scratch.clear();
+            // Bounded per chunk, so a huge skipped line never has to fit in memory.
+            let read = (&mut reader)
+                .take(64 * 1024)
+                .read_until(b'\n', &mut scratch)?;
+            if read == 0 {
+                break;
+            }
+            pos += read as u64;
+            if scratch.last() == Some(&b'\n') {
+                line += 1;
+            }
+        }
+        line
+    };
+    let begin = pos;
+    let mut content = Vec::new();
+    let mut line_no = first_line;
+    let mut last_line = first_line.saturating_sub(1);
+    let mut truncated = false;
+    let mut cut_mid_line = false;
+    loop {
+        if end_line.is_some_and(|end| line_no > end) {
+            break;
+        }
+        let room = max_bytes - content.len();
+        scratch.clear();
+        let read = (&mut reader)
+            .take(room as u64 + 1)
+            .read_until(b'\n', &mut scratch)?;
+        if read == 0 {
+            break;
+        }
+        if scratch.len() > room {
+            // Stop on a character boundary; at least one whole character is always returned.
+            let mut cut = room;
+            while cut > 0 && scratch[cut] & 0b1100_0000 == 0b1000_0000 {
+                cut -= 1;
+            }
+            if cut == 0 && content.is_empty() {
+                cut = 1;
+                while cut < scratch.len() && scratch[cut] & 0b1100_0000 == 0b1000_0000 {
+                    cut += 1;
+                }
+            }
+            content.extend_from_slice(&scratch[..cut]);
+            pos += cut as u64;
+            truncated = true;
+            if cut > 0 {
+                last_line = line_no;
+                cut_mid_line = scratch[cut - 1] != b'\n';
+                if !cut_mid_line {
+                    line_no += 1;
+                }
+            }
+            break;
+        }
+        content.extend_from_slice(&scratch);
+        pos += read as u64;
+        last_line = line_no;
+        if scratch.last() == Some(&b'\n') {
+            line_no += 1;
+        }
+    }
+    Ok(ReadWindow {
+        content,
+        first_line,
+        last_line,
+        begin,
+        end: pos,
+        truncated,
+        cut_mid_line,
+        next_line: line_no,
+    })
+}
+
+/// Lines in the same sense as `str::split_inclusive('\n')`: a final unterminated line counts.
+fn count_lines<R: Read>(mut reader: R) -> std::io::Result<usize> {
+    let mut buffer = vec![0u8; 256 * 1024];
+    let (mut lines, mut last) = (0usize, b'\n');
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        lines += buffer[..read].iter().filter(|byte| **byte == b'\n').count();
+        last = buffer[read - 1];
+    }
+    Ok(lines + usize::from(last != b'\n'))
+}
 
 pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
     let path = args
@@ -30,26 +189,17 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
             retryable: false,
         });
     }
-    let input =
+    let mut input =
         File::open(&resolved.path).map_err(|_| WorkspaceError::not_found("File not found"))?;
-    let metadata = input
+    let file_bytes = input
         .metadata()
-        .map_err(|_| WorkspaceError::not_found("File not found"))?;
-    if metadata.len() > MAX_TEXT_READ_INPUT_BYTES {
-        return Err(WorkspaceError::Tool {
-            code: "FILE_TOO_LARGE",
-            message: format!(
-                "Text file is {} bytes; the read_file input limit is {} bytes. Use search_text or a bounded external reader instead.",
-                metadata.len(), MAX_TEXT_READ_INPUT_BYTES
-            ),
-            category: "validation",
-            retryable: false,
-        });
-    }
-    let max_bytes = args
-        .get("max_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(131_072) as usize;
+        .map_err(|_| WorkspaceError::not_found("File not found"))?
+        .len();
+    let requested_max = args.get("max_bytes").and_then(Value::as_u64);
+    // At least 4 bytes, so one character always fits.
+    let max_bytes = requested_max
+        .unwrap_or(DEFAULT_READ_PAGE_BYTES)
+        .clamp(4, MAX_READ_PAGE_BYTES) as usize;
     let start_line = args
         .get("start_line")
         .and_then(Value::as_u64)
@@ -59,67 +209,145 @@ pub fn read_file(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> 
         .get("end_line")
         .and_then(Value::as_u64)
         .map(|v| v as usize);
+    let offset = args.get("offset").and_then(Value::as_u64);
 
-    // Enforce the cap on the actual open handle as well as its initial size.
-    // A file growing after metadata inspection must not trigger an unbounded read.
-    let mut data = Vec::new();
-    input
-        .take(MAX_TEXT_READ_INPUT_BYTES + 1)
-        .read_to_end(&mut data)
-        .map_err(|_| WorkspaceError::not_found("File could not be read"))?;
-    if data.len() as u64 > MAX_TEXT_READ_INPUT_BYTES {
-        return Err(WorkspaceError::Tool {
-            code: "FILE_TOO_LARGE",
-            message: "Text file exceeded the 16 MiB input limit during reading.".into(),
-            category: "validation",
-            retryable: false,
-        });
+    let mut head = [0u8; BINARY_PEEK_BYTES];
+    let mut head_len = 0;
+    while head_len < head.len() {
+        let read = input.read(&mut head[head_len..]).map_err(read_error)?;
+        if read == 0 {
+            break;
+        }
+        head_len += read;
     }
-    if data.iter().take(4096).any(|b| *b == 0) {
+    let head = &head[..head_len];
+    input.seek(SeekFrom::Start(0)).map_err(read_error)?;
+    let utf16 = match head {
+        [0xFF, 0xFE, ..] => Some(true),
+        [0xFE, 0xFF, ..] => Some(false),
+        _ => None,
+    };
+    if utf16.is_none() && head.contains(&0) {
         return Err(WorkspaceError::Tool {
             code: "BINARY_FILE",
-            message: "Binary file read blocked for text tool.".into(),
+            message:
+                "Binary file read blocked for text tool (UTF-16 text needs a byte-order mark)."
+                    .into(),
             category: "validation",
             retryable: false,
         });
     }
-    let text = String::from_utf8(data).map_err(|_| WorkspaceError::Tool {
-        code: "UNSUPPORTED_ENCODING",
-        message: "File is not valid utf-8.".into(),
-        category: "validation",
-        retryable: false,
-    })?;
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let total_lines = lines.len();
-    let end = end_line.unwrap_or(total_lines).min(total_lines);
-    let selected: String = if end < start_line {
-        String::new()
-    } else {
-        lines[(start_line - 1)..end].concat()
-    };
-    let (content, truncated, truncated_by) = truncate_bytes(&selected, max_bytes);
-    let actual_end = if truncated && !content.is_empty() {
-        start_line + content.lines().count().saturating_sub(1)
-    } else {
-        end
-    };
     let mut warnings = Vec::new();
-    if truncated {
-        warnings.push("content truncated".to_string());
+    let (window, encoding, total_bytes, total_lines) = if let Some(little_endian) = utf16 {
+        if file_bytes > MAX_UTF16_READ_BYTES {
+            return Err(WorkspaceError::Tool {
+                code: "FILE_TOO_LARGE",
+                message: format!(
+                    "UTF-16 file is {file_bytes} bytes; read_file decodes UTF-16 up to {MAX_UTF16_READ_BYTES} bytes. Convert it to UTF-8 first."
+                ),
+                category: "validation",
+                retryable: false,
+            });
+        }
+        let mut raw = Vec::new();
+        input
+            .take(MAX_UTF16_READ_BYTES)
+            .read_to_end(&mut raw)
+            .map_err(read_error)?;
+        let units: Vec<u16> = raw
+            .get(2..)
+            .unwrap_or_default()
+            .chunks_exact(2)
+            .map(|pair| {
+                if little_endian {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect();
+        let text = String::from_utf16_lossy(&units).into_bytes();
+        warnings.push("decoded from UTF-16; offsets count bytes of the UTF-8 text".to_string());
+        let total_lines = count_lines(text.as_slice()).map_err(read_error)?;
+        let total = text.len() as u64;
+        let window = read_window(
+            std::io::Cursor::new(text),
+            0,
+            offset,
+            start_line,
+            end_line,
+            max_bytes,
+        )
+        .map_err(read_error)?;
+        let encoding = if little_endian {
+            "utf-16le"
+        } else {
+            "utf-16be"
+        };
+        (window, encoding, total, Some(total_lines))
+    } else {
+        let bom = if head.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            3
+        } else {
+            0
+        };
+        let total_lines = if file_bytes <= MAX_LINE_COUNT_BYTES {
+            let lines = count_lines(BufReader::new(&mut input)).map_err(read_error)?;
+            input.seek(SeekFrom::Start(0)).map_err(read_error)?;
+            Some(lines)
+        } else {
+            warnings.push(format!(
+                "total_lines is not counted for files over {MAX_LINE_COUNT_BYTES} bytes"
+            ));
+            None
+        };
+        let window = read_window(
+            BufReader::new(input),
+            bom,
+            offset,
+            start_line,
+            end_line,
+            max_bytes,
+        )
+        .map_err(read_error)?;
+        (window, "utf-8", file_bytes, total_lines)
+    };
+    let content = match String::from_utf8(window.content) {
+        Ok(text) => text,
+        Err(error) => {
+            warnings.push("invalid UTF-8 bytes were replaced with U+FFFD".to_string());
+            String::from_utf8_lossy(error.as_bytes()).into_owned()
+        }
+    };
+    if requested_max.is_some_and(|requested| requested > MAX_READ_PAGE_BYTES) {
+        warnings.push(format!(
+            "max_bytes is capped at {MAX_READ_PAGE_BYTES} per call"
+        ));
     }
-    Ok(tool_ok(json!({
+    let more = window.end < total_bytes;
+    if window.truncated {
+        warnings.push("content truncated; continue with next_offset".to_string());
+    }
+    let mut result = json!({
         "path": resolved.display,
         "content": content,
-        "encoding": "utf-8",
-        "start_line": start_line,
-        "end_line": actual_end,
-        "total_lines": total_lines,
-        "total_bytes": text.len(),
-        "bytes_read": content.len(),
-        "truncated": truncated,
-        "truncated_by": truncated_by,
+        "encoding": encoding,
+        "start_line": window.first_line,
+        "end_line": window.last_line,
+        "total_bytes": total_bytes,
+        "bytes_read": window.end - window.begin,
+        "offset": window.begin,
+        "truncated": window.truncated,
+        "truncated_by": window.truncated.then_some("bytes"),
+        "cut_mid_line": window.cut_mid_line,
+        "next_offset": more.then_some(window.end),
+        "next_start_line": (more && !window.cut_mid_line).then_some(window.next_line),
         "warnings": warnings
-    })))
+    });
+    if let Some(lines) = total_lines {
+        result["total_lines"] = json!(lines);
+    }
+    Ok(tool_ok(result))
 }
 
 pub fn list_dir(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceError> {
@@ -411,20 +639,26 @@ fn search_file_streaming(
         Ok(f) => f,
         Err(_) => return false,
     };
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut recent: VecDeque<String> = VecDeque::with_capacity(context_lines.max(1));
     let mut pending: Vec<PendingMatch> = Vec::new();
     let mut line_no = 0usize;
+    let mut raw = Vec::new();
 
-    for line_res in reader.lines() {
-        let line = match line_res {
-            Ok(l) => l,
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw) {
+            Ok(0) => break,
+            Ok(_) => {}
             Err(_) => {
-                // Invalid UTF-8 mid-file: drop unfinished context and stop this file.
                 flush_pending(&mut pending, matches, max_results);
                 return matches.len() >= max_results;
             }
-        };
+        }
+        // Invalid UTF-8 no longer ends the file: such lines are searched with U+FFFD in place.
+        let trimmed = raw.strip_suffix(b"\n").unwrap_or(&raw);
+        let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
+        let line = String::from_utf8_lossy(trimmed).into_owned();
         line_no += 1;
 
         // Feed "after" context for earlier hits.
@@ -542,28 +776,25 @@ fn build_matcher(
         .map_err(|e| WorkspaceError::invalid_argument(format!("Invalid regex: {e}")))?;
         Ok(Matcher::Regex(pattern))
     } else if case_sensitive {
-        Ok(Matcher::Literal(query.to_string()))
+        Ok(Matcher::Exact(query.to_string()))
     } else {
-        Ok(Matcher::Literal(query.to_lowercase()))
+        Ok(Matcher::AnyCase(query.to_lowercase()))
     }
 }
 
 enum Matcher {
     Regex(Regex),
-    Literal(String),
+    /// `case_sensitive: true` matches exactly, even for an all-lowercase query.
+    Exact(String),
+    AnyCase(String),
 }
 
 impl Matcher {
     fn is_match(&self, line: &str) -> bool {
         match self {
             Matcher::Regex(re) => re.is_match(line),
-            Matcher::Literal(lit) => {
-                if lit.chars().any(|c| c.is_uppercase()) {
-                    line.contains(lit.as_str())
-                } else {
-                    line.to_lowercase().contains(lit)
-                }
-            }
+            Matcher::Exact(literal) => line.contains(literal.as_str()),
+            Matcher::AnyCase(lowered) => line.to_lowercase().contains(lowered.as_str()),
         }
     }
 }
@@ -640,18 +871,6 @@ fn collect_dir_entries(
             );
         }
     }
-}
-
-fn truncate_bytes(text: &str, max_bytes: usize) -> (String, bool, Option<&'static str>) {
-    let bytes = text.as_bytes();
-    if bytes.len() <= max_bytes {
-        return (text.to_string(), false, None);
-    }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_string(), true, Some("bytes"))
 }
 
 fn string_list_arg(args: &Value, key: &str) -> Vec<String> {
