@@ -984,8 +984,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     let task;
     if (taskId) {
       task = clean(taskId, 128);
-      if (saved.runs.some((run) => run.project_id === task && !runSettled(run))) {
-        throw new Error("This chat is still running; wait for it to finish or stop it first");
+      // A previous run that is really working must finish or be stopped first. One that is stuck
+      // (a failed start left its cards pending, a held card, a pause) is stopped here and kept
+      // in history, so the user can always continue an old chat.
+      const open = saved.runs.filter((run) => run.project_id === task && !runSettled(run));
+      for (const run of open) {
+        const live = backgroundRuns.get(runKey(id, run.id));
+        const working = Boolean(live && (live.starting || live.driving || live.status === "running"))
+          || (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
+        if (working) throw new Error("This chat is still running; wait for it to finish or stop it first");
+      }
+      for (const run of open) {
+        await updateRun({ workspaceId: id, change: { operation: "cancel", run_id: run.id, expected_revision: run.revision } });
       }
       const detail = await board({ workspaceId: id, taskId: task });
       if (!detail.task) throw new Error("This chat's task no longer exists");

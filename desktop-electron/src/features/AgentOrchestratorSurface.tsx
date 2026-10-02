@@ -223,6 +223,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     try { return localStorage.getItem("coding-tools:ao:codex-executable") ?? ""; }
     catch { return ""; }
   });
+  // An empty setting is fine: the workflow then uses the installed Codex CLI (codex_executable).
+  const [detectedExecutable, setDetectedExecutable] = useState("");
+  const executableArg = (): JsonObject => (executable.trim() ? { executable: executable.trim() } : {});
   const [advanceNotice, setAdvanceNotice] = useState("");
   const [autoStatus, setAutoStatus] = useState("idle");
   const [pendingApprovals, setPendingApprovals] = useState<AoApproval[]>([]);
@@ -253,6 +256,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
       setHarnesses(items.length ? items : [NATIVE_ENTRY]);
       setHarnessNotice(typeof result.notice === "string" ? result.notice : "");
     }).catch(cause => { if (live) setHarnessNotice(cause instanceof Error ? cause.message : String(cause)); });
+    // Show which codex.exe an empty setting resolves to (the Codex CLI first).
+    void moduleCall("codex_executable").then(result => {
+      if (live && typeof result.executable === "string") setDetectedExecutable(result.executable);
+    }).catch(() => { /* No Codex found: the start reports it with install guidance. */ });
     return () => { live = false; };
   }, []);
 
@@ -412,9 +419,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
         accepted = true;
         setSelectedRunId(selection.runId); setView("team");
         if (["start", "resume"].includes(selection.intent)) {
-          if (!executable.trim()) throw new Error("Set the native Codex executable in AO settings first");
           await moduleCall("upstream_hide");
-          const result = await moduleCall(selection.intent === "resume" ? "control_run" : "start_run", { workspaceId, runId: selection.runId, executable: executable.trim(), ...(selection.intent === "resume" ? { action: "resume" } : {}) });
+          const result = await moduleCall(selection.intent === "resume" ? "control_run" : "start_run", { workspaceId, runId: selection.runId, ...executableArg(), ...(selection.intent === "resume" ? { action: "resume" } : {}) });
           if (!disposed) { setAutoStatus(String(result.status || "running")); await loadMissions(workspaceId); }
         }
       } catch (cause) { if (!disposed || accepted) setError(cause instanceof Error ? cause.message : String(cause)); }
@@ -580,17 +586,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
 
-  const needsExecutable = () => {
-    if (executable.trim()) return false;
-    setSheet("settings");
-    setError("Set the native Codex executable in AO settings first");
-    return true;
-  };
-
   const startRun = () => void run("start-run", async () => {
-    if (!selectedRun || needsExecutable()) return;
-    const result = await moduleCall("start_run", { workspaceId, runId: selectedRun.id,
-      executable: executable.trim() });
+    if (!selectedRun) return;
+    const result = await moduleCall("start_run", { workspaceId, runId: selectedRun.id, ...executableArg() });
     if (result.cancelled) return;
     setAutoStatus(typeof result.status === "string" ? result.status : "running");
     setAdvanceNotice("Running; tool approvals still need you");
@@ -599,7 +597,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
 
   const controlRun = (action: "pause" | "resume" | "stop") => void run(action, async () => {
     if (!selectedRun) return;
-    await moduleCall("control_run", { workspaceId, runId: selectedRun.id, action, executable: executable.trim() });
+    await moduleCall("control_run", { workspaceId, runId: selectedRun.id, action, ...executableArg() });
     setAutoStatus(action === "pause" ? "paused" : action === "resume" ? "running" : "held");
     await loadMissions(workspaceId);
   });
@@ -617,7 +615,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
         }
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
-          ...(executable.trim() ? { executable: executable.trim() } : {}) });
+          ...executableArg() });
         await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]);
         const taskId = String(result.taskId);
         setChatTaskId(taskId);
@@ -631,7 +629,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const retryChatStart = (runId: string) => void run("start-run", async () => {
     const taskId = missions.find((mission) => mission.id === runId)?.project_id ?? "";
     try {
-      const result = await moduleCall("start_run", { workspaceId, runId, ...(executable.trim() ? { executable: executable.trim() } : {}) });
+      const result = await moduleCall("start_run", { workspaceId, runId, ...executableArg() });
       setChatNotices((current) => ({ ...current, [taskId]: "" }));
       setAutoStatus(typeof result.status === "string" ? result.status : "running");
     } catch (cause) {
@@ -773,7 +771,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
           <div className="ao-settings">
             <label className="ao-set-row" title="Native Codex executable: runs the WebGPT orchestrator/reviewer and Native Codex workers">
               <span className="ao-set-icon" aria-hidden="true">🧠</span>
-              <input aria-label="Native Codex executable" autoComplete="off" placeholder="C:…codex.exe" spellCheck={false} value={executable} onChange={(event) => {
+              <input aria-label="Native Codex executable" autoComplete="off" placeholder={detectedExecutable ? `Auto: ${detectedExecutable}` : "Auto-detect the Codex CLI"} spellCheck={false} value={executable} onChange={(event) => {
                 const value = event.target.value;
                 setExecutable(value);
                 try { localStorage.setItem("coding-tools:ao:codex-executable", value); } catch { /* Keep it for this session. */ }
@@ -814,6 +812,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             : <AgentOrchestratorChat
                 runs={missions} tasks={board?.tasks ?? []} selectedTaskId={chatTaskId ?? ""} onSelectTask={selectChat}
                 busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} stop={stopChatRun}
+                working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && autoStatus === "running")}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("team"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
                 approve={approve}

@@ -46,6 +46,14 @@ test("chat status and whether a follow-up can be sent", () => {
   assert.equal(chat.chatAcceptsMessage("stopped"), true);
   assert.equal(chat.chatAcceptsMessage("running"), false);
   assert.equal(chat.chatAcceptsMessage(undefined), true, "a new chat accepts its first message");
+  // A stuck run (never started, held, paused) no longer locks an old chat; only real work does.
+  for (const status of ["queued", "attention", "paused"]) {
+    assert.equal(chat.chatAcceptsMessage(status), true, status);
+    assert.equal(chat.chatAcceptsMessage(status, true), false, `${status} while working`);
+    assert.equal(chat.chatRunOpen(status), true, `${status} can be stopped`);
+  }
+  assert.equal(chat.chatRunOpen("done"), false);
+  assert.equal(chat.chatRunOpen("stopped"), false);
 });
 
 test("the transcript pairs each message with that run's replies in orchestration order", () => {
