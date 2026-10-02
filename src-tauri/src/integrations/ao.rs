@@ -480,9 +480,9 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         let wired = match node.role {
             Role::Planner => true,
             Role::Approver => node.parents.len() == 1 && depends_on(planner),
-            Role::Worker => depends_on(planner) && approver.is_none_or(|id| depends_on(id)),
+            Role::Worker => depends_on(planner) && approver.is_none_or(&depends_on),
             Role::ReviewSplit => workers.iter().all(|worker| depends_on(worker)),
-            Role::SubReviewer => split.is_some_and(|id| depends_on(id)),
+            Role::SubReviewer => split.is_some_and(&depends_on),
             Role::Reviewer if sub_reviewers.is_empty() => {
                 workers.iter().all(|worker| depends_on(worker))
             }
@@ -1152,13 +1152,11 @@ Do not edit the implementation; send needed changes back to the workers.",
             Role::ReviewSplit => {}
             _ => prompt.push_str(&format!(
                 "\nCompleted {} output ({}):\n{}\n",
-                parent
-                    .settings
-                    .name
-                    .as_str()
-                    .is_empty()
-                    .then_some(parent_id.as_str())
-                    .unwrap_or(&parent.settings.name),
+                if parent.settings.name.is_empty() {
+                    parent_id.as_str()
+                } else {
+                    &parent.settings.name
+                },
                 receipt.route.model,
                 clip(answer, per_parent)
             )),
@@ -1581,6 +1579,7 @@ pub fn record_terminal(
 /// Records the command approver's decision on a running card's tool request, before it is
 /// answered. Only a mission whose background grant is valid and whose approver has approved
 /// the plan may decide this way; allowing also needs the approver's auto-decide setting.
+#[allow(clippy::too_many_arguments)] // Mirrors the headless approval request's fields one to one.
 pub fn record_approver_decision(
     data: &mut AppData,
     workspace_id: &str,
