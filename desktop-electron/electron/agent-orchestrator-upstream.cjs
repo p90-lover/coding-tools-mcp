@@ -270,7 +270,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return workspaceBoard.readWorkspace(args.workspaceId, args.runId);
     }
     if (operation === "mission_open") {
-      if (!workspaceBoard || !["open", "start", "resume"].includes(args.intent)) throw new Error("Invalid mission navigation request");
+      if (!workspaceBoard || !["open", "start", "resume", "restart"].includes(args.intent)) throw new Error("Invalid mission navigation request");
       const board = await workspaceBoard.readWorkspace(args.workspaceId, args.runId);
       if (!board.runs.some(run => run.id === args.runId)) throw new Error("Mission is outside this workspace");
       missionSelection = { id: crypto.randomUUID(), workspaceId: board.workspaceId, runId: args.runId, intent: args.intent };

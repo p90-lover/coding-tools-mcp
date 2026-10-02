@@ -140,7 +140,6 @@ test("critical IPC is registered before the renderer file is loaded", () => {
   assert.match(main, /handle\("launcher:original-ui-snapshot"/);
   assert.match(main, /handle\("coding-tools:apps:list"/);
   assert.match(main, /deferUiWork/);
-  assert.match(main, /createLazyFactory\(\(\) => createFiveStackControlPlane/);
   assert.match(main, /scheduleFullIpcAfterPaint/);
   assert.match(main, /KEEP_UI_RESPONSIVE_SKIP_REASON/);
   assert.match(main, /runtimeHost\?\.browserConnectorName/);

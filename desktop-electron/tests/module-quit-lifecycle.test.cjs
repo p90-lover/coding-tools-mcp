@@ -40,6 +40,8 @@ function fixture({ active = null, failCleanup = false, restoreFails = false, qui
     stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} },
     stopBridgeWatchdog() {}, backendBundles: { stopWatching() {} },
     agentOrchestratorUpstream: { stop: async () => {} }, antigravityReauth: { stop() {} },
+    // The docked ChatGPT desktop host (main.cjs `chatgptDesktop`) is shut down on every quit.
+    chatgptDesktop: { shutdown: async () => { order.push("stop-chatgpt-desktop"); } },
     managedBootstrapController: controller("bootstrap"), originalUiController: controller("visuals"),
     externalServicesController: controller("external"), upstreamToolController: controller("upstream"),
     showMainWindow() {}, publishOperation() {}, app: { quit: () => quits.push(true) },
@@ -72,7 +74,7 @@ test("accepted app quit disposes each integration controller once", async () => 
   assert.equal(result.ok, true);
   assert.deepEqual(f.disposed, ["bootstrap", "visuals", "external", "upstream"]);
   assert.equal(f.quits.length, 1);
-  assert.deepEqual(f.order, ["restore-route", "stop-runtime"]);
+  assert.deepEqual(f.order, ["restore-route", "stop-runtime", "stop-chatgpt-desktop"]);
 });
 
 test("route restoration failure cancels quit unless the user chooses Quit anyway", async () => {
@@ -83,7 +85,7 @@ test("route restoration failure cancels quit unless the user chooses Quit anyway
 
   const accepted = fixture({ restoreFails: true, quitAnyway: true });
   assert.equal((await accepted.quit()).ok, true);
-  assert.deepEqual(accepted.order, ["restore-route", "stop-runtime"]);
+  assert.deepEqual(accepted.order, ["restore-route", "stop-runtime", "stop-chatgpt-desktop"]);
   assert.equal(accepted.quits.length, 1);
 });
 

@@ -101,7 +101,7 @@ describe("Zero Risk turn broker lifecycle", () => {
       expect(() => broker.completeSafeTurn(requestId, "premature"))
         .toThrow("1 pending Codex tool invocation");
       broker.completeTool(requestId, request!.callId, toolResult({ output: root }));
-      await expect(invocation).resolves.toMatchObject({ structuredContent: { output: root } });
+      expect(await invocation).toMatchObject({ structuredContent: { output: root } });
       expect(() => broker.completeSafeTurn(requestId, "activity still settling"))
         .toThrow("1 active Codex MCP request");
       await callTurnBroker(socketPath, {
@@ -115,7 +115,7 @@ describe("Zero Risk turn broker lifecycle", () => {
         completed: true,
         duplicate: false,
       });
-      await expect(completed).resolves.toBe("final answer");
+      expect(await completed).toBe("final answer");
       expect(broker.completeSafeTurn(requestId, "final answer")).toEqual({
         completed: true,
         duplicate: true,
@@ -151,7 +151,7 @@ describe("Zero Risk turn broker lifecycle", () => {
         Bun.sleep(20).then(() => "waiting_for_confirmation"),
       ])).toBe("waiting_for_confirmation");
       broker.confirmSafeTurnSent(requestId, nonceA);
-      await expect(completion).resolves.toEqual({ completed: true, duplicate: false });
+      expect(await completion).toEqual({ completed: true, duplicate: false });
       await expect(broker.waitForSafeCompletion(requestId)).resolves.toBe("early final");
     } finally {
       await broker.close();
@@ -189,7 +189,7 @@ describe("Zero Risk turn broker lifecycle", () => {
       broker.startSafeTurn(second);
       broker.confirmSafeTurnSent(second, nonceB);
       broker.completeSafeTurn(second, "second survived");
-      await expect(secondCompletion).resolves.toBe("second survived");
+      expect(await secondCompletion).toBe("second survived");
 
       expect(() => broker.startSafeTurn(first)).toThrow("invalid, expired, or revoked");
     } finally {
@@ -213,7 +213,7 @@ describe("Zero Risk turn broker lifecycle", () => {
         completed: true,
         duplicate: false,
       });
-      await expect(summary).resolves.toBe("complete compacted summary");
+      expect(await summary).toBe("complete compacted summary");
     } finally {
       await broker.close();
     }
@@ -245,7 +245,7 @@ describe("Zero Risk turn broker lifecycle", () => {
         token: requestId,
         finalAnswer: "remote final",
       });
-      await expect(completed).resolves.toBe("remote final");
+      expect(await completed).toBe("remote final");
       await remote.revoke(requestId);
     } finally {
       await broker.close();
@@ -280,8 +280,11 @@ describe("Zero Risk public MCP ABI", () => {
       expect(client.getInstructions()).toContain("begin with codex_turn_start using the request_id");
       expect(client.getInstructions()).toContain("send the complete answer with codex_turn_complete");
       const listed = await client.listTools();
+      // The three read-only discovery tools (chat history, workspaces, module status) are part of
+      // both contracts; they carry readOnlyHint and cannot change access or invoke mutations.
       expect(listed.tools.map(tool => tool.name).sort()).toEqual([
         "codex_apply_patch",
+        "codex_chat_sessions",
         "codex_exec",
         "codex_tool_call",
         "codex_tool_inventory",
@@ -289,7 +292,12 @@ describe("Zero Risk public MCP ABI", () => {
         "codex_turn_start",
         "codex_view_image",
         "codex_write_stdin",
+        "coding_tools_apps_inspect",
+        "coding_tools_workspaces",
       ]);
+      for (const name of ["codex_chat_sessions", "coding_tools_apps_inspect", "coding_tools_workspaces"]) {
+        expect(listed.tools.find(tool => tool.name === name)?.annotations?.readOnlyHint).toBe(true);
+      }
       expect(listed.tools.find(tool => tool.name === "codex_turn_start")?.description)
         .toContain("request_id included in the pasted Codex Web GPT request");
       expect(listed.tools.find(tool => tool.name === "codex_tool_inventory")?.description)

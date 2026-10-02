@@ -8,7 +8,8 @@ const { spawnSync } = require("node:child_process");
 
 const projectRoot = path.resolve(__dirname, "../..");
 const sourceRoot = path.join(projectRoot, "module", "agent-orchestrator");
-const sourceCommit = "73473d45f0c18f3a81f66f150868459e3098ca35";
+// Upstream base. The superproject pins a fork commit carrying the Coding Tools integration on top.
+const upstreamCommit = "73473d45f0c18f3a81f66f150868459e3098ca35";
 const stageRoot = path.join(projectRoot, "aiTemp", "ao-source-build");
 const frontendRoot = path.join(stageRoot, "frontend");
 const outputRoot = path.join(projectRoot, "desktop-electron", "build", "agent-orchestrator");
@@ -23,8 +24,15 @@ function run(command, arguments_, cwd, env = {}) {
 }
 
 async function main() {
-  const revision = spawnSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" });
-  assert.equal(revision.stdout.trim(), sourceCommit, "Unexpected AO source revision");
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).stdout.trim();
+  const pin = spawnSync("git", ["rev-parse", "HEAD:module/agent-orchestrator"], { cwd: projectRoot, encoding: "utf8" });
+  const pinned = pin.status === 0 ? pin.stdout.trim() : "";
+  // Either a checkout of the pinned fork commit, or the upstream base with the same integration
+  // present as working-tree changes; anything else is an unreviewed source.
+  assert.ok(head === pinned || head === upstreamCommit, `Unexpected AO source revision ${head} (pinned ${pinned || "none"})`);
+  const provenance = head === pinned && head !== upstreamCommit
+    ? { repository: "p90-lover/agent-orchestrator", commit: head }
+    : { repository: "Untrivial-ai/agent-orchestrator", commit: upstreamCommit, workingTreeIntegration: true };
   fs.mkdirSync(stageRoot, { recursive: true });
   fs.mkdirSync(outputRoot, { recursive: true });
   for (const directory of ["frontend", "packages"]) {
@@ -67,7 +75,7 @@ async function main() {
   });
   fs.copyFileSync(path.join(sourceRoot, "LICENSE"), path.join(outputRoot, "LICENSE"));
   fs.writeFileSync(path.join(outputRoot, "manifest.json"), `${JSON.stringify({
-    repository: "Untrivial-ai/agent-orchestrator", commit: sourceCommit,
+    ...provenance,
     source: "module/agent-orchestrator", standaloneInstall: false, localOnly: true,
     daemonSha256: crypto.createHash("sha256").update(fs.readFileSync(daemonPath)).digest("hex"),
     renderer: "renderer/index.html", dependencyDigest,

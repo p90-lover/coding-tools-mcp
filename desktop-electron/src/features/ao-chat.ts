@@ -64,9 +64,17 @@ export function chatRunStatus(run: ChatRun): ChatStatus {
   return "queued";
 }
 
-/** A chat accepts a new message only when its latest run has settled. */
-export function chatAcceptsMessage(status: ChatStatus | undefined): boolean {
-  return status === undefined || status === "done" || status === "stopped";
+/**
+ * Whether a chat takes a new message. A run that is really working blocks it; a stuck one (a start
+ * that never got going, a held card, a pause) does not: sending stops it and starts a new run.
+ */
+export function chatAcceptsMessage(status: ChatStatus | undefined, working = false): boolean {
+  return status !== "running" && !working;
+}
+
+/** A run that has not settled yet and can still be stopped. */
+export function chatRunOpen(status: ChatStatus | undefined): boolean {
+  return status === "queued" || status === "running" || status === "paused" || status === "attention";
 }
 
 /** Chats in a workspace, most recently started first. Runs arrive oldest first. */

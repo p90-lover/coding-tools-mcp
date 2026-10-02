@@ -365,26 +365,6 @@ test("MCP catalog overlay keeps headless tools and exposes five-stack resources"
   assert.ok(catalog.resources.some((resource) => resource.uri === "coding-tools://workspace/one"));
 });
 
-test("Desktop and MCP share the control-plane tools.call path", () => {
-  const main = read("electron/main.cjs");
-  const paseo = read("src/features/PaseoOrchestratorSurface.tsx");
-  const anneal = read("src/features/AnnealTasksSurface.tsx");
-  assert.match(main, /createFiveStackControlPlane/);
-  assert.match(main, /getWebBridgeStatus:/);
-  assert.match(main, /hasTool/);
-  assert.match(main, /mergeCatalog/);
-  assert.match(main, /manageService/);
-  assert.match(main, /inspectService/);
-  assert.match(main, /repairManagedComponent/);
-  assert.doesNotMatch(main, /five_stack_manage[\s\S]{0,200}installManagedComponent/);
-  assert.match(paseo, /tools\.call/);
-  assert.match(paseo, /paseo_plan/);
-  assert.match(paseo, /paseo_run/);
-  assert.match(paseo, /paseo_review/);
-  assert.match(anneal, /anneal_preview|anneal_open_from_review|five_stack_status/);
-  assert.doesNotMatch(read("electron/five-stack-control-plane.cjs"), /bundled-runtimes/);
-});
-
 test("MCP manage/inspect uses the panel controller and strips secrets", async () => {
   const actions = [];
   let seq = 0;

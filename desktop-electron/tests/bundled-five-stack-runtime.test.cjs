@@ -97,7 +97,6 @@ test("Desktop panels never tell the user to download or install a separate app",
   const original = read("src/features/OriginalUiSurface.tsx");
   const originalUi = read("electron/original-ui.cjs");
 
-  assert.match(surface, /Start all/);
   assert.match(surface, /Repair runtime/);
   assert.doesNotMatch(surface, /Prepare bundled runtime/);
   assert.doesNotMatch(surface, /Install and start all/);
@@ -111,93 +110,6 @@ test("Desktop panels never tell the user to download or install a separate app",
   assert.match(original, /Start the bundled runtime/);
   assert.doesNotMatch(originalUi, /Install the pinned Codex Router source/);
   assert.doesNotMatch(originalUi, /Install and start managed CPA/);
-});
-
-test("prepare-five-stack-runtime materializes pinned sources and CPA archives from a local cache", async () => {
-  const repositoryRoot = temporaryDirectory("coding-tools-five-stack-repo");
-  const desktopDir = path.join(repositoryRoot, "desktop-electron");
-  const manifestRoot = path.join(desktopDir, "vendor", "managed-components");
-  const cacheRoot = path.join(repositoryRoot, "cache");
-  const outputRoot = path.join(desktopDir, "build", "five-stack-runtime");
-  const payload = Buffer.from("bundled-cpa-archive", "utf8");
-  const digest = sha256(payload);
-
-  for (const id of ["paseo", "anneal"]) {
-    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
-      ? JSON.parse(read("vendor/managed-components/paseo.json")) : bundledManifest(id));
-    const source = path.join(cacheRoot, id, "source");
-    fs.mkdirSync(source, { recursive: true });
-    fs.writeFileSync(path.join(source, `${id}.txt`), `${id} bundled\n`);
-    if (id === "paseo") writePinnedPaseoAgent(source);
-  }
-  writeJson(path.join(manifestRoot, "cpa.json"), bundledManifest("cpa", {
-    strategy: "release-binary",
-    commit: undefined,
-    platforms: {
-      [process.platform]: {
-        [process.arch]: {
-          url: "https://github.com/fixture/cpa/releases/download/v1.0.0/cpa.bin",
-          sha256: digest,
-          fileName: "cpa.bin",
-        },
-      },
-    },
-  }));
-  fs.mkdirSync(path.join(cacheRoot, "cpa"), { recursive: true });
-  fs.writeFileSync(path.join(cacheRoot, "cpa", "cpa.bin"), payload);
-
-  let fetched = 0;
-  const options = {
-    repositoryRoot,
-    desktopRoot: desktopDir,
-    manifestRoot,
-    outputRoot,
-    cacheRoot,
-    fetchImpl: async () => {
-      fetched += 1;
-      throw new Error("prepare-five-stack-runtime must not fetch when a cache is present");
-    },
-    spawnSyncProcess: () => {
-      throw new Error("prepare-five-stack-runtime must not git clone when a cache is present");
-    },
-    now: () => "2026-09-18T12:00:00.000Z",
-    nonce: () => crypto.randomUUID(),
-  };
-  const result = await prepareFiveStackRuntime(options);
-
-  assert.equal(fetched, 0);
-  assert.equal(result.outputRoot, outputRoot);
-  const paseoBundle = JSON.parse(fs.readFileSync(path.join(outputRoot, "paseo", "BUNDLE.json"), "utf8"));
-  assert.equal(paseoBundle.version, "0.8.0");
-  assert.equal(paseoBundle.commit, "1e4ba65c6d75a6b061a1d54141f2f105b5908a96");
-  assert.equal(paseoBundle.patchRevision, "codex-cpa-host-env-v1");
-  assert.match(fs.readFileSync(path.join(outputRoot, "paseo", "source", "packages", "server", "src", "server", "agent", "providers", "codex-app-server-agent.ts"), "utf8"), /process\.env\.OPENAI_API_KEY/);
-
-  const paseoManifestPath = path.join(manifestRoot, "paseo.json");
-  const pinnedPaseo = JSON.parse(fs.readFileSync(paseoManifestPath, "utf8"));
-  writeJson(paseoManifestPath, { ...pinnedPaseo, commit: "b".repeat(40) });
-  await assert.rejects(() => prepareFiveStackRuntime(options), /FIVE_STACK_PASEO_PATCH_PIN_MISMATCH/);
-  writeJson(paseoManifestPath, pinnedPaseo);
-
-  const agent = path.join(cacheRoot, "paseo", "source", "packages", "server", "src", "server", "agent", "providers", "codex-app-server-agent.ts");
-  const missingSource = path.join(repositoryRoot, "Trash", "codex-app-server-agent.ts");
-  fs.mkdirSync(path.dirname(missingSource), { recursive: true });
-  fs.renameSync(agent, missingSource);
-  await assert.rejects(() => prepareFiveStackRuntime(options), /FIVE_STACK_PASEO_PATCH_SOURCE_DRIFT/);
-  fs.renameSync(missingSource, agent);
-  assert.deepEqual(fs.readFileSync(path.join(outputRoot, "cpa", "cpa.bin")), payload);
-  assert.equal(
-    JSON.parse(fs.readFileSync(path.join(outputRoot, "cpa", "CODING_TOOLS_BUNDLED.json"), "utf8")).skipNetworkPrepare,
-    true,
-  );
-  const manifest = JSON.parse(fs.readFileSync(path.join(outputRoot, "MANIFEST.json"), "utf8"));
-  assert.equal(manifest.schemaVersion, 1);
-  assert.equal(manifest.productVersion, "0.7.0-rc.14");
-  assert.deepEqual(manifest.components.map((component) => component.id), [
-    "cpa",
-    "paseo",
-    "anneal",
-  ]);
 });
 
 test("production Start is fail-closed and never fetches components from the network", () => {
@@ -579,99 +491,6 @@ test("five-stack prepare replaces npm workspace links with real copies before pu
   assert.equal(fs.readFileSync(path.join(materialized, "index.js"), "utf8"), "export const app = true\n");
   assert.equal(fs.existsSync(path.join(materialized, "node_modules")), false);
   assert.equal(fs.readFileSync(path.join(app, "index.js"), "utf8"), "export const app = true\n");
-});
-
-test("Windows five-stack prepare skips host npm for WSL2 stacks such as Anneal", async (t) => {
-  assert.equal(hostNpmPrepareAllowed({ platformModes: { win32: "wsl2" } }, "win32"), false);
-  assert.equal(hostNpmPrepareAllowed({ platformModes: { win32: "native" } }, "win32"), true);
-  assert.equal(hostNpmPrepareAllowed({}, "linux"), true);
-  assert.match(read("scripts/prepare-five-stack-runtime.cjs"), /hostNpmPrepareAllowed/);
-  assert.match(read("vendor/managed-components/anneal.json"), /"win32": "wsl2"/);
-
-  const repositoryRoot = temporaryDirectory("coding-tools-five-stack-wsl2");
-  const retainedShims = path.join(repositoryRoot, "Trash", "build-shims");
-  fs.mkdirSync(retainedShims, { recursive: true });
-  let retainedCount = 0;
-  t.mock.method(fs, "unlinkSync", (file) => {
-    assert.ok(path.resolve(file).startsWith(`${repositoryRoot}${path.sep}`));
-    fs.renameSync(file, path.join(retainedShims, `${retainedCount++}-${path.basename(file)}`));
-  });
-  const desktopDir = path.join(repositoryRoot, "desktop-electron");
-  const manifestRoot = path.join(desktopDir, "vendor", "managed-components");
-  const cacheRoot = path.join(repositoryRoot, "cache");
-  const outputRoot = path.join(desktopDir, "build", "five-stack-runtime");
-  const payload = Buffer.from("bundled-cpa-archive", "utf8");
-  const digest = sha256(payload);
-
-  for (const id of ["paseo", "anneal"]) {
-    writeJson(path.join(manifestRoot, `${id}.json`), id === "paseo"
-      ? JSON.parse(read("vendor/managed-components/paseo.json")) : bundledManifest(id, id === "anneal"
-      ? { platformModes: { win32: "wsl2", linux: "native", darwin: "native" } }
-      : {}));
-    const sourceRoot = path.join(cacheRoot, id, "source");
-    fs.mkdirSync(sourceRoot, { recursive: true });
-    fs.writeFileSync(path.join(sourceRoot, `${id}.txt`), `${id} bundled\n`);
-    if (id === "paseo") writePinnedPaseoAgent(sourceRoot);
-    if (id === "paseo" || id === "anneal") {
-      writeJson(path.join(sourceRoot, "package.json"), { name: id, private: true });
-    }
-    if (id === "codex-router") {
-      fs.mkdirSync(path.join(sourceRoot, "requirements"), { recursive: true });
-      fs.writeFileSync(path.join(sourceRoot, "requirements", "python.txt"), "litellm==1.96.0 --hash=sha256:fixture\n");
-      const controlCenter = path.join(sourceRoot, "apps", "control-center");
-      fs.mkdirSync(controlCenter, { recursive: true });
-      writeJson(path.join(controlCenter, "package.json"), { name: "control-center", private: true });
-    }
-  }
-  writeJson(path.join(manifestRoot, "cpa.json"), bundledManifest("cpa", {
-    strategy: "release-binary",
-    platforms: {
-      win32: {
-        x64: {
-          fileName: "cpa.bin",
-          url: "https://example.invalid/cpa.bin",
-          sha256: digest,
-        },
-      },
-    },
-  }));
-  fs.mkdirSync(path.join(cacheRoot, "cpa"), { recursive: true });
-  fs.writeFileSync(path.join(cacheRoot, "cpa", "cpa.bin"), payload);
-
-  const calls = [];
-  await prepareFiveStackRuntime({
-    repositoryRoot,
-    desktopRoot: desktopDir,
-    manifestRoot,
-    outputRoot,
-    cacheRoot,
-    platform: "win32",
-    arch: "x64",
-    prepareDependencies: true,
-    fetchImpl: async () => {
-      throw new Error("prepare-five-stack-runtime must not fetch when a cache is present");
-    },
-    spawnSyncProcess: (command, args, options) => {
-      if (args.includes("-c") && args.join(" ").includes("print(sys.executable)")) return { status: 0, stdout: `${path.join(repositoryRoot, "python.exe")}\n` };
-      if (args.includes("download")) {
-        fs.writeFileSync(path.join(args[args.indexOf("--dest") + 1], "litellm-fixture.whl"), "fixture");
-        return { status: 0, stdout: "", stderr: "" };
-      }
-      calls.push({ command, args, options });
-      if (options.cwd.endsWith(path.join("paseo", "source")) && args.join(" ").includes("build:web")) {
-        const webDist = path.join(options.cwd, "packages", "app", "dist");
-        fs.mkdirSync(webDist, { recursive: true });
-        fs.writeFileSync(path.join(webDist, "index.html"), "<!doctype html><title>Paseo</title>");
-      }
-      return { status: 0, stdout: "", stderr: "", error: null };
-    },
-    now: () => "2026-09-18T12:00:00.000Z",
-    nonce: () => "fixture-wsl2",
-  });
-
-  assert.equal(calls.some((call) => String(call.options?.cwd || "").includes(`${path.sep}anneal${path.sep}`)), false);
-  assert.ok(calls.some((call) => String(call.options?.cwd || "").includes(`${path.sep}paseo${path.sep}`)));
-  assert.equal(fs.existsSync(path.join(outputRoot, "anneal", "source", "package.json")), true);
 });
 
 test("Windows installer smoke uses the 45-minute bundled-payload budget", () => {

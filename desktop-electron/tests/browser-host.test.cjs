@@ -1016,10 +1016,12 @@ test("failed private-transfer cleanup also discards an otherwise imported passke
 
 test("launcher quit remains gated through an active embedded-browser operation", () => {
   const source = fs.readFileSync(require.resolve("../electron/main.cjs"), "utf8");
-  assert.match(
-    source,
-    /runtimeHost\?\.currentOperation\(\) \|\| browserHost\?\.currentOperation\(\)/,
-  );
+  const start = source.indexOf("async function requestQuit(");
+  assert.ok(start >= 0, "requestQuit must exist");
+  const quit = source.slice(start);
+  // An active browser operation, then an active runtime operation, each refuses the quit.
+  assert.match(quit, /const browserOperation = browserHost\?\.currentOperation\(\);\s*if \(browserOperation\) \{\s*throw new Error/);
+  assert.match(quit, /const runtimeOperation = runtimeHost\?\.currentOperation\(\);\s*if \(runtimeOperation\) \{\s*throw new Error/);
 });
 
 test("logout clears only the owned ChatGPT session and returns to the sign-in surface", async () => {

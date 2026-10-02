@@ -101,6 +101,8 @@
 .ao-canvas-wires { position: absolute; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 .ao-canvas-wires path { fill: none; stroke: var(--color-text-secondary); stroke-opacity: .4; stroke-width: 1.5; }
 .ao-canvas-wires path.is-running { stroke: var(--ao-green); stroke-opacity: .9; stroke-dasharray: 8 6; animation: ao-wire-flow 1.1s linear infinite; }
+.ao-canvas-wires path.ao-wire-hit { stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
+.ao-canvas-wires path.ao-wire-hit:hover { stroke: var(--ao-red); stroke-opacity: .35; }
 @keyframes ao-wire-flow { to { stroke-dashoffset: -28; } }
 .ao-canvas-card { position: absolute; top: 0; left: 0; width: 212px; min-height: 76px; border-radius: 10px; border: 1px solid rgb(255 255 255 / 10%); background: var(--color-bg-secondary); box-shadow: 0 1px 2px rgb(0 0 0 / 25%); }
 .ao-canvas-card.is-selected, .ao-canvas-card.is-target { outline: 2px solid var(--ao-blue); outline-offset: 2px; }

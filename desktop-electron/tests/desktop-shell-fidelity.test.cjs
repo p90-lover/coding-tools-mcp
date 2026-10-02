@@ -17,8 +17,6 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(app, /SidebarGroup label=\{copy\.configuration\}/);
   assert.match(app, /SidebarGroup label=\{copy\.runtime\}/);
   assert.match(app, /<details className="sidebar-more"/);
-  assert.match(app, /copy\.paseoOrchestrator/);
-  assert.match(app, /copy\.annealTasks/);
   assert.match(app, /copy\.networkProxy/);
   assert.match(app, /setSidebarState\(\{ open, width \}\)/);
   assert.match(app, /className="sidebar-resize"/);
@@ -44,7 +42,17 @@ test("the MCP wizard matches the bundled upstream surface and keeps live tools s
     return source.slice(start, end).replaceAll("\r\n", "\n");
   };
 
-  assert.equal(extract(app, "McpSurface", "ActivitySurface"), extract(upstream, "McpSurface", "ActivitySurface"));
+  // Coding Tools adds an automatic connector-creation action to the upstream wizard. Every upstream
+  // line must still be present, in order; only additions are allowed.
+  const ours = extract(app, "McpSurface", "ActivitySurface").split("\n");
+  const theirs = extract(upstream, "McpSurface", "ActivitySurface").split("\n");
+  let at = 0;
+  for (const line of theirs) {
+    while (at < ours.length && ours[at] !== line) at += 1;
+    assert.ok(at < ours.length, `upstream McpSurface line missing or reordered: ${line.trim()}`);
+    at += 1;
+  }
+  assert.match(extract(app, "McpSurface", "ActivitySurface"), /createMcpConnector/);
   assert.match(app, /function InstantMcpToolsSurface[\s\S]*?<WorkspacePanel/);
   assert.match(app, /surface === "instant-mcp"/);
 });

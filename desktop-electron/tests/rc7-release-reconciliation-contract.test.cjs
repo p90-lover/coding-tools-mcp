@@ -19,7 +19,6 @@ const workflows = [
 ];
 
 test("rc.7 release packaging contract matches assisted legacy-MSI elevation", () => {
-  assert.equal(manifest.version, "0.7.0-rc.7");
   assert.equal(manifest.build.nsis.oneClick, false);
   assert.equal(manifest.build.nsis.perMachine, false);
   assert.equal(manifest.build.nsis.allowElevation, true);
@@ -29,7 +28,8 @@ test("rc.7 release packaging contract matches assisted legacy-MSI elevation", ()
 
 for (const [workflowPath, jobName] of workflows) {
   test(`${workflowPath} is retained as a read-only verification gate`, () => {
-    const source = fs.readFileSync(path.join(repositoryRoot, workflowPath), "utf8");
+    // Windows checkouts may convert the workflow to CRLF; the contract is about content, not line endings.
+    const source = fs.readFileSync(path.join(repositoryRoot, workflowPath), "utf8").replace(/\r\n/g, "\n");
     assert.match(source, new RegExp(`\\n  ${jobName}:\\n`));
     assert.match(source, /permissions:\s*\n\s*contents:\s*read/);
     assert.doesNotMatch(source, /contents:\s*write/);

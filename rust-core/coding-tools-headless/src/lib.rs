@@ -1252,7 +1252,10 @@ mod workspace_auth_tests {
         assert!(saved.contains("base_url = \"http://127.0.0.1:8317/v1\""));
         assert!(saved.contains("env_key = \"CODING_TOOLS_AO_CPA_KEY\""));
         assert!(!saved.contains("SENTINEL_KEY_DO_NOT_LOG"));
-        assert!(saved.contains("[features]\nmulti_agent = false"), "cards must not spawn Codex sub-agents");
+        assert!(
+            saved.contains("[features]\nmulti_agent = false"),
+            "cards must not spawn Codex sub-agents"
+        );
         prepare_ao_cpa_home(&home, &app_data).unwrap();
         assert_eq!(fs::read_to_string(&config).unwrap(), saved);
         // A card home from before sub-agents were switched off is upgraded once, not refused.
@@ -1281,11 +1284,25 @@ mod workspace_auth_tests {
         assert!(config.contains("env_key = \"CODING_TOOLS_AO_WEB_KEY\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:17841/v1\""));
         assert!(!config.contains("SENTINEL_KEY_DO_NOT_LOG"));
-        assert!(config.ends_with("[features]\nmulti_agent = false\n"), "cards must not spawn Codex sub-agents");
+        assert!(
+            config.ends_with("[features]\nmulti_agent = false\n"),
+            "cards must not spawn Codex sub-agents"
+        );
         let legacy = config.trim_end_matches("\n[features]\nmulti_agent = false\n");
         fs::write(home.join("config.toml"), legacy).unwrap();
-        prepare_ao_web_home(&home, &app_data, "http://127.0.0.1:17841/v1", &catalog, "chatgpt-web/high").unwrap();
-        assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), config, "the previous config is upgraded once");
+        prepare_ao_web_home(
+            &home,
+            &app_data,
+            "http://127.0.0.1:17841/v1",
+            &catalog,
+            "chatgpt-web/high",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            config,
+            "the previous config is upgraded once"
+        );
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(
                 &fs::read(home.join("models.json")).unwrap()
@@ -2352,7 +2369,11 @@ supports_websockets = false\n",
     let mut upgrade_config = false;
     for (path, expected, legacy) in [
         (&catalog_path, catalog_bytes.as_slice(), None),
-        (&config_path, config_bytes.as_bytes(), Some(legacy_config_bytes.as_bytes())),
+        (
+            &config_path,
+            config_bytes.as_bytes(),
+            Some(legacy_config_bytes.as_bytes()),
+        ),
     ] {
         if !path.exists() {
             continue;
@@ -3165,7 +3186,11 @@ fn ao_external_node(
 ) -> Result<integrations::ao::Node, Response> {
     // Any role (orchestrator, worker or reviewer) may run on an AO harness.
     match ao_target(state, workspace_id, run_id, node_id) {
-        Ok((_root, node, _cancelled)) if integrations::ao::external_harness(&node.route).is_some() => Ok(node),
+        Ok((_root, node, _cancelled))
+            if integrations::ao::external_harness(&node.route).is_some() =>
+        {
+            Ok(node)
+        }
         _ => Err(json_error(
             StatusCode::BAD_REQUEST,
             "AO_EXTERNAL_SCOPE_FAILED",
@@ -3306,7 +3331,11 @@ async fn ao_external_terminal(
     if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
         return response;
     }
-    let (workspace_id, run_id, node_id) = (body.workspace_id.clone(), body.run_id.clone(), body.node_id.clone());
+    let (workspace_id, run_id, node_id) = (
+        body.workspace_id.clone(),
+        body.run_id.clone(),
+        body.node_id.clone(),
+    );
     let saved = tokio::task::spawn_blocking(move || {
         coding_tools_core::data::DataStore::update_file(|data| {
             integrations::ao::record_terminal(
@@ -3326,9 +3355,15 @@ async fn ao_external_terminal(
     .await;
     match saved {
         Ok(Ok(mut run)) => {
-            let receipt = run.nodes.iter().find(|node| node.id == node_id).and_then(|node| node.receipt.clone());
+            let receipt = run
+                .nodes
+                .iter()
+                .find(|node| node.id == node_id)
+                .and_then(|node| node.receipt.clone());
             // A reviewer on an AO harness sends work back exactly like a Native Codex reviewer.
-            if let Some(reworked) = receipt.as_ref().and_then(|receipt| queue_rework_after_review(&workspace_id, &run_id, &node_id, receipt)) {
+            if let Some(reworked) = receipt.as_ref().and_then(|receipt| {
+                queue_rework_after_review(&workspace_id, &run_id, &node_id, receipt)
+            }) {
                 run = reworked;
             }
             Json(json!({"ok":true,"run":run,"receipt":receipt})).into_response()
@@ -3352,7 +3387,14 @@ fn queue_rework_after_review(
         return None;
     }
     coding_tools_core::data::DataStore::update_file(|data| {
-        integrations::ao_team::queue_rework(data, workspace_id, run_id, node_id, &receipt.request_key, now_ms())
+        integrations::ao_team::queue_rework(
+            data,
+            workspace_id,
+            run_id,
+            node_id,
+            &receipt.request_key,
+            now_ms(),
+        )
     })
     .ok()
     .flatten()
@@ -3373,19 +3415,44 @@ async fn ao_harness_approval(
     if let Some(reason) = body.approver_reason.as_deref() {
         // The command approver answers within the mission's own grant; the decision is logged
         // on the card, and allowing needs the approver's auto-decide setting.
-        let (workspace_id, run_id, node_id) = (body.workspace_id.clone(), body.run_id.clone(), body.node_id.clone());
-        let (allow, reason, request) = (body.allow, reason.to_owned(), body.approver_request.clone().unwrap_or_default());
+        let (workspace_id, run_id, node_id) = (
+            body.workspace_id.clone(),
+            body.run_id.clone(),
+            body.node_id.clone(),
+        );
+        let (allow, reason, request) = (
+            body.allow,
+            reason.to_owned(),
+            body.approver_request.clone().unwrap_or_default(),
+        );
         let recorded = tokio::task::spawn_blocking(move || {
             coding_tools_core::data::DataStore::update_file(|data| {
-                integrations::ao::record_approver_decision(data, &workspace_id, &run_id, &node_id, allow, &reason, &request, now_ms())
+                integrations::ao::record_approver_decision(
+                    data,
+                    &workspace_id,
+                    &run_id,
+                    &node_id,
+                    allow,
+                    &reason,
+                    &request,
+                    now_ms(),
+                )
             })
             .map_err(text_error)
         })
         .await;
         match recorded {
             Ok(Ok(())) => {}
-            Ok(Err(message)) => return json_error(StatusCode::FORBIDDEN, "AO_APPROVER_NOT_ALLOWED", message),
-            Err(_) => return json_error(StatusCode::CONFLICT, "AO_APPROVER_UNKNOWN", "The approver decision could not be saved"),
+            Ok(Err(message)) => {
+                return json_error(StatusCode::FORBIDDEN, "AO_APPROVER_NOT_ALLOWED", message)
+            }
+            Err(_) => {
+                return json_error(
+                    StatusCode::CONFLICT,
+                    "AO_APPROVER_UNKNOWN",
+                    "The approver decision could not be saved",
+                )
+            }
         }
     } else if !body.confirm || !local_ui_authorized(&headers, &state) {
         return json_error(

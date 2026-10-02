@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 fn fail(message: &str) -> AppError {
     AppError::Message(message.into())
@@ -146,6 +146,10 @@ pub struct Run {
     /// Each sub-reviewer's part of the review, keyed by card id; parsed from the split pass.
     #[serde(default)]
     pub review_parts: BTreeMap<String, ReviewPart>,
+    /// Worker cards that run again once their current turn finishes: work handed over from a
+    /// removed card to a busy worker waits here instead of interrupting it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rerun_after: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +306,11 @@ pub enum GraphChange {
         node_id: String,
         parents: Vec<String>,
     },
+    /// Removes a card (never the orchestrator). Its children take over its links, and a worker's
+    /// task is handed to another worker: a linked one first, an idle one before a busy one.
+    RemoveNode {
+        node_id: String,
+    },
 }
 
 pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
@@ -429,7 +438,7 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
             }
         }
     }
-    let (Some(planner), Some(_)) = (planner, reviewer) else {
+    let (Some(_), Some(_)) = (planner, reviewer) else {
         return Err(fail("AO requires a planner and reviewer"));
     };
     if workers.is_empty() {
@@ -454,6 +463,13 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         ));
     }
     if run
+        .rerun_after
+        .iter()
+        .any(|id| !workers.contains(&id.as_str()))
+    {
+        return Err(fail("AO rerun queue names a card that is not a worker"));
+    }
+    if run
         .assignments
         .iter()
         .any(|(id, item)| !workers.contains(&id.as_str()) || !assignment_valid(item))
@@ -476,25 +492,21 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         }) {
             return Err(fail("AO has a duplicate, self, or foreign dependency"));
         }
+        // Links are free: the planner is the only card without inputs (so every card is reached
+        // from it), a reviewer reviews whatever links into it, and a sub-reviewer still hangs
+        // off the split pass that assigns its part.
         let depends_on = |id: &str| node.parents.iter().any(|parent| parent == id);
         let wired = match node.role {
             Role::Planner => true,
-            Role::Approver => node.parents.len() == 1 && depends_on(planner),
-            Role::Worker => depends_on(planner) && approver.is_none_or(&depends_on),
-            Role::ReviewSplit => workers.iter().all(|worker| depends_on(worker)),
             Role::SubReviewer => split.is_some_and(&depends_on),
-            Role::Reviewer if sub_reviewers.is_empty() => {
-                workers.iter().all(|worker| depends_on(worker))
-            }
-            Role::Reviewer => sub_reviewers.iter().all(|sub| depends_on(sub)),
+            _ => !node.parents.is_empty(),
         };
         if !wired {
             return Err(fail(match node.role {
-                Role::Worker => "AO worker must depend on its planner and command approver",
-                Role::Approver => "AO command approver must depend only on the planner",
-                Role::ReviewSplit => "AO review split must depend on every worker",
-                Role::SubReviewer => "AO sub-reviewer must depend on the main reviewer's split pass",
-                _ => "AO reviewer must depend on every worker, or on every sub-reviewer when there are any",
+                Role::SubReviewer => {
+                    "AO sub-reviewer must depend on the main reviewer's split pass"
+                }
+                _ => "AO card needs at least one link; only the orchestrator starts on its own",
             }));
         }
         // Any role may run on any harness: WebGPT or a CPA model on Native Codex, or an AO harness.
@@ -1200,6 +1212,130 @@ pub fn create(data: &mut AppData, expected_board_revision: u64, mut run: Run) ->
     Ok(run)
 }
 
+/// Stops a card: its current attempt moves into its history and it waits to run again.
+fn interrupt(node: &mut Node) {
+    if let Some(receipt) = node.receipt.take() {
+        node.history.push(receipt);
+    }
+    if node.history.len() > HISTORY_LIMIT {
+        let excess = node.history.len() - HISTORY_LIMIT;
+        node.history.drain(..excess);
+    }
+    node.request_key = None;
+    node.state = State::Pending;
+}
+
+fn planner_id(run: &Run) -> AppResult<String> {
+    run.nodes
+        .iter()
+        .find(|node| node.role == Role::Planner)
+        .map(|node| node.id.clone())
+        .ok_or_else(|| fail("AO orchestrator is missing"))
+}
+
+/// Removes a card. Its children inherit its links (the orchestrator when it had none), and a
+/// worker's task goes to another worker: a linked one first, an idle one before a busy one. A
+/// finished worker runs again with the extra task; a busy one runs it after its current turn.
+fn remove_node(run: &mut Run, node_id: &str) -> AppResult<()> {
+    let index = run
+        .nodes
+        .iter()
+        .position(|node| node.id == node_id)
+        .ok_or_else(|| fail("AO node not found"))?;
+    if run.nodes[index].role == Role::Planner {
+        return Err(fail("The orchestrator cannot be removed"));
+    }
+    let removed = run.nodes.remove(index);
+    let planner = planner_id(run)?;
+    for node in &mut run.nodes {
+        if let Some(at) = node.parents.iter().position(|parent| parent == node_id) {
+            node.parents.remove(at);
+            for parent in &removed.parents {
+                if parent != &node.id && !node.parents.contains(parent) {
+                    node.parents.push(parent.clone());
+                }
+            }
+            if node.parents.is_empty() && node.role != Role::Planner {
+                node.parents.push(planner.clone());
+            }
+        }
+    }
+    run.rerun_after.remove(node_id);
+    if removed.role != Role::Worker {
+        return Ok(());
+    }
+    // Linked = a worker the removed card depended on, or one that depended on it.
+    let linked = |node: &Node| {
+        removed.parents.contains(&node.id)
+            || node
+                .parents
+                .iter()
+                .any(|parent| removed.parents.contains(parent) && parent != &planner)
+    };
+    let busy = |node: &Node| matches!(node.state, State::Reserved | State::Running);
+    let mut candidates: Vec<&Node> = run
+        .nodes
+        .iter()
+        .filter(|node| node.role == Role::Worker)
+        .collect();
+    if candidates.is_empty() {
+        return Err(fail("AO requires at least one worker"));
+    }
+    // Idle before busy, then linked before unlinked; the sort is stable, so graph order breaks ties.
+    candidates.sort_by_key(|node| (busy(node), !linked(node)));
+    let target = candidates[0].id.clone();
+    for part in run.review_parts.values_mut() {
+        if let Some(at) = part.workers.iter().position(|worker| worker == node_id) {
+            part.workers.remove(at);
+            if !part.workers.contains(&target) {
+                part.workers.push(target.clone());
+            }
+        }
+    }
+    let Some(task) = run.assignments.remove(node_id) else {
+        return Ok(());
+    };
+    let merged = match run.assignments.remove(&target) {
+        Some(mut own) => {
+            own.task = format!(
+                "{}
+
+Also, handed over from {}: {}",
+                own.task, removed.id, task.task
+            )
+            .chars()
+            .take(4_000)
+            .collect();
+            if !task.acceptance.is_empty() {
+                own.acceptance = format!(
+                    "{}
+{}",
+                    own.acceptance, task.acceptance
+                )
+                .chars()
+                .take(2_000)
+                .collect();
+            }
+            own
+        }
+        None => task,
+    };
+    run.assignments.insert(target.clone(), merged);
+    let node = run
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == target)
+        .expect("target chosen from these nodes");
+    match node.state {
+        State::Reserved | State::Running => {
+            run.rerun_after.insert(target);
+        }
+        State::Finished | State::Held => interrupt(node),
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn update_graph(
     data: &mut AppData,
     workspace_id: &str,
@@ -1314,11 +1450,30 @@ pub fn update_graph(
                 .iter_mut()
                 .find(|node| node.id == node_id)
                 .ok_or_else(|| fail("AO node not found"))?;
-            if node.state != State::Pending {
-                return Err(fail("Active AO node cannot be rewired"));
+            if node.role == Role::Planner {
+                if !parents.is_empty() {
+                    return Err(fail(
+                        "The orchestrator starts the mission and takes no links",
+                    ));
+                }
+            } else {
+                if matches!(node.state, State::Reserved | State::Running | State::Held) {
+                    // Rewiring a working card stops it: the attempt is kept in its history and the
+                    // card runs again from its new links (a late result is ignored).
+                    interrupt(node);
+                }
+                node.parents = parents;
             }
-            node.parents = parents;
+            if node.parents.is_empty() && node.role != Role::Planner {
+                let planner = planner_id(&next)?;
+                next.nodes
+                    .iter_mut()
+                    .find(|node| node.id == node_id)
+                    .expect("node found above")
+                    .parents = vec![planner];
+            }
         }
+        GraphChange::RemoveNode { node_id } => remove_node(&mut next, &node_id)?,
     }
     validate(Some(data), &next)?;
     // Coordinates are presentation, not an expansion of the execution grant.
@@ -1493,6 +1648,19 @@ pub fn record_terminal(
         }
         _ => None,
     };
+    // A card stopped by a graph change keeps its old attempt in history; that turn's late result
+    // is ignored instead of failing the mission.
+    if run.nodes.iter().any(|node| {
+        node.id == node_id
+            && node.state != State::Running
+            && node
+                .history
+                .last()
+                .and_then(|receipt| receipt.thread_id.as_deref())
+                == Some(thread_id)
+    }) {
+        return Ok(run.clone());
+    }
     let node = run
         .nodes
         .iter_mut()
@@ -1541,6 +1709,12 @@ pub fn record_terminal(
             Some(Ok(Split::Review(parts))) => run.review_parts = parts,
             _ => {}
         }
+        // Work handed to this worker while it was busy runs now.
+        if run.rerun_after.remove(node_id) {
+            if let Some(node) = run.nodes.iter_mut().find(|node| node.id == node_id) {
+                interrupt(node);
+            }
+        }
     } else {
         if answer.is_some_and(|value| !value.trim().is_empty() && value.len() <= 12_000) {
             receipt.answer = answer.map(str::to_owned);
@@ -1579,9 +1753,7 @@ pub fn record_terminal(
 /// Records the command approver's decision on a running card's tool request, before it is
 /// answered. Only a mission whose background grant is valid and whose approver has approved
 /// the plan may decide this way; allowing also needs the approver's auto-decide setting.
-// One decision names its run, node and request plus the verdict; explicit parameters match
-// the other AO receipt recorders.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // Mirrors the headless approval request's fields one to one.
 pub fn record_approver_decision(
     data: &mut AppData,
     workspace_id: &str,
@@ -2569,5 +2741,251 @@ mod tests {
         assert!(prompt_for_node(&data, &rework, "tests")
             .unwrap()
             .contains("Prior review feedback"));
+    }
+
+    fn free_link_fixture(nodes: serde_json::Value) -> AppData {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aiTemp")
+            .canonicalize()
+            .unwrap();
+        let mut data: AppData = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),
+                "tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{
+                "id":"task","workspace_id":"qa","title":"Test AO",
+                "description":"Give a short answer","state":"pending","step":0,
+                "created_at":0,"updated_at":0,"clauses":[],"evidence":[]
+            }]}
+        }))
+        .unwrap();
+        let run: Run = serde_json::from_value(json!({
+            "id":"run","workspace_id":"qa","project_id":"project","revision":0,"max_review_rounds":2,
+            "nodes":nodes
+        }))
+        .unwrap();
+        create(&mut data, 1, run).unwrap();
+        data
+    }
+
+    fn free_link_node(id: &str, role: &str, parents: &[&str]) -> serde_json::Value {
+        let route = if role == "worker" {
+            json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
+                "account_id":"shared-cpa-pool","model":"gemini-3.8-flash-high","permission_profile":":read-only"})
+        } else {
+            json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+                "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"})
+        };
+        json!({"id":id,"task_id":"task","role":role,"parents":parents,"x":0,"y":0,"state":"pending","route":route})
+    }
+
+    #[test]
+    fn ao_links_are_free_but_the_orchestrator_stays_the_only_start() {
+        // A chain the old fixed shape refused: the reviewer reviews only the last worker.
+        let mut data = free_link_fixture(json!([
+            free_link_node("planner", "planner", &[]),
+            free_link_node("w1", "worker", &["planner"]),
+            free_link_node("w2", "worker", &["w1"]),
+            free_link_node("reviewer", "reviewer", &["w2"]),
+        ]));
+        // Unlinking every input of a card leaves it waiting on the orchestrator.
+        let unlinked = update_graph(
+            &mut data,
+            "qa",
+            "run",
+            1,
+            GraphChange::SetParents {
+                node_id: "reviewer".into(),
+                parents: vec![],
+            },
+        )
+        .unwrap();
+        let reviewer = unlinked
+            .nodes
+            .iter()
+            .find(|node| node.id == "reviewer")
+            .unwrap();
+        assert_eq!(reviewer.parents, vec!["planner".to_string()]);
+        // The orchestrator never takes links, and cycles are still refused.
+        assert!(update_graph(
+            &mut data,
+            "qa",
+            "run",
+            unlinked.revision,
+            GraphChange::SetParents {
+                node_id: "planner".into(),
+                parents: vec!["w1".into()]
+            }
+        )
+        .is_err());
+        assert!(update_graph(
+            &mut data,
+            "qa",
+            "run",
+            unlinked.revision,
+            GraphChange::SetParents {
+                node_id: "w1".into(),
+                parents: vec!["w2".into()]
+            }
+        )
+        .is_err());
+        assert!(update_graph(
+            &mut data,
+            "qa",
+            "run",
+            unlinked.revision,
+            GraphChange::RemoveNode {
+                node_id: "planner".into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ao_removing_a_worker_hands_its_links_and_task_to_another_worker() {
+        let mut data = free_link_fixture(json!([
+            free_link_node("planner", "planner", &[]),
+            free_link_node("w1", "worker", &["planner"]),
+            free_link_node("w2", "worker", &["w1"]),
+            free_link_node("reviewer", "reviewer", &["w2"]),
+        ]));
+        data.ao_runs[0].assignments.insert(
+            "w1".into(),
+            Assignment {
+                task: "Fix the parser".into(),
+                acceptance: "tests pass".into(),
+            },
+        );
+        data.ao_runs[0].assignments.insert(
+            "w2".into(),
+            Assignment {
+                task: "Update the docs".into(),
+                acceptance: String::new(),
+            },
+        );
+        let revision = data.ao_runs[0].revision;
+        let removed = update_graph(
+            &mut data,
+            "qa",
+            "run",
+            revision,
+            GraphChange::RemoveNode {
+                node_id: "w1".into(),
+            },
+        )
+        .unwrap();
+        assert!(removed.nodes.iter().all(|node| node.id != "w1"));
+        let w2 = removed.nodes.iter().find(|node| node.id == "w2").unwrap();
+        assert_eq!(
+            w2.parents,
+            vec!["planner".to_string()],
+            "w2 inherits w1's links"
+        );
+        let handed = &removed.assignments["w2"];
+        assert!(handed.task.starts_with("Update the docs"));
+        assert!(handed.task.contains("handed over from w1: Fix the parser"));
+        assert!(handed.acceptance.contains("tests pass"));
+        assert!(
+            removed.rerun_after.is_empty(),
+            "an idle worker takes the task at once"
+        );
+    }
+
+    #[test]
+    fn ao_a_busy_worker_queues_handed_over_work_and_a_rewired_card_stops() {
+        let mut data = free_link_fixture(json!([
+            free_link_node("planner", "planner", &[]),
+            free_link_node("w1", "worker", &["planner"]),
+            free_link_node("w2", "worker", &["planner"]),
+            free_link_node("reviewer", "reviewer", &["w1", "w2"]),
+        ]));
+        data.ao_runs[0].assignments.insert(
+            "w1".into(),
+            Assignment {
+                task: "Fix the parser".into(),
+                acceptance: String::new(),
+            },
+        );
+        // w2 is mid-turn on a native thread.
+        {
+            let w2 = data.ao_runs[0]
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == "w2")
+                .unwrap();
+            w2.state = State::Running;
+            w2.request_key = Some("key-2".into());
+            w2.receipt = Some(Receipt {
+                request_key: "key-2".into(),
+                status: "submitted".into(),
+                thread_id: Some("thread-2".into()),
+                turn_id: None,
+                answer: None,
+                verdict: None,
+                error: None,
+                settings: None,
+                route: w2.route.clone(),
+                approvals: vec![],
+            });
+        }
+        let revision = data.ao_runs[0].revision;
+        let removed = update_graph(
+            &mut data,
+            "qa",
+            "run",
+            revision,
+            GraphChange::RemoveNode {
+                node_id: "w1".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            removed.rerun_after.contains("w2"),
+            "the only worker is busy, so the task waits for it"
+        );
+        assert_eq!(
+            removed
+                .nodes
+                .iter()
+                .find(|node| node.id == "w2")
+                .unwrap()
+                .state,
+            State::Running
+        );
+        // Rewiring the busy card stops it; its old turn's late result is then ignored.
+        let rewired = update_graph(
+            &mut data,
+            "qa",
+            "run",
+            removed.revision,
+            GraphChange::SetParents {
+                node_id: "w2".into(),
+                parents: vec!["planner".into()],
+            },
+        )
+        .unwrap();
+        let w2 = rewired.nodes.iter().find(|node| node.id == "w2").unwrap();
+        assert_eq!(w2.state, State::Pending);
+        assert_eq!(
+            w2.history
+                .last()
+                .and_then(|receipt| receipt.thread_id.as_deref()),
+            Some("thread-2")
+        );
+        let late = record_terminal(
+            &mut data,
+            "qa",
+            "run",
+            "w2",
+            "thread-2",
+            Some("turn"),
+            Some("done"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            late.revision, rewired.revision,
+            "a stopped turn's result changes nothing"
+        );
     }
 }

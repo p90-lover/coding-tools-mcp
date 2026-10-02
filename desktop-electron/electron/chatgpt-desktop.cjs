@@ -627,7 +627,9 @@ function createChatGptDesktopHost({
         return;
       }
       if (everyone) closeIdleInstances();
-      if (shouldShow()) await placeNow();
+      // Enforce hidden as well as placed: the app can show its own window again (sign-in, update,
+      // a second launch) and it would then cover whichever page the user moved to.
+      await placeNow({ hideOthers: everyone });
     } catch (error) {
       logger?.warn?.("chatgpt_desktop.placement_failed", { message: error.message });
     } finally {
@@ -686,11 +688,13 @@ function createChatGptDesktopHost({
   // CPA accounts that can sign in start hidden in the background, so picking one is instant.
   // One queued job per account keeps the user's own clicks able to run in between.
 
+  // Only the account shown in the ChatGPT tab starts by itself; every other account starts when
+  // the user switches to it. Each copy costs about 1 GB and runs its own Codex sandbox setup, so
+  // pre-starting every account froze the machine and made those setups collide.
   function autoStartCandidates() {
     return cpaAccounts()
-      .filter((account) => !account.disabled && !instances.has(account.slotId)
-        && !(autoStartBackoff.get(account.slotId)?.until > Date.now()))
-      .sort((a, b) => Number(b.slotId === state.active) - Number(a.slotId === state.active));
+      .filter((account) => account.slotId === state.active && !account.disabled && !instances.has(account.slotId)
+        && !(autoStartBackoff.get(account.slotId)?.until > Date.now()));
   }
 
   function scheduleAutoStart() {
@@ -746,11 +750,19 @@ function createChatGptDesktopHost({
         lastError = error.message;
         packageInfo = undefined;
       });
-      // Re-adopt every account's instance that survived a Coding Tools restart.
+      // After a Coding Tools restart, keep the shown account's copy if it has a window; end every
+      // other surviving copy (including hidden ones that never opened a window), so restarts do
+      // not leave orphaned ChatGPT copies behind.
       if (packageInfo) {
         for (const account of accountList()) {
           const found = await findInstance(account.slotId).catch(() => null);
-          if (found?.hwnd) await adopt(found).catch(() => {});
+          if (!found) continue;
+          if (found.hwnd && account.slotId === state.active) {
+            await adopt(found).catch(() => {});
+          } else if (found.pid) {
+            await helper.call("kill-tree", { pid: found.pid }).catch(() => {});
+            logger?.info?.("chatgpt_desktop.orphan_closed", { slotId: account.slotId });
+          }
         }
       }
       watchAccounts();
