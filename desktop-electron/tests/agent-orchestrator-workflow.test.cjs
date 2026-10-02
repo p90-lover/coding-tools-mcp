@@ -729,6 +729,22 @@ test("Native Codex offers every WebGPT tier, Luna included, and any CPA pool mod
   assert.deepEqual((await offline.call("models", { harness: "codex-native" })).models, WEB);
 });
 
+test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA model", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => { throw new Error("no headless call expected"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gemini-3.8-flash-high" }, { id: "chatgpt-web/high" }, { id: "chatgpt-web/luna" }] }) }),
+    // AO's Codex agent reports WebGPT from the user's Codex config, but cannot run it.
+    aoHarness: { catalog: async () => [{ id: "codex", label: "Codex", installed: true, chat: true }], models: async () => [{ id: "gpt-5.5" }, { id: "chatgpt-web/high" }] },
+    confirm: async () => true,
+  });
+  assert.deepEqual((await workflow.call("harnesses")).harnesses.map((item) => [item.id, item.label]),
+    [["codex-native", "Native Codex"], ["ao:codex", "Codex"]]);
+  assert.deepEqual((await workflow.call("models", { harness: "ao:codex", workspaceId: "ws-1" })).models,
+    ["default", "gpt-5.5", "cpa/gemini-3.8-flash-high"]);
+  assert.ok((await workflow.call("models", { harness: "codex-native" })).models.includes("chatgpt-web/high"));
+});
+
 // A fake headless service holding one workspace's board, runs and team.
 function chatWorld({ runs = [], tasks = [] } = {}) {
   const state = { revision: 3, tasks: tasks.map((task) => ({ ...task })), runs, updates: [], edits: [] };

@@ -202,7 +202,7 @@ export function aoPreviewText(run: Pick<AoMission, "cancelled" | "nodes">, tasks
   return `${node.role}: ${task?.title ?? node.task_id}\n${task?.description ?? ""}`.trim();
 }
 
-const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Codex CLI", runnable: true, installed: true };
+const NATIVE_ENTRY: AoHarness = { id: NATIVE_HARNESS, label: "Native Codex", runnable: true, installed: true };
 
 export function AgentOrchestratorSurface({ language, setError }: {
   language: Language;
