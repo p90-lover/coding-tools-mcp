@@ -31,6 +31,7 @@ const SPECS = Object.freeze({
   observe: { readOnly: true, description: "Read and reconcile one reserved AO card without submitting another turn." },
   advance: { readOnly: false, description: "Run one ready AO card, or observe an active reservation, with local approval and no automatic replay." },
   start_run: { readOnly: false, description: "Validate the saved AO graph and grant its read-only background execution; tool approvals remain separate." },
+  restart_run: { readOnly: false, description: "Stop a stuck or settled mission (kept in history) and start a fresh run of the same task with the current team." },
   control_run: { readOnly: false, description: "Pause queued work, resume a paused mission, or stop only that mission's owned harnesses from the local GUI." },
   run_status: { readOnly: true, description: "Read background AO run progress and held state." },
   approve_harness: { readOnly: false, description: "Allow once or deny one visible AO-owned native tool request after focused local confirmation." },

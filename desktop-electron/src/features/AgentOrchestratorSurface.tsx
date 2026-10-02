@@ -418,7 +418,14 @@ export function AgentOrchestratorSurface({ language, setError }: {
         sessionStorage.setItem("coding-tools:ao:selection", selection.id);
         accepted = true;
         setSelectedRunId(selection.runId); setView("team");
-        if (["start", "resume"].includes(selection.intent)) {
+        if (selection.intent === "restart") {
+          // A fresh run of the same task; the board's old run stays in history.
+          await moduleCall("upstream_hide");
+          const result = await moduleCall("restart_run", { workspaceId, runId: selection.runId, ...executableArg() });
+          if (typeof result.runId === "string") setSelectedRunId(result.runId);
+          if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
+          if (!disposed) { setAutoStatus(String(result.status || "running")); await loadMissions(workspaceId); }
+        } else if (["start", "resume"].includes(selection.intent)) {
           await moduleCall("upstream_hide");
           const result = await moduleCall(selection.intent === "resume" ? "control_run" : "start_run", { workspaceId, runId: selection.runId, ...executableArg(), ...(selection.intent === "resume" ? { action: "resume" } : {}) });
           if (!disposed) { setAutoStatus(String(result.status || "running")); await loadMissions(workspaceId); }
@@ -595,6 +602,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
 
+  // Restart = a fresh run of the same task with the current team; the old run stays in history.
+  const restartRun = () => void run("restart-run", async () => {
+    if (!selectedRun) return;
+    const result = await moduleCall("restart_run", { workspaceId, runId: selectedRun.id, ...executableArg() });
+    if (result.cancelled) return;
+    if (typeof result.runId === "string") setSelectedRunId(result.runId);
+    if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
+    setAutoStatus(typeof result.status === "string" ? result.status : "running");
+    await loadMissions(workspaceId);
+  });
+
   const controlRun = (action: "pause" | "resume" | "stop") => void run(action, async () => {
     if (!selectedRun) return;
     await moduleCall("control_run", { workspaceId, runId: selectedRun.id, action, ...executableArg() });
@@ -710,6 +728,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
             : <ToolButton icon="play" label={copy.start} primary disabled={!canStart} onClick={startRun} />}
           <ToolButton icon="pause" label={copy.pause} disabled={!selectedRun || selectedRun.cancelled || selectedRun.paused || autoStatus !== "running" || Boolean(busy)} onClick={() => controlRun("pause")} />
           <ToolButton icon="stop" label={copy.stop} disabled={!selectedRun || selectedRun.cancelled || finished || Boolean(busy)} onClick={() => controlRun("stop")} />
+          <ToolButton icon="refresh" label="Restart mission" disabled={!selectedRun || autoStatus === "running" || Boolean(busy)} onClick={restartRun} />
         </div>
         <div className="ao-rail-tools">
           <ToolButton icon="refresh" label={copy.refresh} disabled={!workspaceId || Boolean(busy)} onClick={() => void run("refresh", async () => { modelCache.current.clear(); await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]); })} />

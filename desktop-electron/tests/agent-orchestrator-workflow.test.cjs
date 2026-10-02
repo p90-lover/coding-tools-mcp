@@ -1002,3 +1002,37 @@ test("a follow-up still waits while the chat's last run has a card working", asy
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "more" }), /still running/);
   assert.deepEqual(world.updates, []);
 });
+
+test("restart runs the same task again with the current team, stopping a stuck run first", async () => {
+  for (const [state, cancelsFirst] of [["finished", false], ["held", true]]) {
+    const world = chatWorld({
+      tasks: [{ id: "task-1", title: "Fix dots", description: "fix the email dots", state: "backlog", clauses: [] }],
+      runs: [{ id: "old-run", project_id: "task-1", workspace_id: "ws-1", revision: 5, cancelled: false,
+        nodes: [{ id: "lead", state: "finished" }, { id: "w1", state }] }],
+    });
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: world.requestHeadless,
+      findCodexExecutable: () => "C:/Codex/codex.exe",
+      resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    });
+    const restarted = await workflow.call("restart_run", { workspaceId: "ws-1", runId: "old-run" });
+    const expected = cancelsFirst ? ["cancel", "create_from_team"] : ["create_from_team"];
+    assert.deepEqual(world.updates.map((change) => change.operation), expected, state);
+    const created = world.updates.at(-1);
+    assert.equal(created.task_id, "task-1", state);
+    assert.equal(restarted.runId, created.run_id, state);
+    assert.notEqual(restarted.runId, "old-run", state);
+    assert.equal(restarted.status, "failed", "a failed start is reported, not thrown");
+  }
+});
+
+test("restart refuses while the mission has a card working", async () => {
+  const world = chatWorld({
+    tasks: [{ id: "task-1", title: "Fix dots", description: "x", state: "backlog", clauses: [] }],
+    runs: [{ id: "busy-run", project_id: "task-1", workspace_id: "ws-1", revision: 2, cancelled: false,
+      nodes: [{ id: "lead", state: "finished" }, { id: "w1", state: "running" }] }],
+  });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe" });
+  await assert.rejects(workflow.call("restart_run", { workspaceId: "ws-1", runId: "busy-run" }), /still running/);
+  assert.deepEqual(world.updates, []);
+});

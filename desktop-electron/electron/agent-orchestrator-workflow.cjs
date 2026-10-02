@@ -972,6 +972,54 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       change: { operation: "edit", id: taskId, title: clean(name, 240), description: detail.task.description } });
   }
 
+  // A previous run that is really working must finish or be stopped first. One that is stuck
+  // (a failed start left its cards pending, a held card, a pause) is stopped and kept in history,
+  // so an old task can always be continued or restarted.
+  async function retireOpenRuns(id, task, runsOfWorkspace) {
+    const open = runsOfWorkspace.filter((run) => run.project_id === task && !runSettled(run));
+    for (const run of open) {
+      const live = backgroundRuns.get(runKey(id, run.id));
+      const working = Boolean(live && (live.starting || live.driving || live.status === "running"))
+        || (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
+      if (working) throw new Error("This mission is still running; wait for it to finish or stop it first");
+    }
+    for (const run of open) {
+      await updateRun({ workspaceId: id, change: { operation: "cancel", run_id: run.id, expected_revision: run.revision } });
+    }
+  }
+
+  async function createTeamRun(id, task, team) {
+    const current = await board({ workspaceId: id });
+    const runId = randomUUID();
+    await updateRun({ workspaceId: id, change: {
+      operation: "create_from_team", run_id: runId, task_id: task,
+      expected_board_revision: current.revision, team_revision: team.revision,
+      worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
+    } });
+    return runId;
+  }
+
+  // Restart = a fresh run of the same task with the current team; the old run stays in history.
+  async function restartRun({ workspaceId, runId, executable } = {}) {
+    const id = clean(workspaceId, 128);
+    const previous = clean(runId, 80);
+    const selectedExecutable = codexExecutable(executable);
+    const saved = await runs({ workspaceId: id });
+    const mission = saved.runs.find((run) => run.id === previous && run.workspace_id === id);
+    if (!mission) throw new Error("AO run unavailable");
+    if (!mission.project_id) throw new Error("This mission has no task to restart");
+    const team = saved.team;
+    if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
+    await retireOpenRuns(id, mission.project_id, saved.runs);
+    const next = await createTeamRun(id, mission.project_id, team);
+    try {
+      const started = await startRun({ workspaceId: id, runId: next, executable: selectedExecutable });
+      return { ok: true, runId: next, status: started.status };
+    } catch (error) {
+      return { ok: true, runId: next, status: "failed", detail: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   async function chatSend({ workspaceId, taskId, title, message, executable } = {}) {
     const id = clean(workspaceId, 128);
     const text = clean(message, 8192, false);
@@ -984,18 +1032,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     let task;
     if (taskId) {
       task = clean(taskId, 128);
-      // A previous run that is really working must finish or be stopped first. One that is stuck
-      // (a failed start left its cards pending, a held card, a pause) is stopped here and kept
-      // in history, so the user can always continue an old chat.
-      const open = saved.runs.filter((run) => run.project_id === task && !runSettled(run));
-      for (const run of open) {
-        const live = backgroundRuns.get(runKey(id, run.id));
-        const working = Boolean(live && (live.starting || live.driving || live.status === "running"))
-          || (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
-        if (working) throw new Error("This chat is still running; wait for it to finish or stop it first");
-      }
-      for (const run of open) {
-        await updateRun({ workspaceId: id, change: { operation: "cancel", run_id: run.id, expected_revision: run.revision } });
+      try {
+        await retireOpenRuns(id, task, saved.runs);
+      } catch (error) {
+        if (/still running/.test(error?.message)) throw new Error("This chat is still running; wait for it to finish or stop it first");
+        throw error;
       }
       const detail = await board({ workspaceId: id, taskId: task });
       if (!detail.task) throw new Error("This chat's task no longer exists");
@@ -1015,13 +1056,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       task = added[0].id;
     }
 
-    const current = await board({ workspaceId: id });
-    const runId = randomUUID();
-    await updateRun({ workspaceId: id, change: {
-      operation: "create_from_team", run_id: runId, task_id: task,
-      expected_board_revision: current.revision, team_revision: team.revision,
-      worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
-    } });
+    const runId = await createTeamRun(id, task, team);
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
       const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
@@ -1049,6 +1084,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       case "observe": return observe(args);
       case "advance": return advance(args);
       case "start_run": return startRun(args);
+      case "restart_run": return restartRun(args);
       case "control_run": return controlRun(args);
       case "run_status": return runStatus(args);
       case "approve_harness": return approveAoHarness(args);
