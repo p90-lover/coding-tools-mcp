@@ -91,3 +91,22 @@ test("closing the AO gateway cancels a backend request stalled before response h
     await new Promise((resolve) => daemon.close(resolve));
   }
 });
+
+test("the AO harness list waits for fresh install checks and re-checks after a minute", async () => {
+  const { createAgentInventory } = require("../electron/agent-orchestrator-upstream.cjs");
+  let clock = 0;
+  const calls = [];
+  const fresh = { supported: [{ id: "codex" }, { id: "opencode" }], installed: [{ id: "codex" }, { id: "opencode" }] };
+  const partial = { supported: fresh.supported, installed: [{ id: "codex" }] };
+  const api = async (method, endpoint) => { calls.push(`${method} ${endpoint}`); return method === "POST" ? fresh : partial; };
+  const inventory = createAgentInventory(api, { now: () => clock, recheckMs: 60_000 });
+  assert.deepEqual(await inventory(), fresh, "the first list runs the checks instead of reading half-finished ones");
+  clock = 30_000;
+  assert.deepEqual(await inventory(), partial, "within a minute the cached list is read");
+  clock = 61_000;
+  await inventory();
+  assert.deepEqual(calls, ["POST /api/v1/agents/refresh", "GET /api/v1/agents", "POST /api/v1/agents/refresh"]);
+
+  const older = createAgentInventory(async (method) => { if (method === "POST") throw new Error("404"); return partial; });
+  assert.deepEqual(await older(), partial, "a daemon without refresh still answers the plain list");
+});
