@@ -102,6 +102,10 @@
         "to": "agent-orchestrator"
       },
       {
+        "from": "build/acp-runtime",
+        "to": "acp-runtime"
+      },
+      {
         "from": "build/package-resources",
         "to": "."
       },
