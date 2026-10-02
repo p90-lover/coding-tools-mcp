@@ -462,7 +462,11 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
             "AO review part is outside this mission's sub-reviewers or workers",
         ));
     }
-    if run.rerun_after.iter().any(|id| !workers.contains(&id.as_str())) {
+    if run
+        .rerun_after
+        .iter()
+        .any(|id| !workers.contains(&id.as_str()))
+    {
         return Err(fail("AO rerun queue names a card that is not a worker"));
     }
     if run
@@ -499,7 +503,9 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         };
         if !wired {
             return Err(fail(match node.role {
-                Role::SubReviewer => "AO sub-reviewer must depend on the main reviewer's split pass",
+                Role::SubReviewer => {
+                    "AO sub-reviewer must depend on the main reviewer's split pass"
+                }
                 _ => "AO card needs at least one link; only the orchestrator starts on its own",
             }));
         }
@@ -1260,10 +1266,18 @@ fn remove_node(run: &mut Run, node_id: &str) -> AppResult<()> {
     }
     // Linked = a worker the removed card depended on, or one that depended on it.
     let linked = |node: &Node| {
-        removed.parents.contains(&node.id) || node.parents.iter().any(|parent| removed.parents.contains(parent) && parent != &planner)
+        removed.parents.contains(&node.id)
+            || node
+                .parents
+                .iter()
+                .any(|parent| removed.parents.contains(parent) && parent != &planner)
     };
     let busy = |node: &Node| matches!(node.state, State::Reserved | State::Running);
-    let mut candidates: Vec<&Node> = run.nodes.iter().filter(|node| node.role == Role::Worker).collect();
+    let mut candidates: Vec<&Node> = run
+        .nodes
+        .iter()
+        .filter(|node| node.role == Role::Worker)
+        .collect();
     if candidates.is_empty() {
         return Err(fail("AO requires at least one worker"));
     }
@@ -1283,18 +1297,24 @@ fn remove_node(run: &mut Run, node_id: &str) -> AppResult<()> {
     };
     let merged = match run.assignments.remove(&target) {
         Some(mut own) => {
-            own.task = format!("{}
+            own.task = format!(
+                "{}
 
-Also, handed over from {}: {}", own.task, removed.id, task.task)
-                .chars()
-                .take(4_000)
-                .collect();
+Also, handed over from {}: {}",
+                own.task, removed.id, task.task
+            )
+            .chars()
+            .take(4_000)
+            .collect();
             if !task.acceptance.is_empty() {
-                own.acceptance = format!("{}
-{}", own.acceptance, task.acceptance)
-                    .chars()
-                    .take(2_000)
-                    .collect();
+                own.acceptance = format!(
+                    "{}
+{}",
+                    own.acceptance, task.acceptance
+                )
+                .chars()
+                .take(2_000)
+                .collect();
             }
             own
         }
@@ -1432,7 +1452,9 @@ pub fn update_graph(
                 .ok_or_else(|| fail("AO node not found"))?;
             if node.role == Role::Planner {
                 if !parents.is_empty() {
-                    return Err(fail("The orchestrator starts the mission and takes no links"));
+                    return Err(fail(
+                        "The orchestrator starts the mission and takes no links",
+                    ));
                 }
             } else {
                 if matches!(node.state, State::Reserved | State::Running | State::Held) {
@@ -1631,7 +1653,10 @@ pub fn record_terminal(
     if run.nodes.iter().any(|node| {
         node.id == node_id
             && node.state != State::Running
-            && node.history.last().and_then(|receipt| receipt.thread_id.as_deref())
+            && node
+                .history
+                .last()
+                .and_then(|receipt| receipt.thread_id.as_deref())
                 == Some(thread_id)
     }) {
         return Ok(run.clone());
@@ -2763,17 +2788,56 @@ mod tests {
             free_link_node("reviewer", "reviewer", &["w2"]),
         ]));
         // Unlinking every input of a card leaves it waiting on the orchestrator.
-        let unlinked = update_graph(&mut data, "qa", "run", 1, GraphChange::SetParents {
-            node_id: "reviewer".into(), parents: vec![] }).unwrap();
-        let reviewer = unlinked.nodes.iter().find(|node| node.id == "reviewer").unwrap();
+        let unlinked = update_graph(
+            &mut data,
+            "qa",
+            "run",
+            1,
+            GraphChange::SetParents {
+                node_id: "reviewer".into(),
+                parents: vec![],
+            },
+        )
+        .unwrap();
+        let reviewer = unlinked
+            .nodes
+            .iter()
+            .find(|node| node.id == "reviewer")
+            .unwrap();
         assert_eq!(reviewer.parents, vec!["planner".to_string()]);
         // The orchestrator never takes links, and cycles are still refused.
-        assert!(update_graph(&mut data, "qa", "run", unlinked.revision, GraphChange::SetParents {
-            node_id: "planner".into(), parents: vec!["w1".into()] }).is_err());
-        assert!(update_graph(&mut data, "qa", "run", unlinked.revision, GraphChange::SetParents {
-            node_id: "w1".into(), parents: vec!["w2".into()] }).is_err());
-        assert!(update_graph(&mut data, "qa", "run", unlinked.revision,
-            GraphChange::RemoveNode { node_id: "planner".into() }).is_err());
+        assert!(update_graph(
+            &mut data,
+            "qa",
+            "run",
+            unlinked.revision,
+            GraphChange::SetParents {
+                node_id: "planner".into(),
+                parents: vec!["w1".into()]
+            }
+        )
+        .is_err());
+        assert!(update_graph(
+            &mut data,
+            "qa",
+            "run",
+            unlinked.revision,
+            GraphChange::SetParents {
+                node_id: "w1".into(),
+                parents: vec!["w2".into()]
+            }
+        )
+        .is_err());
+        assert!(update_graph(
+            &mut data,
+            "qa",
+            "run",
+            unlinked.revision,
+            GraphChange::RemoveNode {
+                node_id: "planner".into()
+            }
+        )
+        .is_err());
     }
 
     #[test]
@@ -2784,19 +2848,46 @@ mod tests {
             free_link_node("w2", "worker", &["w1"]),
             free_link_node("reviewer", "reviewer", &["w2"]),
         ]));
-        data.ao_runs[0].assignments.insert("w1".into(), Assignment { task: "Fix the parser".into(), acceptance: "tests pass".into() });
-        data.ao_runs[0].assignments.insert("w2".into(), Assignment { task: "Update the docs".into(), acceptance: String::new() });
+        data.ao_runs[0].assignments.insert(
+            "w1".into(),
+            Assignment {
+                task: "Fix the parser".into(),
+                acceptance: "tests pass".into(),
+            },
+        );
+        data.ao_runs[0].assignments.insert(
+            "w2".into(),
+            Assignment {
+                task: "Update the docs".into(),
+                acceptance: String::new(),
+            },
+        );
         let revision = data.ao_runs[0].revision;
-        let removed = update_graph(&mut data, "qa", "run", revision,
-            GraphChange::RemoveNode { node_id: "w1".into() }).unwrap();
+        let removed = update_graph(
+            &mut data,
+            "qa",
+            "run",
+            revision,
+            GraphChange::RemoveNode {
+                node_id: "w1".into(),
+            },
+        )
+        .unwrap();
         assert!(removed.nodes.iter().all(|node| node.id != "w1"));
         let w2 = removed.nodes.iter().find(|node| node.id == "w2").unwrap();
-        assert_eq!(w2.parents, vec!["planner".to_string()], "w2 inherits w1's links");
+        assert_eq!(
+            w2.parents,
+            vec!["planner".to_string()],
+            "w2 inherits w1's links"
+        );
         let handed = &removed.assignments["w2"];
         assert!(handed.task.starts_with("Update the docs"));
         assert!(handed.task.contains("handed over from w1: Fix the parser"));
         assert!(handed.acceptance.contains("tests pass"));
-        assert!(removed.rerun_after.is_empty(), "an idle worker takes the task at once");
+        assert!(
+            removed.rerun_after.is_empty(),
+            "an idle worker takes the task at once"
+        );
     }
 
     #[test]
@@ -2807,28 +2898,94 @@ mod tests {
             free_link_node("w2", "worker", &["planner"]),
             free_link_node("reviewer", "reviewer", &["w1", "w2"]),
         ]));
-        data.ao_runs[0].assignments.insert("w1".into(), Assignment { task: "Fix the parser".into(), acceptance: String::new() });
+        data.ao_runs[0].assignments.insert(
+            "w1".into(),
+            Assignment {
+                task: "Fix the parser".into(),
+                acceptance: String::new(),
+            },
+        );
         // w2 is mid-turn on a native thread.
         {
-            let w2 = data.ao_runs[0].nodes.iter_mut().find(|node| node.id == "w2").unwrap();
+            let w2 = data.ao_runs[0]
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == "w2")
+                .unwrap();
             w2.state = State::Running;
             w2.request_key = Some("key-2".into());
-            w2.receipt = Some(Receipt { request_key: "key-2".into(), status: "submitted".into(),
-                thread_id: Some("thread-2".into()), turn_id: None, answer: None, verdict: None, error: None,
-                settings: None, route: w2.route.clone(), approvals: vec![] });
+            w2.receipt = Some(Receipt {
+                request_key: "key-2".into(),
+                status: "submitted".into(),
+                thread_id: Some("thread-2".into()),
+                turn_id: None,
+                answer: None,
+                verdict: None,
+                error: None,
+                settings: None,
+                route: w2.route.clone(),
+                approvals: vec![],
+            });
         }
         let revision = data.ao_runs[0].revision;
-        let removed = update_graph(&mut data, "qa", "run", revision,
-            GraphChange::RemoveNode { node_id: "w1".into() }).unwrap();
-        assert!(removed.rerun_after.contains("w2"), "the only worker is busy, so the task waits for it");
-        assert_eq!(removed.nodes.iter().find(|node| node.id == "w2").unwrap().state, State::Running);
+        let removed = update_graph(
+            &mut data,
+            "qa",
+            "run",
+            revision,
+            GraphChange::RemoveNode {
+                node_id: "w1".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            removed.rerun_after.contains("w2"),
+            "the only worker is busy, so the task waits for it"
+        );
+        assert_eq!(
+            removed
+                .nodes
+                .iter()
+                .find(|node| node.id == "w2")
+                .unwrap()
+                .state,
+            State::Running
+        );
         // Rewiring the busy card stops it; its old turn's late result is then ignored.
-        let rewired = update_graph(&mut data, "qa", "run", removed.revision, GraphChange::SetParents {
-            node_id: "w2".into(), parents: vec!["planner".into()] }).unwrap();
+        let rewired = update_graph(
+            &mut data,
+            "qa",
+            "run",
+            removed.revision,
+            GraphChange::SetParents {
+                node_id: "w2".into(),
+                parents: vec!["planner".into()],
+            },
+        )
+        .unwrap();
         let w2 = rewired.nodes.iter().find(|node| node.id == "w2").unwrap();
         assert_eq!(w2.state, State::Pending);
-        assert_eq!(w2.history.last().and_then(|receipt| receipt.thread_id.as_deref()), Some("thread-2"));
-        let late = record_terminal(&mut data, "qa", "run", "w2", "thread-2", Some("turn"), Some("done"), true, None).unwrap();
-        assert_eq!(late.revision, rewired.revision, "a stopped turn's result changes nothing");
+        assert_eq!(
+            w2.history
+                .last()
+                .and_then(|receipt| receipt.thread_id.as_deref()),
+            Some("thread-2")
+        );
+        let late = record_terminal(
+            &mut data,
+            "qa",
+            "run",
+            "w2",
+            "thread-2",
+            Some("turn"),
+            Some("done"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            late.revision, rewired.revision,
+            "a stopped turn's result changes nothing"
+        );
     }
 }
