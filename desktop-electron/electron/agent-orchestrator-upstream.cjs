@@ -20,6 +20,26 @@ const API_OPERATIONS = Object.freeze({
 });
 
 // Agents without an AO chat controller run in their own terminal UI and report here.
+// How often the harness list re-runs AO's install checks, so a newly installed CLI shows up.
+const AGENT_RECHECK_MS = 60_000;
+
+// A plain GET lists only the agents whose install check has finished, which right after the
+// daemon starts is often just one; the list was then read once and Codex, opencode and others
+// stayed "not installed". A refresh waits for fresh checks; re-check at most once a minute.
+function createAgentInventory(api, { now = Date.now, recheckMs = AGENT_RECHECK_MS } = {}) {
+  let checkedAt = -Infinity;
+  return async function agentInventory() {
+    if (now() - checkedAt >= recheckMs) {
+      try {
+        const inventory = await api("POST", "/api/v1/agents/refresh");
+        checkedAt = now();
+        return inventory;
+      } catch { /* an older daemon without refresh still answers the plain list */ }
+    }
+    return api("GET", "/api/v1/agents");
+  };
+}
+
 const TUI_RESULT_FILE = "AO_RESULT.md";
 const TUI_RESULT_INSTRUCTION = `When the assignment is finished, write your complete final report (what you did and the evidence) to ${TUI_RESULT_FILE} at the root of your working directory, then stop and wait.`;
 
@@ -127,9 +147,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (!binding.projectId) throw new Error("AO harness workers need this workspace to be a git repository registered in AO");
     return binding.projectId;
   }
+  const agentInventory = createAgentInventory(internalApi);
   const harness = Object.freeze({
     async catalog() {
-      const [inventory, settings] = await Promise.all([internalApi("GET", "/api/v1/agents"), internalApi("GET", "/api/v1/settings")]);
+      const [inventory, settings] = await Promise.all([agentInventory(), internalApi("GET", "/api/v1/settings")]);
       const chat = new Set(Array.isArray(settings?.chatHarnesses) ? settings.chatHarnesses : []);
       const installed = new Map((inventory?.installed ?? []).map(item => [item.id, item]));
       return (inventory?.supported ?? []).filter(item => typeof item?.id === "string" && /^[a-z0-9-]{1,40}$/.test(item.id)).map(item => ({
@@ -496,4 +517,4 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   return { call, start, stop, show, hide, snapshot, harness };
 }
 
-module.exports = { createAgentOrchestratorUpstream, API_OPERATIONS };
+module.exports = { createAgentOrchestratorUpstream, createAgentInventory, API_OPERATIONS };
