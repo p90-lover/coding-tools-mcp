@@ -24,7 +24,7 @@ type PlanTask = {
 type Board = { revision: number; steps: string[]; tasks: PlanTask[]; task?: PlanTask };
 export type AoReceipt = { status: string; answer?: string; error?: string; verdict?: string; thread_id?: string; turn_id?: string; request_key?: string; settings?: RoleSettings; route?: { model: string } };
 export type AoNode = {
-  id: string; task_id: string; role: "planner" | "worker" | "reviewer";
+  id: string; task_id: string; role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer";
   parents: string[]; x: number; y: number; positioned?: boolean; state: string;
   clause_id?: string; request_key?: string; template_role_id?: string;
   settings?: RoleSettings;
@@ -33,7 +33,8 @@ export type AoNode = {
   history?: AoReceipt[];
 };
 export type AoMission = { id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean; nodes: AoNode[]; team?: AoTeam; worker_limit?: number };
-type AoApproval = { nodeId: string; approval_id: string; kind?: string; path?: string; reason?: string; command?: string; cwd?: string; permissions?: Record<string, unknown>; seconds_remaining?: number };
+type AoApproval = { nodeId: string; approval_id: string; kind?: string; path?: string; reason?: string; command?: string; cwd?: string; permissions?: Record<string, unknown>; seconds_remaining?: number;
+  recommendation?: { action: "allow" | "deny" | "ask"; reason: string } };
 type Sheet = "" | "mission" | "worker" | "settings" | "team";
 
 const words = {
@@ -839,6 +840,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
               {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
                 {pendingApprovals.map((approval) => <div key={approval.approval_id}>
                   <p><strong>Approve?</strong> {approval.reason || "Tool request"} · {approval.path || approval.cwd || approval.nodeId}</p>
+                  {approval.recommendation ? <p className={`ao-approver-advice is-${approval.recommendation.action}`}>
+                    🛡️ Command approver suggests <strong>{approval.recommendation.action === "ask" ? "checking it yourself" : approval.recommendation.action}</strong>
+                    {approval.recommendation.reason ? ` — ${approval.recommendation.reason}` : ""}</p> : null}
                   {approval.kind === "command" ? <pre aria-label="Requested command" title={`Once only · expires in ${approval.seconds_remaining ?? 0}s`}>{approval.command}</pre> : null}
                   {approval.permissions ? <details><summary>Permissions</summary><pre aria-label="Requested permissions">{JSON.stringify(approval.permissions, null, 2)}</pre></details> : null}
                   <button className="button-primary" disabled={Boolean(busy)} onClick={() => approve(approval, true)} type="button">Allow once</button>

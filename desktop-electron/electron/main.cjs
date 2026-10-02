@@ -2369,7 +2369,14 @@ async function start() {
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,
       extraPath: () => antigravityCli.binDir(),
-      extraEnv: () => { try { return shimProxyEnvironment(antigravityProxyEnvironment()); } catch { return {}; } },
+      extraEnv: () => {
+        let env = {};
+        try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
+        // Lets AO run any session's model through CPA; the daemon blanks it for the agents themselves.
+        let cpaKey = null;
+        try { cpaKey = externalServicesController?.cpaConnection()?.proxyApiKey; } catch { /* CPA not running */ }
+        return typeof cpaKey === "string" && cpaKey ? { ...env, CODING_TOOLS_CPA_KEY: cpaKey } : env;
+      },
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       WebContentsView, dialog, shell, logger,
     });

@@ -1,3 +1,4 @@
+import { ROLE_TITLE } from "./AgentOrchestratorTeam";
 import { useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
@@ -257,7 +258,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
             wind.current = 0; schedule(); persist(before);
           }}>
           <span className="ao-card-title"><span className={`ao-dot ao-dot-${node.state}`} title={node.state} aria-hidden="true" />
-            <strong>{node.settings?.name || (node.role === "planner" ? "Orchestrator" : node.role === "reviewer" ? "Reviewer" : "Worker")}</strong>
+            <strong>{node.settings?.name || ROLE_TITLE[node.role as keyof typeof ROLE_TITLE] || "Worker"}</strong>
             <span className="ao-canvas-state">{node.role === "reviewer" && node.state === "running" ? "reviewing" : node.state}</span></span>
           <span className="ao-card-route">{describe(node)}</span>
         </button>

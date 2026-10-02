@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 
-export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number };
-export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; nodes: AoNode[] };
+export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number; auto_decide?: boolean };
+export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; nodes: AoNode[] };
 export type AoHarness = { id: string; label: string; runnable: boolean; installed: boolean; authStatus?: string; chat?: boolean };
 export type AoRoute = AoNode["route"];
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
@@ -10,7 +10,8 @@ export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "",
 export const NATIVE_HARNESS = "codex-native";
 export const DEFAULT_WORKER_MODEL = "gemini-3.8-flash-high";
 export const WEB_ROUTE: AoRoute = { harness_id: NATIVE_HARNESS, provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" };
-export const SPECIALTIES = ["planning", "research", "frontend", "backend", "implementation", "qa", "review", "delivery"];
+export const SPECIALTIES = ["planning", "research", "architecture", "frontend", "backend", "database", "api", "devops", "security",
+  "testing", "performance", "debugging", "refactor", "docs", "ui-ux", "mobile", "data-ml", "implementation", "qa", "review", "delivery"];
 
 /**
  * Any worker may use any harness and model: Native Codex runs WebGPT or any model in the
@@ -33,6 +34,8 @@ export const nativePermission = (route: AoRoute): NativePermission => route.perm
 
 /** "chatgpt-web/extra-high" -> "WebGPT Extra High"; other model ids are shown as-is. */
 export function modelLabel(model: string): string {
+  // On an AO harness, "cpa/<model>" runs that CPA pool model through the local gateway.
+  if (model.startsWith("cpa/")) return `CPA · ${model.slice(4)}`;
   if (!model.startsWith("chatgpt-web/")) return model;
   return `WebGPT ${model.slice("chatgpt-web/".length).split("-").map(part => part[0]?.toUpperCase() + part.slice(1)).join(" ")}`;
 }
@@ -58,7 +61,7 @@ export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam
   return { id: crypto.randomUUID(), workspace_id: mission.workspace_id, name: "Workspace team", revision: 0, worker_limit: mission.worker_limit || 3,
     nodes: mission.nodes.map(node => ({ id: roleIds.get(node.id)!, task_id: "", role: node.role, route: { ...node.route },
       parents: node.parents.map(id => roleIds.get(id)!), state: "pending", x: node.x, y: node.y, positioned: node.positioned === true,
-      settings: { ...emptyRoleSettings(), ...node.settings, name: node.settings?.name || (node.role === "planner" ? "Orchestrator" : node.role === "reviewer" ? "Reviewer" : "Worker") },
+      settings: { ...emptyRoleSettings(), ...node.settings, name: node.settings?.name || ({ planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer" } as const)[node.role] },
     })) };
 }
 
@@ -124,10 +127,8 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
   const updateRole = (patch: Partial<AoNode>) => change({ ...draft, nodes: draft.nodes.map(item => item.id === roleId ? { ...item, ...patch } : item) });
   const updateSettings = (patch: Partial<RoleSettings>) => updateRole({ settings: { ...settings, ...patch } });
   const changeKind = (kind: AoNode["role"]) => {
-    if (!role) return;
-    // The orchestrator and reviewer stay on Native Codex; a Native Codex route they already have is kept.
-    updateRole({ role: kind, route: kind === "worker" ? workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL)
-      : role.route.harness_id === NATIVE_HARNESS ? role.route : WEB_ROUTE });
+    // Every role may run on any harness and model, so changing the role keeps its route.
+    if (role) updateRole({ role: kind });
   };
   return <aside className="ao-role-inspector" aria-label="Role inspector">
     <div className="ao-inspector-header">
@@ -143,12 +144,13 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
       <div className="ao-field-row">
         <label>Name<input maxLength={96} value={settings.name} onChange={event => updateSettings({ name: event.target.value })} /></label>
         <label>Role<select value={role.role} onChange={event => changeKind(event.target.value as AoNode["role"])}>
-          <option value="planner">Orchestrator</option><option value="worker">Worker</option><option value="reviewer">Reviewer</option>
+          <option value="planner">Orchestrator</option><option value="approver">Command approver</option><option value="worker">Worker</option>
+          <option value="sub_reviewer">Sub-reviewer</option><option value="reviewer">Main reviewer</option>
+          {role.role === "review_split" ? <option value="review_split">Main reviewer · split</option> : null}
         </select></label>
       </div>
       <div className="ao-field-row">
-        <HarnessPicker route={role.route} harnesses={role.role === "worker" ? harnesses : harnesses.filter(item => item.id === NATIVE_HARNESS)}
-          loadModels={loadModels} onChange={route => updateRole({ route })} />
+        <HarnessPicker route={role.route} harnesses={harnesses} loadModels={loadModels} onChange={route => updateRole({ route })} />
       </div>
       <label>Focus<select value={settings.specialty} onChange={event => updateSettings({ specialty: event.target.value })}>
         <option value="">Custom</option>{SPECIALTIES.map(value => <option key={value} value={value}>{value}</option>)}

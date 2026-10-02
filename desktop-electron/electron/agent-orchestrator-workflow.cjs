@@ -104,6 +104,8 @@ const CHAT_TASK_TITLE = "New task";
 // The WebGPT tiers the bridge serves; it runs a tier the account lacks at the nearest lower one.
 const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
 const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
+// AO harness models shown as "cpa/<model>" run that CPA pool model through the local gateway.
+const CPA_MODEL_PREFIX = "cpa/";
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
 
 // The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
@@ -147,7 +149,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   }
   const dispatching = new Set();
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
-  const externalAgent = (node) => node?.role === "worker" && typeof node.route?.harness_id === "string"
+  // Any card (orchestrator, worker or reviewer) on an AO harness runs as an AO session.
+  const externalAgent = (node) => typeof node?.route?.harness_id === "string"
     && node.route.harness_id.startsWith("ao:") ? node.route.harness_id.slice(3) : null;
   function harnessService() {
     if (!aoHarness) throw new Error("Agent Orchestrator harnesses are unavailable");
@@ -212,7 +215,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const items = await harnessService().models(harness.slice(3), workspaceId);
-      return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default")] };
+      // Every CPA pool model can also run on this agent through the local gateway ("cpa/<model>").
+      let cpa = [];
+      try { cpa = (await models()).models.map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
+      return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default"), ...cpa] };
     }
     if (harness === "codex-native") {
       // Native Codex may use every WebGPT tier (Luna and Think included) or any CPA pool model.
@@ -260,8 +266,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let session = null;
       let failure = null;
       try {
-        session = await harnessService().spawn({ workspaceId, agent, model: node.route.model, prompt: reserved.prompt,
-          name: node.settings?.name || "AO worker" });
+        const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
+        session = await harnessService().spawn({ workspaceId, agent, model: viaCpa ?? node.route.model, prompt: reserved.prompt,
+          name: node.settings?.name || "AO worker", ...(viaCpa ? { gateway: { provider: "cpa", model: viaCpa } } : {}) });
       } catch (error) { failure = error; }
       const saved = await requestHeadless("/api/v1/ao/external/submitted", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
@@ -357,7 +364,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO harness status unavailable");
-    return response;
+    return response.status?.pending_approvals
+      ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
   }
 
   async function connectAoHarness(input = {}, granted = false) {
@@ -387,7 +395,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       }
       const catalog = await models();
       if (!catalog.models.includes(route.model)) throw new Error("Exact AO worker model is absent from CPA catalog");
-    } else if (!["planner", "reviewer", "worker"].includes(node.role)
+    } else if (!["planner", "approver", "worker", "review_split", "sub_reviewer", "reviewer"].includes(node.role)
       || route.harness_id !== "codex-native" || route.provider_id !== "chatgpt-web"
       || !webModel(route.model)) {
       throw new Error("AO WebGPT route does not match the saved card");
@@ -456,7 +464,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true) throw new Error("AO result is unavailable; inspect the run before retrying");
-    return response;
+    return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals) } : response;
   }
 
   async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow } = {}) {
@@ -578,6 +586,82 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   const HELPER_ATTEMPT_LIMIT = 2;
   const TRANSIENT_FAILURE = /not confirm|timed out|timeout|disconnected|network|ECONNRESET|socket|502|503|504|stream/i;
 
+  // Requests the command approver may never allow, whatever the model says.
+  const HARD_DENY = [
+    /\brm\s+-[a-z]*[rf][a-z]*\s+(\/|~|\$HOME|[a-z]:[\\/])/i, /\bmkfs\b|\bformat\s+[a-z]:/i, /\bdd\s+if=/i,
+    /\bgit\s+push\b/i, /\b(curl|wget)\b[^|\n]*\|\s*(ba|z)?sh\b/i, /\b(iwr|irm|invoke-webrequest)\b[^|\n]*\|\s*iex\b/i,
+    /(^|[\\/\s])\.env(\.|\b)|id_rsa|[\\/]\.ssh[\\/]|credentials|secrets?\.(json|ya?ml|toml)/i,
+    /\bRemove-Item\b[^\n]*-Recurse[^\n]*([a-z]:\\|~|\$HOME)/i, /\bdel\s+\/[sq]\b|\brd\s+\/s\b/i,
+    /\bshutdown\b|\breg\s+delete\b|\bbcdedit\b|\bdiskpart\b/i,
+  ];
+  const approverAdvice = new Map(); // approval_id -> { action, reason }
+  const withAdvice = (approvals) => Array.isArray(approvals)
+    ? approvals.map((item) => approverAdvice.has(item?.approval_id) ? { ...item, recommendation: approverAdvice.get(item.approval_id) } : item)
+    : approvals;
+  const describeRequest = (approval) => [approval.kind, approval.command, approval.path, approval.cwd && `in ${approval.cwd}`, approval.reason]
+    .filter(Boolean).join(" · ").slice(0, 1500);
+
+  async function askApprover({ approver, mission, approval }) {
+    const { baseUrl, key } = connection();
+    const route = approver.route ?? {};
+    const own = route.provider_id === "cliproxyapi-antigravity" ? route.model
+      : typeof route.model === "string" && route.model.startsWith(CPA_MODEL_PREFIX) ? route.model.slice(CPA_MODEL_PREFIX.length) : null;
+    const catalog = (await models()).models;
+    const model = own && catalog.includes(own) ? own : catalog[0];
+    if (!model) throw new Error("CPA has no model for the command approver");
+    const prompt = [
+      "You are the command approver for an orchestrated coding mission. A worker asks to run a tool request.",
+      `Workspace: ${mission.workspace_id}. Approver rules: ${String(approver.settings?.instructions || "none").slice(0, 1500)}`,
+      `Request: ${describeRequest(approval)}`,
+      approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
+      'Answer with JSON only: {"action":"allow"|"deny"|"ask","reason":"<one sentence for the user>"}.',
+      "allow: clearly safe and needed for the task. deny: destructive, outside the workspace, secret-touching or unrelated. ask: anything unclear.",
+    ].filter(Boolean).join("\n");
+    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!response.ok) throw new Error(`Command approver returned HTTP ${response.status}`);
+    const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
+    const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+    if (!["allow", "deny", "ask"].includes(decision?.action)) throw new Error("Command approver gave no decision");
+    return { action: decision.action, reason: String(decision.reason || "").slice(0, 300) };
+  }
+
+  /**
+   * Screens pending tool requests with the mission's command approver (once it has approved the plan).
+   * With auto-decide on it answers allow/deny itself; otherwise it only recommends, and "ask" always
+   * goes to the person. The hard deny list wins over the model.
+   */
+  async function screenApprovals(workspaceId, runId, mission, active, observed) {
+    const approver = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
+    if (!approver) return null;
+    let note = null;
+    for (const [index, result] of observed.entries()) {
+      for (const approval of result?.pending_approvals ?? []) {
+        if (!approval?.approval_id || approverAdvice.has(approval.approval_id)) continue;
+        const request = describeRequest(approval);
+        const advice = HARD_DENY.some((pattern) => pattern.test(request))
+          ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
+          : await askApprover({ approver, mission, approval });
+        approverAdvice.set(approval.approval_id, advice);
+        if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
+        if (approver.settings?.auto_decide === true && advice.action !== "ask") {
+          await requestHeadless("/api/v1/ao/harness/approval", {
+            workspace_id: workspaceId, run_id: runId, node_id: active[index].id, approval_id: approval.approval_id,
+            allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
+          });
+          note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+        } else {
+          note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
+        }
+      }
+    }
+    return note;
+  }
+
   async function askRecoveryHelper({ mission, node, task }) {
     const { baseUrl, key } = connection();
     const catalog = (await models()).models;
@@ -649,6 +733,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
             : observed.some(result => result.needs_input) ? "needs_input" : null;
           state.detail = attention === "pending_approval" ? "Waiting for your tool approval"
             : attention === "needs_input" ? "An AO worker needs input on the Board" : undefined;
+          if (attention === "pending_approval") {
+            const note = await screenApprovals(workspaceId, runId, mission, active, observed)
+              .catch((error) => `Command approver unavailable: ${String(error?.message || error).slice(0, 200)}`);
+            if (note) state.detail = note;
+          }
           saved = await runs({ workspaceId, runId });
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
