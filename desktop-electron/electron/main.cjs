@@ -310,8 +310,12 @@ function packagedInstallId() {
 
 // While Coding Tools is open, keep the Codex bridge and MCP tunnel running.
 const BRIDGE_WATCHDOG_INTERVAL_MS = 60_000;
+// One missed health check is usually a stalled machine, not a dead bridge; restarting then kills
+// the Codex turns in flight. Restart only after this many misses in a row.
+const BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART = 2;
 let bridgeWatchdogTimer = null;
 let bridgeWatchdogBusy = false;
+let bridgeWatchdogMisses = 0;
 function startBridgeWatchdog(logger, stateStore) {
   if (IS_DEV_PROFILE || bridgeWatchdogTimer) return;
   bridgeWatchdogTimer = setInterval(async () => {
@@ -321,7 +325,16 @@ function startBridgeWatchdog(logger, stateStore) {
     if (!config) return;
     bridgeWatchdogBusy = true;
     try {
-      if (await runtimeSupervisor.ownedRuntimeReady(config)) return;
+      if (await runtimeSupervisor.ownedRuntimeReady(config)) {
+        bridgeWatchdogMisses = 0;
+        return;
+      }
+      bridgeWatchdogMisses += 1;
+      if (bridgeWatchdogMisses < BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART) {
+        logger.warn("runtime.watchdog_miss", { mode: config.mode, misses: bridgeWatchdogMisses });
+        return;
+      }
+      bridgeWatchdogMisses = 0;
       logger.warn("runtime.watchdog_restart", { mode: config.mode });
       const result = await runtimeSupervisor.startIfConfigured();
       logger.info("runtime.watchdog_result", { status: result?.status });

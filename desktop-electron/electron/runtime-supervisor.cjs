@@ -807,7 +807,9 @@ class RuntimeSupervisor {
       && (!requireAccepting || body?.accepting_turns === true);
   }
 
-  async waitForProxy(config, timeoutMs = 20_000) {
+  // A cold start on a busy machine (bridge files on an HDD, other builds running) has taken 25 s;
+  // giving up sooner made the watchdog kill a bridge that was about to answer.
+  async waitForProxy(config, timeoutMs = 60_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const daemon = this.daemon;
