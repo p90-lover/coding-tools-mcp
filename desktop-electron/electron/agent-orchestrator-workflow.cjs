@@ -224,11 +224,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       return { ok: true, harness, models: [...items.map(item => item.id).filter(id => id !== "default" && !id.startsWith("chatgpt-web/")), ...cpa] };
     }
     if (harness === "codex-native") {
-      // Native Codex runs every WebGPT tier (Luna and Think included) and the CPA pool's models,
-      // except Gemini, which runs on Claude Code through the CPA gateway ("cpa/gemini-...").
-      let cpa = [];
-      try { cpa = (await models()).models; } catch { /* CPA not running: WebGPT only. */ }
-      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa.filter(id => !webModel(id) && !/^gemini/i.test(id))] };
+      // Native Codex runs only WebGPT (every tier, Luna and Think included). CPA pool models run on
+      // an AO harness through the gateway ("cpa/<model>").
+      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS] };
     }
     const { baseUrl, key } = connection();
     const response = await fetchImpl(`${baseUrl}/v1/models`, {
@@ -275,7 +273,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
         const agentModel = viaCpa && agent === "opencode" ? `openai/${viaCpa}` : viaCpa ?? node.route.model;
         session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
-          name: node.settings?.name || "AO worker", ...(viaCpa ? { gateway: { provider: "cpa", model: viaCpa } } : {}) });
+          name: node.settings?.name || "AO worker", ...(viaCpa ? { gateway: { provider: "cpa", model: viaCpa } } : {}),
+          // AO applies effort to the agent's own models; a gateway model skips AO's effort check by design.
+          ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) });
       } catch (error) { failure = error; }
       const saved = await requestHeadless("/api/v1/ao/external/submitted", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
@@ -394,6 +394,43 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (response?.ok !== true) throw new Error("AO harness status unavailable");
     return response.status?.pending_approvals
       ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
+  }
+
+  // What each working card is doing now, for the chat and the cards: when it started, its
+  // current step and when anything was last heard. Read-only; it never advances the run.
+  async function activity({ workspaceId, runId } = {}) {
+    const id = clean(workspaceId, 128);
+    const run = clean(runId, 80);
+    const saved = await runs({ workspaceId: id, runId: run });
+    const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+    if (!mission) throw new Error("AO run not found");
+    const nodes = {};
+    await Promise.all(mission.nodes.filter((node) => node.state === "reserved" || node.state === "running").map(async (node) => {
+      const base = { state: node.state, started_at_ms: node.receipt?.started_at_ms ?? null };
+      try {
+        if (externalAgent(node)) {
+          const session = node.receipt?.thread_id;
+          if (!session) {
+            nodes[node.id] = { ...base, activity: "launching" };
+            return;
+          }
+          const observed = await harnessService().observe(session);
+          nodes[node.id] = { ...base, turn_started: Boolean(observed.turnId),
+            activity: observed.needsInput ? "waiting for input" : observed.exited ? "exited" : String(observed.turnState || "working").slice(0, 40) };
+          return;
+        }
+        const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
+        const thread = (Array.isArray(status.threads) ? status.threads : []).find((entry) => entry.id === node.receipt?.thread_id);
+        const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
+        nodes[node.id] = { ...base, turn_started: turnStarted,
+          activity: !status.connected ? "not connected" : thread?.activity || (turnStarted ? "working" : "waiting for the turn to start"),
+          activity_at_ms: thread?.activity_at_ms || null, last_event_at_ms: thread?.last_event_at_ms || null,
+          started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
+      } catch (error) {
+        nodes[node.id] = { ...base, activity: "unknown", error: String(error?.message || error).slice(0, 300) };
+      }
+    }));
+    return { ok: true, now_ms: Date.now(), nodes };
   }
 
   async function connectAoHarness(input = {}, granted = false) {
@@ -1107,6 +1144,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       case "update_run": return updateRun(args);
       case "team_update": return teamUpdate(args);
       case "harness_status": return harnessStatus(args);
+      case "activity": return activity(args);
       case "connect_harness": return connectAoHarness(args);
       case "stop_harness": return stopAoHarness(args);
       case "observe": return observe(args);

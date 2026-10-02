@@ -33,6 +33,7 @@ const SPECS = Object.freeze({
   start_run: { readOnly: false, description: "Validate the saved AO graph and grant its read-only background execution; tool approvals remain separate." },
   restart_run: { readOnly: false, description: "Stop a stuck or settled mission (kept in history) and start a fresh run of the same task with the current team." },
   control_run: { readOnly: false, description: "Pause queued work, resume a paused mission, or stop only that mission's owned harnesses from the local GUI." },
+  activity: { readOnly: true, description: "Read what each working card of a run is doing now: start time, current step and last activity." },
   run_status: { readOnly: true, description: "Read background AO run progress and held state." },
   approve_harness: { readOnly: false, description: "Allow once or deny one visible AO-owned native tool request after focused local confirmation." },
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },

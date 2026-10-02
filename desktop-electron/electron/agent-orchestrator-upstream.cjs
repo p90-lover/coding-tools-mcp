@@ -179,7 +179,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return (Array.isArray(catalog?.models) ? catalog.models : []).filter(model => typeof model?.id === "string" && model.id.length <= 128)
         .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null }) {
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
       // Chat-capable agents return their answer as a conversation turn. Every other
@@ -191,6 +191,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         projectId, kind: "worker", harness: agentId(agent), mode,
         prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
+        ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
         ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
         displayName: String(name || "AO worker").slice(0, 100),

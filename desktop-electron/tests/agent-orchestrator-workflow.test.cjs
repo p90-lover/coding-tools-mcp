@@ -711,7 +711,7 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.equal(calls.filter((item) => item.endpoint.startsWith("/api/v1/ao/harness/")).length, 0);
 });
 
-test("Native Codex offers every WebGPT tier, Luna included, and every CPA pool model except Gemini", async () => {
+test("Native Codex offers only WebGPT, every tier with Luna included; CPA models run on AO harnesses", async () => {
   const WEB = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro",
     "chatgpt-web/luna", "chatgpt-web/think"];
   const workflow = createAgentOrchestratorWorkflow({
@@ -720,8 +720,8 @@ test("Native Codex offers every WebGPT tier, Luna included, and every CPA pool m
     fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gemini-3.8-flash-high" }, { id: "claude-sonnet-4-6" }, { id: "gpt-5.5" }] }) }),
     confirm: async () => true,
   });
-  assert.deepEqual((await workflow.call("models", { harness: "codex-native" })).models,
-    [...WEB, "claude-sonnet-4-6", "gpt-5.5"], "Gemini runs on Claude Code, not Native Codex");
+  assert.deepEqual((await workflow.call("models", { harness: "codex-native" })).models, WEB,
+    "CPA pool models run on an AO harness through the gateway, never on Native Codex");
   const offline = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
     cpaConnection: () => null, confirm: async () => true,
@@ -1069,4 +1069,38 @@ test("relinking or removing a working card stops its turn; an idle card is just 
       expected_revision: 3, change: { operation: "set_parents", node_id: "w2", parents: ["planner"] } } });
     assert.equal(calls.includes("/api/v1/ao/harness/disconnect"), stops, state);
   }
+});
+
+test("activity reports each working card's runtime and current step without advancing the run", async () => {
+  const calls = [];
+  const native = { id: "w1", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-1", started_at_ms: 1_000 } };
+  const stuck = { id: "w2", role: "worker", state: "running", route: { harness_id: "codex-native", provider_id: "chatgpt-web", model: "chatgpt-web/high" },
+    receipt: { status: "submitted", thread_id: "thread-2", started_at_ms: 2_000 } };
+  const agent = { id: "w3", role: "worker", state: "running", route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" },
+    receipt: { status: "submitted", thread_id: "sess-3" } };
+  const done = { id: "p", role: "planner", state: "finished", route: native.route, receipt: { status: "completed" } };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [done, native, stuck, agent] }] };
+      if (endpoint === "/api/v1/ao/harness/status") {
+        return { ok: true, status: { connected: true, threads: body.node_id === "w1"
+          ? [{ id: "thread-1", turn_id: "turn-1", activity: "running a command", activity_at_ms: 5_000, last_event_at_ms: 6_000 }]
+          : [{ id: "thread-2", turn_id: null, activity: null, started_at_ms: 2_000 }] } };
+      }
+      throw new Error(`unexpected ${endpoint}`);
+    },
+    aoHarness: { observe: async () => ({ turnState: "running", turnId: "t-3" }) },
+    confirm: async () => true,
+  });
+  const result = await workflow.call("activity", { workspaceId: "ws-1", runId: "run-1" });
+  assert.deepEqual(Object.keys(result.nodes).sort(), ["w1", "w2", "w3"], "only working cards");
+  assert.equal(result.nodes.w1.activity, "running a command");
+  assert.equal(result.nodes.w1.last_event_at_ms, 6_000);
+  assert.equal(result.nodes.w1.started_at_ms, 1_000);
+  assert.equal(result.nodes.w2.activity, "waiting for the turn to start");
+  assert.equal(result.nodes.w2.turn_started, false);
+  assert.equal(result.nodes.w3.activity, "running");
+  assert.ok(calls.every((endpoint) => endpoint === "/api/v1/ao/read" || endpoint === "/api/v1/ao/harness/status"), "read-only calls only");
 });

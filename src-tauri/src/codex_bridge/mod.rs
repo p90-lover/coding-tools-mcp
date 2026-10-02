@@ -16,7 +16,7 @@ use std::{
         mpsc::{self, SyncSender},
         Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const PROTOCOL_SOURCE: &str = "721f46a07ab48f00b5e7cdbf2efb78b993d100de";
@@ -46,6 +46,13 @@ pub struct Connection {
     pub model: String,
     pub request_limit: u32,
     pub lifetime_seconds: u64,
+    /// Reasoning effort sent with every turn; None keeps the model's default. AO fills it from
+    /// the card's route.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Context window in tokens, sent as the model_context_window config when the thread starts.
+    #[serde(default)]
+    pub context_window: Option<u32>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +72,42 @@ struct ThreadState {
     notice: Option<String>,
     #[serde(skip)]
     item_id: String,
+    /// What the turn is doing now ("thinking", "running a command", ...): the kind of step only,
+    /// never command text or file contents.
+    activity: Option<String>,
+    /// When `activity` last changed and when anything was last heard (Unix ms; 0 = never).
+    activity_at_ms: u64,
+    last_event_at_ms: u64,
+    /// When the thread was opened (Unix ms), so a turn that never starts shows how long it waited.
+    started_at_ms: u64,
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// The step a notification starts, in plain words, or None when it starts nothing new.
+fn activity_for(method: &str, params: &Value) -> Option<&'static str> {
+    match method {
+        "turn/started" => Some("starting"),
+        "turn/completed" => Some("finished"),
+        "item/started" => Some(match params["item"]["type"].as_str().unwrap_or("") {
+            "reasoning" => "thinking",
+            "commandExecution" => "running a command",
+            "fileChange" => "editing files",
+            "mcpToolCall" | "dynamicToolCall" => "using a tool",
+            "webSearch" => "searching the web",
+            "agentMessage" => "writing the answer",
+            "contextCompaction" => "compacting its context",
+            "enteredReviewMode" => "reviewing",
+            _ => "working",
+        }),
+        _ => None,
+    }
 }
 struct NativeApproval {
     rpc_id: Value,
@@ -716,7 +759,8 @@ impl Hub {
             "seconds_remaining":if bridge.options.lifetime_seconds==0 { Value::Null } else { json!(bridge.options.lifetime_seconds.saturating_sub(bridge.started.elapsed().as_secs())) },
             "lifetime_unbounded":bridge.options.lifetime_seconds==0,
             "replay_retention_seconds":LEDGER_RETENTION.as_secs(),"replay_capacity":MAX_LEDGER,
-            "stop_reason":memory.stop_reason,"threads":memory.threads.values().map(|t|json!({"id":t.id,"status":t.status,"turn_id":t.turn_id})).collect::<Vec<_>>(),
+            "stop_reason":memory.stop_reason,"threads":memory.threads.values().map(|t|json!({"id":t.id,"status":t.status,"turn_id":t.turn_id,
+                "activity":t.activity,"activity_at_ms":t.activity_at_ms,"last_event_at_ms":t.last_event_at_ms,"started_at_ms":t.started_at_ms})).collect::<Vec<_>>(),
             "requested_sandbox":if bridge.options.permission_profile==":workspace" {"workspace-write"} else {"read-only"},
             "permission_profile":bridge.options.permission_profile,
             "ao_worker_command_approvals":bridge.ao_worker_command_approvals,
@@ -1196,6 +1240,17 @@ impl Bridge {
             }
         }
     }
+    /// AO cards run unattended inside Codex's sandbox (unelevated on Windows): every command
+    /// runs there without asking, reads reach the whole disk, writes stay inside the profile's
+    /// boundary, and anything beyond it fails instead of waiting for a person. Other native
+    /// connections keep asking.
+    fn approval_policy(&self) -> &'static str {
+        if self.ao_worker_command_approvals {
+            "never"
+        } else {
+            "on-request"
+        }
+    }
     fn control(&self, request: &Control) -> Result<Value> {
         if !self.live.load(Ordering::SeqCst) {
             return Err("Native consent was revoked before submission".into());
@@ -1204,9 +1259,13 @@ impl Bridge {
             // Select only a locally approved built-in profile and require exact confirmation.
             // Never substitute an unsandboxed permission profile on native failure.
             let profile = self.options.permission_profile.as_str();
-            let value = self.rpc("thread/start", json!({"cwd":self.root,"model":self.options.model,
-                "permissions":profile,"approvalPolicy":"on-request","approvalsReviewer":"user","ephemeral":true,
-                "developerInstructions":developer_instructions(profile)}))?;
+            let mut params = json!({"cwd":self.root,"model":self.options.model,
+                "permissions":profile,"approvalPolicy":self.approval_policy(),"approvalsReviewer":"user","ephemeral":true,
+                "developerInstructions":developer_instructions(profile)});
+            if let Some(tokens) = self.options.context_window {
+                params["config"] = json!({"model_context_window": tokens});
+            }
+            let value = self.rpc("thread/start", params)?;
             if value["activePermissionProfile"]["id"].as_str() != Some(profile) {
                 self.stop("native_permission_profile_mismatch");
                 return Err("Native runtime did not confirm the locally selected permission profile; no turn submitted".into());
@@ -1227,6 +1286,7 @@ impl Bridge {
                 ThreadState {
                     id: id.clone(),
                     status: "idle".into(),
+                    started_at_ms: unix_ms(),
                     ..Default::default()
                 },
             );
@@ -1316,13 +1376,16 @@ impl Bridge {
                 json!({"threadId":id,"delivery":"inline",
                 "target":{"type":"custom","instructions":request.text}}),
             ),
-            _ => self.rpc(
-                "turn/start",
-                json!({"threadId":id,"input":[{"type":"text","text":request.text}],
+            _ => {
+                let mut params = json!({"threadId":id,"input":[{"type":"text","text":request.text}],
                 // Reassert the same supported boundary on every turn, including send.
                 "permissions":self.options.permission_profile,"approvalsReviewer":"user",
-                "cwd":self.root,"model":self.options.model,"approvalPolicy":"on-request"}),
-            ),
+                "cwd":self.root,"model":self.options.model,"approvalPolicy":self.approval_policy()});
+                if let Some(effort) = &self.options.effort {
+                    params["effort"] = json!(effort);
+                }
+                self.rpc("turn/start", params)
+            }
         };
         match result {
             Ok(value) => {
@@ -1376,6 +1439,12 @@ fn apply_notification(memory: &mut Memory, method: &str, params: &Value) {
     };
     if thread.status == "closed" {
         return;
+    }
+    let now = unix_ms();
+    thread.last_event_at_ms = now;
+    if let Some(activity) = activity_for(method, params) {
+        thread.activity = Some(activity.into());
+        thread.activity_at_ms = now;
     }
     match method {
         "item/started" | "item/completed" if params["item"]["type"] == "enteredReviewMode" => {
@@ -1567,6 +1636,8 @@ mod tests {
             model: "fixture".into(),
             request_limit: 1,
             lifetime_seconds: 30,
+            effort: None,
+            context_window: None,
         };
         assert!(reserve(&mut memory, &good, true, &options, true, true).is_err());
         assert_eq!(memory.requests_used, 0);
@@ -1605,6 +1676,8 @@ mod tests {
             model: "chatgpt-web/high".into(),
             request_limit: 1,
             lifetime_seconds: 30,
+            effort: None,
+            context_window: None,
         };
         assert!(checked_options(&root.canonicalize().unwrap(), options).is_ok());
         assert!(!token("thread/foreign"));
@@ -1622,6 +1695,8 @@ mod tests {
             model: "gemini-3.8-flash-high".into(),
             request_limit: 1,
             lifetime_seconds: 30,
+            effort: None,
+            context_window: None,
         };
         let regular = native_child_command(&options, Path::new("aiTemp"), None, false);
         let ao = native_child_command(&options, Path::new("aiTemp"), Some("SENTINEL_KEY"), false);
@@ -1658,6 +1733,8 @@ mod tests {
             model: "chatgpt-web/extra-high".into(),
             request_limit: 1,
             lifetime_seconds: 30,
+            effort: None,
+            context_window: None,
         };
         assert!(ao_permission_allowed(&options));
         options.allow_command_execution = true;
@@ -1739,6 +1816,8 @@ mod tests {
             model: "fixture".into(),
             request_limit: 0,
             lifetime_seconds: 0,
+            effort: None,
+            context_window: None,
         };
         let mut memory = Memory {
             requests_used: 25,
@@ -1837,6 +1916,53 @@ mod tests {
             bad[key] = value;
             assert!(command_approval_details(&root, &bad).is_none());
         }
+    }
+
+    #[test]
+    fn native_bridge_tracks_the_current_step_without_command_text() {
+        let mut memory = Memory::default();
+        memory.threads.insert(
+            "owned".into(),
+            ThreadState {
+                id: "owned".into(),
+                status: "inProgress".into(),
+                turn_id: Some("t".into()),
+                ..Default::default()
+            },
+        );
+        apply_notification(
+            &mut memory,
+            "item/started",
+            &json!({"threadId":"owned","turnId":"t",
+            "item":{"id":"i1","type":"commandExecution","command":"type secret.txt"}}),
+        );
+        let thread = &memory.threads["owned"];
+        assert_eq!(thread.activity.as_deref(), Some("running a command"));
+        assert!(thread.activity_at_ms > 0 && thread.last_event_at_ms >= thread.activity_at_ms);
+        let status = serde_json::to_string(thread).unwrap();
+        assert!(
+            !status.contains("secret.txt"),
+            "only the kind of step is kept"
+        );
+        apply_notification(
+            &mut memory,
+            "item/agentMessage/delta",
+            &json!({"threadId":"owned","turnId":"t","itemId":"i2","delta":"Hello"}),
+        );
+        assert_eq!(
+            memory.threads["owned"].activity.as_deref(),
+            Some("running a command"),
+            "a delta updates when it was last heard, not the step"
+        );
+        apply_notification(
+            &mut memory,
+            "item/started",
+            &json!({"threadId":"owned","turnId":"t","item":{"id":"i3","type":"reasoning"}}),
+        );
+        assert_eq!(
+            memory.threads["owned"].activity.as_deref(),
+            Some("thinking")
+        );
     }
 
     #[test]
@@ -1978,6 +2104,8 @@ mod tests {
                 model: "no-model-request".into(),
                 request_limit: 1,
                 lifetime_seconds: 30,
+                effort: None,
+                context_window: None,
             },
         )
         .unwrap();

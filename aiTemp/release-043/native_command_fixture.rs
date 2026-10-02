@@ -88,6 +88,8 @@ fn native_043_actual_commands_no_model_and_write_denial() {
             model: "no-model".into(),
             request_limit: 1,
             lifetime_seconds: 120,
+            effort: None,
+            context_window: None,
         },
     )
     .unwrap();

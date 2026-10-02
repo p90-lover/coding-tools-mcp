@@ -213,6 +213,11 @@
 .ao-msg-status { align-self: flex-start; color: var(--ao-muted); font-size: 12px; }
 .ao-msg-status.state-running::before, .ao-msg-status.state-reserved::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--ao-green); animation: ao-pulse 1.4s ease-in-out infinite; }
 .ao-msg-status.state-held, .ao-msg-status.state-cancelled { color: var(--ao-red); }
+/* How a card runs (harness · model · effort · context · role), and for a working card its runtime and current step. */
+.ao-msg-detail { display: block; margin: 0 0 4px; color: var(--ao-muted); font-size: 11px; opacity: 0.85; overflow-wrap: anywhere; }
+.ao-msg-status .ao-msg-detail { margin: 3px 0 0 14px; }
+.ao-msg-status.is-stalled { color: var(--color-text-warning); }
+.ao-msg-status.is-stalled::before { background: var(--color-text-warning); animation: none; }
 .ao-msg-approval { align-self: stretch; max-width: none; padding: 10px 12px; border: 1px solid rgb(210 153 34 / 45%); border-radius: 10px; }
 .ao-msg-approval pre { margin: 6px 0; overflow-x: auto; font-size: 12px; }
 .ao-msg-actions { display: flex; gap: 8px; margin-top: 6px; }

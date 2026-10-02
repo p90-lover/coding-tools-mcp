@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatRunOpen, chatNodeName, chatNodeOrder, chatTranscript,
-  type ChatMessage, type ChatRun, type ChatStatus, type ChatSummary,
+  type ChatActivity, type ChatMessage, type ChatNode, type ChatRun, type ChatStatus, type ChatSummary,
 } from "./ao-chat";
 
 type ChatApproval = { nodeId: string; approval_id: string; reason?: string; path?: string; cwd?: string; command?: string; kind?: string };
@@ -64,8 +64,12 @@ export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, onSelectTask, busy, loadDescription, send, stop, openStructure,
-  approvals, approve, describeRoute, notice, retryStart, openTeam, tree, working = false,
+  approvals, approve, describeRoute, notice, retryStart, openTeam, tree, working = false, describeNode, activity,
 }: {
+  /** How each card runs (harness · model · effort · context · role), shown on its messages. */
+  describeNode?: (node: ChatNode) => string;
+  /** What each working card is doing now, by "<run id>:<card id>". */
+  activity?: Record<string, ChatActivity>;
   tree?: ChatWorkspaces;
   runs: ChatRun[];
   tasks: { id: string; title: string }[];
@@ -108,9 +112,17 @@ export function AgentOrchestratorChat({
     return () => { live = false; };
   }, [selectedTaskId, chatRuns.length, loadDescription]);
 
+  // Runtimes count up while a card works.
+  const [now, setNow] = useState(() => Date.now());
+  const anyWorking = chatRuns.some((run) => run.nodes.some((node) => node.state === "running" || node.state === "reserved"));
+  useEffect(() => {
+    if (!anyWorking) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, [anyWorking]);
   const transcript: ChatMessage[] = useMemo(
-    () => chatTranscript(chatRuns, descriptions[selectedTaskId]),
-    [chatRuns, descriptions, selectedTaskId],
+    () => chatTranscript(chatRuns, descriptions[selectedTaskId], { describe: describeNode, activity, now }),
+    [chatRuns, descriptions, selectedTaskId, describeNode, activity, now],
   );
   useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [transcript.length]);
 
@@ -158,9 +170,13 @@ export function AgentOrchestratorChat({
             : message.kind === "agent"
               ? <div key={message.key} className={`ao-msg ao-msg-agent tone-${message.tone}`}>
                   <span className="ao-msg-meta">{message.name}{message.verdict ? ` · ${message.verdict}` : ""}</span>
+                  {message.detail ? <span className="ao-msg-detail">{message.detail}</span> : null}
                   <p>{message.text}</p>
                 </div>
-              : <div key={message.key} className={`ao-msg ao-msg-status state-${message.state}`}>{message.text}</div>)}
+              : <div key={message.key} className={`ao-msg ao-msg-status state-${message.state}${message.stalled ? " is-stalled" : ""}`}>
+                  {message.text}
+                  {message.detail ? <span className="ao-msg-detail">{message.detail}</span> : null}
+                </div>)}
           {notice && latest && chat?.status === "queued" ? (
             <div className="ao-msg ao-msg-approval tone-error">
               <span className="ao-msg-meta">The run could not start</span>
