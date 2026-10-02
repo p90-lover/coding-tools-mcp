@@ -39,21 +39,33 @@ struct Receiver {
 type Shared = Arc<Mutex<Receiver>>;
 
 fn header(headers: &HeaderMap, name: &str) -> String {
-    headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string()
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
 }
 
-async fn callback(State(shared): State<Shared>, headers: HeaderMap, body: String) -> axum::response::Response {
+async fn callback(
+    State(shared): State<Shared>,
+    headers: HeaderMap,
+    body: String,
+) -> axum::response::Response {
     let mut receiver = shared.lock().unwrap();
     let secret = WebhookSecret::parse(&receiver.secret).unwrap();
     let id = header(&headers, "webhook-id");
     let timestamp: i64 = header(&headers, "webhook-timestamp").parse().unwrap_or(0);
-    let signature_valid = header(&headers, "webhook-signature") == secret.sign(&id, timestamp, &body)
+    let signature_valid = header(&headers, "webhook-signature")
+        == secret.sign(&id, timestamp, &body)
         && header(&headers, "content-type") == "application/json"
         && (now_ms() as i64 / 1000 - timestamp).abs() < 300;
     let parsed: Value = serde_json::from_str(&body).unwrap();
     if parsed["type"] == "verification" {
         receiver.verifications += 1;
-        assert!(signature_valid, "verification must be signed with the subscription secret");
+        assert!(
+            signature_valid,
+            "verification must be signed with the subscription secret"
+        );
         assert!(!header(&headers, "x-mcp-subscription-id").is_empty());
         return match receiver.verify {
             Verify::Echo => Json(json!({"challenge": parsed["challenge"]})).into_response(),
@@ -79,7 +91,9 @@ async fn receiver(verify: Verify) -> (String, Shared) {
         verifications: 0,
         deliveries: Vec::new(),
     }));
-    let app = Router::new().route("/hook", post(callback)).with_state(shared.clone());
+    let app = Router::new()
+        .route("/hook", post(callback))
+        .with_state(shared.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -145,7 +159,10 @@ async fn wait_for(shared: &Shared, count: usize) {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("expected {count} deliveries, got {}", shared.lock().unwrap().deliveries.len());
+    panic!(
+        "expected {count} deliveries, got {}",
+        shared.lock().unwrap().deliveries.len()
+    );
 }
 
 #[test]
@@ -162,8 +179,14 @@ fn subscription_ids_are_deterministic_and_argument_order_independent() {
     b.insert("b".into(), json!("2"));
     b.insert("a".into(), json!("1"));
     let id = subscription_id("ws", "https://x.test/h", catalog::RUN_STALLED, &a);
-    assert_eq!(id, subscription_id("ws", "https://x.test/h", catalog::RUN_STALLED, &b));
-    assert_ne!(id, subscription_id("other", "https://x.test/h", catalog::RUN_STALLED, &a));
+    assert_eq!(
+        id,
+        subscription_id("ws", "https://x.test/h", catalog::RUN_STALLED, &b)
+    );
+    assert_ne!(
+        id,
+        subscription_id("other", "https://x.test/h", catalog::RUN_STALLED, &a)
+    );
     assert!(id.starts_with("sub_") && id.len() == 36);
     assert_eq!(event_id(&id, "inc"), event_id(&id, "inc"));
     assert_ne!(event_id(&id, "inc"), event_id(&id, "inc2"));
@@ -173,8 +196,19 @@ fn subscription_ids_are_deterministic_and_argument_order_independent() {
 fn list_describes_every_event() {
     let dir = tempfile::tempdir().unwrap();
     let listed = open_hub(dir.path()).list();
-    let names: Vec<_> = listed["events"].as_array().unwrap().iter().map(|e| e["name"].clone()).collect();
-    assert_eq!(names, catalog::EVENT_NAMES.iter().map(|n| json!(n)).collect::<Vec<_>>());
+    let names: Vec<_> = listed["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].clone())
+        .collect();
+    assert_eq!(
+        names,
+        catalog::EVENT_NAMES
+            .iter()
+            .map(|n| json!(n))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -183,7 +217,10 @@ async fn subscribe_verifies_the_callback_persists_and_survives_a_restart() {
     let (url, shared) = receiver(Verify::Echo).await;
     let first = open_hub(dir.path());
     let result = first
-        .subscribe("ws-a", &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET))
+        .subscribe(
+            "ws-a",
+            &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET),
+        )
         .await
         .unwrap();
     assert!(result["id"].as_str().unwrap().starts_with("sub_"));
@@ -195,7 +232,10 @@ async fn subscribe_verifies_the_callback_persists_and_survives_a_restart() {
 
     // Same identity and secret: a refresh, not a second subscription or verification.
     let again = first
-        .subscribe("ws-a", &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET))
+        .subscribe(
+            "ws-a",
+            &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET),
+        )
         .await
         .unwrap();
     assert_eq!(again["id"], result["id"]);
@@ -206,13 +246,22 @@ async fn subscribe_verifies_the_callback_persists_and_survives_a_restart() {
     let restarted = open_hub(dir.path());
     assert_eq!(restarted.status()["subscriptions"][0]["id"], result["id"]);
     let outcome = restarted.emit(bridge_incident("bridge:1")).unwrap();
-    assert_eq!(outcome, EmitOutcome { deduplicated: false, deliveries: 1 });
+    assert_eq!(
+        outcome,
+        EmitOutcome {
+            deduplicated: false,
+            deliveries: 1
+        }
+    );
     wait_for(&shared, 1).await;
     let receiver = shared.lock().unwrap();
     let delivered = &receiver.deliveries[0];
     assert!(delivered.signature_valid);
     assert_eq!(delivered.subscription_id, result["id"].as_str().unwrap());
-    assert_eq!(delivered.webhook_id, delivered.body["eventId"].as_str().unwrap());
+    assert_eq!(
+        delivered.webhook_id,
+        delivered.body["eventId"].as_str().unwrap()
+    );
     assert_eq!(delivered.body["name"], catalog::BRIDGE_DOWN);
     assert_eq!(delivered.body["cursor"], Value::Null);
     assert_eq!(delivered.body["data"]["component"], "codex_bridge");
@@ -223,13 +272,19 @@ async fn a_rotated_secret_is_verified_again() {
     let dir = tempfile::tempdir().unwrap();
     let (url, shared) = receiver(Verify::Echo).await;
     let hub = open_hub(dir.path());
-    hub.subscribe("ws", &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET))
-        .await
-        .unwrap();
+    hub.subscribe(
+        "ws",
+        &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET),
+    )
+    .await
+    .unwrap();
     shared.lock().unwrap().secret = OTHER_SECRET.into();
-    hub.subscribe("ws", &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, OTHER_SECRET))
-        .await
-        .unwrap();
+    hub.subscribe(
+        "ws",
+        &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, OTHER_SECRET),
+    )
+    .await
+    .unwrap();
     assert_eq!(shared.lock().unwrap().verifications, 2);
     assert_eq!(hub.status()["subscriptions"].as_array().unwrap().len(), 1);
 }
@@ -244,7 +299,10 @@ async fn failed_verification_returns_callback_endpoint_error_and_saves_nothing()
         let (url, _shared) = receiver(mode).await;
         let hub = open_hub(dir.path());
         let error = hub
-            .subscribe("ws", &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET))
+            .subscribe(
+                "ws",
+                &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET),
+            )
             .await
             .unwrap_err();
         assert_eq!(error["code"], CALLBACK_ENDPOINT_ERROR);
@@ -254,7 +312,15 @@ async fn failed_verification_returns_callback_endpoint_error_and_saves_nothing()
     }
     let dir = tempfile::tempdir().unwrap();
     let error = open_hub(dir.path())
-        .subscribe("ws", &subscribe_params(catalog::BRIDGE_DOWN, json!({}), "http://127.0.0.1:9/none", SECRET))
+        .subscribe(
+            "ws",
+            &subscribe_params(
+                catalog::BRIDGE_DOWN,
+                json!({}),
+                "http://127.0.0.1:9/none",
+                SECRET,
+            ),
+        )
         .await
         .unwrap_err();
     assert_eq!(error["data"]["reason"], "unreachable");
@@ -265,11 +331,36 @@ async fn subscribe_rejects_invalid_requests() {
     let dir = tempfile::tempdir().unwrap();
     let strict = Arc::new(EventHub::open(dir.path().to_path_buf(), HubOptions::default()).unwrap());
     let cases = [
-        subscribe_params("coding_tools.unknown", json!({}), "https://x.test/h", SECRET),
-        subscribe_params(catalog::BRIDGE_DOWN, json!({"component":"db"}), "https://x.test/h", SECRET),
-        subscribe_params(catalog::BRIDGE_DOWN, json!({}), "http://127.0.0.1:1/h", SECRET),
-        subscribe_params(catalog::BRIDGE_DOWN, json!({}), "https://user:pw@x.test/h", SECRET),
-        subscribe_params(catalog::BRIDGE_DOWN, json!({}), "https://x.test/h", "whsec_c2hvcnQ="),
+        subscribe_params(
+            "coding_tools.unknown",
+            json!({}),
+            "https://x.test/h",
+            SECRET,
+        ),
+        subscribe_params(
+            catalog::BRIDGE_DOWN,
+            json!({"component":"db"}),
+            "https://x.test/h",
+            SECRET,
+        ),
+        subscribe_params(
+            catalog::BRIDGE_DOWN,
+            json!({}),
+            "http://127.0.0.1:1/h",
+            SECRET,
+        ),
+        subscribe_params(
+            catalog::BRIDGE_DOWN,
+            json!({}),
+            "https://user:pw@x.test/h",
+            SECRET,
+        ),
+        subscribe_params(
+            catalog::BRIDGE_DOWN,
+            json!({}),
+            "https://x.test/h",
+            "whsec_c2hvcnQ=",
+        ),
         json!({"name": catalog::BRIDGE_DOWN, "delivery": {"mode":"poll","url":"https://x.test/h","secret":SECRET}}),
     ];
     for params in cases {
@@ -284,17 +375,26 @@ async fn unsubscribe_is_idempotent_and_scoped_to_the_principal() {
     let (url, _shared) = receiver(Verify::Echo).await;
     let hub = open_hub(dir.path());
     let args = json!({"workspace_id":"ws","run_id":"run-1"});
-    hub.subscribe("ws", &subscribe_params(catalog::MISSION_NEEDS_ATTENTION, args.clone(), &url, SECRET))
-        .await
-        .unwrap();
+    hub.subscribe(
+        "ws",
+        &subscribe_params(catalog::MISSION_NEEDS_ATTENTION, args.clone(), &url, SECRET),
+    )
+    .await
+    .unwrap();
     let unsubscribe = json!({"name": catalog::MISSION_NEEDS_ATTENTION, "arguments": args,
         "delivery": {"mode":"webhook","url": url}});
-    assert_eq!(hub.unsubscribe("other-ws", &unsubscribe).unwrap(), json!({}));
+    assert_eq!(
+        hub.unsubscribe("other-ws", &unsubscribe).unwrap(),
+        json!({})
+    );
     assert_eq!(hub.status()["subscriptions"].as_array().unwrap().len(), 1);
     assert_eq!(hub.unsubscribe("ws", &unsubscribe).unwrap(), json!({}));
     assert!(hub.status()["subscriptions"].as_array().unwrap().is_empty());
     assert_eq!(hub.unsubscribe("ws", &unsubscribe).unwrap(), json!({}));
-    assert!(open_hub(dir.path()).status()["subscriptions"].as_array().unwrap().is_empty());
+    assert!(open_hub(dir.path()).status()["subscriptions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -302,15 +402,41 @@ async fn delivery_honours_filters_workspace_scope_and_incident_dedupe() {
     let dir = tempfile::tempdir().unwrap();
     let (url, shared) = receiver(Verify::Echo).await;
     let hub = open_hub(dir.path());
-    hub.subscribe("ws-a", &subscribe_params(catalog::MISSION_NEEDS_ATTENTION, json!({"attention":"pending_approval"}), &url, SECRET))
-        .await
-        .unwrap();
-    hub.subscribe("ws-a", &subscribe_params(catalog::MISSION_NEEDS_ATTENTION, json!({"attention":"error"}), &url, SECRET))
-        .await
-        .unwrap();
+    hub.subscribe(
+        "ws-a",
+        &subscribe_params(
+            catalog::MISSION_NEEDS_ATTENTION,
+            json!({"attention":"pending_approval"}),
+            &url,
+            SECRET,
+        ),
+    )
+    .await
+    .unwrap();
+    hub.subscribe(
+        "ws-a",
+        &subscribe_params(
+            catalog::MISSION_NEEDS_ATTENTION,
+            json!({"attention":"error"}),
+            &url,
+            SECRET,
+        ),
+    )
+    .await
+    .unwrap();
     // Another workspace's incident never reaches ws-a's connector.
-    assert_eq!(hub.emit(mission_incident("ws-b", "m:1")).unwrap().deliveries, 0);
-    assert_eq!(hub.emit(mission_incident("ws-a", "m:2")).unwrap().deliveries, 1);
+    assert_eq!(
+        hub.emit(mission_incident("ws-b", "m:1"))
+            .unwrap()
+            .deliveries,
+        0
+    );
+    assert_eq!(
+        hub.emit(mission_incident("ws-a", "m:2"))
+            .unwrap()
+            .deliveries,
+        1
+    );
     let duplicate = hub.emit(mission_incident("ws-a", "m:2")).unwrap();
     assert!(duplicate.deduplicated);
     wait_for(&shared, 1).await;
@@ -328,19 +454,29 @@ async fn transient_failures_retry_with_the_same_event_id_and_fresh_signature() {
     let (url, shared) = receiver(Verify::Echo).await;
     shared.lock().unwrap().statuses = VecDeque::from([503, 429, 200]);
     let hub = open_hub(dir.path());
-    hub.subscribe("ws", &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET))
-        .await
-        .unwrap();
+    hub.subscribe(
+        "ws",
+        &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET),
+    )
+    .await
+    .unwrap();
     hub.emit(bridge_incident("bridge:retry")).unwrap();
     wait_for(&shared, 3).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     let receiver = shared.lock().unwrap();
     assert_eq!(receiver.deliveries.len(), 3);
-    let ids: Vec<_> = receiver.deliveries.iter().map(|d| d.webhook_id.clone()).collect();
+    let ids: Vec<_> = receiver
+        .deliveries
+        .iter()
+        .map(|d| d.webhook_id.clone())
+        .collect();
     assert!(ids.iter().all(|id| id == &ids[0]));
     assert!(receiver.deliveries.iter().all(|d| d.signature_valid));
     drop(receiver);
-    assert_eq!(hub.status()["subscriptions"][0]["last_delivery"]["outcome"], "delivered");
+    assert_eq!(
+        hub.status()["subscriptions"][0]["last_delivery"]["outcome"],
+        "delivered"
+    );
 }
 
 #[tokio::test]
@@ -349,9 +485,12 @@ async fn gone_removes_the_subscription_and_too_large_is_not_retried() {
     let (url, shared) = receiver(Verify::Echo).await;
     shared.lock().unwrap().statuses = VecDeque::from([413]);
     let hub = open_hub(dir.path());
-    hub.subscribe("ws", &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET))
-        .await
-        .unwrap();
+    hub.subscribe(
+        "ws",
+        &subscribe_params(catalog::BRIDGE_DOWN, json!({}), &url, SECRET),
+    )
+    .await
+    .unwrap();
     hub.emit(bridge_incident("bridge:413")).unwrap();
     wait_for(&shared, 1).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -368,7 +507,10 @@ async fn gone_removes_the_subscription_and_too_large_is_not_retried() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(hub.status()["subscriptions"].as_array().unwrap().is_empty());
-    assert!(open_hub(dir.path()).status()["subscriptions"].as_array().unwrap().is_empty());
+    assert!(open_hub(dir.path()).status()["subscriptions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -387,9 +529,15 @@ fn expired_subscriptions_are_dropped_on_load() {
         expires_at_ms,
         verified_at_ms: 1,
     };
-    file.save(&[entry("sub_old", 1), entry("sub_live", now_ms() + 60_000)]).unwrap();
+    file.save(&[entry("sub_old", 1), entry("sub_live", now_ms() + 60_000)])
+        .unwrap();
     let hub = open_hub(dir.path());
-    let ids: Vec<_> = hub.status()["subscriptions"].as_array().unwrap().iter().map(|s| s["id"].clone()).collect();
+    let ids: Vec<_> = hub.status()["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].clone())
+        .collect();
     assert_eq!(ids, vec![json!("sub_live")]);
 }
 
@@ -399,7 +547,9 @@ fn proxy_override_accepts_only_http_urls() {
     let hub = open_hub(dir.path());
     assert!(hub.set_proxy(Some("http://127.0.0.1:17891".into())).is_ok());
     assert_eq!(hub.status()["proxy_configured"], true);
-    assert!(hub.set_proxy(Some("socks5://127.0.0.1:1080".into())).is_err());
+    assert!(hub
+        .set_proxy(Some("socks5://127.0.0.1:1080".into()))
+        .is_err());
     assert!(hub.set_proxy(Some("not a url".into())).is_err());
     assert!(hub.set_proxy(None).is_ok());
     assert_eq!(hub.status()["proxy_configured"], false);

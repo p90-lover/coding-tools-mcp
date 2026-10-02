@@ -13,7 +13,11 @@ use tokio_tungstenite::{
     },
 };
 
+// The original Paseo/Anneal action paths below are retired (`act` now refuses them) but are
+// kept for reference under the repository preservation policy, so they are allowed to be unused.
+#[allow(dead_code)]
 const MAX_BYTES: usize = 2 * 1024 * 1024;
+#[allow(dead_code)]
 const ALLOWED_PASEO: &[&str] = &[
     "send_agent_message_request",
     "resume_agent_request",
@@ -22,6 +26,7 @@ const ALLOWED_PASEO: &[&str] = &[
     "agent_permission_response",
     "create_agent_request",
 ];
+#[allow(dead_code)]
 const ALLOWED_ANNEAL_POST: &[&str] = &[
     "/tasks/{id}/start",
     "/tasks/{id}/retry",
@@ -75,6 +80,7 @@ pub fn allowed_anneal_posts() -> &'static [&'static str] {
     ALLOWED_ANNEAL_POST
 }
 
+#[allow(dead_code)]
 fn token(value: &str, label: &str) -> AppResult<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.len() > 200 {
@@ -89,6 +95,7 @@ fn token(value: &str, label: &str) -> AppResult<String> {
     Ok(trimmed.into())
 }
 
+#[allow(dead_code)]
 fn bounded_text(value: &str, max: usize, label: &str) -> AppResult<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -102,6 +109,7 @@ fn bounded_text(value: &str, max: usize, label: &str) -> AppResult<String> {
     Ok(trimmed.into())
 }
 
+#[allow(dead_code)]
 fn request_id(raw: &str) -> String {
     if raw.trim().is_empty() {
         uuid::Uuid::new_v4().to_string()
@@ -119,6 +127,7 @@ pub async fn act(_endpoint_raw: &str, _credential: &str, req: ActRequest) -> App
     }
 }
 
+#[allow(dead_code)]
 async fn paseo_act(raw: &str, credential: &str, req: ActRequest) -> AppResult<ActResult> {
     let op = match req.op.as_str() {
         "send" => "send_agent_message_request",
@@ -194,6 +203,7 @@ async fn paseo_act(raw: &str, credential: &str, req: ActRequest) -> AppResult<Ac
     paseo_rpc(raw, credential, message, &rid, expected).await
 }
 
+#[allow(dead_code)]
 async fn paseo_rpc(
     raw: &str,
     credential: &str,
@@ -300,6 +310,7 @@ async fn paseo_rpc(
     result.map_err(|_| err("Paseo action timed out"))?
 }
 
+#[allow(dead_code)]
 fn anneal_path(op: &str, id: &str) -> AppResult<(&'static str, Value)> {
     let id = token(id, "id")?;
     match op {
@@ -345,6 +356,7 @@ fn anneal_path(op: &str, id: &str) -> AppResult<(&'static str, Value)> {
     }
 }
 
+#[allow(dead_code)]
 async fn anneal_act(raw: &str, credential: &str, req: ActRequest) -> AppResult<ActResult> {
     let id = if req.op.starts_with("inbox_") {
         req.message_id.clone()

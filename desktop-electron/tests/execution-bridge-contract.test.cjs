@@ -8,7 +8,7 @@ const test = require("node:test");
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const read = (relativePath) => fs.readFileSync(path.join(repositoryRoot, relativePath), "utf8");
 
-test("headless sidecar exposes the local Paseo and Anneal execution control plane", () => {
+test("headless sidecar keeps execution reads and retires standalone Paseo/Anneal execution writes", () => {
   const source = read("rust-core/coding-tools-headless/src/lib.rs");
   for (const route of ["read", "provider", "update"]) {
     assert.match(
@@ -17,8 +17,20 @@ test("headless sidecar exposes the local Paseo and Anneal execution control plan
       `missing authenticated /api/v1/execution/${route} route`,
     );
   }
+  const handler = (name) => {
+    const start = source.indexOf(`async fn ${name}(`);
+    assert.ok(start >= 0, `missing ${name} handler`);
+    return source.slice(start, source.indexOf("\nasync fn ", start + 1));
+  };
+  // Reads still report execution state; standalone execution writes are retired in favour of AO.
+  assert.match(handler("execution_read"), /execution::service::view\(/);
+  for (const retired of ["execution_provider", "execution_update"]) {
+    const body = handler(retired);
+    assert.match(body, /auth\(&headers, &state\)/, `${retired} stays authenticated`);
+    assert.match(body, /StatusCode::GONE,\s*"APP_MODULE_RETIRED"/, `${retired} answers 410 APP_MODULE_RETIRED`);
+  }
   for (const operation of ["configure", "reconnect", "disable", "change"]) {
-    assert.match(source, new RegExp(`execution::service::${operation}\\(`));
+    assert.doesNotMatch(source, new RegExp(`execution::service::${operation}\\(`), `retired ${operation} is not reachable`);
   }
 });
 

@@ -24,7 +24,7 @@ const {
 
 const WINDOW_WAIT_MS = 60_000;
 // Background starts are not waited on by anyone, so a slow disk gets longer before giving up.
-const BACKGROUND_WINDOW_WAIT_MS = 5 * 60_000;
+const BACKGROUND_WAIT_FACTOR = 5;
 // ChatGPT treats WM_CLOSE as "hide to background" at times; give it a moment to flush its
 // profile, then end the tree.
 const CLOSE_WAIT_MS = 3_000;
@@ -40,6 +40,9 @@ const BACKGROUND_CHECK_EVERY = 10;
 // A background (hidden) account nobody has looked at for this long is closed to free memory.
 // The account shown in the pane is never closed automatically.
 const IDLE_CLOSE_MS = 20 * 60_000;
+// A failed auto-start waits this long before its next try, doubling up to an hour.
+const AUTO_START_RETRY_MS = 5 * 60_000;
+const AUTO_START_RETRY_MAX_MS = 60 * 60_000;
 const SEED_SANDBOX_MODE = "unelevated";
 const GLOBAL_STATE_FILE = ".codex-global-state.json";
 const PERSISTED_ATOMS = "electron-persisted-atom-state";
@@ -106,6 +109,8 @@ function createChatGptDesktopHost({
   homeDir = require("node:os").homedir(),
   autoStart = true,
   idleCloseMs = IDLE_CLOSE_MS,
+  windowWaitMs = WINDOW_WAIT_MS,
+  autoStartRetryMs = AUTO_START_RETRY_MS,
 }) {
   const statePath = path.join(dataRoot, "state.json");
   let state = { active: null, local: [] };
@@ -137,6 +142,7 @@ function createChatGptDesktopHost({
   let placementRunning = false;
   const syncs = new Map(); // slotId -> { watchers, timer, debounce }
   let autoStartQueued = false;
+  const autoStartBackoff = new Map(); // slotId -> { until, delay }
 
   function persist() {
     writeJson(statePath, state);
@@ -454,21 +460,19 @@ function createChatGptDesktopHost({
   }
 
   // The window is hidden the moment it exists: it is only ever shown docked in the ChatGPT tab.
-  // A start that never produces a window is ended, so no stray ChatGPT window appears later.
-  async function waitForWindow(slotId, timeoutMs = WINDOW_WAIT_MS) {
+  // A start that is still slow is left running (never started twice); a later auto-start finds
+  // its window and adopts it, hidden.
+  async function waitForWindow(slotId, timeoutMs = windowWaitMs) {
     const deadline = Date.now() + timeoutMs;
-    let pid = 0;
     while (Date.now() < deadline) {
       const found = await findInstance(slotId);
       if (found?.hwnd) {
         await helper.call("hide", { hwnd: found.hwnd }).catch(() => {});
         return found;
       }
-      if (found?.pid) pid = found.pid;
       await sleep(750);
     }
-    if (pid) await helper.call("kill-tree", { pid }).catch(() => {});
-    throw new Error(`ChatGPT did not open a window within ${Math.round(timeoutMs / 60_000)} minute(s)`);
+    throw new Error(`ChatGPT did not open a window within ${Math.max(1, Math.round(timeoutMs / 1000))} seconds`);
   }
 
   async function launchInstance(slotId, { background = false } = {}) {
@@ -483,8 +487,11 @@ function createChatGptDesktopHost({
     const account = cpaAccounts().find((entry) => entry.slotId === slotId);
     if (account) prepareCpaAuth(account, paths);
 
+    // A slow start has a process before it has a window. Starting another copy then would
+    // run the same account twice and, on every account change, pile up more of them.
     const existing = await findInstance(slotId);
     if (existing?.hwnd) return existing;
+    if (existing?.pid) return await waitForWindow(slotId, background ? windowWaitMs * BACKGROUND_WAIT_FACTOR : windowWaitMs);
     prepareProfile(slotId, paths);
 
     const command = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe");
@@ -514,7 +521,7 @@ function createChatGptDesktopHost({
     logger?.info?.("chatgpt_desktop.instance_launched", {
       slotId, signedIn: fs.existsSync(paths.auth), proxied: Boolean(proxy), background,
     });
-    return await waitForWindow(slotId, background ? BACKGROUND_WINDOW_WAIT_MS : WINDOW_WAIT_MS);
+    return await waitForWindow(slotId, background ? windowWaitMs * BACKGROUND_WAIT_FACTOR : windowWaitMs);
   }
 
   async function stopInstance(slotId = state.active) {
@@ -681,7 +688,8 @@ function createChatGptDesktopHost({
 
   function autoStartCandidates() {
     return cpaAccounts()
-      .filter((account) => !account.disabled && !instances.has(account.slotId))
+      .filter((account) => !account.disabled && !instances.has(account.slotId)
+        && !(autoStartBackoff.get(account.slotId)?.until > Date.now()))
       .sort((a, b) => Number(b.slotId === state.active) - Number(a.slotId === state.active));
   }
 
@@ -697,9 +705,15 @@ function createChatGptDesktopHost({
           if (!autoStartCandidates().some((entry) => entry.slotId === account.slotId)) return;
           try {
             await adopt(await launchInstance(account.slotId, { background: true }));
+            autoStartBackoff.delete(account.slotId);
             logger?.info?.("chatgpt_desktop.auto_started", { slotId: account.slotId });
           } catch (error) {
-            logger?.warn?.("chatgpt_desktop.auto_start_failed", { slotId: account.slotId, message: error.message });
+            // Account changes (CPA rewrites auth files on every token refresh) re-run auto-start;
+            // without a pause each run would relaunch the same failing account.
+            const previous = autoStartBackoff.get(account.slotId)?.delay;
+            const delay = previous ? Math.min(previous * 2, AUTO_START_RETRY_MAX_MS) : autoStartRetryMs;
+            autoStartBackoff.set(account.slotId, { until: Date.now() + delay, delay });
+            logger?.warn?.("chatgpt_desktop.auto_start_failed", { slotId: account.slotId, message: error.message, retryInMs: delay });
           }
           emit();
         }).catch(() => {});

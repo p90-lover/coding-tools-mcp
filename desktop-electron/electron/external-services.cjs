@@ -312,6 +312,33 @@ function staleWindowMs(id) {
   return id === "paseo" ? PASEO_STALE_MS : HTTP_STALE_MS;
 }
 
+// The retired-state entries (sources and stats) of the latest snapshot, or null when there is
+// no snapshot yet or it predates recorded stats.
+function archivedRetiredState(archiveRoot) {
+  try {
+    if (!fs.existsSync(path.join(archiveRoot, "manifest.json"))) return null;
+    let destination = archiveRoot;
+    const pointer = path.join(archiveRoot, "latest.json");
+    if (fs.existsSync(pointer)) {
+      const relative = JSON.parse(fs.readFileSync(pointer, "utf8")).relative;
+      if (typeof relative !== "string" || !/^snapshots\/[a-f0-9-]{36}$/.test(relative)) return null;
+      destination = path.join(archiveRoot, relative);
+    }
+    const manifest = JSON.parse(fs.readFileSync(path.join(destination, "manifest.json"), "utf8"));
+    if (!manifest?.stats) return null;
+    const sources = {};
+    const stats = {};
+    for (const [relative, source] of Object.entries(manifest.sources || {})) {
+      if (!relative.startsWith("integrations/state/") || !manifest.stats[relative]) continue;
+      sources[relative] = source;
+      stats[relative] = manifest.stats[relative];
+    }
+    return Object.keys(sources).length ? { sources, stats } : null;
+  } catch {
+    return null;
+  }
+}
+
 function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null }) {
   const privateRoot = path.dirname(filePath);
   if (archiveDataRoot) {
@@ -321,6 +348,11 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
     }
   }
   const sources = {};
+  // Size and mtime of each source let later launches confirm an unchanged archive without
+  // reading it: retired services never run again, and their state can be a gigabyte.
+  const stats = {};
+  const statOf = (info) => ({ size: info.size, mtimeMs: Math.trunc(info.mtimeMs) });
+  const sameStat = (a, b) => Boolean(a && b) && a.size === b.size && a.mtimeMs === b.mtimeMs;
   function include(source, relative) {
     if (!fs.existsSync(source)) return;
     const info = fs.lstatSync(source);
@@ -328,7 +360,9 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
     if (info.isDirectory()) {
       for (const entry of fs.readdirSync(source)) include(path.join(source, entry), path.join(relative, entry));
     } else if (info.isFile()) {
-      sources[relative.split(path.sep).join("/")] = source;
+      const key = relative.split(path.sep).join("/");
+      sources[key] = source;
+      stats[key] = statOf(info);
     } else {
       throw new Error("Paseo archive requires regular files");
     }
@@ -338,8 +372,16 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
   if (archiveDataRoot) {
     include(path.join(archiveDataRoot, "managed-components.secrets.json"), "integrations/managed-components.secrets.json");
     include(path.join(archiveDataRoot, "managed-components.key"), "integrations/managed-components.key");
-    for (const id of ["paseo", "codex-router", "commandcode-proxy", "anneal"]) {
-      include(path.join(archiveDataRoot, "state", id), `integrations/state/${id}`);
+    // Retired state is frozen: once a snapshot has recorded it with stats, reuse those entries
+    // instead of walking it again (codex-router alone holds a whole Python environment).
+    const archived = archivedRetiredState(path.join(privateRoot, "archives", "retired-services"));
+    if (archived) {
+      Object.assign(sources, archived.sources);
+      Object.assign(stats, archived.stats);
+    } else {
+      for (const id of ["paseo", "codex-router", "commandcode-proxy", "anneal"]) {
+        include(path.join(archiveDataRoot, "state", id), `integrations/state/${id}`);
+      }
     }
   }
   if (Object.keys(sources).length === 0) return null;
@@ -361,6 +403,7 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
   const archiveRoot = path.join(privateRoot, "archives", "retired-services");
   const manifestPath = path.join(archiveRoot, "manifest.json");
   let destination = archiveRoot;
+  let prior = null;
   if (fs.existsSync(manifestPath)) {
     const pointer = path.join(archiveRoot, "latest.json");
     if (fs.existsSync(pointer)) {
@@ -372,23 +415,52 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
     }
     const previous = JSON.parse(fs.readFileSync(path.join(destination, "manifest.json"), "utf8"));
     const keys = Object.keys(sources).sort();
-    if (keys.length === Object.keys(previous.sources || {}).length
-        && keys.every((relative) => previous.sources[relative] === sources[relative]
-          && fs.readFileSync(sources[relative]).equals(fs.readFileSync(path.join(destination, relative))))) {
+    const sameSources = keys.length === Object.keys(previous.sources || {}).length
+      && keys.every((relative) => previous.sources[relative] === sources[relative]);
+    if (sameSources && previous.stats && keys.every((relative) => sameStat(previous.stats[relative], stats[relative]))) {
       return destination;
     }
+    // The launcher rewrites external-services.json with the same content on every start, so a
+    // newer mtime alone does not mean a change. The small live files are compared by content
+    // (retired state never is); when only their mtimes moved, the stats are refreshed in place
+    // instead of hard-linking every retired file into yet another snapshot.
+    const sameLiveContent = (relative) => {
+      if (relative.startsWith("integrations/state/")) return false;
+      try { return fs.readFileSync(sources[relative]).equals(fs.readFileSync(path.join(destination, relative))); } catch { return false; }
+    };
+    if (sameSources && previous.stats
+        && keys.every((relative) => sameStat(previous.stats[relative], stats[relative]) || sameLiveContent(relative))) {
+      writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources, stats }, null, 2));
+      return destination;
+    }
+    if (sameSources && !previous.stats
+        && keys.every((relative) => fs.readFileSync(sources[relative]).equals(fs.readFileSync(path.join(destination, relative))))) {
+      // A manifest from before stats were recorded: confirm by content once, then record them.
+      writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources, stats }, null, 2));
+      return destination;
+    }
+    prior = { root: destination, stats: previous.stats || {} };
     destination = path.join(archiveRoot, "snapshots", crypto.randomUUID());
   }
   for (const [relative, source] of Object.entries(sources)) {
     const target = path.join(destination, relative);
     fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    // An unchanged file is hard-linked from the previous snapshot instead of copied again.
+    if (prior && sameStat(prior.stats[relative], stats[relative])) {
+      try {
+        fs.linkSync(path.join(prior.root, relative), target);
+        continue;
+      } catch {
+        // Different volume or no link support: fall back to a verified copy.
+      }
+    }
     fs.copyFileSync(source, target);
     if (process.platform !== "win32") fs.chmodSync(target, 0o600);
     if (!fs.readFileSync(source).equals(fs.readFileSync(target))) {
       throw new Error("Paseo archive copy could not be verified");
     }
   }
-  writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources }, null, 2));
+  writePrivateFileAtomic(path.join(destination, "manifest.json"), JSON.stringify({ schemaVersion: 1, sources, stats }, null, 2));
   if (destination !== archiveRoot) {
     writePrivateFileAtomic(path.join(archiveRoot, "latest.json"), JSON.stringify({ relative: path.relative(archiveRoot, destination).split(path.sep).join("/") }));
   }

@@ -285,8 +285,10 @@ pub struct NodePosition {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GraphChange {
+    // Boxed: a full Node is far larger than the other variants (clippy::large_enum_variant).
+    // serde deserializes Box<Node> exactly like Node, so the API shape is unchanged.
     AddWorker {
-        node: Node,
+        node: Box<Node>,
     },
     MoveNode {
         node_id: String,
@@ -478,9 +480,9 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         let wired = match node.role {
             Role::Planner => true,
             Role::Approver => node.parents.len() == 1 && depends_on(planner),
-            Role::Worker => depends_on(planner) && approver.is_none_or(|id| depends_on(id)),
+            Role::Worker => depends_on(planner) && approver.is_none_or(&depends_on),
             Role::ReviewSplit => workers.iter().all(|worker| depends_on(worker)),
-            Role::SubReviewer => split.is_some_and(|id| depends_on(id)),
+            Role::SubReviewer => split.is_some_and(&depends_on),
             Role::Reviewer if sub_reviewers.is_empty() => {
                 workers.iter().all(|worker| depends_on(worker))
             }
@@ -1150,13 +1152,11 @@ Do not edit the implementation; send needed changes back to the workers.",
             Role::ReviewSplit => {}
             _ => prompt.push_str(&format!(
                 "\nCompleted {} output ({}):\n{}\n",
-                parent
-                    .settings
-                    .name
-                    .as_str()
-                    .is_empty()
-                    .then_some(parent_id.as_str())
-                    .unwrap_or(&parent.settings.name),
+                if parent.settings.name.is_empty() {
+                    parent_id.as_str()
+                } else {
+                    &parent.settings.name
+                },
                 receipt.route.model,
                 clip(answer, per_parent)
             )),
@@ -1277,7 +1277,7 @@ pub fn update_graph(
                 .ok_or_else(|| fail("AO reviewer is missing"))?
                 .parents
                 .push(node.id.clone());
-            next.nodes.push(node);
+            next.nodes.push(*node);
         }
         GraphChange::MoveNode { node_id, x, y } => {
             let node = next
@@ -1454,6 +1454,9 @@ pub fn record_submission(
     Ok(run.clone())
 }
 
+// One terminal receipt names its run, node and turn plus the outcome fields; keeping them as
+// explicit parameters matches the other AO receipt recorders.
+#[allow(clippy::too_many_arguments)]
 pub fn record_terminal(
     data: &mut AppData,
     workspace_id: &str,
@@ -1503,7 +1506,7 @@ pub fn record_terminal(
         })
         .ok_or_else(|| fail("AO native thread identity changed"))?;
     let first_word = answer
-        .and_then(|answer| answer.trim_start().split_whitespace().next())
+        .and_then(|answer| answer.split_whitespace().next())
         .map(|word| word.trim_matches(['*', '`', ':', '.']).replace("\\_", "_"));
     let verdict = match (&node.role, first_word.as_deref()) {
         (Role::Reviewer | Role::Approver, Some("APPROVED")) => Some("APPROVED"),
@@ -1576,6 +1579,9 @@ pub fn record_terminal(
 /// Records the command approver's decision on a running card's tool request, before it is
 /// answered. Only a mission whose background grant is valid and whose approver has approved
 /// the plan may decide this way; allowing also needs the approver's auto-decide setting.
+// One decision names its run, node and request plus the verdict; explicit parameters match
+// the other AO receipt recorders.
+#[allow(clippy::too_many_arguments)]
 pub fn record_approver_decision(
     data: &mut AppData,
     workspace_id: &str,

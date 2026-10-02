@@ -25,6 +25,7 @@ import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
+import { GptBrowserSurface } from "./features/GptBrowserSurface";
 
 import type {
   BrowserInteractionMode,
@@ -722,6 +723,12 @@ function LauncherShell({
                   onClick={() => navigateSurface("browser")}
                 />
                 <SidebarItem
+                  active={surface === "gpt-browser"}
+                  icon="browser"
+                  label="GPT Browser"
+                  onClick={() => navigateSurface("gpt-browser")}
+                />
+                <SidebarItem
                   active={surface === "chatgpt-desktop"}
                   icon="browser"
                   label="ChatGPT Desktop"
@@ -850,6 +857,13 @@ function LauncherShell({
                 interactionMode={snapshot.state.browserInteractionMode}
                 operation={operation}
                 platform={snapshot.platform}
+                setError={setError}
+              />
+            ))}
+            {keepAlive("gpt-browser", () => (
+              <GptBrowserSurface
+                active={surface === "gpt-browser" && !(compactSidebar && sidebarOpen) && !biggerContextRecommendationOpen}
+                api={api!}
                 setError={setError}
               />
             ))}

@@ -1,0 +1,38 @@
+.gpb-surface { --gpb-line: rgb(255 255 255 / 9%); display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.gpb-bar {
+  display: flex; flex: 0 0 auto; align-items: center; gap: 8px; height: 46px; padding: 0 12px;
+  padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 12px);
+  border-bottom: 1px solid var(--gpb-line); -webkit-app-region: drag;
+}
+.gpb-bar > * { -webkit-app-region: no-drag; }
+.gpb-bar strong { font-size: 13px; white-space: nowrap; }
+.gpb-spacer { flex: 1 1 auto; align-self: stretch; -webkit-app-region: drag; }
+.gpb-surface select,
+.gpb-link input {
+  min-width: 0; padding: 5px 8px; border: 1px solid rgb(255 255 255 / 12%); border-radius: 7px;
+  background: var(--color-background-surface); color: var(--color-text-primary); font-size: 12px;
+}
+.gpb-surface select { max-width: 240px; }
+.gpb-nav { display: inline-flex; gap: 2px; }
+.gpb-nav button {
+  width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--color-text-primary); font-size: 15px; line-height: 1; cursor: pointer;
+}
+.gpb-nav button:hover:not(:disabled) { background: rgb(255 255 255 / 8%); }
+.gpb-nav button:disabled { opacity: 0.35; cursor: default; }
+.gpb-link { display: flex; flex: 0 1 380px; min-width: 120px; gap: 6px; }
+.gpb-link input { flex: 1 1 auto; }
+.gpb-surface .button-danger {
+  height: 28px; padding: 0 12px; border: 1px solid transparent; border-radius: 7px;
+  background: var(--color-background-status-error); color: var(--color-text-error); font-size: 12px; font-weight: 600;
+}
+/* The account's chatgpt.com page is a native view pinned over .gpb-slot by the main process. */
+.gpb-stage { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
+.gpb-slot { flex: 1 1 auto; min-width: 0; min-height: 0; background: var(--color-background-surface-under); }
+.gpb-empty { display: grid; place-content: center; justify-items: center; gap: 10px; flex: 1 1 auto; padding: 24px; text-align: center; }
+.gpb-empty p { max-width: 460px; margin: 0; font-size: 13px; line-height: 1.5; }
+.gpb-muted { color: var(--color-text-secondary); font-size: 12px; }
+@media (max-width: 760px) {
+  .gpb-link { flex-basis: 200px; }
+  .gpb-bar strong { display: none; }
+}

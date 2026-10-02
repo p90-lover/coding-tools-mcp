@@ -89,8 +89,8 @@ function desktopWithCpaTokens(desktop, cpa) {
 function chooseSyncDirection(desktop, cpa) {
   if (desktop.tokens.refresh_token === cpa.tokens.refresh_token
     && desktop.tokens.access_token === cpa.tokens.access_token) return null;
-  // Copying the stale side over the fresh one would replace a still-valid refresh token with a
-  // retired one and sign that side out, so tokens move only when one side is clearly newer.
+  // A refresh rotates the refresh token, so the side refreshed last holds the only one that
+  // still works; copying the other way would sign it out. Tokens move only on clear evidence.
   const newer = (left, right) => (left > right ? "to-cpa" : right > left ? "to-desktop" : null);
   if (Number.isFinite(desktop.lastRefresh) && Number.isFinite(cpa.lastRefresh)) {
     return newer(desktop.lastRefresh, cpa.lastRefresh);
@@ -99,7 +99,9 @@ function chooseSyncDirection(desktop, cpa) {
   const expiry = (side) => jwtClaims(side.tokens.access_token)?.exp;
   const desktopExpiry = expiry(desktop);
   const cpaExpiry = expiry(cpa);
-  return Number.isFinite(desktopExpiry) && Number.isFinite(cpaExpiry) ? newer(desktopExpiry, cpaExpiry) : null;
+  if (Number.isFinite(desktopExpiry) && Number.isFinite(cpaExpiry)) return newer(desktopExpiry, cpaExpiry);
+  // No usable expiry either: a side with a refresh time wins over one without; none stays put.
+  return newer(desktop.lastRefresh ?? -Infinity, cpa.lastRefresh ?? -Infinity);
 }
 
 function readJson(filePath) {

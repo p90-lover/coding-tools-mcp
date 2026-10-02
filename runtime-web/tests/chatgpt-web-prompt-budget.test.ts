@@ -34,7 +34,7 @@ test("image parts of old tool results are kept; history without big outputs is r
   const parts: CodexMessage = { role: "toolResult", toolCallId: "c", toolName: "view_image", isError: false, timestamp: 0,
     content: [{ type: "image", imageUrl: "data:image/png;base64,AAAA" }, { type: "text", text: "x".repeat(10_000) }] };
   const messages = [parts, ...Array.from({ length: RECENT_TOOL_RESULTS_KEPT_WHOLE }, (_, index) => toolResult(index, "ok"))];
-  const [first] = withTrimmedOldToolResults(messages) as [{ content: Array<{ type: string; text?: string }> }];
+  const [first] = withTrimmedOldToolResults(messages) as unknown as [{ content: Array<{ type: string; text?: string; imageUrl?: string }> }];
   expect(first.content[0]).toEqual({ type: "image", imageUrl: "data:image/png;base64,AAAA" });
   expect(first.content[1]!.text!.length).toBeLessThan(OLD_TOOL_RESULT_CHAR_LIMIT + 200);
   const quiet = [toolResult(1, "ok"), toolResult(2, "fine")];

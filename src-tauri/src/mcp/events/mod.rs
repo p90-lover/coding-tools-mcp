@@ -78,7 +78,12 @@ fn canonical_arguments(arguments: &Map<String, Value>) -> String {
 }
 
 /// Deterministic id from the authenticated principal, callback URL, event name and arguments.
-pub fn subscription_id(principal: &str, url: &str, name: &str, arguments: &Map<String, Value>) -> String {
+pub fn subscription_id(
+    principal: &str,
+    url: &str,
+    name: &str,
+    arguments: &Map<String, Value>,
+) -> String {
     let digest = hex_digest(&[principal, url, name, &canonical_arguments(arguments)]);
     format!("sub_{}", &digest[..32])
 }
@@ -90,7 +95,12 @@ pub fn event_id(subscription_id: &str, incident_id: &str) -> String {
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    left.len() == right.len() && left.iter().zip(right).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
 }
 
 fn rpc_error(code: i64, message: impl Into<String>) -> Value {
@@ -192,7 +202,10 @@ pub fn global() -> Result<Arc<EventHub>, String> {
     let directory = if let Some(root) = GLOBAL_ROOT.get() {
         root.clone()
     } else if cfg!(test) {
-        std::env::temp_dir().join(format!("coding-tools-mcp-events-test-{}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "coding-tools-mcp-events-test-{}",
+            std::process::id()
+        ))
     } else {
         crate::platform::platform()
             .app_config_dir()
@@ -223,7 +236,9 @@ impl EventHub {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HubState> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn persist(&self, state: &HubState) -> Result<(), String> {
@@ -233,7 +248,9 @@ impl EventHub {
     fn prune_expired(&self, state: &mut HubState) {
         let now = now_ms();
         let before = state.subscriptions.len();
-        state.subscriptions.retain(|subscription| subscription.expires_at_ms > now);
+        state
+            .subscriptions
+            .retain(|subscription| subscription.expires_at_ms > now);
         if state.subscriptions.len() != before {
             let _ = self.persist(state);
         }
@@ -242,7 +259,9 @@ impl EventHub {
     /// Route webhook traffic through this proxy (the desktop's global route). `None`
     /// falls back to the process environment (HTTP(S)_PROXY) and system settings.
     pub fn set_proxy(&self, proxy: Option<String>) -> Result<(), String> {
-        let proxy = proxy.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+        let proxy = proxy
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         if let Some(value) = proxy.as_deref() {
             let parsed = url::Url::parse(value).map_err(|_| "proxy must be a URL".to_string())?;
             if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
@@ -267,11 +286,15 @@ impl EventHub {
         let mut builder = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent(concat!("coding-tools-mcp-events/", env!("CARGO_PKG_VERSION")));
+            .user_agent(concat!(
+                "coding-tools-mcp-events/",
+                env!("CARGO_PKG_VERSION")
+            ));
         if self.options.direct {
             builder = builder.no_proxy();
         } else if let Some(proxy) = state.proxy.as_deref() {
-            builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|_| "proxy is invalid".to_string())?);
+            builder = builder
+                .proxy(reqwest::Proxy::all(proxy).map_err(|_| "proxy is invalid".to_string())?);
         }
         let client = builder.build().map_err(|error| error.to_string())?;
         state.client = Some((state.proxy.clone(), client.clone()));
@@ -282,9 +305,14 @@ impl EventHub {
         let url = url::Url::parse(raw)
             .map_err(|_| invalid_params("delivery.url must be an absolute URL"))?;
         if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
-            return Err(invalid_params("delivery.url must not carry credentials or a fragment"));
+            return Err(invalid_params(
+                "delivery.url must not carry credentials or a fragment",
+            ));
         }
-        let loopback = matches!(url.host_str(), Some("127.0.0.1") | Some("localhost") | Some("[::1]"));
+        let loopback = matches!(
+            url.host_str(),
+            Some("127.0.0.1") | Some("localhost") | Some("[::1]")
+        );
         let allowed = match url.scheme() {
             "https" => url.host_str().is_some(),
             "http" => self.options.allow_insecure_loopback && loopback,
@@ -308,8 +336,9 @@ impl EventHub {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid_params("name is required"))?;
-        let arguments = catalog::validate_arguments(name, params.get("arguments").unwrap_or(&Value::Null))
-            .map_err(invalid_params)?;
+        let arguments =
+            catalog::validate_arguments(name, params.get("arguments").unwrap_or(&Value::Null))
+                .map_err(invalid_params)?;
         let delivery = params
             .get("delivery")
             .and_then(Value::as_object)
@@ -317,9 +346,8 @@ impl EventHub {
         if delivery.get("mode").and_then(Value::as_str) != Some("webhook") {
             return Err(invalid_params("delivery.mode must be webhook"));
         }
-        let url = self.validate_callback_url(
-            delivery.get("url").and_then(Value::as_str).unwrap_or(""),
-        )?;
+        let url =
+            self.validate_callback_url(delivery.get("url").and_then(Value::as_str).unwrap_or(""))?;
         let secret_text = delivery
             .get("secret")
             .and_then(Value::as_str)
@@ -348,7 +376,9 @@ impl EventHub {
                     .count()
                     >= MAX_SUBSCRIPTIONS_PER_PRINCIPAL
             {
-                return Err(invalid_params("Subscription limit reached for this connector"));
+                return Err(invalid_params(
+                    "Subscription limit reached for this connector",
+                ));
             }
             existing.is_none_or(|entry| {
                 WebhookSecret::parse(&entry.secret)
@@ -428,12 +458,18 @@ impl EventHub {
             .retain(|entry| !(entry.id == id && entry.principal == principal));
         if state.subscriptions.len() != before {
             state.deliveries.remove(&id);
-            self.persist(&state).map_err(|error| rpc_error(-32603, error))?;
+            self.persist(&state)
+                .map_err(|error| rpc_error(-32603, error))?;
         }
         Ok(json!({}))
     }
 
-    async fn verify_callback(&self, id: &str, url: &str, secret: &WebhookSecret) -> Result<(), Value> {
+    async fn verify_callback(
+        &self,
+        id: &str,
+        url: &str,
+        secret: &WebhookSecret,
+    ) -> Result<(), Value> {
         let challenge = format!(
             "chl_{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -445,7 +481,9 @@ impl EventHub {
             .client()
             .map_err(|error| callback_error("client_unavailable", error))?;
         let mut request = client.post(url).body(body.clone());
-        for (name, value) in signed_headers(secret, &message_id, id, (now_ms() / 1000) as i64, &body) {
+        for (name, value) in
+            signed_headers(secret, &message_id, id, (now_ms() / 1000) as i64, &body)
+        {
             request = request.header(name, value);
         }
         let mut response = request.send().await.map_err(|error| {
@@ -468,19 +506,40 @@ impl EventHub {
                 Ok(Some(chunk)) => {
                     received.extend_from_slice(&chunk);
                     if received.len() > MAX_VERIFY_RESPONSE_BYTES {
-                        return Err(callback_error("invalid_response", "Callback verification response is too large"));
+                        return Err(callback_error(
+                            "invalid_response",
+                            "Callback verification response is too large",
+                        ));
                     }
                 }
                 Ok(None) => break,
-                Err(_) => return Err(callback_error("invalid_response", "Callback verification response was interrupted")),
+                Err(_) => {
+                    return Err(callback_error(
+                        "invalid_response",
+                        "Callback verification response was interrupted",
+                    ))
+                }
             }
         }
         let echoed = serde_json::from_slice::<Value>(&received)
             .ok()
-            .and_then(|value| value.get("challenge").and_then(Value::as_str).map(str::to_string))
-            .ok_or_else(|| callback_error("invalid_response", "Callback did not echo the verification challenge"))?;
+            .and_then(|value| {
+                value
+                    .get("challenge")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| {
+                callback_error(
+                    "invalid_response",
+                    "Callback did not echo the verification challenge",
+                )
+            })?;
         if !constant_time_eq(echoed.as_bytes(), challenge.as_bytes()) {
-            return Err(callback_error("challenge_mismatch", "Callback echoed a different challenge"));
+            return Err(callback_error(
+                "challenge_mismatch",
+                "Callback echoed a different challenge",
+            ));
         }
         Ok(())
     }
@@ -492,12 +551,13 @@ impl EventHub {
         let incident_id = data["incident_id"].as_str().unwrap_or_default().to_string();
         let targets = {
             let mut state = self.lock();
-            if state
-                .incidents
-                .iter()
-                .any(|record| record.name == event.name && record.data["incident_id"] == incident_id)
-            {
-                return Ok(EmitOutcome { deduplicated: true, deliveries: 0 });
+            if state.incidents.iter().any(|record| {
+                record.name == event.name && record.data["incident_id"] == incident_id
+            }) {
+                return Ok(EmitOutcome {
+                    deduplicated: true,
+                    deliveries: 0,
+                });
             }
             self.prune_expired(&mut state);
             state.incidents.push_back(IncidentRecord {
@@ -542,7 +602,10 @@ impl EventHub {
             let event_id = event_id(&subscription.id, &incident_id);
             spawn(async move { hub.deliver(subscription, event_id, body).await });
         }
-        Ok(EmitOutcome { deduplicated: false, deliveries })
+        Ok(EmitOutcome {
+            deduplicated: false,
+            deliveries,
+        })
     }
 
     /// Mark an incident recovered so the read tool and status report it as resolved.
@@ -550,7 +613,10 @@ impl EventHub {
         let mut state = self.lock();
         let mut found = false;
         for record in state.incidents.iter_mut() {
-            if record.name == name && record.data["incident_id"] == incident_id && record.resolved_at_ms.is_none() {
+            if record.name == name
+                && record.data["incident_id"] == incident_id
+                && record.resolved_at_ms.is_none()
+            {
                 record.resolved_at_ms = Some(now_ms());
                 found = true;
             }
@@ -570,11 +636,18 @@ impl EventHub {
 
     fn current_subscription(&self, subscription: &StoredSubscription) -> bool {
         self.lock().subscriptions.iter().any(|entry| {
-            entry.id == subscription.id && entry.secret == subscription.secret && entry.expires_at_ms > now_ms()
+            entry.id == subscription.id
+                && entry.secret == subscription.secret
+                && entry.expires_at_ms > now_ms()
         })
     }
 
-    async fn deliver(self: Arc<Self>, subscription: StoredSubscription, event_id: String, body: String) {
+    async fn deliver(
+        self: Arc<Self>,
+        subscription: StoredSubscription,
+        event_id: String,
+        body: String,
+    ) {
         let Ok(secret) = WebhookSecret::parse(&subscription.secret) else {
             self.record_delivery(&subscription.id, "invalid_secret");
             return;
@@ -582,7 +655,10 @@ impl EventHub {
         for attempt in 0..self.options.max_attempts.max(1) {
             if attempt > 0 {
                 let factor = 1u32 << (attempt - 1).min(8);
-                tokio::time::sleep((self.options.retry_base * factor).min(Duration::from_secs(300))).await;
+                tokio::time::sleep(
+                    (self.options.retry_base * factor).min(Duration::from_secs(300)),
+                )
+                .await;
             }
             // Stop when the subscription was removed, re-keyed or expired meanwhile.
             if !self.current_subscription(&subscription) {
@@ -597,7 +673,13 @@ impl EventHub {
             };
             let mut request = client.post(&subscription.url).body(body.clone());
             // Fresh timestamp and signature per attempt; the event id never changes.
-            for (name, value) in signed_headers(&secret, &event_id, &subscription.id, (now_ms() / 1000) as i64, &body) {
+            for (name, value) in signed_headers(
+                &secret,
+                &event_id,
+                &subscription.id,
+                (now_ms() / 1000) as i64,
+                &body,
+            ) {
                 request = request.header(name, value);
             }
             match request.send().await {
@@ -608,7 +690,9 @@ impl EventHub {
                 Ok(response) if response.status().as_u16() == 410 => {
                     // The receiver no longer wants this subscription.
                     let mut state = self.lock();
-                    state.subscriptions.retain(|entry| entry.id != subscription.id);
+                    state
+                        .subscriptions
+                        .retain(|entry| entry.id != subscription.id);
                     state.deliveries.remove(&subscription.id);
                     let _ = self.persist(&state);
                     return;
@@ -624,7 +708,11 @@ impl EventHub {
                 Err(error) => {
                     self.record_delivery(
                         &subscription.id,
-                        if error.is_timeout() { "timeout" } else { "unreachable" },
+                        if error.is_timeout() {
+                            "timeout"
+                        } else {
+                            "unreachable"
+                        },
                     );
                 }
             }
@@ -658,7 +746,12 @@ impl EventHub {
     }
 
     /// Recent incidents visible to one workspace listener, newest first.
-    pub fn recent_incidents(&self, principal: Option<&str>, include_resolved: bool, limit: usize) -> Vec<Value> {
+    pub fn recent_incidents(
+        &self,
+        principal: Option<&str>,
+        include_resolved: bool,
+        limit: usize,
+    ) -> Vec<Value> {
         let state = self.lock();
         state
             .incidents
@@ -684,7 +777,12 @@ impl EventHub {
     }
 
     /// JSON-RPC dispatch for `events/*`.
-    pub async fn dispatch(&self, principal: &str, method: &str, params: &Value) -> Result<Value, Value> {
+    pub async fn dispatch(
+        &self,
+        principal: &str,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, Value> {
         match method {
             "events/list" => Ok(self.list()),
             "events/subscribe" => self.subscribe(principal, params).await,

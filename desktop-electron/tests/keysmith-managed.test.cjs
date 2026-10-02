@@ -9,9 +9,9 @@ const scriptPath = path.join(projectRoot, "desktop-electron/assets/keysmith/code
 const expectedScriptSha256 = "837ec25713851a2fb6d8646dd078ee03a2e23fe17b19e97e093cedb02349979d";
 
 function fixture(t) {
-  const parent = path.join(__dirname, "../aiTemp/keysmith-setup/runner-tests");
-  fs.mkdirSync(parent, { recursive: true });
-  const root = fs.mkdtempSync(path.join(parent, "fixture-"));
+  // The OS temp folder, not the checkout: Keysmith's atomic writes need directory handles that
+  // a copied or synced checkout's permissions can refuse, which would fail the fixture, not the code.
+  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "keysmith-fixture-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   // Match the user-owned Codex home ACL; copied checkouts may inherit only Modify.
   if (process.platform === "win32") {

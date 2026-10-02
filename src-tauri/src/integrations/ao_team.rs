@@ -487,7 +487,9 @@ pub fn apply(
     // This API is local-UI-only. Apply explicitly authorizes queued settings; running receipts stay intact.
     if next.grant.is_some() {
         let fingerprint = ao::graph_sha256(data, &next)?;
-        next.grant.as_mut().unwrap().graph_sha256 = fingerprint;
+        if let Some(grant) = next.grant.as_mut() {
+            grant.graph_sha256 = fingerprint;
+        }
     }
     next.revision += 1;
     data.ao_runs[index] = next.clone();
@@ -737,7 +739,9 @@ mod tests {
             "qa",
             "run",
             revision,
-            ao::GraphChange::AddWorker { node: extra },
+            ao::GraphChange::AddWorker {
+                node: Box::new(extra),
+            },
         )
         .unwrap();
         data.ao_runs[0].worker_limit = 1;

@@ -5,7 +5,9 @@ const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const { installCpaPanelSession } = require("../electron/cpa-panel-session.cjs");
+const {
+  installCpaPanelSession, panelStorageEntries, CPA_HELPER_KEY_STORE,
+} = require("../electron/cpa-panel-session.cjs");
 
 const ORIGIN = "http://127.0.0.1:8317";
 const SECRET = "real-management-secret";
@@ -107,6 +109,60 @@ test("managed iframe seeds one auto-login navigation and only its management req
   assert.deepEqual(result, { requestHeaders: { authorization: `Bearer ${SECRET}` } });
   await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
   assert.equal(f.frame.reloads, 1);
+});
+
+test("panel storage entries carry only the marker, including CPA Helper's raw key slot", () => {
+  const marker = `coding-tools-${"b".repeat(48)}`;
+  const entries = new Map(panelStorageEntries(ORIGIN, marker));
+  assert.equal(CPA_HELPER_KEY_STORE, "cpaHelper.managementKey");
+  assert.equal(entries.get(CPA_HELPER_KEY_STORE), marker);
+  assert.deepEqual(JSON.parse(entries.get("cli-proxy-auth")), {
+    state: { apiBase: ORIGIN, managementKey: marker, rememberPassword: true }, version: 0,
+  });
+  assert.equal(JSON.parse(entries.get("apiBase")), ORIGIN);
+  assert.equal(JSON.parse(entries.get("managementKey")), marker);
+  assert.equal(entries.get("isLoggedIn"), "true");
+});
+
+test("CPA Helper iframe under the managed panel gets the key only on its own API routes", async () => {
+  const f = fixture();
+  f.install();
+  await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
+  const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
+  assert.equal(f.localStorage.getItem(CPA_HELPER_KEY_STORE), marker);
+
+  const helper = {
+    url: `${ORIGIN}/v0/resource/plugins/cpa-helper/index.html#overview`,
+    top: f.mainFrame,
+    parent: f.frame,
+    isDestroyed: () => false,
+  };
+  const requestHeaders = { Authorization: `Bearer ${marker}` };
+  const helperApi = `${ORIGIN}/v0/management/cpa-helper/usage/summary?from=1`;
+  assert.deepEqual(await f.request({ frame: helper, url: helperApi, requestHeaders }), {
+    requestHeaders: { Authorization: `Bearer ${SECRET}` },
+  });
+  for (const url of [
+    `${ORIGIN}/v0/management/config`,
+    `${ORIGIN}/v0/management/cpa-helper-evil/x`,
+    `http://localhost:8317/v0/management/cpa-helper/usage`,
+  ]) {
+    assert.deepEqual(await f.request({ frame: helper, url, requestHeaders }), { requestHeaders });
+  }
+  for (const frame of [
+    { ...helper, url: `${ORIGIN}/v0/resource/plugins/other/index.html` },
+    { ...helper, parent: f.mainFrame },
+    { ...helper, parent: { ...f.frame, url: `${ORIGIN}/other.html` } },
+    { ...helper, parent: null },
+  ]) {
+    assert.deepEqual(await f.request({ frame, url: helperApi, requestHeaders }), { requestHeaders });
+  }
+  assert.deepEqual(await f.request({ frame: helper, url: helperApi, webContentsId: 72, requestHeaders }), {
+    requestHeaders,
+  });
+  f.setConnection(null);
+  assert.deepEqual(await f.request({ frame: helper, url: helperApi, requestHeaders }), { cancel: true });
+  assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
 
 test("only the exact direct managed iframe and webContents can seed or exchange credentials", async () => {
