@@ -32,7 +32,7 @@ export type AoNode = {
   receipt?: AoReceipt;
   history?: AoReceipt[];
 };
-export type AoMission = { id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean; nodes: AoNode[]; team?: AoTeam; worker_limit?: number };
+export type AoMission = { id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean; solo?: boolean; nodes: AoNode[]; team?: AoTeam; worker_limit?: number };
 type AoApproval = { nodeId: string; approval_id: string; kind?: string; path?: string; reason?: string; command?: string; cwd?: string; permissions?: Record<string, unknown>; seconds_remaining?: number;
   recommendation?: { action: "allow" | "deny" | "ask"; reason: string } };
 type Sheet = "" | "mission" | "worker" | "settings" | "team";

@@ -295,6 +295,7 @@ pub fn save(
         plan_rounds: 0,
         review_parts: Default::default(),
         rerun_after: Default::default(),
+        solo: false,
     };
     ao::validate(None, &proposal)?;
     team.revision = expected_revision + 1;
@@ -369,6 +370,7 @@ pub fn create_run(
             plan_rounds: 0,
             review_parts: Default::default(),
             rerun_after: Default::default(),
+            solo: false,
         },
     )
 }

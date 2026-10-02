@@ -150,6 +150,10 @@ pub struct Run {
     /// removed card to a busy worker waits here instead of interrupting it.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rerun_after: BTreeSet<String>,
+    /// The orchestrator judged the mission simple and answered it alone; the other cards were
+    /// skipped (finished without running).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub solo: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -675,6 +679,8 @@ pub fn grant_run(
 }
 
 const ASSIGNMENTS_FENCE: &str = "```assignments";
+/// Ends an orchestrator answer that completes a simple mission without the team.
+const SOLO_FENCE: &str = "```solo";
 
 /// At most `max` characters, cut on a character boundary.
 fn clip(value: &str, max: usize) -> String {
@@ -717,7 +723,9 @@ fn planner_roster(run: &Run) -> String {
             worker.id, worker.route.harness_id, worker.route.model
         ));
     }
-    roster.push_str(&format!("\nEnd your answer with exactly one block in this form, giving every worker card its own part:\n\
+    roster.push_str(&format!("\nEnd your answer with exactly one of these blocks.\n\
+If you answered the whole mission yourself (simple):\n{SOLO_FENCE}\n{{\"difficulty\":\"simple\",\"reason\":\"why no workers are needed\"}}\n```\n\
+If the workers are needed, give every worker card its own part:\n\
 {ASSIGNMENTS_FENCE}\n[{{\"worker\":\"<card id>\",\"task\":\"what this worker must do\",\"acceptance\":\"how to tell it is done\"}}]\n```\n"));
     roster
 }
@@ -772,6 +780,16 @@ pub(crate) fn parse_assignments(
         return Err("The plan assigned no work to the worker cards");
     }
     Ok(assignments)
+}
+
+/// True when the orchestrator ended with a ```solo block (and no assignments after it): it
+/// answered the mission itself.
+pub(crate) fn is_solo_answer(answer: &str) -> bool {
+    match (answer.rfind(SOLO_FENCE), answer.rfind(ASSIGNMENTS_FENCE)) {
+        (Some(solo), Some(plan)) => solo > plan,
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 const REVIEW_PARTS_FENCE: &str = "```review-parts";
@@ -1051,8 +1069,10 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
         .find(|task| task.id == node.task_id && task.workspace_id == run.workspace_id)
         .ok_or_else(|| fail("AO task not found"))?;
     let responsibility = match node.role {
-        Role::Planner => "Plan the mission and split it across the worker cards listed below. Coding Tools runs every worker on its own harness and model. \
-Do not use your own sub-agent, spawn or delegation tools, and do not do the workers' work yourself. Do not simulate worker results or the reviewer's approval.",
+        Role::Planner => "First judge how difficult the mission is. If you can complete it fully and reliably yourself in this one turn with your own access \
+(a question, an explanation, a short lookup or a small read-only check), do so: give the complete final answer and end with the solo block described below. \
+Otherwise plan the mission and split it across the worker cards listed below; Coding Tools runs every worker on its own harness and model. \
+Do not use your own sub-agent, spawn or delegation tools. When you plan, do not do the workers' work yourself, and do not simulate worker results or the reviewer's approval.",
         Role::Approver => "You are the command approver. Before any worker starts, check the plan and every assignment for commands that delete or overwrite data, \
 force-push, install software, reach outside the workspace or the network, or handle secrets; also check for missing steps and unclear acceptance. \
 Do not change the plan or do the work yourself.",
@@ -1642,6 +1662,7 @@ pub fn record_terminal(
     enum Split {
         Plan(BTreeMap<String, Assignment>),
         Review(BTreeMap<String, ReviewPart>),
+        Solo,
     }
     let plan = match run
         .nodes
@@ -1649,9 +1670,13 @@ pub fn record_terminal(
         .find(|node| node.id == node_id)
         .map(|node| &node.role)
     {
-        Some(Role::Planner) if completed => {
-            answer.map(|answer| parse_assignments(answer, run).map(Split::Plan))
-        }
+        Some(Role::Planner) if completed => answer.map(|answer| {
+            if is_solo_answer(answer) {
+                Ok(Split::Solo)
+            } else {
+                parse_assignments(answer, run).map(Split::Plan)
+            }
+        }),
         Some(Role::ReviewSplit) if completed => {
             answer.map(|answer| parse_review_parts(answer, run).map(Split::Review))
         }
@@ -1713,10 +1738,22 @@ pub fn record_terminal(
         receipt.verdict = verdict.map(str::to_owned);
         receipt.status = "completed".into();
         node.state = State::Finished;
+        let solo = matches!(plan, Some(Ok(Split::Solo)));
         match plan {
             Some(Ok(Split::Plan(assignments))) => run.assignments = assignments,
             Some(Ok(Split::Review(parts))) => run.review_parts = parts,
             _ => {}
+        }
+        if solo {
+            // Every other card is skipped: finished without running, so the mission completes.
+            run.solo = true;
+            for other in run
+                .nodes
+                .iter_mut()
+                .filter(|other| other.id != node_id && other.state == State::Pending)
+            {
+                other.state = State::Finished;
+            }
         }
         // Work handed to this worker while it was busy runs now.
         if run.rerun_after.remove(node_id) {
@@ -2262,6 +2299,36 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("assignments"));
+        // The orchestrator may judge the mission simple and answer it alone: every other card is
+        // skipped, so the whole mission is finished without any worker or reviewer running.
+        assert!(
+            planner_prompt.contains("```solo") && planner_prompt.contains("judge how difficult")
+        );
+        let mut simple = data.clone();
+        let solo = record_terminal(
+            &mut simple,
+            "qa",
+            "run",
+            "planner",
+            "thread-one",
+            Some("turn-one"),
+            Some("The answer is 42.\n```solo\n{\"difficulty\":\"simple\",\"reason\":\"a direct question\"}\n```"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(solo.solo);
+        assert!(solo.nodes.iter().all(|node| node.state == State::Finished));
+        assert!(solo
+            .nodes
+            .iter()
+            .filter(|node| node.id != "planner")
+            .all(|node| node.receipt.is_none()));
+        assert!(validate(Some(&simple), &solo).is_ok());
+        // A solo block followed by an assignments block is a plan, not a solo answer.
+        assert!(!is_solo_answer(
+            "x\n```solo\n{}\n```\n```assignments\n[]\n```"
+        ));
         let run = record_terminal(
             &mut data,
             "qa",

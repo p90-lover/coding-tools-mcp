@@ -97,3 +97,15 @@ test("errors, holds, stops and a just-sent message all show in the transcript", 
   ]);
   assert.equal(transcript[1].tone, "error");
 });
+
+test("a simple mission answered by the orchestrator alone shows one clean answer and a note", () => {
+  const solo = run("r", "t", [
+    node("p", "planner", "finished", { receipt: { answer: "It has 3 files.\n```solo\n{\"difficulty\":\"simple\"}\n```" } }),
+    node("w", "worker", "finished"),
+    node("v", "reviewer", "finished"),
+  ], { solo: true });
+  const transcript = plain(chat.chatTranscript([solo], "how many files?"));
+  assert.deepEqual(transcript.map((item) => item.kind), ["user", "agent", "status"]);
+  assert.equal(transcript[1].text, "It has 3 files.");
+  assert.match(transcript[2].text, /orchestrator answered alone/);
+});
