@@ -2,12 +2,35 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFile } = require("node:child_process");
+
+function git(directory, args) {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", directory, ...args], { windowsHide: true, timeout: 10_000 }, (error, stdout) => {
+      resolve(error ? null : String(stdout).trim());
+    });
+  });
+}
+
+/**
+ * AO starts each session from the repository's default branch. A repository with no remote has
+ * none, so AO refuses it unless `ao.defaultBranch` is recorded (as AO does for repositories it
+ * creates). Record the current branch once; never touch a repository that has a remote.
+ */
+async function recordLocalDefaultBranch(directory) {
+  if ((await git(directory, ["remote"])) !== "") return;
+  if (await git(directory, ["config", "--local", "--get", "ao.defaultBranch"])) return;
+  const branch = await git(directory, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (!branch || !/^[\w./-]{1,200}$/.test(branch)) return;
+  await git(directory, ["config", "--local", "ao.defaultBranch", branch]);
+}
 
 // AO project identity and the existing durable mission IDs are shared by both views.
 // No task store, checkout or model process is created by this binding.
 function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, missionCall,
   realpath = fs.promises.realpath, platform = process.platform,
   isRepositoryRoot = async directory => fs.existsSync(path.join(directory, ".git")),
+  recordDefaultBranch = recordLocalDefaultBranch,
 }) {
   const pending = new Map();
   async function canonical(directory) {
@@ -34,6 +57,8 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
     const projects = await matching(await listProjects(), root);
     if (projects.length > 1) throw new Error("Workspace matches multiple AO projects; select one explicitly in AO first");
     let project = projects[0];
+    // Before AO starts a session in a local-only repository, give it a default branch.
+    if (register && await isRepositoryRoot(item.path)) await recordDefaultBranch(item.path);
     if (!project && register && await isRepositoryRoot(item.path)) {
       project = await createProject({ path: item.path });
       if (!project || await canonical(project.path) !== root) throw new Error("AO project registration changed the workspace scope");
@@ -67,4 +92,4 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
   };
 }
 
-module.exports = { createAoWorkspaceBoard };
+module.exports = { createAoWorkspaceBoard, recordLocalDefaultBranch };

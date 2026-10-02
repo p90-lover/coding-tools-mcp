@@ -187,14 +187,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const chat = Array.isArray(settings?.chatHarnesses) && settings.chatHarnesses.includes(agentId(agent));
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
       const brief = utf8Prefix(prompt, 16384 - Buffer.byteLength(TUI_RESULT_INSTRUCTION, "utf8") - 2);
-      const data = await internalApi("POST", "/api/v1/sessions", {
-        projectId, kind: "worker", harness: agentId(agent), mode: chat ? "chat" : "tui",
-        prompt: chat ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
+      const launch = (mode) => internalApi("POST", "/api/v1/sessions", {
+        projectId, kind: "worker", harness: agentId(agent), mode,
+        prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
         ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
         displayName: String(name || "AO worker").slice(0, 100),
       });
+      let data;
+      try {
+        data = await launch(chat ? "chat" : "tui");
+      } catch (error) {
+        // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
+        // still runs in its own terminal and hands back a result file.
+        if (!chat || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
+        data = await launch("tui");
+      }
       return sessionId(data?.session?.id);
     },
     async observe(id) {
