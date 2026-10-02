@@ -174,6 +174,16 @@ export function aoDependencyChange(run: Pick<AoMission, "nodes">, nodeId: string
   return { operation: "set_parents", node_id: nodeId, parents: [...node.parents, parentId] };
 }
 
+// Only an optional worker→worker link can be removed: the backend requires every worker to keep
+// its orchestrator and the reviewer to depend on every worker.
+export function aoDependencyRemoval(run: Pick<AoMission, "nodes">, nodeId: string, parentId: string) {
+  const node = run.nodes.find((item) => item.id === nodeId);
+  const parent = run.nodes.find((item) => item.id === parentId);
+  if (!node || !parent || node.role !== "worker" || node.state !== "pending"
+    || parent.role !== "worker" || !node.parents.includes(parentId)) return null;
+  return { operation: "set_parents", node_id: nodeId, parents: node.parents.filter((id) => id !== parentId) };
+}
+
 export function aoPreviewText(run: Pick<AoMission, "cancelled" | "nodes">, tasks: Pick<PlanTask, "id" | "title" | "description">[]): string {
   if (run.cancelled) return "No ready card in this run.";
   const node = run.nodes.find((item) => item.state === "pending" && (item.role === "planner" ||
@@ -510,9 +520,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
       throw cause;
     } finally { setBusy(""); }
   };
-  const addDependency = (nodeId: string, parentId: string) => void run("dependency", async () => {
+  const changeDependency = (nodeId: string, parentId: string, remove = false) => void run("dependency", async () => {
     if (!selectedRun) return;
-    const change = aoDependencyChange(selectedRun, nodeId, parentId);
+    const change = remove ? aoDependencyRemoval(selectedRun, nodeId, parentId) : aoDependencyChange(selectedRun, nodeId, parentId);
     if (!change) return;
     const result = await moduleCall("update_run", { workspaceId,
       change: { operation: "graph", run_id: selectedRun.id, expected_revision: selectedRun.revision, change } });
@@ -836,7 +846,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
               nodes={visibleNodes}
               levels={aoLevels(selectedRun).map(level => level.filter(node => showInactive || !["cancelled", "archived"].includes(node.state)))}
               selectedId={inspectedId} busy={Boolean(busy)} onSelect={inspectRole} onMove={moveCard} describe={describeNode}
-              onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}>
+              onConnect={(nodeId, parentId) => changeDependency(nodeId, parentId)}
+              canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
+              onDisconnect={(nodeId, parentId) => changeDependency(nodeId, parentId, true)}
+              canDisconnect={(nodeId, parentId) => Boolean(aoDependencyRemoval(selectedRun, nodeId, parentId))}>
               {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
                 {pendingApprovals.map((approval) => <div key={approval.approval_id}>
                   <p><strong>Approve?</strong> {approval.reason || "Tool request"} · {approval.path || approval.cwd || approval.nodeId}</p>

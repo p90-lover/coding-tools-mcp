@@ -22,6 +22,24 @@ export function moveCanvasSelection(points: Map<string, Point>, dx: number, dy: 
   return new Map([...points].map(([id, point]) => [id, { x: point.x + x, y: point.y + y }]));
 }
 
+export type LinkAction = { kind: "connect" | "disconnect"; id: string; parentId: string };
+
+/**
+ * What shift-clicking `target` does while `starter` is the active card: an existing removable link
+ * between them (either direction) is removed, otherwise the target is linked below the starter, or
+ * above it when only that direction is allowed. Null when the two cards cannot be (un)linked.
+ */
+export function shiftLinkAction(starter: string, target: string,
+  canConnect: (id: string, parentId: string) => boolean,
+  canDisconnect: (id: string, parentId: string) => boolean): LinkAction | null {
+  if (!starter || !target || starter === target) return null;
+  if (canDisconnect(target, starter)) return { kind: "disconnect", id: target, parentId: starter };
+  if (canDisconnect(starter, target)) return { kind: "disconnect", id: starter, parentId: target };
+  if (canConnect(target, starter)) return { kind: "connect", id: target, parentId: starter };
+  if (canConnect(starter, target)) return { kind: "connect", id: starter, parentId: target };
+  return null;
+}
+
 export function canvasLayout(nodes: CanvasNode[], levels: CanvasNode[][], heights = new Map<string, number>()): Map<string, Point> {
   const order = new Map(nodes.map((node, index) => [node.id, index]));
   const extent = Math.max(640, ...levels.map(level => level.length * gapX - (gapX - width)));
@@ -35,7 +53,7 @@ export function canvasLayout(nodes: CanvasNode[], levels: CanvasNode[][], height
   return result;
 }
 
-export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, describe, children }: {
+export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onDisconnect, canDisconnect, describe, children }: {
   nodes: CanvasNode[]; levels: CanvasNode[][]; selectedId: string; busy: boolean;
   describe: (node: CanvasNode) => string;
   children?: ReactNode;
@@ -43,6 +61,8 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   onMove: (positions: { id: string; x: number; y: number }[], parentId?: string) => Promise<void>;
   onConnect: (id: string, parentId: string) => void;
   canConnect: (id: string, parentId: string) => boolean;
+  onDisconnect: (id: string, parentId: string) => void;
+  canDisconnect: (id: string, parentId: string) => boolean;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
   const scene = useRef<HTMLDivElement>(null);
@@ -62,7 +82,37 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   const [dropTarget, setDropTarget] = useState("");
   const [draggingId, setDraggingId] = useState("");
   const [selected, setSelected] = useState(new Set(selectedId ? [selectedId] : []));
+  const [notice, setNotice] = useState("");
+  const noticeTimer = useRef(0);
   const initialized = useRef(false);
+  useLayoutEffect(() => () => window.clearTimeout(noticeTimer.current), []);
+
+  const toggleSelected = (id: string) =>
+    setSelected(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const flash = (text: string) => {
+    window.clearTimeout(noticeTimer.current);
+    setNotice(text);
+    noticeTimer.current = window.setTimeout(() => setNotice(""), 2200);
+  };
+  // Shift-click links (or unlinks) the clicked card with the active one: an armed out-port, or
+  // the single selected card. The starter stays selected so several cards can be linked in a row.
+  const shiftLink = (id: string) => {
+    const starter = parentId || (selected.size === 1 ? [...selected][0] : "");
+    if (!starter || starter === id) return false;
+    const action = shiftLinkAction(starter, id, canConnect, canDisconnect);
+    if (!action) {
+      const linked = current.current.nodes.some(node => node.id === id && node.parents.includes(starter)
+        || node.id === starter && node.parents.includes(id));
+      flash(linked ? "This link is required and can't be removed" : "These cards can't be linked");
+      return true;
+    }
+    if (action.kind === "connect") onConnect(action.id, action.parentId);
+    else onDisconnect(action.id, action.parentId);
+    flash(action.kind === "connect" ? "Linked" : "Unlinked");
+    setParentId("");
+    setSelected(new Set([starter]));
+    return true;
+  };
 
   const draw = () => {
     frame.current = 0;
@@ -164,10 +214,8 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     if (event.button !== 0 || busy || event.target instanceof Element && event.target.closest(".ao-port")) return;
     if (id === null && event.target instanceof Element && event.target.closest(".ao-canvas-card, .ao-canvas-controls, .ao-canvas-overlay")) return;
     event.preventDefault();
-    if (id && (event.shiftKey || event.ctrlKey || event.metaKey)) {
-      setSelected(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-      return;
-    }
+    if (id && event.shiftKey && shiftLink(id)) return;
+    if (id && (event.shiftKey || event.ctrlKey || event.metaKey)) { toggleSelected(id); return; }
     const ids = id ? selected.has(id) ? selected : new Set([id]) : new Set<string>();
     const group = new Map([...positions.current].filter(([key]) => ids.has(key)));
     viewport.current!.setPointerCapture(event.pointerId);
@@ -232,7 +280,8 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       {selected.size > 1 ? <><span role="status">{selected.size}</span><button type="button" disabled={busy} onClick={() => align("x")} aria-label="Align left" title="Align left">⇤</button><button type="button" disabled={busy} onClick={() => align("y")} aria-label="Align top" title="Align top">⤒</button></> : null}
       {parentId ? <button type="button" onClick={() => setParentId("")} aria-label="Cancel connection" title="Cancel connection">✕</button> : null}
     </div>
-    {dropTarget || parentId ? <span className="ao-connect-hint" role="status">{dropTarget ? "Drop to link" : "Pick a card to link"}</span> : null}
+    {notice || dropTarget || parentId ? <span className="ao-connect-hint" role="status">
+      {notice || (dropTarget ? "Drop to link" : "Shift-click a card to link or unlink")}</span> : null}
     {children}
     <div ref={scene} className="ao-canvas-scene">
       <svg className="ao-canvas-wires" aria-hidden="true">{nodes.flatMap(node => node.parents.map(parent => <path key={JSON.stringify([parent, node.id])}
@@ -241,10 +290,12 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       {nodes.map(node => <div key={node.id} data-ao-node={node.id} ref={element => { if (element) elements.current.set(node.id, element); else elements.current.delete(node.id); }}
         className={`ao-canvas-card ao-node-${node.state}${selected.has(node.id) ? " is-selected" : ""}${draggingId && selected.has(node.id) ? " is-dragging" : ""}${dropTarget === node.id ? " is-target" : ""}`}>
         <button type="button" className="ao-card-handle" aria-label={`Edit ${node.settings?.name || node.role}, ${node.state}`}
-          aria-pressed={selected.has(node.id)} title="Shift-click to select multiple cards; arrow keys move the selection"
+          aria-pressed={selected.has(node.id)}
+          title="Shift-click another card to link or unlink it with this one; Ctrl-click to select several; arrow keys move the selection"
           onPointerDown={event => { event.stopPropagation(); begin(event, node.id); }} onClick={event => {
             if (event.detail !== 0) return;
-            if (event.shiftKey || event.ctrlKey || event.metaKey) setSelected(previous => { const next = new Set(previous); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; });
+            if (event.shiftKey && shiftLink(node.id)) return;
+            if (event.shiftKey || event.ctrlKey || event.metaKey) toggleSelected(node.id);
             else { setSelected(new Set([node.id])); onSelect(node.id); }
           }}
           onKeyDown={event => {

@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createGptBrowserHost, chatgptPageUrl, cleanUserAgent, partitionFor } = require("../electron/gpt-browser.cjs");
+const { createGptBrowserHost, browsableUrl, cleanUserAgent, partitionFor } = require("../electron/gpt-browser.cjs");
 
 function fakeWorld() {
   const sessions = new Map();
@@ -57,10 +57,15 @@ function host(world, dataRoot, extra = {}) {
 
 const tempRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), "gpt-browser-"));
 
-test("only https chatgpt.com links are accepted", () => {
-  assert.equal(chatgptPageUrl("https://chatgpt.com/accept-referral?referral_context=abc"), "https://chatgpt.com/accept-referral?referral_context=abc");
-  for (const bad of ["http://chatgpt.com/", "https://evil.com/chatgpt.com", "https://chatgpt.com.evil.com/", "https://a:b@chatgpt.com/", "javascript:alert(1)", "", null]) {
-    assert.equal(chatgptPageUrl(bad), null, String(bad));
+test("the address bar accepts any http(s) site and defaults bare addresses to https", () => {
+  assert.equal(browsableUrl("https://chatgpt.com/accept-referral?referral_context=abc"), "https://chatgpt.com/accept-referral?referral_context=abc");
+  assert.equal(browsableUrl("  example.com/docs?q=1  "), "https://example.com/docs?q=1");
+  assert.equal(browsableUrl("http://localhost:5173/"), "http://localhost:5173/");
+  assert.equal(browsableUrl("127.0.0.1:8080"), "https://127.0.0.1:8080/");
+  assert.equal(browsableUrl("HTTPS://Chatgpt.COM"), "https://chatgpt.com/");
+  for (const bad of ["javascript:alert(1)", "file:///C:/Windows/win.ini", "data:text/html,x", "ftp://example.com/",
+    "https://a:b@chatgpt.com/", "https://foo", "two words.com", "", null, `https://example.com/${"x".repeat(5000)}`]) {
+    assert.equal(browsableUrl(bad), null, String(bad));
   }
 });
 
@@ -92,14 +97,16 @@ test("each account gets its own persistent partition and survives a restart", as
   assert.doesNotMatch(saved, /token|cookie|password/i);
 });
 
-test("a referral link opens in the active account's session", async () => {
+test("an address opens in the active account's session", async () => {
   const world = fakeWorld();
   const browser = host(world, tempRoot());
   await assert.rejects(browser.openUrl("https://chatgpt.com/accept-referral?x=1"), /Add a ChatGPT account first/);
   await browser.addAccount();
-  await assert.rejects(browser.openUrl("https://example.com/"), /Only https:\/\/chatgpt.com links/);
+  await assert.rejects(browser.openUrl("javascript:alert(1)"), /Enter a web address/);
   await browser.openUrl("https://chatgpt.com/accept-referral?x=1");
   assert.equal(world.views.at(-1).webContents.loads.at(-1), "https://chatgpt.com/accept-referral?x=1");
+  await browser.openUrl("example.com/docs");
+  assert.equal(world.views.at(-1).webContents.loads.at(-1), "https://example.com/docs");
 });
 
 test("removing an account erases its session and falls back to another", async () => {
@@ -113,20 +120,42 @@ test("removing an account erases its session and falls back to another", async (
   assert.deepEqual(after.accounts.map((entry) => entry.id), [a]);
 });
 
-test("pages outside ChatGPT sign-in hosts open in the system browser", async () => {
+test("web pages stay in the account's session; only mailto leaves the app", async () => {
   const world = fakeWorld();
   const opened = [];
   const browser = host(world, tempRoot(), { openExternal: async (url) => { opened.push(url); } });
   await browser.addAccount();
   const contents = world.views.at(-1).webContents;
-  let prevented = false;
-  contents.emit("will-navigate", { preventDefault() { prevented = true; } }, "https://example.com/docs");
-  assert.equal(prevented, true);
-  prevented = false;
-  contents.emit("will-navigate", { preventDefault() { prevented = true; } }, "https://accounts.google.com/o/oauth2");
-  assert.equal(prevented, false, "Google sign-in stays in the account's session");
+  const navigate = (url) => {
+    let prevented = false;
+    contents.emit("will-navigate", { preventDefault() { prevented = true; } }, url);
+    return prevented;
+  };
+  assert.equal(navigate("https://example.com/docs"), false);
+  assert.equal(navigate("https://accounts.google.com/o/oauth2"), false, "Google sign-in stays in the account's session");
+  assert.equal(navigate("mailto:help@example.com"), true);
+  assert.equal(navigate("ms-settings:privacy"), true, "a page cannot launch other protocol handlers");
+  assert.equal(navigate("file:///C:/Windows/win.ini"), true);
   assert.deepEqual(contents.openHandler({ url: "https://example.com/x" }), { action: "deny" });
-  assert.deepEqual(opened, ["https://example.com/docs", "https://example.com/x"]);
+  assert.equal(contents.loads.at(-1), "https://example.com/x", "a new-window link loads in place");
+  assert.deepEqual(contents.openHandler({ url: "steam://run/1" }), { action: "deny" });
+  assert.deepEqual(opened, ["mailto:help@example.com"]);
+});
+
+test("the account email is only read from chatgpt.com itself", async () => {
+  const world = fakeWorld();
+  const browser = host(world, tempRoot());
+  await browser.addAccount();
+  const contents = world.views.at(-1).webContents;
+  contents.executeJavaScript = async () => "someone@example.com";
+  await browser.openUrl("https://evilchatgpt.com/");
+  contents.emit("did-stop-loading");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(browser.status().accounts[0].email, null);
+  await browser.openUrl("https://chatgpt.com/");
+  contents.emit("did-stop-loading");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(browser.status().accounts[0].email, "someone@example.com");
 });
 
 test("hiding the pane takes the page out of the window", async () => {

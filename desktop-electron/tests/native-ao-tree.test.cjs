@@ -84,3 +84,35 @@ test("canvas defaults flow downward and saved free positions do not reorder neig
   assert.deepEqual(JSON.parse(JSON.stringify([...translated])), [["a", { x: 9500, y: -10 }], ["b", { x: 9420, y: 70 }]]);
   assert.equal(selection.get("a").x, 9480);
 });
+
+test("only optional worker-to-worker links can be removed", () => {
+  const run = { id: "one", nodes: [
+    node("plan", "planner"), node("a", "worker", ["plan"]),
+    node("b", "worker", ["plan", "a"]), node("review", "reviewer", ["a", "b"]),
+  ] };
+  assert.deepEqual(JSON.parse(JSON.stringify(surfaceExports.aoDependencyRemoval(run, "b", "a"))),
+    { operation: "set_parents", node_id: "b", parents: ["plan"] });
+  assert.equal(surfaceExports.aoDependencyRemoval(run, "b", "plan"), null, "a worker keeps its orchestrator");
+  assert.equal(surfaceExports.aoDependencyRemoval(run, "review", "a"), null, "the reviewer keeps every worker");
+  assert.equal(surfaceExports.aoDependencyRemoval(run, "a", "b"), null, "no link to remove");
+  assert.equal(surfaceExports.aoDependencyRemoval({ ...run, nodes: run.nodes.map((entry) => entry.id === "b" ? { ...entry, state: "running" } : entry) }, "b", "a"), null);
+});
+
+test("shift-click links, unlinks, or refuses relative to the active card", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  const canvas = {};
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+    { exports: canvas, require: () => ({}) });
+  const decide = (run, starter, target) => JSON.parse(JSON.stringify(canvas.shiftLinkAction(starter, target,
+    (id, parentId) => Boolean(surfaceExports.aoDependencyChange(run, id, parentId)),
+    (id, parentId) => Boolean(surfaceExports.aoDependencyRemoval(run, id, parentId)))));
+  const open = { nodes: [node("plan", "planner"), node("a", "worker", ["plan"]), node("b", "worker", ["plan"]), node("review", "reviewer", ["a", "b"])] };
+  assert.deepEqual(decide(open, "a", "b"), { kind: "connect", id: "b", parentId: "a" }, "the clicked card goes below the starter");
+  assert.deepEqual(decide(open, "b", "a"), { kind: "connect", id: "a", parentId: "b" });
+  const linked = { nodes: open.nodes.map((entry) => entry.id === "b" ? { ...entry, parents: ["plan", "a"] } : entry) };
+  assert.deepEqual(decide(linked, "a", "b"), { kind: "disconnect", id: "b", parentId: "a" });
+  assert.deepEqual(decide(linked, "b", "a"), { kind: "disconnect", id: "b", parentId: "a" }, "either click order unlinks");
+  assert.equal(decide(linked, "plan", "a"), null, "the orchestrator link is required");
+  assert.equal(decide(linked, "a", "review"), null, "the reviewer link is required");
+  assert.equal(decide(linked, "a", "a"), null);
+});
