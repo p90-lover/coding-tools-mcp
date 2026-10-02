@@ -333,6 +333,33 @@ test("only the shown account starts by itself; switching starts each account onc
   }
 });
 
+test("a window the app shows by itself is hidden again while another page is open", async () => {
+  const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-reshow-"));
+  const world = fakeDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
+  const host = createChatGptDesktopHost({
+    dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper,
+    platform: "win32", getProxyRoute: () => null, homeDir: path.join(root, "home"), autoStart: false,
+  });
+  try {
+    await host.initialize();
+    host.setOwner(1);
+    host.setSurfaceActive(true);
+    host.setBounds({ x: 0, y: 0, width: 800, height: 600 });
+    await host.open(cpaSlotId("acct-a", "a@x.com"));
+    assert.ok(await until(() => world.visibleMarkers().length === 1), "shown on its own page");
+    host.setSurfaceActive(false);
+    assert.ok(await until(() => world.visibleMarkers().length === 0), "hidden when the user leaves the page");
+    // The app makes its window visible again (sign-in, update prompt, a second launch).
+    for (const window of world.windows.values()) window.visible = true;
+    assert.ok(await until(() => world.visibleMarkers().length === 0, 2_000), "the placement loop hides it again");
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a background account nobody uses is closed when idle; the shown one stays", async () => {
   const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-idle-"));

@@ -627,7 +627,9 @@ function createChatGptDesktopHost({
         return;
       }
       if (everyone) closeIdleInstances();
-      if (shouldShow()) await placeNow();
+      // Enforce hidden as well as placed: the app can show its own window again (sign-in, update,
+      // a second launch) and it would then cover whichever page the user moved to.
+      await placeNow({ hideOthers: everyone });
     } catch (error) {
       logger?.warn?.("chatgpt_desktop.placement_failed", { message: error.message });
     } finally {
