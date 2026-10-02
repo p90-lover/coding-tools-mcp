@@ -27,5 +27,17 @@ test("a WebGPT model always gets the Native Codex route", () => {
   assert.equal(editor.workerRoute("ao:codex", "cpa/gemini-3.8-flash-high").model, "cpa/gemini-3.8-flash-high");
   assert.equal(editor.workerRoute("codex-native", "gemini-3.8-flash-high").provider_id, "cliproxyapi-antigravity");
   assert.equal(editor.harnessLabel("codex-native", []), "Native Codex");
-  assert.match(source, /WebGPT runs only on Native Codex\./);
+  assert.equal(editor.isWebModel("chatgpt-web/luna"), true);
+  assert.equal(editor.isWebModel("cpa/chatgpt-web/high"), true);
+  assert.equal(editor.isWebModel("gpt-5.5"), false);
+});
+
+// The model list on every other harness also offers WebGPT (from Native Codex's list), so a
+// WebGPT model can be picked anywhere and the card then moves to Native Codex.
+test("every harness lists the WebGPT models and marks that they switch to Native Codex", () => {
+  assert.match(source, /loadModels\(NATIVE_HARNESS\)\.then\(items => items\.filter\(isWebModel\)/);
+  assert.match(source, /isWebModel\(model\) \? " · switches to Native Codex"/);
+  assert.match(source, /choosing a WebGPT model switches the harness/);
+  // The model select routes the pick through workerRoute, which forces Native Codex for WebGPT.
+  assert.match(source, /onChange=\{event => onChange\(workerRoute\(route\.harness_id, event\.target\.value, nativePermission\(route\)\)\)\}/);
 });

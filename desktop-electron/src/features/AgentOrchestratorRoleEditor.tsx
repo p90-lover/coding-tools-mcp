@@ -18,9 +18,11 @@ export const SPECIALTIES = ["planning", "research", "architecture", "frontend", 
  * shared CPA pool; every other harness runs as an AO worker session. WebGPT only works through
  * the bridge on Native Codex, so a WebGPT model always gets the Native Codex route.
  */
+export const isWebModel = (model: string) => model.replace(/^cpa\//, "").startsWith("chatgpt-web/");
+
 export function workerRoute(harness: string, model: string, permission: NativePermission = ":workspace"): AoRoute {
   const web = model.replace(/^cpa\//, "");
-  if (web.startsWith("chatgpt-web/")) return { ...WEB_ROUTE, model: web, permission_profile: permission };
+  if (isWebModel(model)) return { ...WEB_ROUTE, model: web, permission_profile: permission };
   if (harness.startsWith("ao:")) {
     return { harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model: model || "default", permission_profile: ":ao-default" };
   }
@@ -88,7 +90,11 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   useEffect(() => {
     let live = true;
     setModels(null); setNotice("");
-    loadModels(harness).then(items => { if (live) setModels(items); })
+    // Every harness also lists the WebGPT models; choosing one moves the card to Native Codex,
+    // the only harness WebGPT runs on (workerRoute).
+    const web = harness === NATIVE_HARNESS ? Promise.resolve([])
+      : loadModels(NATIVE_HARNESS).then(items => items.filter(isWebModel), () => []);
+    Promise.all([loadModels(harness), web]).then(([items, webItems]) => { if (live) setModels([...items, ...webItems]); })
       .catch(cause => { if (live) { setModels([]); setNotice(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [harness, loadModels]);
@@ -103,13 +109,15 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(workerRoute(route.harness_id, event.target.value, nativePermission(route)))}>
       {models && !models.includes(route.model) ? <option value={route.model}>{route.model || "Choose"} (unverified)</option> : null}
       {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
-      {(models ?? []).map(model => <option key={model} value={model}>{modelLabel(model)}</option>)}
+      {(models ?? []).map(model => <option key={model} value={model}>
+        {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex" : ""}
+      </option>)}
     </select></label>
     {harness === NATIVE_HARNESS ? <label>Permission<select value={nativePermission(route)} disabled={disabled}
       onChange={event => onChange({ ...route, permission_profile: event.target.value })}>
       <option value=":workspace">Workspace: create, edit and delete in this workspace</option>
       <option value=":read-only">Read only</option>
-    </select></label> : <p className="ao-hint">WebGPT runs only on Native Codex.</p>}
+    </select></label> : <p className="ao-hint">WebGPT runs only on Native Codex; choosing a WebGPT model switches the harness.</p>}
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
   </>;
 }
