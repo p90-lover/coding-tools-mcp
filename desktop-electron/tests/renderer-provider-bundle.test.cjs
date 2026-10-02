@@ -27,9 +27,15 @@ test("packaged renderer selects Provider Hub and project-scoped update copy", ()
     `renderer assets are missing from ${assets}`,
   );
 
-  const scripts = fs.readdirSync(assets)
-    .filter((name) => /^index-.*\.js$/u.test(name))
-    .sort();
+  // Earlier bundles stay in assets/ (CI forbids deleting tracked files), so the entry script is
+  // the one index.html loads.
+  const indexPath = path.join(dist, "index.html");
+  const referenced = fs.existsSync(indexPath)
+    ? /<script[^>]*\bsrc="\.\/assets\/(index-[^"]+\.js)"/u.exec(fs.readFileSync(indexPath, "utf8"))?.[1]
+    : undefined;
+  const scripts = referenced
+    ? [referenced]
+    : fs.readdirSync(assets).filter((name) => /^index-.*\.js$/u.test(name)).sort();
   assert.equal(
     scripts.length,
     1,
@@ -37,6 +43,7 @@ test("packaged renderer selects Provider Hub and project-scoped update copy", ()
   );
 
   const bundlePath = path.join(assets, scripts[0]);
+  assert.equal(fs.existsSync(bundlePath), true, `index.html loads a missing script: ${bundlePath}`);
   const bundle = fs.readFileSync(bundlePath, "utf8");
   assert.match(bundle, /data-provider-account-summary/, `Provider Hub summary missing from ${bundlePath}`);
   assert.match(bundle, /Refresh accounts/, `account refresh control missing from ${bundlePath}`);

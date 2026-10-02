@@ -65,7 +65,7 @@ test("the transcript pairs each message with that run's replies in orchestration
     ["agent", "Orchestrator", "two steps"],
     ["agent", "Worker", "fixed it"],
     ["agent", "Tests", "added tests"],
-    ["agent", "Reviewer", "APPROVED — looks good"],
+    ["agent", "Main reviewer", "APPROVED — looks good"],
     ["user", "", "now docs"],
     ["status", "", "Orchestrator is working…"],
   ]);
