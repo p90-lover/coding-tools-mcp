@@ -21,7 +21,9 @@ pub fn input_schema(name: &str) -> Value {
             "timeout_ms":{"type":"integer","minimum":100,"maximum":10000,"default":5000},
             "approval_token":{"type":"string"}},"required":["request_id","argv"],"additionalProperties":false}),
         "codex_agent_read" => {
-            json!({"type":"object","properties":{"thread_id":{"type":"string","minLength":1,"maxLength":128}},"required":["thread_id"],"additionalProperties":false})
+            json!({"type":"object","properties":{"thread_id":{"type":"string","minLength":1,"maxLength":128},
+                "offset":{"type":"integer","minimum":0,"description":"Byte offset into a long answer (use answer_next_offset)."}},
+                "required":["thread_id"],"additionalProperties":false})
         }
         "codex_agent_control" => json!({"type":"object","properties":{
             "operation":{"type":"string","enum":["start","send","review","compact","interrupt","close"]},
@@ -57,13 +59,26 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value, Worksp
         "codex_runtime_status" if object.is_empty() => {
             ctx.codex_bridge.status().map(tool_ok).map_err(error)
         }
-        "codex_agent_read" if object.len() == 1 => {
+        "codex_agent_read"
+            if object
+                .keys()
+                .all(|key| key == "thread_id" || key == "offset") =>
+        {
             let id = object
                 .get("thread_id")
                 .and_then(Value::as_str)
                 .filter(|v| !v.is_empty() && v.len() <= 128)
                 .ok_or_else(|| WorkspaceError::invalid_argument("thread_id is required"))?;
-            ctx.codex_bridge.read(id).map(tool_ok).map_err(error)
+            let offset = match object.get("offset") {
+                None => 0,
+                Some(value) => value.as_u64().ok_or_else(|| {
+                    WorkspaceError::invalid_argument("offset must be a non-negative integer")
+                })? as usize,
+            };
+            ctx.codex_bridge
+                .read_page(id, offset)
+                .map(tool_ok)
+                .map_err(error)
         }
         "codex_command_exec" => {
             let mut clean = args.clone();

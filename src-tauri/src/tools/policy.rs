@@ -101,13 +101,18 @@ pub struct PolicySettings {
     pub allow_screen_capture: bool,
 }
 
+/// Largest patch for MCP and native tools. Requests reach the headless service in bodies of at most
+/// 1 MiB, and JSON escaping grows a patch a little, so 800 KB leaves room. (It was 200 KB, which
+/// made creating a larger file impossible, since there is no separate write tool.)
+pub const DEFAULT_MAX_PATCH_BYTES: usize = 800_000;
+
 impl Default for PolicySettings {
     fn default() -> Self {
         Self {
             allowed_commands: default_allowed_command_set(),
             workspace_local_entries: true,
             workspace_script_extensions: default_workspace_script_extension_set(),
-            max_patch_bytes: 200_000,
+            max_patch_bytes: DEFAULT_MAX_PATCH_BYTES,
             permission_mode: "workspace-write".into(),
             approval_mode: "on-request".into(),
             allow_screen_capture: false,
@@ -123,7 +128,7 @@ impl PolicySettings {
             workspace_script_extensions: parse_workspace_script_extensions(
                 &runtime.workspace_script_extensions,
             ),
-            max_patch_bytes: 200_000,
+            max_patch_bytes: DEFAULT_MAX_PATCH_BYTES,
             permission_mode: SandboxMode::parse(&runtime.permission_mode)
                 .as_str()
                 .to_string(),
@@ -292,7 +297,7 @@ fn read_only_command_allowed(command: &str) -> bool {
         return false;
     }
 
-    let Ok(parts) = shell_words::split(command) else {
+    let Ok(parts) = split_command(command) else {
         return false;
     };
     let Some(executable) = parts.first() else {
@@ -418,8 +423,7 @@ pub fn validate_command_for_workspace(
         ));
     }
 
-    let parts =
-        shell_words::split(command).map_err(|_| PolicyError("Invalid command syntax".into()))?;
+    let parts = split_command(command).map_err(|_| PolicyError("Invalid command syntax".into()))?;
     if parts.is_empty() {
         return Err(PolicyError("Empty command".into()));
     }
@@ -493,7 +497,11 @@ pub fn validate_patch(arguments: &Value, policy: &PolicySettings) -> Result<(), 
     }
 
     if patch.len() > policy.max_patch_bytes {
-        return Err(PolicyError("Patch is too large".into()));
+        return Err(PolicyError(format!(
+            "Patch is too large: {} bytes, limit {}. Split it into several apply_patch calls (one file or a few hunks each).",
+            patch.len(),
+            policy.max_patch_bytes
+        )));
     }
 
     Ok(())
@@ -808,5 +816,81 @@ mod release_hardening_checks {
                 "{value:?}"
             );
         }
+    }
+}
+
+/// Splits a command line into words for both the policy check and execution, so the two always
+/// see the same program and arguments. On Windows a backslash is a path separator, not an escape:
+/// `shell_words` would turn `python scripts\run.py` into `scriptsrun.py`. Quotes still group words.
+pub(crate) fn split_command(command: &str) -> Result<Vec<String>, shell_words::ParseError> {
+    if !cfg!(windows) {
+        return shell_words::split(command);
+    }
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        // As in Windows argument parsing, `\"` is a literal quote; any other backslash is literal.
+        if c == '\\' && chars.peek() == Some(&'"') && quote != Some('\'') {
+            chars.next();
+            word.push('"');
+            in_word = true;
+            continue;
+        }
+        match quote {
+            Some(open) if c == open => quote = None,
+            Some(_) => word.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            None if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            None => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err(shell_words::ParseError);
+    }
+    if in_word {
+        words.push(word);
+    }
+    Ok(words)
+}
+
+#[cfg(all(test, windows))]
+mod split_command_tests {
+    use super::split_command;
+
+    #[test]
+    fn windows_paths_keep_their_backslashes_and_quotes_group_words() {
+        assert_eq!(
+            split_command(r#"python scripts\run.py "C:\Program Files\x\a b.txt" 'it is'"#).unwrap(),
+            vec![
+                "python",
+                r"scripts\run.py",
+                r"C:\Program Files\x\a b.txt",
+                "it is"
+            ]
+        );
+        assert_eq!(
+            split_command(r#"cmd /c "x""y""#).unwrap(),
+            vec!["cmd", "/c", "xy"]
+        );
+        assert_eq!(
+            split_command(r#"python -c "print(\"hi\")""#).unwrap(),
+            vec!["python", "-c", r#"print("hi")"#]
+        );
+        assert!(split_command(r#"echo "unterminated"#).is_err());
+        assert!(split_command("   ").unwrap().is_empty());
     }
 }

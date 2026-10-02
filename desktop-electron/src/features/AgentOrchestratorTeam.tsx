@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AoNode } from "./AgentOrchestratorSurface";
 import {
-  DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, emptyRoleSettings, workerRoute,
+  DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, emptyRoleSettings, workerRoute,
   type AoHarness, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 
@@ -54,7 +54,7 @@ export function AgentOrchestratorTeam({ team, harnesses, loadModels, busy, save,
   const updateSettings = (node: AoNode, patch: Partial<RoleSettings>) =>
     update(node.id, { settings: { ...emptyRoleSettings(), ...node.settings, ...patch } });
 
-  const addRole = (role: AoNode["role"], name: string, specialty: string, route = workerRoute(NATIVE_HARNESS, DEFAULT_WORKER_MODEL)) =>
+  const addRole = (role: AoNode["role"], name: string, specialty: string, route = workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL)) =>
     setDraft((current) => {
       if (!planner) return current;
       const node: AoNode = {

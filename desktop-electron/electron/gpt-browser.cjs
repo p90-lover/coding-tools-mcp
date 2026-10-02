@@ -1,9 +1,10 @@
 "use strict";
 
-// GPT Browser: an embedded chatgpt.com browser with one persistent session per ChatGPT account.
-// Each account lives in its own partition, so its sign-in survives restarts and accounts never
-// share cookies. Only the account list (ids, labels, detected emails) is stored here; sessions
-// stay inside Chromium's partitions and no password or token is ever read or written.
+// GPT Browser: an embedded browser, opening chatgpt.com by default, with one persistent session
+// per ChatGPT account and an address bar for any http(s) site. Each account lives in its own
+// partition, so its sign-in survives restarts and accounts never share cookies. Only the account
+// list (ids, labels, detected emails) is stored here; sessions stay inside Chromium's partitions
+// and no password or token is ever read or written.
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -18,34 +19,33 @@ const ACCOUNT_ID = /^[a-z0-9]{12}$/;
 const MAX_LABEL = 64;
 const MAX_URL = 4096;
 
-// Hosts a ChatGPT sign-in may pass through. Anything else opens in the system browser.
-const SIGN_IN_HOSTS = new Set([
-  "chatgpt.com",
-  "auth.openai.com",
-  "auth0.openai.com",
-  "login.openai.com",
-  "accounts.openai.com",
-  "accounts.google.com",
-  "login.microsoftonline.com",
-  "login.live.com",
-  "appleid.apple.com",
-  "idmsa.apple.com",
-]);
+const IP_HOST = /^(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\])$/i;
 
-/** A chatgpt.com page this browser may open on request, or null. */
-function chatgptPageUrl(value) {
-  if (typeof value !== "string" || value.length === 0 || value.length > MAX_URL) return null;
+/**
+ * A web page the address bar may open in the active account, or null. Only http(s) pages
+ * without embedded credentials; a bare address such as "example.com/path" means https.
+ */
+function browsableUrl(value) {
+  if (typeof value !== "string") return null;
+  let text = value.trim();
+  if (!text || text.length > MAX_URL || /\s/.test(text)) return null;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) text = `https://${text}`;
   let parsed;
-  try { parsed = new URL(value.trim()); } catch { return null; }
-  if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com") return null;
+  try { parsed = new URL(text); } catch { return null; }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
   if (parsed.username || parsed.password) return null;
+  const host = parsed.hostname;
+  // A dotted name, localhost or an IP: rejects typos like "https://foo" that are not a site.
+  if (!host || !(host.includes(".") || host === "localhost" || IP_HOST.test(host))) return null;
   return parsed.toString();
 }
 
-function inBrowserHost(value) {
+const isWebUrl = (value) => /^https?:\/\//i.test(String(value || ""));
+
+function onChatgpt(value) {
   try {
-    const parsed = new URL(value);
-    return parsed.protocol === "https:" && SIGN_IN_HOSTS.has(parsed.hostname);
+    const host = new URL(value).hostname;
+    return host === "chatgpt.com" || host.endsWith(".chatgpt.com");
   } catch {
     return false;
   }
@@ -123,7 +123,9 @@ function createGptBrowserHost({
   // Reads only the signed-in email from chatgpt.com's own session endpoint, as the page itself would.
   async function detectEmail(id, contents) {
     try {
-      if (!new URL(contents.getURL()).hostname.endsWith("chatgpt.com")) return;
+      // Exact host match: the address bar can open any site, and "evilchatgpt.com" must not
+      // be able to label an account.
+      if (!onChatgpt(contents.getURL())) return;
       const email = await contents.executeJavaScript(
         "fetch('/api/auth/session',{credentials:'include'}).then(r=>r.ok?r.json():null).then(j=>j&&j.user&&typeof j.user.email==='string'?j.user.email:null).catch(()=>null)",
         true,
@@ -142,15 +144,19 @@ function createGptBrowserHost({
 
   function bindPage(id, page) {
     const contents = page.view.webContents;
+    // Web pages stay in this account's session, as in an ordinary browser tab; a new-window
+    // request loads in place. mailto: goes to the mail app; any other scheme is refused, since
+    // a web page must not be able to launch arbitrary protocol handlers on this machine.
+    const handOff = (url) => { if (/^mailto:/i.test(url)) void openExternal(url); };
     contents.setWindowOpenHandler(({ url }) => {
-      if (chatgptPageUrl(url)) void contents.loadURL(url).catch(() => {});
-      else if (/^https?:/i.test(url)) void openExternal(url);
+      if (isWebUrl(url)) void contents.loadURL(url).catch(() => {});
+      else handOff(url);
       return { action: "deny" };
     });
     const guard = (event, url) => {
-      if (inBrowserHost(url)) return;
+      if (isWebUrl(url)) return;
       event.preventDefault();
-      if (/^https?:/i.test(url)) void openExternal(url);
+      handOff(url);
     };
     contents.on("will-navigate", guard);
     contents.on("will-redirect", guard);
@@ -240,8 +246,8 @@ function createGptBrowserHost({
       return activate(id);
     },
     async openUrl(value) {
-      const url = chatgptPageUrl(value);
-      if (!url) throw new Error("Only https://chatgpt.com links open in the GPT Browser");
+      const url = browsableUrl(value);
+      if (!url) throw new Error("Enter a web address, for example chatgpt.com or https://example.com");
       if (!state.activeId) throw new Error("Add a ChatGPT account first");
       return activate(state.activeId, url);
     },
@@ -294,4 +300,4 @@ function createGptBrowserHost({
   };
 }
 
-module.exports = { createGptBrowserHost, chatgptPageUrl, cleanUserAgent, partitionFor, MAX_ACCOUNTS };
+module.exports = { createGptBrowserHost, browsableUrl, cleanUserAgent, partitionFor, MAX_ACCOUNTS };

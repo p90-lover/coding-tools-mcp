@@ -9,10 +9,16 @@ const scriptPath = path.join(projectRoot, "desktop-electron/assets/keysmith/code
 const expectedScriptSha256 = "837ec25713851a2fb6d8646dd078ee03a2e23fe17b19e97e093cedb02349979d";
 
 function fixture(t) {
-  // The OS temp folder, not the checkout: Keysmith's atomic writes need directory handles that
-  // a copied or synced checkout's permissions can refuse, which would fail the fixture, not the code.
-  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "keysmith-fixture-"));
+  const parent = path.join(__dirname, "../aiTemp/keysmith-setup/runner-tests");
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, "fixture-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // Match the user-owned Codex home ACL; copied checkouts may inherit only Modify.
+  if (process.platform === "win32") {
+    const { execFileSync } = require("node:child_process");
+    const account = execFileSync("whoami.exe", [], { windowsHide: true, encoding: "utf8" }).trim();
+    execFileSync("icacls.exe", [root, "/grant:r", `${account}:(OI)(CI)F`], { windowsHide: true, stdio: "pipe" });
+  }
   const codexDir = path.join(root, "codex");
   fs.mkdirSync(codexDir);
   const instructionFile = path.join(root, "reviewed.md");
@@ -26,6 +32,7 @@ test("preview invokes only the pinned custom-file and hook-preserving mode", asy
   assert.ok(fs.existsSync(path.join(__dirname, "../electron/keysmith-managed.cjs")), "Keysmith host is missing");
   const { createKeysmithManaged } = require("../electron/keysmith-managed.cjs");
   const calls = [];
+  let stdinEnded = false;
   const keysmith = createKeysmithManaged({
     scriptPath,
     pythonExecutable: "python",
@@ -34,6 +41,7 @@ test("preview invokes only the pinned custom-file and hook-preserving mode", asy
     execFileImpl: (file, args, options, callback) => {
       calls.push({ file, args, options });
       callback(null, "preview ready", "");
+      return { stdin: { end() { stdinEnded = true; } } };
     },
   });
 
@@ -45,6 +53,7 @@ test("preview invokes only the pinned custom-file and hook-preserving mode", asy
     fileSha256: crypto.createHash("sha256").update(fs.readFileSync(instructionFile)).digest("hex"),
   });
   assert.equal(calls.length, 1);
+  assert.equal(stdinEnded, true, "Noninteractive installer must close its stdin pipe");
   assert.equal(calls[0].file, "python");
   assert.deepEqual(calls[0].args, [
     "-I", "-B", fs.realpathSync(scriptPath),
@@ -254,6 +263,20 @@ test("isolated Keysmith status, apply, and uninstall preserve hooks and unrelate
   assert.equal(removed.state, "not-installed");
   assert.equal(removed.managedByCodingTools, false);
   assert.match(removed.stdout, /Config activation:\s+not-installed/);
+  assert.deepEqual(fs.readFileSync(configPath), originalConfig);
+  assert.deepEqual(fs.readFileSync(hooksPath), originalHooks);
+
+  const bundledPreview = await keysmith.preview();
+  assert.equal(bundledPreview.ok, true);
+  assert.deepEqual(fs.readFileSync(configPath), originalConfig);
+  assert.equal((await keysmith.apply({
+    confirmed: true, expectedFileSha256: bundledPreview.fileSha256,
+  })).ok, true);
+  assert.equal((await keysmith.status()).state, "active");
+  assert.ok(fs.statSync(path.join(codexDir, "coding-tools-keysmith.md")).size > 1000);
+  assert.deepEqual(fs.readFileSync(hooksPath), originalHooks);
+  assert.equal((await keysmith.previewUninstall()).ok, true);
+  assert.equal((await keysmith.uninstall({ confirmed: true })).ok, true);
   assert.deepEqual(fs.readFileSync(configPath), originalConfig);
   assert.deepEqual(fs.readFileSync(hooksPath), originalHooks);
 });

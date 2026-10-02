@@ -12,7 +12,8 @@ export function GptBrowserSurface({ api, active, setError }: {
   setError: (error: string | null) => void;
 }) {
   const [status, setStatus] = useState<GptBrowserStatus | null>(null);
-  const [link, setLink] = useState("");
+  // null while the address bar simply mirrors the page; a string while the user is typing.
+  const [draft, setDraft] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   const confirmTimer = useRef<number | undefined>(undefined);
@@ -64,10 +65,12 @@ export function GptBrowserSurface({ api, active, setError }: {
     }
   }, [setError]);
 
-  const openLink = () => {
-    const url = link.trim();
+  const go = (input: HTMLInputElement | null) => {
+    const url = (draft ?? "").trim();
     if (!url) return;
-    void run(() => api.openGptBrowserUrl(url)).then(() => setLink(""));
+    setDraft(null);
+    input?.blur();
+    void run(() => api.openGptBrowserUrl(url));
   };
 
   const remove = () => {
@@ -109,17 +112,37 @@ export function GptBrowserSurface({ api, active, setError }: {
             <button type="button" aria-label="Forward" title="Forward" disabled={!page?.canGoForward} onClick={() => void run(() => api.navigateGptBrowser("forward"))}>›</button>
             <button type="button" aria-label="Reload" title="Reload" onClick={() => void run(() => api.navigateGptBrowser("reload"))}>⟳</button>
           </span>
-          {page?.loading ? <span className="gpb-muted">Loading…</span> : null}
-          <form className="gpb-link" onSubmit={(event) => { event.preventDefault(); openLink(); }}>
+          <form
+            className="gpb-link"
+            onSubmit={(event) => {
+              event.preventDefault();
+              go(event.currentTarget.querySelector("input"));
+            }}
+          >
             <input
-              aria-label="Open a chatgpt.com link"
-              placeholder="Paste a chatgpt.com link (referral, chat, GPT…)"
-              value={link}
-              onChange={(event) => setLink(event.target.value)}
+              type="text"
+              inputMode="url"
+              aria-label="Address"
+              placeholder="Type a web address, e.g. chatgpt.com or example.com"
+              value={draft ?? page?.url ?? ""}
+              onFocus={(event) => { setDraft(event.target.value); event.target.select(); }}
+              onBlur={() => setDraft(null)}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.blur(); }}
               spellCheck={false}
+              autoComplete="off"
             />
-            <button type="submit" className="button-primary" disabled={!link.trim()}>Open</button>
+            {/* mousedown would blur the field (dropping the draft) before the submit fires */}
+            <button
+              type="submit"
+              className="button-primary"
+              disabled={draft === null || !draft.trim()}
+              onMouseDown={(event) => event.preventDefault()}
+            >
+              Go
+            </button>
           </form>
+          {page?.loading ? <span className="gpb-muted">Loading…</span> : null}
         </> : null}
         <span className="gpb-spacer" />
         {hasAccount ? (

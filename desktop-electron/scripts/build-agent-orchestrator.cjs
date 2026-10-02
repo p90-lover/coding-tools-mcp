@@ -8,10 +8,36 @@ const { spawnSync } = require("node:child_process");
 
 const projectRoot = path.resolve(__dirname, "../..");
 const sourceRoot = path.join(projectRoot, "module", "agent-orchestrator");
-const sourceCommit = "73473d45f0c18f3a81f66f150868459e3098ca35";
+// Upstream base. The superproject pins a fork commit carrying the Coding Tools integration on top.
+const upstreamCommit = "73473d45f0c18f3a81f66f150868459e3098ca35";
 const stageRoot = path.join(projectRoot, "aiTemp", "ao-source-build");
 const frontendRoot = path.join(stageRoot, "frontend");
 const outputRoot = path.join(projectRoot, "desktop-electron", "build", "agent-orchestrator");
+// AO's packaged ACP runtime (pinned Node + @agentclientprotocol/claude-agent-acp). The daemon looks
+// for it at resources/acp-runtime beside resources/agent-orchestrator; Claude Code's chat mode and
+// model catalog need it.
+const acpOutputRoot = path.join(projectRoot, "desktop-electron", "build", "acp-runtime");
+
+/** Builds AO's ACP runtime with AO's own pinned recipe (checksum-verified Node, npm ci from a
+ * lockfile, no install scripts) and copies it next to the daemon build when it changed. */
+function buildAcpRuntime() {
+  run(process.execPath, [path.join(sourceRoot, "frontend", "scripts", "build-acp-runtime.mjs")], path.join(sourceRoot, "frontend"));
+  const built = path.join(sourceRoot, "frontend", "resources", "acp-runtime");
+  const marker = (directory) => {
+    try { return fs.readFileSync(path.join(directory, ".ao-acp-runtime.json"), "utf8"); } catch { return ""; }
+  };
+  const current = marker(built);
+  if (!current) throw new Error("AO ACP runtime build produced no marker");
+  if (marker(acpOutputRoot) === current) return JSON.parse(current);
+  // Retain the previous runtime in aiTemp/Trash (this repository never deletes build output).
+  if (fs.existsSync(acpOutputRoot)) {
+    const trash = path.join(projectRoot, "aiTemp", "Trash", "acp-runtime");
+    fs.mkdirSync(trash, { recursive: true });
+    fs.renameSync(acpOutputRoot, path.join(trash, new Date().toISOString().replace(/[:.]/g, "-")));
+  }
+  fs.cpSync(built, acpOutputRoot, { recursive: true });
+  return JSON.parse(current);
+}
 
 function run(command, arguments_, cwd, env = {}) {
   console.log(`[AO build] ${command} ${arguments_.join(" ")}`);
@@ -23,8 +49,15 @@ function run(command, arguments_, cwd, env = {}) {
 }
 
 async function main() {
-  const revision = spawnSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" });
-  assert.equal(revision.stdout.trim(), sourceCommit, "Unexpected AO source revision");
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: sourceRoot, encoding: "utf8" }).stdout.trim();
+  const pin = spawnSync("git", ["rev-parse", "HEAD:module/agent-orchestrator"], { cwd: projectRoot, encoding: "utf8" });
+  const pinned = pin.status === 0 ? pin.stdout.trim() : "";
+  // Either a checkout of the pinned fork commit, or the upstream base with the same integration
+  // present as working-tree changes; anything else is an unreviewed source.
+  assert.ok(head === pinned || head === upstreamCommit, `Unexpected AO source revision ${head} (pinned ${pinned || "none"})`);
+  const provenance = head === pinned && head !== upstreamCommit
+    ? { repository: "p90-lover/agent-orchestrator", commit: head }
+    : { repository: "Untrivial-ai/agent-orchestrator", commit: upstreamCommit, workingTreeIntegration: true };
   fs.mkdirSync(stageRoot, { recursive: true });
   fs.mkdirSync(outputRoot, { recursive: true });
   for (const directory of ["frontend", "packages"]) {
@@ -66,11 +99,13 @@ async function main() {
     GOWORK: "off", GOTOOLCHAIN: "local",
   });
   fs.copyFileSync(path.join(sourceRoot, "LICENSE"), path.join(outputRoot, "LICENSE"));
+  const acpRuntime = buildAcpRuntime();
   fs.writeFileSync(path.join(outputRoot, "manifest.json"), `${JSON.stringify({
-    repository: "Untrivial-ai/agent-orchestrator", commit: sourceCommit,
+    ...provenance,
     source: "module/agent-orchestrator", standaloneInstall: false, localOnly: true,
     daemonSha256: crypto.createHash("sha256").update(fs.readFileSync(daemonPath)).digest("hex"),
     renderer: "renderer/index.html", dependencyDigest,
+    acpRuntime: { path: "../acp-runtime", node: acpRuntime.node, signature: acpRuntime.signature },
   }, null, 2)}\n`);
   console.log(`[AO build] Published source integration to ${outputRoot}`);
 }

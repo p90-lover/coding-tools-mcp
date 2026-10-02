@@ -105,3 +105,23 @@ test("canvas defaults flow downward and saved free positions do not reorder neig
   assert.deepEqual(JSON.parse(JSON.stringify([...translated])), [["a", { x: 9500, y: -10 }], ["b", { x: 9420, y: 70 }]]);
   assert.equal(selection.get("a").x, 9480);
 });
+
+test("shift-click links or unlinks relative to the active card under free links", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  const canvas = {};
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+    { exports: canvas, require: () => ({}) });
+  const decide = (run, starter, target) => JSON.parse(JSON.stringify(canvas.shiftLinkAction(starter, target,
+    (id, parentId) => Boolean(surfaceExports.aoDependencyChange(run, id, parentId)),
+    (id, parentId) => Boolean(surfaceExports.aoUnlinkChange(run, id, parentId)))));
+  const open = { nodes: [node("plan", "planner"), node("a", "worker", ["plan"]), node("b", "worker", ["plan"]), node("review", "reviewer", ["a", "b"])] };
+  assert.deepEqual(decide(open, "a", "b"), { kind: "connect", id: "b", parentId: "a" }, "the clicked card goes below the starter");
+  assert.deepEqual(decide(open, "b", "a"), { kind: "connect", id: "a", parentId: "b" });
+  const linked = { nodes: open.nodes.map((entry) => entry.id === "b" ? { ...entry, parents: ["plan", "a"] } : entry) };
+  assert.deepEqual(decide(linked, "a", "b"), { kind: "disconnect", id: "b", parentId: "a" });
+  assert.deepEqual(decide(linked, "b", "a"), { kind: "disconnect", id: "b", parentId: "a" }, "either click order unlinks");
+  // Free links: any link can be removed; a card left unlinked waits on the orchestrator.
+  assert.deepEqual(decide(linked, "plan", "a"), { kind: "disconnect", id: "a", parentId: "plan" });
+  assert.deepEqual(decide(linked, "a", "review"), { kind: "disconnect", id: "review", parentId: "a" });
+  assert.equal(decide(linked, "a", "a"), null);
+});

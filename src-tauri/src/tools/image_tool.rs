@@ -15,6 +15,10 @@ pub(super) const MAX_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 pub(super) const MAX_PIXELS: u64 = 16_777_216;
 const MAX_SOURCE_DIMENSION: u32 = 32_768;
 const MAX_OUTPUT_BYTES: u64 = 5_242_880;
+/// Default encoded-image budget. Tool results pass through the headless service, which keeps at
+/// most 256 KiB of serialized result; base64 adds a third, so 160 KiB of image fits with room to
+/// spare (half that when a data URL repeats the image). Larger budgets remain available on request.
+const DEFAULT_OUTPUT_BYTES: u64 = 160 * 1024;
 static VISION_GATE: Mutex<()> = Mutex::new(());
 
 pub(super) fn vision_guard() -> Result<MutexGuard<'static, ()>, WorkspaceError> {
@@ -185,8 +189,17 @@ impl ViewOptions {
             }
         }
         Ok(Self {
-            max_bytes: integer(args, "max_bytes", MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES)?
-                as usize,
+            max_bytes: integer(
+                args,
+                "max_bytes",
+                if args.get("output").and_then(Value::as_str) == Some("data_url") {
+                    DEFAULT_OUTPUT_BYTES / 2
+                } else {
+                    DEFAULT_OUTPUT_BYTES
+                },
+                1024,
+                MAX_OUTPUT_BYTES,
+            )? as usize,
             max_width: integer(args, "max_width", 2000, 1, 4096)? as u32,
             max_height: integer(args, "max_height", 2000, 1, 4096)? as u32,
             auto_resize: boolean(args, "auto_resize", true)?,
@@ -451,6 +464,38 @@ pub fn compare_images(ws: &Workspace, args: &Value) -> Result<Value, WorkspaceEr
 mod vision_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn a_large_noisy_image_fits_the_default_tool_result_budget() {
+        // Noise barely compresses, so this is the hardest case for the 160 KiB default.
+        let mut seed = 0x2545_f491_u32;
+        let pixels = image::RgbaImage::from_fn(1800, 1200, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            image::Rgba([seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 255])
+        });
+        for (args, budget) in [
+            (serde_json::json!({}), 160 * 1024),
+            (serde_json::json!({"output": "data_url"}), 80 * 1024),
+        ] {
+            let options = ViewOptions::parse(&args).unwrap();
+            let out = render_image(
+                DynamicImage::ImageRgba8(pixels.clone()),
+                &args,
+                options,
+                serde_json::json!({}),
+            )
+            .unwrap();
+            let encoded = out["base64"].as_str().unwrap();
+            let bytes = STANDARD.decode(encoded).unwrap();
+            assert!(bytes.len() <= budget, "{} > {budget}", bytes.len());
+            assert!(
+                out.to_string().len() < 256 * 1024,
+                "the whole result must fit the headless limit"
+            );
+        }
+    }
 
     #[test]
     fn vision_limits_and_regions_reject_invalid_inputs() {

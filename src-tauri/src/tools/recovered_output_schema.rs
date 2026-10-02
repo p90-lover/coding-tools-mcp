@@ -6,10 +6,12 @@ pub fn for_tool(name: &str) -> Option<Value> {
         "read_file" => (
             json!(["path", "content", "encoding", "truncated"]),
             json!({
-                "path":{"type":"string"},"content":{"type":"string"},"encoding":{"const":"utf-8"},
+                "path":{"type":"string"},"content":{"type":"string"},"encoding":{"enum":["utf-8","utf-16le","utf-16be"]},
                 "start_line":{"type":"integer","minimum":0},"end_line":{"type":"integer","minimum":0},
                 "total_lines":{"type":"integer","minimum":0},"total_bytes":{"type":"integer","minimum":0},
-                "bytes_read":{"type":"integer","minimum":0},"truncated":{"type":"boolean"},"warnings":{"type":"array","items":{"type":"string"}}
+                "bytes_read":{"type":"integer","minimum":0},"truncated":{"type":"boolean"},"warnings":{"type":"array","items":{"type":"string"}},
+                "offset":{"type":"integer","minimum":0},"next_offset":{"type":["integer","null"],"minimum":0},
+                "next_start_line":{"type":["integer","null"],"minimum":1},"cut_mid_line":{"type":"boolean"}
             }),
         ),
         "operation_log" => (

@@ -198,7 +198,7 @@ pub const P0_TOOLS: &[(&str, &str, &str, bool, bool, bool)] = &[
     (
         "read_file",
         "Read file",
-        "Read a UTF-8 text file slice inside the configured workspace.",
+        "Read a text file slice inside the configured workspace (UTF-8, or UTF-16 with a BOM). Files of any size can be read in pages: each call returns up to max_bytes (192 KiB at most); when more remains, continue with offset=next_offset (exact, even inside a very long line) or start_line=next_start_line.",
         true,
         false,
         false,
@@ -890,7 +890,8 @@ fn base_input_schema(name: &str) -> Value {
                 "path": { "type": "string", "minLength": 1 },
                 "start_line": { "type": "integer", "minimum": 1, "default": 1 },
                 "end_line": { "type": "integer", "minimum": 1 },
-                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 131072 }
+                "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to start at (use next_offset from the previous page). Overrides start_line." },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 196608, "default": 131072 }
             },
             "required": ["path"],
             "additionalProperties": false
@@ -937,7 +938,7 @@ fn base_input_schema(name: &str) -> Value {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 67108864,
-                    "default": 2097152,
+                    "default": 67108864,
                     "description": "Skip files larger than this many bytes (default 2MiB) to avoid memory spikes"
                 }
             },
@@ -1032,7 +1033,8 @@ fn base_input_schema(name: &str) -> Value {
                 "staged": { "type": "boolean", "default": false },
                 "unstaged": { "type": "boolean", "default": true },
                 "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 3 },
-                "max_bytes": { "type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144 }
+                "offset": { "type": "integer", "minimum": 0, "description": "Byte offset of the page (use next_offset)." },
+                "max_bytes": { "type": "integer", "minimum": 1024, "maximum": 196608, "default": 131072 }
             },
             "additionalProperties": false
         }),
@@ -1054,7 +1056,8 @@ fn base_input_schema(name: &str) -> Value {
                 "paths": { "type": "array", "items": { "type": "string" } },
                 "include_diff": { "type": "boolean", "default": true },
                 "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 3 },
-                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 262144 }
+                "offset": { "type": "integer", "minimum": 0, "description": "Byte offset of the page (use next_offset)." },
+                "max_bytes": { "type": "integer", "minimum": 1, "maximum": 196608, "default": 131072 }
             },
             "additionalProperties": false
         }),
@@ -1124,7 +1127,7 @@ fn vision_schema(name: &str) -> Value {
         "width": {"type": "integer", "minimum": 1}, "height": {"type": "integer", "minimum": 1}
     }, "required": ["x", "y", "width", "height"], "additionalProperties": false});
     let mut properties = json!({
-        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 5242880, "default": 5242880},
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 5242880, "default": 163840, "description": "Encoded image budget; the image is resized/re-encoded to fit. Default 160 KiB (80 KiB with output=data_url) so results stay under the 256 KiB tool-result limit."},
         "max_width": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
         "max_height": {"type": "integer", "minimum": 1, "maximum": 4096, "default": 2000},
         "auto_resize": {"type": "boolean", "default": true},

@@ -764,7 +764,8 @@ fn write_stdin_inner(
         .and_then(Value::as_u64)
         .unwrap_or(1000)
         .min(30_000);
-    let until = Instant::now() + std::time::Duration::from_millis(yield_ms.min(1000));
+    // The schema promises up to 30 s; a hidden 1 s cap forced callers into polling loops.
+    let until = Instant::now() + std::time::Duration::from_millis(yield_ms);
     while !session.has_exited() && Instant::now() < until {
         std::thread::sleep(std::time::Duration::from_millis(20));
         tauri::async_runtime::block_on(session.refresh_status());

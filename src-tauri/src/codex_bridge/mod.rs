@@ -20,8 +20,12 @@ use std::{
 };
 
 pub const PROTOCOL_SOURCE: &str = "721f46a07ab48f00b5e7cdbf2efb78b993d100de";
-const MAX_FRAME: usize = 512 * 1024;
-const MAX_TEXT: usize = 64 * 1024;
+/// One JSON-RPC line from the App Server. Larger lines are skipped (see `skip_oversized`), not fatal.
+const MAX_FRAME: usize = 4 * 1024 * 1024;
+/// Stored answer per thread (at most MAX_THREADS threads). Reads return it in READ_PAGE pages.
+const MAX_TEXT: usize = 1024 * 1024;
+/// One codex_agent_read page of the answer; keeps the result well under the 256 KiB tool limit.
+const READ_PAGE: usize = 96 * 1024;
 const MAX_THREADS: usize = 4;
 const MAX_LEDGER: usize = 64;
 const LEDGER_RETENTION: Duration = Duration::from_secs(90 * 60);
@@ -617,13 +621,19 @@ impl Hub {
                 if !bridge.live.load(Ordering::SeqCst) {
                     break;
                 }
-                if result.is_err()
-                    || line.is_empty()
-                    || line.len() > MAX_FRAME
-                    || line.last() != Some(&b'\n')
-                {
-                    bridge.stop("native_output_disconnected_or_frame_limit");
+                if result.is_err() || line.is_empty() {
+                    bridge.stop("native_output_disconnected");
                     break;
+                }
+                if line.last() != Some(&b'\n') {
+                    // A line longer than MAX_FRAME (a large command output or file item) used to
+                    // stop the whole bridge. Skip just that message; a reply it carried fails fast.
+                    if line.len() <= MAX_FRAME || skip_rest_of_line(&mut reader).is_err() {
+                        bridge.stop("native_output_disconnected");
+                        break;
+                    }
+                    bridge.skip_oversized(&line);
+                    continue;
                 }
                 match serde_json::from_slice::<Value>(&line) {
                     Ok(value) => bridge.receive(value),
@@ -745,7 +755,11 @@ impl Hub {
             json!({"ok":true,"approved":approved,"scope":if !approved {"none"} else if request.command.is_some() {"once"} else {"turn"}}),
         )
     }
+    /// The thread state with the first page of its answer.
     pub fn read(&self, id: &str) -> Result<Value> {
+        self.read_page(id, 0)
+    }
+    pub fn read_page(&self, id: &str, offset: usize) -> Result<Value> {
         let bridge = self.bridge()?;
         let memory = lock(&bridge.memory)?;
         let thread = memory
@@ -754,6 +768,18 @@ impl Hub {
             .ok_or("Thread is not owned by this listener connection")?;
         let mut value =
             serde_json::to_value(thread).map_err(|_| "Cannot serialize native thread state")?;
+        // Long answers are read in pages; answer_next_offset continues on a character boundary.
+        let answer = thread.answer.as_str();
+        let mut start = offset.min(answer.len());
+        while !answer.is_char_boundary(start) {
+            start += 1;
+        }
+        let page = bounded(&answer[start..], READ_PAGE);
+        let end = start + page.len();
+        value["answer"] = json!(page);
+        value["answer_offset"] = json!(start);
+        value["answer_total_bytes"] = json!(answer.len());
+        value["answer_next_offset"] = json!((end < answer.len()).then_some(end));
         if bridge.ao_worker_command_approvals
             && lock(&bridge.approvals)?.values().any(|request| {
                 request.thread_id == id
@@ -1055,6 +1081,13 @@ impl Bridge {
             }
         });
         true
+    }
+    /// Answers a pending request whose reply was too large to accept, instead of letting it time
+    /// out (which stops the bridge). Notifications that are too large are dropped.
+    fn skip_oversized(&self, prefix: &[u8]) {
+        if let Some(id) = reply_id(prefix) {
+            self.receive(json!({"id":id,"error":{"code":-32001,"message":"Native reply exceeded the bridge frame limit"}}));
+        }
     }
     fn receive(&self, value: Value) {
         if let Some(method) = value["method"].as_str() {
@@ -1971,3 +2004,78 @@ mod tests {
 #[cfg(test)]
 #[path = "../../../aiTemp/release-verification/native_turn_fixture.rs"]
 mod native_turn_fixture;
+
+/// Consumes the remainder of an oversized line without holding it in memory.
+fn skip_rest_of_line<R: BufRead>(reader: &mut R) -> std::io::Result<()> {
+    let mut chunk = Vec::new();
+    loop {
+        chunk.clear();
+        if (&mut *reader)
+            .take(64 * 1024)
+            .read_until(b'\n', &mut chunk)?
+            == 0
+        {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        if chunk.last() == Some(&b'\n') {
+            return Ok(());
+        }
+    }
+}
+
+/// The numeric id of a JSON-RPC reply (`{"id":N,...}`) read from the start of its line. Requests
+/// and notifications put "method" first or carry no top-level id, so they are not matched.
+fn reply_id(prefix: &[u8]) -> Option<u64> {
+    let head = &prefix[..prefix.len().min(512)];
+    let valid = match std::str::from_utf8(head) {
+        Ok(text) => text,
+        Err(error) => std::str::from_utf8(&head[..error.valid_up_to()]).ok()?,
+    };
+    let rest = valid.trim_start().strip_prefix('{')?.trim_start();
+    let rest = rest
+        .strip_prefix("\"jsonrpc\":\"2.0\",")
+        .map(str::trim_start)
+        .unwrap_or(rest);
+    let digits = rest.strip_prefix("\"id\":")?.trim_start();
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    let id = digits[..end].parse().ok()?;
+    // `{"id":N,"method":...}` is a request from the server, not a reply.
+    (!digits[end..]
+        .trim_start()
+        .trim_start_matches(',')
+        .trim_start()
+        .starts_with("\"method\""))
+    .then_some(id)
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::{reply_id, skip_rest_of_line};
+
+    #[test]
+    fn reply_ids_are_read_only_from_top_level_replies() {
+        assert_eq!(reply_id(br#"{"id":42,"result":{"output":"..."#), Some(42));
+        assert_eq!(reply_id(br#"{"jsonrpc":"2.0","id":7,"result":"#), Some(7));
+        assert_eq!(
+            reply_id(br#"{"method":"item/completed","params":{"id":3"#),
+            None
+        );
+        assert_eq!(
+            reply_id(br#"{"id":9,"method":"item/commandExecution/requestApproval""#),
+            None
+        );
+    }
+
+    #[test]
+    fn the_rest_of_an_oversized_line_is_skipped_and_the_next_line_kept() {
+        let data = format!("{}\n{{\"id\":1}}\n", "x".repeat(300_000));
+        let mut reader = std::io::BufReader::new(data.as_bytes());
+        skip_rest_of_line(&mut reader).unwrap();
+        let mut next = String::new();
+        std::io::BufRead::read_line(&mut reader, &mut next).unwrap();
+        assert_eq!(next, "{\"id\":1}\n");
+        assert!(skip_rest_of_line(&mut std::io::BufReader::new(&b"no newline"[..])).is_err());
+    }
+}
