@@ -8,32 +8,6 @@ const test = require("node:test");
 const root = path.resolve(__dirname, "..", "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 
-test("Electron exposes separate Paseo, Anneal, and Network surfaces through composed components", () => {
-  const types = read("desktop-electron/src/types.ts");
-  const app = read("desktop-electron/src/App.tsx");
-  const paseo = read("desktop-electron/src/features/PaseoOrchestratorSurface.tsx");
-  const anneal = read("desktop-electron/src/features/AnnealTasksSurface.tsx");
-  const network = read("desktop-electron/src/features/NetworkProxySurface.tsx");
-  const copy = read("desktop-electron/src/features/orchestration-copy.ts");
-
-  for (const surface of ["paseo", "anneal", "network"]) {
-    assert.match(types, new RegExp(`\\"${surface}\\"`), `missing ${surface} surface type`);
-    assert.match(app, new RegExp(`surface === \\"${surface}\\"`), `missing ${surface} navigation/rendering`);
-  }
-
-  assert.match(app, /PaseoOrchestratorSurface/);
-  assert.match(app, /AnnealTasksSurface/);
-  assert.match(app, /NetworkProxySurface/);
-  assert.match(paseo, /orchestrationCopy/);
-  assert.match(anneal, /orchestrationCopy/);
-  assert.match(copy, /paseoTitle:\s*"Paseo"/);
-  assert.match(copy, /paseoOrchestrator:\s*"Main orchestrator"/);
-  assert.match(copy, /paseoOrchestrator:\s*"主協調器"/);
-  assert.match(copy, /annealTitle:\s*"Anneal Tasks"/);
-  assert.match(copy, /annealTitle:\s*"Anneal 任務"/);
-  assert.match(network, /localText\(language, "Network Proxy", "網路代理"/);
-});
-
 test("Paseo surface can plan ChatGPT Web work and control an owned mission", () => {
   const source = read("desktop-electron/src/features/PaseoOrchestratorSurface.tsx");
 

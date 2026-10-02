@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatNodeName, chatNodeOrder, chatTranscript,
+  CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatRunOpen, chatNodeName, chatNodeOrder, chatTranscript,
   type ChatMessage, type ChatRun, type ChatStatus, type ChatSummary,
 } from "./ao-chat";
 
@@ -64,7 +64,7 @@ export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, onSelectTask, busy, loadDescription, send, stop, openStructure,
-  approvals, approve, describeRoute, notice, retryStart, openTeam, tree,
+  approvals, approve, describeRoute, notice, retryStart, openTeam, tree, working = false,
 }: {
   tree?: ChatWorkspaces;
   runs: ChatRun[];
@@ -73,6 +73,8 @@ export function AgentOrchestratorChat({
   selectedTaskId: string;
   onSelectTask: (taskId: string) => void;
   busy: boolean;
+  /** The chat's latest run is being driven right now (not just left pending). */
+  working?: boolean;
   loadDescription: (taskId: string) => Promise<string>;
   send: (input: { taskId?: string; title?: string; message: string }) => Promise<void>;
   stop: (runId: string) => void;
@@ -112,7 +114,8 @@ export function AgentOrchestratorChat({
   );
   useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [transcript.length]);
 
-  const canSend = !busy && !sending && Boolean(draft.trim()) && chatAcceptsMessage(chat?.status);
+  const accepts = chatAcceptsMessage(chat?.status, working);
+  const canSend = !busy && !sending && Boolean(draft.trim()) && accepts;
   const submit = async () => {
     if (!canSend) return;
     setSending(true);
@@ -136,7 +139,7 @@ export function AgentOrchestratorChat({
                 value={title} onChange={(event) => setTitle(event.target.value)} />}
           {chat ? <span className={`ao-pill status-${chat.status}`}><span className="ao-pill-dot" aria-hidden="true" />{STATUS_LABEL[chat.status]}</span> : null}
           <span className="ao-rail-spacer" />
-          {latest && !chatAcceptsMessage(chat?.status)
+          {latest && chatRunOpen(chat?.status)
             ? <button type="button" className="button-secondary" disabled={busy} onClick={() => stop(latest.id)}>Stop</button> : null}
           <button type="button" className="button-secondary" onClick={openTeam}>Team</button>
           {latest ? <button type="button" className="button-secondary" aria-pressed={showStructure}
@@ -191,7 +194,7 @@ export function AgentOrchestratorChat({
 
         <form className="ao-chat-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
           <textarea aria-label="Message" maxLength={8192} rows={3} value={draft}
-            placeholder={!chatAcceptsMessage(chat?.status) ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "What should the team do?"}
+            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "What should the team do?"}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} />
           <button className="button-primary" type="submit" disabled={!canSend}>{sending ? "Starting…" : "Send"}</button>

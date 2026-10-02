@@ -1,3 +1,4 @@
+import { ROLE_TITLE } from "./AgentOrchestratorTeam";
 import { useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
@@ -34,7 +35,7 @@ export function canvasLayout(nodes: CanvasNode[], levels: CanvasNode[][], height
   return result;
 }
 
-export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, describe, children }: {
+export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onUnlink, onRemove, canRemove, describe, children }: {
   nodes: CanvasNode[]; levels: CanvasNode[][]; selectedId: string; busy: boolean;
   describe: (node: CanvasNode) => string;
   children?: ReactNode;
@@ -42,6 +43,11 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   onMove: (positions: { id: string; x: number; y: number }[], parentId?: string) => Promise<void>;
   onConnect: (id: string, parentId: string) => void;
   canConnect: (id: string, parentId: string) => boolean;
+  /** Click a link to remove it. */
+  onUnlink?: (id: string, parentId: string) => void;
+  /** Remove a card (never the orchestrator). */
+  onRemove?: (id: string) => void;
+  canRemove?: (id: string) => boolean;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
   const scene = useRef<HTMLDivElement>(null);
@@ -81,7 +87,10 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       const influence = dragged ? Math.max(0, 1 - Math.hypot((x1 + x2) / 2 - dragged.x - width / 2, (y1 + y2) / 2 - dragged.y - height / 2) / 400) : 1;
       const bend = reducedMotion.current ? 0 : wind.current * influence;
       const reach = Math.max(60, Math.abs(y2 - y1) * .45);
-      paths.current.get(JSON.stringify([parent, node.id]))?.setAttribute("d", `M${x1},${y1} C${x1 + bend},${y1 + reach} ${x2 + bend},${y2 - reach} ${x2},${y2}`);
+      const shape = `M${x1},${y1} C${x1 + bend},${y1 + reach} ${x2 + bend},${y2 - reach} ${x2},${y2}`;
+      const key = JSON.stringify([parent, node.id]);
+      paths.current.get(key)?.setAttribute("d", shape);
+      paths.current.get(`${key}#hit`)?.setAttribute("d", shape);
     }
     if (!drag.current && Math.abs(wind.current) > .3 && !reducedMotion.current) {
       wind.current *= -.68;
@@ -230,13 +239,19 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
       <button type="button" onClick={() => zoom(1.2)} aria-label="Zoom in" title="Zoom in">+</button><button type="button" onClick={fit} aria-label="Fit to screen" title="Fit">⤢</button>
       {selected.size > 1 ? <><span role="status">{selected.size}</span><button type="button" disabled={busy} onClick={() => align("x")} aria-label="Align left" title="Align left">⇤</button><button type="button" disabled={busy} onClick={() => align("y")} aria-label="Align top" title="Align top">⤒</button></> : null}
       {parentId ? <button type="button" onClick={() => setParentId("")} aria-label="Cancel connection" title="Cancel connection">✕</button> : null}
+      {onRemove && selected.size === 1 && canRemove?.([...selected][0]) ? <button type="button" disabled={busy} onClick={() => onRemove([...selected][0])}
+        aria-label="Remove selected card" title="Remove card (its task passes to another worker)">🗑</button> : null}
     </div>
     {dropTarget || parentId ? <span className="ao-connect-hint" role="status">{dropTarget ? "Drop to link" : "Pick a card to link"}</span> : null}
     {children}
     <div ref={scene} className="ao-canvas-scene">
-      <svg className="ao-canvas-wires" aria-hidden="true">{nodes.flatMap(node => node.parents.map(parent => <path key={JSON.stringify([parent, node.id])}
+      <svg className="ao-canvas-wires" aria-hidden="true">{nodes.flatMap(node => node.parents.flatMap(parent => [<path key={JSON.stringify([parent, node.id])}
         ref={element => { const key = JSON.stringify([parent, node.id]); if (element) paths.current.set(key, element); else paths.current.delete(key); }}
-        className={["running", "reserved"].includes(node.state) ? "is-running" : ""} />))}</svg>
+        className={["running", "reserved"].includes(node.state) ? "is-running" : ""} />,
+        // A wide invisible twin makes the thin link easy to click.
+        onUnlink ? <path key={`${JSON.stringify([parent, node.id])}#hit`} className="ao-wire-hit"
+          ref={element => { const key = `${JSON.stringify([parent, node.id])}#hit`; if (element) paths.current.set(key, element); else paths.current.delete(key); }}
+          onClick={() => { if (!busy) onUnlink(node.id, parent); }}><title>Click to remove this link</title></path> : null]))}</svg>
       {nodes.map(node => <div key={node.id} data-ao-node={node.id} ref={element => { if (element) elements.current.set(node.id, element); else elements.current.delete(node.id); }}
         className={`ao-canvas-card ao-node-${node.state}${selected.has(node.id) ? " is-selected" : ""}${draggingId && selected.has(node.id) ? " is-dragging" : ""}${dropTarget === node.id ? " is-target" : ""}`}>
         <button type="button" className="ao-card-handle" aria-label={`Edit ${node.settings?.name || node.role}, ${node.state}`}
@@ -257,14 +272,14 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
             wind.current = 0; schedule(); persist(before);
           }}>
           <span className="ao-card-title"><span className={`ao-dot ao-dot-${node.state}`} title={node.state} aria-hidden="true" />
-            <strong>{node.settings?.name || (node.role === "planner" ? "Orchestrator" : node.role === "reviewer" ? "Reviewer" : "Worker")}</strong>
+            <strong>{node.settings?.name || ROLE_TITLE[node.role as keyof typeof ROLE_TITLE] || "Worker"}</strong>
             <span className="ao-canvas-state">{node.role === "reviewer" && node.state === "running" ? "reviewing" : node.state}</span></span>
           <span className="ao-card-route">{describe(node)}</span>
         </button>
         <button type="button" className="ao-port ao-port-in" aria-label={`Connect dependency to ${node.settings?.name || node.role}`}
           disabled={!parentId || !canConnect(node.id, parentId) || busy} onClick={() => { onConnect(node.id, parentId); setParentId(""); }}>●</button>
         <button type="button" className="ao-port ao-port-out" aria-label={`Connect from ${node.settings?.name || node.role}`}
-          disabled={node.role === "reviewer" || busy} aria-pressed={parentId === node.id} onClick={() => setParentId(parentId === node.id ? "" : node.id)}>●</button>
+          disabled={busy} aria-pressed={parentId === node.id} onClick={() => setParentId(parentId === node.id ? "" : node.id)}>●</button>
       </div>)}
     </div>
   </div>;

@@ -1000,7 +1000,24 @@ test("failed terminal migration verifies the unchanged previous runtime instead 
   ]);
 });
 
-test("failed launcher update restores every mutable setup file before restarting the previous runtime", async () => {
+// Windows creates symlinks only with Developer Mode or elevation (EPERM otherwise); this test
+// restores a symlinked shared Codex config, so it needs one. Elsewhere it always runs.
+const canCreateSymlinks = (() => {
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-host-symlink-probe-"));
+  try {
+    fs.writeFileSync(path.join(probeRoot, "target"), "x");
+    fs.symlinkSync(path.join(probeRoot, "target"), path.join(probeRoot, "link"));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
+  }
+})();
+
+test("failed launcher update restores every mutable setup file before restarting the previous runtime", {
+  skip: !canCreateSymlinks && "this machine cannot create symlinks (Windows without Developer Mode)",
+}, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-setup-checkpoint-"));
   const coreHome = path.join(root, "core");
   const codexHome = path.join(root, "codex");

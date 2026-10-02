@@ -70,7 +70,7 @@ test("Network Proxy exposes and localizes the typed subagent routing scope", () 
   );
   assert.match(
     source,
-    /scopes: \[[^\]]*"oauth", "subagent", "paseo"[^\]]*\]/,
+    /scopes: \[[^\]]*"oauth", "subagent", "mcp"[^\]]*\]/,
   );
   assert.match(source, /"mcp"/);
   assert.match(source, /17891/);

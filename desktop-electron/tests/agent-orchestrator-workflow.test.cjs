@@ -268,10 +268,13 @@ test("a Luna orchestrator card connects on the Luna tier", async () => {
   assert.deepEqual(calls[0].web_model_catalog, { models: [{ slug: "chatgpt-web/luna" }] });
 });
 
-test("the role inspector lets the orchestrator and reviewer choose their model", () => {
+test("the role inspector lets every role choose any harness and model", () => {
   const editor = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorRoleEditor.tsx"), "utf8");
   assert.doesNotMatch(editor, /<span className="ao-chip">WebGPT High<\/span>/, "no fixed WebGPT High chip for non-workers");
-  assert.match(editor, /harnesses=\{role\.role === "worker" \? harnesses : harnesses\.filter\(item => item\.id === NATIVE_HARNESS\)\}/);
+  assert.match(editor, /<HarnessPicker route=\{role\.route\} harnesses=\{harnesses\}/, "orchestrator and reviewer see every harness");
+  assert.doesNotMatch(editor, /item\.id === NATIVE_HARNESS\)/, "no role is limited to Native Codex");
+  const team = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorTeam.tsx"), "utf8");
+  assert.doesNotMatch(team, /nativeOnly/, "the team editor offers every harness too");
   const surface = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
   assert.doesNotMatch(surface, /node\.route\.model === "chatgpt-web\/high" \? "WebGPT High"/, "cards name the chosen tier");
 });
@@ -967,4 +970,87 @@ test("a saved desktop-app codex.exe gives way to the Codex CLI, but another chos
   await make().call("chat_send", { workspaceId: "ws-1", message: "hi", executable: desktop });
   await make().call("chat_send", { workspaceId: "ws-1", message: "hi", executable: "D:/tools/codex.exe" });
   assert.deepEqual(seen, [cli, "D:/tools/codex.exe"]);
+});
+
+test("a follow-up to a chat whose last run is stuck stops that run and starts a new one", async () => {
+  for (const state of ["pending", "held"]) {
+    const world = chatWorld({
+      tasks: [{ id: "task-1", title: "Fix dots", description: "fix the email dots", state: "backlog", clauses: [] }],
+      runs: [{ id: "old-run", project_id: "task-1", workspace_id: "ws-1", revision: 4, cancelled: false,
+        nodes: [{ id: "lead", state }, { id: "w1", state: "pending" }] }],
+    });
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: world.requestHeadless,
+      findCodexExecutable: () => "C:/Codex/codex.exe",
+      resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    });
+    const sent = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "and the other dots" });
+    assert.equal(sent.taskId, "task-1", state);
+    assert.deepEqual(world.updates.map((change) => change.operation), ["cancel", "create_from_team"], state);
+    assert.deepEqual(world.updates[0], { operation: "cancel", run_id: "old-run", expected_revision: 4 }, state);
+    assert.match(world.tasks[0].description, /Follow-up \(.* UTC\):\nand the other dots$/, state);
+  }
+});
+
+test("a follow-up still waits while the chat's last run has a card working", async () => {
+  const world = chatWorld({
+    tasks: [{ id: "task-1", title: "Fix dots", description: "fix the email dots", state: "backlog", clauses: [] }],
+    runs: [{ id: "busy-run", project_id: "task-1", workspace_id: "ws-1", revision: 2, cancelled: false,
+      nodes: [{ id: "lead", state: "finished" }, { id: "w1", state: "running" }] }],
+  });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe" });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "more" }), /still running/);
+  assert.deepEqual(world.updates, []);
+});
+
+test("restart runs the same task again with the current team, stopping a stuck run first", async () => {
+  for (const [state, cancelsFirst] of [["finished", false], ["held", true]]) {
+    const world = chatWorld({
+      tasks: [{ id: "task-1", title: "Fix dots", description: "fix the email dots", state: "backlog", clauses: [] }],
+      runs: [{ id: "old-run", project_id: "task-1", workspace_id: "ws-1", revision: 5, cancelled: false,
+        nodes: [{ id: "lead", state: "finished" }, { id: "w1", state }] }],
+    });
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: world.requestHeadless,
+      findCodexExecutable: () => "C:/Codex/codex.exe",
+      resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    });
+    const restarted = await workflow.call("restart_run", { workspaceId: "ws-1", runId: "old-run" });
+    const expected = cancelsFirst ? ["cancel", "create_from_team"] : ["create_from_team"];
+    assert.deepEqual(world.updates.map((change) => change.operation), expected, state);
+    const created = world.updates.at(-1);
+    assert.equal(created.task_id, "task-1", state);
+    assert.equal(restarted.runId, created.run_id, state);
+    assert.notEqual(restarted.runId, "old-run", state);
+    assert.equal(restarted.status, "failed", "a failed start is reported, not thrown");
+  }
+});
+
+test("restart refuses while the mission has a card working", async () => {
+  const world = chatWorld({
+    tasks: [{ id: "task-1", title: "Fix dots", description: "x", state: "backlog", clauses: [] }],
+    runs: [{ id: "busy-run", project_id: "task-1", workspace_id: "ws-1", revision: 2, cancelled: false,
+      nodes: [{ id: "lead", state: "finished" }, { id: "w1", state: "running" }] }],
+  });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe" });
+  await assert.rejects(workflow.call("restart_run", { workspaceId: "ws-1", runId: "busy-run" }), /still running/);
+  assert.deepEqual(world.updates, []);
+});
+
+test("relinking or removing a working card stops its turn; an idle card is just relinked", async () => {
+  for (const [state, stops] of [["running", true], ["pending", false]]) {
+    const calls = [];
+    const route = { harness_id: "codex-native", model: "gemini-3.8-flash-high" };
+    const requestHeadless = async (endpoint, body) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [{ id: "w2", state, route }] }] };
+      if (endpoint === "/api/v1/ao/update") return { ok: true, run: { id: "run-1", workspace_id: "ws-1", nodes: [{ id: "w2", state: "pending", route }] } };
+      if (endpoint === "/api/v1/ao/harness/disconnect") { assert.equal(body.node_id, "w2"); return { ok: true }; }
+      throw new Error(`unexpected ${endpoint}`);
+    };
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe" });
+    await workflow.call("update_run", { workspaceId: "ws-1", change: { operation: "graph", run_id: "run-1",
+      expected_revision: 3, change: { operation: "set_parents", node_id: "w2", parents: ["planner"] } } });
+    assert.equal(calls.includes("/api/v1/ao/harness/disconnect"), stops, state);
+  }
 });

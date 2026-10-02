@@ -27,7 +27,7 @@ test("AO tree keeps each run separate and stacks joins below both parents", () =
   assert.deepEqual(Array.from(surfaceExports.aoLevels({ id: "two", nodes: [node("other", "planner")] })[0], (item) => item.id), ["other"]);
 });
 
-test("AO dependency edit preserves parents and refuses active/cyclic cards", () => {
+test("AO dependency edit preserves parents, allows any card but the orchestrator, refuses cycles", () => {
   const run = { id: "one", nodes: [
     node("plan", "planner"), node("a", "worker", ["plan"]),
     node("b", "worker", ["plan"]), node("review", "reviewer", ["a", "b"]),
@@ -36,7 +36,28 @@ test("AO dependency edit preserves parents and refuses active/cyclic cards", () 
     { operation: "set_parents", node_id: "b", parents: ["plan", "a"] });
   assert.equal(surfaceExports.aoDependencyChange(run, "a", "review"), null);
   assert.equal(surfaceExports.aoDependencyChange(run, "a", "plan"), null);
-  assert.equal(surfaceExports.aoDependencyChange({ ...run, nodes: run.nodes.map((entry) => entry.id === "b" ? { ...entry, state: "running" } : entry) }, "b", "a"), null);
+  // A working card can be relinked now (the engine stops and reruns it); the orchestrator never takes links.
+  assert.deepEqual(JSON.parse(JSON.stringify(surfaceExports.aoDependencyChange({ ...run, nodes: run.nodes.map((entry) => entry.id === "b" ? { ...entry, state: "running" } : entry) }, "b", "a"))),
+    { operation: "set_parents", node_id: "b", parents: ["plan", "a"] });
+  assert.equal(surfaceExports.aoDependencyChange(run, "plan", "a"), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(surfaceExports.aoDependencyChange(run, "review", "plan"))),
+    { operation: "set_parents", node_id: "review", parents: ["a", "b", "plan"] });
+});
+
+test("AO links can be removed and any card but the orchestrator can be removed", () => {
+  const run = { id: "one", nodes: [
+    node("plan", "planner"), node("a", "worker", ["plan"]),
+    node("b", "worker", ["plan", "a"]), node("review", "reviewer", ["a", "b"]),
+  ] };
+  assert.deepEqual(JSON.parse(JSON.stringify(surfaceExports.aoUnlinkChange(run, "b", "a"))),
+    { operation: "set_parents", node_id: "b", parents: ["plan"] });
+  assert.deepEqual(JSON.parse(JSON.stringify(surfaceExports.aoUnlinkChange(run, "a", "plan"))),
+    { operation: "set_parents", node_id: "a", parents: [] }, "the engine links a card left without links to the orchestrator");
+  assert.equal(surfaceExports.aoUnlinkChange(run, "b", "review"), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(surfaceExports.aoRemoveChange(run, "a"))), { operation: "remove_node", node_id: "a" });
+  assert.equal(surfaceExports.aoRemoveChange(run, "plan"), null);
+  assert.equal(surfaceExports.aoNodeWorking({ state: "running" }), true);
+  assert.equal(surfaceExports.aoNodeWorking({ state: "pending" }), false);
 });
 
 test("preview is scoped to the selected run and waits for all parents", () => {

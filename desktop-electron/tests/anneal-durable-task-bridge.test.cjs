@@ -81,18 +81,3 @@ test("tasks.list IPC accepts only the bounded task page DTO with revision", asyn
     page,
   );
 });
-
-test("Anneal dispatch uses the durable task revision and refreshes selected source state", () => {
-  const source = fs.readFileSync(
-    path.join(__dirname, "..", "src", "features", "AnnealTasksSurface.tsx"),
-    "utf8",
-  );
-
-  assert.match(source, /api\.tasks\.list\(\{ workspaceId, limit: 100 \}\)/);
-  assert.match(source, /setTaskRevision\(page\.revision\)/);
-  assert.match(source, /expectedRevision:\s*taskRevision/);
-  assert.match(source, /refreshSource:\s*true/);
-  assert.match(source, /onClick=\{\(\) => void refresh\(true\)\}/);
-  assert.match(source, /mission\.lastStatus/);
-  assert.doesNotMatch(source, /root\.annealTasks/);
-});

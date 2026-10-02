@@ -143,7 +143,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return (Array.isArray(catalog?.models) ? catalog.models : []).filter(model => typeof model?.id === "string" && model.id.length <= 128)
         .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null }) {
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
       // Chat-capable agents return their answer as a conversation turn. Every other
@@ -154,6 +154,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         projectId, kind: "worker", harness: agentId(agent), mode: chat ? "chat" : "tui",
         prompt: chat ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
+        // A CPA model runs through the local gateway; AO adds the key from its own environment.
+        ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
         displayName: String(name || "AO worker").slice(0, 100),
       });
       return sessionId(data?.session?.id);
@@ -268,7 +270,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return workspaceBoard.readWorkspace(args.workspaceId, args.runId);
     }
     if (operation === "mission_open") {
-      if (!workspaceBoard || !["open", "start", "resume"].includes(args.intent)) throw new Error("Invalid mission navigation request");
+      if (!workspaceBoard || !["open", "start", "resume", "restart"].includes(args.intent)) throw new Error("Invalid mission navigation request");
       const board = await workspaceBoard.readWorkspace(args.workspaceId, args.runId);
       if (!board.runs.some(run => run.id === args.runId)) throw new Error("Mission is outside this workspace");
       missionSelection = { id: crypto.randomUUID(), workspaceId: board.workspaceId, runId: args.runId, intent: args.intent };

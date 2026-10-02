@@ -23,6 +23,10 @@ pub struct RoleSettings {
     pub expected_output: String,
     pub working_directory: String,
     pub revision: u64,
+    /// Command approver only: allow or deny tool requests on its own. Off means it only recommends.
+    /// Omitted when off, so grants issued before this setting keep their fingerprint.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auto_decide: bool,
 }
 
 impl RoleSettings {
@@ -68,6 +72,9 @@ pub struct Team {
     pub revision: u64,
     #[serde(default = "default_worker_limit")]
     pub worker_limit: u8,
+    /// Rework rounds new missions from this team allow (1 to 10).
+    #[serde(default = "ao::default_review_rounds")]
+    pub max_review_rounds: u8,
     pub nodes: Vec<Node>,
 }
 
@@ -121,14 +128,102 @@ pub fn attach_worker_role(run: &mut Run, node: &mut Node) {
         role.parents = parents;
         role.template_role_id = None;
         node.template_role_id = Some(role.id.clone());
-        if let Some(reviewer) = team
-            .nodes
-            .iter_mut()
-            .find(|role| role.role == Role::Reviewer)
-        {
-            reviewer.parents.push(role.id.clone());
-        }
         team.nodes.push(role);
+        normalize_roles(&mut team.nodes);
+    }
+}
+
+/// Wires the helper roles so a team only lists them: the command approver sits between the
+/// planner and the workers, and sub-reviewers get the main reviewer's split pass in front of
+/// them. The split pass mirrors the main reviewer's harness, model and settings.
+pub fn normalize_roles(nodes: &mut Vec<Node>) {
+    let first = |nodes: &[Node], role: Role| {
+        nodes
+            .iter()
+            .find(|node| node.role == role)
+            .map(|node| node.id.clone())
+    };
+    let all = |nodes: &[Node], role: Role| {
+        nodes
+            .iter()
+            .filter(|node| node.role == role)
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let (Some(planner), Some(reviewer)) =
+        (first(nodes, Role::Planner), first(nodes, Role::Reviewer))
+    else {
+        return;
+    };
+    let approver = first(nodes, Role::Approver);
+    let workers = all(nodes, Role::Worker);
+    let sub_reviewers = all(nodes, Role::SubReviewer);
+    if sub_reviewers.is_empty() {
+        nodes.retain(|node| node.role != Role::ReviewSplit);
+    } else if first(nodes, Role::ReviewSplit).is_none() {
+        let main = nodes
+            .iter()
+            .find(|node| node.id == reviewer)
+            .cloned()
+            .expect("reviewer exists");
+        let mut split = main.clone();
+        split.id = (0..)
+            .map(|n| {
+                if n == 0 {
+                    format!("{}-split", main.id)
+                } else {
+                    format!("{}-split-{n}", main.id)
+                }
+            })
+            .find(|id| !nodes.iter().any(|node| &node.id == id))
+            .expect("a free id");
+        split.role = Role::ReviewSplit;
+        split.y = main.y.saturating_sub(1);
+        split.request_key = None;
+        split.receipt = None;
+        split.history.clear();
+        split.state = State::Pending;
+        nodes.push(split);
+    }
+    let split = first(nodes, Role::ReviewSplit);
+    if let (Some(split_id), Some(main)) = (
+        &split,
+        nodes.iter().find(|node| node.id == reviewer).cloned(),
+    ) {
+        if let Some(node) = nodes.iter_mut().find(|node| &node.id == split_id) {
+            node.route = main.route;
+            node.settings = main.settings.clone();
+            node.settings.name = format!(
+                "{} · split",
+                if main.settings.name.is_empty() {
+                    "Main reviewer"
+                } else {
+                    &main.settings.name
+                }
+            );
+        }
+    }
+    for node in nodes.iter_mut() {
+        match node.role {
+            Role::Planner => node.parents.clear(),
+            Role::Approver => node.parents = vec![planner.clone()],
+            Role::Worker => {
+                for required in std::iter::once(&planner).chain(approver.as_ref()) {
+                    if !node.parents.contains(required) {
+                        node.parents.push(required.clone());
+                    }
+                }
+            }
+            Role::ReviewSplit => node.parents = workers.clone(),
+            Role::SubReviewer => node.parents = split.iter().cloned().collect(),
+            Role::Reviewer => {
+                node.parents = if sub_reviewers.is_empty() {
+                    workers.clone()
+                } else {
+                    sub_reviewers.clone()
+                }
+            }
+        }
     }
 }
 
@@ -155,6 +250,10 @@ pub fn save(
             "Choose a team name and one to 24 simultaneous workers",
         ));
     }
+    if !(1..=ao::MAX_REVIEW_ROUNDS).contains(&team.max_review_rounds) {
+        return Err(fail("Choose one to ten review rounds"));
+    }
+    normalize_roles(&mut team.nodes);
     let existing = data
         .ao_teams
         .iter()
@@ -191,6 +290,11 @@ pub fn save(
         team: None,
         worker_limit: team.worker_limit,
         review_rounds: 0,
+        assignments: Default::default(),
+        max_review_rounds: team.max_review_rounds,
+        plan_rounds: 0,
+        review_parts: Default::default(),
+        rerun_after: Default::default(),
     };
     ao::validate(None, &proposal)?;
     team.revision = expected_revision + 1;
@@ -257,9 +361,14 @@ pub fn create_run(
             paused: false,
             nodes,
             grant: None,
+            max_review_rounds: team.max_review_rounds,
             team: Some(team),
             worker_limit,
             review_rounds: 0,
+            assignments: Default::default(),
+            plan_rounds: 0,
+            review_parts: Default::default(),
+            rerun_after: Default::default(),
         },
     )
 }
@@ -302,8 +411,8 @@ pub fn control(
                 if let Some(receipt) = node.receipt.take() {
                     node.history.push(receipt);
                 }
-                if node.history.len() > 2 {
-                    let excess = node.history.len() - 2;
+                if node.history.len() > ao::HISTORY_LIMIT {
+                    let excess = node.history.len() - ao::HISTORY_LIMIT;
                     node.history.drain(..excess);
                 }
                 node.request_key = None;
@@ -416,12 +525,26 @@ pub fn set_limits(
     Ok(())
 }
 
-// Called only after the owned reviewer connection is closed, never when reopening saved work.
+fn requeue(node: &mut Node) {
+    if let Some(receipt) = node.receipt.take() {
+        node.history.push(receipt);
+    }
+    if node.history.len() > ao::HISTORY_LIMIT {
+        let excess = node.history.len() - ao::HISTORY_LIMIT;
+        node.history.drain(..excess);
+    }
+    node.request_key = None;
+    node.state = State::Pending;
+}
+
+// Called only after the owned gate connection is closed, never when reopening saved work.
+// A main reviewer's CHANGES_REQUIRED sends the named workers (or all) and the review chain back;
+// a command approver's CHANGES_REQUIRED sends the plan back to the planner.
 pub fn queue_rework(
     data: &mut AppData,
     workspace_id: &str,
     run_id: &str,
-    reviewer_id: &str,
+    gate_id: &str,
     request_key: &str,
     now_ms: u64,
 ) -> AppResult<Option<Run>> {
@@ -431,13 +554,13 @@ pub fn queue_rework(
         .position(|run| run.id == run_id && run.workspace_id == workspace_id)
         .ok_or_else(|| fail("AO mission was not found"))?;
     let mut next = data.ao_runs[index].clone();
-    let reviewer = next.nodes.iter().position(|node| {
-        node.id == reviewer_id && node.role == Role::Reviewer && node.state == State::Held
+    let gate = next.nodes.iter().position(|node| {
+        node.id == gate_id
+            && matches!(node.role, Role::Reviewer | Role::Approver)
+            && node.state == State::Held
     });
-    let Some(reviewer) = reviewer else {
-        return Ok(None);
-    };
-    let Some(receipt) = next.nodes[reviewer].receipt.as_ref() else {
+    let Some(gate) = gate else { return Ok(None) };
+    let Some(receipt) = next.nodes[gate].receipt.as_ref() else {
         return Ok(None);
     };
     if next.cancelled
@@ -448,19 +571,37 @@ pub fn queue_rework(
     {
         return Ok(None);
     }
-    if next.review_rounds >= 2 {
-        next.nodes[reviewer].receipt.as_mut().unwrap().error = Some(
-            "Review still requests changes after two rework rounds; human review is required"
-                .into(),
-        );
+    let answer = receipt.answer.clone().unwrap_or_default();
+    let replan = next.nodes[gate].role == Role::Approver;
+    let exhausted = if replan {
+        (next.plan_rounds >= ao::MAX_PLAN_ROUNDS).then(|| format!(
+            "The command approver still sends the plan back after {} rounds; a person must decide", ao::MAX_PLAN_ROUNDS))
+    } else {
+        (next.review_rounds >= next.max_review_rounds).then(|| {
+            format!(
+                "Review still requests changes after {} rework rounds; human review is required",
+                next.max_review_rounds
+            )
+        })
+    };
+    if let Some(message) = exhausted {
+        next.nodes[gate].receipt.as_mut().unwrap().error = Some(message);
     } else if let Err(error) = ao::grant_valid(
         data,
         &next,
         now_ms,
         &next.grant.as_ref().unwrap().executable_sha256,
     ) {
-        next.nodes[reviewer].receipt.as_mut().unwrap().error =
-            Some(format!("Rework held: {error}"));
+        next.nodes[gate].receipt.as_mut().unwrap().error = Some(format!("Rework held: {error}"));
+    } else if replan {
+        for node in next
+            .nodes
+            .iter_mut()
+            .filter(|node| matches!(node.role, Role::Planner | Role::Approver))
+        {
+            requeue(node);
+        }
+        next.plan_rounds += 1;
     } else {
         if next
             .nodes
@@ -475,16 +616,18 @@ pub fn queue_rework(
         {
             return Ok(None);
         }
+        let targets = ao::parse_rework_targets(&answer, &next);
         for node in &mut next.nodes {
-            if node.role == Role::Planner {
-                continue;
+            let redo = match node.role {
+                Role::Worker => targets.is_empty() || targets.contains(&node.id),
+                Role::ReviewSplit | Role::SubReviewer | Role::Reviewer => true,
+                Role::Planner | Role::Approver => false,
+            };
+            if redo {
+                requeue(node);
             }
-            if let Some(receipt) = node.receipt.take() {
-                node.history.push(receipt);
-            }
-            node.request_key = None;
-            node.state = State::Pending;
         }
+        next.review_parts.clear();
         next.review_rounds += 1;
     }
     next.revision += 1;
@@ -564,6 +707,20 @@ mod tests {
         assert_eq!(applied.nodes[0].state, State::Running);
         assert!(ao::grant_valid(&data, &applied, 1002, &sha).is_ok());
 
+        let plan = |run: &Run| {
+            format!(
+                "Plan
+```assignments
+[{{\"worker\":\"{}\",\"task\":\"Build it\"}}]
+```",
+                run.nodes
+                    .iter()
+                    .find(|node| node.role == Role::Worker)
+                    .unwrap()
+                    .id
+            )
+        };
+        let first_plan = plan(&data.ao_runs[0]);
         ao::record_terminal(
             &mut data,
             "qa",
@@ -571,7 +728,7 @@ mod tests {
             &planner,
             "native-thread",
             Some("plan-turn"),
-            Some("Plan"),
+            Some(&first_plan),
             true,
             None,
         )
@@ -635,6 +792,7 @@ mod tests {
             Some("thread-two"),
         )
         .unwrap();
+        let second_plan = plan(data.ao_runs.iter().find(|run| run.id == "run-two").unwrap());
         let second = ao::record_terminal(
             &mut data,
             "qa",
@@ -642,7 +800,7 @@ mod tests {
             &second_planner,
             "thread-two",
             Some("turn-two"),
-            Some("Plan"),
+            Some(&second_plan),
             true,
             None,
         )

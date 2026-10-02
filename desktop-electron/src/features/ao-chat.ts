@@ -8,7 +8,7 @@
 
 export type ChatNode = {
   id: string;
-  role: "planner" | "worker" | "reviewer";
+  role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer";
   state: string;
   x: number;
   settings?: { name?: string };
@@ -64,9 +64,17 @@ export function chatRunStatus(run: ChatRun): ChatStatus {
   return "queued";
 }
 
-/** A chat accepts a new message only when its latest run has settled. */
-export function chatAcceptsMessage(status: ChatStatus | undefined): boolean {
-  return status === undefined || status === "done" || status === "stopped";
+/**
+ * Whether a chat takes a new message. A run that is really working blocks it; a stuck one (a start
+ * that never got going, a held card, a pause) does not: sending stops it and starts a new run.
+ */
+export function chatAcceptsMessage(status: ChatStatus | undefined, working = false): boolean {
+  return status !== "running" && !working;
+}
+
+/** A run that has not settled yet and can still be stopped. */
+export function chatRunOpen(status: ChatStatus | undefined): boolean {
+  return status === "queued" || status === "running" || status === "paused" || status === "attention";
 }
 
 /** Chats in a workspace, most recently started first. Runs arrive oldest first. */
@@ -93,8 +101,12 @@ export function chatList(runs: ChatRun[], tasks: { id: string; title: string }[]
     });
 }
 
-const ROLE_ORDER: Record<ChatNode["role"], number> = { planner: 0, worker: 1, reviewer: 2 };
-const ROLE_NAME: Record<ChatNode["role"], string> = { planner: "Orchestrator", worker: "Worker", reviewer: "Reviewer" };
+// Pipeline order: plan, command check, work, review split, sub-reviews, final review.
+const ROLE_ORDER: Record<ChatNode["role"], number> = { planner: 0, approver: 1, worker: 2, review_split: 3, sub_reviewer: 4, reviewer: 5 };
+const ROLE_NAME: Record<ChatNode["role"], string> = {
+  planner: "Orchestrator", approver: "Command approver", worker: "Worker",
+  review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer",
+};
 
 export function chatNodeName(node: ChatNode): string {
   return node.settings?.name?.trim() || ROLE_NAME[node.role];
@@ -120,7 +132,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined)
       } else if (node.state === "finished" && node.receipt?.answer) {
         messages.push({
           kind: "agent", key, role: node.role, name, text: node.receipt.answer,
-          tone: node.role === "reviewer" ? "verdict" : "answer",
+          tone: node.role === "reviewer" || node.role === "approver" || node.role === "sub_reviewer" ? "verdict" : "answer",
           ...(node.receipt.verdict ? { verdict: node.receipt.verdict } : {}),
         });
       } else if (node.state === "running" || node.state === "reserved") {

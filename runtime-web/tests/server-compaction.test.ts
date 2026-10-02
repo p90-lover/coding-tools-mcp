@@ -472,20 +472,35 @@ test("Luna rejects a remote-v2 compaction trigger before opening another browser
   expect(body.error.message).toContain("rolling checkpoint");
 });
 
-test("rejects Pro-only routed models before opening a browser when the account has no Pro access", async () => {
-  for (const [routedModel, label] of [
-    ["chatgpt-web/extra-high", "Extra High"],
-    ["chatgpt-web/pro", "Pro"],
-  ] as const) {
-    const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: routedModel, input: "test", stream: false }),
-    }), defaultConfig("browser-only"));
+// Since 31aab006 every Sol tier is listed and a tier the account lacks runs at the nearest lower
+// one (Extra High/Pro -> High without Pro) instead of failing the turn; the substitution is logged.
+test("runs Pro-only routed models at High, with a logged fallback, when the account has no Pro access", async () => {
+  const warn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...parts: unknown[]) => { warnings.push(parts.map(String).join(" ")); };
+  try {
+    for (const routedModel of ["chatgpt-web/extra-high", "chatgpt-web/pro"]) {
+      const seen: { model: string; reasoning: unknown }[] = [];
+      const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: routedModel, input: "test", stream: false }),
+      }), defaultConfig("browser-only"), () => ({
+        name: "fallback-recorder",
+        async runTurn(parsed, _incoming, emit) {
+          seen.push({ model: parsed.modelId, reasoning: parsed.options.reasoning });
+          emit({ type: "text_delta", text: "ok", phase: "final_answer" });
+          emit({ type: "done", stopReason: "stop", endTurn: true, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, estimated: true } });
+        },
+      }));
 
-    expect(response.status).toBe(400);
-    const body = await response.json() as { error: { message: string } };
-    expect(body.error.message).toContain(`${label} is not available for this account`);
+      expect(response.status).toBe(200);
+      expect(seen).toHaveLength(1);
+      expect(warnings.some((line) => line.includes("model_fallback")
+        && line.includes(`"requested":"${routedModel}"`) && line.includes('"served":"chatgpt-web/high"'))).toBeTrue();
+    }
+  } finally {
+    console.warn = warn;
   }
 });
 

@@ -243,6 +243,7 @@ function fakeDesktopWorld(root) {
         case "place": if (windows.has(input.hwnd)) windows.get(input.hwnd).visible = true; return null;
         case "close": windows.delete(input.hwnd); return null;
         case "running": return [...windows.values()].some((w) => w.pid === input.pid);
+        case "kill-tree": for (const [hwnd, w] of windows) if (w.pid === input.pid) windows.delete(hwnd); return null;
         default: return null;
       }
     },
@@ -301,7 +302,7 @@ test("a new account's profile skips the sandbox prompt and onboarding, keeping e
   }
 });
 
-test("detected accounts start hidden, and switching between them never relaunches", async () => {
+test("only the shown account starts by itself; switching starts each account once", async () => {
   const { createChatGptDesktopHost, cpaSlotId, slotPaths } = require("../electron/chatgpt-desktop.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-switch-"));
   const world = fakeDesktopWorld(root);
@@ -315,17 +316,44 @@ test("detected accounts start hidden, and switching between them never relaunche
   const b = cpaSlotId("acct-b", "b@x.com");
   try {
     await host.initialize();
-    assert.ok(await until(() => host.status().runningSlotIds.length === 2), "both accounts auto-started");
-    assert.deepEqual(world.visibleMarkers(), [], "auto-started windows stay hidden");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(world.launches(), 0, "no account is shown yet, so nothing starts in the background");
     host.setOwner(1);
     host.setSurfaceActive(true);
     host.setBounds({ x: 0, y: 0, width: 800, height: 600 });
     await host.open(a);
     await host.open(b);
     await host.open(a);
-    assert.equal(world.launches(), 2, "no relaunch on switch");
+    assert.equal(world.launches(), 2, "each account starts once; switching back does not relaunch");
     assert.ok(await until(() => world.visibleMarkers().length === 1));
     assert.deepEqual(world.visibleMarkers(), [slotPaths(dataRoot, a).roaming]);
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a window the app shows by itself is hidden again while another page is open", async () => {
+  const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-reshow-"));
+  const world = fakeDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
+  const host = createChatGptDesktopHost({
+    dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper,
+    platform: "win32", getProxyRoute: () => null, homeDir: path.join(root, "home"), autoStart: false,
+  });
+  try {
+    await host.initialize();
+    host.setOwner(1);
+    host.setSurfaceActive(true);
+    host.setBounds({ x: 0, y: 0, width: 800, height: 600 });
+    await host.open(cpaSlotId("acct-a", "a@x.com"));
+    assert.ok(await until(() => world.visibleMarkers().length === 1), "shown on its own page");
+    host.setSurfaceActive(false);
+    assert.ok(await until(() => world.visibleMarkers().length === 0), "hidden when the user leaves the page");
+    // The app makes its window visible again (sign-in, update prompt, a second launch).
+    for (const window of world.windows.values()) window.visible = true;
+    assert.ok(await until(() => world.visibleMarkers().length === 0, 2_000), "the placement loop hides it again");
   } finally {
     await host.shutdown();
     fs.rmSync(root, { recursive: true, force: true });
@@ -342,10 +370,12 @@ test("a background account nobody uses is closed when idle; the shown one stays"
     platform: "win32", getProxyRoute: () => null, homeDir: path.join(root, "home"), idleCloseMs: 200,
   });
   const a = cpaSlotId("acct-a", "a@x.com");
+  const b = cpaSlotId("acct-b", "b@x.com");
   try {
     await host.initialize();
+    await host.open(b);
     await host.open(a);
-    assert.ok(await until(() => host.status().runningSlotIds.length === 2));
+    assert.equal(host.status().runningSlotIds.length, 2);
     assert.ok(await until(() => host.status().runningSlotIds.length === 1, 8_000), "idle background account closed");
     assert.deepEqual(host.status().runningSlotIds, [a]);
     assert.equal(host.status().running, true);
@@ -419,12 +449,16 @@ test("a slot whose instance is still starting is not launched a second time", as
 });
 
 test("an account whose auto-start failed is not retried on every account change", async () => {
-  const { createChatGptDesktopHost } = require("../electron/chatgpt-desktop.cjs");
+  const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-backoff-"));
   const world = slowDesktopWorld(root);
   const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
+  const dataRoot = path.join(root, "data");
+  // a@x.com was the shown account when Coding Tools last closed, so it starts by itself.
+  fs.mkdirSync(dataRoot, { recursive: true });
+  fs.writeFileSync(path.join(dataRoot, "state.json"), JSON.stringify({ active: cpaSlotId("acct-a", "a@x.com"), local: [] }));
   const host = createChatGptDesktopHost({
-    dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
+    dataRoot, resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
     getProxyRoute: () => null, homeDir: path.join(root, "home"), windowWaitMs: 200, autoStartRetryMs: 60_000,
   });
   try {
@@ -433,13 +467,39 @@ test("an account whose auto-start failed is not retried on every account change"
       for (let i = 0; i < 100 && !predicate(); i++) await new Promise((resolve) => setTimeout(resolve, 50));
     };
     await waitFor(() => world.launches() >= 1);
-    await new Promise((resolve) => setTimeout(resolve, 400)); // let a@x.com's window wait time out
+    await new Promise((resolve) => setTimeout(resolve, 1_500)); // let a@x.com's background wait time out
     // A CPA token refresh rewrites auth files; adding b@x.com changes the account list the same way.
     cpaFolder(root, [["b@x.com", "acct-b"]]);
-    await waitFor(() => world.pendingCount() >= 2);
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    assert.equal(world.pendingCount(), 2, "b@x.com is new and starts");
-    assert.equal(world.launches(), 2, "a@x.com failed recently and must not be launched again");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(world.launches(), 1, "a@x.com failed recently and b@x.com is not shown, so nothing starts");
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("copies left running by an earlier Coding Tools are closed on start, except the shown one", async () => {
+  const { createChatGptDesktopHost, cpaSlotId, slotPaths } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-orphans-"));
+  const world = fakeDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"], ["b@x.com", "acct-b"]]);
+  const dataRoot = path.join(root, "data");
+  const a = cpaSlotId("acct-a", "a@x.com");
+  const b = cpaSlotId("acct-b", "b@x.com");
+  fs.mkdirSync(dataRoot, { recursive: true });
+  fs.writeFileSync(path.join(dataRoot, "state.json"), JSON.stringify({ active: a, local: [] }));
+  // Both accounts still have a copy from before the restart.
+  world.windows.set(900, { pid: 1900, marker: slotPaths(dataRoot, a).roaming, visible: false });
+  world.windows.set(901, { pid: 1901, marker: slotPaths(dataRoot, b).roaming, visible: false });
+  const host = createChatGptDesktopHost({
+    dataRoot, resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
+    getProxyRoute: () => null, homeDir: path.join(root, "home"),
+  });
+  try {
+    await host.initialize();
+    assert.deepEqual(host.status().runningSlotIds, [a], "the shown account's copy is kept");
+    assert.ok(!world.windows.has(901), "the other account's leftover copy is closed");
+    assert.equal(world.launches(), 0, "nothing new is started");
   } finally {
     await host.shutdown();
     fs.rmSync(root, { recursive: true, force: true });

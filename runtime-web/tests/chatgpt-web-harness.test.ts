@@ -29,6 +29,19 @@ import { decodeCompactionSummary, SUMMARY_PREFIX } from "../src/responses/compac
 import { parseRequest } from "../src/responses/parser";
 import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig, CodexTool } from "../src/types";
 
+/**
+ * Await a rejection directly. Bun 1.4 on Windows can leave `expect(promise).rejects/.resolves`
+ * waiting forever on a promise that settles through named-pipe I/O; a plain await does not.
+ */
+async function rejection(promise: Promise<unknown>): Promise<any> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the promise to reject");
+}
+
 const tempName = `codex-chatgpt-web-harness-${process.pid}-${Date.now()}`;
 const tempParent = resolve(import.meta.dir, "../../aiTemp");
 const tempRoot = join(tempParent, tempName);
@@ -54,7 +67,7 @@ test("current-turn MCP progress tracks active calls without claiming completion"
   expect(chatGptExternalProgressIsLive(progress.snapshot(), 100_000, 60_000)).toBeTrue();
   const observed = progress.waitForToolBatchObservation(toolBatchRevision);
   await progress.acknowledgeToolBatch(toolBatchRevision);
-  await expect(observed).resolves.toBeUndefined();
+  expect(await observed).toBeUndefined();
 
   progress.recordToolResult(2_000);
   progress.recordToolResult(3_000);
@@ -74,7 +87,7 @@ test("current-turn MCP progress wait remains abortable", async () => {
   const controller = new AbortController();
   const waiting = progress.waitForChange(0, controller.signal);
   controller.abort();
-  await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+  expect(await rejection(waiting)).toMatchObject({ name: "AbortError" });
 });
 
 test("tool-boundary observation wait is cancelled by browser settlement", async () => {
@@ -85,7 +98,7 @@ test("tool-boundary observation wait is cancelled by browser settlement", async 
 
   browserSettlement.abort();
 
-  await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+  expect(await rejection(waiting)).toMatchObject({ name: "AbortError" });
 });
 
 test("retiring current-turn MCP progress atomically clears calls and rejects its browser boundary", async () => {
@@ -1045,7 +1058,7 @@ describe("ChatGPT outer-native harness v4", () => {
       await started;
       await Bun.sleep(0);
       disconnect.abort();
-      await expect(first).rejects.toThrow("ChatGPT web turn aborted");
+      expect((await rejection(first)).message).toContain("ChatGPT web turn aborted");
       expect(firstEvents.some(event => event.type === "text_delta" && event.text === "Recovered ")).toBeTrue();
 
       const events: AdapterEvent[] = [];
@@ -1107,7 +1120,7 @@ describe("ChatGPT outer-native harness v4", () => {
           }
         },
       );
-      await expect(first).rejects.toMatchObject({ name: "AbortError" });
+      expect(await rejection(first)).toMatchObject({ name: "AbortError" });
 
       const replayed: AdapterEvent[] = [];
       const reconnect = createChatGptWebAdapter(provider).runTurn!(
@@ -1462,10 +1475,10 @@ describe("ChatGPT outer-native harness v4", () => {
     const observerAbort = new AbortController();
     const observer = sessions.retireAndWait("abort-retirement", observerAbort.signal);
     observerAbort.abort();
-    await expect(observer).rejects.toMatchObject({ name: "AbortError" });
+    expect(await rejection(observer)).toMatchObject({ name: "AbortError" });
 
     finishBrowser();
-    await expect(retirement).resolves.toBeTrue();
+    expect(await retirement).toBeTrue();
     sessions.clear();
   });
 
@@ -2161,7 +2174,7 @@ describe("ChatGPT outer-native harness v4", () => {
     }, 10_000);
     await broker.nextToolBatch(token);
     broker.revoke(token);
-    await expect(invocation).rejects.toThrow("revoked");
+    expect((await rejection(invocation)).message).toContain("revoked");
     await expect(callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId }))
       .rejects.toThrow("has already finished");
     await broker.close();
@@ -2963,7 +2976,7 @@ describe("ChatGPT outer-native harness v4", () => {
           const calls: GatewayProgramCall[] = [];
           const execution = executeGatewayProgram(request!.input!, [wait.name], calls);
           if (timeout_ms === 180_000) {
-            await expect(execution).rejects.toThrow("requires timeout_ms=30000");
+            expect((await rejection(execution)).message).toContain("requires timeout_ms=30000");
             expect(calls).toEqual([]);
           } else {
             await execution;
@@ -3236,7 +3249,7 @@ describe("ChatGPT outer-native harness v4", () => {
       const [request] = await broker.nextToolBatch(abandonedToken);
       expect(request).toMatchObject({ wireName: "exec_command" });
       abort.abort(new Error("synthetic MCP client cancellation"));
-      await expect(abandoned).rejects.toBeDefined();
+      expect(await rejection(abandoned)).toBeDefined();
 
       const deadline = Date.now() + 5_000;
       let abandonedError: unknown;
@@ -3576,7 +3589,7 @@ test("mirrored turn progress carries daemon MCP activity into the browser helper
   expect(chatGptExternalProgressIsLive(mirror.snapshot(), 30_000, 60_000)).toBeTrue();
   const observed = daemon.waitForToolBatchObservation(toolBatchRevision);
   await mirror.acknowledgeToolBatch(toolBatchRevision);
-  await expect(observed).resolves.toBeUndefined();
+  expect(await observed).toBeUndefined();
 
   daemon.recordToolResult(2_000);
   expect(mirror.apply(daemon.snapshot())).toBeTrue();

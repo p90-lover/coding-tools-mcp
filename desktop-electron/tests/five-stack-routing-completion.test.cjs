@@ -76,60 +76,6 @@ test("CPA routing plans Codex subagents, Paseo, and Anneal through one account p
   }
 });
 
-test("external service state owns persisted execution endpoints for Paseo and Anneal", () => {
-  const { createExternalServicesController } = require("../electron/external-services.cjs");
-  const root = retainedTestRoot("execution-endpoints");
-  const filePath = path.join(root, "external-services.json");
-  const keyPath = path.join(root, "external-services.key");
-  const controller = createExternalServicesController({
-    filePath,
-    keyPath,
-    safeStorage: { isEncryptionAvailable: () => false },
-    env: {},
-  });
-
-  const initialPaseo = controller.snapshot().services.find((service) => service.id === "paseo");
-  const initialAnneal = controller.snapshot().services.find((service) => service.id === "anneal");
-  assert.equal(initialPaseo.executionEndpoint, "ws://127.0.0.1:6768/ws");
-  assert.equal(initialAnneal.executionEndpoint, "http://127.0.0.1:3000/");
-
-  controller.configure("paseo", { executionEndpoint: "ws://localhost:7777/control" });
-  controller.configure("anneal", { executionEndpoint: "http://localhost:3100/api" });
-  assert.equal(
-    controller.snapshot().services.find((service) => service.id === "paseo").executionEndpoint,
-    "ws://localhost:7777/control",
-  );
-  assert.equal(
-    controller.snapshot().services.find((service) => service.id === "anneal").executionEndpoint,
-    "http://localhost:3100/api/",
-  );
-  assert.throws(
-    () => controller.configure("paseo", { executionEndpoint: "ws://example.com/ws" }),
-    /loopback/i,
-  );
-  assert.throws(
-    () => controller.configure("anneal", { executionEndpoint: "ws://127.0.0.1:3000/ws" }),
-    /HTTP/i,
-  );
-  controller.dispose();
-
-  const reopened = createExternalServicesController({
-    filePath,
-    keyPath,
-    safeStorage: { isEncryptionAvailable: () => false },
-    env: {},
-  });
-  assert.equal(
-    reopened.snapshot().services.find((service) => service.id === "paseo").executionEndpoint,
-    "ws://localhost:7777/control",
-  );
-  assert.equal(
-    reopened.snapshot().services.find((service) => service.id === "anneal").executionEndpoint,
-    "http://localhost:3100/api/",
-  );
-  reopened.dispose();
-});
-
 test("renderer, agent adapter, and browser login use the unified integration contracts", () => {
   const types = read("src/types.ts");
   const providers = read("src/providers/provider-types.ts");
