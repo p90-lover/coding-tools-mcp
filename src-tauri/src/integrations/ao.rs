@@ -216,6 +216,17 @@ fn web_route_valid(route: &Route) -> bool {
             .is_some_and(|tier| WEB_TIERS.contains(&tier))
 }
 
+/// The route asks for WebGPT: its provider, or a WebGPT model id directly or through the
+/// local CPA gateway prefix an AO harness uses.
+fn web_model_named(route: &Route) -> bool {
+    route.provider_id == "chatgpt-web"
+        || route
+            .model
+            .strip_prefix("cpa/")
+            .unwrap_or(&route.model)
+            .starts_with("chatgpt-web/")
+}
+
 /// Any model in the shared CPA pool, run by Native Codex.
 fn cpa_route_valid(route: &Route) -> bool {
     route.harness_id == "codex-native"
@@ -408,13 +419,6 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                 }
             }
             Role::Worker => {
-                // Workers may run on any route; a WebGPT worker must use the bridge on Native Codex.
-                if (node.route.provider_id == "chatgpt-web"
-                    || node.route.model.starts_with("chatgpt-web/"))
-                    && !web_route_valid(&node.route)
-                {
-                    return Err(fail("AO WebGPT worker requires a WebGPT-on-Codex route"));
-                }
                 if node.route.harness_id.starts_with("ao:") && !external_route_valid(&node.route) {
                     return Err(fail("AO harness worker route is invalid"));
                 }
@@ -508,6 +512,11 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                 }
                 _ => "AO card needs at least one link; only the orchestrator starts on its own",
             }));
+        }
+        // WebGPT only works through the bridge on Native Codex, for every role; an AO harness
+        // or the CPA pool cannot run it (not even as "cpa/chatgpt-web/...").
+        if web_model_named(&node.route) && !web_route_valid(&node.route) {
+            return Err(fail("AO WebGPT runs only on Native Codex"));
         }
         // Any role may run on any harness: WebGPT or a CPA model on Native Codex, or an AO harness.
         if node.role != Role::Worker
@@ -1970,6 +1979,56 @@ mod tests {
             "account_id":"chatgpt-web","model":"chatgpt-web/extra-high","permission_profile":":read-only"}))).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"ao:codex","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/pro","permission_profile":":read-only"}))).is_err());
+    }
+
+    #[test]
+    fn ao_webgpt_runs_only_on_native_codex_for_every_role() {
+        let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+        let external = |model: &str| {
+            json!({"harness_id":"ao:codex","provider_id":EXTERNAL_PROVIDER,
+            "account_id":EXTERNAL_ACCOUNT,"model":model,"permission_profile":EXTERNAL_PERMISSION})
+        };
+        let cpa = |model: &str| {
+            json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
+            "account_id":"shared-cpa-pool","model":model,"permission_profile":":read-only"})
+        };
+        let run = |lead: &serde_json::Value,
+                   worker: &serde_json::Value,
+                   reviewer: &serde_json::Value|
+         -> Run {
+            serde_json::from_value(json!({"id":"run","workspace_id":"qa","project_id":"p","revision":0,"nodes":[
+                {"id":"planner","task_id":"t","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":lead},
+                {"id":"worker","task_id":"t","role":"worker","parents":["planner"],"x":0,"y":1,"state":"pending","route":worker},
+                {"id":"reviewer","task_id":"t","role":"reviewer","parents":["worker"],"x":0,"y":2,"state":"pending","route":reviewer}
+            ]})).unwrap()
+        };
+        assert!(validate(None, &run(&web, &web, &web)).is_ok());
+        // An AO harness keeps its own models and every non-WebGPT CPA model.
+        assert!(validate(
+            None,
+            &run(
+                &external("default"),
+                &external("cpa/gemini-3.8-flash-high"),
+                &web
+            )
+        )
+        .is_ok());
+        for bad in [
+            external("chatgpt-web/high"),
+            external("cpa/chatgpt-web/high"),
+            cpa("chatgpt-web/high"),
+        ] {
+            for nodes in [(&bad, &web, &web), (&web, &bad, &web), (&web, &web, &bad)] {
+                let error = validate(None, &run(nodes.0, nodes.1, nodes.2)).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("WebGPT runs only on Native Codex"),
+                    "{error}"
+                );
+            }
+        }
     }
 
     #[test]

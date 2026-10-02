@@ -15,13 +15,15 @@ export const SPECIALTIES = ["planning", "research", "architecture", "frontend", 
 
 /**
  * Any worker may use any harness and model: Native Codex runs WebGPT or any model in the
- * shared CPA pool; every other harness runs as an AO worker session.
+ * shared CPA pool; every other harness runs as an AO worker session. WebGPT only works through
+ * the bridge on Native Codex, so a WebGPT model always gets the Native Codex route.
  */
 export function workerRoute(harness: string, model: string, permission: NativePermission = ":workspace"): AoRoute {
+  const web = model.replace(/^cpa\//, "");
+  if (web.startsWith("chatgpt-web/")) return { ...WEB_ROUTE, model: web, permission_profile: permission };
   if (harness.startsWith("ao:")) {
     return { harness_id: harness, provider_id: "agent-orchestrator", account_id: "ao-local", model: model || "default", permission_profile: ":ao-default" };
   }
-  if (model.startsWith("chatgpt-web/")) return { ...WEB_ROUTE, model, permission_profile: permission };
   return { harness_id: NATIVE_HARNESS, provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model, permission_profile: permission };
 }
 
@@ -42,7 +44,7 @@ export function modelLabel(model: string): string {
 
 export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string {
   return harnesses.find(item => item.id === harnessId)?.label
-    ?? (harnessId === NATIVE_HARNESS ? "Codex CLI" : harnessId.replace(/^ao:/, ""));
+    ?? (harnessId === NATIVE_HARNESS ? "Native Codex" : harnessId.replace(/^ao:/, ""));
 }
 
 export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam {
@@ -107,7 +109,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       onChange={event => onChange({ ...route, permission_profile: event.target.value })}>
       <option value=":workspace">Workspace: create, edit and delete in this workspace</option>
       <option value=":read-only">Read only</option>
-    </select></label> : null}
+    </select></label> : <p className="ao-hint">WebGPT runs only on Native Codex.</p>}
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
   </>;
 }

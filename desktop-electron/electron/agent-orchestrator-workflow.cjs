@@ -215,9 +215,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const items = await harnessService().models(harness.slice(3), workspaceId);
-      // Every CPA pool model can also run on this agent through the local gateway ("cpa/<model>").
+      // Every CPA pool model can also run on this agent through the local gateway ("cpa/<model>"),
+      // except WebGPT, which only works through the bridge on Native Codex.
       let cpa = [];
-      try { cpa = (await models()).models.map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
+      try { cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/")).map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
       return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default"), ...cpa] };
     }
     if (harness === "codex-native") {
@@ -241,7 +242,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
   async function harnesses() {
-    const native = { id: "codex-native", label: "Codex CLI", runnable: true, installed: true, authStatus: "configured" };
+    const native = { id: "codex-native", label: "Native Codex", runnable: true, installed: true, authStatus: "configured" };
     try {
       const catalog = await harnessService().catalog();
       return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
