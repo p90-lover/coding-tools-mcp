@@ -106,10 +106,13 @@ const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high"
 const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
 // AO harness models shown as "cpa/<model>" run that CPA pool model through the local gateway.
 const CPA_MODEL_PREFIX = "cpa/";
-// The CPA gateway reaches an agent only through the ANTHROPIC_* / OPENAI_* variables. These agents
-// read them; others (e.g. agy, which signs in with Google) ignore them and would sit on a model
-// they cannot run, so they get only their own models.
-const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode"]);
+// Agents AO's daemon can point at the CPA gateway, each through its own launch variables
+// (Claude Code: ANTHROPIC_*, Codex: a CPA-only CODEX_HOME, opencode: OPENAI_*, agy: its
+// AGY_LLM_GATEWAY_* mode, which needs no Google sign-in). Other agents get only their own models.
+const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
+// agy reads "gemini-<version>-flash-<level>" as its own model plus a thinking level and asks the
+// gateway for "gemini-<version>-flash", which CPA does not serve, so those stay off agy.
+const gatewayModelFits = (agent, model) => agent !== "agy" || !/^gemini-[\d.]+-flash-(low|medium|high)$/.test(model);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
 
 // The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
@@ -223,7 +226,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // except WebGPT, which only works through the bridge on Native Codex.
       let cpa = [];
       if (GATEWAY_AGENTS.has(harness.slice(3))) {
-        try { cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/")).map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
+        try {
+          cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/") && gatewayModelFits(harness.slice(3), id))
+            .map(id => `${CPA_MODEL_PREFIX}${id}`);
+        } catch { /* CPA not running: own models only. */ }
       }
       // An agent may report WebGPT from the user's Codex config; it cannot run it, so it is left out here.
       // "default" is not offered: it lets the agent pick, and silently change, its own model.
@@ -277,7 +283,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let failure = null;
       try {
         const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
-        if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
+        if (viaCpa && (!GATEWAY_AGENTS.has(agent) || !gatewayModelFits(agent, viaCpa))) {
           throw new Error(`${node.settings?.name || "This card"}: ${agent} cannot use CPA models (${node.route.model}); choose one of its own models`);
         }
         // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
