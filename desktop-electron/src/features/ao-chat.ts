@@ -11,9 +11,56 @@ export type ChatNode = {
   role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer";
   state: string;
   x: number;
-  settings?: { name?: string };
-  receipt?: { answer?: string; error?: string; verdict?: string };
+  settings?: { name?: string; role_name?: string };
+  route?: { harness_id: string; model: string; effort?: string; context_window?: number };
+  receipt?: { answer?: string; error?: string; verdict?: string; started_at_ms?: number };
 };
+
+/** What a working card is doing now (the workflow's "activity" operation). */
+export type ChatActivity = {
+  activity?: string;
+  started_at_ms?: number | null;
+  activity_at_ms?: number | null;
+  last_event_at_ms?: number | null;
+  turn_started?: boolean;
+};
+
+export type ChatOptions = {
+  /** One line per card: harness · model · effort · context · role. */
+  describe?: (node: ChatNode) => string;
+  /** Live activity by "<run id>:<card id>". */
+  activity?: Record<string, ChatActivity>;
+  now?: number;
+};
+
+/** A working card that has not been heard from for this long is shown as possibly stuck. */
+export const STALL_MS = 10 * 60_000;
+
+/** 42_000 -> "42s"; 185_000 -> "3m"; 10_680_000 -> "2h 58m". */
+export function chatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
+}
+
+/**
+ * The status detail for a working card: how it runs, how long it has been running, its current
+ * step and when it was last heard. Stalled when nothing has been heard for STALL_MS, or the turn
+ * has still not started after that long.
+ */
+export function chatWorkingDetail(node: ChatNode, live: ChatActivity | undefined, now: number, describe?: (node: ChatNode) => string): { detail: string; stalled: boolean } {
+  const started = live?.started_at_ms ?? node.receipt?.started_at_ms ?? null;
+  const heard = live?.last_event_at_ms || live?.activity_at_ms || null;
+  const parts = [describe?.(node) ?? ""];
+  if (started) parts.push(`running ${chatDuration(now - started)}`);
+  if (live?.activity) parts.push(heard ? `${live.activity} (last heard ${chatDuration(now - heard)} ago)` : live.activity);
+  const quietSince = heard ?? started;
+  const stalled = Boolean(quietSince && now - quietSince >= STALL_MS && (heard || live?.turn_started === false));
+  return { detail: parts.filter(Boolean).join(" · "), stalled };
+}
 
 export type ChatRun = {
   id: string;
@@ -37,8 +84,8 @@ export type ChatSummary = {
 
 export type ChatMessage =
   | { kind: "user"; key: string; text: string; stamp?: string }
-  | { kind: "agent"; key: string; role: ChatNode["role"]; name: string; text: string; tone: "answer" | "error" | "verdict"; verdict?: string }
-  | { kind: "status"; key: string; text: string; state: string };
+  | { kind: "agent"; key: string; role: ChatNode["role"]; name: string; text: string; tone: "answer" | "error" | "verdict"; verdict?: string; detail?: string }
+  | { kind: "status"; key: string; text: string; state: string; detail?: string; stalled?: boolean };
 
 export const CHAT_DEFAULT_TITLE = "New task";
 
@@ -131,8 +178,9 @@ export function withoutSoloBlock(answer: string): string {
 }
 
 /** The conversation for one chat: each user message followed by that run's replies. */
-export function chatTranscript(runs: ChatRun[], description: string | undefined): ChatMessage[] {
+export function chatTranscript(runs: ChatRun[], description: string | undefined, options: ChatOptions = {}): ChatMessage[] {
   const said = chatMessagesFromDescription(description);
+  const now = options.now ?? Date.now();
   const messages: ChatMessage[] = [];
   runs.forEach((run, index) => {
     const user = said[index];
@@ -140,17 +188,24 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined)
     for (const node of chatNodeOrder(run.nodes)) {
       const name = chatNodeName(node);
       const key = `${run.id}:${node.id}`;
+      const described = options.describe?.(node);
+      const detail = described ? { detail: described } : {};
       if (node.receipt?.error) {
-        messages.push({ kind: "agent", key, role: node.role, name, text: node.receipt.error, tone: "error" });
+        messages.push({ kind: "agent", key, role: node.role, name, text: node.receipt.error, tone: "error", ...detail });
       } else if (node.state === "finished" && node.receipt?.answer) {
         messages.push({
           kind: "agent", key, role: node.role, name,
           text: run.solo && node.role === "planner" ? withoutSoloBlock(node.receipt.answer) : node.receipt.answer,
           tone: node.role === "reviewer" || node.role === "approver" || node.role === "sub_reviewer" ? "verdict" : "answer",
           ...(node.receipt.verdict ? { verdict: node.receipt.verdict } : {}),
+          ...detail,
         });
       } else if (node.state === "running" || node.state === "reserved") {
-        messages.push({ kind: "status", key, text: `${name} is working…`, state: node.state });
+        const working = chatWorkingDetail(node, options.activity?.[key], now, options.describe);
+        messages.push({
+          kind: "status", key, state: node.state, detail: working.detail, stalled: working.stalled,
+          text: working.stalled ? `${name} may be stuck: nothing heard for a while. Stop or restart the mission if it does not recover.` : `${name} is working…`,
+        });
       } else if (node.state === "held") {
         messages.push({ kind: "status", key, text: `${name} needs your attention`, state: node.state });
       }

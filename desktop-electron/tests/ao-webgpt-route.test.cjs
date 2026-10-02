@@ -25,7 +25,13 @@ test("a WebGPT model always gets the Native Codex route", () => {
   }
   assert.equal(editor.workerRoute("ao:codex", "default").harness_id, "ao:codex");
   assert.equal(editor.workerRoute("ao:codex", "cpa/gemini-3.8-flash-high").model, "cpa/gemini-3.8-flash-high");
-  assert.equal(editor.workerRoute("codex-native", "gemini-3.8-flash-high").provider_id, "cliproxyapi-antigravity");
+  // Native Codex runs only WebGPT: any other model picked there moves to an AO harness through
+  // the CPA gateway (Gemini to Claude Code, the rest to Codex).
+  assert.deepEqual(plain(editor.workerRoute("codex-native", "gemini-3.8-flash-high")), {
+    harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-3.8-flash-high", permission_profile: ":ao-default",
+  });
+  assert.equal(editor.workerRoute("codex-native", "gpt-6-luna").harness_id, "ao:codex");
+  assert.equal(editor.workerRoute("codex-native", "gpt-6-luna").model, "cpa/gpt-6-luna");
   assert.equal(editor.harnessLabel("codex-native", []), "Native Codex");
   assert.equal(editor.isWebModel("chatgpt-web/luna"), true);
   assert.equal(editor.isWebModel("cpa/chatgpt-web/high"), true);
@@ -38,7 +44,29 @@ test("every harness lists the WebGPT models and marks that they switch to Native
   assert.match(source, /loadModels\(NATIVE_HARNESS\)\.then\(items => items\.filter\(isWebModel\)/);
   assert.match(source, /setModels\(\[\.\.\.new Set\(\[\.\.\.items, \.\.\.webItems\]\)\]\)/, "no duplicate WebGPT rows");
   assert.match(source, /isWebModel\(model\) \? " · switches to Native Codex"/);
-  assert.match(source, /choosing a WebGPT model switches the harness/);
-  // The model select routes the pick through workerRoute, which forces Native Codex for WebGPT.
-  assert.match(source, /onChange=\{event => onChange\(workerRoute\(route\.harness_id, event\.target\.value, nativePermission\(route\)\)\)\}/);
+  assert.match(source, /Native Codex runs only WebGPT: choosing a WebGPT model switches to it/);
+  // The model select routes the pick through workerRoute (which forces Native Codex for WebGPT
+  // and an AO harness for everything else), keeping the card's effort and context where they apply.
+  assert.match(source, /onChange=\{event => onChange\(withTuning\(workerRoute\(route\.harness_id, event\.target\.value, nativePermission\(route\)\), route\)\)\}/);
+});
+
+test("effort and context window carry over only where the new route applies them", () => {
+  const native = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "high", context_window: 262144 };
+  const own = editor.withTuning(editor.workerRoute("ao:codex", "gpt-5.5"), native);
+  assert.equal(own.effort, "high", "an AO agent's own model takes effort");
+  assert.equal(own.context_window, undefined, "AO harnesses have no context window");
+  const gateway = editor.withTuning(editor.workerRoute("ao:codex", "cpa/gpt-6-luna"), native);
+  assert.equal(gateway.effort, undefined, "AO skips effort for gateway models");
+  assert.deepEqual(plain(editor.withTuning(editor.workerRoute("codex-native", "chatgpt-web/pro"), native)).context_window, 262144);
+  assert.equal(editor.tokensLabel(262144), "256K");
+  assert.equal(editor.tokensLabel(1000000), "1M");
+});
+
+test("every card describes how it runs, with a custom role in place of the built-in one", () => {
+  const route = { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only", effort: "xhigh", context_window: 1048576 };
+  assert.equal(editor.cardMeta({ role: "planner", route, settings: {} }, []), "Native Codex · WebGPT High · effort xhigh · 1M context · Orchestrator");
+  assert.equal(editor.cardMeta({ role: "worker", settings: { role_name: "Security auditor" },
+    route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "high" } },
+  [{ id: "ao:codex", label: "Codex" }]), "Codex · CPA · gpt-6-luna · Security auditor", "gateway models show no effort");
+  assert.match(source, /<option value="custom:">Custom role…<\/option>/);
 });

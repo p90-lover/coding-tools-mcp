@@ -279,6 +279,8 @@ fn native_bridge_actual_turns_against_loopback_fixture() {
             model: "mock-model".into(),
             request_limit: 6,
             lifetime_seconds: 120,
+            effort: None,
+            context_window: None,
         },
     )
     .unwrap();

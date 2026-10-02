@@ -7,10 +7,10 @@ import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSur
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat, ChatListPane } from "./AgentOrchestratorChat";
 import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
-import { chatList } from "./ao-chat";
+import { chatList, type ChatActivity, type ChatNode } from "./ao-chat";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
-  harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import { pageHidden } from "./page-visibility";
@@ -22,13 +22,13 @@ type PlanTask = {
   clauseProgress: { done: number; total: number };
 };
 type Board = { revision: number; steps: string[]; tasks: PlanTask[]; task?: PlanTask };
-export type AoReceipt = { status: string; answer?: string; error?: string; verdict?: string; thread_id?: string; turn_id?: string; request_key?: string; settings?: RoleSettings; route?: { model: string } };
+export type AoReceipt = { status: string; answer?: string; error?: string; verdict?: string; thread_id?: string; turn_id?: string; request_key?: string; settings?: RoleSettings; route?: { model: string }; started_at_ms?: number };
 export type AoNode = {
   id: string; task_id: string; role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer";
   parents: string[]; x: number; y: number; positioned?: boolean; state: string;
   clause_id?: string; request_key?: string; template_role_id?: string;
   settings?: RoleSettings;
-  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string };
+  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string; effort?: string; context_window?: number };
   receipt?: AoReceipt;
   history?: AoReceipt[];
 };
@@ -733,6 +733,28 @@ export function AgentOrchestratorSurface({ language, setError }: {
     try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
   };
   const chatTree = { workspaces, workspaceId, onWorkspace: chooseWorkspace };
+  // Every message names how its card runs; working cards also show runtime and current step.
+  const describeChatNode = useCallback((node: ChatNode) => node.route ? cardMeta(node as unknown as AoNode, harnesses) : "", [harnesses]);
+  const [chatActivity, setChatActivity] = useState<Record<string, ChatActivity>>({});
+  const workingRunIds = missions.filter((mission) => mission.project_id === chatTaskId
+    && mission.nodes.some((node) => node.state === "running" || node.state === "reserved")).map((mission) => mission.id).join(",");
+  useEffect(() => {
+    if (!workspaceId || !workingRunIds) return;
+    let live = true;
+    const poll = async () => {
+      const found: Record<string, ChatActivity> = {};
+      for (const runId of workingRunIds.split(",")) {
+        try {
+          const result = await moduleCall("activity", { workspaceId, runId }) as { nodes?: Record<string, ChatActivity> };
+          for (const [nodeId, value] of Object.entries(result.nodes ?? {})) found[`${runId}:${nodeId}`] = value;
+        } catch { /* the run may have just settled */ }
+      }
+      if (live) setChatActivity(found);
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 10_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [workspaceId, workingRunIds]);
 
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
@@ -878,6 +900,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || undefined : undefined}
                 retryStart={retryChatStart} openTeam={openTeam} tree={chatTree}
+                describeNode={describeChatNode} activity={chatActivity}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
         ) : null}
 

@@ -115,3 +115,36 @@ test("the flattened solo marker from the web bridge is hidden too", () => {
   assert.equal(chat.withoutSoloBlock(live), "391\n\n17 multiplied by 23 equals 391.");
   assert.equal(chat.withoutSoloBlock("I went solo here.\nDone."), "I went solo here.\nDone.");
 });
+
+test("every message names how its card runs; a working card shows runtime, step and when it was last heard", () => {
+  const now = 10 * 3_600_000;
+  const describe = (entry) => `${entry.route.model} · ${entry.settings?.role_name || entry.role}`;
+  const runs = [run("r1", "t", [
+    node("p", "planner", "finished", { route: { harness_id: "codex-native", model: "chatgpt-web/high" }, receipt: { answer: "plan" } }),
+    node("w", "worker", "running", { route: { harness_id: "ao:codex", model: "cpa/gpt-6-luna" }, settings: { role_name: "Auditor" },
+      receipt: { started_at_ms: now - 2 * 3_600_000 - 58 * 60_000 } }),
+  ])];
+  const live = { "r1:w": { activity: "running a command", last_event_at_ms: now - 30_000, turn_started: true } };
+  const transcript = plain(chat.chatTranscript(runs, "go", { describe, activity: live, now }));
+  assert.equal(transcript[1].detail, "chatgpt-web/high · planner", "finished answers carry their card's description");
+  assert.equal(transcript[2].detail, "cpa/gpt-6-luna · Auditor · running 2h 58m · running a command (last heard 30s ago)");
+  assert.equal(transcript[2].stalled, false);
+  assert.equal(transcript[2].text, "Worker is working…");
+});
+
+test("a card that is silent, or whose turn never started, for ten minutes is shown as possibly stuck", () => {
+  const now = 10 * 3_600_000;
+  const working = (receipt) => [run("r1", "t", [node("w", "worker", "running", { receipt })])];
+  const silent = plain(chat.chatTranscript(working({ started_at_ms: now - 3 * 3_600_000 }), "go",
+    { activity: { "r1:w": { activity: "thinking", last_event_at_ms: now - 2 * 3_600_000, turn_started: true } }, now }));
+  assert.equal(silent[1].stalled, true);
+  assert.match(silent[1].text, /may be stuck/);
+  const neverStarted = plain(chat.chatTranscript(working({ started_at_ms: now - 3 * 3_600_000 }), "go",
+    { activity: { "r1:w": { activity: "waiting for the turn to start", turn_started: false } }, now }));
+  assert.equal(neverStarted[1].stalled, true, "the 3-hour Gemini case: submitted, no turn");
+  const fresh = plain(chat.chatTranscript(working({ started_at_ms: now - 60_000 }), "go",
+    { activity: { "r1:w": { turn_started: false } }, now }));
+  assert.equal(fresh[1].stalled, false, "a minute in is not stuck");
+  assert.equal(chat.chatDuration(42_000), "42s");
+  assert.equal(chat.chatDuration(3 * 3_600_000), "3h");
+});
