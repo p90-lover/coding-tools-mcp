@@ -271,7 +271,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let failure = null;
       try {
         const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
-        session = await harnessService().spawn({ workspaceId, agent, model: viaCpa ?? node.route.model, prompt: reserved.prompt,
+        // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
+        // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
+        const agentModel = viaCpa && agent === "opencode" ? `openai/${viaCpa}` : viaCpa ?? node.route.model;
+        session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
           name: node.settings?.name || "AO worker", ...(viaCpa ? { gateway: { provider: "cpa", model: viaCpa } } : {}) });
       } catch (error) { failure = error; }
       const saved = await requestHeadless("/api/v1/ao/external/submitted", {
