@@ -19,13 +19,16 @@ const TOOL_PROFILES = ["read-only", "core", "advanced", "compat-readonly-all"] a
 
 const isWritable = (mode: string) => ["workspace-write", "trusted", "danger-full-access", "dangerous"].includes(mode);
 const isReadOnly = (mode: string) => ["read-only", "safe"].includes(mode);
+// The backend treats "full" as an alias of "advanced" (tools/registry_definitions.rs).
+const profileOf = (profile: string) => profile === "full" ? "advanced" : profile;
 
 function labels(copy: Copy) {
   return {
     permission: (mode: string) => isWritable(mode) ? copy.wsEditWritable : isReadOnly(mode) ? copy.wsEditReadOnly : mode || copy.workspaceUnknown,
     approval: (mode: string) => ({ ask: copy.wsApprovalAsk, "on-request": copy.wsApprovalOnRequest, never: copy.wsApprovalNever } as Record<string, string>)[mode] ?? mode,
     profile: (profile: string) => ({
-      "read-only": copy.wsProfileReadOnly, core: copy.wsProfileCore, advanced: copy.wsProfileAdvanced, "compat-readonly-all": copy.wsProfileCompat,
+      "read-only": copy.wsProfileReadOnly, core: copy.wsProfileCore, advanced: copy.wsProfileAdvanced, full: copy.wsProfileAdvanced,
+      "compat-readonly-all": copy.wsProfileCompat,
     } as Record<string, string>)[profile] ?? profile,
   };
 }
@@ -76,7 +79,7 @@ export function WorkspacePanel({ copy, language, setError }: WorkspacePanelProps
 
   const unchanged = (workspace: WorkspaceSummary) => !draft || (
     draft.permissionMode === workspace.permissionMode && draft.approvalMode === workspace.approvalMode
-    && draft.toolProfile === workspace.toolProfile && draft.screenCaptureEnabled === (workspace.screenCaptureEnabled === true));
+    && draft.toolProfile === profileOf(workspace.toolProfile) && draft.screenCaptureEnabled === (workspace.screenCaptureEnabled === true));
 
   const select = (key: keyof Draft, value: string, options: readonly string[], describe: (value: string) => string) => (
     <select disabled={busy} value={value} onChange={(event) => setDraft((current) => current ? { ...current, [key]: event.target.value } : current)}>
@@ -104,7 +107,7 @@ export function WorkspacePanel({ copy, language, setError }: WorkspacePanelProps
               <button className="button-secondary" disabled={busy} type="button" onClick={() => {
                 setDraft({
                   workspaceId: workspace.id, permissionMode: workspace.permissionMode, approvalMode: workspace.approvalMode,
-                  toolProfile: workspace.toolProfile, screenCaptureEnabled: workspace.screenCaptureEnabled === true,
+                  toolProfile: profileOf(workspace.toolProfile), screenCaptureEnabled: workspace.screenCaptureEnabled === true,
                 });
                 setNotice(null);
               }}>{copy.workspaceEditPolicy}</button>) : null}>

@@ -151,12 +151,10 @@ export function NativeCodexPanel({ copy, language, setError }: NativeCodexPanelP
               : status === null ? <Pill tone="busy">{copy.wsListenerChecking}</Pill>
               : <Pill tone={connected ? "ok" : "idle"}>{connected ? copy.nativeCodexConnected : copy.nativeCodexDisconnected}</Pill>
           }>
-            {typeof status?.model === "string" || typeof status?.reason === "string" ? (
-              <dl className="wsx-facts">
-                {typeof status?.model === "string" ? <><dt>{copy.nativeCodexModel}</dt><dd>{status.model}</dd></> : null}
-                {typeof status?.reason === "string" ? <><dt>{copy.workspaceListenerStatus}</dt><dd>{status.reason}</dd></> : null}
-              </dl>
+            {typeof status?.model === "string" ? (
+              <dl className="wsx-facts"><dt>{copy.nativeCodexModel}</dt><dd>{status.model}</dd></dl>
             ) : null}
+            {typeof status?.reason === "string" ? <p className="wsx-intro">{status.reason}</p> : null}
             <div className="wsx-actions">
               <button className="button-secondary" disabled={busy || !connected} onClick={() => void stop()} type="button">{copy.nativeCodexStop}</button>
             </div>
