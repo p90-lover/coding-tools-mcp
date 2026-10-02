@@ -219,7 +219,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       // except WebGPT, which only works through the bridge on Native Codex.
       let cpa = [];
       try { cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/")).map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
-      return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default"), ...cpa] };
+      // An agent may report WebGPT from the user's Codex config; it cannot run it, so it is left out here.
+      return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default" && !id.startsWith("chatgpt-web/")), ...cpa] };
     }
     if (harness === "codex-native") {
       // Native Codex may use every WebGPT tier (Luna and Think included) or any CPA pool model.

@@ -734,7 +734,8 @@ test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA m
     requestHeadless: async () => { throw new Error("no headless call expected"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
     fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "gemini-3.8-flash-high" }, { id: "chatgpt-web/high" }, { id: "chatgpt-web/luna" }] }) }),
-    aoHarness: { catalog: async () => [{ id: "codex", label: "Codex", installed: true, chat: true }], models: async () => [{ id: "gpt-5.5" }] },
+    // AO's Codex agent reports WebGPT from the user's Codex config, but cannot run it.
+    aoHarness: { catalog: async () => [{ id: "codex", label: "Codex", installed: true, chat: true }], models: async () => [{ id: "gpt-5.5" }, { id: "chatgpt-web/high" }] },
     confirm: async () => true,
   });
   assert.deepEqual((await workflow.call("harnesses")).harnesses.map((item) => [item.id, item.label]),

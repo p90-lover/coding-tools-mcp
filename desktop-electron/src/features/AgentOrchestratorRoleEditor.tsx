@@ -94,7 +94,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     // the only harness WebGPT runs on (workerRoute).
     const web = harness === NATIVE_HARNESS ? Promise.resolve([])
       : loadModels(NATIVE_HARNESS).then(items => items.filter(isWebModel), () => []);
-    Promise.all([loadModels(harness), web]).then(([items, webItems]) => { if (live) setModels([...items, ...webItems]); })
+    Promise.all([loadModels(harness), web]).then(([items, webItems]) => { if (live) setModels([...new Set([...items, ...webItems])]); })
       .catch(cause => { if (live) { setModels([]); setNotice(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [harness, loadModels]);

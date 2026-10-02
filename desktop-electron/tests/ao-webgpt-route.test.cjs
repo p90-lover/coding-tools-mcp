@@ -36,6 +36,7 @@ test("a WebGPT model always gets the Native Codex route", () => {
 // WebGPT model can be picked anywhere and the card then moves to Native Codex.
 test("every harness lists the WebGPT models and marks that they switch to Native Codex", () => {
   assert.match(source, /loadModels\(NATIVE_HARNESS\)\.then\(items => items\.filter\(isWebModel\)/);
+  assert.match(source, /setModels\(\[\.\.\.new Set\(\[\.\.\.items, \.\.\.webItems\]\)\]\)/, "no duplicate WebGPT rows");
   assert.match(source, /isWebModel\(model\) \? " · switches to Native Codex"/);
   assert.match(source, /choosing a WebGPT model switches the harness/);
   // The model select routes the pick through workerRoute, which forces Native Codex for WebGPT.
