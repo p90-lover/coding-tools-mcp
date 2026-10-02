@@ -1036,3 +1036,21 @@ test("restart refuses while the mission has a card working", async () => {
   await assert.rejects(workflow.call("restart_run", { workspaceId: "ws-1", runId: "busy-run" }), /still running/);
   assert.deepEqual(world.updates, []);
 });
+
+test("relinking or removing a working card stops its turn; an idle card is just relinked", async () => {
+  for (const [state, stops] of [["running", true], ["pending", false]]) {
+    const calls = [];
+    const route = { harness_id: "codex-native", model: "gemini-3.8-flash-high" };
+    const requestHeadless = async (endpoint, body) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run-1", workspace_id: "ws-1", nodes: [{ id: "w2", state, route }] }] };
+      if (endpoint === "/api/v1/ao/update") return { ok: true, run: { id: "run-1", workspace_id: "ws-1", nodes: [{ id: "w2", state: "pending", route }] } };
+      if (endpoint === "/api/v1/ao/harness/disconnect") { assert.equal(body.node_id, "w2"); return { ok: true }; }
+      throw new Error(`unexpected ${endpoint}`);
+    };
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe" });
+    await workflow.call("update_run", { workspaceId: "ws-1", change: { operation: "graph", run_id: "run-1",
+      expected_revision: 3, change: { operation: "set_parents", node_id: "w2", parents: ["planner"] } } });
+    assert.equal(calls.includes("/api/v1/ao/harness/disconnect"), stops, state);
+  }
+});

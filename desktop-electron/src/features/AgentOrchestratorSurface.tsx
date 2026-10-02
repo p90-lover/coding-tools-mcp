@@ -161,8 +161,9 @@ export function aoLevels(run: Pick<AoMission, "nodes">): AoNode[][] {
 export function aoDependencyChange(run: Pick<AoMission, "nodes">, nodeId: string, parentId: string) {
   const node = run.nodes.find((item) => item.id === nodeId);
   const parent = run.nodes.find((item) => item.id === parentId);
-  if (!node || !parent || node.role !== "worker" || node.state !== "pending"
-    || parent.role === "reviewer" || nodeId === parentId || node.parents.includes(parentId)) return null;
+  // Links are free between every card except the orchestrator, which only starts the mission.
+  // Linking a working card stops it and reruns it from its new links (the engine does that).
+  if (!node || !parent || node.role === "planner" || nodeId === parentId || node.parents.includes(parentId)) return null;
   const byId = new Map(run.nodes.map((item) => [item.id, item]));
   const ancestors = (id: string, seen = new Set<string>()): boolean => {
     if (id === nodeId) return true;
@@ -172,6 +173,24 @@ export function aoDependencyChange(run: Pick<AoMission, "nodes">, nodeId: string
   };
   if (ancestors(parentId)) return null;
   return { operation: "set_parents", node_id: nodeId, parents: [...node.parents, parentId] };
+}
+
+/** Removes one link. A card left without links waits on the orchestrator (the engine adds it). */
+export function aoUnlinkChange(run: Pick<AoMission, "nodes">, nodeId: string, parentId: string) {
+  const node = run.nodes.find((item) => item.id === nodeId);
+  if (!node || node.role === "planner" || !node.parents.includes(parentId)) return null;
+  return { operation: "set_parents", node_id: nodeId, parents: node.parents.filter((id) => id !== parentId) };
+}
+
+/** Removes a card; a worker's task passes to another worker (linked first, idle before busy). */
+export function aoRemoveChange(run: Pick<AoMission, "nodes">, nodeId: string) {
+  const node = run.nodes.find((item) => item.id === nodeId);
+  if (!node || node.role === "planner") return null;
+  return { operation: "remove_node", node_id: nodeId };
+}
+
+export function aoNodeWorking(node: Pick<AoNode, "state"> | undefined) {
+  return Boolean(node && ["running", "reserved"].includes(node.state));
 }
 
 export function aoPreviewText(run: Pick<AoMission, "cancelled" | "nodes">, tasks: Pick<PlanTask, "id" | "title" | "description">[]): string {
@@ -523,10 +542,32 @@ export function AgentOrchestratorSurface({ language, setError }: {
       throw cause;
     } finally { setBusy(""); }
   };
+  // Changing a working card stops its turn and reruns it (or, when removed, hands its task on).
+  const stopsWork = (nodeId: string, what: string) => {
+    const node = selectedRun?.nodes.find((item) => item.id === nodeId);
+    return !aoNodeWorking(node) || window.confirm(`${node?.settings?.name || node?.role || "This card"} is working. ${what}`);
+  };
+  const applyGraphChange = (change: JsonObject) => void run("dependency", async () => {
+    if (!selectedRun) return;
+    const result = await moduleCall("update_run", { workspaceId,
+      change: { operation: "graph", run_id: selectedRun.id, expected_revision: selectedRun.revision, change } });
+    if (!result.cancelled) await loadMissions(workspaceId);
+  });
+  const unlink = (nodeId: string, parentId: string) => {
+    if (!selectedRun) return;
+    const change = aoUnlinkChange(selectedRun, nodeId, parentId);
+    if (change && stopsWork(nodeId, "Removing this link stops it and runs it again from its remaining links.")) applyGraphChange(change);
+  };
+  const removeCard = (nodeId: string) => {
+    if (!selectedRun) return;
+    const change = aoRemoveChange(selectedRun, nodeId);
+    if (!change || !window.confirm("Remove this card? A worker's task passes to another worker: a linked one first, an idle one before a busy one (which runs it after its current turn).")) return;
+    if (stopsWork(nodeId, "Removing it stops its current turn.")) applyGraphChange(change);
+  };
   const addDependency = (nodeId: string, parentId: string) => void run("dependency", async () => {
     if (!selectedRun) return;
     const change = aoDependencyChange(selectedRun, nodeId, parentId);
-    if (!change) return;
+    if (!change || !stopsWork(nodeId, "Linking it stops its current turn and runs it again from the new links.")) return;
     const result = await moduleCall("update_run", { workspaceId,
       change: { operation: "graph", run_id: selectedRun.id, expected_revision: selectedRun.revision, change } });
     if (!result.cancelled) await loadMissions(workspaceId);
@@ -854,7 +895,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
               nodes={visibleNodes}
               levels={aoLevels(selectedRun).map(level => level.filter(node => showInactive || !["cancelled", "archived"].includes(node.state)))}
               selectedId={inspectedId} busy={Boolean(busy)} onSelect={inspectRole} onMove={moveCard} describe={describeNode}
-              onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}>
+              onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
+              onUnlink={unlink} onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))}>
               {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
                 {pendingApprovals.map((approval) => <div key={approval.approval_id}>
                   <p><strong>Approve?</strong> {approval.reason || "Tool request"} · {approval.path || approval.cwd || approval.nodeId}</p>

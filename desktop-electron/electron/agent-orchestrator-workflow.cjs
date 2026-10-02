@@ -336,11 +336,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         clean(node?.role, 20); clean(node?.route?.harness_id, 128); clean(node?.route?.model, 128);
       }
     }
+    // Relinking or removing a card that is working stops its turn; the engine has already put the
+    // attempt into history (rewire) or removed the card, and ignores the late result.
+    const graphChange = change.operation === "graph" ? change.change : null;
+    const touched = ["set_parents", "remove_node"].includes(graphChange?.operation) ? clean(graphChange.node_id, 80) : "";
+    let before;
+    if (touched) {
+      const saved = await runs({ workspaceId: id, runId: clean(change.run_id, 80) });
+      before = saved.runs.find((run) => run.id === change.run_id)?.nodes?.find((node) => node.id === touched);
+    }
     const response = await requestHeadless("/api/v1/ao/update", {
       workspace_id: id, change, confirm: true,
     }, { localConfirmation: true });
     if (response?.ok !== true || response.run?.workspace_id !== id) {
       throw new Error("AO run update failed; refresh before retrying");
+    }
+    if (before && ["running", "reserved"].includes(before.state)) {
+      const after = response.run.nodes?.find((node) => node.id === touched);
+      if (!after || after.state === "pending") {
+        if (externalAgent(before) && before.receipt?.thread_id) {
+          await harnessService().interrupt(before.receipt.thread_id).catch(() => undefined);
+        } else {
+          await requestHeadless("/api/v1/ao/harness/disconnect", {
+            workspace_id: id, run_id: change.run_id, node_id: touched, confirm: true,
+          }, { localConfirmation: true }).catch(() => undefined);
+        }
+      }
     }
     return response;
   }
