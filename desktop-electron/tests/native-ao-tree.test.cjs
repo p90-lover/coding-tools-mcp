@@ -76,10 +76,13 @@ const boardSource = fs.readFileSync(path.resolve(__dirname, "../../module/agent-
 const costSource = fs.readFileSync(path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/lib/format-cost.ts"), "utf8");
 const costExports = {};
 vm.runInNewContext(ts.transpileModule(costSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: costExports });
+const tokenSource = fs.readFileSync(path.resolve(__dirname, "../../module/agent-orchestrator/packages/product-ui/src/formatting.ts"), "utf8");
+const tokenExports = {};
+vm.runInNewContext(ts.transpileModule(tokenSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: tokenExports });
 const boardExports = {};
 vm.runInNewContext(ts.transpileModule(boardSource, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-}).outputText, { exports: boardExports, require: name => name === "../lib/format-cost" ? costExports : {} });
+}).outputText, { exports: boardExports, require: name => name === "../lib/format-cost" ? costExports : name === "../lib/format-token-count" ? tokenExports : {} });
 
 const route = (harness_id, model) => ({ harness_id, model });
 const receipt = (harness, model, thread_id, started_at_ms = 1000) => ({
@@ -159,15 +162,40 @@ test("mission cost distinguishes unavailable from measured zero and never prices
   const mission = { id: "zero", nodes: [{ ...node("w", "worker", [], "finished"), receipt: receipt("ao:codex", "gpt", "s1") }] };
   for (const total of [null, undefined, NaN, -1]) {
     const card = boardExports.missionCard(mission, undefined, new Map([["s1", usage("s1", total)]]));
-    assert.equal(card.usage?.compactLabel, "Cost unavailable");
+    assert.equal(card.usage?.compactLabel, "10 tok", "missing or invalid prices must not hide measured tokens");
+    assert.match(card.usage.accessibleLabel, /USD estimate not reported/);
   }
   assert.equal(boardExports.missionCard(mission, undefined, new Map([["s1", usage("s1", 0)]])).usage.compactLabel, "Est. $0.00");
   const native = { id: "native", nodes: [{ ...node("p", "planner", [], "finished"), receipt: receipt("codex-native", "chatgpt-web/high", "native-thread") }] };
   const nativeCard = boardExports.missionCard(native, undefined, new Map([["native-thread", usage("native-thread", 0)]]));
-  assert.equal(nativeCard.usage.compactLabel, "Cost unavailable");
+  assert.equal(nativeCard.usage.compactLabel, "Usage not reported");
   assert.match(nativeCard.costCoverage, /Native WebGPT cost unavailable/);
   const mixed = boardExports.missionCard({ ...mission, nodes: [...mission.nodes, ...native.nodes] }, undefined, new Map([["s1", usage("s1", 0)]]));
   assert.equal(mixed.usage.compactLabel, "Est. $0.00 · partial");
+});
+
+test("mission usage keeps observed tokens when a CPA dollar estimate is absent", () => {
+  const first = receipt("ao:codex", "cpa/gpt-6.1-sol", "session-a");
+  const second = receipt("ao:claude-code", "cpa/gpt-5.5", "session-b");
+  const mission = { id: "unpriced", nodes: [
+    { ...node("a", "worker", [], "finished"), receipt: first, history: [first] },
+    { ...node("b", "reviewer", [], "finished"), receipt: second },
+  ] };
+  const summaries = new Map([
+    ["session-a", { ...usage("session-a", null), processedTokens: 243032 }],
+    ["session-b", { ...usage("session-b", null), processedTokens: 43129 }],
+  ]);
+  const card = boardExports.missionCard(mission, undefined, summaries);
+  assert.equal(card.usage.compactLabel, "286.2K tok", "sessions repeated in history are counted once");
+  assert.match(card.usage.accessibleLabel, /286,161 recorded tokens/);
+  assert.match(card.usage.accessibleLabel, /USD estimate not reported/);
+  assert.doesNotMatch(card.usage.compactLabel, /\$/);
+  summaries.delete("session-b");
+  assert.equal(boardExports.missionCard(mission, undefined, summaries).usage.compactLabel, "243K tok · partial");
+  summaries.set("session-a", { ...usage("session-a", null), processedTokens: 0 });
+  assert.equal(boardExports.missionCard({ ...mission, nodes: [mission.nodes[0]] }, undefined, summaries).usage.compactLabel, "0 tok");
+  summaries.clear();
+  assert.equal(boardExports.missionCard(mission, undefined, summaries).usage.compactLabel, "Usage not reported");
 });
 
 test("mission timing uses the reservation of active attempts only and does not grow a finished duration", () => {
@@ -217,6 +245,7 @@ test("mission board scopes usage to the AO project, never the task ID or all pro
         } };
         if (name === "../hooks/useSessionUsageSummaries") return hookExports;
         if (name === "../lib/format-cost") return costExports;
+        if (name === "../lib/format-token-count") return tokenExports;
         if (name === "../lib/session-presentation") return { boardKanbanColumnOrder: [] };
         if (name === "@aoagents/product-ui") return { SessionsBoardGridView: "mission-grid" };
         return {};
@@ -228,7 +257,7 @@ test("mission board scopes usage to the AO project, never the task ID or all pro
     assert.equal(query.enabled, Boolean(projectId));
     if (projectId) assert.deepEqual(Array.from(query.queryKey), ["session-usage", "ao-project"]);
     const grid = rendered.props.children.at(-1).props.children;
-    if (projectId !== undefined) assert.equal(grid.props.sessions[0].usage.compactLabel, projectId ? "Est. $0.20" : "Cost unavailable");
+    if (projectId !== undefined) assert.equal(grid.props.sessions[0].usage.compactLabel, projectId ? "Est. $0.20" : "Usage not reported");
   }
 });
 
@@ -268,4 +297,93 @@ test("shift-click links or unlinks relative to the active card under free links"
   assert.deepEqual(decide(linked, "plan", "a"), { kind: "disconnect", id: "a", parentId: "plan" });
   assert.deepEqual(decide(linked, "a", "review"), { kind: "disconnect", id: "review", parentId: "a" });
   assert.equal(decide(linked, "a", "a"), null);
+});
+
+function mountResizableCanvas() {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  const callbacks = [], observers = [], frames = new Map(), handlers = new Map();
+  let nextFrame = 1;
+  const box = { width: 1600, height: 1000, left: 0, top: 0 };
+  const surface = { clientWidth: box.width, clientHeight: box.height, getBoundingClientRect: () => box,
+    addEventListener: (name, callback) => handlers.set(name, callback), removeEventListener() {} };
+  const scene = { style: {} }, cards = new Map();
+  const exports = {};
+  const jsx = (type, props) => ({ type, props });
+  vm.runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, {
+    exports,
+    require: name => name === "react" ? {
+      useRef: value => ({ current: value }), useState: value => [typeof value === "function" ? value() : value, () => {}],
+      useLayoutEffect: effect => callbacks.push(effect),
+    } : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : { ROLE_TITLE: {} },
+    window: { clearTimeout() {}, setTimeout() {} },
+    matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }),
+    ResizeObserver: class { constructor(callback) { observers.push(callback); } observe() {} disconnect() {} },
+    requestAnimationFrame: callback => { const id = nextFrame++; frames.set(id, callback); return id; },
+    cancelAnimationFrame: id => frames.delete(id),
+  });
+  const nodes = [node("p", "planner"), node("a", "worker", ["p"]), node("b", "worker", ["a"]), node("r", "reviewer", ["b"])];
+  const tree = exports.AgentOrchestratorCanvas({ nodes, levels: surfaceExports.aoLevels({ nodes }), selectedId: "", busy: false,
+    describe: () => "route", onSelect() {}, onMove: async () => {}, onConnect() {}, canConnect: () => false });
+  const bind = element => {
+    if (!element || typeof element !== "object") return;
+    if (Array.isArray(element)) return element.forEach(bind);
+    const ref = element.props?.ref;
+    if (ref) {
+      let target = { style: {}, offsetHeight: 76, setAttribute() {} };
+      if (element.props.className === "ao-canvas") target = surface;
+      if (element.props.className === "ao-canvas-scene") target = scene;
+      if (element.props["data-ao-node"]) cards.set(element.props["data-ao-node"], target);
+      if (typeof ref === "function") ref(target); else ref.current = target;
+    }
+    bind(element.props?.children);
+  };
+  bind(tree);
+  const flush = () => { for (const [id, callback] of frames) { frames.delete(id); callback(); } };
+  callbacks.forEach(effect => effect()); observers.forEach(callback => callback()); flush();
+  const camera = () => {
+    const match = scene.style.transform.match(/translate\(([-\d.]+)px, ([-\d.]+)px\) scale\(([-\d.]+)\)/);
+    return { x: Number(match[1]), y: Number(match[2]), scale: Number(match[3]) };
+  };
+  const rectangles = () => [...cards.values()].map(card => {
+    const point = card.style.transform.match(/translate\(([-\d.]+)px, ([-\d.]+)px\)/);
+    const view = camera();
+    return { x: Number(point[1]) * view.scale + view.x, y: Number(point[2]) * view.scale + view.y,
+      width: 212 * view.scale, height: 76 * view.scale };
+  });
+  return { camera, rectangles, box,
+    resize(width, height) { Object.assign(box, { width, height }); Object.assign(surface, { clientWidth: width, clientHeight: height }); observers.forEach(callback => callback()); flush(); },
+    pan(dx, dy) { handlers.get("wheel")({ deltaX: dx, deltaY: dy, preventDefault() {} }); flush(); },
+    zoom() { handlers.get("wheel")({ ctrlKey: true, deltaY: -100, clientX: box.width / 2, clientY: box.height / 2, preventDefault() {} }); flush(); },
+  };
+}
+
+test("canvas refits its automatic camera when the visible pane shrinks instead of retaining wide-screen zoom", () => {
+  const canvas = mountResizableCanvas();
+  assert.equal(canvas.camera().scale, 1.25);
+  canvas.resize(880, 430);
+  assert.ok(canvas.camera().scale < 1, "a real ResizeObserver callback reduces the former 125% camera");
+  assert.ok(canvas.rectangles().every(card => card.x >= 0 && card.y >= 0 && card.x + card.width <= 880 && card.y + card.height <= 430),
+    "all structure cards remain in the compact viewport");
+  const compact = canvas.camera();
+  canvas.resize(880, 430);
+  assert.deepEqual(canvas.camera(), compact, "same-size observer events do not change camera intent");
+});
+
+test("canvas resize keeps a manually panned world centre, but recovers if all cards would be offscreen", () => {
+  const canvas = mountResizableCanvas();
+  canvas.pan(180, 40);
+  canvas.zoom();
+  const before = canvas.camera();
+  const centre = { x: (canvas.box.width / 2 - before.x) / before.scale, y: (canvas.box.height / 2 - before.y) / before.scale };
+  canvas.resize(1200, 800);
+  const after = canvas.camera();
+  assert.equal(after.scale, before.scale, "manual zoom is not reset on ordinary resize");
+  assert.equal((600 - after.x) / after.scale, centre.x);
+  assert.equal((400 - after.y) / after.scale, centre.y);
+  canvas.pan(20_000, 20_000);
+  canvas.resize(880, 430);
+  assert.ok(canvas.rectangles().some(card => card.x + card.width > 0 && card.y + card.height > 0 && card.x < 880 && card.y < 430),
+    "resize cannot leave only an empty canvas after manual navigation");
 });

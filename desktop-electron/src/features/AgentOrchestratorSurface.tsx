@@ -70,6 +70,93 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
+const OVERVIEW_RATIO_KEY = "coding-tools:ao:overview-ratio:v1";
+const OVERVIEW_DIVIDER = 8;
+
+/** Keep both panes usable, scaling their minimums together only on very short screens. */
+export function aoOverviewSplit(ratio: number, height: number) {
+  const available = Math.max(0, height - OVERVIEW_DIVIDER);
+  const preferred = Number.isFinite(ratio) && ratio > 0 && ratio < 1 ? ratio : 0.7;
+  const min = available ? Math.min(160 / available, 160 / 280) : 0;
+  const max = available <= 280 && available > 0 ? min : available ? 1 - 120 / available : 1;
+  const bounded = Math.min(max, Math.max(min, preferred));
+  return { ratio: bounded, min, max, graph: available * bounded };
+}
+
+/** A captured drag suspends the native board, which otherwise intercepts pointer events. */
+export function OverviewSplit({ hidden, onResize, children }: {
+  hidden: boolean; onResize: (resizing: boolean) => void; children: [ReactNode, ReactNode];
+}) {
+  const panel = useRef<HTMLDivElement>(null);
+  const dragCleanup = useRef<(() => void) | null>(null);
+  const [ratio, setRatio] = useState(() => {
+    try {
+      const saved = Number(localStorage.getItem(OVERVIEW_RATIO_KEY));
+      return Number.isFinite(saved) && saved > 0 && saved < 1 ? saved : 0.7;
+    } catch { return 0.7; }
+  });
+  const [height, setHeight] = useState(0);
+  const split = aoOverviewSplit(ratio, height);
+  useLayoutEffect(() => {
+    if (hidden) dragCleanup.current?.();
+    const measure = () => setHeight(panel.current?.getBoundingClientRect().height ?? 0);
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (panel.current) observer.observe(panel.current);
+    return () => observer.disconnect();
+  }, [hidden]);
+  useEffect(() => () => dragCleanup.current?.(), []);
+  const remember = (next: number) => {
+    setRatio(next);
+    try { localStorage.setItem(OVERVIEW_RATIO_KEY, String(next)); } catch { /* Keep the ratio for this session. */ }
+  };
+  const drag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || dragCleanup.current) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    onResize(true);
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== event.pointerId) return;
+      const area = panel.current?.getBoundingClientRect();
+      if (area && area.height > OVERVIEW_DIVIDER) {
+        const nextRatio = (next.clientY - area.top - OVERVIEW_DIVIDER / 2) / (area.height - OVERVIEW_DIVIDER);
+        remember(aoOverviewSplit(Math.min(0.99, Math.max(0.01, nextRatio)), area.height).ratio);
+      }
+    };
+    const end = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", end);
+      handle.removeEventListener("lostpointercapture", end);
+      dragCleanup.current = null;
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      onResize(false);
+    };
+    dragCleanup.current = end;
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+    handle.addEventListener("lostpointercapture", end);
+  };
+  return <div hidden={hidden} className="ao-overview" ref={panel}
+    style={{ gridTemplateRows: height > OVERVIEW_DIVIDER ? `${split.graph}px ${OVERVIEW_DIVIDER}px minmax(0, 1fr)` : undefined }}>
+    {children[0]}
+    <div className="ao-overview-divider" role="separator" tabIndex={0} aria-label="Resize Structure and Mission board"
+      aria-orientation="horizontal" aria-valuemin={Math.round(split.min * 100)} aria-valuemax={Math.round(split.max * 100)}
+      aria-valuenow={Math.round(split.ratio * 100)} title="Drag or use arrow keys to resize; double-click to reset"
+      onPointerDown={drag} onDoubleClick={() => remember(0.7)}
+      onKeyDown={event => {
+        const next = event.key === "ArrowUp" ? split.ratio - 0.03 : event.key === "ArrowDown" ? split.ratio + 0.03
+          : event.key === "Home" ? split.min : event.key === "End" ? split.max : event.key === "0" ? 0.7 : null;
+        if (next === null) return;
+        event.preventDefault();
+        remember(aoOverviewSplit(next, height).ratio);
+      }} />
+    {children[1]}
+  </div>;
+}
+
 type PopupAnchor = { left: number; right: number; top: number };
 
 /** Keep floating controls inside their own stage, including the graph above the native board. */
@@ -246,6 +333,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [sheet, setSheet] = useState<Sheet>("");
   const stageRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<HTMLDivElement>(null);
+  const [overviewResizing, setOverviewResizing] = useState(false);
   const [roleAnchor, setRoleAnchor] = useState<PopupAnchor>();
   const closeSheet = useCallback(() => setSheet(""), []);
   const [workspacePath, setWorkspacePath] = useState("");
@@ -411,7 +499,8 @@ export function AgentOrchestratorSurface({ language, setError }: {
     }, 5000);
     return () => { live = false; clearInterval(timer); };
   }, [workspaceId]);
-  const selectChat = (taskId: string) => {
+  const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
+    setSheet(""); setInspectedId(""); setView(next);
     setChatTaskId(taskId);
     const latest = chatList(missions, board?.tasks ?? []).find((entry) => entry.taskId === taskId);
     if (latest) setSelectedRunId(latest.latestRunId);
@@ -770,10 +859,6 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const chatTree = {
     workspaces, workspaceId, onWorkspace: chooseWorkspace, view,
     labels: { chat: copy.canvas, overview: copy.overview },
-    onView: (id: string, next: "chat" | "overview") => {
-      if (id !== workspaceId) chooseWorkspace(id);
-      setSheet(""); setInspectedId(""); setView(next);
-    },
   };
   // Every message names how its card runs; working cards also show runtime and current step.
   const describeChatNode = useCallback((node: ChatNode) => node.route ? cardMeta(node as unknown as AoNode, harnesses) : "", [harnesses]);
@@ -933,7 +1018,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
         ) : null}
 
-        <div hidden={view !== "overview"} className="ao-overview">
+        <OverviewSplit hidden={view !== "overview"} onResize={setOverviewResizing}>
           <div className="ao-overview-graph" ref={graphRef}>
           {!workspaceId && workspaceReady ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : !selectedRun ? <div className="ao-empty-state"><p>{copy.noMissions}</p><button className="button-primary" type="button" disabled={!board} onClick={() => openSheet("mission")}>{copy.newMission}</button></div>
@@ -969,11 +1054,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
           </FloatingSheet> : null}
           </div>
           <div className="ao-workspace-board">
-            {view === "overview" && workspaceReady && workspaceId && !sheet
+            {view === "overview" && workspaceReady && workspaceId && !sheet && !overviewResizing
               ? <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
               : sheet ? <div className="ao-empty-state">Mission board resumes when this dialog closes.</div> : null}
           </div>
-        </div>
+        </OverviewSplit>
       </div>
       </div>
     </section>

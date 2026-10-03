@@ -6,7 +6,7 @@
   position: relative; display: flex; min-width: 0; min-height: 0; height: 100%; overflow: hidden;
 }
 
-/* One project tree, with view navigation above each project's missions. */
+/* One project tree, with compact view controls on each task. */
 .ao-workflow > .ao-chat-list { flex: 0 0 220px; padding-top: calc(env(titlebar-area-height, 34px) + 10px); }
 .ao-head-spacer { flex: 1 1 auto; min-width: 8px; }
 .ao-workspace-head { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 50px; padding: 8px 12px; border-bottom: 1px solid var(--ao-line); }
@@ -40,7 +40,11 @@
 @keyframes ao-pulse { 50% { opacity: .25; } }
 
 .ao-stage { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
-.ao-overview:not([hidden]) { display: grid; grid-template-rows: minmax(0, 42%) minmax(0, 1fr); flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
+.ao-overview:not([hidden]) { display: grid; grid-template-rows: minmax(0, .7fr) 8px minmax(0, .3fr); flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
+.ao-overview-divider { position: relative; z-index: 9; cursor: row-resize; touch-action: none; user-select: none; background: var(--color-bg-primary); -webkit-app-region: no-drag; }
+.ao-overview-divider::after { content: ""; position: absolute; width: 36px; height: 2px; top: 3px; left: calc(50% - 18px); border-radius: 2px; background: var(--ao-muted); opacity: .5; }
+.ao-overview-divider:hover::after, .ao-overview-divider:focus-visible::after { background: var(--ao-blue); opacity: 1; }
+.ao-overview-divider:focus-visible { outline: 1px solid var(--ao-blue); outline-offset: -1px; }
 .ao-overview[hidden] { display: none; }
 .ao-overview-graph { position: relative; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
 .ao-overview-graph > .ao-canvas { min-height: 0; }
@@ -188,10 +192,12 @@
 .ao-chat-list .ao-chat-workspace > span[aria-hidden] { flex: none; width: 12px; font-size: 11px; opacity: .7; }
 .ao-chat-list .ao-chat-items { padding-left: 14px; margin: 2px 0 6px; border-left: 1px solid var(--ao-line); margin-left: 14px; }
 .ao-chat-list .ao-chat-tree > li + li { margin-top: 10px; }
-.ao-project-nav { display: grid; gap: 2px; margin: 4px 0 6px 14px; padding-left: 14px; }
-.ao-project-nav button { color: var(--ao-muted); }
-.ao-project-nav button[aria-current="page"] { background: rgb(255 255 255 / 8%); color: var(--color-text-primary); font-weight: 600; }
-.ao-project-nav button:active { transform: scale(.98); }
+.ao-chat-row { display: flex; align-items: center; gap: 1px; min-width: 0; }
+.ao-chat-list .ao-chat-select { flex: 1 1 auto; min-width: 0; padding: 0 5px; gap: 5px; }
+.ao-chat-list .ao-chat-view { display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 26px; padding: 0; border-radius: 5px; opacity: 1; }
+.ao-chat-list .ao-chat-view[aria-pressed="true"] { background: rgb(255 255 255 / 8%); color: var(--color-text-primary); }
+.ao-chat-list .ao-chat-view:active { transform: scale(.94); }
+.ao-chat-list .ao-chat-view:focus-visible, .ao-chat-list .ao-chat-select:focus-visible { outline: 1px solid var(--ao-blue); outline-offset: -1px; }
 .ao-chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-chat-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); opacity: .8; }
 .ao-chat-dot.status-running, .ao-chat-dot.status-queued, .ao-chat-dot.state-running, .ao-chat-dot.state-reserved { background: var(--ao-green); animation: ao-pulse 1.4s ease-in-out infinite; }

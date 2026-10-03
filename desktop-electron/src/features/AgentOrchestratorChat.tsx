@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Icon } from "../icons";
 import {
   CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatNodeName, chatNodeOrder, chatTranscript,
   type ChatActivity, type ChatMessage, type ChatNode, type ChatRun, type ChatStatus, type ChatSummary,
@@ -10,13 +11,12 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
   queued: "Starting", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
 };
 
-/** Project navigation and chats share one persistent tree across Mission and Overview. */
+/** Workspaces and task-level view controls share one persistent tree. */
 export type ChatWorkspaces = {
   workspaces: { id: string; name: string }[];
   workspaceId: string;
   onWorkspace: (workspaceId: string) => void;
   view?: "chat" | "overview";
-  onView?: (workspaceId: string, view: "chat" | "overview") => void;
   labels?: { chat: string; overview: string };
 };
 
@@ -25,17 +25,28 @@ export type ChatWorkspaces = {
  * is expanded (its chats are the ones loaded); choosing another workspace switches to it.
  */
 export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
-  chats: ChatSummary[]; selectedTaskId: string; onSelect: (taskId: string) => void; onNew?: () => void;
+  chats: ChatSummary[]; selectedTaskId: string; onSelect: (taskId: string, view: "chat" | "overview") => void; onNew?: () => void;
   tree?: ChatWorkspaces;
 }) {
   const chatItems = (
     <ul className="ao-chat-items">
       {onNew ? <li><button type="button" className="ao-chat-new" aria-pressed={!selectedTaskId} onClick={onNew}>＋ New chat</button></li> : null}
       {chats.map((entry) => (
-        <li key={entry.taskId}>
-          <button type="button" aria-current={entry.taskId === selectedTaskId} onClick={() => onSelect(entry.taskId)}>
+        <li key={entry.taskId} className="ao-chat-row">
+          <button type="button" className="ao-chat-select" title={entry.title} aria-current={entry.taskId === selectedTaskId}
+            onClick={() => onSelect(entry.taskId, "chat")}>
             <span className={`ao-chat-dot status-${entry.status}`} aria-label={STATUS_LABEL[entry.status]} title={STATUS_LABEL[entry.status]} />
             <span className="ao-chat-title">{entry.title}</span>
+          </button>
+          <button type="button" className="ao-chat-view" aria-label={`${tree?.labels?.chat ?? "Mission"} · ${entry.title}`}
+            title={`${tree?.labels?.chat ?? "Mission"} · ${entry.title}`}
+            aria-pressed={entry.taskId === selectedTaskId && tree?.view === "chat"} onClick={() => onSelect(entry.taskId, "chat")}>
+            <Icon name="mail" width="15" height="15" />
+          </button>
+          <button type="button" className="ao-chat-view" aria-label={`${tree?.labels?.overview ?? "Overview"} · ${entry.title}`}
+            title={`${tree?.labels?.overview ?? "Overview"} · ${entry.title}`}
+            aria-pressed={entry.taskId === selectedTaskId && tree?.view === "overview"} onClick={() => onSelect(entry.taskId, "overview")}>
+            <Icon name="orchestrator" width="15" height="15" />
           </button>
         </li>
       ))}
@@ -55,12 +66,6 @@ export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
                   <span aria-hidden="true">{open ? "▾" : "▸"}</span><span aria-hidden="true">📁</span>
                   <span className="ao-chat-title">{workspace.name}</span>
                 </button>
-                {tree.onView ? <nav className="ao-project-nav" aria-label={`${workspace.name} views`}>
-                  <button type="button" aria-current={open && tree.view === "chat" ? "page" : undefined}
-                    onClick={() => tree.onView?.(workspace.id, "chat")}>{tree.labels?.chat ?? "Mission tab"}</button>
-                  <button type="button" aria-current={open && tree.view === "overview" ? "page" : undefined}
-                    onClick={() => tree.onView?.(workspace.id, "overview")}>{tree.labels?.overview ?? "Overview board"}</button>
-                </nav> : null}
                 {open ? chatItems : null}
               </li>
             );
