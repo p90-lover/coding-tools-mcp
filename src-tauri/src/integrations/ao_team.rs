@@ -27,6 +27,11 @@ pub struct RoleSettings {
     /// Omitted when off, so grants issued before this setting keep their fingerprint.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub auto_decide: bool,
+    /// A role the user typed (e.g. "Security auditor"). The card keeps its base role's place in
+    /// the mission; the name is shown everywhere and given to the model as its role.
+    /// Omitted when empty, so grants issued before this setting keep their fingerprint.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub role_name: String,
 }
 
 impl RoleSettings {
@@ -37,6 +42,7 @@ impl RoleSettings {
             (&self.instructions, 4096, true),
             (&self.expected_output, 2048, true),
             (&self.working_directory, 512, false),
+            (&self.role_name, 48, false),
         ] {
             if value.len() > limit
                 || value
@@ -227,21 +233,25 @@ pub fn normalize_roles(nodes: &mut Vec<Node>) {
     }
 }
 
-/// Gemini runs on Claude Code through the CPA gateway ("cpa/<model>"), not on Native Codex.
-/// A Native Codex card with a Gemini CPA model is moved there when a team is saved or a
-/// mission is created from it.
+/// Native Codex runs only WebGPT. Every other model runs on an AO harness through the CPA
+/// gateway ("cpa/<model>"): Gemini on Claude Code, the rest on Codex. A Native Codex card with
+/// a CPA model is moved there when a team is saved or a mission is created from it; its effort
+/// is kept, and its context window dropped (AO harnesses have no such setting).
 pub fn normalize_routes(nodes: &mut [Node]) {
     for node in nodes {
         let route = &mut node.route;
-        if route.harness_id == "codex-native"
-            && route.provider_id == "cliproxyapi-antigravity"
-            && route.model.to_ascii_lowercase().starts_with("gemini")
-        {
+        if route.harness_id == "codex-native" && route.provider_id == "cliproxyapi-antigravity" {
+            let agent = if route.model.to_ascii_lowercase().starts_with("gemini") {
+                "ao:claude-code"
+            } else {
+                "ao:codex"
+            };
             route.model = format!("cpa/{}", route.model);
-            route.harness_id = "ao:claude-code".into();
+            route.harness_id = agent.into();
             route.provider_id = "agent-orchestrator".into();
             route.account_id = "ao-local".into();
             route.permission_profile = ":ao-default".into();
+            route.context_window = None;
         }
     }
 }
@@ -702,10 +712,10 @@ mod tests {
         assert_eq!(nodes[0].route.harness_id, "ao:claude-code");
         assert_eq!(nodes[0].route.model, "cpa/gemini-3.8-flash-high");
         assert_eq!(nodes[0].route.provider_id, "agent-orchestrator");
-        assert_eq!(
-            nodes[1].route.harness_id, "codex-native",
-            "OpenAI CPA models stay on Native Codex"
-        );
+        // Native Codex runs only WebGPT: every other CPA model moves to AO's Codex harness.
+        assert_eq!(nodes[1].route.harness_id, "ao:codex");
+        assert_eq!(nodes[1].route.model, "cpa/gpt-6-luna");
+        assert_eq!(nodes[1].route.permission_profile, ":ao-default");
         assert!(require_explicit_models(&nodes).is_ok());
         nodes[1].route.model = "default".into();
         let refused = require_explicit_models(&nodes).unwrap_err().to_string();
@@ -727,7 +737,7 @@ mod tests {
             "control_board":{"revision":1,"tasks":[{"id":"goal","workspace_id":"qa","title":"Test roles","description":"Read only","state":"pending","step":0,"created_at":0,"updated_at":0,"clauses":[],"evidence":[]}]}
         })).unwrap();
         let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
-        let worker = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity","account_id":"shared-cpa-pool","model":"gemini-3.8-flash-high","permission_profile":":read-only"});
+        let worker = json!({"harness_id":"ao:codex","provider_id":"agent-orchestrator","account_id":"ao-local","model":"cpa/gemini-3.8-flash-high","permission_profile":":ao-default"});
         let team: Team = serde_json::from_value(json!({"id":"team","workspace_id":"qa","name":"Product team","revision":0,"nodes":[
             {"id":"lead","task_id":"","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":web},
             {"id":"worker","task_id":"","role":"worker","parents":["lead"],"x":0,"y":1,"state":"pending","route":worker},

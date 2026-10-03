@@ -8,6 +8,7 @@ const SPECS = Object.freeze({
   terminal_close: { readOnly: false, description: "Close one in-app Antigravity CLI terminal." },
   refresh: { readOnly: false, description: "Force CPA to refresh one Antigravity account's token." },
   sign_in: { readOnly: false, description: "Re-authenticate one CPA Antigravity account through CPA's own browser sign-in." },
+  cancel_sign_in: { readOnly: false, description: "Cancel the pending sign-in for one CPA Antigravity account and close its owned browser." },
   sweep: { readOnly: false, description: "Refresh expired CPA Antigravity accounts now and re-authenticate any that need it." },
   set_auto: { readOnly: false, description: "Turn automatic CPA Antigravity re-authentication on or off." },
 });

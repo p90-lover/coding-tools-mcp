@@ -64,6 +64,39 @@ pub struct Route {
     pub account_id: String,
     pub model: String,
     pub permission_profile: String,
+    /// Reasoning effort for this card ("minimal" to "xhigh"); None keeps the model's default.
+    /// Omitted when unset, so grants issued before this setting keep their fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Context window in tokens for this card; None keeps the model's default. Native Codex
+    /// applies it; AO harnesses have no such setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+}
+
+/// Current Unix time in milliseconds (0 if the clock is before 1970).
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// Reasoning efforts a card may ask for (Codex's ReasoningEffort names).
+pub const EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+/// Context windows a card may ask for, in tokens.
+pub const CONTEXT_WINDOWS: std::ops::RangeInclusive<u32> = 4_096..=2_000_000;
+
+/// The route's tuning is one Codex knows, inside the allowed range.
+fn route_tuning_valid(route: &Route) -> bool {
+    route
+        .effort
+        .as_deref()
+        .is_none_or(|effort| EFFORTS.contains(&effort))
+        && route
+            .context_window
+            .is_none_or(|tokens| CONTEXT_WINDOWS.contains(&tokens))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +117,9 @@ pub struct Receipt {
     /// Tool requests the command approver decided during this attempt ("allowed · reason · request").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<String>,
+    /// When the card was reserved (Unix ms), so every view can show how long it has been running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,6 +558,21 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         if web_model_named(&node.route) && !web_route_valid(&node.route) {
             return Err(fail("AO WebGPT runs only on Native Codex"));
         }
+        // Native Codex runs only WebGPT; other models run on an AO harness through the CPA
+        // gateway. Cards that already ran keep their old route so older missions stay usable.
+        if node.state == State::Pending
+            && node.route.harness_id == "codex-native"
+            && !web_route_valid(&node.route)
+        {
+            return Err(fail(
+                "Native Codex runs only WebGPT models; choose an AO harness (Codex or Claude Code) for other models",
+            ));
+        }
+        if !route_tuning_valid(&node.route) {
+            return Err(fail(
+                "AO card effort must be minimal, low, medium, high or xhigh, and its context window 4,096 to 2,000,000 tokens",
+            ));
+        }
         // Any role may run on any harness: WebGPT or a CPA model on Native Codex, or an AO harness.
         if node.role != Role::Worker
             && !web_route_valid(&node.route)
@@ -718,8 +769,19 @@ fn planner_roster(run: &Run) -> String {
         } else {
             &worker.settings.specialty
         };
+        let role = if worker.settings.role_name.is_empty() {
+            String::new()
+        } else {
+            format!(" · role {}", worker.settings.role_name)
+        };
+        let effort = worker
+            .route
+            .effort
+            .as_deref()
+            .map(|effort| format!(" · effort {effort}"))
+            .unwrap_or_default();
         roster.push_str(&format!(
-            "- id `{}` · {name} · specialty {specialty} · {} / {}\n",
+            "- id `{}` · {name}{role} · specialty {specialty} · {} / {}{effort}\n",
             worker.id, worker.route.harness_id, worker.route.model
         ));
     }
@@ -1621,6 +1683,7 @@ pub fn reserve(
         verdict: None,
         route: node.route.clone(),
         approvals: Vec::new(),
+        started_at_ms: Some(grant_now_ms.unwrap_or_else(unix_now_ms)),
     });
     if grant_now_ms.is_some() {
         run.grant.as_mut().unwrap().turns_started += 1;
@@ -1969,8 +2032,8 @@ mod tests {
 
     #[test]
     fn ao_planner_assignments_map_each_worker_card_once() {
-        let route = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"luna","permission_profile":":workspace"});
+        let route = json!({"harness_id":"ao:codex","provider_id":"agent-orchestrator",
+            "account_id":"ao-local","model":"cpa/luna","permission_profile":":ao-default"});
         let mut run: Run = serde_json::from_value(json!({"id":"run","workspace_id":"qa","project_id":"p","revision":0,"nodes":[
             {"id":"planner","task_id":"t","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":route},
             {"id":"w1","task_id":"t","role":"worker","parents":["planner"],"x":0,"y":1,"state":"pending","route":route,
@@ -2067,13 +2130,48 @@ mod tests {
         assert!(validate(None, &run(web.clone())).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/other","permission_profile":":read-only"}))).is_err());
+        // Native Codex runs only WebGPT: a CPA model on it is refused for a card yet to start.
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
+            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_err());
         // Every WebGPT tier the bridge serves is allowed, but only on Native Codex.
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/extra-high","permission_profile":":read-only"}))).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"ao:codex","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/pro","permission_profile":":read-only"}))).is_err());
+    }
+
+    #[test]
+    fn ao_card_effort_and_context_window_are_checked_and_only_stored_when_set() {
+        let run = |tuning: serde_json::Value| -> Run {
+            let mut route = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+                "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+            route
+                .as_object_mut()
+                .unwrap()
+                .extend(tuning.as_object().unwrap().clone());
+            serde_json::from_value(json!({"id":"run","workspace_id":"qa","project_id":"p","revision":0,"nodes":[
+                {"id":"planner","task_id":"t","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":route},
+                {"id":"worker","task_id":"t","role":"worker","parents":["planner"],"x":0,"y":1,"state":"pending","route":route},
+                {"id":"reviewer","task_id":"t","role":"reviewer","parents":["worker"],"x":0,"y":2,"state":"pending","route":route}
+            ]})).unwrap()
+        };
+        assert!(validate(None, &run(json!({}))).is_ok());
+        assert!(validate(
+            None,
+            &run(json!({"effort":"xhigh","context_window":262_144}))
+        )
+        .is_ok());
+        for bad in [
+            json!({"effort":"max"}),
+            json!({"effort":""}),
+            json!({"context_window":1_024}),
+            json!({"context_window":4_000_000}),
+        ] {
+            assert!(validate(None, &run(bad.clone())).is_err(), "{bad}");
+        }
+        // An untuned route serializes exactly as before, so existing grants keep their fingerprint.
+        let plain = serde_json::to_value(&run(json!({})).nodes[0].route).unwrap();
+        assert!(plain.get("effort").is_none() && plain.get("context_window").is_none());
     }
 
     #[test]
@@ -2127,7 +2225,7 @@ mod tests {
     }
 
     #[test]
-    fn ao_orchestrator_and_reviewer_may_use_any_webgpt_tier_or_cpa_model_on_native_codex() {
+    fn ao_orchestrator_and_reviewer_may_use_any_webgpt_tier_on_native_codex_or_an_ao_harness() {
         let worker = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
         let run = |lead: serde_json::Value| -> Run {
@@ -2140,7 +2238,7 @@ mod tests {
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/medium","permission_profile":":read-only"}))).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_ok());
+            "account_id":"shared-cpa-pool","model":"claude-sonnet-4-6","permission_profile":":read-only"}))).is_err());
         // The orchestrator and reviewer may also run on an AO harness such as Claude Code.
         assert!(validate(None, &run(json!({"harness_id":"ao:claude-code","provider_id":EXTERNAL_PROVIDER,
             "account_id":EXTERNAL_ACCOUNT,"model":"default","permission_profile":EXTERNAL_PERMISSION}))).is_ok());
@@ -2174,8 +2272,8 @@ mod tests {
         .unwrap();
         let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
-        let worker = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"gemini-3.8-flash-high","permission_profile":":read-only"});
+        let worker = json!({"harness_id":"ao:codex","provider_id":"agent-orchestrator",
+            "account_id":"ao-local","model":"cpa/gemini-3.8-flash-high","permission_profile":":ao-default"});
         let run: Run = serde_json::from_value(json!({
             "id":"run","workspace_id":"qa","project_id":"project","revision":0,"max_review_rounds":2,
             "nodes":[
@@ -2650,8 +2748,8 @@ mod tests {
         })).unwrap();
         let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
-        let cpa = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-            "account_id":"shared-cpa-pool","model":"luna","permission_profile":":workspace"});
+        let cpa = json!({"harness_id":"ao:codex","provider_id":"agent-orchestrator",
+            "account_id":"ao-local","model":"cpa/luna","permission_profile":":ao-default"});
         let node = |id: &str, role: &str, route: &serde_json::Value, name: &str| {
             json!({"id":id,"task_id":"task","role":role,
             "parents":[],"x":0,"y":0,"state":"pending","route":route,"settings":{"name":name}})
@@ -2953,8 +3051,8 @@ mod tests {
 
     fn free_link_node(id: &str, role: &str, parents: &[&str]) -> serde_json::Value {
         let route = if role == "worker" {
-            json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
-                "account_id":"shared-cpa-pool","model":"gemini-3.8-flash-high","permission_profile":":read-only"})
+            json!({"harness_id":"ao:codex","provider_id":"agent-orchestrator",
+                "account_id":"ao-local","model":"cpa/gemini-3.8-flash-high","permission_profile":":ao-default"})
         } else {
             json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
                 "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"})
@@ -3109,6 +3207,7 @@ mod tests {
                 settings: None,
                 route: w2.route.clone(),
                 approvals: vec![],
+                started_at_ms: None,
             });
         }
         let revision = data.ao_runs[0].revision;

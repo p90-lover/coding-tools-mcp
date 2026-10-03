@@ -1358,6 +1358,8 @@ mod workspace_auth_tests {
                 account_id: "shared-cpa-pool".into(),
                 model: "gemini-3.8-flash-high".into(),
                 permission_profile: ":read-only".into(),
+                effort: None,
+                context_window: None,
             },
             request_key: None,
             receipt: None,
@@ -1373,6 +1375,8 @@ mod workspace_auth_tests {
             model: "gemini-3.8-flash-high".into(),
             request_limit: 1,
             lifetime_seconds: 30,
+            effort: None,
+            context_window: None,
         };
         let sentinel = "SENTINEL_KEY_DO_NOT_LOG_1234567890";
         assert_eq!(
@@ -2594,7 +2598,7 @@ async fn ao_harness_connect(
     let private_key = body.private_proxy_api_key;
     let web_base_url = body.web_bridge_base_url;
     let web_catalog = body.web_model_catalog;
-    let connection: AoCodexConnection = match serde_json::from_value(body.connection) {
+    let mut connection: AoCodexConnection = match serde_json::from_value(body.connection) {
         Ok(connection) => connection,
         Err(_) => {
             return json_error(
@@ -2604,6 +2608,9 @@ async fn ao_harness_connect(
             )
         }
     };
+    // The card's tuning comes from its saved (and fingerprinted) route, never from the caller.
+    connection.effort = node.route.effort.clone();
+    connection.context_window = node.route.context_window;
     let worker = match ao_connect_policy(&node, &connection, private_key.as_deref()) {
         Ok(worker) => worker,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_ROUTE_MISMATCH", error),

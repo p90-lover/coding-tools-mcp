@@ -15,9 +15,12 @@ const {
 } = require("../electron/backend-bundle.cjs");
 
 const electronRoot = path.join(__dirname, "..", "electron");
+test.after(() => fs.rmSync(path.resolve(__dirname, "../../aiTemp", `antigravity-auth-bundle-${process.pid}`), { recursive: true, force: true }));
 
 function temporary(name) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
+  const root = path.resolve(__dirname, "../../aiTemp", `antigravity-auth-bundle-${process.pid}`);
+  fs.mkdirSync(root, { recursive: true });
+  return fs.mkdtempSync(path.join(root, `${name}-`));
 }
 
 // A minimal bundle built from the real backend modules plus a stub app-handler host.
@@ -53,6 +56,7 @@ test("with no bundle the installer's backend is used", () => {
 });
 
 test("an installed bundle becomes the backend and its modules load from the bundle", () => {
+  assert.ok(BACKEND_MODULES.includes("antigravity-auth-browser.cjs"), "managed sign-in must ship in the backend closure");
   const userData = temporary("backend-user");
   const manager = bundles(userData);
   const manifest = manager.install(writeBundle(temporary("backend-src"), "b-1"));

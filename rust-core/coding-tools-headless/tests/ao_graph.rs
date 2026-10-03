@@ -14,13 +14,18 @@ fn fixture() -> (AppData, Run) {
         account_id: "web-account".into(),
         model: "chatgpt-web/high".into(),
         permission_profile: ":read-only".into(),
+        effort: None,
+        context_window: None,
     };
+    // Native Codex runs only WebGPT; a CPA model runs on an AO harness through the gateway.
     let worker = Route {
-        harness_id: "codex-native".into(),
-        provider_id: "cliproxyapi-antigravity".into(),
-        account_id: "worker-account".into(),
-        model: "gemini-3.8-flash-high".into(),
-        permission_profile: ":workspace".into(),
+        harness_id: "ao:claude-code".into(),
+        provider_id: "agent-orchestrator".into(),
+        account_id: "ao-local".into(),
+        model: "cpa/gemini-3.8-flash-high".into(),
+        permission_profile: ":ao-default".into(),
+        effort: None,
+        context_window: None,
     };
     // Built from JSON so fields added to Node and Run later (all optional) keep this fixture valid.
     let node = |id: &str, role: Role, parents: Vec<&str>, route: Route| -> Node {

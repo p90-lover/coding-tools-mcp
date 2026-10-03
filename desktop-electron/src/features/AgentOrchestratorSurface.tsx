@@ -7,10 +7,10 @@ import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSur
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat, ChatListPane } from "./AgentOrchestratorChat";
 import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
-import { chatList } from "./ao-chat";
+import { chatList, type ChatActivity, type ChatNode } from "./ao-chat";
 import {
   AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings,
-  harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, teamForMission, workerRoute, type AoHarness, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import { pageHidden } from "./page-visibility";
@@ -22,13 +22,13 @@ type PlanTask = {
   clauseProgress: { done: number; total: number };
 };
 type Board = { revision: number; steps: string[]; tasks: PlanTask[]; task?: PlanTask };
-export type AoReceipt = { status: string; answer?: string; error?: string; verdict?: string; thread_id?: string; turn_id?: string; request_key?: string; settings?: RoleSettings; route?: { model: string } };
+export type AoReceipt = { status: string; answer?: string; error?: string; verdict?: string; thread_id?: string; turn_id?: string; request_key?: string; settings?: RoleSettings; route?: { model: string }; started_at_ms?: number };
 export type AoNode = {
   id: string; task_id: string; role: "planner" | "approver" | "worker" | "review_split" | "sub_reviewer" | "reviewer";
   parents: string[]; x: number; y: number; positioned?: boolean; state: string;
   clause_id?: string; request_key?: string; template_role_id?: string;
   settings?: RoleSettings;
-  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string };
+  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string; effort?: string; context_window?: number };
   receipt?: AoReceipt;
   history?: AoReceipt[];
 };
@@ -38,16 +38,16 @@ type AoApproval = { nodeId: string; approval_id: string; kind?: string; path?: s
 type Sheet = "" | "mission" | "worker" | "settings" | "team";
 
 const words = {
-  en: { title: "Agent Orchestrator", workspace: "Workspace", mission: "Mission", newMission: "New mission", canvas: "Mission tab", structure: "Structure", board: "Mission board",
+  en: { title: "Agent Orchestrator", workspace: "Workspace", mission: "Mission", newMission: "New mission", canvas: "Mission tab", overview: "Overview board", history: "Inactive cards shown for this mission",
     start: "Start", resume: "Resume", pause: "Pause", stop: "Stop", settings: "Settings", refresh: "Refresh", addWorker: "Worker",
     noMissions: "No missions yet", noWorkspace: "Add a workspace to begin", create: "Create", add: "Add", cancel: "Cancel" },
-  "zh-CN": { title: "代理编排", workspace: "工作区", mission: "任务", newMission: "新任务", canvas: "任务页", structure: "结构", board: "任务看板",
+  "zh-CN": { title: "代理编排", workspace: "工作区", mission: "任务", newMission: "新任务", canvas: "任务页", overview: "总览看板", history: "正在显示此任务的历史节点",
     start: "开始", resume: "继续", pause: "暂停", stop: "停止", settings: "设置", refresh: "刷新", addWorker: "工作者",
     noMissions: "尚无任务", noWorkspace: "先添加工作区", create: "创建", add: "添加", cancel: "取消" },
-  "zh-TW": { title: "代理編排", workspace: "工作區", mission: "任務", newMission: "新任務", canvas: "任務分頁", structure: "結構", board: "任務看板",
+  "zh-TW": { title: "代理編排", workspace: "工作區", mission: "任務", newMission: "新任務", canvas: "任務分頁", overview: "總覽看板", history: "正在顯示此任務的歷史節點",
     start: "開始", resume: "繼續", pause: "暫停", stop: "停止", settings: "設定", refresh: "重新整理", addWorker: "工作者",
     noMissions: "尚無任務", noWorkspace: "先新增工作區", create: "建立", add: "新增", cancel: "取消" },
-  ja: { title: "エージェント編成", workspace: "ワークスペース", mission: "ミッション", newMission: "新規ミッション", canvas: "ミッション", structure: "構成", board: "ミッションボード",
+  ja: { title: "エージェント編成", workspace: "ワークスペース", mission: "ミッション", newMission: "新規ミッション", canvas: "ミッション", overview: "概要ボード", history: "このミッションの履歴カードを表示",
     start: "開始", resume: "再開", pause: "一時停止", stop: "停止", settings: "設定", refresh: "更新", addWorker: "ワーカー",
     noMissions: "ミッションはまだありません", noWorkspace: "ワークスペースを追加してください", create: "作成", add: "追加", cancel: "キャンセル" },
 } satisfies Record<Language, Record<string, string>>;
@@ -70,28 +70,134 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
-/** A popup that opens centred in the stage and moves by dragging its header. */
-function FloatingSheet({ stage, title, onClose, children }: { stage: RefObject<HTMLDivElement | null>; title: string; onClose: () => void; children: ReactNode }) {
+const OVERVIEW_RATIO_KEY = "coding-tools:ao:overview-ratio:v1";
+const OVERVIEW_DIVIDER = 8;
+
+/** Keep both panes usable, scaling their minimums together only on very short screens. */
+export function aoOverviewSplit(ratio: number, height: number) {
+  const available = Math.max(0, height - OVERVIEW_DIVIDER);
+  const preferred = Number.isFinite(ratio) && ratio > 0 && ratio < 1 ? ratio : 0.7;
+  const min = available ? Math.min(160 / available, 160 / 280) : 0;
+  const max = available <= 280 && available > 0 ? min : available ? 1 - 120 / available : 1;
+  const bounded = Math.min(max, Math.max(min, preferred));
+  return { ratio: bounded, min, max, graph: available * bounded };
+}
+
+/** A captured drag suspends the native board, which otherwise intercepts pointer events. */
+export function OverviewSplit({ hidden, onResize, children }: {
+  hidden: boolean; onResize: (resizing: boolean) => void; children: [ReactNode, ReactNode];
+}) {
+  const panel = useRef<HTMLDivElement>(null);
+  const dragCleanup = useRef<(() => void) | null>(null);
+  const [ratio, setRatio] = useState(() => {
+    try {
+      const saved = Number(localStorage.getItem(OVERVIEW_RATIO_KEY));
+      return Number.isFinite(saved) && saved > 0 && saved < 1 ? saved : 0.7;
+    } catch { return 0.7; }
+  });
+  const [height, setHeight] = useState(0);
+  const split = aoOverviewSplit(ratio, height);
+  useLayoutEffect(() => {
+    if (hidden) dragCleanup.current?.();
+    const measure = () => setHeight(panel.current?.getBoundingClientRect().height ?? 0);
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (panel.current) observer.observe(panel.current);
+    return () => observer.disconnect();
+  }, [hidden]);
+  useEffect(() => () => dragCleanup.current?.(), []);
+  const remember = (next: number) => {
+    setRatio(next);
+    try { localStorage.setItem(OVERVIEW_RATIO_KEY, String(next)); } catch { /* Keep the ratio for this session. */ }
+  };
+  const drag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || dragCleanup.current) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    onResize(true);
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== event.pointerId) return;
+      const area = panel.current?.getBoundingClientRect();
+      if (area && area.height > OVERVIEW_DIVIDER) {
+        const nextRatio = (next.clientY - area.top - OVERVIEW_DIVIDER / 2) / (area.height - OVERVIEW_DIVIDER);
+        remember(aoOverviewSplit(Math.min(0.99, Math.max(0.01, nextRatio)), area.height).ratio);
+      }
+    };
+    const end = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", end);
+      handle.removeEventListener("lostpointercapture", end);
+      dragCleanup.current = null;
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      onResize(false);
+    };
+    dragCleanup.current = end;
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+    handle.addEventListener("lostpointercapture", end);
+  };
+  return <div hidden={hidden} className="ao-overview" ref={panel}
+    style={{ gridTemplateRows: height > OVERVIEW_DIVIDER ? `${split.graph}px ${OVERVIEW_DIVIDER}px minmax(0, 1fr)` : undefined }}>
+    {children[0]}
+    <div className="ao-overview-divider" role="separator" tabIndex={0} aria-label="Resize Structure and Mission board"
+      aria-orientation="horizontal" aria-valuemin={Math.round(split.min * 100)} aria-valuemax={Math.round(split.max * 100)}
+      aria-valuenow={Math.round(split.ratio * 100)} title="Drag or use arrow keys to resize; double-click to reset"
+      onPointerDown={drag} onDoubleClick={() => remember(0.7)}
+      onKeyDown={event => {
+        const next = event.key === "ArrowUp" ? split.ratio - 0.03 : event.key === "ArrowDown" ? split.ratio + 0.03
+          : event.key === "Home" ? split.min : event.key === "End" ? split.max : event.key === "0" ? 0.7 : null;
+        if (next === null) return;
+        event.preventDefault();
+        remember(aoOverviewSplit(next, height).ratio);
+      }} />
+    {children[1]}
+  </div>;
+}
+
+type PopupAnchor = { left: number; right: number; top: number };
+
+/** Keep floating controls inside their own stage, including the graph above the native board. */
+export function clampPopupPosition(area: { width: number; height: number }, box: { width: number; height: number }, point: { x: number; y: number }) {
+  return {
+    x: Math.min(Math.max(8, point.x), Math.max(8, area.width - box.width - 8)),
+    y: Math.min(Math.max(8, point.y), Math.max(8, area.height - box.height - 8)),
+  };
+}
+
+/** Sheets open centrally; role settings open beside their selected card. Both drag by the header. */
+function FloatingSheet({ stage, title, onClose, children, anchor, className = "", closeLabel = "Close" }: {
+  stage: RefObject<HTMLDivElement | null>; title: string; onClose: () => void; children: ReactNode;
+  anchor?: PopupAnchor; className?: string; closeLabel?: string;
+}) {
   const sheet = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const clamp = useCallback((x: number, y: number) => {
     const area = stage.current?.getBoundingClientRect();
     const box = sheet.current?.getBoundingClientRect();
     if (!area || !box) return { x, y };
-    return { x: Math.min(Math.max(8, x), Math.max(8, area.width - box.width - 8)), y: Math.min(Math.max(8, y), Math.max(8, area.height - box.height - 8)) };
+    return clampPopupPosition(area, box, { x, y });
   }, [stage]);
   useLayoutEffect(() => {
     const area = stage.current?.getBoundingClientRect();
     const box = sheet.current?.getBoundingClientRect();
-    if (area && box) setPosition(clamp((area.width - box.width) / 2, (area.height - box.height) / 2));
-  }, [clamp, stage]);
+    if (area && box) setPosition(clamp(
+      anchor ? anchor.right + box.width + 20 <= area.width ? anchor.right + 12 : anchor.left - box.width - 12 : (area.width - box.width) / 2,
+      anchor ? anchor.top : (area.height - box.height) / 2,
+    ));
+  }, [anchor, clamp, stage]);
   useEffect(() => {
     const keep = () => setPosition(current => current && clamp(current.x, current.y));
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const observer = new ResizeObserver(keep);
+    if (stage.current) observer.observe(stage.current);
+    if (sheet.current) observer.observe(sheet.current);
     window.addEventListener("resize", keep);
     window.addEventListener("keydown", escape);
-    return () => { window.removeEventListener("resize", keep); window.removeEventListener("keydown", escape); };
-  }, [clamp, onClose]);
+    return () => { observer.disconnect(); window.removeEventListener("resize", keep); window.removeEventListener("keydown", escape); };
+  }, [clamp, onClose, stage]);
   const drag = (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0 || !position || (event.target as HTMLElement).closest("button")) return;
     const handle = event.currentTarget;
@@ -103,11 +209,11 @@ function FloatingSheet({ stage, title, onClose, children }: { stage: RefObject<H
     handle.addEventListener("pointerup", end);
     handle.addEventListener("pointercancel", end);
   };
-  return <div ref={sheet} className="ao-float" role="dialog" aria-label={title}
+  return <div ref={sheet} className={`ao-float ${className}`} role="dialog" aria-label={title}
     style={position ? { left: position.x, top: position.y } : { visibility: "hidden" }}>
     <div className="ao-float-head" onPointerDown={drag} title="Drag to move">
       <h2>{title}</h2>
-      <button type="button" className="ao-float-close" aria-label="Close" onClick={onClose}>✕</button>
+      <button type="button" className="ao-float-close" aria-label={closeLabel} onClick={onClose}>✕</button>
     </div>
     {children}
   </div>;
@@ -138,6 +244,12 @@ async function listAllWorkspaces(): Promise<WorkspaceSummary[]> {
     cursor = page.nextCursor;
   }
   return items;
+}
+
+/** A selected historical run stays inspectable even when every card is filtered as inactive. */
+export function aoVisibleNodes(nodes: AoNode[], showInactive: boolean): AoNode[] {
+  const visible = nodes.filter(node => showInactive || !["cancelled", "archived"].includes(node.state));
+  return visible.length ? visible : nodes;
 }
 
 export function aoLevels(run: Pick<AoMission, "nodes">): AoNode[][] {
@@ -212,14 +324,17 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [workspaceId, setWorkspaceId] = useState(() => { try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
-  // "chat" is the Mission tab; "team" is the structure editor (canvas) for one run.
-  const [view, setView] = useState<"chat" | "board" | "team">("chat");
+  // One project tree switches between the conversation and the selected graph above its workspace board.
+  const [view, setView] = useState<"chat" | "overview">("chat");
   // null until the workspace's runs load; "" means a new, unsent chat.
   const [chatTaskId, setChatTaskId] = useState<string | null>(null);
   // Why a chat's latest run could not start, by task id; cleared once it starts.
   const [chatNotices, setChatNotices] = useState<Record<string, string>>({});
   const [sheet, setSheet] = useState<Sheet>("");
   const stageRef = useRef<HTMLDivElement>(null);
+  const graphRef = useRef<HTMLDivElement>(null);
+  const [overviewResizing, setOverviewResizing] = useState(false);
+  const [roleAnchor, setRoleAnchor] = useState<PopupAnchor>();
   const closeSheet = useCallback(() => setSheet(""), []);
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceName, setWorkspaceName] = useState("");
@@ -372,9 +487,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setChatTaskId(latest?.taskId ?? "");
     if (latest) setSelectedRunId(latest.latestRunId);
   }, [chatTaskId, missions, board]);
-  // Keep other chats' statuses and newly created runs current while the chat view is open.
+  // Keep the shared project tree and newly created runs current in either view.
   useEffect(() => {
-    if (view !== "chat" || !workspaceId) return;
+    if (!workspaceId) return;
     let live = true;
     const timer = setInterval(() => {
       if (pageHidden()) return;
@@ -383,8 +498,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
       }).catch(() => {});
     }, 5000);
     return () => { live = false; clearInterval(timer); };
-  }, [view, workspaceId]);
-  const selectChat = (taskId: string) => {
+  }, [workspaceId]);
+  const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
+    setSheet(""); setInspectedId(""); setView(next);
     setChatTaskId(taskId);
     const latest = chatList(missions, board?.tasks ?? []).find((entry) => entry.taskId === taskId);
     if (latest) setSelectedRunId(latest.latestRunId);
@@ -398,6 +514,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const inspectedNode = selectedRun?.nodes.find(node => node.id === inspectedId);
   useEffect(() => { setInspectedId(""); setDraftTeam(null); setMissionLimit(selectedRun?.worker_limit || 3); }, [selectedRunId]);
   const inspectRole = (id: string) => {
+    const area = graphRef.current?.getBoundingClientRect();
+    const card = graphRef.current?.querySelector<HTMLElement>(`[data-ao-node="${CSS.escape(id)}"]`)?.getBoundingClientRect();
+    setRoleAnchor(area && card ? { left: card.left - area.left, right: card.right - area.left, top: card.top - area.top } : undefined);
     setInspectedId(id);
     if (selectedRun && !draftTeam) setDraftTeam(teamForMission(selectedRun, team));
   };
@@ -421,7 +540,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
   useEffect(() => {
-    if (view !== "board" || !workspaceId) return;
+    if (view !== "overview" || !workspaceId) return;
     let disposed = false;
     let reading = false;
     const pollSelection = async () => {
@@ -436,16 +555,20 @@ export function AgentOrchestratorSurface({ language, setError }: {
         // Consume the UI request before any start. Reloading must never replay it.
         sessionStorage.setItem("coding-tools:ao:selection", selection.id);
         accepted = true;
-        setSelectedRunId(selection.runId); setView("team");
+        const current = await moduleCall("runs", { workspaceId });
+        if (disposed) return;
+        const currentRuns = Array.isArray(current.runs) ? current.runs as AoMission[] : [];
+        setMissions(currentRuns);
+        setSelectedRunId(selection.runId);
+        const selected = currentRuns.find(mission => mission.id === selection.runId);
+        if (selected) setChatTaskId(selected.project_id);
         if (selection.intent === "restart") {
           // A fresh run of the same task; the board's old run stays in history.
-          await moduleCall("upstream_hide");
           const result = await moduleCall("restart_run", { workspaceId, runId: selection.runId, ...executableArg() });
           if (typeof result.runId === "string") setSelectedRunId(result.runId);
           if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
           if (!disposed) { setAutoStatus(String(result.status || "running")); await loadMissions(workspaceId); }
         } else if (["start", "resume"].includes(selection.intent)) {
-          await moduleCall("upstream_hide");
           const result = await moduleCall(selection.intent === "resume" ? "control_run" : "start_run", { workspaceId, runId: selection.runId, ...executableArg(), ...(selection.intent === "resume" ? { action: "resume" } : {}) });
           if (!disposed) { setAutoStatus(String(result.status || "running")); await loadMissions(workspaceId); }
         }
@@ -616,7 +739,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setMissionTitle(""); setMissionPrompt("");
     await loadMissions(workspaceId);
     setSelectedRunId(id);
-    setView("team");
+    setView("overview");
   });
 
   const addWorker = () => void run("add-worker", async () => {
@@ -725,60 +848,73 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const finished = !selectedRun || selectedRun.nodes.every(node => node.state === "finished");
   const canStart = Boolean(selectedRun) && !selectedRun!.cancelled && !finished && autoStatus !== "running" && !busy;
   const statusText = selectedRun?.cancelled ? "stopped" : autoStatus;
-  const visibleNodes = selectedRun?.nodes.filter(node => showInactive || !["cancelled", "archived"].includes(node.state)) ?? [];
+  const visibleNodes = aoVisibleNodes(selectedRun?.nodes ?? [], showInactive);
+  const showingHistory = !showInactive && visibleNodes.length > 0 && visibleNodes.every(node => ["cancelled", "archived"].includes(node.state));
   const workers = selectedRun?.nodes.filter(node => node.role === "worker") ?? [];
   const chooseWorkspace = (id: string) => {
     setWorkspaceId(id);
     setChatTaskId(null);
     try { localStorage.setItem("coding-tools:ao:workspace", id); } catch { /* Selection still works for this session. */ }
   };
-  const chatTree = { workspaces, workspaceId, onWorkspace: chooseWorkspace };
+  const chatTree = {
+    workspaces, workspaceId, onWorkspace: chooseWorkspace, view,
+    labels: { chat: copy.canvas, overview: copy.overview },
+  };
+  // Every message names how its card runs; working cards also show runtime and current step.
+  const describeChatNode = useCallback((node: ChatNode) => node.route ? cardMeta(node as unknown as AoNode, harnesses) : "", [harnesses]);
+  const [chatActivity, setChatActivity] = useState<Record<string, ChatActivity>>({});
+  const workingRunIds = missions.filter((mission) => mission.project_id === chatTaskId
+    && mission.nodes.some((node) => node.state === "running" || node.state === "reserved")).map((mission) => mission.id).join(",");
+  useEffect(() => {
+    if (!workspaceId || !workingRunIds) return;
+    let live = true;
+    const poll = async () => {
+      const found: Record<string, ChatActivity> = {};
+      for (const runId of workingRunIds.split(",")) {
+        try {
+          const result = await moduleCall("activity", { workspaceId, runId }) as { nodes?: Record<string, ChatActivity> };
+          for (const [nodeId, value] of Object.entries(result.nodes ?? {})) found[`${runId}:${nodeId}`] = value;
+        } catch { /* the run may have just settled */ }
+      }
+      if (live) setChatActivity(found);
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 10_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [workspaceId, workingRunIds]);
 
   return (
     <section className="ao-workflow" aria-label={copy.title} lang={language}>
-      <nav className="ao-rail" aria-label={copy.title}>
-        {/* Chat and Structure pick the workspace in their list, as Codex does; the Board keeps this. */}
-        <label className="ao-rail-field" title={copy.workspace} hidden={view !== "board"}><span aria-hidden="true">📁</span>
-          <select className="ao-select" aria-label={copy.workspace} value={workspaceId} disabled={Boolean(busy)}
-            onChange={(event) => chooseWorkspace(event.target.value)}>
-            {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
-          </select>
-        </label>
-        <div className="ao-rail-field" title={copy.mission}><span aria-hidden="true">🎯</span>
-          <select className="ao-select" aria-label={copy.mission} value={selectedRunId} disabled={Boolean(busy) || !missions.length}
-            onChange={(event) => { setSelectedRunId(event.target.value); const picked = missions.find((mission) => mission.id === event.target.value); if (picked) setChatTaskId(picked.project_id); }}>
-            {!missions.length ? <option value="">{copy.noMissions}</option> : null}
-            {missions.map((mission) => <option key={mission.id} value={mission.id}>{taskName(mission.project_id)}</option>)}
-          </select>
-          <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission" || (view === "chat" && chatTaskId === "")}
-            onClick={() => { if (view === "chat") { setSheet(""); setChatTaskId(""); } else openSheet("mission"); }} />
+      <ChatListPane chats={chatList(missions, board?.tasks ?? [])} selectedTaskId={chatTaskId ?? ""}
+        onSelect={selectChat} onNew={() => { setChatTaskId(""); setView("chat"); setSheet(""); }} tree={chatTree} />
+      <div className="ao-main">
+      <div className="ao-dragstrip" aria-hidden="true" />
+      <header className="ao-workspace-head">
+        <div className="ao-workspace-title">
+          <strong>{workspaces.find(workspace => workspace.id === workspaceId)?.name || copy.title}</strong>
+          <span>{view === "overview" ? copy.overview : copy.canvas}{selectedRun && (view === "overview" || chatTaskId) ? ` · ${taskName(selectedRun.project_id)}` : ""}</span>
         </div>
-        <div className="ao-rail-nav" role="tablist" aria-label="View" aria-orientation="vertical">
-          <button type="button" role="tab" aria-selected={view === "chat"} onClick={() => { setSheet(""); setView("chat"); }}><span aria-hidden="true">💬</span>{copy.canvas}</button>
-          <button type="button" role="tab" aria-selected={view === "team"} onClick={() => setView("team")}><span aria-hidden="true">🧭</span>{copy.structure}</button>
-          <button type="button" role="tab" aria-selected={view === "board"} onClick={() => { setSheet(""); setView("board"); }}><span aria-hidden="true">📋</span>{copy.board}</button>
-        </div>
-        <span className="ao-rail-spacer" />
-        {selectedRun ? <span className={`ao-pill status-${statusText}`} role="status" title={advanceNotice || statusText}>
+        <span className="ao-head-spacer" />
+        {selectedRun && (view === "overview" || chatTaskId) ? <span className={`ao-pill status-${statusText}`} role="status" title={advanceNotice || statusText}>
           <span className="ao-pill-dot" aria-hidden="true" />{statusText}
           {advanceNotice && ["held", "paused"].includes(statusText) ? <span className="ao-pill-detail">{advanceNotice}</span> : null}
         </span> : null}
-        <div className="ao-rail-tools">
+        {selectedRun && (view === "overview" || chatTaskId) ? <div className="ao-head-tools" aria-label="Mission controls">
           {selectedRun?.paused
             ? <ToolButton icon="play" label={copy.resume} primary disabled={!canStart} onClick={() => controlRun("resume")} />
             : <ToolButton icon="play" label={copy.start} primary disabled={!canStart} onClick={startRun} />}
           <ToolButton icon="pause" label={copy.pause} disabled={!selectedRun || selectedRun.cancelled || selectedRun.paused || autoStatus !== "running" || Boolean(busy)} onClick={() => controlRun("pause")} />
           <ToolButton icon="stop" label={copy.stop} disabled={!selectedRun || selectedRun.cancelled || finished || Boolean(busy)} onClick={() => controlRun("stop")} />
           <ToolButton icon="refresh" label="Restart mission" disabled={!selectedRun || autoStatus === "running" || Boolean(busy)} onClick={restartRun} />
-        </div>
-        <div className="ao-rail-tools">
+        </div> : null}
+        <div className="ao-head-tools" aria-label="Project controls">
+          <ToolButton icon="plus" label={copy.newMission} disabled={!board || Boolean(busy)} pressed={sheet === "mission" || (view === "chat" && chatTaskId === "")}
+            onClick={() => { if (view === "chat") { setSheet(""); setChatTaskId(""); } else openSheet("mission"); }} />
+          <button type="button" className="button-secondary" disabled={Boolean(busy) || !workspaceId} onClick={openTeam}>Team</button>
           <ToolButton icon="refresh" label={copy.refresh} disabled={!workspaceId || Boolean(busy)} onClick={() => void run("refresh", async () => { modelCache.current.clear(); await Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]); })} />
           <ToolButton icon="gear" label={copy.settings} pressed={sheet === "settings"} onClick={() => openSheet("settings")} />
         </div>
-      </nav>
-
-      <div className="ao-main">
-      <div className="ao-dragstrip" aria-hidden="true" />
+      </header>
 
       <div className="ao-stage" ref={stageRef}>
         {sheet === "mission" ? <FloatingSheet stage={stageRef} title={`🚀 ${copy.newMission}`} onClose={closeSheet}>
@@ -846,7 +982,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               <button className="ao-set-save" type="submit" aria-label="Save worker limits" title="Save worker limits"
                 disabled={Boolean(busy) || !workspaceId || ![globalLimit, missionLimit].every(value => Number.isInteger(value) && value >= 1 && value <= 24)}>💾</button>
             </form>
-            <label className="ao-set-row ao-set-toggle" title="Show cancelled and archived cards on the mission tab">
+            <label className="ao-set-row ao-set-toggle" title="Show cancelled and archived cards alongside active cards. Historical missions always remain inspectable.">
               <span className="ao-set-icon" aria-hidden="true">👁️</span>
               <span>Cancelled cards</span>
               <input type="checkbox" role="switch" checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
@@ -870,30 +1006,25 @@ export function AgentOrchestratorSurface({ language, setError }: {
           !workspaceId && workspaceReady
             ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : <AgentOrchestratorChat
-                runs={missions} tasks={board?.tasks ?? []} selectedTaskId={chatTaskId ?? ""} onSelectTask={selectChat}
-                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} stop={stopChatRun}
+                runs={missions} tasks={board?.tasks ?? []} selectedTaskId={chatTaskId ?? ""}
+                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat}
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && autoStatus === "running")}
-                openStructure={(runId) => { setSelectedRunId(runId); setView("team"); }}
+                openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || undefined : undefined}
-                retryStart={retryChatStart} openTeam={openTeam} tree={chatTree}
+                retryStart={retryChatStart}
+                describeNode={describeChatNode} activity={chatActivity}
                 describeRoute={(nodeId, runId) => { const node = missions.find((mission) => mission.id === runId)?.nodes.find((entry) => entry.id === nodeId); return node ? describeNode(node as unknown as CanvasNode) : ""; }} />
         ) : null}
 
-        {view === "board" && workspaceReady && workspaceId && !sheet ? <div className="ao-workspace-board">
-          <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("team")} />
-        </div> : null}
-
-        <div hidden={view !== "team"} className="ao-team-view ao-structure-view">
-          <ChatListPane chats={chatList(missions, board?.tasks ?? [])} selectedTaskId={selectedRun?.project_id ?? ""}
-            onSelect={selectChat} tree={chatTree} />
-          <div className="ao-structure-canvas">
+        <OverviewSplit hidden={view !== "overview"} onResize={setOverviewResizing}>
+          <div className="ao-overview-graph" ref={graphRef}>
           {!workspaceId && workspaceReady ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : !selectedRun ? <div className="ao-empty-state"><p>{copy.noMissions}</p><button className="button-primary" type="button" disabled={!board} onClick={() => openSheet("mission")}>{copy.newMission}</button></div>
             : <AgentOrchestratorCanvas key={selectedRun.id}
               nodes={visibleNodes}
-              levels={aoLevels(selectedRun).map(level => level.filter(node => showInactive || !["cancelled", "archived"].includes(node.state)))}
+              levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
               selectedId={inspectedId} busy={Boolean(busy)} onSelect={inspectRole} onMove={moveCard} describe={describeNode}
               onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
@@ -914,12 +1045,21 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 disabled={selectedRun.cancelled || selectedRun.nodes.length >= 24 || selectedRun.nodes.some((node) => node.role === "reviewer" && node.state !== "pending") || Boolean(busy)}
                 onClick={() => { openSheet("worker"); setWorkerRouteDraft(workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL)); }}><Glyph name="worker" /><span>{copy.addWorker}</span></button>
             </AgentOrchestratorCanvas>}
-          {selectedRun && inspectedNode && draftTeam ? <AgentOrchestratorRoleEditor key={inspectedNode.id}
-            node={inspectedNode} mission={selectedRun} draft={draftTeam} harnesses={harnesses} loadModels={loadModels} busy={Boolean(busy)}
-            change={setDraftTeam} apply={applyTeam} discard={() => setDraftTeam(teamForMission(selectedRun, team))}
-            close={() => setInspectedId("")} taskName={taskName} /> : null}
+          {showingHistory ? <span className="ao-history-hint" role="status">{copy.history}</span> : null}
+          {view === "overview" && !sheet && selectedRun && inspectedNode && draftTeam ? <FloatingSheet key={inspectedNode.id} stage={graphRef}
+            title={`${inspectedNode.settings?.name || inspectedNode.role} · ${inspectedNode.state}`} anchor={roleAnchor}
+            className="ao-role-popup" closeLabel="Close role inspector" onClose={() => setInspectedId("")}>
+            <AgentOrchestratorRoleEditor node={inspectedNode} mission={selectedRun} draft={draftTeam} harnesses={harnesses} loadModels={loadModels} busy={Boolean(busy)}
+              change={setDraftTeam} apply={applyTeam} discard={() => setDraftTeam(teamForMission(selectedRun, team))} taskName={taskName} />
+          </FloatingSheet> : null}
           </div>
-        </div>
+          {/* Collapse native bounds during a drag without unmounting and reopening the board. */}
+          <div className="ao-workspace-board" style={{ display: overviewResizing ? "none" : undefined }}>
+            {view === "overview" && workspaceReady && workspaceId && !sheet
+              ? <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
+              : sheet ? <div className="ao-empty-state">Mission board resumes when this dialog closes.</div> : null}
+          </div>
+        </OverviewSplit>
       </div>
       </div>
     </section>

@@ -71,10 +71,16 @@ test("Provider Hub localizes the new management controls in Traditional Chinese"
   }
 });
 
-test("The application exposes one active Provider destination and imports the SaaS surface", () => {
+test("The application keeps Connections Providers without a duplicate More destination", () => {
+  const providerIntegration = fs.readFileSync(path.join(root, "src/providers/ProviderHubIntegration.tsx"), "utf8");
+  const main = fs.readFileSync(path.join(root, "src/main.tsx"), "utf8");
   const providerDestinations = app.match(/active=\{surface === "providers"\}/g) ?? [];
   const providerSurfaceMounts = app.match(/<ProviderCenterSurface\b/g) ?? [];
-  assert.equal(providerDestinations.length, 1);
+  assert.equal(providerDestinations.length, 0, "More must not expose the duplicate Provider Hub destination");
+  assert.match(main, /<ProviderHubIntegration>/);
+  assert.match(providerIntegration, /navigationGroup: "Connections",\s+navigationLabel: "Providers"/);
+  assert.match(providerIntegration, /className=\{`sidebar-item provider-sidebar-item/);
+  assert.match(providerIntegration, /onClick=\{\(\) => setOpen\(true\)\}/);
   assert.equal(providerSurfaceMounts.length, 1);
   assert.match(app, /ProviderHubSaasSurface/);
   assert.doesNotMatch(app, /from "\.\/features\/ProviderHubSurface"/);

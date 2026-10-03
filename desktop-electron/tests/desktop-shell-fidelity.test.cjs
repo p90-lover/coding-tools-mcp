@@ -17,6 +17,10 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(app, /SidebarGroup label=\{copy\.configuration\}/);
   assert.match(app, /SidebarGroup label=\{copy\.runtime\}/);
   assert.match(app, /<details className="sidebar-more"/);
+  const more = app.slice(app.indexOf('<details className="sidebar-more"'), app.indexOf("</details>", app.indexOf('<details className="sidebar-more"')));
+  assert.doesNotMatch(more, /navigateSurface\("providers"\)/, "the retired Provider Hub is not a More navigation item");
+  assert.match(read("src/providers/ProviderHubIntegration.tsx"), /provider-sidebar-item/, "Connections keeps its independent Providers entry");
+  assert.match(read("src/tokens.css"), /select option,[\s\S]*select optgroup\s*\{[^}]*background-color:[^}]*color:/, "unhovered native menu items keep explicit contrast");
   assert.match(app, /copy\.networkProxy/);
   assert.match(app, /setSidebarState\(\{ open, width \}\)/);
   assert.match(app, /className="sidebar-resize"/);
