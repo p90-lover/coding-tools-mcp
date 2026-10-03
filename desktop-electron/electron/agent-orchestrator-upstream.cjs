@@ -323,6 +323,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       if (!workspaceBoard || !["open", "start", "resume", "restart"].includes(args.intent)) throw new Error("Invalid mission navigation request");
       const board = await workspaceBoard.readWorkspace(args.workspaceId, args.runId);
       if (!board.runs.some(run => run.id === args.runId)) throw new Error("Mission is outside this workspace");
+      // The board owns keyboard focus; return it before the main controller requests consent.
+      const parent = getWindow();
+      if (args.intent !== "open" && attached && view && !view.webContents.isDestroyed()
+        && view.webContents.isFocused() && parent && !parent.isDestroyed()
+        && parent.isVisible() && !parent.isMinimized() && parent.isFocused()) {
+        parent.webContents.focus();
+      }
       missionSelection = { id: crypto.randomUUID(), workspaceId: board.workspaceId, runId: args.runId, intent: args.intent };
       return { ok: true };
     }

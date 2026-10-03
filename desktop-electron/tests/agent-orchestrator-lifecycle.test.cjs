@@ -39,6 +39,9 @@ function createHarness(hooks = {}) {
   const parent = {
     isDestroyed: () => false,
     isFocused: () => true,
+    isVisible: () => true,
+    isMinimized: () => false,
+    webContents: { focus: () => hooks.focusMain?.() },
     getContentBounds: () => ({ width: 1000, height: 800 }),
     contentView: {
       children: [],
@@ -181,6 +184,9 @@ function createHarness(hooks = {}) {
         child.exit(0);
         return { ok: true };
       }
+      if (endpoint.pathname === "/api/v1/projects") {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ projects: [] }) };
+      }
       assert.equal(endpoint.pathname, "/readyz");
       await hooks.readyFetch?.(child);
       return { ok: true, json: async () => { await hooks.readyBody?.(child); return { pid: child.pid, status: "ready" }; } };
@@ -188,6 +194,7 @@ function createHarness(hooks = {}) {
   }, { filename: sourcePath });
   const controller = loadedModule.exports.createAgentOrchestratorUpstream({
     resourceRoot, dataRoot, WebContentsView: FakeView, getWindow: () => parent,
+    getWorkspaces: hooks.getWorkspaces, missionCall: hooks.missionCall,
     confirm: async (request) => hooks.confirm?.(request) ?? true,
     shell: { openExternal: async (url) => { opened.push(url); } },
     openAuth: hooks.openAuth,
@@ -468,4 +475,69 @@ test("an AO terminal takes keyboard focus when it opens and whenever it is click
     view.webContents.emit("before-mouse-event", {}, { type: "mouseDown", x: 5, y: 5, button: "left" });
     assert.equal(view.focusCalls, 2, "clicking the AO view gives it keyboard focus");
   } finally { await controller.stop(); }
+});
+
+test("mission launch intents hand focus back to the main controller before publishing", async () => {
+  let mainFocused = false;
+  let childFocused = true;
+  let selectionAtFocus;
+  const harness = createHarness({
+    getWorkspaces: async () => [{ id: "qa", path: path.resolve(__dirname, "../..") }],
+    missionCall: async operation => operation === "board"
+      ? { ok: true, revision: 1, tasks: [] } : { ok: true, runs: [{ id: "mission-qa" }] },
+    focusMain: () => {
+      selectionAtFocus = harness.controller.snapshot().missionSelection;
+      mainFocused = true;
+      childFocused = false;
+    },
+  });
+  try {
+    await harness.controller.show(firstBounds);
+    const view = harness.views[0];
+    view.webContents.isFocused = () => childFocused;
+    for (const intent of ["start", "resume", "restart"]) {
+      mainFocused = false;
+      childFocused = true;
+      const previous = harness.controller.snapshot().missionSelection;
+      await harness.gateways[0].options.desktopRequest("mission_open", { workspaceId: "qa", runId: "mission-qa", intent });
+      assert.equal(mainFocused, true, `${intent} gives the guarded main controller keyboard focus`);
+      assert.equal(childFocused, false);
+      assert.equal(selectionAtFocus, previous, "focus is transferred before a launch intent becomes visible to the poller");
+      assert.equal(harness.controller.snapshot().missionSelection.intent, intent);
+    }
+  } finally { await harness.controller.stop(); }
+});
+
+test("mission navigation never steals focus from background or unavailable views", async () => {
+  let mainFocused = false;
+  let childFocused = true;
+  const harness = createHarness({
+    getWorkspaces: async () => [{ id: "qa", path: path.resolve(__dirname, "../..") }],
+    missionCall: async operation => operation === "board"
+      ? { ok: true, revision: 1, tasks: [] } : { ok: true, runs: [{ id: "mission-qa" }] },
+    focusMain: () => { mainFocused = true; childFocused = false; },
+  });
+  try {
+    await harness.controller.show(firstBounds);
+    const view = harness.views[0];
+    for (const state of [
+      { intent: "open" }, { focused: false }, { visible: false },
+      { minimized: true }, { destroyed: true }, { childFocused: false },
+      { childDestroyed: true }, { detached: true },
+    ]) {
+      if (state.detached) harness.controller.hide();
+      mainFocused = false;
+      childFocused = state.childFocused !== false;
+      harness.parent.isFocused = () => state.focused !== false;
+      harness.parent.isVisible = () => state.visible !== false;
+      harness.parent.isMinimized = () => state.minimized === true;
+      harness.parent.isDestroyed = () => state.destroyed === true;
+      view.webContents.isFocused = () => childFocused;
+      view.webContents.isDestroyed = () => state.childDestroyed === true;
+      await harness.gateways[0].options.desktopRequest("mission_open", {
+        workspaceId: "qa", runId: "mission-qa", intent: state.intent || "start",
+      });
+      assert.equal(mainFocused, false, JSON.stringify(state));
+    }
+  } finally { await harness.controller.stop(); }
 });
