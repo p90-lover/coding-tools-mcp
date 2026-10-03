@@ -140,6 +140,7 @@ function createChatGptDesktopHost({
   let queue = Promise.resolve();
   let placementTimer = null;
   let placementRunning = false;
+  let shuttingDown = false;
   const syncs = new Map(); // slotId -> { watchers, timer, debounce }
   let autoStartQueued = false;
   const autoStartBackoff = new Map(); // slotId -> { until, delay }
@@ -295,7 +296,7 @@ function createChatGptDesktopHost({
       supported: platform === "win32",
       installed: Boolean(packageInfo),
       version: packageInfo?.version ?? null,
-      running: Boolean(activeInstance()),
+      running: Boolean(activeInstance()?.hwnd),
       activeSlotId: state.active,
       runningSlotId: activeInstance()?.slotId ?? null,
       runningSlotIds: [...instances.keys()],
@@ -464,12 +465,15 @@ function createChatGptDesktopHost({
   // its window and adopts it, hidden.
   async function waitForWindow(slotId, timeoutMs = windowWaitMs) {
     const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+    while (Date.now() < deadline && !shuttingDown) {
       const found = await findInstance(slotId);
+      if (shuttingDown) break;
       if (found?.hwnd) {
         await helper.call("hide", { hwnd: found.hwnd }).catch(() => {});
         return found;
       }
+      // Keep process-only starts managed even if this caller's wait expires.
+      if (found?.pid && !instances.has(slotId)) await adopt(found);
       await sleep(750);
     }
     throw new Error(`ChatGPT did not open a window within ${Math.max(1, Math.round(timeoutMs / 1000))} seconds`);
@@ -514,9 +518,8 @@ function createChatGptDesktopHost({
       env.push(["HTTPS_PROXY", proxy.url], ["HTTP_PROXY", proxy.url], ["ALL_PROXY", proxy.url], ["NO_PROXY", noProxy]);
       switches = ` --proxy-server="${proxy.url}"${proxy.bypass.length ? ` --proxy-bypass-list="${proxy.bypass.join(";")}"` : ""}`;
     }
-    // Background starts open minimized (never taking focus) and are hidden as soon as they exist.
-    const minimized = background ? " /min" : "";
-    const argumentsText = `/d /c ${env.map(([key, value]) => `set "${key}=${value}"&& `).join("")}start ""${minimized} "${pkg.exe}"${switches}`;
+    // Every start stays minimized until its window is adopted on the current desktop pane.
+    const argumentsText = `/d /c ${env.map(([key, value]) => `set "${key}=${value}"&& `).join("")}start "" /min "${pkg.exe}"${switches}`;
     await helper.call("launch", { family: pkg.family, command, arguments: argumentsText }, 45_000);
     logger?.info?.("chatgpt_desktop.instance_launched", {
       slotId, signedIn: fs.existsSync(paths.auth), proxied: Boolean(proxy), background,
@@ -558,13 +561,16 @@ function createChatGptDesktopHost({
   }
 
   async function adopt(found) {
+    if (shuttingDown) return;
     const previous = instances.get(found.slotId);
-    instances.set(found.slotId, {
+    const current = {
       ...found,
       startedAt: previous?.startedAt ?? Date.now(),
       lastActiveAt: found.slotId === state.active ? Date.now() : previous?.lastActiveAt ?? 0,
-    });
-    if (owner) await helper.call("dock", { hwnd: found.hwnd, owner });
+    };
+    instances.set(found.slotId, current);
+    if (owner && found.hwnd) await helper.call("dock", { hwnd: found.hwnd, owner });
+    if (shuttingDown || instances.get(found.slotId) !== current) return;
     startSync(found.slotId);
     startPlacementLoop();
     await placeNow({ hideOthers: true });
@@ -606,14 +612,16 @@ function createChatGptDesktopHost({
       // The docked window every tick; background instances only every few seconds.
       const everyone = placementTicks++ % BACKGROUND_CHECK_EVERY === 0;
       for (const entry of [...instances.values()]) {
-        if (!everyone && entry.slotId !== state.active) continue;
-        if (await helper.call("alive", { hwnd: entry.hwnd })) continue;
+        if (!everyone && entry.slotId !== state.active && entry.hwnd) continue;
+        if (entry.hwnd && await helper.call("alive", { hwnd: entry.hwnd })) continue;
         // The app can replace its window (sign-in, crash recovery); follow it or notice it exited.
         const again = await findInstance(entry.slotId);
+        if (shuttingDown || instances.get(entry.slotId) !== entry) continue;
         if (again?.hwnd) {
-          instances.set(entry.slotId, { ...again, startedAt: entry.startedAt, lastActiveAt: entry.lastActiveAt });
-          if (owner) await helper.call("dock", { hwnd: again.hwnd, owner });
-          if (entry.slotId !== state.active) await helper.call("hide", { hwnd: again.hwnd });
+          await adopt(again);
+          emit();
+        } else if (!entry.hwnd && (again?.pid || await helper.call("running", { pid: entry.pid }))) {
+          continue;
         } else {
           instances.delete(entry.slotId);
           finalSync(entry.slotId);
@@ -675,7 +683,7 @@ function createChatGptDesktopHost({
     // Hide whatever was docked right away, even if the new account still has to start.
     await placeNow({ hideOthers: true });
     const ready = instances.get(slotId);
-    if (ready) {
+    if (ready?.hwnd) {
       ready.lastActiveAt = Date.now();
       await placeNow();
       return;
@@ -821,6 +829,7 @@ function createChatGptDesktopHost({
       void placeNow().catch(() => {});
     },
     async shutdown() {
+      shuttingDown = true;
       stopPlacementLoop();
       stopWatchingAccounts();
       try { await stopAllInstances(); } finally { stopAllSync(); helper.dispose(); }

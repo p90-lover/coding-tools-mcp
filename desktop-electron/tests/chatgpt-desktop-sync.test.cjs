@@ -505,3 +505,150 @@ test("copies left running by an earlier Coding Tools are closed on start, except
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("foreground startup stays minimized when the user leaves before window discovery", async () => {
+  const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-startup-"));
+  const world = fakeDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
+  const call = world.helper.call;
+  let launchArguments;
+  let releaseDiscovery;
+  const discovery = new Promise((resolve) => { releaseDiscovery = resolve; });
+  world.helper.call = async (op, input = {}) => {
+    if (op === "launch") {
+      launchArguments = input.arguments;
+      await call(op, input);
+      // Model start /min: a newly created window does not cover the host while discovery waits.
+      for (const window of world.windows.values()) window.visible = !/start "" \/min /.test(launchArguments);
+      return null;
+    }
+    if (op === "find" && launchArguments) await discovery;
+    return call(op, input);
+  };
+  const host = createChatGptDesktopHost({
+    dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper,
+    platform: "win32", getProxyRoute: () => null, homeDir: path.join(root, "home"), autoStart: false,
+  });
+  let opening;
+  try {
+    await host.initialize();
+    host.setOwner(1);
+    host.setSurfaceActive(true);
+    host.setBounds({ x: 0, y: 0, width: 800, height: 600 });
+    opening = host.open(cpaSlotId("acct-a", "a@x.com"));
+    assert.ok(await until(() => Boolean(launchArguments)));
+    host.setSurfaceActive(false);
+    assert.match(launchArguments, /start "" \/min /, "foreground launches must also start minimized");
+    assert.equal(world.visibleMarkers().length, 0, "loading must not cover the page the user switched to");
+    releaseDiscovery();
+    await opening;
+    assert.equal(world.visibleMarkers().length, 0, "finishing startup must not show an inactive pane");
+    host.setSurfaceActive(true);
+    assert.ok(await until(() => world.visibleMarkers().length === 1), "returning to the desktop pane shows it");
+  } finally {
+    releaseDiscovery();
+    await opening?.catch(() => {});
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("timed-out startup still adopts a late window hidden on another page", async () => {
+  const { createChatGptDesktopHost, cpaSlotId, slotPaths } = require("../electron/chatgpt-desktop.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-late-window-"));
+  const world = slowDesktopWorld(root);
+  const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
+  const dataRoot = path.join(root, "data");
+  const slotId = cpaSlotId("acct-a", "a@x.com");
+  const call = world.helper.call;
+  let revealed = false;
+  world.helper.call = async (op, input = {}) => {
+    if (op === "find" && revealed) return { pid: 5000, hwnd: 900 };
+    return call(op, input);
+  };
+  const host = createChatGptDesktopHost({
+    dataRoot, resolveCpaAuthDir: () => authDir, helper: world.helper, platform: "win32",
+    getProxyRoute: () => null, homeDir: path.join(root, "home"), autoStart: false, windowWaitMs: 50,
+  });
+  try {
+    await host.initialize();
+    host.setOwner(1);
+    host.setSurfaceActive(true);
+    host.setBounds({ x: 0, y: 0, width: 800, height: 600 });
+    const opening = assert.rejects(host.open(slotId), /did not open a window/);
+    assert.ok(await until(() => world.launches() === 1));
+    host.setSurfaceActive(false);
+    await opening;
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(host.status().running, false, "a process without a window must not make the pane ready");
+    // The app reveals its window after the open operation already timed out.
+    world.windows.set(900, { pid: 5000, marker: slotPaths(dataRoot, slotId).roaming, visible: true });
+    revealed = true;
+    assert.ok(await until(() => world.visibleMarkers().length === 0 && host.status().running, 2_000),
+      "the existing placement loop must adopt and hide the late window");
+    assert.deepEqual(host.status().runningSlotIds, [slotId]);
+    assert.equal(world.launches(), 1, "recovering the late window must not launch another copy");
+  } finally {
+    await host.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native docking leaves a restored startup window hidden", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/chatgpt-desktop-win32.cjs"), "utf8");
+  const dock = source.slice(source.indexOf("public static void Dock("), source.indexOf("public static void Undock("));
+  const place = source.slice(source.indexOf("public static bool Place("), source.indexOf("public static void Hide("));
+  assert.ok(source.includes("const int SW_SHOWNOACTIVATE = 4;"), "restore must use the non-activating Win32 flag");
+  const restore = dock.indexOf("ShowWindow(h, SW_SHOWNOACTIVATE)");
+  const hide = dock.indexOf("ShowWindow(h, 0)");
+  assert.ok(restore >= 0 && hide >= 0, "non-activating restore and hide must exist in Dock");
+  assert.ok(hide > restore, "hide must follow restore so docking never finishes with a visible window");
+  assert.match(place, /ShowWindow\(handle, SW_SHOWNOACTIVATE\)/);
+  assert.doesNotMatch(dock + place, /ShowWindow\(\w+, 9\)/, "restore must not activate another pane");
+});
+
+for (const action of ["stop", "shutdown"]) {
+  test("in-flight startup discovery cannot resurrect an instance after " + action, async () => {
+    const { createChatGptDesktopHost, cpaSlotId } = require("../electron/chatgpt-desktop.cjs");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatgpt-desktop-stop-startup-"));
+    const world = slowDesktopWorld(root);
+    const authDir = cpaFolder(root, [["a@x.com", "acct-a"]]);
+    const call = world.helper.call;
+    let delayDiscovery = false;
+    let discoveryStarted = false;
+    let releaseDiscovery;
+    const discovery = new Promise((resolve) => { releaseDiscovery = resolve; });
+    world.helper.call = async (op, input = {}) => {
+      if (op === "find" && delayDiscovery && !discoveryStarted) {
+        discoveryStarted = true;
+        return discovery;
+      }
+      return call(op, input);
+    };
+    const host = createChatGptDesktopHost({
+      dataRoot: path.join(root, "data"), resolveCpaAuthDir: () => authDir, helper: world.helper,
+      platform: "win32", getProxyRoute: () => null, homeDir: path.join(root, "home"),
+      autoStart: false, windowWaitMs: 50,
+    });
+    try {
+      await host.initialize();
+      host.setOwner(1);
+      await assert.rejects(host.open(cpaSlotId("acct-a", "a@x.com")), /did not open a window/);
+      delayDiscovery = true;
+      assert.ok(await until(() => discoveryStarted), "the placement loop must have a pending discovery");
+      await host[action]();
+      const docks = world.log.filter((op) => op === "dock").length;
+      // A stale result arrives from a discovery that began before the instance was stopped.
+      releaseDiscovery({ pid: 5000, hwnd: 900 });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(world.log.filter((op) => op === "dock").length, docks, "stopped instances must not be docked");
+      assert.equal(host.status().running, false);
+      assert.deepEqual(host.status().runningSlotIds, []);
+    } finally {
+      releaseDiscovery({ pid: 5000, hwnd: 0 });
+      await host.shutdown();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
