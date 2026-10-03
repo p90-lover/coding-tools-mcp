@@ -745,7 +745,7 @@ test("WebGPT is offered only on Native Codex; AO harnesses get every other CPA m
   assert.ok((await workflow.call("models", { harness: "codex-native" })).models.includes("chatgpt-web/high"));
 });
 
-test("CPA models go only to agents the gateway can reach, and never ones agy would rewrite", async () => {
+test("CPA models go only to agents that can use them through the gateway", async () => {
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: async () => { throw new Error("no headless call expected"); },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k".repeat(40) }),
@@ -755,8 +755,8 @@ test("CPA models go only to agents the gateway can reach, and never ones agy wou
   });
   // Aider has no gateway launch support: its own models only.
   assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
-  // agy would ask CPA for "gemini-3.8-flash" (the level becomes a thinking setting), so that one is left out.
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models, ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.1-pro-low"]);
+  // agy's gateway mode sends no tools for CPA's model names, so it keeps its own models.
+  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models, ["own-model"]);
   assert.deepEqual((await workflow.call("models", { harness: "ao:claude-code" })).models,
     ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
 });
