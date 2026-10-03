@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { AoNode } from "./AgentOrchestratorSurface";
 import {
   DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, emptyRoleSettings, workerRoute,
-  type AoHarness, type AoTeam, type RoleSettings,
+  type AoHarness, type AoModelLoader, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 
 export const ROLE_TITLE: Record<AoNode["role"], string> = {
@@ -30,7 +30,7 @@ const MAX_SUB_REVIEWERS = 8;
 export function AgentOrchestratorTeam({ team, harnesses, loadModels, busy, save, close }: {
   team: AoTeam;
   harnesses: AoHarness[];
-  loadModels: (harness: string) => Promise<string[]>;
+  loadModels: AoModelLoader;
   busy: boolean;
   save: (team: AoTeam) => void;
   close: () => void;

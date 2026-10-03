@@ -5,6 +5,13 @@ export type RoleSettings = { name: string; specialty: string; instructions: stri
 export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; nodes: AoNode[] };
 export type AoHarness = { id: string; label: string; runnable: boolean; installed: boolean; authStatus?: string; chat?: boolean };
 export type AoRoute = AoNode["route"];
+export type AoModelCapabilities = {
+  efforts?: string[];
+  contextWindow?: { min: number; max?: number; kind?: "context" | "compaction" };
+  contextLimit?: number; effortReason?: string; contextReason?: string;
+};
+export type AoModelCatalog = { models: string[]; capabilities?: Record<string, AoModelCapabilities> };
+export type AoModelLoader = (harness: string) => Promise<string[] | AoModelCatalog>;
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
 
 export const NATIVE_HARNESS = "codex-native";
@@ -35,9 +42,9 @@ export function workerRoute(harness: string, model: string, permission: NativePe
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
 export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh"] as const;
-/** Effort applies on Native Codex and to an AO agent's own models; AO skips it for gateway models. */
+/** Legacy Native-to-agent carry-over policy; AO controls use the selected model capabilities. */
 export const effortApplies = (route: AoRoute) => !(route.harness_id.startsWith("ao:") && route.model.startsWith("cpa/"));
-/** Only Native Codex has a context-window setting. */
+/** Legacy carry-over policy when entering or leaving Native Codex. */
 export const contextApplies = (route: AoRoute) => route.harness_id === NATIVE_HARNESS;
 
 /** Carry a card's effort and context window over to its new route where they still apply. */
@@ -45,8 +52,9 @@ export function withTuning(next: AoRoute, previous: AoRoute): AoRoute {
   const route: AoRoute = { ...next };
   delete route.effort;
   delete route.context_window;
-  if (previous.effort && effortApplies(route)) route.effort = previous.effort;
-  if (previous.context_window && contextApplies(route)) route.context_window = previous.context_window;
+  const betweenAgents = next.harness_id.startsWith("ao:") && previous.harness_id.startsWith("ao:");
+  if (previous.effort && (betweenAgents || effortApplies(route))) route.effort = previous.effort;
+  if (previous.context_window && (betweenAgents || contextApplies(route))) route.context_window = previous.context_window;
   return route;
 }
 
@@ -71,8 +79,8 @@ export function cardMeta(node: Pick<AoNode, "role" | "settings" | "route">, harn
   return [
     harnessLabel(route.harness_id, harnesses),
     modelLabel(route.model),
-    route.effort && effortApplies(route) ? `effort ${route.effort}` : "",
-    route.context_window && contextApplies(route) ? `${tokensLabel(route.context_window)} context` : "",
+    route.effort && (effortApplies(route) || route.harness_id.startsWith("ao:")) ? `effort ${route.effort}` : "",
+    route.context_window && (contextApplies(route) || route.harness_id.startsWith("ao:")) ? `${tokensLabel(route.context_window)} context` : "",
     roleLabel(node),
   ].filter(Boolean).join(" · ");
 }
@@ -129,24 +137,34 @@ export function defaultTeam(workspaceId: string, worker: AoRoute): AoTeam {
 /** Harness + model pickers shared by the inspector, New mission and Add worker sheets. */
 export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false }: {
   route: AoRoute; harnesses: AoHarness[]; disabled?: boolean;
-  loadModels: (harness: string) => Promise<string[]>;
+  loadModels: AoModelLoader;
   onChange: (route: AoRoute) => void;
 }) {
   const [models, setModels] = useState<string[] | null>(null);
+  const [capabilities, setCapabilities] = useState<{ harness: string; models: Record<string, AoModelCapabilities> } | null>(null);
   const [notice, setNotice] = useState("");
   const harness = route.harness_id;
   useEffect(() => {
     let live = true;
-    setModels(null); setNotice("");
+    setModels(null); setCapabilities(null); setNotice("");
     // Every harness also lists the WebGPT models; choosing one moves the card to Native Codex,
     // the only harness WebGPT runs on (workerRoute).
     const web = harness === NATIVE_HARNESS ? Promise.resolve([])
-      : loadModels(NATIVE_HARNESS).then(items => items.filter(isWebModel), () => []);
-    Promise.all([loadModels(harness), web]).then(([items, webItems]) => { if (live) setModels([...new Set([...items, ...webItems])]); })
+      : loadModels(NATIVE_HARNESS).then(items => (Array.isArray(items) ? items : items.models).filter(isWebModel), () => []);
+    Promise.all([loadModels(harness), web]).then(([items, webItems]) => {
+      if (!live) return;
+      const catalog = Array.isArray(items) ? { models: items } : items;
+      setModels([...new Set([...catalog.models, ...webItems])]);
+      setCapabilities({ harness, models: catalog.capabilities ?? {} });
+    })
       .catch(cause => { if (live) { setModels([]); setNotice(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
   }, [harness, loadModels]);
   const known = harnesses.some(item => item.id === harness);
+  const native = harness === NATIVE_HARNESS;
+  const capability = capabilities?.harness === harness ? capabilities.models[route.model] : undefined;
+  const efforts = native ? [...EFFORTS] : capability?.efforts;
+  const context = native ? { min: 4096, max: 2000000 } : capability?.contextWindow;
   return <>
     <label>Harness<select value={harness} disabled={disabled} onChange={event => {
       // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
@@ -174,21 +192,29 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       <option value=":read-only">Read only</option>
     </select></label> : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here.</p>}
     <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
-    <label title={effortApplies(route) ? "Reasoning effort for this card" : "AO skips effort for CPA gateway models"}>Reasoning effort
-      <select value={effortApplies(route) ? route.effort ?? "" : ""} disabled={disabled || !effortApplies(route)}
+    <label title={native ? "Reasoning effort for this card" : capability?.effortReason || (efforts ? efforts.length ? "Reasoning efforts advertised for this model" : "This model does not support an effort override" : "Model capabilities have not been verified")}>Reasoning effort
+      <select value={route.effort ?? ""} disabled={disabled || !efforts?.length} aria-invalid={!native && Boolean(route.effort) && Boolean(efforts) && !efforts?.includes(route.effort!)}
         onChange={event => { const next = { ...route }; if (event.target.value) next.effort = event.target.value; else delete next.effort; onChange(next); }}>
-        <option value="">{effortApplies(route) ? "Model default" : "Not applicable (gateway model)"}</option>
-        {EFFORTS.map(effort => <option key={effort} value={effort}>{effort}</option>)}
+        <option value="">{native ? "Model default" : efforts ? efforts.length ? "Model default" : "Not supported" : "Capabilities unverified"}</option>
+        {!native && route.effort && !efforts?.includes(route.effort) ? <option value={route.effort} disabled>{route.effort} (saved, unverified or unsupported)</option> : null}
+        {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select></label>
-    <label title={contextApplies(route) ? "Context window in tokens (4,096 to 2,000,000)" : "AO harnesses have no context-window setting"}>Context window
-      <input type="number" min={4096} max={2000000} step={1} inputMode="numeric" disabled={disabled || !contextApplies(route)}
-        placeholder={contextApplies(route) ? "Model default" : "Not applicable on AO harnesses"}
-        value={contextApplies(route) ? route.context_window ?? "" : ""}
+    <label title={native ? "Context window in tokens (4,096 to 2,000,000)" : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "No verified client context override")}>Context window
+      <input type="number" min={context?.min} max={context?.max} step={1} inputMode="numeric" disabled={disabled || !context}
+        placeholder={native ? "Model default" : context ? context.kind === "compaction" ? "Client compaction default" : "Client default" : "No verified override"}
+        value={route.context_window ?? ""} aria-invalid={!native && Boolean(context) && route.context_window !== undefined && (route.context_window < context!.min || context!.max !== undefined && route.context_window > context!.max)}
         onChange={event => { const next = { ...route }; const tokens = Math.round(Number(event.target.value)); if (event.target.value && Number.isFinite(tokens)) next.context_window = tokens; else delete next.context_window; onChange(next); }} /></label>
-    <p className="ao-hint ao-wide">{contextApplies(route)
+    {!native && (route.effort !== undefined || route.context_window !== undefined) ? <button type="button" className="button-secondary ao-wide"
+      disabled={disabled} title="Clear requested effort and client context budget" onClick={() => {
+        const next = { ...route }; delete next.effort; delete next.context_window; onChange(next);
+      }}>Model defaults</button> : null}
+    <p className="ao-hint ao-wide">{native
       ? "Native harness context budget: 4,096–2,000,000 tokens. Blank uses the model default, not a claimed model limit."
-      : effortApplies(route) ? "This harness accepts reasoning effort; context window is managed by the harness."
-      : "CPA gateway models manage their own effort and context window; these overrides are not sent."}</p>
+      : [capability?.effortReason || (!efforts ? "Effort capabilities are unverified." : !efforts.length ? "This model has no effort override." : ""),
+          capability?.contextReason || (!context ? "This client has no verified context override." : context.kind === "compaction"
+            ? "Context sets the client compaction threshold, not a thinking budget or output limit."
+            : "Context sets the client budget, not a thinking budget or a larger provider limit."),
+          capability?.contextLimit ? `Model context limit: ${tokensLabel(capability.contextLimit)} tokens.` : ""].filter(Boolean).join(" ")}</p>
     </fieldset>
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
   </>;
@@ -196,7 +222,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
 
 export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy, change, apply, discard, taskName }: {
   node: AoNode; mission: AoMission; draft: AoTeam; harnesses: AoHarness[]; busy: boolean;
-  loadModels: (harness: string) => Promise<string[]>;
+  loadModels: AoModelLoader;
   change: (team: AoTeam) => void; apply: () => void; discard: () => void; taskName: (id: string) => string;
 }) {
   const [tab, setTab] = useState<"settings" | "output" | "history">("settings");
