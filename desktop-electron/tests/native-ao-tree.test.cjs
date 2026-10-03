@@ -299,6 +299,41 @@ test("shift-click links or unlinks relative to the active card under free links"
   assert.equal(decide(linked, "a", "a"), null);
 });
 
+test("overview resize keeps the native mission board mounted while collapsing its hit-test area", () => {
+  const file = ts.createSourceFile("AgentOrchestratorSurface.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let board;
+  const visit = item => {
+    if (ts.isJsxElement(item) && item.openingElement.attributes.properties.some(attribute =>
+      ts.isJsxAttribute(attribute) && attribute.name.getText(file) === "className"
+      && attribute.initializer && ts.isStringLiteral(attribute.initializer) && attribute.initializer.text === "ao-workspace-board")) board = item;
+    ts.forEachChild(item, visit);
+  };
+  visit(file);
+  assert.ok(board, "exercise the actual overview board render branch");
+  const nativeBoard = () => {};
+  const jsx = (type, props, key) => ({ type, props, key });
+  const rendered = {};
+  vm.runInNewContext(ts.transpileModule(`export function renderBoard({ overviewResizing, view = "overview", sheet = "", workspaceReady = true, workspaceId = "workspace" }) {
+    return (${board.getText(file)});
+  }`, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
+    exports: rendered, AgentOrchestratorOriginalSurface: nativeBoard, setView: () => {},
+    require: () => ({ jsx, jsxs: jsx }),
+  });
+  const before = rendered.renderBoard({ overviewResizing: false });
+  const during = rendered.renderBoard({ overviewResizing: true });
+  const after = rendered.renderBoard({ overviewResizing: false });
+  assert.equal(before.props.children.type, nativeBoard);
+  assert.equal(during.props.children?.type, nativeBoard, "dragging must not unmount and reopen the mission board");
+  assert.equal(after.props.children.type, before.props.children.type);
+  assert.equal(after.props.children.key, before.props.children.key, "release keeps the same React identity");
+  assert.equal(during.props.style?.display, "none", "the mounted viewport collapses so its ResizeObserver suppresses native pointer interception");
+  assert.notEqual(after.props.style?.display, "none", "release restores the board's measurable bounds");
+  assert.equal(rendered.renderBoard({ overviewResizing: true, view: "chat" }).props.children, null);
+  assert.equal(rendered.renderBoard({ overviewResizing: false, workspaceReady: false }).props.children, null);
+  assert.equal(rendered.renderBoard({ overviewResizing: false, workspaceId: "" }).props.children, null);
+  assert.equal(rendered.renderBoard({ overviewResizing: false, sheet: "settings" }).props.children.props.className, "ao-empty-state");
+});
+
 function mountResizableCanvas() {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
   const callbacks = [], observers = [], frames = new Map(), handlers = new Map();

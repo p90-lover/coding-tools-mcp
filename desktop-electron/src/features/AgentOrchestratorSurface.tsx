@@ -1053,8 +1053,9 @@ export function AgentOrchestratorSurface({ language, setError }: {
               change={setDraftTeam} apply={applyTeam} discard={() => setDraftTeam(teamForMission(selectedRun, team))} taskName={taskName} />
           </FloatingSheet> : null}
           </div>
-          <div className="ao-workspace-board">
-            {view === "overview" && workspaceReady && workspaceId && !sheet && !overviewResizing
+          {/* Collapse native bounds during a drag without unmounting and reopening the board. */}
+          <div className="ao-workspace-board" style={{ display: overviewResizing ? "none" : undefined }}>
+            {view === "overview" && workspaceReady && workspaceId && !sheet
               ? <AgentOrchestratorOriginalSurface projectBoard hostbar={false} workspaceId={workspaceId} openMissions={() => setView("overview")} />
               : sheet ? <div className="ao-empty-state">Mission board resumes when this dialog closes.</div> : null}
           </div>
