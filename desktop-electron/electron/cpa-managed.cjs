@@ -131,6 +131,7 @@ function yamlString(value) {
 }
 
 const COMMANDCODE_PLUGINS = [
+  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.1.dll", sha256: "7cc601330e14bfcbd1d64bef869dffe85b39baa72d608395c89745ed6192f6e7" },
   { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.1.dll", sha256: "ffb690666d979bbeb529ce076291b808aac39b9091ef62f28b5c8e37285cb70c" },
   { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.1.dll", sha256: "b9ab54aa73d1c9fd4e9baaaa4960643aa81f2caecb2f69e5463fc3a62f079afc" },
   // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
@@ -182,6 +183,10 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   fs.mkdirSync(pluginDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(authDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(logDirectory, { recursive: true, mode: 0o700 });
+  const clineAuth = path.join(authDirectory, "cline-pass-switcher.json");
+  if (!fs.existsSync(clineAuth)) {
+    writePrivateFileAtomic(clineAuth, `${JSON.stringify({ type: "cline", switcher: true, label: "Cline Pass" })}\n`);
+  }
   if (process.platform !== "win32") {
     fs.chmodSync(authDirectory, 0o700);
     fs.chmodSync(logDirectory, 0o700);
@@ -212,6 +217,11 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     `      data_dir: ${yamlString(path.join(state, "cpa-helper-data"))}`,
     "      keeper_enabled: false",
     // CPA leaves a plugin without a configs entry unregistered.
+    "    cline-pass-switcher:",
+    "      enabled: true",
+    `      runtime-executable: ${yamlString(process.execPath)}`,
+    `      data-dir: ${yamlString(path.join(state, "cline-pass-switcher-data"))}`,
+    ...(outboundProxyUrl ? [`      proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
     "    grok-login-provider:",
     "      enabled: true",
     "debug: false",
