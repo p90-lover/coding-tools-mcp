@@ -148,3 +148,67 @@ test("a card that is silent, or whose turn never started, for ten minutes is sho
   assert.equal(chat.chatDuration(42_000), "42s");
   assert.equal(chat.chatDuration(3 * 3_600_000), "3h");
 });
+
+
+test("project view navigation stays above missions and switches the requested workspace", () => {
+  const componentSource = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const component = {};
+  vm.runInNewContext(ts.transpileModule(componentSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
+    exports: component,
+    require: name => name === "./ao-chat" ? chat : require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })),
+  });
+  const selected = [];
+  const pane = component.ChatListPane({
+    chats: [{ taskId: "task-a", title: "Fix app", status: "running" }], selectedTaskId: "task-a", onSelect: id => selected.push(["task", id]),
+    tree: { workspaces: [{ id: "a", name: "Alpha" }, { id: "b", name: "Beta" }], workspaceId: "a",
+      onWorkspace: id => selected.push(["workspace", id]), view: "overview",
+      onView: (id, view) => selected.push([id, view]), labels: { chat: "Mission tab", overview: "Overview board" } },
+  });
+  const walk = element => !element || typeof element !== "object" ? [] : Array.isArray(element)
+    ? element.flatMap(walk) : [element, ...walk(element.props?.children)];
+  const elements = walk(pane);
+  const navs = elements.filter(element => element.type === "nav");
+  assert.equal(navs.length, 2, "each project has navigation, including a project without loaded missions");
+  assert.equal(navs[0].props["aria-label"], "Alpha views");
+  const alphaButtons = walk(navs[0]).filter(element => element.type === "button");
+  assert.deepEqual(alphaButtons.map(element => element.props.children), ["Mission tab", "Overview board"]);
+  assert.equal(alphaButtons[1].props["aria-current"], "page");
+  const betaButtons = walk(navs[1]).filter(element => element.type === "button");
+  betaButtons[1].props.onClick();
+  assert.deepEqual(selected, [["b", "overview"]]);
+  const task = elements.find(element => element.type === "button" && element.props["aria-current"] === true);
+  assert.ok(elements.indexOf(navs[0]) < elements.indexOf(task), "project navigation precedes its mission list");
+  task.props.onClick();
+  assert.deepEqual(selected[1], ["task", "task-a"]);
+});
+
+test("movable role popups stay inside their graph instead of covering the native mission board", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  const surface = {};
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+    { exports: surface, require: () => ({}) });
+  assert.equal(typeof surface.clampPopupPosition, "function");
+  const area = { width: 900, height: 360 };
+  const popup = { width: 340, height: 320 };
+  assert.deepEqual(plain(surface.clampPopupPosition(area, popup, { x: 870, y: 350 })), { x: 552, y: 32 });
+  assert.deepEqual(plain(surface.clampPopupPosition(area, popup, { x: -100, y: -30 })), { x: 8, y: 8 });
+  assert.deepEqual(plain(surface.clampPopupPosition(area, popup, { x: 270, y: 20 })), { x: 270, y: 20 });
+});
+
+
+test("a selected historical mission still exposes its graph when every card is inactive", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  const surface = {};
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+    { exports: surface, require: () => ({}) });
+  assert.equal(typeof surface.aoVisibleNodes, "function");
+  const stopped = [node("planner", "planner", "cancelled"), node("worker", "worker", "archived")];
+  assert.deepEqual(plain(surface.aoVisibleNodes(stopped, false)).map(item => item.id), ["planner", "worker"],
+    "filtering cannot erase the entire selected historical mission");
+  const mixed = [...stopped, node("reviewer", "reviewer", "running")];
+  assert.deepEqual(plain(surface.aoVisibleNodes(mixed, false)).map(item => item.id), ["reviewer"],
+    "inactive-card filtering remains effective for a mission with active cards");
+  assert.deepEqual(plain(surface.aoVisibleNodes(mixed, true)).map(item => item.id), ["planner", "worker", "reviewer"]);
+  assert.deepEqual(plain(surface.aoVisibleNodes([], false)), []);
+  assert.equal(stopped[0].state, "cancelled", "inspection never revives or edits a saved card");
+});

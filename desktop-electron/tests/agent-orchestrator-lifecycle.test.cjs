@@ -190,6 +190,7 @@ function createHarness(hooks = {}) {
     resourceRoot, dataRoot, WebContentsView: FakeView, getWindow: () => parent,
     confirm: async (request) => hooks.confirm?.(request) ?? true,
     shell: { openExternal: async (url) => { opened.push(url); } },
+    openAuth: hooks.openAuth,
     logger: { warn: (...entry) => warnings.push(entry) },
   });
   return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened };
@@ -227,10 +228,11 @@ test("the AO view may use the clipboard from its gateway origin and nothing else
   } finally { await controller.stop(); }
 });
 
-test("terminal links open in the system browser, asking first unless they are sign-in links", async () => {
+test("terminal sign-in links stay in the managed browser, while other links require confirmation", async () => {
   let answer = false;
   const asked = [];
-  const { controller, views, opened } = createHarness({ confirm: (request) => { if (request?.detail) { asked.push(request.detail); return answer; } return true; } });
+  const auth = [];
+  const { controller, views, opened } = createHarness({ openAuth: async url => auth.push(url), confirm: (request) => { if (request?.detail) { asked.push(request.detail); return answer; } return true; } });
   try {
     await controller.show(firstBounds);
     const click = async (url) => {
@@ -244,7 +246,8 @@ test("terminal links open in the system browser, asking first unless they are si
     await click("https://user:secret@accounts.google.com/");
     await click("file:///C:/Windows/System32/calc.exe");
     await click("javascript:alert(1)");
-    assert.deepEqual(opened, ["https://accounts.google.com/o/oauth2/auth?client_id=x", "https://example.com/readme"]);
+    assert.deepEqual(auth, ["https://accounts.google.com/o/oauth2/auth?client_id=x"]);
+    assert.deepEqual(opened, ["https://example.com/readme"]);
     assert.deepEqual(asked, ["https://example.com/docs", "https://example.com/readme"]);
   } finally { await controller.stop(); }
 });

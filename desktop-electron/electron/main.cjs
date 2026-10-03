@@ -25,7 +25,7 @@ const {
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
 const { createChatGptDesktopHost } = require("./chatgpt-desktop.cjs");
-const { createGptBrowserHost } = require("./gpt-browser.cjs");
+const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
@@ -161,6 +161,7 @@ let originalUiController = null;
 let appsHost = null;
 let agentOrchestratorUpstream = null;
 let antigravityReauth = null;
+let antigravityAuthBrowser = null;
 // The swappable backend tier (see backend-bundle.cjs): restarted in place, never with the core.
 let backendBundles = null;
 let backendControl = null;
@@ -2166,6 +2167,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     backendBundles?.stopWatching();
     await agentOrchestratorUpstream?.stop();
     antigravityReauth?.stop();
+    antigravityAuthBrowser?.closeAll();
     // The embedded ChatGPT instance belongs to this app; its own stop path logs failures.
     await chatgptDesktop?.shutdown().catch(() => {});
     await browserHost?.persistSession();
@@ -2387,8 +2389,9 @@ async function start() {
     logger,
   });
   const startBackendFrom = (backend) => {
-    const { createAntigravityCli, shimProxyEnvironment } = backendBundles.requireModule(backend, "antigravity-cli.cjs");
+    const { createAntigravityCli, shimProxyEnvironment, manualAuthEnvironment } = backendBundles.requireModule(backend, "antigravity-cli.cjs");
     const { createAntigravityReauth } = backendBundles.requireModule(backend, "cpa-antigravity-reauth.cjs");
+    const { createAntigravityAuthBrowser } = backendBundles.requireModule(backend, "antigravity-auth-browser.cjs");
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
     const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
@@ -2397,13 +2400,13 @@ async function start() {
       toolsRoot: path.join(app.getPath("userData"), "tools"),
       confirm: confirmAoAction, getWorkspaces: listHeadlessWorkspaces, logger,
     });
+    antigravityAuthBrowser = createAntigravityAuthBrowser({
+      BrowserWindow, sessionFor: partition => session.fromPartition(partition),
+      proxyEnvironment: antigravityProxyEnvironment, cleanUserAgent,
+    });
     antigravityReauth = createAntigravityReauth({
       cpaConnection: () => externalServicesController?.cpaConnection(),
-      openExternal: (url) => {
-        const target = new URL(url);
-        if (target.protocol !== "https:" || target.username || target.password) throw new Error("CPA sign-in URL is unsafe");
-        return shell.openExternal(target.toString());
-      },
+      openExternal: (url, options) => antigravityAuthBrowser(url, options),
       notify: ({ title, body }) => { if (Notification.isSupported()) new Notification({ title, body, silent: true }).show(); },
       statePath: path.join(app.getPath("userData"), "tools", "antigravity-reauth.json"),
       logger,
@@ -2423,7 +2426,7 @@ async function start() {
           const env = antigravityProxyEnvironment();
           if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy in Network Proxy first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
-            executable: antigravityCli.executable(), env, workspaceId: args.workspaceId || undefined,
+            executable: antigravityCli.executable(), env: manualAuthEnvironment(env), workspaceId: args.workspaceId || undefined,
           });
           return { ok: true, ...terminal, title: "agy" };
         }
@@ -2432,6 +2435,7 @@ async function start() {
           return { ok: true };
         case "refresh": return antigravityReauth.refresh(args.name);
         case "sign_in": return antigravityReauth.signIn(args.name);
+        case "cancel_sign_in": return antigravityReauth.cancelSignIn(args.name);
         case "sweep": return antigravityReauth.sweep();
         case "set_auto": return antigravityReauth.setAuto(args.auto);
         default: throw new Error("Unknown Antigravity CLI operation");
@@ -2458,6 +2462,7 @@ async function start() {
         return typeof cpaKey === "string" && cpaKey ? { ...env, CODING_TOOLS_CPA_KEY: cpaKey } : env;
       },
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
+      openAuth: (url) => antigravityAuthBrowser(url),
       WebContentsView, dialog, shell, logger,
     });
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
@@ -2537,6 +2542,7 @@ async function start() {
       // A broken deployed backend never takes the app down: fall back to the installer's backend.
       logger.error("backend.bundle_start_failed", { id: backend.id, message: error instanceof Error ? error.message : String(error) });
       antigravityReauth?.stop();
+      antigravityAuthBrowser?.closeAll();
       backendBundles.useBuiltin();
       startBackendFrom(backendBundles.current());
       publishOperation({ name: "backend-update", status: "failed", message: `Backend ${backend.id} failed to start; using the installed backend` });
@@ -2544,6 +2550,7 @@ async function start() {
   };
   const stopBackend = async (reason) => {
     antigravityReauth?.stop();
+    antigravityAuthBrowser?.closeAll();
     await agentOrchestratorUpstream?.stop().catch((error) => {
       logger.warn("backend.ao_stop_failed", { message: error instanceof Error ? error.message : String(error) });
     });

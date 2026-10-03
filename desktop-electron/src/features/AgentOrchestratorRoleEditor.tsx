@@ -173,25 +173,31 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       <option value=":workspace">Workspace: create, edit and delete in this workspace</option>
       <option value=":read-only">Read only</option>
     </select></label> : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here.</p>}
-    <label title={effortApplies(route) ? "Reasoning effort for this card" : "AO skips effort for CPA gateway models"}>Effort
+    <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
+    <label title={effortApplies(route) ? "Reasoning effort for this card" : "AO skips effort for CPA gateway models"}>Reasoning effort
       <select value={effortApplies(route) ? route.effort ?? "" : ""} disabled={disabled || !effortApplies(route)}
         onChange={event => { const next = { ...route }; if (event.target.value) next.effort = event.target.value; else delete next.effort; onChange(next); }}>
         <option value="">{effortApplies(route) ? "Model default" : "Not applicable (gateway model)"}</option>
         {EFFORTS.map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select></label>
     <label title={contextApplies(route) ? "Context window in tokens (4,096 to 2,000,000)" : "AO harnesses have no context-window setting"}>Context window
-      <input type="number" min={4096} max={2000000} step={1024} inputMode="numeric" disabled={disabled || !contextApplies(route)}
+      <input type="number" min={4096} max={2000000} step={1} inputMode="numeric" disabled={disabled || !contextApplies(route)}
         placeholder={contextApplies(route) ? "Model default" : "Not applicable on AO harnesses"}
         value={contextApplies(route) ? route.context_window ?? "" : ""}
         onChange={event => { const next = { ...route }; const tokens = Math.round(Number(event.target.value)); if (event.target.value && Number.isFinite(tokens)) next.context_window = tokens; else delete next.context_window; onChange(next); }} /></label>
+    <p className="ao-hint ao-wide">{contextApplies(route)
+      ? "Native harness context budget: 4,096–2,000,000 tokens. Blank uses the model default, not a claimed model limit."
+      : effortApplies(route) ? "This harness accepts reasoning effort; context window is managed by the harness."
+      : "CPA gateway models manage their own effort and context window; these overrides are not sent."}</p>
+    </fieldset>
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
   </>;
 }
 
-export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy, change, apply, discard, close, taskName }: {
+export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy, change, apply, discard, taskName }: {
   node: AoNode; mission: AoMission; draft: AoTeam; harnesses: AoHarness[]; busy: boolean;
   loadModels: (harness: string) => Promise<string[]>;
-  change: (team: AoTeam) => void; apply: () => void; discard: () => void; close: () => void; taskName: (id: string) => string;
+  change: (team: AoTeam) => void; apply: () => void; discard: () => void; taskName: (id: string) => string;
 }) {
   const [tab, setTab] = useState<"settings" | "output" | "history">("settings");
   const roleId = node.template_role_id || node.id;
@@ -218,13 +224,7 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
     if (value.startsWith("custom:")) updateRole({ role: "worker", settings: { ...settings, role_name: value.slice(7) } });
     else changeKind(value as AoNode["role"]);
   };
-  return <aside className="ao-role-inspector" aria-label="Role inspector">
-    <div className="ao-inspector-header">
-      <span className={`ao-dot ao-dot-${node.state}`} aria-hidden="true" />
-      <strong>{settings.name || node.role}</strong>
-      <span className="ao-inspector-state">{node.state}</span>
-      <button type="button" onClick={close} aria-label="Close role inspector">×</button>
-    </div>
+  return <div className="ao-role-inspector" aria-label="Role inspector">
     <div className="ao-inspector-tabs" role="tablist" aria-label="Role details">
       {(["settings", "output", "history"] as const).map(name => <button key={name} type="button" role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>{name}</button>)}
     </div>
@@ -274,5 +274,5 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
       </details>)}
       {!item.receipt && !item.history?.length ? <p className="ao-hint">Not started</p> : null}
     </section>)}</div> : null}
-  </aside>;
+  </div>;
 }

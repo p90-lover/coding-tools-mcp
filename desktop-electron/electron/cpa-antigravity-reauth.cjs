@@ -33,6 +33,7 @@ function createAntigravityReauth({
   let timer = null;
   let sweeping = null;
   let signingIn = null;
+  let manualGeneration = 0;
   const lastPrompt = new Map();
   let lastSweep = null;
 
@@ -45,7 +46,7 @@ function createAntigravityReauth({
     fs.renameSync(`${statePath}.tmp`, statePath);
   }
 
-  async function management(pathname, { method = "GET", body } = {}) {
+  async function management(pathname, { method = "GET", body, signal } = {}) {
     const connection = cpaConnection();
     if (!connection) throw new Error("Managed CPA is not installed");
     const response = await fetchImpl(new URL(pathname, `${connection.baseUrl}/`), {
@@ -53,7 +54,7 @@ function createAntigravityReauth({
       headers: { Accept: "application/json", Authorization: `Bearer ${connection.managementKey}`,
         ...(body ? { "Content-Type": "application/json" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(30_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
     });
     let value = {};
     try { value = await response.json(); } catch {}
@@ -66,8 +67,8 @@ function createAntigravityReauth({
     return value;
   }
 
-  async function accounts() {
-    const listing = await management("/v0/management/auth-files");
+  async function accounts({ signal } = {}) {
+    const listing = await management("/v0/management/auth-files", { signal });
     return (Array.isArray(listing?.files) ? listing.files : [])
       .map(normalizedAuthFile).filter(entry => entry && PROVIDERS.has(entry.provider)).map(publicAccount);
   }
@@ -86,31 +87,55 @@ function createAntigravityReauth({
     return { ok: Boolean(current && !needsAuth(current)), account: current ?? null };
   }
 
-  /** CPA's own Antigravity OAuth. The old file is disabled (not deleted) once the new one exists. */
-  async function signIn(name) {
-    if (signingIn) return signingIn;
-    signingIn = (async () => {
-      const before = (await accounts()).find(account => account.name === name) ?? null;
+  function cancelSignIn(name) {
+    if (!signingIn || (name && signingIn.name !== name)) return { ok: true, cancelled: false };
+    signingIn.controller.abort();
+    signingIn = null;
+    manualGeneration += 1;
+    return { ok: true, cancelled: true };
+  }
+
+  /** A manual attempt supersedes the old browser; stale completions cannot alter accounts. */
+  function signIn(name, { automatic = false } = {}) {
+    if (typeof name !== "string" || !name.trim() || name.length > 256) throw new Error("Choose a CPA account");
+    if (signingIn?.name === name) return signingIn.promise;
+    if (automatic && signingIn) return Promise.resolve({ ok: false, cancelled: true });
+    cancelSignIn();
+    if (!automatic) manualGeneration += 1;
+    const attempt = { name, startedAt: new Date(now()).toISOString(), controller: new AbortController(), promise: null };
+    const { signal } = attempt.controller;
+    signingIn = attempt;
+    attempt.promise = (async () => {
+      const before = (await accounts({ signal })).find(account => account.name === name);
+      signal.throwIfAborted();
+      if (!before) throw new Error("The CPA account is no longer available");
+      lastPrompt.set(before.email || name, now());
       const result = await login({
-        adapterId: "cpa-antigravity", identity: before?.email || "",
+        adapterId: "cpa-antigravity", identity: before.email || "", signal,
         requestJson: (pathname, options = {}) => management(pathname, options),
-        openExternal,
+        openExternal: (url, options) => openExternal(url, { ...options, onCancel: () => { if (signingIn === attempt) cancelSignIn(name); } }),
       });
+      signal.throwIfAborted();
       const created = result.authFile;
-      if (before && created && created.name !== before.name && created.identity
+      if (created && created.name !== before.name && created.identity
         && String(created.identity).toLowerCase() === String(before.email || "").toLowerCase()) {
-        await management("/v0/management/auth-files/status", { method: "PATCH", body: { name: before.name, disabled: true } });
+        await management("/v0/management/auth-files/status", { method: "PATCH", body: { name: before.name, disabled: true }, signal });
       }
-      logger.info?.("cpa.antigravity_reauth.signed_in", { replaced: Boolean(before && created?.name !== before.name) });
-      return { ok: true, account: created ? publicAccount(created) : null, replaced: before?.name ?? null };
-    })().finally(() => { signingIn = null; });
-    return signingIn;
+      signal.throwIfAborted();
+      logger.info?.("cpa.antigravity_reauth.signed_in", { replaced: Boolean(created?.name !== before.name) });
+      return { ok: true, account: created ? publicAccount(created) : null, replaced: before.name };
+    })().catch(error => {
+      if (signal.aborted) return { ok: false, cancelled: true, name };
+      throw error;
+    }).finally(() => { if (signingIn === attempt) signingIn = null; });
+    return attempt.promise;
   }
 
   async function sweep({ interactive = true } = {}) {
     if (sweeping) return sweeping;
     sweeping = (async () => {
       const report = { at: new Date(now()).toISOString(), refreshed: [], signIn: [], failed: [] };
+      const generation = manualGeneration;
       try {
         for (const account of await accounts()) {
           if (!needsAuth(account)) continue;
@@ -118,13 +143,16 @@ function createAntigravityReauth({
           if (refreshed.ok) { report.refreshed.push(account.email || account.name); continue; }
           const key = account.email || account.name;
           const recentlyPrompted = lastPrompt.has(key) && now() - lastPrompt.get(key) < promptGapMs;
-          if (!interactive || !readState().auto || signingIn || recentlyPrompted) {
+          if (!interactive || !readState().auto || signingIn || generation !== manualGeneration || recentlyPrompted) {
             report.failed.push(key);
             continue;
           }
           lastPrompt.set(key, now());
-          notify({ title: "Gemini sign-in expired", body: `Reconnecting ${key} in your browser for CPA.` });
-          try { await signIn(account.name); report.signIn.push(key); }
+          notify({ title: "Gemini sign-in expired", body: `Reconnecting ${key} in the proxy-routed sign-in window for CPA.` });
+          try {
+            const result = await signIn(account.name, { automatic: true });
+            (result.ok ? report.signIn : report.failed).push(key);
+          }
           catch (error) { report.failed.push(key); logger.warn?.("cpa.antigravity_reauth.failed", { message: String(error.message).slice(0, 200) }); }
         }
       } catch (error) {
@@ -141,14 +169,14 @@ function createAntigravityReauth({
     timer = setInterval(() => { void sweep(); }, intervalMs);
     timer.unref?.();
   }
-  function stop() { clearInterval(timer); timer = null; }
+  function stop() { clearInterval(timer); timer = null; manualGeneration += 1; cancelSignIn(); }
 
   async function status() {
     let list = [];
     let error = null;
     try { list = await accounts(); } catch (cause) { error = String(cause.message).slice(0, 300); }
     return { ok: true, auto: readState().auto, accounts: list, needsAttention: list.filter(needsAuth).length,
-      signingIn: Boolean(signingIn), lastSweep, error };
+      signingIn: Boolean(signingIn), signInAccount: signingIn ? { name: signingIn.name, startedAt: signingIn.startedAt } : null, lastSweep, error };
   }
 
   function setAuto(auto) {
@@ -157,7 +185,7 @@ function createAntigravityReauth({
     return { ok: true, auto };
   }
 
-  return Object.freeze({ accounts, refresh, signIn, sweep, start, stop, status, setAuto });
+  return Object.freeze({ accounts, refresh, signIn, cancelSignIn, sweep, start, stop, status, setAuto });
 }
 
 module.exports = { createAntigravityReauth, needsAuth, publicAccount };

@@ -6,21 +6,16 @@
   position: relative; display: flex; min-width: 0; min-height: 0; height: 100%; overflow: hidden;
 }
 
-/* Controls live in a left rail; its empty space drags the window. */
-.ao-rail {
-  display: flex; flex: 0 0 196px; flex-direction: column; gap: 8px; min-height: 0; padding: 12px 10px 10px;
-  border-right: 1px solid var(--ao-line); overflow-y: auto; -webkit-app-region: drag;
-}
-.ao-rail > * { -webkit-app-region: no-drag; }
-.ao-rail-spacer { flex: 1 1 auto; min-height: 12px; -webkit-app-region: drag; }
-.ao-rail-field { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 14px; }
-.ao-rail-field .ao-select { flex: 1 1 auto; }
-.ao-rail-nav { display: grid; gap: 2px; margin-top: 4px; }
-.ao-rail-nav button { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--ao-muted); font-size: 12px; text-align: left; }
-.ao-rail-nav button:hover { background: rgb(255 255 255 / 5%); }
-.ao-rail-nav button[aria-selected="true"] { background: rgb(255 255 255 / 9%); color: var(--color-text-primary); font-weight: 600; }
-.ao-rail-tools { display: flex; gap: 4px; }
-.ao-rail .ao-pill { max-width: 100%; align-self: flex-start; }
+/* One project tree, with view navigation above each project's missions. */
+.ao-workflow > .ao-chat-list { flex: 0 0 220px; padding-top: calc(env(titlebar-area-height, 34px) + 10px); }
+.ao-head-spacer { flex: 1 1 auto; min-width: 8px; }
+.ao-workspace-head { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 50px; padding: 8px 12px; border-bottom: 1px solid var(--ao-line); }
+.ao-workspace-title { display: flex; flex: 1 1 180px; flex-direction: column; gap: 3px; min-width: 0; }
+.ao-workspace-title strong { font-size: 13px; font-weight: 600; }
+.ao-workspace-title > span { color: var(--ao-muted); font-size: 11px; overflow-wrap: anywhere; }
+.ao-head-tools { display: flex; align-items: center; gap: 3px; }
+.ao-head-tools + .ao-head-tools { padding-left: 6px; border-left: 1px solid var(--ao-line); }
+.ao-head-tools > .button-secondary { min-height: 30px; padding: 3px 8px; font-size: 12px; }
 .ao-main { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; }
 /* Keeps the window draggable and the stage clear of the native window buttons. */
 .ao-dragstrip { flex: 0 0 auto; height: env(titlebar-area-height, 34px); -webkit-app-region: drag; }
@@ -45,15 +40,20 @@
 @keyframes ao-pulse { 50% { opacity: .25; } }
 
 .ao-stage { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
-.ao-workspace-board { position: absolute; inset: 0; z-index: 2; background: var(--color-bg-primary); }
-.ao-team-view { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
-.ao-team-view[hidden] { display: none; }
+.ao-overview:not([hidden]) { display: grid; grid-template-rows: minmax(0, 42%) minmax(0, 1fr); flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
+.ao-overview[hidden] { display: none; }
+.ao-overview-graph { position: relative; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+.ao-overview-graph > .ao-canvas { min-height: 0; }
+.ao-history-hint { position: absolute; z-index: 3; top: 12px; right: 12px; max-width: calc(100% - 140px); padding: 6px 10px; border-radius: 7px; background: var(--color-bg-secondary); color: var(--ao-muted); font-size: 11px; pointer-events: none; }
+.ao-workspace-board { position: relative; min-width: 0; min-height: 0; border-top: 1px solid var(--ao-line); background: var(--color-bg-primary); }
+.ao-workspace-board .ao-original-viewport { min-height: 0; }
+.ao-workspace-board > .ao-empty-state { height: 100%; font-size: 12px; }
 .ao-empty-state { display: grid; flex: 1; place-content: center; justify-items: center; gap: 12px; color: var(--ao-muted); }
 
 /* Pop-over sheets instead of inline forms. */
 /* Popups open centred in the stage and move by their header. */
 .ao-float { position: absolute; z-index: 8; display: flex; flex-direction: column; width: min(460px, calc(100% - 24px)); max-height: calc(100% - 16px); overflow: auto; border: 1px solid var(--ao-line); border-radius: 12px; background: var(--color-bg-secondary); box-shadow: 0 20px 48px rgb(0 0 0 / 40%); }
-.ao-float-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 10px 10px 8px 14px; background: inherit; cursor: grab; user-select: none; touch-action: none; }
+.ao-float-head { flex: 0 0 auto; position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 10px 10px 8px 14px; background: inherit; cursor: grab; user-select: none; touch-action: none; }
 .ao-float-head:active { cursor: grabbing; }
 .ao-float-head h2 { flex: 1 1 auto; margin: 0; font-size: 13px; font-weight: 600; }
 .ao-float-close { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted); cursor: pointer; }
@@ -143,14 +143,14 @@
 .ao-approvals pre { flex: 1 1 100%; margin: 0; padding: 6px 8px; border-radius: 6px; background: rgb(0 0 0 / 25%); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ao-approvals details { flex: 1 1 100%; font-size: 11px; }
 
-/* Inspector: dismissible drawer over the canvas. */
-.ao-role-inspector { position: absolute; z-index: 6; right: 12px; top: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 10px; width: min(330px, calc(100% - 24px)); padding: 0 14px 14px; overflow: auto; border: 1px solid var(--ao-line); border-radius: 10px; background: color-mix(in srgb, var(--color-bg-secondary) 97%, transparent); box-shadow: 0 16px 40px rgb(0 0 0 / 35%); }
+/* The role editor reuses the movable sheet and stays inside the graph viewport. */
+.ao-role-popup { z-index: 6; width: min(370px, calc(100% - 16px)); max-height: calc(100% - 16px); }
+.ao-role-inspector { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 0 14px 14px; }
+.ao-route-tuning { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-column: 1 / -1; gap: 8px; min-width: 0; margin: 0; padding: 8px 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; }
+.ao-route-tuning legend { padding: 0 4px; color: var(--color-text-primary); font-size: 11px; font-weight: 600; }
+.ao-route-tuning label { display: grid; gap: 5px; min-width: 0; color: var(--ao-muted); font-size: 11px; }
+.ao-route-tuning input:disabled, .ao-route-tuning select:disabled { opacity: .55; }
 .ao-role-inspector form { display: flex; flex-direction: column; gap: 10px; }
-.ao-inspector-header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; margin: 0 -14px; padding: 10px 8px 10px 14px; background: var(--color-bg-secondary); }
-.ao-inspector-header strong { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.ao-inspector-state { color: var(--ao-muted); font-size: 11px; text-transform: capitalize; }
-.ao-inspector-header button { width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--color-text-primary); font-size: 18px; }
-.ao-inspector-header button:hover { background: rgb(255 255 255 / 8%); }
 .ao-inspector-tabs { display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgb(255 255 255 / 5%); }
 .ao-inspector-tabs button { flex: 1 1 0; min-width: 0; height: 26px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted); text-transform: capitalize; font-size: 12px; }
 .ao-inspector-tabs button[aria-selected="true"] { background: var(--color-bg-secondary); color: var(--color-text-primary); }
@@ -163,7 +163,8 @@
 .ao-attempt-history summary { cursor: pointer; margin-top: 6px; color: var(--ao-muted); }
 
 @media (max-width: 760px) {
-  .ao-rail { flex-basis: 150px; }
+  .ao-workflow > .ao-chat-list { flex-basis: 170px; }
+  .ao-workspace-head { gap: 4px; padding: 6px 8px; }
   .ao-pill-detail { display: none; }
   .ao-sheet, .ao-field-row { grid-template-columns: minmax(0, 1fr); }
 }
@@ -173,9 +174,9 @@
   .ao-workflow .ao-set-toggle input, .ao-workflow .ao-set-toggle input::before { transition: none; }
 }
 
-/* Chat-first Mission tab: chats | conversation | structure. */
-.ao-chat { display: grid; flex: 1 1 auto; grid-template-columns: 220px minmax(0, 1fr); min-width: 0; min-height: 0; }
-.ao-chat.with-structure { grid-template-columns: 220px minmax(0, 1fr) 240px; }
+/* Mission tab: conversation with optional team summary. The project tree lives outside both views. */
+.ao-chat { display: grid; flex: 1 1 auto; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; }
+.ao-chat.with-structure { grid-template-columns: minmax(0, 1fr) 240px; }
 .ao-chat-list { display: flex; flex-direction: column; gap: 6px; min-height: 0; padding: 10px 8px; border-right: 1px solid var(--ao-line); overflow-y: auto; }
 .ao-chat-list ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .ao-chat-new, .ao-chat-list li button { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--ao-muted); font-size: 12px; text-align: left; cursor: pointer; }
@@ -186,7 +187,11 @@
 .ao-chat-list .ao-chat-workspace { font-weight: 600; color: var(--color-text-primary); }
 .ao-chat-list .ao-chat-workspace > span[aria-hidden] { flex: none; width: 12px; font-size: 11px; opacity: .7; }
 .ao-chat-list .ao-chat-items { padding-left: 14px; margin: 2px 0 6px; border-left: 1px solid var(--ao-line); margin-left: 14px; }
-.ao-chat-list .ao-chat-tree > li + li { margin-top: 2px; }
+.ao-chat-list .ao-chat-tree > li + li { margin-top: 10px; }
+.ao-project-nav { display: grid; gap: 2px; margin: 4px 0 6px 14px; padding-left: 14px; }
+.ao-project-nav button { color: var(--ao-muted); }
+.ao-project-nav button[aria-current="page"] { background: rgb(255 255 255 / 8%); color: var(--color-text-primary); font-weight: 600; }
+.ao-project-nav button:active { transform: scale(.98); }
 .ao-chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-chat-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted); opacity: .8; }
 .ao-chat-dot.status-running, .ao-chat-dot.status-queued, .ao-chat-dot.state-running, .ao-chat-dot.state-reserved { background: var(--ao-green); animation: ao-pulse 1.4s ease-in-out infinite; }
@@ -231,21 +236,17 @@
 .ao-chat-node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-chat-node-meta { color: var(--ao-muted); font-size: 11px; }
 @media (max-width: 900px) {
-  .ao-chat, .ao-chat.with-structure { grid-template-columns: 170px minmax(0, 1fr); }
+  .ao-chat, .ao-chat.with-structure { grid-template-columns: minmax(0, 1fr); }
   .ao-chat-structure { display: none; }
 }
 
-/* Structure view: the same chat list beside the canvas; team settings sheet. */
-.ao-structure-view:not([hidden]) { display: grid; grid-template-columns: 220px minmax(0, 1fr); flex: 1 1 auto; min-width: 0; min-height: 0; }
-.ao-structure-canvas { position: relative; display: flex; min-width: 0; min-height: 0; }
-.ao-structure-canvas > * { flex: 1 1 auto; }
+/* Team settings use the same compact form vocabulary as the role popup. */
 .ao-team-sheet { max-height: min(78vh, 760px); overflow-y: auto; }
 .ao-team-role { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid var(--ao-line); border-radius: 10px; }
 .ao-team-role legend { display: flex; align-items: center; gap: 10px; padding: 0 4px; font-size: 12px; font-weight: 600; }
 .ao-team-role textarea { width: 100%; resize: vertical; }
 .ao-link { padding: 0; border: 0; background: none; color: var(--ao-red); font-size: 11px; cursor: pointer; }
 .ao-msg-approval.tone-error { border-color: rgb(248 81 73 / 50%); }
-@media (max-width: 900px) { .ao-structure-view:not([hidden]) { grid-template-columns: 170px minmax(0, 1fr); } }
 /* The command approver's recommendation on a pending tool request. */
 .ao-approver-advice { flex-basis: 100%; margin: 0; padding: 6px 8px; border-radius: 6px; background: rgb(255 255 255 / 4%); font-size: 12px; }
 .ao-approver-advice.is-allow { color: var(--ao-green); }

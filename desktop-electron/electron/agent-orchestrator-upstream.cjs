@@ -58,7 +58,7 @@ async function allocatePort() {
   return port;
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, getWorkspaces, missionCall, extraPath = () => null, extraEnv = () => ({}), logger = console }) {
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, extraPath = () => null, extraEnv = () => ({}), logger = console }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -78,7 +78,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let originalPath = "/";
 
   // AO terminals open clicked links with window.open (e.g. agy's Google sign-in URL). The view
-  // always denies the new window; this decides whether the URL goes to the system browser.
+  // always denies the new window; Google sign-in stays inside the proxy-routed browser.
   async function openTerminalLink(rawUrl) {
     let url;
     try { url = new URL(String(rawUrl || "")); } catch { return false; }
@@ -86,7 +86,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // Terminal output is untrusted: only the sign-in hosts agy prints open without asking.
     const trusted = url.protocol === "https:" && TRUSTED_TERMINAL_LINK_HOSTS.has(url.hostname);
     if (!trusted && !(await confirm({ message: "Open this link from the terminal?", detail: url.toString() }))) return false;
-    await shell.openExternal(url.toString());
+    if (trusted) {
+      if (typeof openAuth !== "function") throw new Error("Proxy-routed Antigravity sign-in is unavailable");
+      await openAuth(url.toString());
+    } else await shell.openExternal(url.toString());
     return true;
   }
   const workspaceBoard = typeof getWorkspaces === "function" && typeof missionCall === "function"
