@@ -123,3 +123,20 @@ test("Surface caches AO model capability catalogs while Native Codex keeps its l
   assert.deepEqual(calls, ["ao:codex"], "cache retains the full catalog and avoids a duplicate capability request");
   assert.deepEqual(plain(await loader("codex-native")), ["fixture"], "Native model array and behavior stay unchanged");
 });
+
+
+test("AO-only efforts never cross into Native Codex; valid high and AO-to-AO tuning still carry over", async () => {
+  const p = await picker(route(), ["cpa/gpt"]);
+  for (const effort of ["none", "auto", "max"]) {
+    const previous = { ...route("ao:claude-code", "cpa/fixture"), effort, context_window: 32768 };
+    const native = p.editor.withTuning(p.editor.workerRoute("ao:claude-code", "chatgpt-web/high"), previous);
+    assert.equal(native.harness_id, "codex-native");
+    assert.equal(native.effort, undefined, `Native's unchanged five efforts do not accept ${effort}`);
+    const ao = p.editor.withTuning(route("ao:opencode", "cpa/next"), previous);
+    assert.equal(ao.effort, effort, "AO-to-AO requested effort is retained");
+    assert.equal(ao.context_window, 32768, "AO-to-AO client context is retained");
+  }
+  const valid = p.editor.withTuning(p.editor.workerRoute("ao:codex", "chatgpt-web/high"),
+    { ...route(), effort: "high", context_window: 32768 });
+  assert.equal(valid.effort, "high", "valid Native effort carry-over remains unchanged");
+});

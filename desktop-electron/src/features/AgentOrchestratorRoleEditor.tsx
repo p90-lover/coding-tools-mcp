@@ -53,7 +53,10 @@ export function withTuning(next: AoRoute, previous: AoRoute): AoRoute {
   delete route.effort;
   delete route.context_window;
   const betweenAgents = next.harness_id.startsWith("ao:") && previous.harness_id.startsWith("ao:");
-  if (previous.effort && (betweenAgents || effortApplies(route))) route.effort = previous.effort;
+  const keepEffort = route.harness_id === NATIVE_HARNESS
+    ? EFFORTS.some(effort => effort === previous.effort)
+    : betweenAgents || effortApplies(route);
+  if (previous.effort && keepEffort) route.effort = previous.effort;
   if (previous.context_window && (betweenAgents || contextApplies(route))) route.context_window = previous.context_window;
   return route;
 }
