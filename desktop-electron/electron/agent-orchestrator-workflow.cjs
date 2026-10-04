@@ -127,7 +127,15 @@ function aoWebCatalogForModel(catalog, model) {
   return { models: [{ ...template, slug: model, display_name: `ChatGPT Web — ${tier}` }] };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null }) {
+function delayToMilliseconds(value, unit) {
+  const multiplier = {seconds:1000,minutes:60000,hours:3600000}[unit];
+  const ms = value * multiplier;
+  if (!Number.isSafeInteger(value) || value <= 0 || !multiplier || !Number.isSafeInteger(ms)) {
+    throw new Error("Choose a positive whole number of seconds, minutes or hours");
+  }
+  return ms;
+}
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
   // chosen executable that no longer exists falls back to the currently installed one.
   function codexExecutable(chosen) {
@@ -199,8 +207,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function board({ workspaceId, taskId } = {}) {
     const result = checked(await tool(workspaceId, "workflow_list", {
       ...(taskId ? { task_id: clean(taskId, 128) } : {}),
-      limit: 100,
-      include_archived: false,
+      limit: 100, include_archived: true,
     }));
     return { ok: true, revision: result.revision, steps: result.steps, tasks: result.tasks ?? [],
       task: result.task ?? null, workspaceId: result.workspace_id };
@@ -386,6 +393,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return response;
   }
 
+  function missingModelNotice(team) {
+    const invalid = Array.isArray(team?.nodes) ? team.nodes.find(node => !node.route?.model || node.route.model === "default") : null;
+    return invalid ? `Choose an explicit model for ${String(invalid.settings?.name || invalid.role || "this role").slice(0,96)} in Team settings before sending.` : null;
+  }
   async function teamUpdate({ workspaceId, change } = {}) {
     if (!change || typeof change !== "object" || Array.isArray(change)
       || !["save_team", "apply_team", "set_limits"].includes(change.operation)) {
@@ -637,6 +648,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, confirm: true }, { localConfirmation: true });
     if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
     if (action === "stop") {
+      const saved = await runs({workspaceId:id});
+      const life = taskLifecycle(saved,result.run.project_id);
+      if (life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)) {
+        await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id});
+      }
       for (const node of result.run.nodes ?? []) {
         if (externalAgent(node) && node.state === "running" && node.receipt?.thread_id) {
           await harnessService().interrupt(node.receipt.thread_id).catch(() => undefined);
@@ -1087,6 +1103,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (!mission) throw new Error("AO run unavailable");
     if (!mission.project_id) throw new Error("This mission has no task to restart");
     const team = saved.team;
+    const missingModel = missingModelNotice(team);
+    if (missingModel) return { ok: false, reason: missingModel };
     if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
     await retireOpenRuns(id, mission.project_id, saved.runs);
     const next = await createTeamRun(id, mission.project_id, team);
@@ -1105,6 +1123,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
     const team = saved.team;
+    const missingModel = missingModelNotice(team);
+    if (missingModel) return { ok: false, reason: missingModel };
     if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
 
     let task;
@@ -1145,6 +1165,305 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
   }
 
+  const configurationJobs = new Map();
+  const ownTeamRevisions = new Map();
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  async function lifecycleMutation(workspaceId, change) {
+    const result = await requestHeadless("/api/v1/ao/update", {
+      workspace_id: workspaceId, change: { operation: "lifecycle", change }, confirm: true,
+    }, { localConfirmation: true });
+    if (result?.ok !== true || result.lifecycle?.workspace_id !== workspaceId) {
+      throw new Error("Mission intent needs a fresh status check; no replacement was assumed");
+    }
+    return result;
+  }
+  function taskLifecycle(saved, taskId) {
+    return saved.task_lifecycle?.find(item => item.task_id === taskId) ?? { revision: 0, visibility: "active", reconfigure: [], schedule: null };
+  }
+  function visibleHandoff(mission) {
+    const parts = [];
+    for (const node of mission.nodes || []) {
+      parts.push(`${node.settings?.name || node.role}: ${node.state}`);
+      for (const receipt of [...(node.history || []), node.receipt].filter(Boolean)) {
+        if (typeof receipt.answer === "string" && receipt.answer.trim()) parts.push(receipt.answer);
+      }
+    }
+    const text = parts.join("\n\n");
+    const characters = Array.from(text);
+    return characters.length <= 8000 ? text : characters.slice(0, 7970).join("") + "\n[visible work truncated]";
+  }
+  // New replacement/hide paths require proof. The older manual control keeps its own behavior.
+  async function stopOwned(workspaceId, mission) {
+    const state = backgroundRuns.get(runKey(workspaceId, mission.id));
+    if (state) { state.stopped = true; state.status = "held"; }
+    const keys = () => [...dispatching].some(key => {
+      const [ws, run] = JSON.parse(key); return ws === workspaceId && run === mission.id;
+    });
+    for (let attempt = 0; keys() && attempt < 40; attempt++) await delay(250);
+    if (keys()) throw new Error("Owned launch is still pending; stop needs attention");
+    const current = await runs({ workspaceId, runId: mission.id });
+    const latest = current.runs.find(run => run.id === mission.id && run.workspace_id === workspaceId);
+    if (!latest) throw new Error("Owned mission disappeared while stopping");
+    const external = latest.nodes.filter(node => externalAgent(node)
+      && (["running","reserved"].includes(node.state) || node.request_key && node.state !== "finished" && node.receipt?.status !== "completed"));
+    if (external.some(node => !node.receipt?.thread_id)) throw new Error("Owned session identity is unknown; stop needs attention");
+    const result = await requestHeadless("/api/v1/ao/control", {
+      workspace_id: workspaceId, run_id: mission.id, action: "stop", confirm: true,
+    }, { localConfirmation: true });
+    if (result?.ok !== true || result.run?.id !== mission.id || result.run?.workspace_id !== workspaceId
+        || result.run.nodes.some(node => ["running", "reserved"].includes(node.state))) {
+      throw new Error("Owned native stop was not acknowledged; no replacement was started");
+    }
+    for (const node of external) {
+      await harnessService().interrupt(node.receipt.thread_id);
+      let stopped = false;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const observation = await harnessService().observe(node.receipt.thread_id);
+        stopped = observation.exited === true || (["completed", "failed", "interrupted", "cancelled"].includes(observation.turnState)
+          && !["working", "running", "starting"].includes(observation.status));
+        if (stopped) break;
+        await delay(250);
+      }
+      if (!stopped) throw new Error("Owned turn is still working; stop needs attention, no replacement was started");
+    }
+    return result.run;
+  }
+  async function resolveStoppedIntents(workspaceId,taskId,saved) {
+    let life=taskLifecycle(saved,taskId);
+    for(const intent of life.reconfigure || []) {
+      if (!["prepared","needs_attention"].includes(intent.phase)) continue;
+      const record=await runs({workspaceId,runId:intent.previous_run_id});
+      const mission=record.runs.find(run=>run.id===intent.previous_run_id && run.project_id===taskId);
+      if (!mission) throw new Error("Unconfirmed owned mission needs attention");
+      await stopOwned(workspaceId,mission);
+      const fresh=taskLifecycle(await runs({workspaceId}),taskId);
+      const result=await lifecycleMutation(workspaceId,{operation:"reconfigure_stopped",task_id:taskId,
+        intent_id:intent.id,expected_revision:fresh.revision,stopped_attempts:intent.required_attempts || []});
+      life=result.lifecycle;
+    }
+    return life;
+  }
+  async function reconfigureRun(input = {}) {
+    const workspaceId = clean(input.workspaceId, 128), previous = clean(input.runId, 80);
+    if (Object.keys(input).some(key => !["workspaceId", "runId", "taskId", "team", "intentId", "executable"].includes(key))) {
+      throw new Error("Unsupported mission configuration field");
+    }
+    const first = await runs({ workspaceId, runId: previous });
+    const captured = first.runs.find(run => run.id === previous && run.workspace_id === workspaceId);
+    if (!captured || input.taskId && captured.project_id !== input.taskId) throw new Error("Mission is not owned by the captured task");
+    const taskId = captured.project_id, key = JSON.stringify([workspaceId, taskId]);
+    const draft = structuredClone(input.team);
+    const operation = (configurationJobs.get(key) || Promise.resolve()).catch(() => undefined).then(async () => {
+      let saved = await runs({ workspaceId });
+      let life = await resolveStoppedIntents(workspaceId,taskId,saved);
+      saved = await runs({workspaceId});
+      if (life.visibility !== "active") throw new Error("Restore this task before changing its configuration");
+      let runId = previous;
+      const seen = new Set();
+      while (!seen.has(runId)) {
+        seen.add(runId);
+        const replacement = life.reconfigure?.find(intent => intent.previous_run_id === runId && intent.phase === "replaced")?.replacement_run_id;
+        if (!replacement) break;
+        runId = replacement;
+      }
+      if (life.schedule && ["scheduled","missed","needs_attention","cancelled","claimed"].includes(life.schedule.state)) runId = life.schedule.run_id;
+      let mission = saved.runs.find(run => run.id === runId && run.workspace_id === workspaceId && run.project_id === taskId);
+      if (!mission) mission = (await runs({ workspaceId, runId })).runs.find(run => run.id === runId && run.project_id === taskId);
+      if (!mission) throw new Error("Current task-owned mission was not found");
+      if (!draft || draft.workspace_id !== workspaceId || !Array.isArray(draft.nodes)) throw new Error("Choose a valid workspace team");
+      const invalid = draft.nodes.find(node => !node.route?.model || node.route.model === "default");
+      if (invalid) throw new Error(`Choose an explicit model for ${invalid.settings?.name || invalid.role}; configuration was not applied`);
+      const currentTeam = (saved.teams || [saved.team]).find(team => team?.id === draft.id);
+      if (!currentTeam) throw new Error("Saved team identity changed; reopen its settings");
+      const known = ownTeamRevisions.get(JSON.stringify([workspaceId, draft.id]));
+      if (draft.revision !== currentTeam.revision && known !== currentTeam.revision) throw new Error("Team changed in another window; refresh before retrying");
+      const response = await teamUpdate({ workspaceId, change: { operation: "save_team",
+        expected_revision: currentTeam.revision, team: { ...draft, revision: currentTeam.revision } } });
+      const team = response.team;
+      ownTeamRevisions.set(JSON.stringify([workspaceId, team.id]), team.revision);
+      const intentId = input.intentId ? clean(input.intentId, 128) : randomUUID();
+      const prepared = await lifecycleMutation(workspaceId, { operation: "prepare_reconfigure", task_id: taskId,
+        intent_id: intentId, expected_revision: life.revision, run_id: mission.id, run_revision: mission.revision,
+        team_id: team.id, team_revision: team.revision });
+      try {
+        const stopped = await stopOwned(workspaceId, mission);
+        const intent = prepared.lifecycle.reconfigure.find(item => item.id === intentId);
+        if (!intent) throw new Error("Prepared replacement identity was not returned");
+        // The durable kernel compares these exact identities with its prepared reservation set.
+        const finished = await lifecycleMutation(workspaceId, { operation: "finish_reconfigure", task_id: taskId,
+          intent_id: intentId, expected_revision: prepared.lifecycle.revision,
+          replacement_run_id: randomUUID(), stopped_attempts: intent.required_attempts, handoff: visibleHandoff(mission) });
+        const replacement = finished.run;
+        if (!replacement?.id || replacement.workspace_id !== workspaceId) throw new Error("Replacement outcome needs inspection");
+        if (finished.lifecycle.schedule && ["scheduled","missed","needs_attention","cancelled","claimed"].includes(finished.lifecycle.schedule.state)) {
+          armSchedule(workspaceId, finished.lifecycle);
+          return { ok: true, taskId, previousRunId: mission.id, runId: replacement.id, team, status: finished.lifecycle.schedule.state,
+            detail: finished.lifecycle.schedule.state === "scheduled" ? "Original deadline preserved" : "Configuration applied; explicit schedule recovery is required." };
+        }
+        try {
+          const started = await startRun({ workspaceId, runId: replacement.id, ...(input.executable ? { executable: input.executable } : {}) });
+          return { ok: true, taskId, previousRunId: mission.id, runId: replacement.id, team, status: started.status };
+        } catch {
+          return { ok: true, taskId, previousRunId: mission.id, runId: replacement.id, team, status: "failed",
+            detail: "Configuration applied; the new mission could not start. Check its harness and start it explicitly." };
+        }
+      } catch (error) {
+        await lifecycleMutation(workspaceId, { operation: "reconfigure_attention", task_id: taskId, intent_id: intentId,
+          expected_revision: prepared.lifecycle.revision, message: "Owned stop or replacement needs inspection; no automatic replay." }).catch(() => undefined);
+        throw error;
+      }
+    });
+    configurationJobs.set(key, operation);
+    try { return await operation; } finally { if (configurationJobs.get(key) === operation) configurationJobs.delete(key); }
+  }
+
+  const scheduleTimers = new Map();
+  let schedulerDisposed = false;
+  const scheduleKey = (workspaceId, taskId) => JSON.stringify([workspaceId, taskId]);
+  function clearSchedule(workspaceId, taskId) {
+    const key = scheduleKey(workspaceId, taskId);
+    const timer = scheduleTimers.get(key);
+    if (timer !== undefined) clearTimer(timer);
+    scheduleTimers.delete(key);
+  }
+  function armSchedule(workspaceId, life) {
+    clearSchedule(workspaceId, life.task_id);
+    const job = life.schedule;
+    if (schedulerDisposed || life.visibility !== "active" || job?.state !== "scheduled") return;
+    const key = scheduleKey(workspaceId, life.task_id);
+    const handle = setTimer(async () => {
+      scheduleTimers.delete(key);
+      if (schedulerDisposed) return;
+      try {
+        const saved = await runs({ workspaceId });
+        const current = taskLifecycle(saved, life.task_id), latest = current.schedule;
+        if (current.visibility !== "active" || latest?.id !== job.id || latest.state !== "scheduled") return;
+        if (latest.due_at_ms > now()) { armSchedule(workspaceId, current); return; }
+        const claim = await lifecycleMutation(workspaceId, { operation:"claim_schedule", task_id:life.task_id,
+          intent_id:latest.id, expected_revision:current.revision });
+        if (schedulerDisposed) return;
+        try {
+          await startRun({ workspaceId, runId:claim.run.id });
+          await lifecycleMutation(workspaceId, { operation:"recover_schedule", task_id:life.task_id,
+            intent_id:latest.id, expected_revision:claim.lifecycle.revision, action:"started" });
+        } catch {
+          const fresh = taskLifecycle(await runs({ workspaceId }), life.task_id);
+          if (fresh.schedule?.id === latest.id && fresh.schedule.state === "claimed") {
+            await lifecycleMutation(workspaceId, { operation:"recover_schedule", task_id:life.task_id,
+              intent_id:latest.id, expected_revision:fresh.revision, action:"needs_attention" });
+          }
+        }
+      } catch {
+        // Reconcile a lost claim response, but never repeat a start from uncertainty.
+        try {
+          const fresh=taskLifecycle(await runs({workspaceId}),life.task_id);
+          if(fresh.schedule?.id===job.id && fresh.schedule.state==="claimed") {
+            await lifecycleMutation(workspaceId,{operation:"recover_schedule",task_id:life.task_id,
+              intent_id:job.id,expected_revision:fresh.revision,action:"needs_attention"});
+          } else if(fresh.schedule?.id===job.id && fresh.schedule.state==="scheduled" && fresh.schedule.due_at_ms<=now()) {
+            await lifecycleMutation(workspaceId,{operation:"recover_schedule",task_id:life.task_id,
+              intent_id:job.id,expected_revision:fresh.revision,action:"missed"});
+          }
+        } catch { /* Keep the durable uncertain intent for explicit recovery. */ }
+      }
+    }, Math.min(2_147_483_647, Math.max(1, job.due_at_ms - now())));
+    handle?.unref?.();
+    scheduleTimers.set(key, handle);
+  }
+  async function restoreSchedules(workspaces = []) {
+    schedulerDisposed = false;
+    for (const workspace of workspaces) {
+      const workspaceId = clean(typeof workspace === "string" ? workspace : workspace.id, 128);
+      const saved = await runs({ workspaceId });
+      for (const life of saved.task_lifecycle || []) {
+        const job = life.schedule;
+        if (!job || life.visibility !== "active") continue;
+        if (job.state === "claimed" || job.state === "scheduled" && job.due_at_ms <= now()) {
+          await lifecycleMutation(workspaceId, { operation:"recover_schedule", task_id:life.task_id,
+            intent_id:job.id, expected_revision:life.revision,
+            action:job.state === "claimed" ? "needs_attention" : "missed" });
+        } else armSchedule(workspaceId, life);
+      }
+    }
+  }
+  async function scheduleStart(input = {}) {
+    const key=JSON.stringify([clean(input.workspaceId,128),clean(input.taskId,128)]);
+    const previous=configurationJobs.get(key);
+    const operation=(previous || Promise.resolve()).catch(()=>undefined).then(()=>scheduleStartNow(input));
+    configurationJobs.set(key,operation);
+    try { return await operation; }
+    finally { if(configurationJobs.get(key)===operation) configurationJobs.delete(key); }
+  }
+  async function scheduleStartNow({ workspaceId, taskId, runId, delay: value, unit, intentId, team: draft } = {}) {
+    const id = clean(workspaceId,128), task = clean(taskId,128), duration = delayToMilliseconds(value,unit);
+    let due = now() + duration;
+    if (!Number.isSafeInteger(due) || due > 8_640_000_000_000_000) throw new Error("Delay exceeds the supported date range");
+    const saved = await runs({workspaceId:id});
+    const source = saved.runs.find(run=>run.id===runId && run.workspace_id===id && run.project_id===task);
+    if (!source) throw new Error("Select this task's saved mission before scheduling");
+    if (saved.runs.some(run=>run.project_id===task && run.nodes.some(node=>["running","reserved"].includes(node.state)))) {
+      throw new Error("Stop this task before scheduling a delayed start");
+    }
+    let team = (saved.teams || [saved.team]).find(team=>team?.id === source.team?.id) || saved.team;
+    if (!team?.id) throw new Error("Save a valid team before scheduling");
+    if (!await confirm({message:"Schedule this mission once?",detail:`${task}\nStart after ${value} ${unit}. The app must stay running; a missed start requires recovery.`})) return {ok:true,cancelled:true};
+    if (draft) {
+      if(draft.id!==team.id || draft.workspace_id!==id || !Array.isArray(draft.nodes)) throw new Error("Choose this task's saved team");
+      const missing=missingModelNotice(draft);if(missing) throw new Error(missing);
+      const known=ownTeamRevisions.get(JSON.stringify([id,draft.id]));
+      if(draft.revision!==team.revision && known!==team.revision) throw new Error("Team changed in another window; refresh before scheduling");
+      const updated=await teamUpdate({workspaceId:id,change:{operation:"save_team",expected_revision:team.revision,
+        team:{...draft,revision:team.revision}}});
+      team=updated.team;ownTeamRevisions.set(JSON.stringify([id,team.id]),team.revision);
+    }
+    await resolveStoppedIntents(id,task,saved);
+    const refreshed=await runs({workspaceId:id});
+    for(const old of refreshed.runs.filter(run=>run.project_id===task && run.nodes.some(node=>node.request_key && node.state==="cancelled" && node.receipt?.status!=="completed"))) await stopOwned(id,old);
+    const life = taskLifecycle(await runs({workspaceId:id}),task);
+    due=now()+duration;
+    const result = await lifecycleMutation(id,{operation:"schedule_start",task_id:task,
+      intent_id:intentId ? clean(intentId,128) : randomUUID(),expected_revision:life.revision,
+      run_id:randomUUID(),team_id:team.id,team_revision:team.revision,due_at_ms:due});
+    armSchedule(id,result.lifecycle);
+    return {ok:true,taskId:task,runId:result.run.id,status:"scheduled",dueAtMs:due};
+  }
+  async function cancelSchedule({workspaceId,taskId,intentId} = {}) {
+    const id=clean(workspaceId,128),task=clean(taskId,128);
+    clearSchedule(id,task);
+    const saved=await runs({workspaceId:id}),life=taskLifecycle(saved,task);
+    if (!life.schedule || intentId && life.schedule.id !== intentId) throw new Error("The selected schedule changed");
+    for (const mission of saved.runs.filter(run=>run.project_id===task && run.nodes.some(node=>["running","reserved"].includes(node.state)
+      || node.request_key && node.state !== "finished" && node.receipt?.status !== "completed"))) await stopOwned(id,mission);
+    const fresh=taskLifecycle(await runs({workspaceId:id}),task);
+    return lifecycleMutation(id,{operation:"cancel_schedule",task_id:task,intent_id:fresh.schedule.id,expected_revision:fresh.revision});
+  }
+  async function visibilityAction({workspaceId,taskId} = {},visibility) {
+    const id=clean(workspaceId,128),task=clean(taskId,128);
+    const detail=await board({workspaceId:id,taskId:task});
+    if (!detail.task) throw new Error("The selected task was not found");
+    if (visibility !== "active" && !await confirm({message:`${visibility === "deleted" ? "Delete" : "Archive"} "${detail.task.title}"?`,
+      detail:"Stop only this task's owned work and cancel its delayed start. Original input and history remain recoverable."})) return {ok:true,cancelled:true};
+    clearSchedule(id,task);
+    const queued=configurationJobs.get(JSON.stringify([id,task]));
+    if (queued) await queued.catch(()=>undefined);
+    const saved=await runs({workspaceId:id});
+    if (visibility !== "active") {
+      for (const mission of saved.runs.filter(run=>run.project_id===task && (!runSettled(run)
+        || run.nodes.some(node=>["running","reserved"].includes(node.state)
+          || node.request_key && node.state !== "finished" && node.receipt?.status !== "completed")))) await stopOwned(id,mission);
+    }
+    const life=await resolveStoppedIntents(id,task,await runs({workspaceId:id}));
+    return lifecycleMutation(id,visibility === "active"
+      ? {operation:"restore_task",task_id:task,expected_revision:life.revision}
+      : {operation:"set_visibility",task_id:task,expected_revision:life.revision,visibility});
+  }
+  function dispose() {
+    schedulerDisposed = true;
+    for (const timer of scheduleTimers.values()) clearTimer(timer);
+    scheduleTimers.clear();
+  }
+
   async function call(operation, args = {}) {
     switch (operation) {
       case "chat_send": return chatSend(args);
@@ -1164,6 +1483,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       case "advance": return advance(args);
       case "start_run": return startRun(args);
       case "restart_run": return restartRun(args);
+      case "reconfigure_run": return reconfigureRun(args);
+      case "schedule_start": return scheduleStart(args);
+      case "cancel_schedule": return cancelSchedule(args);
+      case "recover_schedule": return args.action === "cancel" ? cancelSchedule(args) : scheduleStart(args);
+      case "archive_task": return visibilityAction(args, "archived");
+      case "delete_task": return visibilityAction(args, "deleted");
+      case "restore_task": return visibilityAction(args, "active");
       case "control_run": return controlRun(args);
       case "run_status": return runStatus(args);
       case "approve_harness": return approveAoHarness(args);
@@ -1176,7 +1502,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
   }
 
-  return Object.freeze({ call });
+  return Object.freeze({ call, restoreSchedules, dispose });
 }
 
-module.exports = { createAgentOrchestratorWorkflow, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { createAgentOrchestratorWorkflow, delayToMilliseconds, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

@@ -371,6 +371,22 @@ pub fn create_run(
         .find(|team| team.workspace_id == workspace_id && team.revision == team_revision)
         .cloned()
         .ok_or_else(|| fail("Saved team changed; refresh before creating this mission"))?;
+    create_run_with_snapshot(data, workspace_id, run_id, task_id, expected_board_revision, team, worker_limit)
+}
+
+/// Creates from an exact saved snapshot, so an edit in another task cannot change this run.
+pub fn create_run_with_snapshot(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: String,
+    task_id: String,
+    expected_board_revision: u64,
+    team: Team,
+    worker_limit: u8,
+) -> AppResult<Run> {
+    if team.workspace_id != workspace_id {
+        return Err(fail("Saved team belongs to another workspace"));
+    }
     if !(1..=24).contains(&worker_limit) {
         return Err(fail("Mission worker limit must be one to 24"));
     }

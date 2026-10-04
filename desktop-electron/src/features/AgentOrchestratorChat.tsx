@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../icons";
 import {
-  CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatNodeName, chatNodeOrder, chatTranscript,
+  CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatNodeName, chatNodeOrder, chatTranscript, scheduledStartLabel,
   type ChatActivity, type ChatMessage, type ChatNode, type ChatRun, type ChatStatus, type ChatSummary,
 } from "./ao-chat";
 
 type ChatApproval = { nodeId: string; approval_id: string; reason?: string; path?: string; cwd?: string; command?: string; kind?: string };
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
-  queued: "Starting", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
+  queued: "Starting", scheduled: "Scheduled", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
 };
 
 /** Workspaces and task-level view controls share one persistent tree. */
@@ -24,7 +24,10 @@ export type ChatWorkspaces = {
  * Like Codex's sidebar: workspaces first, each opening to its chats. Only the current workspace
  * is expanded (its chats are the ones loaded); choosing another workspace switches to it.
  */
-export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
+export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree, onAction, busyTaskId, now = Date.now() }: {
+  now?: number;
+  onAction?: (taskId: string, action: "schedule" | "cancel_schedule" | "archive" | "delete" | "restore") => void;
+  busyTaskId?: string;
   chats: ChatSummary[]; selectedTaskId: string; onSelect: (taskId: string, view: "chat" | "overview") => void; onNew?: () => void;
   tree?: ChatWorkspaces;
 }) {
@@ -36,8 +39,9 @@ export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
           <button type="button" className="ao-chat-select" title={entry.title} aria-current={entry.taskId === selectedTaskId}
             onClick={() => onSelect(entry.taskId, "chat")}>
             <span className={`ao-chat-dot status-${entry.status}`} aria-label={STATUS_LABEL[entry.status]} title={STATUS_LABEL[entry.status]} />
-            <span className="ao-chat-title">{entry.title}</span>
+            <span className="ao-chat-title">{entry.title}{entry.schedule?.state === "scheduled" ? <small className="ao-schedule-detail">{scheduledStartLabel(entry.schedule.due_at_ms,now)}</small> : null}</span>
           </button>
+          <div className="ao-chat-actions">
           <button type="button" className="ao-chat-view" aria-label={`${tree?.labels?.chat ?? "Mission"} · ${entry.title}`}
             title={`${tree?.labels?.chat ?? "Mission"} · ${entry.title}`}
             aria-pressed={entry.taskId === selectedTaskId && tree?.view === "chat"} onClick={() => onSelect(entry.taskId, "chat")}>
@@ -48,6 +52,20 @@ export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
             aria-pressed={entry.taskId === selectedTaskId && tree?.view === "overview"} onClick={() => onSelect(entry.taskId, "overview")}>
             <Icon name="orchestrator" width="15" height="15" />
           </button>
+          {onAction ? <>
+            <button type="button" className="ao-chat-view" disabled={busyTaskId === entry.taskId || entry.status === "running"}
+              aria-label={`${entry.schedule?.state === "scheduled" ? "Cancel schedule" : "Schedule"} · ${entry.title}`}
+              title={entry.status === "running" ? "Stop this mission before scheduling" : "One-time delayed start; app must stay running"}
+              onClick={() => onAction(entry.taskId, entry.schedule?.state === "scheduled" ? "cancel_schedule" : "schedule")}>◷</button>
+            <button type="button" className="ao-chat-view" disabled={busyTaskId === entry.taskId}
+              aria-label={`${entry.visibility && entry.visibility !== "active" ? "Restore" : "Archive"} · ${entry.title}`}
+              title={entry.visibility && entry.visibility !== "active" ? "Restore mission" : "Archive mission"}
+              onClick={() => onAction(entry.taskId, entry.visibility && entry.visibility !== "active" ? "restore" : "archive")}>▣</button>
+            <button type="button" className="ao-chat-view" disabled={busyTaskId === entry.taskId}
+              aria-label={`Delete · ${entry.title}`} title="Delete mission (recoverable)"
+              onClick={() => onAction(entry.taskId, "delete")}>×</button>
+          </> : null}
+          </div>
         </li>
       ))}
       {!chats.length && !onNew ? <li><p className="ao-chat-empty">No chats yet</p></li> : null}

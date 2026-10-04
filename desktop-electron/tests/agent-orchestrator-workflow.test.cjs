@@ -9,6 +9,191 @@ const { createAgentOrchestratorWorkflow, resolveAoNativeConnection } = require("
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
+function reconfigureWorld(observation = {status:"needs_input",turnState:"interrupted"}) {
+  const calls=[];
+  const node={id:"lead",role:"planner",task_id:"task",state:"running",request_key:"request-one",
+    route:{harness_id:"ao:codex",model:"agent-model"},settings:{name:"Lead"},
+    receipt:{thread_id:"owned",answer:"Visible file A is verified",reasoning:"PRIVATE_THINKING"},history:[]};
+  const old={id:"old",workspace_id:"ws",project_id:"task",revision:1,cancelled:false,nodes:[node]};
+  const other={id:"other",workspace_id:"ws",project_id:"other-task",revision:1,cancelled:false,nodes:[{...node,id:"other-lead"}]};
+  let team={id:"team",workspace_id:"ws",revision:0,worker_limit:2,nodes:[{...node,task_id:"",state:"pending",receipt:null,request_key:null,route:{harness_id:"codex-native",model:"chatgpt-web/high",effort:"xhigh"}}]};
+  const saved={ok:true,runs:[old,other],team,task_lifecycle:[]};
+  const workflow=createAgentOrchestratorWorkflow({
+    findCodexExecutable:()=>"C:/codex.exe",exists:()=>true,confirm:async()=>true,
+    resolveHarness:async()=>{calls.push(["resolve-harness"]);throw Error("Harness unavailable in offline test")},
+    aoHarness:{interrupt:async id=>{calls.push(["interrupt",id])},observe:async()=>observation},
+    requestHeadless:async(endpoint,body,options)=>{
+      calls.push([endpoint,structuredClone(body),options]);
+      if(endpoint==="/api/v1/ao/read") return structuredClone(saved);
+      if(endpoint==="/api/v1/ao/control"){
+        const target=saved.runs.find(run=>run.id===body.run_id);target.cancelled=true;target.revision++;target.nodes.forEach(node=>node.state="cancelled");return {ok:true,run:structuredClone(target)};
+      }
+      if(endpoint==="/api/v1/ao/update"){
+        const c=body.change;
+        if(c.operation==="save_team"){team={...structuredClone(c.team),revision:team.revision+1};saved.team=team;return {ok:true,team};}
+        const m=c.change;
+        let life=saved.task_lifecycle[0]??{task_id:"task",workspace_id:"ws",revision:0,visibility:"active",reconfigure:[],schedule:null};
+        if(m.operation==="prepare_reconfigure"){
+          life.reconfigure.push({id:m.intent_id,previous_run_id:old.id,phase:"prepared",
+            required_attempts:[{node_id:"lead",request_key:"request-one"}]});
+        } else if(m.operation==="finish_reconfigure"){
+          const next={...structuredClone(old),id:m.replacement_run_id,cancelled:false,paused:false,
+            team:structuredClone(team),nodes:team.nodes.map(n=>({...n,id:"new-lead",state:"pending"}))};
+          saved.runs.push(next);life.reconfigure[0].replacement_run_id=next.id;life.reconfigure[0].phase="replaced";
+          life.revision++;saved.task_lifecycle=[life];return {ok:true,lifecycle:life,run:next};
+        } else if(m.operation==="reconfigure_attention"){life.reconfigure[0].phase="needs_attention";}
+        life.revision++;saved.task_lifecycle=[life];return {ok:true,lifecycle:life};
+      }
+      if(endpoint==="/api/v1/tools/call")return {ok:true,operation:{state:"completed",result:{
+        ok:true,revision:1,tasks:[],task:{id:"task",title:"Original task",description:"Unchanged"}}}};
+      throw Error("Unexpected endpoint "+endpoint);
+    },
+  });
+  return {workflow,calls,saved,team};
+}
+
+test("reconfigure replaces only the captured task after acknowledged interruption and carries visible work, not private thinking", async()=>{
+  const world=reconfigureWorld(),before=structuredClone(world.saved.runs[1]);
+  const result=await world.workflow.call("reconfigure_run",{workspaceId:"ws",runId:"old",
+    taskId:"task",intentId:"edit",team:world.team});
+  assert.equal(result.previousRunId,"old");assert.notEqual(result.runId,"old");
+  assert.equal(result.status,"failed");
+  assert.deepEqual(world.saved.runs[1],before);
+  const finish=world.calls.find(c=>c[1]?.change?.change?.operation==="finish_reconfigure")[1].change.change;
+  assert.deepEqual(finish.stopped_attempts,[{node_id:"lead",request_key:"request-one"}]);
+  assert.match(finish.handoff,/Visible file A/);assert.ok(!finish.handoff.includes("PRIVATE_THINKING"));
+  assert.equal(result.team.nodes[0].route.effort,"xhigh");
+  assert.equal(world.saved.runs.length,3);
+});
+
+test("reconfigure never creates a replacement when interruption is uncertain or the owned turn is still working", async()=>{
+  const world=reconfigureWorld({status:"working",turnState:"running"});
+  await assert.rejects(world.workflow.call("reconfigure_run",{workspaceId:"ws",runId:"old",
+    taskId:"task",intentId:"edit",team:world.team}),/stop|working|attention/i);
+  assert.equal(world.saved.runs.length,2);
+  assert.ok(!world.calls.some(c=>c[1]?.change?.change?.operation==="finish_reconfigure"));
+});
+
+test("archive cannot hide a cancelled-but-still-live external turn after an uncertain reconfigure stop", async()=>{
+  const world=reconfigureWorld({status:"working",turnState:"running"});
+  await assert.rejects(world.workflow.call("reconfigure_run",{workspaceId:"ws",runId:"old",
+    taskId:"task",intentId:"edit",team:world.team}));
+  assert.equal(world.saved.runs[0].nodes[0].state,"cancelled");
+  await assert.rejects(world.workflow.call("archive_task",{workspaceId:"ws",taskId:"task"}),/working|stop|attention/i);
+  assert.equal(world.saved.task_lifecycle[0].visibility,"active");
+  assert.ok(!world.calls.some(c=>c[1]?.change?.change?.operation==="set_visibility"));
+});
+
+test("model edits preserve missed, uncertain and cancelled schedule holds rather than launching",async()=>{
+  for(const state of ["missed","needs_attention","cancelled","claimed"]){
+    const world=reconfigureWorld();
+    world.saved.task_lifecycle=[{workspace_id:"ws",task_id:"task",revision:0,visibility:"active",reconfigure:[],
+      schedule:{id:"job",run_id:"old",state,due_at_ms:1}}];
+    const result=await world.workflow.call("reconfigure_run",{workspaceId:"ws",runId:"old",taskId:"task",team:world.team});
+    assert.equal(result.status,state);
+    assert.ok(!world.calls.some(call=>call[0]==="resolve-harness"));
+  }
+});
+
+test("an edit captured before schedule creation retargets the actual scheduled run",async()=>{
+  const world=reconfigureWorld();
+  world.saved.runs[0].cancelled=true;
+  world.saved.runs[0].nodes[0].state="cancelled";
+  const pending={...structuredClone(world.saved.runs[0]),id:"scheduled",cancelled:false,nodes:[
+    {...world.saved.runs[0].nodes[0],state:"pending",request_key:null,receipt:null}]};
+  world.saved.runs.push(pending);
+  world.saved.task_lifecycle=[{workspace_id:"ws",task_id:"task",revision:0,visibility:"active",reconfigure:[],
+    schedule:{id:"job",run_id:"scheduled",state:"scheduled",due_at_ms:9999999999999}}];
+  const result=await world.workflow.call("reconfigure_run",{workspaceId:"ws",runId:"old",taskId:"task",team:world.team});
+  const prepared=world.calls.find(call=>call[1]?.change?.change?.operation==="prepare_reconfigure")[1].change.change;
+  assert.equal(prepared.run_id,"scheduled");
+  assert.equal(result.previousRunId,"scheduled");
+  world.workflow.dispose();
+});
+
+test("one-time delay validates positive integral seconds, minutes and hours", ()=>{
+  const {delayToMilliseconds}=require("../electron/agent-orchestrator-workflow.cjs");
+  assert.equal(delayToMilliseconds(2,"minutes"),120000);
+  assert.equal(delayToMilliseconds(1,"hours"),3600000);
+  for(const [value,unit] of [[0,"seconds"],[-1,"seconds"],[1.5,"seconds"],[1,"days"],[Number.MAX_SAFE_INTEGER,"hours"]])
+    assert.throws(()=>delayToMilliseconds(value,unit));
+});
+
+test("future schedule wakes from current durable identity, claims once, and restart recovery does not replay", async()=>{
+  let now=1000, grants=0;
+  const timers=new Map();
+  const mission={id:"new-config",workspace_id:"ws",project_id:"task",revision:1,cancelled:false,nodes:[
+    {id:"lead",role:"planner",state:"pending",route:{harness_id:"codex-native",model:"chatgpt-web/high"}}]};
+  const life={workspace_id:"ws",task_id:"task",revision:1,visibility:"active",
+    schedule:{id:"job",run_id:"new-config",due_at_ms:2000,state:"scheduled",revision:1}};
+  const workflow=createAgentOrchestratorWorkflow({now:()=>now,
+    setTimer:fn=>{const id=timers.size+1;timers.set(id,fn);return id},clearTimer:id=>timers.delete(id),
+    findCodexExecutable:()=>"C:/codex.exe",exists:()=>true,
+    resolveHarness:async()=>({executable:"C:/codex.exe",expected_sha256:"a".repeat(64)}),
+    requestHeadless:async(endpoint,body)=>{
+      if(endpoint==="/api/v1/ao/read")return {ok:true,runs:[structuredClone(mission)],task_lifecycle:[structuredClone(life)]};
+      if(endpoint==="/api/v1/ao/update"){
+        const c=body.change.change;
+        assert.equal(c.intent_id,"job");
+        if(c.operation==="claim_schedule"){assert.equal(life.schedule.state,"scheduled");life.schedule.state="claimed";}
+        else if(c.operation==="recover_schedule")life.schedule.state=c.action;
+        else throw Error("unexpected schedule mutation");
+        life.revision++;return {ok:true,lifecycle:structuredClone(life),run:structuredClone(mission)};
+      }
+      if(endpoint==="/api/v1/ao/grant"){
+        grants++;mission.nodes[0].state="finished";
+        return {ok:true,run:structuredClone(mission),grant:{executable_sha256:"a".repeat(64)}};
+      }
+      throw Error("Unexpected endpoint "+endpoint);
+    },
+  });
+  assert.equal(typeof workflow.restoreSchedules,"function");
+  await workflow.restoreSchedules([{id:"ws"}]);
+  assert.equal(timers.size,1);assert.equal(grants,0);
+  now=2000;const tick=[...timers.values()][0];await tick();await tick();
+  assert.equal(grants,1);assert.equal(life.schedule.state,"started");
+  workflow.dispose();
+  life.schedule.state="claimed";life.revision++;grants=0;
+  await workflow.restoreSchedules([{id:"ws"}]);
+  assert.equal(life.schedule.state,"needs_attention");assert.equal(grants,0);
+});
+
+test("an invalid saved model reports a safe actionable result through IPC rather than transport failure", async()=>{
+  let writes=0;
+  const workflow=createAgentOrchestratorWorkflow({findCodexExecutable:()=>"C:/codex.exe",
+    requestHeadless:async(endpoint)=>{
+      if(endpoint==="/api/v1/ao/read")return {ok:true,runs:[],team:{id:"team",revision:1,nodes:[
+        {role:"reviewer",settings:{name:"Reviewer"},route:{model:"default"}}]}};
+      writes++;throw Error("must not create task or call a model");
+    }});
+  const host=createCodingToolsAppsHost({services:{agentOrchestrator:(operation,args)=>workflow.call(operation,args)}});
+  const ipc={invoke:(_channel,payload)=>host.call(payload.moduleId,payload.operation,payload.arguments)};
+  const response=await invokeContract(ipc,"apps.call",{moduleId:"agent-orchestrator",operation:"chat_send",
+    arguments:{workspaceId:"ws",message:"Original user message"}});
+  assert.equal(response.result.ok,false);
+  assert.match(response.result.reason,/Choose an explicit model for Reviewer/);
+  assert.equal(writes,0);
+});
+
+test("explicit stop revokes a pending schedule and its timer rather than leaving a scheduled ghost",async()=>{
+  const timers=new Map();
+  const mission={id:"r",workspace_id:"ws",project_id:"t",revision:1,cancelled:false,nodes:[{id:"p",state:"pending"}]};
+  const life={workspace_id:"ws",task_id:"t",revision:1,visibility:"active",schedule:{id:"job",run_id:"r",state:"scheduled",due_at_ms:5000}};
+  const workflow=createAgentOrchestratorWorkflow({now:()=>1000,setTimer:fn=>{timers.set(1,fn);return 1},clearTimer:id=>timers.delete(id),
+    requestHeadless:async(endpoint,body)=>{
+      if(endpoint==="/api/v1/ao/read")return {ok:true,runs:[structuredClone(mission)],task_lifecycle:[structuredClone(life)]};
+      if(endpoint==="/api/v1/ao/control"){mission.cancelled=true;mission.nodes[0].state="cancelled";return {ok:true,run:structuredClone(mission)};}
+      if(endpoint==="/api/v1/ao/update"){assert.equal(body.change.change.operation,"cancel_schedule");life.schedule.state="cancelled";return {ok:true,lifecycle:structuredClone(life)};}
+      throw Error("Unexpected "+endpoint);
+    }});
+  await workflow.restoreSchedules([{id:"ws"}]);
+  assert.equal(timers.size,1);
+  await workflow.call("control_run",{workspaceId:"ws",runId:"r",action:"stop"});
+  assert.equal(life.schedule.state,"cancelled");
+  assert.equal(timers.size,0);
+  workflow.dispose();
+});
+
 test("team settings use their local UI operation and cannot be changed through mission graph tools", async () => {
   const requests = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {

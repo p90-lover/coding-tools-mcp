@@ -293,7 +293,12 @@ if (require.main === module) {
   }
 }
 
+function helperPricesPath(stateRoot) {
+  return path.join(requiredAbsolutePath(stateRoot, "CPA state root"), "cpa-helper-data", "prices.json");
+}
+
 module.exports = {
+  helperPricesPath,
   prepare,
   run,
   runtimeConfiguration,
