@@ -48,14 +48,14 @@ Implement FR-1 through FR-6 using existing native and app authorization infrastr
   - _需求: FR-1, FR-2, FR-3, FR-4, FR-5, FR-6_
 - [x] 3.2 Run focused Rust/CJS suites and renderer typecheck/UI test; broaden only for material failures.
   - _需求: NFR-5_
-- [ ] 3.3 Publish the reviewed, graph-analyzed scoped patch as the requested PR and attach it. Source verification is complete; publication is pending.
+- [x] 3.3 Published and attached https://github.com/p90-lover/coding-tools-mcp/pull/252 with source commit `d1444ae2134cd0a333ea36985ff2bc043405732a`; only the 29 scoped source/test/spec files are included.
   - _需求: NFR-1, NFR-2, NFR-4_
 
 ## 检查点
 - [x] Specifications and concrete policy design approved and check_spec passed.
 - [x] Each changed public/native policy path has real persistence/effective evidence.
 - [x] No unresolved high-priority review finding.
-- [ ] Only task-owned files committed and PR attached; app not restarted.
+- [x] Only task-owned files committed and PR attached; app not restarted.
 
 ## 需求覆盖矩阵
 | ID | Design section | Task | Status |
@@ -81,7 +81,7 @@ Implement FR-1 through FR-6 using existing native and app authorization infrastr
 - [x] Native/app policies remain distinct and legacy-compatible.
 - [x] Saved versus running-effective scope is honest.
 - [x] Focused tests and required UI proof are real.
-- [ ] Task-owned temporary data cleaned by managed worktree archive or retained paths/sizes explicitly reported.
+- [x] Temporary ownership/disposition recorded: test processes stopped; the disposable managed worktree will be archived after publication. Required tracked regression fixtures remain in Git; primary diagnostic/backups blocked by the tool's deletion guard are reported separately.
 
 ## Verified source result (2026-10-04)
 - Node: the seven focused workflow/readiness/browser/permission/route/chat suites passed 201/201, exit 0.
@@ -93,4 +93,4 @@ Implement FR-1 through FR-6 using existing native and app authorization infrastr
 - Independent bounded final source review found no remaining actionable finding after fixing split normalization, deferred retry policy, exact modern command scope and typed approval handling.
 - GitNexus detect_changes returned all 203 matched changed symbols and 16 affected processes (18 tracked files), without partial/truncated results. Aggregate risk is CRITICAL. The index is 94 commits stale and excludes new unindexed modules; current-source review, compiler/tests and new-module inspection are the authority, not an all-clear from the graph.
 - Reconnects replace only a mismatched idle owned native connection after exact route/state and existing consent/grant checks. Active attempts retain their original policy. Deferred changes bind only explicit fields at safe retry/requeue boundaries.
-- Publishing and final managed-worktree cleanup are recorded after the PR is created.
+- Published PR: https://github.com/p90-lover/coding-tools-mcp/pull/252 (OPEN, 29 scoped files), source head `d1444ae2134cd0a333ea36985ff2bc043405732a`. Its Runtime/contracts/types/renderer CI check passed. A documentation-only follow-up records publication; final managed archive/retained-file results are reported in the task.
