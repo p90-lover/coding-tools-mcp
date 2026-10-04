@@ -145,6 +145,10 @@ func configure(raw []byte) error {
                  }
                  if (text.trimStart().startsWith('{')) { isSSE = false; netError = 'upstream returned JSON instead of SSE'; break; }
                }`), 1)
+
+		b = bytes.Replace(b, []byte("  const upstreams = r.pipeline === 'planner'\n    ? [...new Set([...(harvest || []), ...r.fallbacks])]\n    : [...new Set([...r.fallbacks, ...(harvest || []), ...Object.keys(detail)])];"), []byte("  // The gateway may hide its fallback catalog; the successful provider is still observed evidence.\n  const observed = r.finalProvider ? [r.finalProvider] : [];\n  const upstreams = r.pipeline === 'planner'\n    ? [...new Set([...observed, ...(harvest || []), ...r.fallbacks])]\n    : [...new Set([...observed, ...r.fallbacks, ...(harvest || []), ...Object.keys(detail)])];"), 1)
+		b = bytes.Replace(b, []byte("availableProviders: harvest || prev.availableProviders || [],"), []byte("availableProviders: [...new Set([...observed, ...(harvest || prev.availableProviders || [])])],"), 1)
+
 		if err := os.WriteFile(filepath.Join(runtimeDir, filepath.FromSlash(name)), b, 0600); err != nil {
 			return err
 		}
