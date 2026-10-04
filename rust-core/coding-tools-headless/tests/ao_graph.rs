@@ -2,12 +2,14 @@ use coding_tools_core::{data::AppData, integrations::ao::*};
 use serde_json::json;
 
 fn fixture() -> (AppData, Run) {
-    let mut data = AppData::default();
-    data.control_board = serde_json::from_value(json!({"revision":2,"tasks":[{
-        "id":"task","workspace_id":"qa","title":"Mission","description":"",
-        "state":"backlog","step":0,"created_at":1,"updated_at":1,"evidence":[]
-    }]}))
-    .unwrap();
+    let data = AppData {
+        control_board: serde_json::from_value(json!({"revision":2,"tasks":[{
+            "id":"task","workspace_id":"qa","title":"Mission","description":"",
+            "state":"backlog","step":0,"created_at":1,"updated_at":1,"evidence":[]
+        }]}))
+        .unwrap(),
+        ..AppData::default()
+    };
     let web = Route {
         harness_id: "codex-native".into(),
         provider_id: "chatgpt-web".into(),

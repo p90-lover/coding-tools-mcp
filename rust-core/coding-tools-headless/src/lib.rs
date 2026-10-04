@@ -355,6 +355,8 @@ struct ContextEntry {
     context: Arc<tools::ToolContext>,
 }
 
+type AoHubMap = HashMap<(String, String, String), Arc<AoCodexHub>>;
+
 #[derive(Clone)]
 struct ServiceState {
     lifecycle: Lifecycle,
@@ -362,7 +364,7 @@ struct ServiceState {
     local_ui_token: Option<String>,
     core: Arc<CoreState>,
     contexts: Arc<Mutex<HashMap<String, ContextEntry>>>,
-    ao_hubs: Arc<Mutex<HashMap<(String, String, String), Arc<AoCodexHub>>>>,
+    ao_hubs: Arc<Mutex<AoHubMap>>,
     ao_home_root: PathBuf,
     operations: Arc<Mutex<OperationStore>>,
     shutdown_tx: tokio::sync::watch::Sender<Option<String>>,
@@ -564,7 +566,7 @@ enum AoMutation {
     },
     Create {
         expected_board_revision: u64,
-        run: integrations::ao::Run,
+        run: Box<integrations::ao::Run>,
     },
     Graph {
         run_id: String,
@@ -1350,6 +1352,32 @@ mod workspace_auth_tests {
     }
 
     #[test]
+    fn ao_create_payload_stays_flat_and_mutation_stack_is_bounded() {
+        let raw = json!({"id":"run","workspace_id":"qa","project_id":"goal","revision":0,"cancelled":false,"nodes":[]});
+        let expected: integrations::ao::Run = serde_json::from_value(raw.clone()).unwrap();
+        let request: AoMutation = serde_json::from_value(json!({
+            "operation":"create","expected_board_revision":2,"run":raw
+        }))
+        .unwrap();
+        let AoMutation::Create {
+            expected_board_revision,
+            run,
+        } = request
+        else {
+            panic!("create request was changed");
+        };
+        assert_eq!(expected_board_revision, 2);
+        assert_eq!(
+            serde_json::to_value(run).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert!(
+            std::mem::size_of::<AoMutation>() < 256,
+            "large mission graphs must not inflate every mutation request"
+        );
+    }
+
+    #[test]
     fn native_reconnect_retires_only_mismatched_idle_pending_policy() {
         let mut node: integrations::ao::Node = serde_json::from_value(json!({
             "id":"role","task_id":"","role":"worker","parents":[],"x":0,"y":0,"state":"pending",
@@ -1453,10 +1481,7 @@ mod workspace_auth_tests {
             context_window: None,
         };
         let sentinel = "SENTINEL_KEY_DO_NOT_LOG_1234567890";
-        assert_eq!(
-            ao_connect_policy(&node, &connection, Some(sentinel)).unwrap(),
-            true
-        );
+        assert!(ao_connect_policy(&node, &connection, Some(sentinel)).unwrap());
         assert!(ao_connect_policy(&node, &connection, None).is_err());
         // Codex's workspace profile is allowed when the saved card chose it; the connection
         // must match the card, and no other profile or standalone commands are accepted.
@@ -1507,11 +1532,11 @@ mod workspace_auth_tests {
         node.route.model = "chatgpt-web/high".into();
         connection.model = "chatgpt-web/high".into();
         assert!(ao_connect_policy(&node, &connection, Some(sentinel)).is_err());
-        assert_eq!(ao_connect_policy(&node, &connection, None).unwrap(), false);
+        assert!(!ao_connect_policy(&node, &connection, None).unwrap());
         // The orchestrator may run on another WebGPT tier, or on a CPA model with the pool key.
         node.route.model = "chatgpt-web/extra-high".into();
         connection.model = node.route.model.clone();
-        assert_eq!(ao_connect_policy(&node, &connection, None).unwrap(), false);
+        assert!(!ao_connect_policy(&node, &connection, None).unwrap());
         node.route.provider_id = "cliproxyapi-antigravity".into();
         node.route.account_id = "shared-cpa-pool".into();
         node.route.model = "claude-sonnet-4-6".into();
@@ -3361,7 +3386,7 @@ fn ao_external_node(
     workspace_id: &str,
     run_id: &str,
     node_id: &str,
-) -> Result<integrations::ao::Node, Response> {
+) -> Result<integrations::ao::Node, Box<Response>> {
     // Any role (orchestrator, worker or reviewer) may run on an AO harness.
     match ao_target(state, workspace_id, run_id, node_id) {
         Ok((_root, node, _cancelled))
@@ -3369,11 +3394,11 @@ fn ao_external_node(
         {
             Ok(node)
         }
-        _ => Err(json_error(
+        _ => Err(Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "AO_EXTERNAL_SCOPE_FAILED",
             "AO harness card unavailable",
-        )),
+        ))),
     }
 }
 
@@ -3406,7 +3431,7 @@ async fn ao_external_reserve(
         }
     };
     if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        return response;
+        return *response;
     }
     let grant_now_ms = background.then(now_ms);
     let request_key = format!("ao-{}", uuid::Uuid::new_v4());
@@ -3468,7 +3493,7 @@ async fn ao_external_submitted(
         Err(response) => return *response,
     };
     if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        return response;
+        return *response;
     }
     let saved = tokio::task::spawn_blocking(move || {
         coding_tools_core::data::DataStore::update_file(|data| {
@@ -3507,7 +3532,7 @@ async fn ao_external_terminal(
         Err(response) => return *response,
     };
     if let Err(response) = ao_external_node(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        return response;
+        return *response;
     }
     let (workspace_id, run_id, node_id) = (
         body.workspace_id.clone(),
@@ -3975,7 +4000,7 @@ async fn ao_update(
                         "AO run belongs to another workspace".into(),
                     ));
                 }
-                integrations::ao::create(data, expected_board_revision, run).map(|run| json!({"ok":true,"run":run}))
+                integrations::ao::create(data, expected_board_revision, *run).map(|run| json!({"ok":true,"run":run}))
             }
             AoMutation::Graph {
                 run_id,
