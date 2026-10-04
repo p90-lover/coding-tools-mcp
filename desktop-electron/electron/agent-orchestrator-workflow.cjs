@@ -217,6 +217,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { baseUrl: url.origin, key: value.proxyApiKey };
   }
 
+
+
+
+
+
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const items = await harnessService().models(harness.slice(3), workspaceId);
@@ -411,38 +416,98 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // What each working card is doing now, for the chat and the cards: when it started, its
   // current step and when anything was last heard. Read-only; it never advances the run.
+  function publicText(value, limit = 4096) {
+    let text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+      .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]")
+      .replace(/((?:api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
+    try {
+      const key = cpaConnection?.().proxyApiKey;
+      if (typeof key === "string" && key.length >= 8) text = text.replaceAll(key, "[redacted]");
+    } catch { /* No CPA connection is needed for read-only output. */ }
+    return text.slice(0, limit);
+  }
+
+  const activityFrames = new Map();
+  const activityAttempt = (workspace, run, node) => JSON.stringify([
+    workspace, run, node.id, node.receipt?.request_key || node.request_key || null,
+    node.receipt?.thread_id || null, node.receipt?.turn_id || null,
+    node.receipt?.started_at_ms || null, node.route?.model || null, node.settings?.revision || null,
+  ]);
+
   async function activity({ workspaceId, runId } = {}) {
-    const id = clean(workspaceId, 128);
-    const run = clean(runId, 80);
+    const id = clean(workspaceId, 128), run = clean(runId, 80);
     const saved = await runs({ workspaceId: id, runId: run });
-    const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+    const mission = saved.runs.find(entry => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run not found");
-    const nodes = {};
-    await Promise.all(mission.nodes.filter((node) => node.state === "reserved" || node.state === "running").map(async (node) => {
-      const base = { state: node.state, started_at_ms: node.receipt?.started_at_ms ?? null };
-      try {
-        if (externalAgent(node)) {
-          const session = node.receipt?.thread_id;
-          if (!session) {
-            nodes[node.id] = { ...base, activity: "launching" };
-            return;
-          }
-          const observed = await harnessService().observe(session);
-          nodes[node.id] = { ...base, turn_started: Boolean(observed.turnId),
-            activity: observed.needsInput ? "waiting for input" : observed.exited ? "exited" : String(observed.turnState || "working").slice(0, 40) };
-          return;
-        }
-        const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
-        const thread = (Array.isArray(status.threads) ? status.threads : []).find((entry) => entry.id === node.receipt?.thread_id);
-        const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
-        nodes[node.id] = { ...base, turn_started: turnStarted,
-          activity: !status.connected ? "not connected" : thread?.activity || (turnStarted ? "working" : "waiting for the turn to start"),
-          activity_at_ms: thread?.activity_at_ms || null, last_event_at_ms: thread?.last_event_at_ms || null,
-          started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
-      } catch (error) {
-        nodes[node.id] = { ...base, activity: "unknown", error: String(error?.message || error).slice(0, 300) };
+    const working = mission.nodes.filter(node => ["reserved", "running"].includes(node.state));
+    const keys = new Set(working.map(node => activityAttempt(id, run, node)));
+    const scope = runKey(id, run);
+    for (const [key, entry] of activityFrames) {
+      if (entry.scope === scope && !keys.has(key)) {
+        entry.retired = true; entry.frame = null;
+        if (!entry.pending) activityFrames.delete(key);
       }
-    }));
+    }
+    const nodes = {};
+    for (const node of working) {
+      const key = activityAttempt(id, run, node);
+      const base = { state: node.state, started_at_ms: node.receipt?.started_at_ms ?? null,
+        activity: "checking", output: "", pending: true };
+      let entry = activityFrames.get(key);
+      if (!entry) {
+        // Keep in-flight tombstones until settled: bounded retention without duplicate requests.
+        if (activityFrames.size >= 256) {
+          const disposable = [...activityFrames].find(([, value]) => !value.pending);
+          if (disposable) activityFrames.delete(disposable[0]);
+        }
+        if (activityFrames.size >= 256) { nodes[node.id] = base; continue; }
+        entry = { scope, pending: null, frame: null, retired: false };
+        activityFrames.set(key, entry);
+      }
+      if (!entry.pending) {
+        entry.pending = (async () => {
+          let frame;
+          try {
+            if (externalAgent(node)) {
+              const session = node.receipt?.thread_id;
+              if (!session) frame = { ...base, activity: "launching" };
+              else {
+                const observed = await harnessService().observe(session);
+                const currentTurn = !node.receipt?.turn_id || observed.turnId === node.receipt.turn_id;
+                frame = { ...base, turn_started: Boolean(observed.turnId),
+                  activity: observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
+                  step: publicText(observed.activity || observed.turnState || "working", 120),
+                  output: currentTurn ? publicText(observed.liveOutput ?? observed.answer) : "",
+                  error: publicText(observed.error, 500) };
+              }
+            } else {
+              const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
+              const thread = (Array.isArray(status.threads) ? status.threads : []).find(entry => entry.id === node.receipt?.thread_id);
+              const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
+              frame = { ...base, turn_started: turnStarted,
+                activity: !status.connected ? "not connected" : thread?.activity || (turnStarted ? "working" : "waiting for the turn to start"),
+                step: publicText(thread?.activity || "working", 120), output: publicText(status.live_output || thread?.answer || thread?.output),
+                error: publicText(status.live_error || thread?.error, 500),
+                activity_at_ms: thread?.activity_at_ms || null, last_event_at_ms: thread?.last_event_at_ms || null,
+                started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
+            }
+            const latest = await savedNode(id, run, node.id);
+            if (!latest.node || !["reserved", "running"].includes(latest.node.state)
+              || activityAttempt(id, run, latest.node) !== key) {
+              entry.retired = true; entry.frame = null; return;
+            }
+            if (!entry.retired && activityFrames.get(key) === entry) entry.frame = { ...frame, pending: false };
+          } catch (error) {
+            if (!entry.retired) entry.frame = { ...(entry.frame || base), pending: false,
+              activity: "unknown", error: publicText(error?.message || error, 300) };
+          }
+        })().finally(() => {
+          entry.pending = null;
+          if (entry.retired && activityFrames.get(key) === entry) activityFrames.delete(key);
+        });
+      }
+      nodes[node.id] = { ...(entry.frame || base), state: node.state, pending: Boolean(entry.pending) };
+    }
     return { ok: true, now_ms: Date.now(), nodes };
   }
 
@@ -577,12 +642,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       throw new Error("This AO run is already advancing in the background");
     }
     const saved = await runs({ workspaceId: id, runId: run });
-    const mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+    let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
     if (!mission || mission.cancelled) throw new Error("Select an active AO run");
     const active = mission.nodes.find((node) => ["reserved", "running"].includes(node.state));
     if (active) return observe({ workspaceId: id, runId: run, nodeId: active.id });
+    const exhausted = mission.nodes.filter(node => node.role === "worker" && node.state === "held"
+      && ((node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT || POOL_EXHAUSTED.test(String(node.receipt?.error || ""))));
+    if (exhausted.length) {
+      if (!await confirm({ message: "Send failed work for review?", detail: "Keep partial answers and errors. This does not retry workers or repair accounts." })) return { ok: false, cancelled: true };
+      for (const node of exhausted) await controlRun({ workspaceId: id, runId: run, action: "review_failures", nodeId: node.id });
+      mission = (await runs({ workspaceId: id, runId: run })).runs.find(entry => entry.id === run && entry.workspace_id === id);
+      if (!mission) throw new Error("Saved mission is unavailable");
+    }
     const ready = mission.nodes.find((node) => node.state === "pending"
-      && node.parents.every((parentId) => mission.nodes.some((parent) => parent.id === parentId && parent.state === "finished")));
+      && parentsReady(mission, node));
     if (!ready) {
       const held = mission.nodes.find((node) => node.state === "held");
       if (held) return observe({ workspaceId: id, runId: run, nodeId: held.id });
@@ -631,10 +704,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { ok: true, status };
   }
 
-  async function controlRun({ workspaceId, runId, action, executable } = {}) {
-    if (!["pause", "resume", "stop", "retry"].includes(action)) throw new Error("Choose a mission control");
+  async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
+    if (!["pause", "resume", "stop", "retry", "retry_auto", "review_failures"].includes(action)) throw new Error("Choose a mission control");
     const id = clean(workspaceId, 128), run = clean(runId, 80);
-    const result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, confirm: true }, { localConfirmation: true });
+    const result = await requestHeadless("/api/v1/ao/control", { workspace_id: id, run_id: run, action, ...(nodeId ? { node_id: clean(nodeId, 80) } : {}), confirm: true }, { localConfirmation: true });
     if (result?.ok !== true || result.run?.workspace_id !== id) throw new Error("Mission control needs a fresh status check");
     if (action === "stop") {
       for (const node of result.run.nodes ?? []) {
@@ -647,7 +720,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (action === "resume") {
       if (current?.driving) { current.status = "running"; current.detail = undefined; }
       else return startRun({ workspaceId: id, runId: run, executable });
-    } else if (current && action !== "retry") {
+    } else if (current && !["retry", "retry_auto", "review_failures"].includes(action)) {
       current.status = action === "pause" ? "paused" : "held";
       current.stopped = action === "stop";
       current.detail = action === "pause" ? "Paused; already-sent turns may finish" : "Stopped by you";
@@ -662,6 +735,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // does not depend on the WebGPT path that may have just failed. Retries are bounded by the card's
   // two-attempt history, so a card that keeps failing ends with the helper's reason, not a loop.
   const HELPER_ATTEMPT_LIMIT = 2;
+  const REVIEW_ROLES = new Set(["review_split", "sub_reviewer", "reviewer"]);
+
+  function exhaustedWorkerFailure(mission) {
+    const held = mission.nodes.filter(node => node.state === "held");
+    return !mission.cancelled && held.length > 0 && held.every(node => node.role === "worker")
+      && held.some(node => (node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT)
+      && !mission.nodes.some(node => ["cancelled", "archived", "reserved"].includes(node.state));
+  }
+
+  function parentsReady(mission, node) {
+    if (node.role === "retry" && !mission.nodes.some(entry => entry.role === "worker" && entry.state === "held"
+      && (entry.history?.length ?? 0) < HELPER_ATTEMPT_LIMIT && !POOL_EXHAUSTED.test(String(entry.receipt?.error || "")))) return false;
+    return (node.parents || []).every(parentId => mission.nodes.some(parent => parent.id === parentId
+      && (parent.state === "finished" || REVIEW_ROLES.has(node.role) && (parent.state === "failed"
+        || parent.role === "worker" && parent.state === "pending" && blockedByFailure(mission, parent)))));
+  }
   const TRANSIENT_FAILURE = /not confirm|timed out|timeout|disconnected|network|ECONNRESET|socket|502|503|504|stream/i;
 
   // Requests the command approver may never allow, whatever the model says.
@@ -771,30 +860,91 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return { action: decision.action, reason: String(decision.reason || "").slice(0, 300), model };
   }
 
-  // Returns a status detail for the user; retrying re-queues the held cards.
-  async function recoverHeld(workspaceId, mission) {
-    const held = mission.nodes.filter((node) => node.state === "held");
+  const POOL_EXHAUSTED = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)/i;
+  function blockedByFailure(mission, node, depth = 0) {
+    return depth < mission.nodes.length && (node.parents || []).some(id => {
+      const parent = mission.nodes.find(entry => entry.id === id);
+      return parent?.state === "failed" || (parent?.role === "worker" && parent.state === "pending" && blockedByFailure(mission, parent, depth + 1));
+    });
+  }
+  function missionSettled(mission) {
+    return mission.nodes.filter(node => node.role !== "retry").every(node =>
+      ["finished", "failed", "cancelled", "archived"].includes(node.state) ||
+      (node.role === "worker" && node.state === "pending" && blockedByFailure(mission, node)));
+  }
+
+  async function recoverHeld(workspaceId, mission, state = {}) {
+    const held = mission.nodes.filter(node => node.state === "held");
     if (!held.length || mission.cancelled) return null;
-    const exhausted = held.find((node) => (node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT);
-    if (exhausted) return `${exhausted.settings?.name || exhausted.role} failed ${HELPER_ATTEMPT_LIMIT + 1} times; decide the next step yourself or send a follow-up`;
-    const node = held[0];
-    let decision;
-    try {
-      const task = (await board({ workspaceId, taskId: mission.project_id })).task;
-      decision = await askRecoveryHelper({ mission, node, task });
-    } catch {
-      // No helper available: retry only what looks transient.
-      decision = TRANSIENT_FAILURE.test(String(node.receipt?.error || ""))
-        ? { action: "retry", reason: "The failure looks transient" }
-        : { action: "wait", reason: "The recovery helper is unavailable; inspect the failed step" };
+    const workers = held.filter(node => node.role === "worker");
+    const exhausted = workers.filter(node => (node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT ||
+      POOL_EXHAUSTED.test(String(node.receipt?.error || "")));
+    if (exhausted.length) {
+      for (const node of exhausted) await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
+      return { changed: true, detail: "Retries or the account pool are exhausted; review will receive partial work and errors" };
     }
-    if (decision.action !== "retry") return `Helper: ${decision.reason || decision.action}`;
-    await controlRun({ workspaceId, runId: mission.id, action: "retry" });
-    return `Helper retried ${node.settings?.name || node.role}: ${decision.reason}`;
+    const node = workers[0] || held.find(entry => entry.role !== "retry");
+    if (!node) return null;
+    if (REVIEW_ROLES.has(node.role) && (node.receipt?.verdict === "CHANGES_REQUIRED" || mission.nodes.some(entry => entry.role === "worker" && entry.state === "failed"))) {
+      return { detail: "Reviewer next step: " + publicText(node.receipt?.answer || node.receipt?.error, 400) };
+    }
+    if ((node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT) {
+      return { detail: (node.settings?.name || node.role) + " failed 3 times; decide the next step yourself or send a follow-up" };
+    }
+    state.recoveryWaits ||= new Map();
+    const workerAttempt = node.receipt?.request_key || node.id;
+    if (state.recoveryWaits.has(workerAttempt)) return { detail: state.recoveryWaits.get(workerAttempt) };
+    const retry = workers.length && mission.nodes.find(entry => entry.role === "retry");
+    let decision;
+    if (retry) {
+      if (retry.state === "held" || retry.state === "failed") {
+        await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
+        if (retry.state === "held") await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: retry.id });
+        return { changed: true, detail: "Retry role failed; partial work and recovery errors go to review" };
+      }
+      if (retry.state !== "finished") return { detail: "The configured Retry role is deciding the failed step" };
+      state.recoveryDecisions ||= new Map();
+      const request = retry.receipt?.request_key || retry.id;
+      const attempt = node.receipt?.request_key || node.id;
+      const prior = state.recoveryDecisions.get(request);
+      if ((prior && prior !== attempt) || (retry.receipt?.started_at_ms && node.receipt?.started_at_ms > retry.receipt.started_at_ms)) {
+        await controlRun({ workspaceId, runId: mission.id, action: "retry", nodeId: retry.id });
+        return { changed: true, detail: "Retry role is inspecting the new failed attempt" };
+      }
+      if (prior === attempt) return { detail: state.recoveryDetail || "Retry is waiting for your action" };
+      try {
+        const answer = String(retry.receipt?.answer || "").slice(0, 4000);
+        decision = JSON.parse(answer.slice(answer.indexOf("{"), answer.lastIndexOf("}") + 1));
+        if (!["retry", "wait", "stop", "give_up"].includes(decision?.action)) throw new Error("Retry returned no bounded decision");
+      } catch { decision = { action: "give_up", reason: "Retry returned no verifiable decision" }; }
+      state.recoveryDecisions.set(request, attempt);
+    } else {
+      try {
+        const task = (await board({ workspaceId, taskId: mission.project_id })).task;
+        decision = await askRecoveryHelper({ mission, node, task });
+      } catch {
+        decision = TRANSIENT_FAILURE.test(String(node.receipt?.error || ""))
+          ? { action: "retry", reason: "The failure looks transient" }
+          : { action: "wait", reason: "The recovery helper is unavailable; inspect the failed step" };
+      }
+    }
+    const detail = "Helper: " + publicText(decision.reason || decision.action, 300);
+    state.recoveryDetail = detail;
+    if (decision.action === "wait") state.recoveryWaits.set(workerAttempt, detail);
+    if (decision.action === "retry") {
+      await controlRun({ workspaceId, runId: mission.id, action: node.role === "worker" ? "retry_auto" : "retry", ...(node.role === "worker" ? { nodeId: node.id } : {}) });
+      return { changed: true, retried: true, detail: "Helper retried " + (node.settings?.name || node.role) + ": " + publicText(decision.reason, 300) };
+    }
+    if (workers.length && ["stop", "give_up"].includes(decision.action)) {
+      await controlRun({ workspaceId, runId: mission.id, action: "review_failures", nodeId: node.id });
+      return { changed: true, detail };
+    }
+    return { detail };
   }
 
   async function driveRun(workspaceId, runId, executable, state) {
     const pause = () => new Promise(resolve => setTimeout(resolve, 500));
+    const observing = new Map();
     state.driving = true;
     try {
       for (;;) {
@@ -803,77 +953,108 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed AO service does not report worker capacity; update the matching runtime");
-        const active = mission.nodes.filter(node => node.state === "running");
-        let attention = null;
-        if (active.length) {
-          const observed = await Promise.all(active.map(node => observe({ workspaceId, runId, nodeId: node.id })));
-          attention = observed.some(result => result.pending_approvals?.length) ? "pending_approval"
-            : observed.some(result => result.needs_input) ? "needs_input" : null;
-          state.detail = attention === "pending_approval" ? "Waiting for your tool approval"
-            : attention === "needs_input" ? "An AO worker needs input on the Board" : undefined;
-          if (attention === "pending_approval") {
-            const note = await screenApprovals(workspaceId, runId, mission, active, observed)
-              .catch((error) => `Command approver unavailable: ${String(error?.message || error).slice(0, 200)}`);
-            if (note) state.detail = note;
+        // Reserve and launch with the latest revision; never await sibling output here.
+        while (!state.stopped && !mission.cancelled && !mission.paused
+          && !(mission.grant?.expires_at_ms && Date.now() >= mission.grant.expires_at_ms)) {
+          const capacity = saved.worker_capacity[runId];
+          const ready = mission.nodes.find(node => node.state === "pending" && parentsReady(mission, node) && (node.role !== "worker" || capacity > 0));
+          if (!ready) break;
+          let sent;
+          try {
+            if (externalAgent(ready)) sent = await dispatchExternal(workspaceId, runId, ready, mission.revision, true);
+            else {
+              const status = await harnessStatus({ workspaceId, runId, nodeId: ready.id });
+              if (status.status?.connected && status.status.model !== ready.route.model) throw new Error("AO connected harness route changed");
+              if (!status.status?.connected) {
+                const connected = await connectAoHarness({ workspaceId, runId, nodeId: ready.id, executable }, true);
+                if (connected.waiting) { state.detail = "Waiting for a harness slot"; break; }
+              }
+              sent = await requestHeadless("/api/v1/ao/harness/execute", {
+                workspace_id: workspaceId, run_id: runId, node_id: ready.id,
+                expected_revision: mission.revision, confirm: false,
+              });
+              if (sent?.ok !== true) throw new Error("AO turn outcome unknown");
+            }
+          } catch (error) {
+            const fresh = await runs({ workspaceId, runId });
+            const next = fresh.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+            // Recover only a persisted failed launch. An unknown send is never replayed.
+            if (!next?.nodes.some(node => node.id === ready.id && node.state === "held")) throw error;
+            saved = fresh; mission = next; continue;
           }
+          if (sent.waiting) { state.detail = "Waiting for a worker slot or current graph revision"; break; }
           saved = await runs({ workspaceId, runId });
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
         }
-        reportRun(workspaceId, runId, state, mission, attention);
-        const running = mission.nodes.some(node => node.state === "running");
-        if (mission.cancelled || mission.nodes.some(node => ["held", "cancelled", "archived", "reserved"].includes(node.state))) {
-          if (running) { state.detail = "Finishing already-sent turns; no more work will start"; await pause(); continue; }
-          const helped = state.stopped ? null : await recoverHeld(workspaceId, mission).catch((error) => `Helper failed: ${error.message}`);
-          if (helped?.startsWith("Helper retried")) {
-            state.status = "held"; state.detail = helped;
-            // The retry dropped the grant; start again once this loop has ended.
+        if (state.stopped) return;
+        const active = mission.nodes.filter(node => node.state === "running");
+        for (const [id] of observing) if (!active.some(node => node.id === id)) observing.delete(id);
+        for (const node of active) {
+          if (observing.has(node.id)) continue;
+          const pending = { done: false };
+          pending.promise = observe({ workspaceId, runId, nodeId: node.id })
+            .then(result => { pending.result = result; }, error => { pending.error = error; })
+            .finally(() => { pending.done = true; });
+          observing.set(node.id, pending);
+        }
+        const completed = active.filter(node => observing.get(node.id)?.done);
+        const observed = completed.map(node => observing.get(node.id).result || {});
+        for (const node of completed) {
+          const pending = observing.get(node.id);
+          if (pending.error) state.detail = publicText(pending.error?.message || pending.error, 500);
+          observing.delete(node.id);
+        }
+        const attention = observed.some(result => result.pending_approvals?.length) ? "pending_approval"
+          : observed.some(result => result.needs_input) ? "needs_input" : null;
+        if (attention) state.detail = attention === "pending_approval" ? "Waiting for your tool approval" : "An AO worker needs input on the Board";
+        if (attention === "pending_approval") {
+          const note = await screenApprovals(workspaceId, runId, mission, completed, observed)
+            .catch(error => "Command approver unavailable: " + publicText(error?.message || error, 200));
+          if (note) state.detail = note;
+        }
+        const helped = mission.paused || mission.cancelled ? null : await recoverHeld(workspaceId, mission, state);
+        if (helped?.detail) state.detail = helped.detail;
+        if (helped?.changed || completed.length) {
+          saved = await runs({ workspaceId, runId });
+          mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
+          if (!mission) throw new Error("Saved mission is unavailable");
+          if (helped?.retried && !mission.grant) {
+            state.status = "held";
             setTimeout(() => { void startRun({ workspaceId, runId, executable }).catch(() => {}); }, 0);
             return;
           }
+          if (helped?.changed) continue;
+        }
+        reportRun(workspaceId, runId, state, mission, attention);
+        if (missionSettled(mission)) {
+          const failed = mission.nodes.some(node => node.state === "failed");
+          state.status = failed ? "failed" : mission.cancelled ? "held" : "finished";
+          state.detail = failed ? "Review contains failed or blocked work; inspect partial results before continuing" : undefined;
+          reportRun(workspaceId, runId, state, mission, failed ? "error" : null); return;
+        }
+        const running = mission.nodes.some(node => ["running", "reserved"].includes(node.state));
+        if (!running && !mission.paused && !mission.nodes.some(node => node.state === "pending" && parentsReady(mission, node))) {
           state.status = "held";
-          state.detail = helped || "Run stopped; inspect the saved cards";
-          reportRun(workspaceId, runId, state, mission, state.stopped ? null : "stopped");
-          return;
+          state.detail ||= mission.nodes.some(node => node.role === "worker" && node.state === "pending" && blockedByFailure(mission, node))
+            ? "Queued work is blocked by a failed dependency; inspect partial results" : "No card is ready; inspect dependencies and failed steps";
+          reportRun(workspaceId, runId, state, mission, "stopped"); return;
         }
-        if (mission.nodes.every(node => node.state === "finished")) {
-          state.status = "finished"; state.detail = undefined; reportRun(workspaceId, runId, state, mission); return;
-        }
-        if (mission.paused) { state.status = "paused"; state.detail = "Paused; queued work will not start"; await pause(); continue; }
-        const capacity = Number(saved.worker_capacity?.[runId] ?? 0);
-        const ready = mission.nodes.find(node => node.state === "pending"
-          && (node.role !== "worker" || capacity > 0)
-          && node.parents.every(parentId => mission.nodes.some(parent => parent.id === parentId && parent.state === "finished")));
-        if (!ready) {
-          if (running || capacity === 0) {
-            if (mission.grant?.expires_at_ms && Date.now() >= mission.grant.expires_at_ms) throw new Error("Run grant expired while waiting for a worker slot");
-            state.detail ||= "Waiting for a worker slot";
-            await pause(); continue;
+        if (mission.paused) { state.status = "paused"; state.detail = "Paused; queued work will not start"; }
+        else if (mission.cancelled) { state.status = "held"; state.detail = "Finishing already-sent turns; no more work will start"; }
+        else {
+          state.status = "running";
+          if (mission.grant?.expires_at_ms && Date.now() >= mission.grant.expires_at_ms) {
+            state.status = "held"; state.detail = "Run grant expired; already-sent turns may finish, but queued work needs local approval";
+            if (!running) { reportRun(workspaceId, runId, state, mission, "stopped"); return; }
           }
-          throw new Error("No card is ready; inspect dependencies");
         }
-        if (externalAgent(ready)) {
-          const sent = await dispatchExternal(workspaceId, runId, ready, mission.revision, true);
-          if (sent.waiting) { state.detail = "Waiting for a worker slot or current graph revision"; await pause(); }
-          continue;
-        }
-        const status = await harnessStatus({ workspaceId, runId, nodeId: ready.id });
-        if (status.status?.connected && status.status.model !== ready.route.model) throw new Error("AO connected harness route changed");
-        if (!status.status?.connected) {
-          const connected = await connectAoHarness({ workspaceId, runId, nodeId: ready.id, executable }, true);
-          if (connected.waiting) { state.detail = "Waiting for a harness slot"; await pause(); continue; }
-        }
-        const sent = await requestHeadless("/api/v1/ao/harness/execute", {
-          workspace_id: workspaceId, run_id: runId, node_id: ready.id,
-          expected_revision: mission.revision, confirm: false,
-        });
-        if (sent?.ok !== true) throw new Error("AO turn outcome unknown");
-        if (sent.waiting) { state.detail = "Waiting for a worker slot or current graph revision"; await pause(); }
+        const pending = [...observing.values()].filter(entry => !entry.done).map(entry => entry.promise);
+        if (pending.length) await Promise.race([...pending, pause()]);
+        else if (running || mission.paused || saved.worker_capacity[runId] === 0) await pause();
       }
     } catch (error) {
-      state.status = "held";
-      state.detail = String(error?.message || "AO stage outcome is uncertain; inspect the saved run before retrying")
-        .replace(/Bearer\s+\S+|sk-[A-Za-z0-9_-]+/gi, "[redacted]").slice(0, 500);
+      state.status = "held"; state.detail = publicText(error?.message || error, 500);
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
     } finally { state.driving = false; }
   }
@@ -891,25 +1072,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (existing?.starting || existing?.driving || existing?.status === "running") {
       return { ok: true, started: false, status: existing.status };
     }
-    const state = { status: "idle", starting: true, detail: "Awaiting local approval" };
+    const state = { status: "starting", starting: true, detail: "Awaiting local approval", recoveryDecisions: existing?.recoveryDecisions };
     backgroundRuns.set(key, state);
     try {
       const saved = await runs({ workspaceId: id, runId: run });
       let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
       if (mission?.paused) throw new Error("Resume this paused mission from its local controls");
       // Starting a run whose card is held (and nothing still running) is an explicit retry.
-      if (mission && !mission.cancelled && mission.nodes.some((node) => node.state === "held")
+      if (mission && !mission.cancelled && mission.nodes.some((node) => node.state === "held" && (node.role !== "worker" || !mission.grant))
         && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
         await controlRun({ workspaceId: id, runId: run, action: "retry" });
         const again = await runs({ workspaceId: id, runId: run });
         mission = again.runs.find((entry) => entry.id === run && entry.workspace_id === id);
       }
       if (!mission || mission.cancelled || !mission.nodes?.length
-        || mission.nodes.some((node) => ["held", "cancelled", "archived", "reserved"].includes(node.state))) {
+        || mission.nodes.some((node) => ["cancelled", "archived", "reserved"].includes(node.state))) {
         throw new Error("AO run has an active or unresolved card; inspect it before starting");
       }
-      if (mission.nodes.every((node) => node.state === "finished")) throw new Error("AO run is already finished");
-      const resuming = mission.nodes.some((node) => node.state === "running");
+      if (missionSettled(mission)) throw new Error("AO run is already finished");
+      const resuming = mission.nodes.some((node) => node.state === "running") || Boolean(mission.grant && mission.nodes.some(node => ["held", "failed"].includes(node.state)));
       const selected = await resolveHarness({ workspaceId: id, runId: run, nodeId: mission.nodes[0].id,
         executable: selectedExecutable, model: mission.nodes[0].route.model });
       if (!/^[a-f0-9]{64}$/.test(selected?.expected_sha256 || "") || !path.isAbsolute(selected.executable)) {
@@ -934,7 +1115,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       void driveRun(id, run, selectedExecutable, state);
       return { ok: true, started: true, status: "running" };
     } catch (error) {
-      backgroundRuns.delete(key);
+      state.status = "failed";
+      state.starting = false;
+      state.detail = publicText(error?.message || error, 500);
+      reportRun(id, run, state, null, "error");
       throw error;
     }
   }
@@ -1019,7 +1203,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   // and void its grant, so follow-ups wait until the chat's current run has settled.
 
   function runSettled(run) {
-    return run.cancelled || (run.nodes ?? []).every((node) => ["finished", "cancelled", "archived"].includes(node.state));
+    return run.cancelled || missionSettled({ ...run, nodes: run.nodes ?? [] });
   }
 
   // A chat starts as "New task"; once its run has started, name it after what was asked.
@@ -1066,15 +1250,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
   }
 
-  async function createTeamRun(id, task, team) {
+  async function createTeamRun(id, task, team, includeRun = false) {
     const current = await board({ workspaceId: id });
     const runId = randomUUID();
-    await updateRun({ workspaceId: id, change: {
+    const created = await updateRun({ workspaceId: id, change: {
       operation: "create_from_team", run_id: runId, task_id: task,
-      expected_board_revision: current.revision, team_revision: team.revision,
+      expected_board_revision: current.revision, team_revision: team.revision, team_id: team.id,
       worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
     } });
-    return runId;
+    return includeRun ? { runId, run: created.run } : runId;
   }
 
   // Restart = a fresh run of the same task with the current team; the old run stays in history.
@@ -1086,8 +1270,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const mission = saved.runs.find((run) => run.id === previous && run.workspace_id === id);
     if (!mission) throw new Error("AO run unavailable");
     if (!mission.project_id) throw new Error("This mission has no task to restart");
-    const team = saved.team;
-    if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
+    const teamId = mission.team?.id;
+    const team = teamId ? (saved.teams ?? (saved.team ? [saved.team] : [])).find(item => item.id === teamId) : saved.team;
+    if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Saved team changed; refresh before restarting");
     await retireOpenRuns(id, mission.project_id, saved.runs);
     const next = await createTeamRun(id, mission.project_id, team);
     try {
@@ -1098,14 +1283,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
   }
 
-  async function chatSend({ workspaceId, taskId, title, message, executable } = {}) {
+  async function chatSend({ workspaceId, taskId, title, message, executable, teamId, teamRevision, deferStart } = {}) {
     const id = clean(workspaceId, 128);
     const text = clean(message, 8192, false);
     if (!text.trim()) throw new Error("Type a message to start the chat");
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
-    const team = saved.team;
-    if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
+    const previous = taskId ? saved.runs.filter(run => run.project_id === taskId).at(-1) : null;
+    const selectedId = (teamId === undefined ? "" : clean(teamId, 80)) || previous?.team?.id;
+    const team = selectedId ? (saved.teams ?? (saved.team ? [saved.team] : [])).find(item => item.id === selectedId) : saved.team;
+    if (!team?.id || !Number.isSafeInteger(team.revision) || (team.workspace_id && team.workspace_id !== id)) throw new Error("Saved team changed or was not found; refresh before starting");
+    if (teamRevision !== undefined && (!Number.isSafeInteger(teamRevision) || teamRevision < 0 || teamRevision !== team.revision)) {
+      throw new Error("Saved team revision changed; refresh before starting");
+    }
+    if (deferStart !== undefined && typeof deferStart !== "boolean") throw new Error("Choose a valid deferred startup option");
 
     let task;
     if (taskId) {
@@ -1134,7 +1325,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       task = added[0].id;
     }
 
-    const runId = await createTeamRun(id, task, team);
+    const { runId, run: createdRun } = await createTeamRun(id, task, team, true);
+    if (deferStart === true) {
+      // Keep the normal authorization path: an expired/missing local approval fails visibly.
+      void startRun({ workspaceId: id, runId, executable: selectedExecutable }).then(() => {
+        if (!taskId) void nameChat(id, task, text).catch(() => undefined);
+      }).catch(() => undefined);
+      return { ok: true, taskId: task, runId, run: createdRun, status: "starting" };
+    }
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
       const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });

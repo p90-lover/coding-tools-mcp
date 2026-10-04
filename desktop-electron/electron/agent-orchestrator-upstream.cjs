@@ -219,11 +219,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const answer = (Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.role === "assistant" && message.turnId === turn?.id && !message.streaming)
         .map(message => message.text).join("\n\n").trim();
+      // Streaming is display-only evidence for this owned session's current turn.
+      const liveOutput = (Array.isArray(conversation?.messages) && typeof turn?.id === "string" ? conversation.messages : [])
+        .filter(message => message.role === "assistant" && message.turnId === turn.id && typeof message.text === "string")
+        .map(message => message.text).join("\n\n").trim();
       const status = session?.session?.status;
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
-        answer: answer.slice(0, 12000),
+        answer: answer.slice(0, 12000), liveOutput: utf8Prefix(liveOutput, 4096),
       };
     },
     async interrupt(id) {

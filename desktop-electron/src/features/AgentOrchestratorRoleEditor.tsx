@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
+import { chatWorkingDetail, type ChatActivity } from "./ao-chat";
 
 export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number; auto_decide?: boolean; role_name?: string };
-export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; nodes: AoNode[] };
+export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; is_default?: boolean; editable_graph?: boolean; nodes: AoNode[] };
 export type AoHarness = { id: string; label: string; runnable: boolean; installed: boolean; authStatus?: string; chat?: boolean };
 export type AoRoute = AoNode["route"];
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
@@ -15,7 +16,7 @@ export const DEFAULT_WORKER_MODEL = "cpa/gemini-3.8-flash-high";
 export const AGENT_DEFAULT_MODEL = "default";
 export const WEB_ROUTE: AoRoute = { harness_id: NATIVE_HARNESS, provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":read-only" };
 export const SPECIALTIES = ["planning", "research", "architecture", "frontend", "backend", "database", "api", "devops", "security",
-  "testing", "performance", "debugging", "refactor", "docs", "ui-ux", "mobile", "data-ml", "implementation", "qa", "review", "delivery"];
+  "testing", "performance", "debugging", "refactor", "docs", "ui-ux", "mobile", "data-ml", "implementation", "qa", "review", "delivery", "recovery"];
 
 /**
  * Native Codex runs only WebGPT, through the bridge; every other model runs on an AO harness
@@ -58,7 +59,7 @@ export function tokensLabel(tokens: number): string {
   return tokens.toLocaleString("en-US");
 }
 
-const ROLE_LABELS = { planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer" } as const;
+const ROLE_LABELS = { planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer", retry: "Retry" } as const;
 
 /** The role a card shows: the custom role the user typed, else its built-in role's name. */
 export function roleLabel(node: Pick<AoNode, "role" | "settings">): string {
@@ -98,7 +99,7 @@ export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string 
 }
 
 export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam {
-  if (saved) {
+  if (saved && (!mission.team || mission.team.id === saved.id)) {
     const team = structuredClone(saved);
     if (mission.team?.id === team.id) {
       const extra = mission.team.nodes.filter(role => !team.nodes.some(existing => existing.id === role.id));
@@ -113,7 +114,7 @@ export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam
   return { id: crypto.randomUUID(), workspace_id: mission.workspace_id, name: "Workspace team", revision: 0, worker_limit: mission.worker_limit || 3,
     nodes: mission.nodes.map(node => ({ id: roleIds.get(node.id)!, task_id: "", role: node.role, route: { ...node.route },
       parents: node.parents.map(id => roleIds.get(id)!), state: "pending", x: node.x, y: node.y, positioned: node.positioned === true,
-      settings: { ...emptyRoleSettings(), ...node.settings, name: node.settings?.name || ({ planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer" } as const)[node.role] },
+      settings: { ...emptyRoleSettings(), ...node.settings, name: node.settings?.name || ({ planner: "Orchestrator", approver: "Command approver", worker: "Worker", review_split: "Main reviewer · split", sub_reviewer: "Sub-reviewer", reviewer: "Main reviewer", retry: "Retry" } as const)[node.role] },
     })) };
 }
 
@@ -194,23 +195,26 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   </>;
 }
 
-export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy, change, apply, discard, taskName }: {
-  node: AoNode; mission: AoMission; draft: AoTeam; harnesses: AoHarness[]; busy: boolean;
+export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy, change, apply, discard, taskName, template = false, activity }: {
+  node: AoNode; mission: AoMission; draft: AoTeam; harnesses: AoHarness[]; busy: boolean; template?: boolean; activity?: Record<string, ChatActivity>;
   loadModels: (harness: string) => Promise<string[]>;
   change: (team: AoTeam) => void; apply: () => void; discard: () => void; taskName: (id: string) => string;
 }) {
-  const [tab, setTab] = useState<"settings" | "output" | "history">("settings");
+  const [tab, setTab] = useState<"settings" | "output" | "history">(!template && ["running", "reserved"].includes(node.state) ? "output" : "settings");
   const roleId = node.template_role_id || node.id;
   const role = draft.nodes.find(role => role.id === roleId);
   const settings = { ...emptyRoleSettings(), ...role?.settings };
   const jobs = mission.nodes.filter(job => (job.template_role_id || job.id) === roleId);
   const [jobId, setJobId] = useState(node.id);
   const job = jobs.find(job => job.id === jobId) || jobs[0] || node;
+  const live = activity?.[`${mission.id}:${job.id}`];
+  const working = !template && ["running", "reserved"].includes(job.state);
+  const progress = working ? chatWorkingDetail(job, live, Date.now()).detail : "";
   const updateRole = (patch: Partial<AoNode>) => change({ ...draft, nodes: draft.nodes.map(item => item.id === roleId ? { ...item, ...patch } : item) });
   const updateSettings = (patch: Partial<RoleSettings>) => updateRole({ settings: { ...settings, ...patch } });
   const changeKind = (kind: AoNode["role"]) => {
     // Every role may run on any harness and model, so changing the role keeps its route.
-    if (role) updateRole({ role: kind, settings: { ...settings, role_name: "" } });
+    if (role && (template || kind !== "retry" && role.role !== "retry")) updateRole({ role: kind, settings: { ...settings, role_name: "" } });
   };
   // A custom role works as a worker under the name the user typed; names already used in this
   // team are offered again.
@@ -218,22 +222,23 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
   const roleValue = settings.role_name !== undefined && settings.role_name !== "" ? `custom:${settings.role_name}` : role?.role ?? "worker";
   const [typingRole, setTypingRole] = useState(false);
   const pickRole = (value: string) => {
-    if (!role) return;
+    if (!role || (!template && role.role === "retry")) return;
     if (value === "custom:") { setTypingRole(true); updateRole({ role: "worker", settings: { ...settings, role_name: settings.role_name || "" } }); return; }
     setTypingRole(false);
     if (value.startsWith("custom:")) updateRole({ role: "worker", settings: { ...settings, role_name: value.slice(7) } });
     else changeKind(value as AoNode["role"]);
   };
   return <div className="ao-role-inspector" aria-label="Role inspector">
-    <div className="ao-inspector-tabs" role="tablist" aria-label="Role details">
+    {working ? <p className="ao-hint ao-role-live" role="status">{progress || "Working; waiting for the first activity update"}</p> : null}
+    {!template ? <div className="ao-inspector-tabs" role="tablist" aria-label="Role details">
       {(["settings", "output", "history"] as const).map(name => <button key={name} type="button" role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>{name}</button>)}
-    </div>
-    {tab === "settings" ? role ? <form onSubmit={event => { event.preventDefault(); apply(); }}>
+    </div> : null}
+    {template || tab === "settings" ? role ? <form onSubmit={event => { event.preventDefault(); apply(); }}>
       <div className="ao-field-row">
         <label>Name<input maxLength={96} value={settings.name} onChange={event => updateSettings({ name: event.target.value })} /></label>
-        <label>Role<select value={typingRole ? "custom:" : roleValue} onChange={event => pickRole(event.target.value)}>
+        <label>Role<select value={typingRole ? "custom:" : roleValue} disabled={!template && role.role === "retry"} title={!template ? "Configure Retry roles in Runtime > Orchestrator Team before starting a chat" : undefined} onChange={event => pickRole(event.target.value)}>
           <option value="planner">Orchestrator</option><option value="approver">Command approver</option><option value="worker">Worker</option>
-          <option value="sub_reviewer">Sub-reviewer</option><option value="reviewer">Main reviewer</option>
+          <option value="sub_reviewer">Sub-reviewer</option><option value="reviewer">Main reviewer</option><option value="retry" disabled={(!template && role.role !== "retry") || (role.role !== "retry" && draft.nodes.some(item => item.role === "retry"))}>Retry</option>
           {role.role === "review_split" ? <option value="review_split">Main reviewer · split</option> : null}
           {customRoles.map(name => <option key={name} value={`custom:${name}`}>{name}</option>)}
           <option value="custom:">Custom role…</option>
@@ -254,18 +259,19 @@ export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, l
         <label>Expected output<textarea aria-label="Expected output" rows={3} maxLength={2048} value={settings.expected_output} onChange={event => updateSettings({ expected_output: event.target.value })} /></label>
         <label>Working directory<input placeholder="Workspace root" maxLength={512} value={settings.working_directory} onChange={event => updateSettings({ working_directory: event.target.value })} /></label>
       </details>
-      <div className="ao-inspector-actions" title="Saves the team and updates queued cards. Running attempts keep their settings.">
-        <button className="button-primary" type="submit" disabled={busy || !role.route.model}>Apply</button>
+      <div className="ao-inspector-actions" title={template ? "Saves this team for new chats. Existing chats keep their team." : "Saves the team and updates queued cards. Running attempts keep their settings."}>
+        <button className="button-primary" type="submit" disabled={busy || !role.route.model}>{template ? "Save team" : "Apply"}</button>
         <button className="button-secondary" type="button" disabled={busy} onClick={discard}>Reset</button>
       </div>
     </form> : <p className="ao-hint">Not linked to the saved team. Results stay available.</p> : null}
-    {tab === "output" ? <div>
+    {!template && tab === "output" ? <div>
       {jobs.length > 1 ? <label>Task<select value={job.id} onChange={event => setJobId(event.target.value)}>{jobs.map(item => <option key={item.id} value={item.id}>{taskName(item.task_id)}</option>)}</select></label> : null}
       {job.receipt?.error ? <p role="alert">{job.receipt.error}</p> : null}
       {job.receipt?.verdict ? <p className="ao-chip-line"><span className="ao-chip">{job.receipt.verdict}</span></p> : null}
-      <pre>{job.receipt?.answer || "No output yet."}</pre>
+      {live?.error && live.error !== job.receipt?.error ? <p role="alert">{live.error}</p> : null}
+      <pre aria-label="Role output">{job.receipt?.answer || live?.output || (working ? "Waiting for output from the running role…" : "No output yet.")}</pre>
     </div> : null}
-    {tab === "history" ? <div>{jobs.map(item => <section key={item.id} className="ao-attempt-history">
+    {!template && tab === "history" ? <div>{jobs.map(item => <section key={item.id} className="ao-attempt-history">
       <strong>{taskName(item.task_id)}</strong>
       {[...(item.history || []), ...(item.receipt ? [item.receipt] : [])].map((receipt, index) => <details key={receipt.request_key || index}>
         <summary>#{index + 1} · {receipt.status}</summary>

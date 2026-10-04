@@ -22,6 +22,8 @@ pub enum Role {
     /// Command approver: checks the plan's commands before any worker starts.
     Approver,
     Worker,
+    /// Dormant recovery sidecar; activated only by a held worker.
+    Retry,
     /// The main reviewer's first pass: splits the review across the sub-reviewers.
     ReviewSplit,
     /// Checks one part of the finished work and reports PART_OK or PART_FAILED.
@@ -51,6 +53,8 @@ pub enum State {
     Reserved,
     Running,
     Finished,
+    /// Terminal incomplete work; receipts remain evidence, never success.
+    Failed,
     Held,
     Cancelled,
     Archived,
@@ -379,6 +383,7 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
     let mut ids = HashSet::new();
     let mut planner = None;
     let mut approver = None;
+    let mut retry = None;
     let mut split = None;
     let mut sub_reviewers = Vec::new();
     let mut reviewer = None;
@@ -474,6 +479,13 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                     return Err(fail("AO allows one main-reviewer split pass"));
                 }
             }
+            Role::Retry => {
+                if retry.replace(node.id.as_str()).is_some()
+                    || (node.route.harness_id.starts_with("ao:") && !external_route_valid(&node.route))
+                {
+                    return Err(fail("AO allows one Retry role with a valid harness route"));
+                }
+            }
             Role::SubReviewer => sub_reviewers.push(node.id.as_str()),
             Role::Reviewer => {
                 if reviewer.replace(node.id.as_str()).is_some() {
@@ -506,12 +518,10 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
             "AO review part is outside this mission's sub-reviewers or workers",
         ));
     }
-    if run
-        .rerun_after
-        .iter()
-        .any(|id| !workers.contains(&id.as_str()))
+    if run.rerun_after.iter().any(|id| !run.nodes.iter().any(|node| node.id == *id
+        && matches!(node.role, Role::Worker | Role::ReviewSplit | Role::SubReviewer | Role::Reviewer)))
     {
-        return Err(fail("AO rerun queue names a card that is not a worker"));
+        return Err(fail("AO rerun queue names a card that is not a worker or reviewer"));
     }
     if run
         .assignments
@@ -540,7 +550,11 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         // from it), a reviewer reviews whatever links into it, and a sub-reviewer still hangs
         // off the split pass that assigns its part.
         let depends_on = |id: &str| node.parents.iter().any(|parent| parent == id);
+        if node.parents.iter().any(|id| by_id[id.as_str()].role == Role::Retry) {
+            return Err(fail("Retry is a control-plane sidecar, not a work or review dependency"));
+        }
         let wired = match node.role {
+            Role::Retry => node.parents.len() == 1 && planner.is_some_and(&depends_on),
             Role::Planner => true,
             Role::SubReviewer => split.is_some_and(&depends_on),
             _ => !node.parents.is_empty(),
@@ -618,16 +632,79 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
     Ok(())
 }
 
+fn blocked_by_failure(run: &Run, node: &Node, depth: usize) -> bool {
+    depth < run.nodes.len() && node.parents.iter().any(|id| {
+        run.nodes.iter().any(|parent| parent.id == *id &&
+            (parent.state == State::Failed || (parent.role == Role::Worker
+                && parent.state == State::Pending && blocked_by_failure(run, parent, depth + 1))))
+    })
+}
+
 pub fn parents_finished(run: &Run, node_id: &str) -> bool {
-    let Some(node) = run.nodes.iter().find(|node| node.id == node_id) else {
+    let Some(node) = run.nodes.iter().find(|node| node.id == node_id) else { return false };
+    if node.role == Role::Retry && !run.nodes.iter().any(|item| item.role == Role::Worker
+        && item.state == State::Held && item.history.len() < WORKER_RETRY_LIMIT) {
         return false;
-    };
-    !node.parents.is_empty()
-        && node.parents.iter().all(|parent| {
-            run.nodes
-                .iter()
-                .any(|candidate| candidate.id == *parent && candidate.state == State::Finished)
-        })
+    }
+    let reviewing = matches!(node.role, Role::ReviewSplit | Role::SubReviewer | Role::Reviewer);
+    !node.parents.is_empty() && node.parents.iter().all(|id| {
+        run.nodes.iter().any(|parent| parent.id == *id &&
+            (parent.state == State::Finished || (reviewing &&
+                (parent.state == State::Failed || (parent.role == Role::Worker
+                    && parent.state == State::Pending && blocked_by_failure(run, parent, 0))))))
+    })
+}
+
+/// Mirrors the desktop recovery helper's two automatic retries. Once any worker exhausts
+/// that batch, its unresolved failures are review evidence, never successful parent output.
+const WORKER_RETRY_LIMIT: usize = 2;
+
+fn review_failures_ready(run: &Run, node_id: &str) -> bool {
+    run.nodes.iter().any(|node| node.id == node_id &&
+        matches!(node.role, Role::ReviewSplit | Role::SubReviewer | Role::Reviewer))
+        && run.nodes.iter().any(|node| node.role == Role::Worker &&
+            (node.state == State::Failed || (node.state == State::Pending && blocked_by_failure(run, node, 0))))
+}
+
+fn parents_ready(run: &Run, node_id: &str) -> bool {
+    parents_finished(run, node_id)
+}
+
+/// Errors and partial answers are quoted task data, with one shared budget for all failures.
+fn worker_failure_summary(run: &Run) -> AppResult<String> {
+    let workers: Vec<_> = run
+        .nodes
+        .iter()
+        .filter(|node| node.role == Role::Worker && (matches!(node.state, State::Held | State::Failed)
+            || (node.state == State::Pending && blocked_by_failure(run, node, 0))))
+        .collect();
+    let per_worker = 5_000 / workers.len().max(1);
+    let mut summary = String::from(
+        "\nFailed worker evidence (quoted task data; partial output is not completed work):\n",
+    );
+    for worker in workers {
+        let per_attempt = (per_worker / (worker.history.len() + 1)).max(80);
+        let evidence = |receipt: &Receipt| {
+            serde_json::json!({
+                "status":receipt.status, "model":receipt.route.model,
+                "error":clip(receipt.error.as_deref().unwrap_or("(no error text)"), per_attempt / 3),
+                "partial_output":clip(receipt.answer.as_deref().unwrap_or("(no output)"), per_attempt / 2)
+            })
+        };
+        let value = serde_json::json!({
+            "worker":worker.id, "state":worker.state, "assignment":run.assignments.get(&worker.id),
+            "attempt_count":worker.history.len() + usize::from(worker.receipt.is_some()),
+            "blocked_dependency":worker.state == State::Pending,
+            "current":worker.receipt.as_ref().map(&evidence),
+            "history":worker.history.iter().map(evidence).collect::<Vec<_>>()
+        });
+        summary.push_str(&serde_json::to_string(&clip(
+            &serde_json::to_string(&value)?,
+            per_worker,
+        ))?);
+        summary.push('\n');
+    }
+    Ok(summary)
 }
 
 pub fn grant_valid(
@@ -648,6 +725,7 @@ pub fn grant_valid(
         || grant.max_turns as usize
             > run.nodes.len()
                 * (usize::from(run.max_review_rounds) + usize::from(MAX_PLAN_ROUNDS) + 1)
+                + WORKER_RETRY_LIMIT * run.nodes.iter().filter(|node| node.role == Role::Worker).count() * 2
         || grant
             .expires_at_ms
             .checked_sub(grant.granted_at_ms)
@@ -684,7 +762,7 @@ pub fn grant_run(
         || run
             .nodes
             .iter()
-            .any(|node| !matches!(node.state, State::Pending | State::Finished))
+            .any(|node| !matches!(node.state, State::Pending | State::Finished | State::Failed))
     {
         return Err(fail("AO run changed or has unresolved execution"));
     }
@@ -710,6 +788,9 @@ pub fn grant_run(
         .map(|node| match (&node.role, &node.state) {
             (Role::Planner | Role::Approver, State::Pending) => 1 + replans,
             (Role::Planner | Role::Approver, _) => replans,
+            (Role::Retry, _) => WORKER_RETRY_LIMIT * run.nodes.iter().filter(|node| node.role == Role::Worker).count(),
+            (_, State::Failed) => 0,
+            (Role::Worker, State::Pending) => 1 + remaining_reworks + WORKER_RETRY_LIMIT,
             (Role::Reviewer, State::Finished) => 0,
             (_, State::Pending) => 1 + remaining_reworks,
             _ => remaining_reworks,
@@ -1170,6 +1251,7 @@ Do not use your own sub-agent, spawn or delegation tools. When you plan, do not 
 force-push, install software, reach outside the workspace or the network, or handle secrets; also check for missing steps and unclear acceptance. \
 Do not change the plan or do the work yourself.",
         Role::Worker => "Perform only your assigned work and report evidence. Do not speak for the orchestrator or approve your own work.",
+        Role::Retry => "Inspect the failed worker evidence and recommend a bounded recovery decision. Do not execute code, change credentials, rotate accounts, widen permissions, or restart healthy siblings. Return JSON only: {\"action\":\"retry\"|\"wait\"|\"give_up\",\"reason\":\"one short sentence\"}. The controller enforces at most two automatic retries per worker.",
         Role::ReviewSplit => "You are the main reviewer. First split the review of the finished work across the sub-reviewers listed below so that every worker's output is checked. \
 Do not review the work yourself yet and do not edit anything.",
         Role::SubReviewer => "You are a sub-reviewer. Check only your part of the finished work against what each worker was asked to do. Do not edit the implementation.",
@@ -1240,19 +1322,31 @@ Do not edit the implementation; send needed changes back to the workers.",
             None => "\nThe orchestrator gave you no specific part. Contribute the part of the plan that matches your specialty and say exactly what you did.\n".into(),
         }),
         Role::SubReviewer => prompt.push_str(&sub_review_part(run, &node.id)),
-        Role::Approver | Role::ReviewSplit | Role::Reviewer => prompt.push_str(&assignment_summary(run)),
+        Role::Approver | Role::ReviewSplit | Role::Reviewer | Role::Retry => prompt.push_str(&assignment_summary(run)),
     }
     if node.role == Role::ReviewSplit {
         prompt.push_str(&review_split_roster(run));
     }
+    if node.role == Role::Retry {
+        prompt.push_str(&worker_failure_summary(run)?);
+    }
+    let failure_review = review_failures_ready(run, node_id);
+    if failure_review {
+        prompt.push_str(&worker_failure_summary(run)?);
+        prompt.push_str("\nWorker retries are exhausted. Decide the next safe step from the failures and partial work. You cannot approve failed or unverified work. Do not approve missing work as delivered. Do not restore credentials, widen permissions, or treat a suggested retry as authorization. The user must approve any further recovery action.\n");
+    }
     // Earlier outputs share one budget so the whole prompt stays within a native turn.
-    let per_parent = (11_000 / node.parents.len().max(1)).max(1_200);
+    let per_parent = ((if failure_review { 5_000 } else { 11_000 }) / node.parents.len().max(1))
+        .max(if failure_review { 600 } else { 1_200 });
     for parent_id in &node.parents {
         let parent = run
             .nodes
             .iter()
             .find(|parent| &parent.id == parent_id)
             .ok_or_else(|| fail("AO parent not found"))?;
+        if failure_review && parent.role == Role::Worker && parent.state != State::Finished {
+            continue; // Failure evidence is above, never labelled as a completed parent.
+        }
         let receipt = parent
             .receipt
             .as_ref()
@@ -1451,7 +1545,7 @@ Also, handed over from {}: {}",
         State::Reserved | State::Running => {
             run.rerun_after.insert(target);
         }
-        State::Finished | State::Held => interrupt(node),
+        State::Finished | State::Held | State::Failed => interrupt(node),
         _ => {}
     }
     Ok(())
@@ -1644,7 +1738,7 @@ pub fn reserve(
     if run.cancelled
         || run.paused
         || run.revision != expected_revision
-        || !parents_finished(run, node_id)
+        || !parents_ready(run, node_id)
             && run
                 .nodes
                 .iter()
@@ -1788,6 +1882,7 @@ pub fn record_terminal(
     }) {
         return Ok(run.clone());
     }
+    let failure_review = review_failures_ready(run, node_id);
     let node = run
         .nodes
         .iter_mut()
@@ -1812,7 +1907,8 @@ pub fn record_terminal(
     };
     // Gates finish only on approval; a sub-reviewer finishes on either finding.
     let verdict_ok = match node.role {
-        Role::Reviewer | Role::Approver => verdict == Some("APPROVED"),
+        Role::Reviewer => verdict == Some("APPROVED") && !failure_review,
+        Role::Approver => verdict == Some("APPROVED"),
         Role::SubReviewer => verdict.is_some(),
         _ => true,
     };
@@ -1857,7 +1953,7 @@ pub fn record_terminal(
     } else {
         if answer.is_some_and(|value| !value.trim().is_empty() && value.len() <= 12_000) {
             receipt.answer = answer.map(str::to_owned);
-            receipt.verdict = verdict.map(str::to_owned);
+            receipt.verdict = if failure_review && node.role == Role::Reviewer { Some("CHANGES_REQUIRED".into()) } else { verdict.map(str::to_owned) };
         }
         receipt.status = "held".into();
         let plan_error = match plan {
@@ -1868,7 +1964,9 @@ pub fn record_terminal(
             .filter(|value| !value.trim().is_empty())
             .or(plan_error)
             .unwrap_or_else(|| {
-                if verdict == Some("CHANGES_REQUIRED") && node.role == Role::Approver {
+                if failure_review && verdict == Some("APPROVED") {
+                    "Failed worker work cannot be approved; a next-step decision is required"
+                } else if verdict == Some("CHANGES_REQUIRED") && node.role == Role::Approver {
                     "Command approver sent the plan back"
                 } else if verdict == Some("CHANGES_REQUIRED") {
                     "Reviewer requested changes"
@@ -1883,7 +1981,14 @@ pub fn record_terminal(
             .to_owned();
         crate::tools::history::redact_text(&mut error);
         receipt.error = Some(error.chars().take(2048).collect());
-        node.state = State::Held;
+        node.state = if failure_review && node.role == Role::Reviewer { State::Failed } else { State::Held };
+    }
+    // An in-flight review must finish its owned attempt before fresh failure evidence is sent.
+    if run.nodes.iter().any(|node| node.id == node_id
+        && matches!(node.role, Role::ReviewSplit | Role::SubReviewer | Role::Reviewer))
+        && run.rerun_after.remove(node_id)
+    {
+        if let Some(node) = run.nodes.iter_mut().find(|node| node.id == node_id) { interrupt(node); }
     }
     run.revision += 1;
     Ok(run.clone())
@@ -2140,6 +2245,8 @@ mod tests {
             "account_id":"chatgpt-web","model":"chatgpt-web/pro","permission_profile":":read-only"}))).is_err());
     }
 
+
+
     #[test]
     fn ao_card_effort_and_context_window_are_checked_and_only_stored_when_set() {
         let run = |tuning: serde_json::Value| -> Run {
@@ -2255,6 +2362,248 @@ mod tests {
     }
 
     #[test]
+    fn ao_exhausted_worker_failure_reviews_preserve_failures_routes_and_grants() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../aiTemp")
+            .canonicalize()
+            .unwrap();
+        let route = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/pro","permission_profile":":read-only"});
+        let mut data: AppData = serde_json::from_value(json!({
+            "profiles":[{"id":"qa","name":"QA","path":workspace.to_string_lossy(),
+                "tunnel":{},"auth":{"type":"bearer"},"runtime":{},"actions":{}}],
+            "control_board":{"revision":1,"tasks":[{
+                "id":"task","workspace_id":"qa","title":"Failure review",
+                "description":"Inspect the saved failures only","state":"pending","step":0,
+                "created_at":0,"updated_at":0,"clauses":[],"evidence":[]
+            }]}
+        }))
+        .unwrap();
+        let run: Run = serde_json::from_value(json!({
+            "id":"run","workspace_id":"qa","project_id":"project","revision":0,
+            "nodes":[
+                {"id":"planner","task_id":"task","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":route},
+                {"id":"failed","task_id":"task","role":"worker","parents":["planner"],"x":0,"y":1,"state":"pending","route":route},
+                {"id":"sibling","task_id":"task","role":"worker","parents":["planner"],"x":1,"y":1,"state":"pending","route":route},
+                {"id":"reviewer","task_id":"task","role":"reviewer","parents":["failed","sibling"],"x":0,"y":2,"state":"pending","route":route}
+            ]
+        })).unwrap();
+        create(&mut data, 1, run).unwrap();
+        let sha = "a".repeat(64);
+        grant_run(&mut data, "qa", "run", 1, &sha, 1_000).unwrap();
+        let attempt = |key: &str, error: &str, output: &str| -> Receipt {
+            serde_json::from_value(json!({"request_key":key,"status":"held","thread_id":key,
+                "turn_id":null,"answer":output,"error":error,"route":route}))
+            .unwrap()
+        };
+        let run = &mut data.ao_runs[0];
+        run.nodes[0].state = State::Finished;
+        run.nodes[1].state = State::Held;
+        run.nodes[1].request_key = Some("third".into());
+        run.nodes[1].receipt = Some(attempt(
+            "third",
+            "Latest send timed out",
+            "Latest partial output",
+        ));
+        run.nodes[1].history = vec![
+            attempt("first", "First failure", "First partial output"),
+            attempt("second", "Second failure", "Second partial output"),
+        ];
+        for state in [State::Pending, State::Running, State::Reserved] {
+            data.ao_runs[0].nodes[2].state = state;
+            let revision = data.ao_runs[0].revision;
+            assert!(reserve(
+                &mut data,
+                "qa",
+                "run",
+                "reviewer",
+                revision,
+                "blocked".into(),
+                Some(1_001)
+            )
+            .is_err());
+        }
+        data.ao_runs[0].nodes[2].state = State::Finished;
+        let mut sibling = attempt("sibling", "", "Sibling finished");
+        sibling.status = "completed".into();
+        sibling.turn_id = Some("sibling-turn".into());
+        sibling.error = None;
+        data.ao_runs[0].nodes[2].receipt = Some(sibling);
+        crate::integrations::ao_team::control(&mut data, "qa", "run", "review_failures").unwrap();
+        let ready = data.clone();
+        let revision = ready.ao_runs[0].revision;
+        let mut unexhausted = ready.clone();
+        unexhausted.ao_runs[0].nodes[1].history.pop();
+        unexhausted.ao_runs[0].nodes[1].state = State::Held;
+        assert!(reserve(
+            &mut unexhausted,
+            "qa",
+            "run",
+            "reviewer",
+            revision,
+            "too-early".into(),
+            Some(1_001)
+        )
+        .is_err());
+        let mut expired = ready.clone();
+        assert!(reserve(
+            &mut expired,
+            "qa",
+            "run",
+            "reviewer",
+            revision,
+            "expired".into(),
+            Some(3_601_000)
+        )
+        .is_err());
+        let mut changed_route = ready.clone();
+        changed_route.ao_runs[0].nodes[3].route.model = "chatgpt-web/light".into();
+        assert!(reserve(
+            &mut changed_route,
+            "qa",
+            "run",
+            "reviewer",
+            revision,
+            "changed".into(),
+            Some(1_001)
+        )
+        .is_err());
+        let mut no_grant = ready.clone();
+        no_grant.ao_runs[0].grant = None;
+        assert!(reserve(
+            &mut no_grant,
+            "qa",
+            "run",
+            "reviewer",
+            revision,
+            "ungranted".into(),
+            Some(1_001)
+        )
+        .is_err());
+        let mut large = ready.clone();
+        let failed = &mut large.ao_runs[0].nodes[1];
+        for receipt in failed.receipt.iter_mut().chain(failed.history.iter_mut()) {
+            receipt.answer = Some("成果".repeat(2_000));
+            receipt.error = Some("失敗".repeat(300));
+        }
+        assert!(prompt_for_node(&large, &large.ao_runs[0], "reviewer").unwrap().len() <= 16_000,
+            "quoted non-ASCII failure evidence shares the native byte budget");
+        let prompt = prompt_for_node(&ready, &ready.ao_runs[0], "reviewer").unwrap();
+        for evidence in [
+            "First failure",
+            "Second failure",
+            "Latest send timed out",
+            "First partial output",
+            "Second partial output",
+            "Latest partial output",
+            "Sibling finished",
+        ] {
+            assert!(
+                prompt.contains(evidence),
+                "failure-review prompt omitted {evidence}"
+            );
+        }
+        assert!(prompt.contains("Do not approve") && prompt.len() <= 16_000);
+        let reserved = reserve(
+            &mut data,
+            "qa",
+            "run",
+            "reviewer",
+            revision,
+            "review".into(),
+            Some(1_001),
+        )
+        .unwrap();
+        assert_eq!(reserved.nodes[1], ready.ao_runs[0].nodes[1]);
+        assert_eq!(reserved.nodes[3].route, ready.ao_runs[0].nodes[3].route);
+        assert_eq!(reserved.grant.as_ref().unwrap().turns_started, 1);
+        record_submission(
+            &mut data,
+            "qa",
+            "run",
+            "reviewer",
+            "review",
+            Some("review-thread"),
+        )
+        .unwrap();
+        let submitted = data.clone();
+        let approved = record_terminal(
+            &mut data,
+            "qa",
+            "run",
+            "reviewer",
+            "review-thread",
+            Some("review-turn"),
+            Some("APPROVED despite failed work"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(approved.nodes[1].state, State::Failed);
+        assert_eq!(
+            approved.nodes[3].state,
+            State::Failed,
+            "failure reviews cannot certify success"
+        );
+        let mut decision = submitted.clone();
+        let held = record_terminal(
+            &mut decision,
+            "qa",
+            "run",
+            "reviewer",
+            "review-thread",
+            Some("review-turn"),
+            Some("CHANGES_REQUIRED wait for the user to restore sign-in"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(held.nodes[3].state, State::Failed);
+        assert!(held.nodes[3]
+            .receipt
+            .as_ref()
+            .unwrap()
+            .answer
+            .as_deref()
+            .unwrap()
+            .contains("restore sign-in"));
+        assert!(crate::integrations::ao_team::queue_rework(
+            &mut decision,
+            "qa",
+            "run",
+            "reviewer",
+            "review",
+            1_002
+        )
+        .unwrap()
+        .is_none());
+        let mut failed_review = submitted;
+        let failed = record_terminal(
+            &mut failed_review,
+            "qa",
+            "run",
+            "reviewer",
+            "review-thread",
+            Some("failed-review-turn"),
+            None,
+            false,
+            Some("Reviewer connection failed"),
+        )
+        .unwrap();
+        assert_eq!(failed.nodes[3].state, State::Failed);
+        assert!(reserve(
+            &mut failed_review,
+            "qa",
+            "run",
+            "reviewer",
+            failed.revision,
+            "again".into(),
+            Some(1_003)
+        )
+        .is_err());
+    }
+
+    #[test]
     fn ao_receipts_gate_all_parents_and_never_replay_a_reserved_card() {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../aiTemp")
@@ -2286,7 +2635,7 @@ mod tests {
         let sha = "a".repeat(64);
         let mut granted = data.clone();
         let grant = grant_run(&mut granted, "qa", "run", 1, &sha, 1_000).unwrap();
-        assert_eq!(grant.grant.as_ref().unwrap().max_turns, 7);
+        assert_eq!(grant.grant.as_ref().unwrap().max_turns, 9);
         assert!(grant_valid(&granted, &grant, 1_001, &sha).is_ok());
         let mut moved_workspace = granted.clone();
         moved_workspace.profiles[0].path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2793,8 +3142,8 @@ mod tests {
         create(&mut data, 1, run).unwrap();
         let sha = "a".repeat(64);
         let granted = grant_run(&mut data, "qa", "run", 1, &sha, 1_000).unwrap();
-        // planner 1+2, approver 1+2, 2 workers x(1+3), split, 2 subs, reviewer x(1+3) = 30
-        assert_eq!(granted.grant.as_ref().unwrap().max_turns, 30);
+        // planner/approver 1+2, 2 workers x(1+3+2 retries), split/2 subs/reviewer x(1+3) = 34
+        assert_eq!(granted.grant.as_ref().unwrap().max_turns, 34);
         let mut key = 0;
         let mut turn = |data: &mut AppData, id: &str, answer: &str| -> Run {
             key += 1;

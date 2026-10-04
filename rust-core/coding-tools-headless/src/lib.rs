@@ -560,7 +560,7 @@ struct AoReadRequest {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum AoMutation {
     CreateFromTeam {
-        run_id: String, task_id: String, expected_board_revision: u64, team_revision: u64, worker_limit: u8,
+        run_id: String, task_id: String, expected_board_revision: u64, team_revision: u64, team_id: Option<String>, worker_limit: u8,
     },
     Create {
         expected_board_revision: u64,
@@ -590,7 +590,7 @@ struct AoUpdateRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AoControlRequest { workspace_id: String, run_id: String, action: String, confirm: bool }
+struct AoControlRequest { workspace_id: String, run_id: String, action: String, node_id: Option<String>, confirm: bool }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -959,6 +959,20 @@ fn apply_workspace_policy_update(
 #[cfg(test)]
 mod workspace_auth_tests {
     use super::*;
+
+    #[test]
+    fn ao_team_creation_accepts_explicit_and_legacy_team_selection() {
+        let mut request = json!({"operation":"create_from_team","run_id":"run","task_id":"goal",
+            "expected_board_revision":1,"team_revision":2,"worker_limit":3});
+        let legacy: AoMutation = serde_json::from_value(request.clone()).unwrap();
+        assert!(matches!(legacy, AoMutation::CreateFromTeam { team_id: None, .. }));
+        request["team_id"] = json!("second");
+        let selected: AoMutation = serde_json::from_value(request.clone()).unwrap();
+        assert!(matches!(selected, AoMutation::CreateFromTeam { team_id: Some(id), .. } if id == "second"));
+        request["credential"] = json!("not-accepted");
+        assert!(serde_json::from_value::<AoMutation>(request).is_err());
+    }
+
 
     #[test]
     fn ao_execute_accepts_only_saved_task_scope() {
@@ -2529,9 +2543,10 @@ async fn ao_harness_status(
         Ok(lease) => lease,
         Err(response) => return *response,
     };
-    if let Err(error) = ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
-        return json_error(StatusCode::BAD_REQUEST, "AO_NODE_SCOPE_FAILED", error);
-    }
+    let (_, node, _) = match ao_target(&state, &body.workspace_id, &body.run_id, &body.node_id) {
+        Ok(target) => target,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, "AO_NODE_SCOPE_FAILED", error),
+    };
     let key = (body.workspace_id, body.run_id, body.node_id);
     let hub = state
         .ao_hubs
@@ -2540,7 +2555,15 @@ async fn ao_harness_status(
         .and_then(|hubs| hubs.get(&key).cloned());
     match hub {
         Some(hub) => match hub.status() {
-            Ok(status) => {
+            Ok(mut status) => {
+                // Only the current owned receipt is read, never another run or historical thread.
+                if let Some(thread) = node.receipt.as_ref().and_then(|receipt| receipt.thread_id.as_deref()) {
+                    if let Ok(current) = hub.read(thread) {
+                        let bounded = |key: &str, limit| current[key].as_str().unwrap_or("").chars().take(limit).collect::<String>();
+                        status["live_output"] = json!(bounded("answer", 4096));
+                        status["live_error"] = json!(bounded("notice", 500));
+                    }
+                }
                 Json(json!({"ok":true,"owned":true,"route_verified":false,"status":status}))
                     .into_response()
             }
@@ -3511,7 +3534,7 @@ async fn ao_harness_approval(
 async fn ao_control(State(state): State<ServiceState>, headers: HeaderMap, Json(body): Json<AoControlRequest>) -> Response {
     if let Err(response) = auth(&headers, &state) { return *response; }
     let _lease = match admit(&state, "ao_control") { Ok(lease) => lease, Err(response) => return *response };
-    if !body.confirm || !local_ui_authorized(&headers, &state) || !matches!(body.action.as_str(), "pause" | "resume" | "stop" | "retry") {
+    if !body.confirm || !local_ui_authorized(&headers, &state) || !matches!(body.action.as_str(), "pause" | "resume" | "stop" | "retry" | "retry_auto" | "review_failures") {
         return json_error(StatusCode::FORBIDDEN, "AO_CONTROL_LOCAL_ONLY", "Use the local mission controls");
     }
     let workspace_id = body.workspace_id;
@@ -3519,7 +3542,7 @@ async fn ao_control(State(state): State<ServiceState>, headers: HeaderMap, Json(
     let stopping = body.action == "stop";
     let updated = tokio::task::spawn_blocking({
         let workspace_id = workspace_id.clone(); let run_id = run_id.clone();
-        move || coding_tools_core::data::DataStore::update_file(|data| integrations::ao_team::control(data, &workspace_id, &run_id, &body.action))
+        move || coding_tools_core::data::DataStore::update_file(|data| integrations::ao_team::control_selected(data, &workspace_id, &run_id, &body.action, body.node_id.as_deref()))
     }).await;
     let mut run = match updated {
         Ok(Ok(run)) => run,
@@ -3586,9 +3609,10 @@ async fn ao_read(
             } else {
                 scoped.take(100).cloned().collect()
             };
-            let team = data.ao_teams.iter().find(|team| team.workspace_id == body.workspace_id);
+            let teams: Vec<_> = data.ao_teams.iter().filter(|team| team.workspace_id == body.workspace_id).collect();
+            let team = integrations::ao_team::default_team(data, &body.workspace_id);
             let capacity: std::collections::HashMap<_, _> = runs.iter().map(|run| (run.id.clone(), integrations::ao_team::available_workers(data, run))).collect();
-            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"limits":data.ao_limits,"worker_capacity":capacity}))
+            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"teams":teams,"limits":data.ao_limits,"worker_capacity":capacity}))
         })
         .map_err(text_error)
     })
@@ -3638,8 +3662,8 @@ async fn ao_update(
             .policy_execution_guard()
             .map_err(|error| error.message().to_string())?;
         coding_tools_core::data::DataStore::update_file(|data| match body.change {
-            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, worker_limit } =>
-                integrations::ao_team::create_run(data, &workspace_id, run_id, task_id, expected_board_revision, team_revision, worker_limit)
+            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, team_id, worker_limit } =>
+                integrations::ao_team::create_run(data, &workspace_id, run_id, task_id, expected_board_revision, team_revision, team_id.as_deref(), worker_limit)
                     .map(|run| json!({"ok":true,"run":run})),
             AoMutation::SaveTeam { expected_revision, team } => integrations::ao_team::save(data, &workspace_id, expected_revision, team)
                 .map(|team| json!({"ok":true,"team":team})),
