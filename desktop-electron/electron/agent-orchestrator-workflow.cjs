@@ -24,12 +24,15 @@ function clausesFrom(value) {
   }));
 }
 
-// Codex's own permission profiles: read-only, or workspace (create, edit and delete inside the
-// workspace; anything else is asked for). Native standalone command execution stays off.
-const AO_PERMISSION_PROFILES = [":read-only", ":workspace"];
-
-async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executable, model, permissionProfile = ":read-only", userData }) {
-  if (!AO_PERMISSION_PROFILES.includes(permissionProfile)) throw new Error("Choose read-only or workspace permission for this card");
+// Keep the actual native profile ID. The consented runtime's profile metadata enforces
+// availability/managed policy; the standalone command grant is independent and stays off.
+async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executable, model, permissionProfile = ":read-only",
+  approvalPolicy, approvalsReviewer, userData }) {
+  clean(permissionProfile, 128);
+  if (permissionProfile === ":ao-default" || /[\x00-\x1F\x7F]/.test(permissionProfile)) throw new Error("Choose an actual native permission profile");
+  if (approvalPolicy !== undefined && !["on-request", "never"].includes(approvalPolicy)) throw new Error("Unsupported native approval policy");
+  if (approvalsReviewer !== undefined && !["user", "auto_review"].includes(approvalsReviewer)
+    || approvalPolicy === "never" && approvalsReviewer === "auto_review") throw new Error("Unsupported native approvals reviewer selection");
   if (!path.isAbsolute(executable) || !path.isAbsolute(userData)) {
     throw new Error("Select absolute native Codex executable and application-data paths");
   }
@@ -54,12 +57,17 @@ async function resolveAoNativeConnection({ workspaceId, runId, nodeId, executabl
     codex_home: path.join(userData, "headless", "ao-homes", nodeHash),
     allow_model_usage: true, allow_command_execution: false,
     permission_profile: permissionProfile, model: clean(model, 128),
+    ...(approvalPolicy !== undefined ? { approval_policy: approvalPolicy } : {}),
+    ...(approvalsReviewer !== undefined ? { approvals_reviewer: approvalsReviewer } : {}),
     request_limit: 3, lifetime_seconds: 900,
   };
 }
 
 function permissionText(profile) {
-  return profile === ":workspace" ? "workspace (create, edit and delete inside the workspace)" : "read-only";
+  if (profile === ":workspace") return "workspace (create, edit and delete inside the workspace)";
+  if (profile === ":read-only") return "read-only";
+  if (profile === ":danger-full-access") return "full access (no native sandbox)";
+  return "native profile: " + String(profile ?? "unknown");
 }
 
 // The installed Codex desktop app keeps its CLI at %LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe;
@@ -127,7 +135,7 @@ function aoWebCatalogForModel(catalog, model) {
   return { models: [{ ...template, slug: model, display_name: `ChatGPT Web — ${tier}` }] };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null }) {
   // A saved path goes stale when the Codex app updates itself (it replaces bin\<build>\), so a
   // chosen executable that no longer exists falls back to the currently installed one.
   function codexExecutable(chosen) {
@@ -409,6 +417,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
   }
 
+  async function permissionProfiles({ workspaceId, runId, nodeId } = {}) {
+    const response = await requestHeadless("/api/v1/ao/harness/permission-profiles", {
+      workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80), node_id: clean(nodeId, 80),
+    });
+    if (response?.ok !== true || !response.capability) throw new Error("Native permission capability unavailable");
+    return response;
+  }
+
   // What each working card is doing now, for the chat and the cards: when it started, its
   // current step and when anything was last heard. Read-only; it never advances the run.
   async function activity({ workspaceId, runId } = {}) {
@@ -444,6 +460,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       }
     }));
     return { ok: true, now_ms: Date.now(), nodes };
+  }
+
+  async function requireWebReadiness(node) {
+    if (node.route?.provider_id !== "chatgpt-web") return;
+    if (typeof webBridgeReadiness !== "function") {
+      throw new Error("Browser readiness is unavailable; open Browser and sign in to ChatGPT");
+    }
+    let state;
+    try { state = await webBridgeReadiness({ nodeId: node.id, role: node.role, model: node.route.model }); }
+    catch { throw new Error("Browser readiness is unavailable; open Browser and check the ChatGPT session"); }
+    if (state?.authenticated === false) throw new Error("Sign in to ChatGPT in Browser before starting this role");
+    if (state?.authenticated !== true || state?.ready !== true) {
+      throw new Error("Browser is not ready; open Browser and check the ChatGPT session");
+    }
   }
 
   async function connectAoHarness(input = {}, granted = false) {
@@ -485,17 +515,19 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         throw new Error("AO WebGPT requires the managed local bridge");
       }
       webBridge = { baseUrl };
+      await requireWebReadiness(node);
     }
     const selected = await resolveHarness({ workspaceId, runId, nodeId, executable,
-      model: route.model, providerId: route.provider_id, accountId: route.account_id, permissionProfile: route.permission_profile });
+      model: route.model, providerId: route.provider_id, accountId: route.account_id, permissionProfile: route.permission_profile,
+      approvalPolicy: route.approval_policy, approvalsReviewer: route.approvals_reviewer });
     if (!selected || selected.model !== route.model || selected.permission_profile !== route.permission_profile
-      || !AO_PERMISSION_PROFILES.includes(selected.permission_profile)
+      || selected.approval_policy !== route.approval_policy || selected.approvals_reviewer !== route.approvals_reviewer
       || selected.allow_model_usage !== true || selected.allow_command_execution !== false) {
       throw new Error("AO native connection does not match the saved route and permission");
     }
     if (!granted && !await confirm({
       message: "Connect this AO-owned Codex session?",
-      detail: `Workspace: ${workspaceId}\nRun: ${runId}\nNode: ${nodeId}\nProvider: ${route.provider_id}\nAccount policy: ${route.account_id}\nModel: ${route.model}\nExecutable: ${selected.executable}\nSHA-256: ${selected.expected_sha256}\nPermission: ${permissionText(route.permission_profile)}; standalone commands: off`.slice(0, 1200),
+      detail: `Workspace: ${workspaceId}\nRun: ${runId}\nNode: ${nodeId}\nProvider: ${route.provider_id}\nAccount policy: ${route.account_id}\nModel: ${route.model}\nExecutable: ${selected.executable}\nSHA-256: ${selected.expected_sha256}\nPermission: ${permissionText(route.permission_profile)}; approval policy: ${route.approval_policy ?? 'legacy runtime default'}; reviewer: ${route.approvals_reviewer ?? 'legacy runtime default'}; standalone commands: off`.slice(0, 1200),
     })) return { ok: false, cancelled: true };
     if (!worker) {
       const catalog = await webModelCatalog?.({ executable: selected.executable, model: route.model });
@@ -545,29 +577,47 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     return response.pending_approvals ? { ...response, pending_approvals: withAdvice(response.pending_approvals) } : response;
   }
 
-  async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow } = {}) {
-    const id = clean(workspaceId, 128);
-    const run = clean(runId, 80);
-    const node = clean(nodeId, 80);
+  async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId } = {}) {
+    const id = clean(workspaceId, 128), run = clean(runId, 80), node = clean(nodeId, 80);
     const approval = clean(approvalId, 128);
-    if (typeof allow !== "boolean") throw new Error("Choose Allow or Deny for this AO tool request");
+    const typed = response !== undefined;
+    if (typed ? allow !== undefined || !response || typeof response !== "object" || Array.isArray(response)
+      : typeof allow !== "boolean") throw new Error("Choose either a typed native reply or legacy Allow/Deny");
+    let reply, thread, turn;
+    if (typed) {
+      if (typeof threadId !== "string" || typeof turnId !== "string") throw new Error("Native reply requires live thread/turn scope");
+      thread = clean(threadId, 256); turn = clean(turnId, 256);
+      const serialized = JSON.stringify(response);
+      if (Buffer.byteLength(serialized, "utf8") > 16 * 1024) throw new Error("Native reply exceeds the consent payload limit");
+      reply = JSON.parse(serialized);
+    }
     const current = await harnessStatus({ workspaceId: id, runId: run, nodeId: node });
     const pending = current.status?.pending_approvals?.find((entry) => entry.approval_id === approval);
     if (!pending) throw new Error("AO tool request is no longer pending");
+    if (typed && (!pending.method || pending.thread_id !== thread || pending.turn_id !== turn)) {
+      throw new Error("Native approval thread/turn scope changed; refresh the pending request");
+    }
+    const questions = Array.isArray(pending.request?.questions) ? pending.request.questions : [];
+    const displayReply = typed && pending.kind === "questions"
+      ? { ...reply, answers: Object.fromEntries(Object.entries(reply.answers ?? {}).map(([key, answer]) =>
+        [key, questions.some(question => question.id === key && question.isSecret === true) ? "[redacted secret answer]" : answer])) }
+      : reply;
     if (!await confirm({
-      message: allow ? "Allow this AO tool request once?" : "Deny this AO tool request?",
-      detail: pending.kind === "command"
-        ? `Run: ${run}\nNode: ${node}\nCommand: ${String(pending.command || "")}\nWorking directory: ${String(pending.cwd || "")}\nReason: ${String(pending.reason || "")}\nRequested permissions: ${JSON.stringify(pending.permissions || {})}\nThis approves this command once, not the session. The native runtime may execute it beyond the default read-only sandbox.`
-        : `Run: ${run}\nNode: ${node}\nPath: ${String(pending.path || "").slice(0, 500)}\nReason: ${String(pending.reason || "").slice(0, 500)}`,
+      message: typed ? "Send this scoped native reply?" : allow ? "Allow this AO tool request once?" : "Deny this AO tool request?",
+      detail: typed
+        ? `Run: ${run}\nNode: ${node}\nThread: ${thread}\nTurn: ${turn}\nMethod: ${pending.method}\nRequest: ${JSON.stringify(pending.request || {})}\nSelected response: ${JSON.stringify(displayReply)}\nThe native runtime validates its offered decisions and requested permission subset; workspace MCP grants are not changed.`
+        : pending.kind === "command"
+          ? `Run: ${run}\nNode: ${node}\nCommand: ${String(pending.command || "")}\nWorking directory: ${String(pending.cwd || "")}\nReason: ${String(pending.reason || "")}\nRequested permissions: ${JSON.stringify(pending.permissions || {})}\nThis approves this command once, not the session. The native runtime may execute it beyond the default read-only sandbox.`
+          : `Run: ${run}\nNode: ${node}\nPath: ${String(pending.path || "").slice(0, 500)}\nReason: ${String(pending.reason || "").slice(0, 500)}`,
     })) return { ok: false, cancelled: true };
-    const response = await requestHeadless("/api/v1/ao/harness/approval", {
-      workspace_id: id, run_id: run, node_id: node,
-      approval_id: approval, allow, confirm: true,
+    const result = await requestHeadless("/api/v1/ao/harness/approval", {
+      workspace_id: id, run_id: run, node_id: node, approval_id: approval,
+      ...(typed ? { response: reply, thread_id: thread, turn_id: turn } : { allow }), confirm: true,
     }, { localConfirmation: true });
-    if (response?.ok !== true || response.result?.ok !== true) {
+    if (result?.ok !== true || result.result?.ok !== true) {
       throw new Error("AO tool approval outcome is unknown; inspect the card before retrying");
     }
-    return response;
+    return result;
   }
 
   async function advance({ workspaceId, runId, executable } = {}) {
@@ -601,15 +651,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     if (status.status?.connected && status.status.model !== ready.route.model) {
       throw new Error("AO connected harness model does not match the saved card");
     }
-    if (!status.status?.connected) {
+    const stalePolicy = status.status?.connected && (
+      typeof status.status.permission_profile === "string" && status.status.permission_profile !== ready.route.permission_profile
+      || ready.route.approval_policy !== undefined && status.status.approval_policy !== ready.route.approval_policy
+      || ready.route.approvals_reviewer !== undefined && status.status.approvals_reviewer !== ready.route.approvals_reviewer);
+    if (!status.status?.connected || stalePolicy) {
       const connected = await connectAoHarness({ workspaceId: id, runId: run,
         nodeId: ready.id, executable: selectedExecutable });
       if (connected.cancelled) return connected;
     }
     if (!await confirm({
       message: "Run this AO card?",
-      detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nRole: ${ready.role}\nModel: ${ready.route.model}\nPermission: ${permissionText(ready.route.permission_profile)}; other tool requests ask you`.slice(0, 1200),
+      detail: `Workspace: ${id}\nRun: ${run}\nNode: ${ready.id}\nRole: ${ready.role}\nModel: ${ready.route.model}\nPermission: ${permissionText(ready.route.permission_profile)}; approval policy: ${ready.route.approval_policy ?? "legacy runtime default"}; reviewer: ${ready.route.approvals_reviewer ?? "legacy runtime default"}; workspace MCP approvals are separate`.slice(0, 1200),
     })) return { ok: false, cancelled: true };
+    await requireWebReadiness(ready);
     const response = await requestHeadless("/api/v1/ao/harness/execute", {
       workspace_id: id, run_id: run, node_id: ready.id,
       expected_revision: mission.revision, confirm: true,
@@ -674,7 +729,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   ];
   const approverAdvice = new Map(); // approval_id -> { action, reason }
   const withAdvice = (approvals) => Array.isArray(approvals)
-    ? approvals.map((item) => approverAdvice.has(item?.approval_id) ? { ...item, recommendation: approverAdvice.get(item.approval_id) } : item)
+    ? approvals.map((item) => {
+      // Modern native commands carry escalation scope separately from item/permissions requests.
+      const request = item?.request;
+      const scoped = item?.kind === "command" && request
+        && (Object.hasOwn(request, "additionalPermissions") || Object.hasOwn(request, "networkApprovalContext"))
+        ? { ...item, permissions: { additionalPermissions: request.additionalPermissions ?? null,
+          networkApprovalContext: request.networkApprovalContext ?? null } } : item;
+      return approverAdvice.has(item?.approval_id)
+        ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
+    })
     : approvals;
   const describeRequest = (approval) => [approval.kind, approval.command, approval.path, approval.cwd && `in ${approval.cwd}`, approval.reason]
     .filter(Boolean).join(" · ").slice(0, 1500);
@@ -719,11 +783,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     let note = null;
     for (const [index, result] of observed.entries()) {
       for (const approval of result?.pending_approvals ?? []) {
-        if (!approval?.approval_id || approverAdvice.has(approval.approval_id)) continue;
+        if (approval?.kind !== "command" || !approval.approval_id || approverAdvice.has(approval.approval_id)) continue;
         const request = describeRequest(approval);
-        const advice = HARD_DENY.some((pattern) => pattern.test(request))
-          ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
-          : await askApprover({ approver, mission, approval });
+        // The command advisor must not decide from a truncated command or permission scope.
+        const incomplete = request.length >= 1500 || JSON.stringify(approval.permissions ?? {}).length > 800;
+        let advice = incomplete
+          ? { action: "ask", reason: "Inspect the complete native command and requested permission scope yourself" }
+          : HARD_DENY.some((pattern) => pattern.test(request))
+            ? { action: "deny", reason: "Blocked by the command approver's safety rules" }
+            : await askApprover({ approver, mission, approval });
+        const offered = approval.request?.availableDecisions;
+        if (Array.isArray(offered) && advice.action !== "ask"
+          && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
+          advice = { action: "ask", reason: "This native request requires a typed offered decision from you" };
+        }
         approverAdvice.set(approval.approval_id, advice);
         if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
         if (approver.settings?.auto_decide === true && advice.action !== "ask") {
@@ -859,10 +932,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         }
         const status = await harnessStatus({ workspaceId, runId, nodeId: ready.id });
         if (status.status?.connected && status.status.model !== ready.route.model) throw new Error("AO connected harness route changed");
-        if (!status.status?.connected) {
+        const stalePolicy = status.status?.connected && (
+          typeof status.status.permission_profile === "string" && status.status.permission_profile !== ready.route.permission_profile
+          || ready.route.approval_policy !== undefined && status.status.approval_policy !== ready.route.approval_policy
+          || ready.route.approvals_reviewer !== undefined && status.status.approvals_reviewer !== ready.route.approvals_reviewer);
+        if (!status.status?.connected || stalePolicy) {
           const connected = await connectAoHarness({ workspaceId, runId, nodeId: ready.id, executable }, true);
           if (connected.waiting) { state.detail = "Waiting for a harness slot"; await pause(); continue; }
         }
+        await requireWebReadiness(ready);
         const sent = await requestHeadless("/api/v1/ao/harness/execute", {
           workspace_id: workspaceId, run_id: runId, node_id: ready.id,
           expected_revision: mission.revision, confirm: false,
@@ -910,6 +988,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       }
       if (mission.nodes.every((node) => node.state === "finished")) throw new Error("AO run is already finished");
       const resuming = mission.nodes.some((node) => node.state === "running");
+      const readyWebRole = mission.nodes.find(node => node.state === "pending"
+        && node.route?.provider_id === "chatgpt-web"
+        && (node.parents ?? []).every(parent => mission.nodes.some(entry => entry.id === parent && entry.state === "finished")));
+      if (readyWebRole) await requireWebReadiness(readyWebRole);
       const selected = await resolveHarness({ workspaceId: id, runId: run, nodeId: mission.nodes[0].id,
         executable: selectedExecutable, model: mission.nodes[0].route.model });
       if (!/^[a-f0-9]{64}$/.test(selected?.expected_sha256 || "") || !path.isAbsolute(selected.executable)) {
@@ -1157,6 +1239,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       case "update_run": return updateRun(args);
       case "team_update": return teamUpdate(args);
       case "harness_status": return harnessStatus(args);
+      case "permission_profiles": return permissionProfiles(args);
       case "activity": return activity(args);
       case "connect_harness": return connectAoHarness(args);
       case "stop_harness": return stopAoHarness(args);

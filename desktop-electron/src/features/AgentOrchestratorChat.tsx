@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../icons";
+import type { ReactNode } from "react";
+import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import {
   CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatNodeName, chatNodeOrder, chatTranscript,
   type ChatActivity, type ChatMessage, type ChatNode, type ChatRun, type ChatStatus, type ChatSummary,
 } from "./ao-chat";
 
-type ChatApproval = { nodeId: string; approval_id: string; reason?: string; path?: string; cwd?: string; command?: string; kind?: string };
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   queued: "Starting", running: "Running", paused: "Paused", attention: "Needs you", stopped: "Stopped", done: "Done",
@@ -78,7 +79,7 @@ export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
-  approvals, approve, describeRoute, notice, retryStart, working = false, describeNode, activity,
+  approvals, approve, describeRoute, notice, retryStart, working = false, describeNode, activity, permissions,
 }: {
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
   describeNode?: (node: ChatNode) => string;
@@ -95,7 +96,8 @@ export function AgentOrchestratorChat({
   send: (input: { taskId?: string; title?: string; message: string }) => Promise<void>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
-  approve: (approval: ChatApproval, allow: boolean) => void;
+  approve: (approval: ChatApproval, reply: ApprovalReply) => void;
+  permissions?: ReactNode;
   describeRoute: (nodeId: string, runId: string) => string;
   /** Why this chat's latest run could not start, if it could not. */
   notice?: string;
@@ -200,19 +202,10 @@ export function AgentOrchestratorChat({
               </div>
             </div>
           ) : null}
-          {approvals.map((approval) => (
-            <div key={approval.approval_id} className="ao-msg ao-msg-approval">
-              <span className="ao-msg-meta">Approval needed</span>
-              <p>{approval.reason || "Tool request"} · {approval.path || approval.cwd || approval.nodeId}</p>
-              {approval.kind === "command" && approval.command ? <pre>{approval.command}</pre> : null}
-              <div className="ao-msg-actions">
-                <button className="button-primary" type="button" disabled={busy} onClick={() => approve(approval, true)}>Allow once</button>
-                <button className="button-secondary" type="button" disabled={busy} onClick={() => approve(approval, false)}>Deny</button>
-              </div>
-            </div>
-          ))}
+          {approvals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={busy} approve={approve} />)}
         </div>
 
+        {permissions}
         <form className="ao-chat-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
           <textarea aria-label="Message" maxLength={8192} rows={3} value={draft}
             placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "What should the team do?"}

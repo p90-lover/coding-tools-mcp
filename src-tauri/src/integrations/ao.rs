@@ -56,6 +56,20 @@ pub enum State {
     Archived,
 }
 
+#[cfg(test)]
+#[test]
+fn native_permission_selection_round_trips_without_legacy_fingerprint_changes() {
+    let legacy = serde_json::json!({"harness_id":"codex-native","provider_id":"chatgpt-web","account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":workspace"});
+    let route: Route = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(route).unwrap(), legacy);
+    let mut selected = legacy;
+    selected["native_permission_profile"] = serde_json::json!(":workspace");
+    selected["approval_policy"] = serde_json::json!("on-request");
+    selected["approvals_reviewer"] = serde_json::json!("auto_review");
+    let route: Route = serde_json::from_value(selected.clone()).unwrap();
+    assert_eq!(serde_json::to_value(route).unwrap(), selected);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
@@ -64,6 +78,13 @@ pub struct Route {
     pub account_id: String,
     pub model: String,
     pub permission_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_permission_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<String>,
+
     /// Reasoning effort for this card ("minimal" to "xhigh"); None keeps the model's default.
     /// Omitted when unset, so grants issued before this setting keep their fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,9 +112,23 @@ pub const CONTEXT_WINDOWS: std::ops::RangeInclusive<u32> = 4_096..=2_000_000;
 /// The route's tuning is one Codex knows, inside the allowed range.
 fn route_tuning_valid(route: &Route) -> bool {
     route
-        .effort
+        .approval_policy
         .as_deref()
-        .is_none_or(|effort| EFFORTS.contains(&effort))
+        .is_none_or(|value| matches!(value, "on-request" | "never"))
+        && route
+            .approvals_reviewer
+            .as_deref()
+            .is_none_or(|value| matches!(value, "user" | "auto_review"))
+        && !(route.approval_policy.as_deref() == Some("never")
+            && route.approvals_reviewer.as_deref() == Some("auto_review"))
+        && route
+            .native_permission_profile
+            .as_deref()
+            .is_none_or(|value| text(value, 128) && value != EXTERNAL_PERMISSION)
+        && route
+            .effort
+            .as_deref()
+            .is_none_or(|effort| EFFORTS.contains(&effort))
         && route
             .context_window
             .is_none_or(|tokens| CONTEXT_WINDOWS.contains(&tokens))

@@ -155,7 +155,7 @@ test("each task has always-visible Mission and Overview icons that select that t
   const component = {};
   vm.runInNewContext(ts.transpileModule(componentSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component,
-    require: name => name === "./ao-chat" ? chat : name === "../icons" ? { Icon: () => null }
+    require: name => name === "./ao-chat" ? chat : name === "../icons" ? { Icon: () => null } : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: () => null }
       : require(require.resolve(name, { paths: [path.resolve(__dirname, "..")] })),
   });
   const selected = [];
@@ -235,7 +235,8 @@ test("overview divider remembers its ratio, supports keyboard/reset and releases
     return surface.OverviewSplit({ hidden: false, onResize: value => resizing.push(value), children: ["graph", "board"] });
   };
   let tree = render();
-  tree.props.ref.current = { getBoundingClientRect: () => ({ top: 10, height: 808 }) };
+  // React 19 keeps ref in props; older installed React exposes it on the element.
+  (tree.props.ref || tree.ref).current = { getBoundingClientRect: () => ({ top: 10, height: 808 }) };
   layouts.forEach(effect => effect());
   tree = render();
   let divider = tree.props.children[1];

@@ -6,6 +6,11 @@ import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
 import { AgentOrchestratorChat, ChatListPane } from "./AgentOrchestratorChat";
+import { AgentOrchestratorPermissions, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
+import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
+import { WorkspacePanel } from "./WorkspacePanel";
+import { NativeCodexPanel } from "./NativeCodexPanel";
+import { copyFor } from "../i18n";
 import { AgentOrchestratorTeam } from "./AgentOrchestratorTeam";
 import { chatList, type ChatActivity, type ChatNode } from "./ao-chat";
 import {
@@ -28,13 +33,12 @@ export type AoNode = {
   parents: string[]; x: number; y: number; positioned?: boolean; state: string;
   clause_id?: string; request_key?: string; template_role_id?: string;
   settings?: RoleSettings;
-  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string; effort?: string; context_window?: number };
+  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string; native_permission_profile?: string; approval_policy?: string; approvals_reviewer?: string; effort?: string; context_window?: number };
   receipt?: AoReceipt;
   history?: AoReceipt[];
 };
 export type AoMission = { id: string; project_id: string; workspace_id: string; revision: number; cancelled: boolean; paused?: boolean; solo?: boolean; nodes: AoNode[]; team?: AoTeam; worker_limit?: number };
-type AoApproval = { nodeId: string; approval_id: string; kind?: string; path?: string; reason?: string; command?: string; cwd?: string; permissions?: Record<string, unknown>; seconds_remaining?: number;
-  recommendation?: { action: "allow" | "deny" | "ask"; reason: string } };
+
 type Sheet = "" | "mission" | "worker" | "settings" | "team";
 
 const words = {
@@ -363,6 +367,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
   const [advanceNotice, setAdvanceNotice] = useState("");
   const [autoStatus, setAutoStatus] = useState("idle");
   const [pendingApprovals, setPendingApprovals] = useState<AoApproval[]>([]);
+  const [runtimePolicies, setRuntimePolicies] = useState<Record<string, RuntimePermissionPolicy>>({});
   const [runTaskId, setRunTaskId] = useState("");
   const [workerParentId, setWorkerParentId] = useState("");
   const [busy, setBusy] = useState("");
@@ -520,20 +525,57 @@ export function AgentOrchestratorSurface({ language, setError }: {
     setInspectedId(id);
     if (selectedRun && !draftTeam) setDraftTeam(teamForMission(selectedRun, team));
   };
+  const persistTeam = async (draft: AoTeam, mission?: AoMission, expectedRevision?: number, permissionScope?: { selected_role_ids: string[]; permission_selection: JsonObject }) => {
+    const { permission_selections: _missionPermissionSelections, ...reusableTeam } = draft;
+    const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: draft.revision, team: reusableTeam as unknown as JsonObject } });
+    if (saved.cancelled || !saved.team) throw new Error("Permission save cancelled; no application confirmed.");
+    const next = saved.team as AoTeam; setTeam(next); setDraftTeam(structuredClone(next));
+    if (!mission) return "Team saved for future missions. Running attempts are unchanged.";
+    try {
+      const applied = await moduleCall("team_update", { workspaceId, change: { operation: "apply_team", run_id: mission.id, expected_revision: expectedRevision ?? mission.revision, team_revision: next.revision, ...permissionScope } });
+      if (applied.cancelled) throw new Error("Application cancelled");
+      return "Policy saved for queued / future attempts. Running attempts are unchanged; each future native turn still requires exact runtime acknowledgement.";
+    } catch (cause) {
+      throw new Error("Team saved for future missions only; this chat was not updated: " + (cause instanceof Error ? cause.message : String(cause)));
+    } finally { await loadMissions(workspaceId); }
+  };
   const applyTeam = () => void run("team", async () => {
     if (!draftTeam || !selectedRun) return;
-    const saved = await moduleCall("team_update", { workspaceId, change: { operation: "save_team", expected_revision: draftTeam.revision, team: draftTeam as unknown as JsonObject } });
-    const next = saved.team as AoTeam; setTeam(next); setDraftTeam(structuredClone(next));
-    try {
-      const latest = await moduleCall("runs", { workspaceId, runId: selectedRun.id });
-      const mission = (latest.runs as AoMission[]).find(item => item.id === selectedRun.id)!;
-      await moduleCall("team_update", { workspaceId, change: { operation: "apply_team", run_id: mission.id, expected_revision: mission.revision, team_revision: next.revision } });
-      setAdvanceNotice("Team saved; queued cards updated");
-    } catch (cause) {
-      setAdvanceNotice("Team saved for future missions only");
-      throw cause;
-    } finally { await loadMissions(workspaceId); }
+    setAdvanceNotice(await persistTeam(draftTeam, selectedRun));
   });
+  const chatMission = [...missions].reverse().find(mission => mission.project_id === chatTaskId);
+  const permissionTeam = chatMission ? { ...teamForMission(chatMission, team), nodes: missionPermissionNodes(chatMission) } : team;
+  const loadPermissionProfiles = useCallback(async (roleId: string): Promise<PermissionCapability> => {
+    if (!chatMission) return { supported: false, profiles: [], reason: "Send the chat and connect this role with local consent before reading runtime profiles." };
+    const node = [...chatMission.nodes].reverse().find(item => (item.template_role_id || item.id) === roleId);
+    if (!node) return { supported: false, profiles: [], reason: "This role has no native runtime attempt yet." };
+    const result = await moduleCall("permission_profiles", { workspaceId, runId: chatMission.id, nodeId: node.id });
+    return result.capability as PermissionCapability ?? { supported: false, profiles: [], reason: "Runtime permission metadata unavailable" };
+  }, [workspaceId, chatMission?.id, chatMission?.nodes.map(node => node.id).join("|")]);
+  const savePermissions = async (_snapshot: AoTeam, revision: number | undefined, selectedRoleIds: string[], selection: PermissionSelection) => {
+    if (!team) throw new Error("Saved team unavailable; refresh before applying.");
+    const latest = await moduleCall("runs", { workspaceId });
+    const saved = latest.team as AoTeam | undefined;
+    if (!saved || saved.id !== team.id || saved.revision !== team.revision) throw new Error("Saved team revision changed; refresh and select permissions again.");
+    const permissionSelection: JsonObject = {
+      ...(selection.profile !== undefined ? { permission_profile: selection.profile } : {}),
+      ...(selection.policy !== undefined ? { approval_policy: selection.policy } : {}),
+      ...(selection.reviewer !== undefined ? { approvals_reviewer: selection.reviewer } : {}),
+    };
+    const sameReusableTeam = !chatMission?.team || chatMission.team.id === saved.id;
+    const reusableIds = sameReusableTeam ? selectedRoleIds.filter(id => saved.nodes.some(node => node.id === id)) : [];
+    const scope = { selected_role_ids: selectedRoleIds, permission_selection: permissionSelection };
+    if (reusableIds.length) {
+      const next = mergeSavedPermissions(saved, reusableIds, selection);
+      return persistTeam(next, chatMission, revision, scope);
+    }
+    if (!chatMission) throw new Error("No native mission role available to update.");
+    const applied = await moduleCall("team_update", { workspaceId, change: { operation: "apply_team", run_id: chatMission.id, expected_revision: revision ?? chatMission.revision, team_revision: saved.revision, ...scope } });
+    if (applied.cancelled) throw new Error("Permission application cancelled; no change confirmed.");
+    await loadMissions(workspaceId);
+    return "Policy saved for queued / future attempts in this mission only. Running attempts and the reusable team are unchanged; runtime acknowledgement is still required. No helper role was created.";
+
+  };
   const saveLimits = () => void run("limits", async () => {
     await moduleCall("team_update", { workspaceId, change: { operation: "set_limits", expected_revision: limits.revision, max_workers: globalLimit,
       ...(selectedRun ? { run_id: selectedRun.id, run_revision: selectedRun.revision, worker_limit: missionLimit } : {}) } });
@@ -631,6 +673,10 @@ export function AgentOrchestratorSurface({ language, setError }: {
           if (updated?.id === selectedRunId && updated.workspace_id === workspaceId && (!newest || updated.revision > newest.revision)) newest = updated;
         }
         setPendingApprovals(approvals);
+        setRuntimePolicies(Object.fromEntries(results.flatMap(({ nodeId, result }) => {
+          const status = (result.status ?? result) as Record<string, unknown>;
+          return typeof status.policy_acknowledged === "boolean" ? [[selectedRunId + ":" + nodeId, status as unknown as RuntimePermissionPolicy]] : [];
+        })));
         if (newest) { const updated = newest; setMissions(current => current.map(mission => mission.id === updated.id && mission.revision <= updated.revision ? updated : mission)); }
       } catch (cause) { if (live) setError(cause instanceof Error ? cause.message : String(cause)); }
       finally { reading = false; }
@@ -838,10 +884,11 @@ export function AgentOrchestratorSurface({ language, setError }: {
     await loadMissions(workspaceId);
   });
 
-  const approve = (approval: AoApproval, allow: boolean) => void run("approval", async () => {
+  const approve = (approval: AoApproval, reply: ApprovalReply) => void run("approval", async () => {
     if (!selectedRun) return;
     const result = await moduleCall("approve_harness", { workspaceId, runId: selectedRun.id,
-      nodeId: approval.nodeId, approvalId: approval.approval_id, allow });
+      nodeId: approval.nodeId, approvalId: approval.approval_id,
+      ...(typeof reply === "boolean" ? { allow: reply } : { response: reply as JsonObject, threadId: approval.thread_id!, turnId: approval.turn_id! }) });
     if (!result.cancelled) setPendingApprovals((current) => current.filter((item) => item.approval_id !== approval.approval_id));
   });
 
@@ -1011,6 +1058,20 @@ export function AgentOrchestratorSurface({ language, setError }: {
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && autoStatus === "running")}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? pendingApprovals : []}
+                permissions={<AgentOrchestratorPermissions key={chatMission?.id || "new"} team={permissionTeam} mission={chatMission} busy={Boolean(busy)}
+                  loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies} shared={<>
+                    <details><summary>Workspace MCP policy · shared across roles</summary>
+                      <p className="ao-hint">Filesystem, approval, tool catalog and screen capture are shared workspace settings. Confirmed saves require MCP restart; this menu does not restart it. App MCP never denies permission-requiring requests.</p>
+                      <WorkspacePanel copy={copyFor(language)} language={language} setError={setError} />
+                    </details>
+                    <details><summary>Shared native model / standalone command grants</summary>
+                      <p className="ao-hint">Separate shared-client consent. Standalone command execution is not model shell/MCP approval and is not enabled by role permission changes.</p>
+                      <NativeCodexPanel copy={copyFor(language)} language={language} setError={setError} />
+                    </details>
+                    <details><summary>Computer / snapshot / OS-app rights</summary>
+                      <p className="ao-hint">Not editable from this chat. Use the existing app/OS consent workflow. Role profiles do not grant computer, snapshot or other app access.</p>
+                    </details>
+                  </>} />}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || undefined : undefined}
                 retryStart={retryChatStart}
@@ -1030,16 +1091,7 @@ export function AgentOrchestratorSurface({ language, setError }: {
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
               onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))}>
               {pendingApprovals.length ? <aside className="ao-approvals ao-canvas-overlay" aria-label="AO tool approvals">
-                {pendingApprovals.map((approval) => <div key={approval.approval_id}>
-                  <p><strong>Approve?</strong> {approval.reason || "Tool request"} · {approval.path || approval.cwd || approval.nodeId}</p>
-                  {approval.recommendation ? <p className={`ao-approver-advice is-${approval.recommendation.action}`}>
-                    🛡️ Command approver suggests <strong>{approval.recommendation.action === "ask" ? "checking it yourself" : approval.recommendation.action}</strong>
-                    {approval.recommendation.reason ? ` — ${approval.recommendation.reason}` : ""}</p> : null}
-                  {approval.kind === "command" ? <pre aria-label="Requested command" title={`Once only · expires in ${approval.seconds_remaining ?? 0}s`}>{approval.command}</pre> : null}
-                  {approval.permissions ? <details><summary>Permissions</summary><pre aria-label="Requested permissions">{JSON.stringify(approval.permissions, null, 2)}</pre></details> : null}
-                  <button className="button-primary" disabled={Boolean(busy)} onClick={() => approve(approval, true)} type="button">Allow once</button>
-                  <button className="button-secondary" disabled={Boolean(busy)} onClick={() => approve(approval, false)} type="button">Deny</button>
-                </div>)}
+                {pendingApprovals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={Boolean(busy)} approve={approve} />)}
               </aside> : null}
               <button type="button" className="ao-fab ao-canvas-overlay" title="Add worker"
                 disabled={selectedRun.cancelled || selectedRun.nodes.length >= 24 || selectedRun.nodes.some((node) => node.role === "reviewer" && node.state !== "pending") || Boolean(busy)}

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 
 export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number; auto_decide?: boolean; role_name?: string };
-export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; nodes: AoNode[] };
+export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; nodes: AoNode[]; permission_selections?: Record<string, { permission_profile?: string; approval_policy?: string; approvals_reviewer?: string }> };
 export type AoHarness = { id: string; label: string; runnable: boolean; installed: boolean; authStatus?: string; chat?: boolean };
 export type AoRoute = AoNode["route"];
 export const emptyRoleSettings = (): RoleSettings => ({ name: "", specialty: "", instructions: "", expected_output: "", working_directory: "", revision: 0 });
@@ -27,7 +27,7 @@ export const isWebModel = (model: string) => model.replace(/^cpa\//, "").startsW
 
 export function workerRoute(harness: string, model: string, permission: NativePermission = ":workspace"): AoRoute {
   const bare = model.replace(/^cpa\//, "");
-  if (isWebModel(model)) return { ...WEB_ROUTE, model: bare, permission_profile: permission };
+  if (isWebModel(model)) return { ...WEB_ROUTE, model: bare, permission_profile: permission === ":ao-default" ? WEB_ROUTE.permission_profile : permission };
   const agent = harness.startsWith("ao:") ? harness : /^gemini/i.test(bare) ? "ao:claude-code" : "ao:codex";
   const routed = harness.startsWith("ao:") || !model ? model : `cpa/${bare}`;
   return { harness_id: agent, provider_id: "agent-orchestrator", account_id: "ao-local", model: routed || "default", permission_profile: ":ao-default" };
@@ -43,6 +43,15 @@ export const contextApplies = (route: AoRoute) => route.harness_id === NATIVE_HA
 /** Carry a card's effort and context window over to its new route where they still apply. */
 export function withTuning(next: AoRoute, previous: AoRoute): AoRoute {
   const route: AoRoute = { ...next };
+  // Routing is not a permission change: preserve raw custom and managed profile IDs.
+  const permission = previous.harness_id === NATIVE_HARNESS ? previous.permission_profile : previous.native_permission_profile ?? (previous.permission_profile !== ":ao-default" ? previous.permission_profile : undefined);
+  if (permission !== undefined) {
+    if (route.harness_id === NATIVE_HARNESS) route.permission_profile = permission;
+    else route.native_permission_profile = permission;
+  }
+  if (route.harness_id === NATIVE_HARNESS && previous.native_permission_profile !== undefined) route.native_permission_profile = previous.native_permission_profile;
+  if (previous.approval_policy !== undefined) route.approval_policy = previous.approval_policy;
+  if (previous.approvals_reviewer !== undefined) route.approvals_reviewer = previous.approvals_reviewer;
   delete route.effort;
   delete route.context_window;
   if (previous.effort && effortApplies(route)) route.effort = previous.effort;
@@ -81,8 +90,8 @@ export function cardMeta(node: Pick<AoNode, "role" | "settings" | "route">, harn
  * Native Codex cards use Codex's own profiles: workspace (create, edit and delete inside the
  * workspace; anything else is asked for) or read-only. Workers default to workspace.
  */
-export type NativePermission = ":workspace" | ":read-only";
-export const nativePermission = (route: AoRoute): NativePermission => route.permission_profile === ":workspace" ? ":workspace" : ":read-only";
+export type NativePermission = string;
+export const nativePermission = (route: AoRoute): NativePermission => route.harness_id === NATIVE_HARNESS ? route.permission_profile : route.native_permission_profile ?? route.permission_profile;
 
 /** "chatgpt-web/extra-high" -> "WebGPT Extra High"; other model ids are shown as-is. */
 export function modelLabel(model: string): string {
@@ -99,8 +108,14 @@ export function harnessLabel(harnessId: string, harnesses: AoHarness[]): string 
 
 export function teamForMission(mission: AoMission, saved: AoTeam | null): AoTeam {
   if (saved) {
+    if (mission.team && mission.team.id !== saved.id) return structuredClone(mission.team);
     const team = structuredClone(saved);
     if (mission.team?.id === team.id) {
+      // Use this mission's policy snapshot, retaining the revision needed for optimistic save.
+      team.nodes = team.nodes.map(role => {
+        const snapshot = mission.team!.nodes.find(item => item.id === role.id);
+        return snapshot ? { ...role, route: structuredClone(snapshot.route), settings: structuredClone(snapshot.settings) } : role;
+      });
       const extra = mission.team.nodes.filter(role => !team.nodes.some(existing => existing.id === role.id));
       team.nodes.push(...structuredClone(extra));
       const reviewer = team.nodes.find(role => role.role === "reviewer");
@@ -168,11 +183,8 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex" : ""}
       </option>)}
     </select></label>
-    {harness === NATIVE_HARNESS ? <label>Permission<select value={nativePermission(route)} disabled={disabled}
-      onChange={event => onChange({ ...route, permission_profile: event.target.value })}>
-      <option value=":workspace">Workspace: create, edit and delete in this workspace</option>
-      <option value=":read-only">Read only</option>
-    </select></label> : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here.</p>}
+    {harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
+      : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p>}
     <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
     <label title={effortApplies(route) ? "Reasoning effort for this card" : "AO skips effort for CPA gateway models"}>Reasoning effort
       <select value={effortApplies(route) ? route.effort ?? "" : ""} disabled={disabled || !effortApplies(route)}

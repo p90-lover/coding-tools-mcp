@@ -14,6 +14,9 @@ fn fixture() -> (AppData, Run) {
         account_id: "web-account".into(),
         model: "chatgpt-web/high".into(),
         permission_profile: ":read-only".into(),
+        native_permission_profile: None,
+        approval_policy: None,
+        approvals_reviewer: None,
         effort: None,
         context_window: None,
     };
@@ -24,6 +27,9 @@ fn fixture() -> (AppData, Run) {
         account_id: "ao-local".into(),
         model: "cpa/gemini-3.8-flash-high".into(),
         permission_profile: ":ao-default".into(),
+        native_permission_profile: None,
+        approval_policy: None,
+        approvals_reviewer: None,
         effort: None,
         context_window: None,
     };

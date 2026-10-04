@@ -10,8 +10,51 @@ const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirnam
 const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorRoleEditor.tsx"), "utf8");
 const editor = {};
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-vm.runInNewContext(compiled, { exports: editor, require: () => ({}) });
+vm.runInNewContext(compiled, { exports: editor, require: () => ({}), structuredClone });
 const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test("saved native policy survives harness and model round trips without coercion", () => {
+  for (const profile of [":workspace", ":read-only", ":full-access", "managed/custom-policy"]) {
+    const native = { ...editor.WEB_ROUTE, permission_profile: profile, approval_policy: "on-request", approvals_reviewer: "auto_review" };
+    const external = editor.withTuning(editor.workerRoute("ao:codex", "gpt-5.5"), native);
+    assert.equal(external.permission_profile, ":ao-default");
+    assert.equal(external.native_permission_profile, profile);
+    const restored = editor.withTuning(editor.workerRoute("codex-native", "chatgpt-web/high", editor.nativePermission(external)), external);
+    assert.equal(restored.permission_profile, profile);
+    assert.equal(restored.approval_policy, "on-request");
+    assert.equal(restored.approvals_reviewer, "auto_review");
+  }
+  assert.equal(editor.workerRoute("codex-native", "chatgpt-web/high", ":ao-default").permission_profile, ":read-only", "legacy external routes with no native selection restore the legacy native default");
+  assert.equal(editor.nativePermission({ permission_profile: "unknown/raw" }), "unknown/raw");
+  const current = { ...editor.WEB_ROUTE, permission_profile: "current/raw", native_permission_profile: "older/raw" };
+  assert.equal(editor.nativePermission(current), "current/raw");
+  const remembered = editor.withTuning(editor.workerRoute("ao:codex", "gpt-5.5"), current);
+  assert.equal(remembered.native_permission_profile, "current/raw", "leaving native remembers the active raw policy, not an older inactive selection");
+});
+
+test("legacy external-only conversion creates only a read-only native scope with no inherited role policy", () => {
+  const legacy = { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "gpt-5.5", permission_profile: ":ao-default" };
+  for (const harness of ["codex-native", "ao:codex", "ao:claude-code"]) {
+    const next = editor.withTuning(editor.workerRoute(harness, "chatgpt-web/high", editor.nativePermission(legacy)), legacy);
+    assert.equal(next.harness_id, "codex-native");
+    assert.equal(next.permission_profile, ":read-only");
+    assert.equal(next.native_permission_profile, undefined);
+    assert.equal(next.approval_policy, undefined);
+    assert.equal(next.approvals_reviewer, undefined);
+  }
+});
+
+test("mission permissions win over another saved team's routes while its revision is retained", () => {
+  const saved = { id: "team", revision: 7, nodes: [{ id: "lead", route: { ...editor.WEB_ROUTE, permission_profile: ":workspace" } }] };
+  const mission = { team: { ...saved, revision: 2, nodes: [{ id: "lead", route: { ...editor.WEB_ROUTE, permission_profile: "managed/custom" } }] }, nodes: [] };
+  const draft = editor.teamForMission(mission, saved);
+  assert.equal(draft.revision, 7);
+  assert.equal(draft.nodes[0].route.permission_profile, "managed/custom");
+  assert.equal(saved.nodes[0].route.permission_profile, ":workspace");
+  const historical = editor.teamForMission({ ...mission, team: { ...mission.team, id: "old-team" } }, saved);
+  assert.equal(historical.id, "old-team");
+  assert.equal(historical.nodes[0].route.permission_profile, "managed/custom");
+});
 
 // WebGPT only works through the bridge on Native Codex: picking a WebGPT model on any harness
 // gives the Native Codex route, so a card can never ask an AO harness to run it.

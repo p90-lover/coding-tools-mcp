@@ -2480,6 +2480,18 @@ async function start() {
         }
         return { baseUrl: `http://127.0.0.1:${config.port}/v1` };
       },
+      webBridgeReadiness: async () => {
+        if (!browserHost || !fs.existsSync(browserHost.descriptorPath)) return { authenticated: null, ready: false };
+        const session = await browserHost.authenticationReadiness();
+        if (session.authenticated !== true || session.ready !== true) return session;
+        const snapshot = runtimeHost.runtimeConfigSnapshot();
+        const config = snapshot.config;
+        if (!snapshot.configured || config?.host !== "127.0.0.1"
+          || !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
+          return { authenticated: true, ready: false };
+        }
+        return { authenticated: true, ready: await runtimeSupervisor.proxyHealth(config, 2_000, undefined, true) };
+      },
       // The runtime returns Codex's WebGPT High entry (Luna on a Luna-only account); other tiers
       // reuse it under their own slug (the bridge picks the effort from the slug, not this entry).
       webModelCatalog: async ({ executable, model = "chatgpt-web/high" }) => {

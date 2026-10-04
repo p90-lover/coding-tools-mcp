@@ -6,6 +6,19 @@
   position: relative; display: flex; min-width: 0; min-height: 0; height: 100%; overflow: hidden;
 }
 
+/* The composer menu is a bounded, scrollable native-policy surface, separate from app consent. */
+.ao-permissions { position: relative; flex: 0 0 auto; padding: 8px 16px 0; }
+.ao-permissions-panel { position: absolute; z-index: 30; bottom: 100%; left: 16px; right: 16px; max-height: min(65vh, 680px); overflow: auto; padding: 18px; border: 1px solid var(--ao-line); border-radius: 12px; background: var(--color-background-elevated); box-shadow: 0 12px 40px rgb(0 0 0 / 30%); }
+.ao-permissions-panel h3 { margin-top: 0; }
+.ao-permissions-panel label, .ao-msg-approval fieldset label { display: grid; gap: 6px; margin: 10px 0; }
+.ao-permissions-panel select, .ao-msg-approval input, .ao-msg-approval textarea, .ao-msg-approval select { max-width: 100%; padding: 8px; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary); color: inherit; }
+.ao-permissions-panel > button { margin-right: 8px; }
+.ao-permissions-panel > details { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--ao-line); }
+.ao-msg-approval fieldset { border: 0; margin: 0; padding: 0; }
+.ao-msg-approval fieldset input[type="checkbox"] { width: auto; justify-self: start; }
+.ao-msg-approval pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ao-msg-approval a { color: var(--ao-blue); }
+
 /* One project tree, with compact view controls on each task. */
 .ao-workflow > .ao-chat-list { flex: 0 0 220px; padding-top: calc(env(titlebar-area-height, 34px) + 10px); }
 .ao-head-spacer { flex: 1 1 auto; min-width: 8px; }
