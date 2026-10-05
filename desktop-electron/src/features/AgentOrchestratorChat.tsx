@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../icons";
+import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
 import type { ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import {
-  CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatNodeName, chatNodeOrder, chatTranscript,
+  CHAT_DEFAULT_TITLE, chatAcceptsMessage, chatList, chatTranscript,
   type ChatActivity, type ChatMessage, type ChatNode, type ChatRun, type ChatStatus, type ChatSummary,
 } from "./ao-chat";
 
@@ -79,7 +80,7 @@ export function ChatListPane({ chats, selectedTaskId, onSelect, onNew, tree }: {
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
-  approvals, approve, describeRoute, notice, retryStart, working = false, describeNode, activity, permissions,
+  approvals, approve, describeRoute, notice, retryStart, working = false, describeNode, activity, permissions, composer, onOpenTeam, onOpenMissionBoard,
 }: {
   /** How each card runs (harness · model · effort · context · role), shown on its messages. */
   describeNode?: (node: ChatNode) => string;
@@ -98,6 +99,9 @@ export function AgentOrchestratorChat({
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => void;
   permissions?: ReactNode;
+  composer?: Omit<ComposerControlsProps, "permissions" | "busy">;
+  onOpenTeam?: () => void;
+  onOpenMissionBoard?: () => void;
   describeRoute: (nodeId: string, runId: string) => string;
   /** Why this chat's latest run could not start, if it could not. */
   notice?: string;
@@ -110,7 +114,6 @@ export function AgentOrchestratorChat({
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState("");
   const [title, setTitle] = useState("");
-  const [showStructure, setShowStructure] = useState(true);
   const [sending, setSending] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
 
@@ -152,7 +155,7 @@ export function AgentOrchestratorChat({
   };
 
   return (
-    <div className={`ao-chat${showStructure && latest ? " with-structure" : ""}`}>
+    <div className="ao-chat">
       <section className="ao-chat-main" aria-label={chat?.title || CHAT_DEFAULT_TITLE}>
         <header className="ao-chat-head">
           {selectedTaskId
@@ -161,13 +164,15 @@ export function AgentOrchestratorChat({
                 value={title} onChange={(event) => setTitle(event.target.value)} />}
           {chat ? <span className={`ao-pill status-${chat.status}`}><span className="ao-pill-dot" aria-hidden="true" />{STATUS_LABEL[chat.status]}</span> : null}
           <span className="ao-head-spacer" />
-          {latest ? <button type="button" className="button-secondary" aria-pressed={showStructure}
-            onClick={() => setShowStructure((value) => !value)}>Team summary</button> : null}
+          <button type="button" className="ao-chat-nav" disabled={busy || (!onOpenTeam && !latest)}
+            onClick={() => onOpenTeam ? onOpenTeam() : latest && openStructure(latest.id)}><Icon name="orchestrator" width="16" height="16" />Team</button>
+          <button type="button" className="ao-chat-nav" disabled={busy || !onOpenMissionBoard} onClick={onOpenMissionBoard}>
+            <Icon name="logs" width="16" height="16" />Mission Board</button>
         </header>
 
         <div className="ao-chat-scroll" ref={scroller}>
           {!transcript.length ? <p className="ao-chat-empty">
-            {selectedTaskId ? "Loading…" : "Describe the task. Sending starts the orchestrator, workers and reviewer."}
+            {selectedTaskId ? "Loading…" : composer?.mode === "single" ? "Describe the task. Sending starts the selected model." : "Describe the task. Sending starts the chosen team."}
           </p> : null}
           {transcript.map((message) => message.kind === "user"
             ? <div key={message.key} className="ao-msg ao-msg-user">
@@ -205,35 +210,18 @@ export function AgentOrchestratorChat({
           {approvals.map(approval => <AgentOrchestratorApproval key={approval.approval_id} approval={approval} busy={busy} approve={approve} />)}
         </div>
 
-        {permissions}
         <form className="ao-chat-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
           <textarea aria-label="Message" maxLength={8192} rows={3} value={draft}
-            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : "What should the team do?"}
+            placeholder={!accepts ? "Running — you can send a follow-up when it finishes" : selectedTaskId ? "Send a follow-up…" : composer?.mode === "single" ? "Ask anything…" : "What should the team do?"}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} />
-          <button className="button-primary" type="submit" disabled={!canSend}>{sending ? "Starting…" : "Send"}</button>
+          <div className="ao-composer-bottom">
+            {composer ? <AgentOrchestratorComposerControls {...composer} permissions={permissions} busy={busy || sending} /> : permissions}
+            <button className="ao-chat-send" type="submit" aria-label={sending ? "Starting…" : "Send message"} disabled={!canSend}><Icon name="forward" width="20" height="20" /></button>
+          </div>
         </form>
       </section>
 
-      {showStructure && latest ? (
-        <aside className="ao-chat-structure" aria-label="Structure">
-          <h3>Structure</h3>
-          <ol>
-            {chatNodeOrder(latest.nodes).map((node) => (
-              <li key={node.id} className={`state-${node.state}`}>
-                <span className={`ao-chat-dot state-${node.state}`} aria-hidden="true" />
-                <span className="ao-chat-node-name">{chatNodeName(node)}</span>
-                <span className="ao-chat-node-meta" title={describeRoute(node.id, latest.id)}>{node.state}</span>
-              </li>
-            ))}
-          </ol>
-          <p className="ao-chat-node-meta">
-            {latest.nodes.filter((node) => node.role === "worker" && node.state === "finished").length}
-            /{latest.nodes.filter((node) => node.role === "worker").length} workers done
-          </p>
-          <button type="button" className="button-secondary" onClick={() => openStructure(latest.id)}>Open overview</button>
-        </aside>
-      ) : null}
     </div>
   );
 }

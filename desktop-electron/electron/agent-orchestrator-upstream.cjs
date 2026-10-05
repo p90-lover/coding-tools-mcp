@@ -182,16 +182,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return (Array.isArray(catalog?.models) ? catalog.models : []).filter(model => typeof model?.id === "string" && model.id.length <= 128)
         .slice(0, 100).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, approvalMode = null }) {
+      if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
       // Chat-capable agents return their answer as a conversation turn. Every other
       // installed agent runs in its own terminal UI and hands back a result file.
       const chat = Array.isArray(settings?.chatHarnesses) && settings.chatHarnesses.includes(agentId(agent));
+      const codexWorkspace = agent === "codex" && ["accept-edits", "auto"].includes(approvalMode);
+      if (codexWorkspace && !chat) throw new Error("Codex workspace permissions require its capable chat driver; TUI sandbox settings cannot be verified.");
       // AO caps prompts at 16 KiB of UTF-8; leave room for the TUI result instruction.
       const brief = utf8Prefix(prompt, 16384 - Buffer.byteLength(TUI_RESULT_INSTRUCTION, "utf8") - 2);
       const launch = (mode) => internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode,
+        ...(approvalMode ? { approvalMode } : {}),
         prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}`,
         ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
         ...(effort && !gateway ? { effort: String(effort).slice(0, 32) } : {}),
@@ -205,7 +209,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       } catch (error) {
         // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
         // still runs in its own terminal and hands back a result file.
-        if (!chat || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
+        if (!chat || codexWorkspace || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
         data = await launch("tui");
       }
       return sessionId(data?.session?.id);

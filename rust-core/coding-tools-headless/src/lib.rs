@@ -562,7 +562,11 @@ struct AoReadRequest {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum AoMutation {
     CreateFromTeam {
-        run_id: String, task_id: String, expected_board_revision: u64, team_revision: u64, worker_limit: u8,
+        run_id: String, task_id: String, expected_board_revision: u64, worker_limit: u8,
+        #[serde(default)] team_revision: Option<u64>,
+        #[serde(default)] team_id: Option<String>,
+        #[serde(default)] execution_mode: Option<integrations::ao::ExecutionMode>,
+        #[serde(default)] single_route: Option<Box<integrations::ao::Route>>,
     },
     Create {
         expected_board_revision: u64,
@@ -579,7 +583,9 @@ enum AoMutation {
     },
     SaveTeam { expected_revision: u64, team: integrations::ao_team::Team },
     ApplyTeam {
-        run_id: String, expected_revision: u64, team_revision: u64,
+        run_id: String, expected_revision: u64,
+        #[serde(default)] team_revision: Option<u64>,
+        #[serde(default)] team_id: Option<String>,
         #[serde(default)] selected_role_ids: Option<Vec<String>>,
         #[serde(default)] permission_selection: Option<integrations::ao_team::PermissionSelection>,
     },
@@ -1375,6 +1381,45 @@ mod workspace_auth_tests {
             std::mem::size_of::<AoMutation>() < 256,
             "large mission graphs must not inflate every mutation request"
         );
+    }
+
+    #[test]
+    fn composer_execution_dto_keeps_legacy_team_and_explicit_single_separate() {
+        let legacy: AoMutation = serde_json::from_value(json!({"operation":"create_from_team","run_id":"run","task_id":"task","expected_board_revision":1,"team_revision":2,"worker_limit":1})).unwrap();
+        assert!(matches!(
+            legacy,
+            AoMutation::CreateFromTeam {
+                execution_mode: None,
+                team_revision: Some(2),
+                single_route: None,
+                ..
+            }
+        ));
+        let mut single = json!({"operation":"create_from_team","run_id":"run","task_id":"task","expected_board_revision":1,"worker_limit":1,
+            "execution_mode":"single","single_route":{"harness_id":"ao:claude-code","provider_id":"agent-orchestrator","account_id":"ao-local","model":"cpa/gpt-6-luna","permission_profile":":ao-default"}});
+        let parsed: AoMutation = serde_json::from_value(single.clone()).unwrap();
+        assert!(matches!(
+            parsed,
+            AoMutation::CreateFromTeam {
+                execution_mode: Some(integrations::ao::ExecutionMode::Single),
+                team_revision: None,
+                team_id: None,
+                single_route: Some(_),
+                ..
+            }
+        ));
+        single["execution_mode"] = json!("fake_single");
+        assert!(serde_json::from_value::<AoMutation>(single).is_err());
+        let apply: AoMutation = serde_json::from_value(json!({"operation":"apply_team","run_id":"run","expected_revision":2,"selected_role_ids":["only"],
+            "permission_selection":{"permission_profile":":workspace","approval_policy":"on-request","approvals_reviewer":"user"}})).unwrap();
+        assert!(matches!(
+            apply,
+            AoMutation::ApplyTeam {
+                team_revision: None,
+                team_id: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3829,9 +3874,10 @@ async fn ao_read(
             } else {
                 scoped.take(100).cloned().collect()
             };
-            let team = data.ao_teams.iter().find(|team| team.workspace_id == body.workspace_id);
+            let teams: Vec<_> = data.ao_teams.iter().filter(|team| team.workspace_id == body.workspace_id).collect();
+            let team = teams.first().copied();
             let capacity: std::collections::HashMap<_, _> = runs.iter().map(|run| (run.id.clone(), integrations::ao_team::available_workers(data, run))).collect();
-            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"limits":data.ao_limits,"worker_capacity":capacity}))
+            Ok(json!({"ok":true,"runs":runs,"board_revision":data.control_board.revision,"team":team,"teams":teams,"limits":data.ao_limits,"worker_capacity":capacity}))
         })
         .map_err(text_error)
     })
@@ -3975,12 +4021,14 @@ async fn ao_update(
             .policy_execution_guard()
             .map_err(|error| error.message().to_string())?;
         let mut result = coding_tools_core::data::DataStore::update_file(|data| match body.change {
-            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, worker_limit } =>
-                integrations::ao_team::create_run(data, &workspace_id, run_id, task_id, expected_board_revision, team_revision, worker_limit)
+            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, team_id, execution_mode, single_route, worker_limit } =>
+                integrations::ao_team::create_selected_run(data, &workspace_id, run_id, task_id, expected_board_revision, worker_limit,
+                    integrations::ao_team::CreateSelection { execution_mode, team_id, team_revision, single_route: single_route.map(|route| *route) })
                     .map(|run| json!({"ok":true,"run":run})),
             AoMutation::SaveTeam { expected_revision, team } => integrations::ao_team::save(data, &workspace_id, expected_revision, team)
                 .map(|team| json!({"ok":true,"team":team})),
-            AoMutation::ApplyTeam { run_id, expected_revision, team_revision, selected_role_ids, permission_selection } => integrations::ao_team::apply_selected(data, &workspace_id, &run_id, expected_revision, team_revision, selected_role_ids.as_deref(), permission_selection.as_ref())
+            AoMutation::ApplyTeam { run_id, expected_revision, team_revision, team_id, selected_role_ids, permission_selection } => integrations::ao_team::apply_selected_config(data, &workspace_id, &run_id, expected_revision,
+                integrations::ao_team::ApplySelection { team_id, team_revision, selected_role_ids, permission_selection })
                 .map(|run| json!({"ok":true,"run":run})),
             AoMutation::SetLimits { expected_revision, max_workers, run_id, run_revision, worker_limit } => {
                 let mission = match (run_id.as_deref(), run_revision, worker_limit) {

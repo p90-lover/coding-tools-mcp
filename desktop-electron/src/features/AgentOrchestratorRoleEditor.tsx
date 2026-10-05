@@ -21,14 +21,14 @@ export const SPECIALTIES = ["planning", "research", "architecture", "frontend", 
  * Native Codex runs only WebGPT, through the bridge; every other model runs on an AO harness
  * (CPA pool models through the gateway as "cpa/<model>"). A WebGPT model therefore always gets
  * the Native Codex route, and any other model picked on Native Codex moves to an AO harness:
- * Gemini to Claude Code, the rest to Codex.
+ * Unspecified non-WebGPT choices default to Claude Code; explicit AO choices stay unchanged.
  */
 export const isWebModel = (model: string) => model.replace(/^cpa\//, "").startsWith("chatgpt-web/");
 
 export function workerRoute(harness: string, model: string, permission: NativePermission = ":workspace"): AoRoute {
   const bare = model.replace(/^cpa\//, "");
   if (isWebModel(model)) return { ...WEB_ROUTE, model: bare, permission_profile: permission === ":ao-default" ? WEB_ROUTE.permission_profile : permission };
-  const agent = harness.startsWith("ao:") ? harness : /^gemini/i.test(bare) ? "ao:claude-code" : "ao:codex";
+  const agent = harness.startsWith("ao:") ? harness : DEFAULT_WORKER_HARNESS;
   const routed = harness.startsWith("ao:") || !model ? model : `cpa/${bare}`;
   return { harness_id: agent, provider_id: "agent-orchestrator", account_id: "ao-local", model: routed || "default", permission_profile: ":ao-default" };
 }
@@ -142,8 +142,8 @@ export function defaultTeam(workspaceId: string, worker: AoRoute): AoTeam {
 }
 
 /** Harness + model pickers shared by the inspector, New mission and Add worker sheets. */
-export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false }: {
-  route: AoRoute; harnesses: AoHarness[]; disabled?: boolean;
+export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, hidePermissionNote = false }: {
+  route: AoRoute; harnesses: AoHarness[]; disabled?: boolean; hideModel?: boolean; hidePermissionNote?: boolean;
   loadModels: (harness: string) => Promise<string[]>;
   onChange: (route: AoRoute) => void;
 }) {
@@ -163,7 +163,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   }, [harness, loadModels]);
   const known = harnesses.some(item => item.id === harness);
   return <>
-    <label>Harness<select value={harness} disabled={disabled} onChange={event => {
+    <label>Harness<select value={harness} disabled={disabled || isWebModel(route.model)} title={isWebModel(route.model) ? "WebGPT requires Native Codex" : undefined} onChange={event => {
       // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
       const next = event.target.value;
       const model = next === NATIVE_HARNESS ? WEB_ROUTE.model : next === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
@@ -174,7 +174,7 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
         {item.label}{!item.runnable ? " · not installed" : item.authStatus === "unauthorized" ? " · sign in" : item.chat === false ? " · terminal" : ""}
       </option>)}
     </select></label>
-    <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(withTuning(workerRoute(route.harness_id, event.target.value, nativePermission(route)), route))}>
+    {!hideModel ? <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(withTuning(workerRoute(route.harness_id, event.target.value, nativePermission(route)), route))}>
       {!route.model || route.model === AGENT_DEFAULT_MODEL
         ? <option value={route.model} disabled>Choose a model{route.model ? " (\"default\" is not allowed)" : ""}</option>
         : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (unverified)</option> : null}
@@ -182,9 +182,9 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
       {(models ?? []).map(model => <option key={model} value={model}>
         {modelLabel(model)}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex" : ""}
       </option>)}
-    </select></label>
-    {harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
-      : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p>}
+    </select></label> : null}
+    {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Saved native permission: {nativePermission(route) || "Unknown"}. Change permissions explicitly in the chat composer menu; runtime capabilities are authoritative.</p>
+      : <p className="ao-hint">Native Codex runs only WebGPT: choosing a WebGPT model switches to it, and any other model runs here. Native permissions are retained but unavailable on this adapter.</p> : null}
     <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
     <label title={effortApplies(route) ? "Reasoning effort for this card" : "AO skips effort for CPA gateway models"}>Reasoning effort
       <select value={effortApplies(route) ? route.effort ?? "" : ""} disabled={disabled || !effortApplies(route)}

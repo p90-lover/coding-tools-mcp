@@ -1343,3 +1343,172 @@ test("secret native question answers are forwarded but masked in local confirmat
   assert.doesNotMatch(detail, /private-code-answer/);
   assert.match(detail, /redacted/i);
 });
+
+test("explicit single chat binds one selected route without a saved team", async () => {
+  const world = chatWorld(), route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local",
+    model: "cpa/gemini-3.8-flash-high", permission_profile: ":ao-default" };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (...args) => {
+      const result = await world.requestHeadless(...args);
+      return args[0] === "/api/v1/ao/read" ? { ...result, team: null, teams: [] } : result;
+    },
+    findCodexExecutable: () => "C:/Codex/codex.exe",
+    resolveHarness: async () => { throw new Error("fixture stop"); },
+  });
+  const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "single task", executionMode: "single", singleRoute: route });
+  assert.equal(sent.taskId, "task-1");
+  assert.equal(world.updates.length, 1);
+  assert.equal(world.updates[0].execution_mode, "single");
+  assert.deepEqual(world.updates[0].single_route, route);
+  assert.equal(Object.hasOwn(world.updates[0], "team_revision"), false);
+  assert.equal(Object.hasOwn(world.updates[0], "team_id"), false);
+});
+
+test("team chat binds selected identity and rejects stale config before writing", async () => {
+  for (const stale of [false, true]) {
+    const world = chatWorld(), selected = { id: "team-picked", revision: 9, worker_limit: 1 };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async (...args) => {
+        const result = await world.requestHeadless(...args);
+        return args[0] === "/api/v1/ao/read" ? { ...result, teams: [result.team, selected] } : result;
+      },
+      findCodexExecutable: () => "C:/Codex/codex.exe",
+      resolveHarness: async () => { throw new Error("fixture stop"); },
+    });
+    const input = { workspaceId: "ws-1", message: "team task", executionMode: "team", teamId: "team-picked", teamRevision: stale ? 8 : 9 };
+    if (stale) {
+      await assert.rejects(workflow.call("chat_send", input), /team.*changed|revision|saved/i);
+      assert.equal(world.tasks.length, 0);
+    } else {
+      await workflow.call("chat_send", input);
+      assert.equal(world.updates[0].team_id, selected.id);
+      assert.equal(world.updates[0].team_revision, 9);
+      assert.equal(world.updates[0].execution_mode, "team");
+      assert.equal(Object.hasOwn(world.updates[0], "single_route"), false);
+    }
+  }
+});
+
+test("external Codex-style permission tuples map to the real AO approval mode at spawn", async () => {
+  for (const agent of ["codex", "claude-code"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review","auto"],["never","user","bypass-permissions"]]) {
+    let launched;
+    const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "gpt-6-luna",
+      permission_profile: ":ao-default", native_permission_profile: policy === "never" ? ":danger-full-access" : ":workspace", approval_policy: policy, approvals_reviewer: reviewer };
+    const mission = { id:"run", workspace_id:"ws", revision:1, nodes:[{id:"one",role:"planner",state:"pending",parents:[],route}] };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? {ok:true,runs:[mission],worker_capacity:{run:1}}
+        : endpoint.endsWith("/reserve") ? {ok:true,request_key:"key",prompt:"direct task"} : {ok:true,run:mission},
+      aoHarness: { spawn: async input => { launched=input;return "session"; } },
+      confirm: async () => true,
+    });
+    await workflow.call("advance", {workspaceId:"ws",runId:"run",executable:"C:/codex.exe"});
+    assert.equal(launched.approvalMode, expected);
+  }
+});
+
+test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {
+  const reads = [], launches = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint) => { reads.push(endpoint); throw new Error("No native connection"); },
+    aoHarness: { catalog: async () => [
+      { id: "claude-code", installed: true }, { id: "codex", installed: true }, { id: "opencode", installed: true },
+    ], spawn: async (...args) => { launches.push(args); } },
+  });
+  const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id: "ao:claude-code" } })).capability;
+  assert.equal(capability.supported, true);
+  assert.equal(capability.source, "ao-adapter");
+  assert.equal(capability.requested_only, true, "adapter modes are requests, not effective native readback");
+  assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
+  assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
+  assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
+  for (const harness_id of ["ao:opencode", "codex-native"]) {
+    const unsupported = await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } });
+    assert.equal(unsupported.capability.supported, false);
+  }
+  assert.deepEqual(reads, []);
+  assert.deepEqual(launches, []);
+});
+
+test("explicit single mode has no hidden task-naming or recovery model", async () => {
+  const naming = startableChatWorld();
+  const requests = [];
+  const options = requestHeadless => ({
+    requestHeadless, findCodexExecutable: () => "C:/Codex/codex.exe",
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => {
+      requests.push(String(url));
+      return { ok: true, json: async () => String(url).endsWith("/v1/models")
+        ? { data: [{ id: "another-model" }] } : { choices: [{ message: { content: "Another model named it" } }] } };
+    },
+    webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+    resolveHarness: async () => ({ expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }),
+  });
+  await createAgentOrchestratorWorkflow(options(naming.requestHeadless)).call("chat_send", {
+    workspaceId: "ws-1", message: "Single task", executionMode: "single",
+    singleRoute: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web", model: "chatgpt-web/high", permission_profile: ":workspace" },
+  });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(requests, [], "no separate model names a single-mode chat");
+
+  const recovery = heldMissionWorld();
+  const requestHeadless = async (...args) => {
+    const result = await recovery.requestHeadless(...args);
+    if (args[0] === "/api/v1/ao/read") result.runs[0].execution_mode = "single";
+    return result;
+  };
+  const workflow = createAgentOrchestratorWorkflow(options(requestHeadless));
+  await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+  await until(() => recovery.reads >= 2);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal((await workflow.call("run_status", { workspaceId: "ws-1", runId: "r1" })).status, "held");
+  assert.deepEqual(recovery.controls, [], "a failed single model requires an explicit retry");
+  assert.deepEqual(requests, [], "no recovery model is invoked");
+});
+
+test("external dispatch refuses permission tuples the adapter cannot honor", async () => {
+  for (const tuple of [
+    { native_permission_profile: ":read-only" },
+    { native_permission_profile: "managed/custom" },
+    { native_permission_profile: ":workspace" },
+    { native_permission_profile: ":read-only", approval_policy: "never", approvals_reviewer: "user" },
+    { native_permission_profile: "managed/custom", approval_policy: "on-request", approvals_reviewer: "user" },
+    { native_permission_profile: ":workspace", approval_policy: "untrusted", approvals_reviewer: "user" },
+  ]) {
+    let launched = false;
+    const route = { harness_id: "ao:codex", model: "gpt-6-luna", permission_profile: ":ao-default", ...tuple };
+    const mission = { id:"run",workspace_id:"ws",revision:1,nodes:[{id:"one",role:"planner",state:"pending",parents:[],route}] };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? {ok:true,runs:[mission],worker_capacity:{run:1}}
+        : endpoint.endsWith("/reserve") ? {ok:true,request_key:"key",prompt:"direct"} : {ok:true,run:mission},
+      aoHarness: { spawn: async () => { launched=true;return "session"; } }, confirm: async()=>true,
+    });
+    await assert.rejects(workflow.call("advance", {workspaceId:"ws",runId:"run"}), /cannot honor|permission tuple|unsupported.*permission/i);
+    assert.equal(launched, false);
+  }
+});
+
+test("single restart honors deferred narrowing without rewriting its completed full-access receipt", async () => {
+  for (const harness_id of ["codex-native", "ao:codex"]) {
+    const native = harness_id === "codex-native";
+    const originalRoute = { harness_id, provider_id:native?"chatgpt-web":"agent-orchestrator", account_id:"local",
+      model:native?"chatgpt-web/high":"gpt-6-luna", permission_profile:native?":danger-full-access":":ao-default",
+      native_permission_profile:":danger-full-access", approval_policy:"never", approvals_reviewer:"user", effort:"high" };
+    const receipt = { status:"finished", answer:"Old answer", route:structuredClone(originalRoute) };
+    const mission = { id:"old-single", project_id:"task-1", workspace_id:"ws-1", revision:6, cancelled:false, execution_mode:"single",
+      nodes:[{id:"attempt",template_role_id:"selected",state:"finished",route:originalRoute,receipt}],
+      team:{id:"single-snapshot",permission_selections:{selected:{permission_profile:":workspace",approval_policy:"on-request",approvals_reviewer:"user"}}} };
+    const snapshot = structuredClone(mission);
+    const world = chatWorld({ runs:[mission], tasks:[{id:"task-1",title:"Single",description:"Task",state:"backlog",clauses:[]}] });
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless:world.requestHeadless,findCodexExecutable:()=>"C:/Codex/codex.exe",
+      resolveHarness:async()=>{throw new Error("fixture stop before dispatch")},
+    });
+    await workflow.call("restart_run", {workspaceId:"ws-1",runId:"old-single"});
+    const replacement = world.updates.find(change=>change.operation==="create_from_team");
+    assert.equal(replacement.execution_mode,"single");
+    assert.deepEqual(replacement.single_route, {...originalRoute,native_permission_profile:":workspace",
+      permission_profile:native?":workspace":":ao-default",approval_policy:"on-request",approvals_reviewer:"user"});
+    assert.deepEqual(mission,snapshot,"historical raw route/receipt/model and harness stay immutable");
+    assert.equal(Object.hasOwn(replacement,"team_id"),false);
+  }
+});

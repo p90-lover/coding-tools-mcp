@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { Icon } from "../icons";
+import { useComposerPopover } from "./AgentOrchestratorComposerControls";
 import type { ReactNode } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
-import { NATIVE_HARNESS, nativePermission, roleLabel, type AoTeam } from "./AgentOrchestratorRoleEditor";
+import { NATIVE_HARNESS, nativePermission, type AoTeam } from "./AgentOrchestratorRoleEditor";
 
 export type PermissionCapability = {
   supported: boolean; reason?: string;
@@ -41,92 +43,89 @@ export function mergeSavedPermissions(saved: AoTeam, ids: string[], selection: P
 }
 export function selectPermissions(team: AoTeam, ids: string[], selection: PermissionSelection): AoTeam {
   return { ...team, nodes: team.nodes.map(node => {
-    if (!ids.includes(node.id) || node.route.harness_id !== NATIVE_HARNESS) return node;
+    if (!ids.includes(node.id)) return node;
     const route = { ...node.route };
-    if (selection.profile !== undefined) { route.permission_profile = selection.profile; route.native_permission_profile = selection.profile; }
+    if (selection.profile !== undefined) { if (route.harness_id === NATIVE_HARNESS) route.permission_profile = selection.profile; route.native_permission_profile = selection.profile; }
     if (selection.policy !== undefined) route.approval_policy = selection.policy;
     if (selection.reviewer !== undefined) route.approvals_reviewer = selection.reviewer;
     return { ...node, route };
   }) };
 }
 
-export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles, save, shared, runtimePolicies }: {
+export const PERMISSION_MODES = [
+  { label: "Ask for approval", detail: "Ask before additional access", symbol: "✋", profile: ":workspace", policy: "on-request", reviewer: "user" },
+  { label: "Approve for me", detail: "Review requests automatically", symbol: "🛡️", profile: ":workspace", policy: "on-request", reviewer: "auto_review" },
+  { label: "Full access", detail: "Unrestricted file and network access", symbol: "⚡", profile: ":danger-full-access", policy: "never", reviewer: "user" },
+] as const;
+
+export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles, save, runtimePolicies }: {
   team: AoTeam | null; mission?: AoMission; busy: boolean;
   loadProfiles: (roleId: string) => Promise<PermissionCapability>;
   save: (team: AoTeam, missionRevision: number | undefined, selectedRoleIds: string[], selection: PermissionSelection) => Promise<string>;
-  shared: ReactNode; runtimePolicies?: Record<string, RuntimePermissionPolicy>;
+  /** Retained for legacy callers; shared grant controls deliberately do not render here. */
+  shared?: ReactNode; runtimePolicies?: Record<string, RuntimePermissionPolicy>;
 }) {
-  const [open, setOpen] = useState(false);
-  const [roleId, setRoleId] = useState("*");
+  const popup = useComposerPopover();
   const [metadata, setMetadata] = useState<Record<string, PermissionCapability>>({});
-  const [selection, setSelection] = useState<PermissionSelection>({});
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
   const nodes = team?.nodes ?? [];
-  const selected = roleId === "*" ? nodes : nodes.filter(node => node.id === roleId);
-  const supported = selected.filter(node => node.route.harness_id === NATIVE_HARNESS);
-  const key = supported.map(node => node.id).join("|");
-  useEffect(() => { setOpen(false); setSelection({}); setMetadata({}); setNotice(""); }, [mission?.id, team?.id]);
+  const supported = nodes.filter(node => metadata[node.id]?.supported);
+  const key = nodes.map(node => node.id).join("|");
+  useEffect(() => { popup.setOpen(false); setMetadata({}); setNotice(""); }, [mission?.id, team?.id]);
   useEffect(() => {
-    if (!open) return;
+    if (!popup.open) return;
     let live = true;
-    setSelection({}); setMetadata({}); setNotice("");
-    void Promise.all(supported.map(async node => {
+    setMetadata({}); setNotice("");
+    void Promise.all(nodes.map(async node => {
       try { return [node.id, await loadProfiles(node.id)] as const; }
       catch (cause) { return [node.id, { supported: false, profiles: [], reason: String(cause) }] as const; }
     })).then(entries => { if (live) setMetadata(Object.fromEntries(entries)); });
     return () => { live = false; };
-  }, [open, key, loadProfiles]);
+  }, [popup.open, key, loadProfiles]);
   const capabilities = supported.map(node => metadata[node.id]);
-  const available = capabilities.length > 0 && capabilities.every(cap => cap?.supported);
-  const profiles = available ? capabilities[0].profiles.filter(profile => capabilities.every(cap => cap.profiles.some(item => item.id === profile.id && item.allowed))) : [];
-  const policies = available ? (capabilities[0].approval_policies ?? []).filter(policy => capabilities.every(cap => cap.approval_policies?.includes(policy))) : [];
-  const reviewers = available ? (capabilities[0].approvals_reviewers ?? []).filter(reviewer => capabilities.every(cap => cap.approvals_reviewers?.includes(reviewer))) : [];
-  const changed = Object.values(selection).some(value => value !== undefined);
-  const apply = async () => {
-    if (!team || !available || !changed || busy || saving) return;
-    if (selection.profile && /full.access/i.test(selection.profile) && !window.confirm("Full access removes the native sandbox boundary. Apply explicitly to the selected roles? Workspace MCP and app grants remain unchanged.")) return;
-    setSaving(true); setNotice("");
-    try { const ids = supported.map(node => node.id); setNotice(await save(selectPermissions(team, ids, selection), mission?.revision, ids, selection)); setSelection({}); }
-    catch (cause) { setNotice(cause instanceof Error ? cause.message : String(cause)); }
+  const available = nodes.length > 0 && nodes.every(node => metadata[node.id]?.supported === true);
+  const canSelect = (selection: PermissionSelection) => available && capabilities.every(capability =>
+    capability.profiles.some(profile => profile.id === selection.profile && profile.allowed) &&
+    capability.approval_policies?.includes(selection.policy!) && capability.approvals_reviewers?.includes(selection.reviewer!));
+  const active = PERMISSION_MODES.find(mode => nodes.length > 0 && nodes.every(node =>
+    nativePermission(node.route) === mode.profile && node.route.approval_policy === mode.policy && node.route.approvals_reviewer === mode.reviewer));
+  const effective = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)).map(node => {
+    const status = runtimePolicies?.[mission.id + ":" + node.id];
+    return status?.policy_acknowledged && status.effective_policy ? "Effective native runtime: " + Object.values(status.effective_policy).join(" · ")
+      : "Native policy not acknowledged / effective readback unavailable";
+  }).join("; ");
+  const reason = nodes.map(node => metadata[node.id]?.reason).filter(Boolean).join("; ")
+    || (!nodes.length ? "Choose a model or saved team first." : !nodes.every(node => metadata[node.id] !== undefined) ? "Reading runtime permission capabilities…" : !supported.length ? "Permissions unavailable on this adapter; existing settings remain unchanged." : "Runtime or managed policy does not allow this selection.");
+  const apply = async (selection: PermissionSelection) => {
+    if (!team || !canSelect(selection) || busy || saving) return;
+    if (selection.profile === ":danger-full-access" && !window.confirm("Full access removes the native sandbox boundary. Apply explicitly to these roles? Workspace MCP and app grants remain unchanged.")) return;
+    setSaving(true); setNotice(""); setFailed(false);
+    try {
+      const ids = supported.map(node => node.id);
+      setNotice(await save(selectPermissions(team, ids, selection), mission?.revision, ids, selection));
+      popup.close();
+    } catch (cause) { setFailed(true); setNotice(cause instanceof Error ? cause.message : String(cause)); }
     finally { setSaving(false); }
   };
-  return <div className="ao-permissions">
-    <button type="button" className="button-secondary" aria-expanded={open} aria-controls="ao-permissions-panel" onClick={() => setOpen(value => !value)}>Permissions · {permissionSummary(nodes)}</button>
-    {open ? <section id="ao-permissions-panel" className="ao-permissions-panel" aria-label="Chat permissions">
-      <h3>Native role permissions</h3>
-      <p className="ao-hint">Saved policy for this {mission ? "chat" : "future team"}. Apply updates queued/future attempts only; running attempts keep their bound policy. Saved is not effective runtime readback.</p>
-      <label>Roles<select value={roleId} disabled={saving} onChange={event => { setRoleId(event.target.value); setSelection({}); }}>
-        <option value="*">All supported roles</option>
-        {nodes.map(node => <option key={node.id} value={node.id}>{node.settings?.name || roleLabel(node)} · {node.route.harness_id}</option>)}
-      </select></label>
-      <p>Saved: {permissionSummary(selected)}</p>
-      {selected.filter(node => node.route.harness_id !== NATIVE_HARNESS).map(node => <p key={node.id} className="ao-hint">{node.settings?.name || node.id}: native policy unavailable on {node.route.harness_id}; retained unchanged.</p>)}
-      {supported.map(node => <p key={node.id} className="ao-hint">{node.settings?.name || node.id}: {metadata[node.id]?.supported ? "Native runtime metadata available" : metadata[node.id]?.reason || "Reading runtime capability…"}
-        {mission?.nodes.filter(attempt => (attempt.template_role_id || attempt.id) === node.id && ["running", "reserved"].includes(attempt.state)).map(attempt => {
-          const status = runtimePolicies?.[mission.id + ":" + attempt.id];
-          const effective = status?.policy_acknowledged ? status.effective_policy : null;
-          return <span key={attempt.id}> · Running attempt saved profile: {attempt.route.permission_profile || "Unknown"}
-            {effective ? " · Effective native runtime: " + (effective.permission_profile || "Unknown") + " · " + (effective.approval_policy || "Unknown") + " · " + (effective.approvals_reviewer || "Unknown")
-              : " · Native policy not acknowledged / effective readback unavailable; normal lifecycle reconnect may be required."}
-          </span>;
-        })}
-      </p>)}
-      <label>Native profile<select value={selection.profile ?? ""} disabled={!available || saving} onChange={event => setSelection(current => ({ ...current, profile: event.target.value || undefined }))}>
-        <option value="">Keep saved ({permissionSummary(selected)})</option>
-        {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.id}{profile.description ? " · " + profile.description : ""}</option>)}
-      </select></label>
-      <label>Native approval policy<select value={selection.policy ?? ""} disabled={!available || saving} onChange={event => setSelection(current => ({ ...current, policy: event.target.value || undefined }))}>
-        <option value="">Keep saved / legacy</option>{policies.map(policy => <option key={policy} value={policy}>{policy}</option>)}
-      </select></label>
-      <label>Approval reviewer<select value={selection.reviewer ?? ""} disabled={!available || saving} onChange={event => setSelection(current => ({ ...current, reviewer: event.target.value || undefined, ...(event.target.value === "auto_review" ? { policy: "on-request" } : {}) }))}>
-        <option value="">Keep saved / legacy</option>{reviewers.map(reviewer => <option key={reviewer} value={reviewer}>{reviewer}</option>)}
-      </select></label>
-      <p className="ao-hint">Automatic review uses on-request with the same sandbox. Native never does not grant workspace MCP/app consent.</p>
-      <button type="button" className="button-primary" disabled={!available || !changed || busy || saving} onClick={() => void apply()}>{saving ? "Saving…" : "Apply to queued / future"}</button>
-      <button type="button" className="button-secondary" disabled={saving} onClick={() => { setSelection({}); setOpen(false); }}>Cancel</button>
-      {notice ? <p role="status">{notice}</p> : null}
-      {shared}
+  return <div className="ao-permissions ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
+    <button type="button" className="ao-composer-chip" ref={popup.trigger} aria-expanded={popup.open} aria-haspopup="menu"
+      aria-controls="ao-permissions-panel" disabled={busy || saving} title={permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
+      onClick={() => popup.setOpen(value => !value)}>
+      <span aria-hidden="true">🛡️</span><span>{active?.label || "Custom / Mixed"}</span><span aria-hidden="true">⌄</span>
+    </button>
+    {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
+      <header><h3>Access permissions</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="18" height="18" /></button></header>
+      {PERMISSION_MODES.map(mode => <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
+        className="ao-permission-option" disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies to queued / future attempts only; running attempts and shared app grants are unchanged." : reason}
+        onClick={() => void apply({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
+        <span className="ao-permission-symbol" aria-hidden="true">{mode.symbol}</span>
+        <span><strong>{mode.label}</strong><small>{mode.detail}</small></span>
+        {active?.label === mode.label ? <Icon name="check" width="18" height="18" /> : null}
+      </button>)}
     </section> : null}
+    {notice ? <span className="ao-permission-notice" role={failed ? "alert" : "status"}
+      style={failed ? undefined : { position: "absolute", width: 1, height: 1, minWidth: 0, padding: 0, margin: -1, overflow: "hidden", clipPath: "inset(50%)", whiteSpace: "nowrap", border: 0 }}>{notice}</span> : null}
   </div>;
 }

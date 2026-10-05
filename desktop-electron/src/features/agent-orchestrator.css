@@ -271,3 +271,102 @@
 .ao-approver-advice.is-allow { color: var(--ao-green); }
 .ao-approver-advice.is-deny { color: var(--ao-red); }
 .ao-approver-advice.is-ask { color: var(--ao-amber); }
+
+/* The Mission Board view reuses the native board and stays inside the existing stage. */
+.ao-workflow .ao-board-view { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.ao-workflow .ao-board-view > header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--ao-line); }
+.ao-workflow .ao-board-view > header strong { flex: 1; }
+.ao-workflow .ao-board-view > .ao-original { flex: 1; min-height: 0; }
+
+/* Approved Codex light surface: isolated to the orchestrator, never the launcher theme. */
+.ao-workflow {
+  --color-bg-primary: #fff; --color-bg-secondary: #fff;
+  --color-background-surface: #fff; --color-background-elevated: #fff;
+  --color-text-primary: #16243a; --color-text-secondary: #748198;
+  --ao-line: #e4eaf1; --ao-muted: #748198; --ao-blue: #1677ff;
+  --ao-green: #27b354; --ao-red: #ed4356; --ao-amber: #d29313;
+  color: var(--color-text-primary); background: #fff;
+}
+.ao-workflow .ao-chat-list { background: #fbfcfe; border-color: var(--ao-line); }
+.ao-workflow .ao-chat-workspace, .ao-workflow .ao-chat-select, .ao-workflow .ao-chat-new { color: #46536b; }
+.ao-workflow .ao-chat-select[aria-current="true"], .ao-workflow .ao-chat-new[aria-pressed="true"] { background: #edf4ff; color: #17243a; }
+.ao-workflow .ao-chat { display: flex; flex: 1 1 auto; width: 100%; min-height: 0; background: #fff; }
+.ao-workflow .ao-chat-main { width: 100%; }
+.ao-workflow .ao-chat-head { padding: 12px 24px; gap: 10px; border-color: var(--ao-line); background: #fff; }
+.ao-workflow .ao-chat-head h2, .ao-workflow .ao-chat-name { font-size: 14px; font-weight: 600; }
+.ao-workflow .ao-chat-name { border: 0; background: transparent; max-width: 380px; padding: 4px 0; }
+.ao-workflow .ao-chat-nav { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex: 0 0 auto; height: 32px; padding: 0 11px; border: 1px solid var(--ao-line); border-radius: 7px; color: #25364e; background: #f9fbfd; font-size: 12px; cursor: pointer; }
+.ao-workflow .ao-chat-nav:hover:not(:disabled) { background: #edf4ff; }
+.ao-workflow .ao-chat-nav:disabled { opacity: .45; cursor: default; }
+.ao-workflow .ao-chat-scroll { padding: 30px max(24px, calc((100% - 780px) / 2)); gap: 24px; }
+.ao-workflow .ao-msg { line-height: 1.55; }
+.ao-workflow .ao-msg-agent { background: #fff; border: 1px solid var(--ao-line); border-radius: 10px; padding: 12px 16px; max-width: 90%; }
+.ao-workflow .ao-msg-user { margin-left: auto; background: #eaf4ff; color: #16243a; border: 0; border-radius: 12px; padding: 9px 14px; max-width: 85%; }
+.ao-workflow .ao-msg-meta, .ao-workflow .ao-msg-detail { color: var(--ao-muted); }
+.ao-workflow .ao-chat-composer { display: block; flex: 0 0 auto; width: calc(100% - 48px); max-width: 860px; margin: 12px auto 22px; padding: 12px; border: 1px solid var(--ao-line); border-radius: 16px; background: #fff; box-shadow: 0 4px 18px rgb(31 54 86 / 3%); }
+.ao-workflow .ao-chat-composer textarea { display: block; width: 100%; min-height: 58px; max-height: 180px; padding: 2px 3px; border: 0; border-radius: 6px; background: #fff; color: #17243a; resize: vertical; outline-offset: 0; }
+.ao-workflow .ao-chat-composer textarea::placeholder { color: #8390a5; }
+.ao-workflow .ao-composer-bottom { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding-top: 9px; }
+.ao-workflow .ao-composer-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.ao-workflow .ao-chat-send { display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; color: #fff; background: #147bff; cursor: pointer; }
+.ao-workflow .ao-chat-send svg { transform: rotate(-90deg); }
+.ao-workflow .ao-chat-send:disabled { background: #dbe4f0; color: #8b99ae; cursor: default; }
+.ao-workflow .ao-mode-toggle { flex: 0 0 20px; width: 20px; height: 20px; border: 0; border-radius: 50%; box-shadow: inset 0 -2px 4px rgb(0 0 0 / 13%); cursor: pointer; }
+.ao-workflow .ao-mode-toggle.is-single { background: linear-gradient(#ff7784, #f5354c); }
+.ao-workflow .ao-mode-toggle.is-team { background: linear-gradient(#60dd7d, #24b047); }
+.ao-workflow .ao-composer-picker { position: relative; min-width: 0; }
+.ao-workflow .ao-permissions { padding: 0; }
+.ao-workflow .ao-composer-chip { display: flex; align-items: center; gap: 8px; height: 32px; max-width: 300px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fbfcfe; color: #22324b; font-size: 12px; cursor: pointer; }
+.ao-workflow .ao-composer-chip > span:nth-last-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-workflow .ao-composer-chip:hover:not(:disabled) { border-color: #bed6ff; background: #f4f8ff; }
+.ao-workflow .ao-composer-popover { position: absolute; z-index: 40; bottom: calc(100% + 12px); left: 0; right: auto; width: min(360px, calc(100vw - 40px)); max-height: min(72vh, 650px); overflow: auto; padding: 16px; border: 1px solid #dfe7f0; border-radius: 12px; background: #fff; color: #17243a; box-shadow: 0 10px 36px rgb(31 54 86 / 13%); }
+.ao-workflow .ao-composer-popover header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 12px; }
+.ao-workflow .ao-composer-popover h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.ao-workflow .ao-popover-close { display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; padding: 0; border: 0; background: transparent; color: #607086; border-radius: 4px; cursor: pointer; }
+.ao-workflow .ao-composer-popover input, .ao-workflow .ao-composer-popover select { border-color: var(--ao-line); background: #fff; font: inherit; font-size: 12px; }
+.ao-workflow .ao-composer-popover label { color: #25354e; font-size: 12px; }
+.ao-workflow .ao-composer-popover .ao-hint, .ao-workflow .ao-popup-muted { color: #7a879c; font-size: 11px; line-height: 1.45; }
+.ao-workflow .ao-model-popup { display: flex; flex-direction: column; gap: 10px; }
+.ao-workflow .ao-model-popup > header { order: 0; margin-bottom: 0; }
+.ao-workflow .ao-model-search { order: 1; }
+.ao-workflow .ao-model-popup .ao-field-row { display: contents; }
+.ao-workflow .ao-model-popup .ao-field-row > label { order: 2; }
+.ao-workflow .ao-model-popup > h4 { order: 3; margin: 3px 0 -4px; font-size: 12px; }
+.ao-workflow .ao-model-options { order: 4; max-height: 200px; overflow-y: auto; }
+.ao-workflow .ao-model-popup .ao-route-tuning { order: 5; display: grid; grid-template-columns: 1fr; gap: 10px; margin: 4px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--ao-line); }
+.ao-workflow .ao-model-popup .ao-route-tuning legend { display: none; }
+.ao-workflow .ao-model-popup .ao-route-tuning label { display: grid; gap: 7px; }
+.ao-workflow .ao-picker-option { display: flex; align-items: center; width: 100%; gap: 10px; margin: 3px 0; padding: 9px 8px; border: 0; border-radius: 7px; background: #fff; color: #27384f; text-align: left; cursor: pointer; }
+.ao-workflow .ao-picker-option[aria-checked="true"], .ao-workflow .ao-permission-option[aria-checked="true"] { background: #edf6ff; color: #122742; }
+.ao-workflow .ao-picker-option > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ao-workflow .ao-option-radio { flex: 0 0 14px; width: 14px; height: 14px; border: 1px solid #8496ac; border-radius: 50%; }
+.ao-workflow .ao-picker-option[aria-checked="true"] .ao-option-radio { border-color: #1677ff; box-shadow: inset 0 0 0 3px #fff; background: #1677ff; }
+.ao-workflow .ao-picker-option small { display: block; margin-top: 5px; color: #7b899e; font-size: 11px; }
+.ao-workflow .ao-permissions-panel { width: min(330px, calc(100vw - 40px)); }
+.ao-workflow .ao-permission-option { display: flex; align-items: center; width: 100%; gap: 14px; margin: 7px 0 0; padding: 13px 12px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; color: #1c2d46; text-align: left; cursor: pointer; }
+.ao-workflow .ao-permission-option > span:nth-child(2) { flex: 1; }
+.ao-workflow .ao-permission-option strong { display: block; font-size: 12px; font-weight: 600; }
+.ao-workflow .ao-permission-option small { display: block; margin-top: 5px; color: #7b899e; font-size: 11px; line-height: 1.4; }
+.ao-workflow .ao-permission-symbol { font-size: 25px; width: 30px; text-align: center; }
+.ao-workflow .ao-permission-option:disabled { opacity: .42; cursor: not-allowed; }
+.ao-workflow .ao-permission-notice { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 220px; max-width: 360px; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; color: #46536b; box-shadow: 0 3px 12px rgb(31 54 86 / 8%); font-size: 11px; z-index: 41; }
+.ao-workflow .ao-canvas { background-image: radial-gradient(#d9e4f0 1px, transparent 1px); }
+.ao-workflow .ao-canvas-card { border-color: #dce5ef; box-shadow: 0 2px 7px rgb(31 54 86 / 5%); }
+.ao-workflow .ao-canvas-card.ao-node-finished { border-color: #dce5ef; background: #fff; }
+.ao-workflow .ao-float { border-color: var(--ao-line); box-shadow: 0 12px 40px rgb(31 54 86 / 15%); }
+.ao-workflow select, .ao-workflow input, .ao-workflow textarea { border-color: var(--ao-line); }
+.ao-workflow button:focus-visible, .ao-workflow select:focus-visible, .ao-workflow input:focus-visible, .ao-workflow textarea:focus-visible { outline-color: #1677ff; }
+@media (max-width: 680px) {
+  .ao-workflow > .ao-chat-list { flex-basis: 150px; }
+  .ao-workflow .ao-chat-head { padding: 10px 12px; flex-wrap: wrap; }
+  .ao-workflow .ao-chat-name { max-width: 220px; }
+  .ao-workflow .ao-chat-scroll { padding: 20px 14px; }
+  .ao-workflow .ao-chat-composer { width: calc(100% - 24px); margin-bottom: 12px; }
+  .ao-workflow .ao-composer-controls { gap: 7px; }
+  .ao-workflow .ao-composer-chip { max-width: 200px; }
+  .ao-workflow .ao-composer-popover { position: fixed; left: max(12px, env(safe-area-inset-left)); right: 12px; bottom: 110px; width: auto; max-height: calc(100vh - 160px); }
+}
+@media (max-width: 440px) {
+  .ao-workflow > .ao-chat-list { display: none; }
+  .ao-workflow .ao-chat-head .ao-pill { display: none; }
+}

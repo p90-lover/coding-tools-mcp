@@ -73,7 +73,7 @@ test("a WebGPT model always gets the Native Codex route", () => {
   assert.deepEqual(plain(editor.workerRoute("codex-native", "gemini-3.8-flash-high")), {
     harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-3.8-flash-high", permission_profile: ":ao-default",
   });
-  assert.equal(editor.workerRoute("codex-native", "gpt-6-luna").harness_id, "ao:codex");
+  assert.equal(editor.workerRoute("codex-native", "gpt-6-luna").harness_id, "ao:claude-code");
   assert.equal(editor.workerRoute("codex-native", "gpt-6-luna").model, "cpa/gpt-6-luna");
   assert.equal(editor.harnessLabel("codex-native", []), "Native Codex");
   assert.equal(editor.isWebModel("chatgpt-web/luna"), true);
@@ -112,4 +112,14 @@ test("every card describes how it runs, with a custom role in place of the built
     route: { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "high" } },
   [{ id: "ao:codex", label: "Codex" }]), "Codex · CPA · gpt-6-luna · Security auditor", "gateway models show no effort");
   assert.match(source, /<option value="custom:">Custom role…<\/option>/);
+});
+
+test("new non-WebGPT picks default to Claude Code and WebGPT locks the visible harness", () => {
+  for (const model of ["gpt-6-luna", "claude-sonnet", "gemini-3.8-flash-high"]) {
+    assert.equal(editor.workerRoute("", model).harness_id, "ao:claude-code");
+    assert.equal(editor.workerRoute("codex-native", model).harness_id, "ao:claude-code");
+  }
+  assert.equal(editor.workerRoute("ao:opencode", "gpt-6-luna").harness_id, "ao:opencode", "explicit valid harness choice is retained");
+  assert.match(source, /disabled=\{disabled \|\| isWebModel\(route\.model\)\}/, "WebGPT disables harness switching");
+  assert.match(source, /WebGPT requires Native Codex/);
 });

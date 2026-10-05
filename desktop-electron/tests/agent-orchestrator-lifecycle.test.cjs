@@ -103,7 +103,7 @@ function createHarness(hooks = {}) {
   }
 
   const dependencies = {
-    "./agent-orchestrator-workspace.cjs": require("../electron/agent-orchestrator-workspace.cjs"),
+    "./agent-orchestrator-workspace.cjs": hooks.workspaceBoard ? { createAoWorkspaceBoard: () => hooks.workspaceBoard } : require("../electron/agent-orchestrator-workspace.cjs"),
     "node:crypto": crypto,
     "node:path": path,
     "node:fs": {
@@ -183,6 +183,10 @@ function createHarness(hooks = {}) {
         await hooks.shutdown?.(child);
         child.exit(0);
         return { ok: true };
+      }
+      if (hooks.api) {
+        const result = await hooks.api(endpoint, options);
+        if (result !== undefined) return { ok: true, status: 200, text: async () => JSON.stringify(result) };
       }
       if (endpoint.pathname === "/api/v1/projects") {
         return { ok: true, status: 200, text: async () => JSON.stringify({ projects: [] }) };
@@ -540,4 +544,56 @@ test("mission navigation never steals focus from background or unavailable views
       assert.equal(mainFocused, false, JSON.stringify(state));
     }
   } finally { await harness.controller.stop(); }
+});
+
+test("AO harness sends each explicit permission mode to the session API without changing legacy launches", async () => {
+  const launches = [];
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint, options) => {
+      if (endpoint.pathname === "/api/v1/settings") return { chatHarnesses: ["claude-code", "codex"] };
+      if (endpoint.pathname === "/api/v1/sessions") {
+        launches.push(JSON.parse(options.body));
+        return { session: { id: "session-fixture" } };
+      }
+    },
+  });
+  try {
+    await h.controller.start();
+    for (const approvalMode of ["default", "accept-edits", "auto", "bypass-permissions"]) {
+      await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "model", prompt: "read only", approvalMode });
+      assert.equal(launches.at(-1).approvalMode, approvalMode);
+    }
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", model: "model", prompt: "read only" });
+    assert.equal(Object.hasOwn(launches.at(-1), "approvalMode"), false);
+    const count = launches.length;
+    await assert.rejects(h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", prompt: "read", approvalMode: "unrecognized" }), /Unsupported AO permission mode/);
+    assert.equal(launches.length, count);
+  } finally { await h.controller.stop(); }
+});
+
+test("explicit Codex workspace permissions require chat and cannot fall back to TUI", async () => {
+  for (const enabled of [false, true]) {
+    const launches = [];
+    const h = createHarness({
+      getWorkspaces:async()=>[],missionCall:async()=>({ok:true}),
+      workspaceBoard:{bind:async()=>({projectId:"project-fixture"})},
+      api:async(endpoint,options)=>{
+        if(endpoint.pathname==="/api/v1/settings")return {chatHarnesses:enabled?["codex"]:[]};
+        if(endpoint.pathname==="/api/v1/sessions"){
+          const launch=JSON.parse(options.body);launches.push(launch);
+          if(enabled && launch.mode==="chat")throw new Error("CHAT_DRIVER_UNAVAILABLE");
+          return {session:{id:"session"}};
+        }
+      },
+    });
+    try {
+      for(const approvalMode of ["accept-edits","auto"]){
+        await assert.rejects(h.controller.harness.spawn({workspaceId:"ws",agent:"codex",prompt:"read only",approvalMode}),/workspace.*chat|CHAT_DRIVER_UNAVAILABLE/i);
+      }
+      assert.ok(launches.every(launch=>launch.mode==="chat"),"never launches a TUI with inherited sandbox");
+      if(!enabled)assert.equal(launches.length,0,"refused before a session exists");
+    } finally {await h.controller.stop();}
+  }
 });

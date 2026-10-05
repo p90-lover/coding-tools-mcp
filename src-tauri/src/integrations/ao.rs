@@ -185,9 +185,24 @@ pub struct Node {
     pub history: Vec<Receipt>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Single,
+    #[default]
+    Team,
+}
+impl ExecutionMode {
+    pub fn is_team(&self) -> bool {
+        *self == Self::Team
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {
+    #[serde(default, skip_serializing_if = "ExecutionMode::is_team")]
+    pub execution_mode: ExecutionMode,
     pub id: String,
     pub workspace_id: String,
     pub project_id: String,
@@ -358,8 +373,11 @@ pub(super) fn graph_sha256(data: &AppData, run: &Run) -> AppResult<String> {
             "task_title":task.title,"task_description":task.description,"clause":clause,
         }));
     }
-    let scope = serde_json::json!({"run_id":run.id,"workspace_id":run.workspace_id,
+    let mut scope = serde_json::json!({"run_id":run.id,"workspace_id":run.workspace_id,
         "workspace_root":workspace_root,"project_id":run.project_id,"nodes":nodes});
+    if run.execution_mode == ExecutionMode::Single {
+        scope["execution_mode"] = serde_json::json!("single");
+    }
     let bytes = serde_json::to_vec(&scope).map_err(|_| fail("AO grant scope is unavailable"))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
@@ -403,7 +421,11 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
     if !text(&run.id, 80)
         || !text(&run.workspace_id, 128)
         || !text(&run.project_id, 128)
-        || !(3..=24).contains(&run.nodes.len())
+        || if run.execution_mode == ExecutionMode::Single {
+            run.nodes.len() != 1
+        } else {
+            !(3..=24).contains(&run.nodes.len())
+        }
         || !(1..=24).contains(&run.worker_limit)
         || !(1..=MAX_REVIEW_ROUNDS).contains(&run.max_review_rounds)
         || run.review_rounds > run.max_review_rounds
@@ -517,11 +539,28 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
             }
         }
     }
-    let (Some(_), Some(_)) = (planner, reviewer) else {
-        return Err(fail("AO requires a planner and reviewer"));
-    };
-    if workers.is_empty() {
-        return Err(fail("AO requires at least one worker"));
+    if run.execution_mode == ExecutionMode::Single {
+        if planner.is_none()
+            || reviewer.is_some()
+            || approver.is_some()
+            || split.is_some()
+            || !workers.is_empty()
+            || !sub_reviewers.is_empty()
+            || run.solo
+            || run.plan_rounds != 0
+            || run.review_rounds != 0
+        {
+            return Err(fail(
+                "Single execution requires exactly one selected assistant without team phases",
+            ));
+        }
+    } else {
+        let (Some(_), Some(_)) = (planner, reviewer) else {
+            return Err(fail("AO requires a planner and reviewer"));
+        };
+        if workers.is_empty() {
+            return Err(fail("AO requires at least one worker"));
+        }
     }
     if sub_reviewers.len() > MAX_SUB_REVIEWERS || split.is_some() != !sub_reviewers.is_empty() {
         return Err(fail(
@@ -1196,6 +1235,22 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
         .iter()
         .find(|task| task.id == node.task_id && task.workspace_id == run.workspace_id)
         .ok_or_else(|| fail("AO task not found"))?;
+    if run.execution_mode == ExecutionMode::Single {
+        let mut prompt = format!("Single assistant task: {}\nWorkspace: {}\nComplete the requested task yourself and report the result and verification. Do not spawn or delegate to other agents; there are no team planning or review stages.\n\nTask: {}\n{}\n", run.id, run.workspace_id, task.title, task.description);
+        if !node.settings.instructions.is_empty() {
+            prompt.push_str(&format!(
+                "\nInstructions:\n{}\n",
+                node.settings.instructions
+            ));
+        }
+        if !node.settings.expected_output.is_empty() {
+            prompt.push_str(&format!(
+                "\nExpected output:\n{}\n",
+                node.settings.expected_output
+            ));
+        }
+        return Ok(prompt);
+    }
     let responsibility = match node.role {
         Role::Planner => "First judge how difficult the mission is. If you can complete it fully and reliably yourself in this one turn with your own access \
 (a question, an explanation, a short lookup or a small read-only check), do so: give the complete final answer and end with the solo block described below. \
@@ -1798,13 +1853,14 @@ pub fn record_terminal(
         .find(|node| node.id == node_id)
         .map(|node| &node.role)
     {
-        Some(Role::Planner) if completed => answer.map(|answer| {
-            if is_solo_answer(answer) {
-                Ok(Split::Solo)
-            } else {
-                parse_assignments(answer, run).map(Split::Plan)
-            }
-        }),
+        Some(Role::Planner) if completed && run.execution_mode == ExecutionMode::Team => answer
+            .map(|answer| {
+                if is_solo_answer(answer) {
+                    Ok(Split::Solo)
+                } else {
+                    parse_assignments(answer, run).map(Split::Plan)
+                }
+            }),
         Some(Role::ReviewSplit) if completed => {
             answer.map(|answer| parse_review_parts(answer, run).map(Split::Review))
         }

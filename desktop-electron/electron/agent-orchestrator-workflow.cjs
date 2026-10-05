@@ -286,6 +286,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let session = null;
       let failure = null;
       try {
+        const profile = node.route.native_permission_profile ?? node.route.permission_profile;
+        if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!["claude-code", "codex"].includes(agent)
+          || !(profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user")
+            || profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user"))) {
+          throw new Error("This adapter cannot honor the saved permission tuple; choose a supported mode explicitly.");
+        }
         const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
         if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
           throw new Error(`${node.settings?.name || "This card"}: ${agent} cannot use CPA models (${node.route.model}); choose one of its own models`);
@@ -294,7 +300,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
         // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
         const agentModel = viaCpa && agent === "opencode" ? `openai/${viaCpa}` : viaCpa ?? node.route.model;
         session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
-          name: node.settings?.name || "AO worker", ...(viaCpa ? { gateway: { provider: "cpa", model: viaCpa } } : {}),
+          name: node.settings?.name || "AO worker",
+          ...(node.route.approval_policy ? { approvalMode: node.route.approval_policy === "never" ? "bypass-permissions"
+            : node.route.approvals_reviewer === "auto_review" ? "auto" : "accept-edits" } : {}),
+          ...(viaCpa ? { gateway: { provider: "cpa", model: viaCpa } } : {}),
           // AO applies effort to the agent's own models; a gateway model skips AO's effort check by design.
           ...(!viaCpa && node.route.effort ? { effort: node.route.effort } : {}) });
       } catch (error) { failure = error; }
@@ -417,9 +426,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       ? { ...response, status: { ...response.status, pending_approvals: withAdvice(response.status.pending_approvals) } } : response;
   }
 
-  async function permissionProfiles({ workspaceId, runId, nodeId } = {}) {
+  async function permissionProfiles({ workspaceId, runId, nodeId, route } = {}) {
+    const id = clean(workspaceId, 128);
+    const unavailable = reason => ({ ok: true, capability: { supported: false, profiles: [], reason } });
+    if (route !== undefined) {
+      if (!route || typeof route !== "object" || Array.isArray(route) || typeof route.harness_id !== "string") throw new Error("Choose a valid model route");
+      if (runId || nodeId) {
+        const saved = await savedNode(id, clean(runId, 80), clean(nodeId, 80));
+        if (!saved.node) throw new Error("AO role not found");
+        if (saved.node.route.harness_id !== route.harness_id) return unavailable("The selected harness has no connected attempt. Existing role permissions are unchanged.");
+        route = saved.node.route;
+      }
+      if (route.harness_id !== "codex-native") {
+        const agent = externalAgent({ route });
+        if (!["claude-code", "codex"].includes(agent)) return unavailable("This adapter does not support the three permission modes.");
+        const catalog = await harnessService().catalog();
+        const adapter = catalog.find(item => item.id === agent && item.installed);
+        if (!adapter) return unavailable("This harness is not installed.");
+        // The bundled AO adapters accept approvalMode per session. This is not Native Codex
+        // metadata or an effective-policy acknowledgement, and grants no shared MCP/app rights.
+        return { ok: true, capability: {
+          supported: true, source: "ao-adapter", requested_only: true,
+          profiles: [{ id: ":workspace", allowed: agent !== "codex" || adapter.chat === true }, { id: ":danger-full-access", allowed: true }],
+          ...(agent === "codex" && !adapter.chat ? { reason: "Workspace presets require the Codex chat driver; TUI inherits unverified sandbox settings." } : {}),
+          approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"],
+        } };
+      }
+    }
+    if (!runId || !nodeId) return unavailable("Connect this Native Codex role with local consent before reading its runtime permission profiles.");
     const response = await requestHeadless("/api/v1/ao/harness/permission-profiles", {
-      workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80), node_id: clean(nodeId, 80),
+      workspace_id: id, run_id: clean(runId, 80), node_id: clean(nodeId, 80),
     });
     if (response?.ok !== true || !response.capability) throw new Error("Native permission capability unavailable");
     return response;
@@ -848,6 +884,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function recoverHeld(workspaceId, mission) {
     const held = mission.nodes.filter((node) => node.state === "held");
     if (!held.length || mission.cancelled) return null;
+    if (mission.execution_mode === "single") return "Single model failed; inspect the saved answer and retry explicitly.";
     const exhausted = held.find((node) => (node.history?.length ?? 0) >= HELPER_ATTEMPT_LIMIT);
     if (exhausted) return `${exhausted.settings?.name || exhausted.role} failed ${HELPER_ATTEMPT_LIMIT + 1} times; decide the next step yourself or send a follow-up`;
     const node = held[0];
@@ -1148,13 +1185,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
   }
 
-  async function createTeamRun(id, task, team) {
+  async function createTeamRun(id, task, team, selection = {}) {
     const current = await board({ workspaceId: id });
     const runId = randomUUID();
     await updateRun({ workspaceId: id, change: {
       operation: "create_from_team", run_id: runId, task_id: task,
-      expected_board_revision: current.revision, team_revision: team.revision,
-      worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
+      expected_board_revision: current.revision,
+      ...(selection.executionMode === "single" ? { execution_mode: "single", single_route: selection.singleRoute, worker_limit: 1 }
+        : { team_revision: team.revision, worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
+          ...(selection.executionMode === "team" ? { execution_mode: "team", team_id: team.id } : {}) }),
     } });
     return runId;
   }
@@ -1168,10 +1207,26 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     const mission = saved.runs.find((run) => run.id === previous && run.workspace_id === id);
     if (!mission) throw new Error("AO run unavailable");
     if (!mission.project_id) throw new Error("This mission has no task to restart");
-    const team = saved.team;
-    if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
+    const single = mission.execution_mode === "single";
+    const team = mission.team?.id ? (saved.teams ?? [saved.team]).find(item => item?.id === mission.team.id) : saved.team;
+    if (!single && (!team?.id || !Number.isSafeInteger(team.revision))) throw new Error("Save the selected team for this workspace first");
+    let singleRoute;
+    if (single) {
+      const node = mission.nodes[0];
+      if (!node?.route) throw new Error("Single model route unavailable");
+      singleRoute = { ...node.route };
+      const intent = mission.team?.permission_selections?.[node.template_role_id || node.id];
+      if (intent?.permission_profile !== undefined) {
+        singleRoute.native_permission_profile = intent.permission_profile;
+        if (singleRoute.harness_id === "codex-native") singleRoute.permission_profile = intent.permission_profile;
+      }
+      if (intent?.approval_policy !== undefined) singleRoute.approval_policy = intent.approval_policy;
+      if (intent?.approvals_reviewer !== undefined) singleRoute.approvals_reviewer = intent.approvals_reviewer;
+    }
     await retireOpenRuns(id, mission.project_id, saved.runs);
-    const next = await createTeamRun(id, mission.project_id, team);
+    const next = await createTeamRun(id, mission.project_id, team,
+      single ? { executionMode: "single", singleRoute }
+        : mission.team?.id ? { executionMode: "team" } : {});
     try {
       const started = await startRun({ workspaceId: id, runId: next, executable: selectedExecutable });
       return { ok: true, runId: next, status: started.status };
@@ -1180,14 +1235,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
     }
   }
 
-  async function chatSend({ workspaceId, taskId, title, message, executable } = {}) {
+  async function chatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision } = {}) {
     const id = clean(workspaceId, 128);
     const text = clean(message, 8192, false);
     if (!text.trim()) throw new Error("Type a message to start the chat");
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
-    const team = saved.team;
-    if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
+    if (executionMode !== undefined && !["single", "team"].includes(executionMode)) throw new Error("Choose single or team execution");
+    let team = saved.team;
+    if (executionMode === "single") {
+      const allowed = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window"];
+      if (teamId !== undefined || teamRevision !== undefined || !singleRoute || typeof singleRoute !== "object" || Array.isArray(singleRoute)
+        || Object.keys(singleRoute).some(key => !allowed.includes(key))
+        || typeof singleRoute.model !== "string" || !singleRoute.model || singleRoute.model === "default") {
+        throw new Error("Choose one explicit model route without saved-team fields");
+      }
+      clean(singleRoute.model, 128); clean(singleRoute.harness_id, 128); clean(singleRoute.permission_profile, 128);
+    } else {
+      if (singleRoute !== undefined) throw new Error("A team request cannot include a single model route");
+      if (executionMode === "team") {
+        team = (saved.teams ?? [saved.team]).find(item => item?.id === teamId);
+        if (!team || !Number.isSafeInteger(teamRevision) || team.revision !== teamRevision) {
+          throw new Error("Saved team changed; refresh its identity and revision before sending");
+        }
+      }
+      if (!team?.id || !Number.isSafeInteger(team.revision)) throw new Error("Save a team for this workspace first");
+    }
 
     let task;
     if (taskId) {
@@ -1209,18 +1282,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       const before = await board({ workspaceId: id });
       const known = new Set(before.tasks.map((entry) => entry.id));
       await write(id, { expected_revision: before.revision, change: {
-        operation: "create", title: clean(title && String(title).trim() ? title : CHAT_TASK_TITLE, 240), description: text,
+        operation: "create", title: clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(text) : CHAT_TASK_TITLE, 240), description: text,
       } });
       const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
       if (added.length !== 1) throw new Error("The new chat's task needs review; refresh the board");
       task = added[0].id;
     }
 
-    const runId = await createTeamRun(id, task, team);
+    const runId = await createTeamRun(id, task, team, { executionMode, singleRoute });
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
       const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
-      if (!taskId) void nameChat(id, task, text).catch(() => undefined);
+      if (!taskId && executionMode !== "single") void nameChat(id, task, text).catch(() => undefined);
       return { ok: true, taskId: task, runId, status: started.status };
     } catch (error) {
       return { ok: true, taskId: task, runId, status: "failed", detail: error instanceof Error ? error.message : String(error) };
