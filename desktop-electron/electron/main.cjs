@@ -2647,6 +2647,14 @@ async function start() {
     callReadOnlyAppTool: (tool) => appsMcp.callTool(tool, {}),
     callNativeCodexTool: (body) => headlessHost.request("/api/v1/tools/call", body, { timeout: 80_000 }),
     callAgentOrchestrator: (operation, args) => appsHost.call("agent-orchestrator", operation, args),
+    // Installers and patch scripts ask for this instead of killing the app, so the Codex bridge,
+    // MCP tunnel and CPA stay up and the next launcher adopts them (same path as the tray item).
+    requestKeepBridgeQuit: async ({ relaunch }) => {
+      if (shutdownInProgress || exitCommitted) return { ok: false, message: "Launcher shutdown is already in progress" };
+      logger.info("launcher.keep_bridge_quit_requested", { relaunch });
+      setTimeout(() => { void requestQuit({ keepBridge: true, relaunch }); }, 100);
+      return { ok: true, status: relaunch ? "restarting" : "quitting" };
+    },
     onTurnEvent: (event) => {
       if (event.type === "native_fetch_failed") mcpEventMonitor.nativeFetchFailed(event);
       else if (event.type === "native_fetch_ok") mcpEventMonitor.nativeFetchSucceeded();
