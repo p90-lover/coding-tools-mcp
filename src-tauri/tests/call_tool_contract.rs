@@ -67,6 +67,149 @@ fn read_file_happy_path() {
     assert_eq!(payload["project_instructions"]["target"], "src/math.js");
 }
 
+/// Reads a whole file page by page with `next_offset`, as a model would.
+fn read_all_pages(
+    ctx: &coding_tools_mcp_desktop_lib::tools::ToolContext,
+    path: &str,
+    max_bytes: u64,
+) -> (String, usize) {
+    let (mut text, mut pages, mut offset) = (String::new(), 0, 0u64);
+    loop {
+        let out = invoke(
+            ctx,
+            "read_file",
+            json!({"path": path, "offset": offset, "max_bytes": max_bytes}),
+        );
+        let payload = assert_ok(&out);
+        assert_eq!(payload["offset"], offset);
+        text.push_str(payload["content"].as_str().unwrap());
+        pages += 1;
+        match payload["next_offset"].as_u64() {
+            Some(next) => {
+                assert!(next > offset, "paging must make progress: {payload}");
+                offset = next;
+            }
+            None => return (text, pages),
+        }
+    }
+}
+
+#[test]
+fn read_file_pages_through_files_larger_than_the_old_16_mib_limit() {
+    let fx = tiny_js_fixture();
+    let line = "0123456789abcdef".repeat(8) + "\n"; // 129 bytes
+    let original = line.repeat(17 * 1024 * 1024 / 129 + 1);
+    fs::write(fx.root.join("big.log"), &original).unwrap();
+    let ctx = ctx_for(&fx.root);
+    let first = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "big.log", "max_bytes": 129 * 1000}),
+    );
+    let payload = assert_ok(&first);
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(payload["total_bytes"], original.len() as u64);
+    assert!(payload["content"].as_str().unwrap().len() <= 192 * 1024);
+    // A page that ends on a line boundary can also continue by line number.
+    let next_line = payload["next_start_line"].as_u64().unwrap();
+    let by_line = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "big.log", "start_line": next_line, "end_line": next_line}),
+    );
+    assert_eq!(assert_ok(&by_line)["content"], line);
+    let last = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "big.log", "offset": original.len() as u64 - 129}),
+    );
+    let last = assert_ok(&last);
+    assert_eq!(last["content"], line);
+    assert_eq!(last["next_offset"], Value::Null);
+}
+
+#[test]
+fn read_file_pages_through_a_single_huge_line_and_multibyte_text_exactly() {
+    let fx = tiny_js_fixture();
+    let original = "é漢😀x".repeat(40_000); // one 400 KB line of 1-4 byte characters
+    fs::write(fx.root.join("min.js"), &original).unwrap();
+    let ctx = ctx_for(&fx.root);
+    let first = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "min.js", "max_bytes": 100_001}),
+    );
+    let payload = assert_ok(&first);
+    assert_eq!(payload["cut_mid_line"], true);
+    assert_eq!(
+        payload["next_start_line"],
+        Value::Null,
+        "line numbers cannot resume inside a line"
+    );
+    let (text, pages) = read_all_pages(&ctx, "min.js", 100_001);
+    assert_eq!(text, original, "pages must join back to the exact file");
+    assert!(pages >= 4);
+}
+
+#[test]
+fn read_file_decodes_utf16_and_replaces_invalid_utf8_instead_of_failing() {
+    let fx = tiny_js_fixture();
+    let mut utf16 = vec![0xFF, 0xFE];
+    for unit in "hello\r\nwörld\r\n".encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+    fs::write(fx.root.join("wide.txt"), utf16).unwrap();
+    fs::write(fx.root.join("mixed.txt"), b"ok line\nbad \xff\xfe byte\n").unwrap();
+    let ctx = ctx_for(&fx.root);
+    let wide = invoke(&ctx, "read_file", json!({"path": "wide.txt"}));
+    let wide = assert_ok(&wide);
+    assert_eq!(wide["encoding"], "utf-16le");
+    assert_eq!(wide["content"], "hello\r\nwörld\r\n");
+    assert_eq!(wide["total_lines"], 2);
+    let mixed = invoke(
+        &ctx,
+        "read_file",
+        json!({"path": "mixed.txt", "start_line": 2}),
+    );
+    let mixed = assert_ok(&mixed);
+    assert_eq!(mixed["content"], "bad \u{FFFD}\u{FFFD} byte\n");
+    assert!(mixed["warnings"].to_string().contains("U+FFFD"));
+}
+
+#[test]
+fn search_text_respects_case_sensitivity_and_searches_past_invalid_utf8() {
+    let fx = tiny_js_fixture();
+    fs::write(
+        fx.root.join("notes.txt"),
+        b"Alpha needle\n\xff\xfe junk\nalpha NEEDLE again\nneedle last\n",
+    )
+    .unwrap();
+    let ctx = ctx_for(&fx.root);
+    let lines = |query: &str, case_sensitive: bool| -> Vec<u64> {
+        let out = invoke(
+            &ctx,
+            "search_text",
+            json!({"query": query, "path": "notes.txt", "case_sensitive": case_sensitive}),
+        );
+        assert_ok(&out)["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["line"].as_u64().unwrap())
+            .collect()
+    };
+    assert_eq!(
+        lines("needle", true),
+        vec![1, 4],
+        "a lowercase query with case_sensitive must not match NEEDLE"
+    );
+    assert_eq!(
+        lines("needle", false),
+        vec![1, 3, 4],
+        "lines after invalid UTF-8 are still searched"
+    );
+}
+
 #[test]
 fn unknown_tool_is_validation_error() {
     let fx = tiny_js_fixture();

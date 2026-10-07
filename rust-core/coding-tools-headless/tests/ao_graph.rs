@@ -22,36 +22,30 @@ fn fixture() -> (AppData, Run) {
         model: "gemini-3.8-flash-high".into(),
         permission_profile: ":workspace".into(),
     };
-    let node = |id: &str, role: Role, parents: Vec<&str>, route: Route| Node {
-        id: id.into(),
-        task_id: "task".into(),
-        clause_id: None,
-        role,
-        parents: parents.into_iter().map(str::to_string).collect(),
-        x: 0,
-        y: 0,
-        state: State::Pending,
-        route,
-        request_key: None,
+    // Built from JSON so fields added to Node and Run later (all optional) keep this fixture valid.
+    let node = |id: &str, role: Role, parents: Vec<&str>, route: Route| -> Node {
+        serde_json::from_value(json!({
+            "id": id, "task_id": "task", "role": role, "parents": parents,
+            "x": 0, "y": 0, "state": State::Pending, "route": route,
+        }))
+        .unwrap()
     };
-    let run = Run {
-        id: "run".into(),
-        workspace_id: "qa".into(),
-        project_id: "project".into(),
-        revision: 0,
-        cancelled: false,
-        nodes: vec![
-            node("planner", Role::Planner, vec![], web.clone()),
-            node("worker-a", Role::Worker, vec!["planner"], worker.clone()),
-            node("worker-b", Role::Worker, vec!["planner"], worker),
-            node(
-                "reviewer",
-                Role::Reviewer,
-                vec!["worker-a", "worker-b"],
-                web,
-            ),
-        ],
-    };
+    let nodes = vec![
+        node("planner", Role::Planner, vec![], web.clone()),
+        node("worker-a", Role::Worker, vec!["planner"], worker.clone()),
+        node("worker-b", Role::Worker, vec!["planner"], worker),
+        node(
+            "reviewer",
+            Role::Reviewer,
+            vec!["worker-a", "worker-b"],
+            web,
+        ),
+    ];
+    let run: Run = serde_json::from_value(json!({
+        "id": "run", "workspace_id": "qa", "project_id": "project",
+        "revision": 0, "cancelled": false, "nodes": nodes,
+    }))
+    .unwrap();
     (data, run)
 }
 
@@ -128,12 +122,30 @@ fn graph_checks_scope_cycles_joins_and_stale_revisions() {
     assert!(!parents_finished(&data.ao_runs[0], "reviewer"));
     data.ao_runs[0].nodes[2].state = State::Finished;
     assert!(parents_finished(&data.ao_runs[0], "reviewer"));
-    let reserved = reserve(&mut data, "qa", "run", "reviewer", 2, "request-1".into()).unwrap();
+    let reserved = reserve(
+        &mut data,
+        "qa",
+        "run",
+        "reviewer",
+        2,
+        "request-1".into(),
+        None,
+    )
+    .unwrap();
     assert_eq!(reserved.nodes[3].state, State::Reserved);
     let cancelled = cancel(&mut data, "qa", "run", 3).unwrap();
     assert!(cancelled.cancelled);
     assert_eq!(cancelled.nodes[3].state, State::Reserved);
-    assert!(reserve(&mut data, "qa", "run", "worker-a", 4, "request-2".into()).is_err());
+    assert!(reserve(
+        &mut data,
+        "qa",
+        "run",
+        "worker-a",
+        4,
+        "request-2".into(),
+        None
+    )
+    .is_err());
 }
 
 #[test]
@@ -149,7 +161,7 @@ fn adding_one_worker_extends_the_review_join_without_replaying_active_work() {
         "run",
         1,
         GraphChange::AddWorker {
-            node: worker.clone(),
+            node: Box::new(worker.clone()),
         },
     )
     .unwrap();
@@ -163,7 +175,7 @@ fn adding_one_worker_extends_the_review_join_without_replaying_active_work() {
         "run",
         1,
         GraphChange::AddWorker {
-            node: worker.clone()
+            node: Box::new(worker.clone())
         },
     )
     .is_err());
@@ -176,7 +188,9 @@ fn adding_one_worker_extends_the_review_join_without_replaying_active_work() {
         "qa",
         "run",
         2,
-        GraphChange::AddWorker { node: late }
+        GraphChange::AddWorker {
+            node: Box::new(late)
+        }
     )
     .is_err());
     assert_eq!(data.ao_runs[0].nodes.len(), 5);

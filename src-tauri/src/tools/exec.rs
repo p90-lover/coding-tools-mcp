@@ -165,7 +165,7 @@ fn run_native_diagnostic(
     cmd: &str,
     cwd: &Path,
 ) -> Result<Option<Value>, WorkspaceError> {
-    let parts = shell_words::split(cmd)
+    let parts = crate::tools::policy::split_command(cmd)
         .map_err(|_| WorkspaceError::invalid_argument("Invalid command syntax"))?;
     if parts.is_empty() {
         return Ok(None);
@@ -682,7 +682,7 @@ fn parse_and_resolve(
     workspace: &Workspace,
     policy: &crate::tools::policy::PolicySettings,
 ) -> Result<(String, Vec<String>), WorkspaceError> {
-    let parts = shell_words::split(cmd)
+    let parts = crate::tools::policy::split_command(cmd)
         .map_err(|_| WorkspaceError::invalid_argument("Invalid command syntax"))?;
     if parts.is_empty() {
         return Err(WorkspaceError::invalid_argument("Empty command"));

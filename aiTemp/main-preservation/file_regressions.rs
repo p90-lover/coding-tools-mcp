@@ -95,21 +95,28 @@ fn audit_patch_cannot_replace_a_directory_with_a_file() {
 #[test]
 fn audit_text_read_must_bound_input_not_only_output() {
     let (_, ctx) = context();
+    // Large files are no longer refused: read_file streams one bounded page at a time, so memory
+    // stays bounded by max_bytes (capped per call) and the rest is reached with next_offset.
+    // Sparse fixture: text at the start (so it is not binary), zeros up to just over 16 MiB.
     let file = ctx.workspace.root().join("oversized.txt");
-    fs::File::create(&file)
-        .unwrap()
-        .set_len(16 * 1024 * 1024 + 1)
-        .unwrap();
-    let err = file::read_file(
+    {
+        use std::io::Write;
+        let mut handle = fs::File::create(&file).unwrap();
+        handle.write_all("line\n".repeat(2000).as_bytes()).unwrap();
+        handle.set_len(16 * 1024 * 1024 + 1).unwrap();
+    }
+    let page = file::read_file(
         &ctx.workspace,
         &json!({"path":"oversized.txt","max_bytes":1}),
     )
-    .unwrap_err();
+    .unwrap();
     assert_eq!(
-        err.code(),
-        "FILE_TOO_LARGE",
-        "AUDIT_UNBOUNDED_READ: size must be rejected before reading or decoding"
+        page["bytes_read"], 4,
+        "AUDIT_UNBOUNDED_READ: a large file must be read one bounded page at a time, never whole"
     );
+    assert_eq!(page["truncated"], true);
+    assert_eq!(page["next_offset"], 4);
+    assert_eq!(page["total_bytes"], 16 * 1024 * 1024 + 1);
     fs::write(
         ctx.workspace.root().join("utf8.txt"),
         "first\n香港文字\nthird\n",

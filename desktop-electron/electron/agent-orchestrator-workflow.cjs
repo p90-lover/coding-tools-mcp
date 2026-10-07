@@ -215,16 +215,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const items = await harnessService().models(harness.slice(3), workspaceId);
-      // Every CPA pool model can also run on this agent through the local gateway ("cpa/<model>").
+      // Every CPA pool model can also run on this agent through the local gateway ("cpa/<model>"),
+      // except WebGPT, which only works through the bridge on Native Codex.
       let cpa = [];
-      try { cpa = (await models()).models.map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
-      return { ok: true, harness, models: ["default", ...items.map(item => item.id).filter(id => id !== "default"), ...cpa] };
+      try { cpa = (await models()).models.filter(id => !id.startsWith("chatgpt-web/")).map(id => `${CPA_MODEL_PREFIX}${id}`); } catch { /* CPA not running: own models only. */ }
+      // An agent may report WebGPT from the user's Codex config; it cannot run it, so it is left out here.
+      // "default" is not offered: it lets the agent pick, and silently change, its own model.
+      return { ok: true, harness, models: [...items.map(item => item.id).filter(id => id !== "default" && !id.startsWith("chatgpt-web/")), ...cpa] };
     }
     if (harness === "codex-native") {
-      // Native Codex may use every WebGPT tier (Luna and Think included) or any CPA pool model.
+      // Native Codex runs every WebGPT tier (Luna and Think included) and the CPA pool's models,
+      // except Gemini, which runs on Claude Code through the CPA gateway ("cpa/gemini-...").
       let cpa = [];
       try { cpa = (await models()).models; } catch { /* CPA not running: WebGPT only. */ }
-      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa.filter(id => !webModel(id))] };
+      return { ok: true, harness, models: [...WEB_TIERS, ...LUNA_TIERS, ...cpa.filter(id => !webModel(id) && !/^gemini/i.test(id))] };
     }
     const { baseUrl, key } = connection();
     const response = await fetchImpl(`${baseUrl}/v1/models`, {
@@ -241,7 +245,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
 
   // Native Codex runs WebGPT/CPA routes in-process; every other worker harness is AO's own.
   async function harnesses() {
-    const native = { id: "codex-native", label: "Codex CLI", runnable: true, installed: true, authStatus: "configured" };
+    const native = { id: "codex-native", label: "Native Codex", runnable: true, installed: true, authStatus: "configured" };
     try {
       const catalog = await harnessService().catalog();
       return { ok: true, harnesses: [native, ...catalog.map(item => ({ id: `ao:${item.id}`, label: item.label,
@@ -267,7 +271,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless, cpaConnection, webBr
       let failure = null;
       try {
         const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
-        session = await harnessService().spawn({ workspaceId, agent, model: viaCpa ?? node.route.model, prompt: reserved.prompt,
+        // The gateway serves CPA through OpenAI- and Anthropic-compatible endpoints; opencode names
+        // models as provider/model, so a CPA model is its OpenAI provider's "openai/<model>".
+        const agentModel = viaCpa && agent === "opencode" ? `openai/${viaCpa}` : viaCpa ?? node.route.model;
+        session = await harnessService().spawn({ workspaceId, agent, model: agentModel, prompt: reserved.prompt,
           name: node.settings?.name || "AO worker", ...(viaCpa ? { gateway: { provider: "cpa", model: viaCpa } } : {}) });
       } catch (error) { failure = error; }
       const saved = await requestHeadless("/api/v1/ao/external/submitted", {

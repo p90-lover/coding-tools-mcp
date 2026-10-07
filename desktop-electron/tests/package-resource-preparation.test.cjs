@@ -541,6 +541,11 @@ test("package and runtime preparation use repository aiTemp retention without de
       to: "agent-orchestrator",
     },
     {
+      // AO's ACP runtime (pinned Node + claude-agent-acp), found by the daemon beside agent-orchestrator.
+      from: "build/acp-runtime",
+      to: "acp-runtime",
+    },
+    {
       from: "build/package-resources",
       to: ".",
     },

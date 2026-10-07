@@ -20,6 +20,8 @@ export type ChatRun = {
   project_id: string;
   cancelled: boolean;
   paused?: boolean;
+  /** The orchestrator judged the mission simple and answered it alone; no other card ran. */
+  solo?: boolean;
   nodes: ChatNode[];
 };
 
@@ -117,6 +119,17 @@ export function chatNodeOrder(nodes: ChatNode[]): ChatNode[] {
   return [...nodes].sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || a.x - b.x);
 }
 
+/**
+ * The orchestrator's answer without the trailing solo marker block the engine reads, fenced
+ * (```solo) or as the web bridge flattens it (a bare "solo" line, then the body in backticks).
+ */
+export function withoutSoloBlock(answer: string): string {
+  const fenced = answer.lastIndexOf("```solo");
+  const flattened = [...answer.matchAll(/(^|\n)[ \t]*solo[ \t]*\r?\n\s*[`{]/gi)].pop();
+  const start = Math.max(fenced, flattened?.index !== undefined ? flattened.index + flattened[1].length : -1);
+  return start < 0 ? answer : answer.slice(0, start).trimEnd();
+}
+
 /** The conversation for one chat: each user message followed by that run's replies. */
 export function chatTranscript(runs: ChatRun[], description: string | undefined): ChatMessage[] {
   const said = chatMessagesFromDescription(description);
@@ -131,7 +144,8 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined)
         messages.push({ kind: "agent", key, role: node.role, name, text: node.receipt.error, tone: "error" });
       } else if (node.state === "finished" && node.receipt?.answer) {
         messages.push({
-          kind: "agent", key, role: node.role, name, text: node.receipt.answer,
+          kind: "agent", key, role: node.role, name,
+          text: run.solo && node.role === "planner" ? withoutSoloBlock(node.receipt.answer) : node.receipt.answer,
           tone: node.role === "reviewer" || node.role === "approver" || node.role === "sub_reviewer" ? "verdict" : "answer",
           ...(node.receipt.verdict ? { verdict: node.receipt.verdict } : {}),
         });
@@ -140,6 +154,9 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined)
       } else if (node.state === "held") {
         messages.push({ kind: "status", key, text: `${name} needs your attention`, state: node.state });
       }
+    }
+    if (run.solo) {
+      messages.push({ kind: "status", key: `${run.id}:solo`, text: "Simple mission: the orchestrator answered alone; no workers ran.", state: "finished" });
     }
     if (run.cancelled) messages.push({ kind: "status", key: `${run.id}:stopped`, text: "Stopped", state: "cancelled" });
   });

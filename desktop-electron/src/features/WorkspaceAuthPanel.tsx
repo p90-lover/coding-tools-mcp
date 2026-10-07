@@ -1,17 +1,21 @@
 import { useEffect, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
-import type { WorkspaceSummary } from "../api/contracts";
 import type { Copy } from "../i18n";
 import type { Language } from "../types";
-import "./workspace-auth.css";
+import { pageHidden } from "./page-visibility";
+import { Card, Field, Notice, Pill, Segmented, WorkspacePicker, errorText, useWorkspaces } from "./workspace-ui";
+import type { Tone } from "./workspace-ui";
 
 type CredentialKey = "bearer_token" | "oauth_password" | "actions_api_key" | "actions_oauth_client_secret" | "actions_oauth_password";
+type Service = "mcp" | "actions";
 
 interface WorkspaceAuthPanelProps {
   copy: Copy;
   language: Language;
   setError: (error: string | null) => void;
 }
+
+const LISTENER_POLL_MS = 5000;
 
 function listenerState(value: unknown): string {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -22,46 +26,24 @@ function listenerState(value: unknown): string {
 }
 
 export function WorkspaceAuthPanel({ copy, language, setError }: WorkspaceAuthPanelProps) {
-  const [workspaces, setWorkspaces] = useState<readonly WorkspaceSummary[]>([]);
+  const { workspaces, loaded, loading, refresh } = useWorkspaces(setError);
   const [workspaceId, setWorkspaceId] = useState("");
-  const [service, setService] = useState<"mcp" | "actions">("mcp");
+  const [service, setService] = useState<Service>("mcp");
   const [authType, setAuthType] = useState("");
   const [clientId, setClientId] = useState("");
   const [redirectUris, setRedirectUris] = useState("");
   const [scopes, setScopes] = useState("");
   const [shared, setShared] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
-  const [loaded, setLoaded] = useState(false);
-  const [listenerStatus, setListenerStatus] = useState("unknown");
+  const [working, setWorking] = useState(false);
+  const [notice, setNotice] = useState<{ text: string; restart?: boolean } | null>(null);
+  const [listener, setListener] = useState("checking");
   const selected = workspaces.find((workspace) => workspace.id === workspaceId);
+  const busy = loading || working;
 
-  const refresh = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const items: WorkspaceSummary[] = [];
-      let cursor: number | null = 0;
-      while (cursor !== null) {
-        const page = await getCodingToolsClient().workspaces.list({ cursor, limit: 100 });
-        items.push(...page.items);
-        cursor = page.nextCursor;
-      }
-      setWorkspaces(items);
-      setWorkspaceId((current) => items.some((item) => item.id === current) ? current : items[0]?.id ?? "");
-      setLoaded(true);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-
+  // Keep a valid selection as the list loads or changes.
   useEffect(() => {
-    void refresh();
-    // Load once when this surface mounts; later refreshes are explicit.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!workspaces.some((workspace) => workspace.id === workspaceId)) setWorkspaceId(workspaces[0]?.id ?? "");
+  }, [workspaces, workspaceId]);
 
   useEffect(() => {
     if (!selected) return;
@@ -72,23 +54,29 @@ export function WorkspaceAuthPanel({ copy, language, setError }: WorkspaceAuthPa
     setShared((service === "mcp" ? selected.mcpUseSharedSecrets : selected.actionsUseSharedSecrets) === true);
   }, [selected, service]);
 
+  // The listener can be started or stopped from elsewhere, so poll while this page is visible.
+  // A failed read shows as an error state here instead of a repeating global toast.
   useEffect(() => {
-    if (!selected) {
-      setListenerStatus("unknown");
-      return;
-    }
+    if (!selected) return;
     let current = true;
-    setListenerStatus("loading");
-    void (async () => {
+    let reading = false;
+    setListener("checking");
+    const read = async () => {
+      if (reading) return;
+      reading = true;
       try {
         const result = await getCodingToolsClient().workspaces.service({ workspaceId: selected.id, service, operation: "status" });
-        if (current) setListenerStatus(listenerState(result.status));
-      } catch (cause) {
-        if (current) setError(cause instanceof Error ? cause.message : String(cause));
+        if (current) setListener(listenerState(result.status));
+      } catch {
+        if (current) setListener("error");
+      } finally {
+        reading = false;
       }
-    })();
-    return () => { current = false; };
-  }, [selected?.id, service, setError]);
+    };
+    void read();
+    const timer = setInterval(() => { if (!pageHidden()) void read(); }, LISTENER_POLL_MS);
+    return () => { current = false; clearInterval(timer); };
+  }, [selected?.id, service]);
 
   const savedType = service === "mcp" ? selected?.mcpAuthType : selected?.actionsAuthType;
   const savedClientId = service === "mcp" ? selected?.mcpOAuthClientId : selected?.actionsOAuthClientId;
@@ -102,167 +90,143 @@ export function WorkspaceAuthPanel({ copy, language, setError }: WorkspaceAuthPa
     || scopes !== savedScopes || shared !== savedShared
   );
 
-  const credentialKeys: CredentialKey[] = service === "mcp"
-    ? authType === "oauth" ? ["oauth_password"] : authType === "bearer" ? ["bearer_token"] : []
-    : authType === "oauth" ? ["actions_oauth_client_secret", "actions_oauth_password"]
-      : authType === "api_key" ? ["actions_api_key"] : [];
+  const credentials: { key: CredentialKey; label: string }[] = service === "mcp"
+    ? authType === "oauth" ? [{ key: "oauth_password", label: copy.wsCredOAuthPassword }]
+      : authType === "bearer" ? [{ key: "bearer_token", label: copy.wsCredBearer }] : []
+    : authType === "oauth" ? [
+      { key: "actions_oauth_client_secret", label: copy.wsCredClientSecret },
+      { key: "actions_oauth_password", label: copy.wsCredOAuthPassword },
+    ] : authType === "api_key" ? [{ key: "actions_api_key", label: copy.wsCredApiKey }] : [];
 
-  const save = async () => {
-    if (!selected || !dirty || busy) return;
-    setBusy(true);
-    setError(null);
-    setNotice("");
-    try {
-      const result = await getCodingToolsClient().workspaces.updateAuth({
-        workspaceId: selected.id,
-        service,
-        authType,
-        oauthClientId: clientId.trim(),
-        oauthRedirectUris: redirectUris.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
-        oauthScopes: service === "actions" ? scopes.trim() : "",
-        useSharedSecrets: shared,
-      });
-      if (result.cancelled === true) {
-        setNotice(copy.workspaceAuthCancelled);
-      } else if (result.ok === true) {
-        await refresh();
-        setNotice(copy.workspaceAuthSaved);
-      } else {
-        throw new Error("Workspace authentication save was not confirmed");
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const authOptions = service === "mcp"
+    ? [{ value: "oauth", label: copy.wsAuthOAuth }, { value: "bearer", label: copy.wsAuthBearer }, { value: "noauth", label: copy.wsAuthNone }]
+    : [{ value: "oauth", label: copy.wsAuthOAuth }, { value: "api_key", label: copy.wsAuthApiKey }, { value: "none", label: copy.wsAuthNone }];
 
-  const copyCredential = async (key: CredentialKey) => {
+  const act = async (run: () => Promise<void>) => {
     if (!selected || busy) return;
-    setBusy(true);
+    setWorking(true);
     setError(null);
-    setNotice("");
-    try {
-      const result = await getCodingToolsClient().workspaces.copySecret({ workspaceId: selected.id, key });
-      if (result.cancelled === true) {
-        setNotice(copy.workspaceAuthCancelled);
-      } else if (result.copied === true) {
-        setNotice(copy.workspaceCredentialCopied);
-      } else {
-        throw new Error("Workspace credential copy was not confirmed");
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
+    setNotice(null);
+    try { await run(); } catch (cause) { setError(errorText(cause)); } finally { setWorking(false); }
   };
 
-  const control = async (operation: "start" | "stop" | "restart") => {
-    if (!selected || busy) return;
-    setBusy(true);
-    setError(null);
-    setNotice("");
-    try {
-      const result = await getCodingToolsClient().workspaces.service({ workspaceId: selected.id, service, operation });
-      if (result.cancelled === true) {
-        setNotice(copy.workspaceAuthCancelled);
-      } else if (result.ok === true) {
-        setListenerStatus(listenerState(result.status));
-      } else {
-        throw new Error("Workspace listener change was not confirmed");
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const save = () => act(async () => {
+    if (!selected || !dirty) return;
+    const result = await getCodingToolsClient().workspaces.updateAuth({
+      workspaceId: selected.id,
+      service,
+      authType,
+      oauthClientId: clientId.trim(),
+      oauthRedirectUris: redirectUris.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+      oauthScopes: service === "actions" ? scopes.trim() : "",
+      useSharedSecrets: shared,
+    });
+    if (result.cancelled === true) { setNotice({ text: copy.workspaceAuthCancelled }); return; }
+    if (result.ok !== true) throw new Error("Workspace authentication save was not confirmed");
+    await refresh();
+    setNotice({ text: copy.workspaceAuthSaved, restart: true });
+  });
+
+  const copyCredential = (key: CredentialKey) => act(async () => {
+    if (!selected) return;
+    const result = await getCodingToolsClient().workspaces.copySecret({ workspaceId: selected.id, key });
+    if (result.cancelled === true) setNotice({ text: copy.workspaceAuthCancelled });
+    else if (result.copied === true) setNotice({ text: copy.workspaceCredentialCopied });
+    else throw new Error("Workspace credential copy was not confirmed");
+  });
+
+  const control = (operation: "start" | "stop" | "restart") => act(async () => {
+    if (!selected) return;
+    const result = await getCodingToolsClient().workspaces.service({ workspaceId: selected.id, service, operation });
+    if (result.cancelled === true) setNotice({ text: copy.workspaceAuthCancelled });
+    else if (result.ok === true) setListener(listenerState(result.status));
+    else throw new Error("Workspace listener change was not confirmed");
+  });
+
+  const listenerPill: [Tone, string] = listener === "running" ? ["ok", copy.wsListenerRunning]
+    : listener === "stopped" ? ["idle", copy.wsListenerStopped]
+    : listener === "error" ? ["error", copy.wsListenerError]
+    : listener === "checking" ? ["busy", copy.wsListenerChecking]
+    : ["warn", listener || copy.workspaceUnknown];
+  const port = service === "mcp" ? selected?.mcpLocalPort : selected?.actionsLocalPort;
 
   return (
-    <section aria-label={copy.workspaceAuth} lang={language}>
-      <div className="section-heading">
-        <span>{copy.workspaceAuth}</span>
-        <button className="button-secondary" disabled={busy} onClick={() => void refresh()} type="button">
-          {busy ? copy.running : copy.refreshTools}
-        </button>
-      </div>
-      <p>{copy.workspaceAuthBody}</p>
-      {loaded && workspaces.length === 0 ? (
-        <div className="surface-empty"><span>{copy.noWorkspaces}</span></div>
-      ) : selected ? (
-        <form className="workspace-auth-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-          <label><span>{copy.selectWorkspace}</span>
-            <select value={workspaceId} onChange={(event) => { setWorkspaceId(event.target.value); setNotice(""); }}>
-              {workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
-            </select>
-          </label>
-          <code className="workspace-auth-path">{selected.path}</code>
-          <label><span>{copy.workspaceService}</span>
-            <select value={service} onChange={(event) => { setService(event.target.value as "mcp" | "actions"); setNotice(""); }}>
-              <option value="mcp">MCP</option>
-              <option value="actions">Actions</option>
-            </select>
-          </label>
-          <code className="workspace-auth-endpoint">127.0.0.1:{service === "mcp" ? selected.mcpLocalPort ?? "?" : selected.actionsLocalPort ?? "?"}</code>
-          <div className="workspace-listener">
-            <strong>{copy.workspaceListenerStatus}: {listenerStatus === "loading" ? copy.loading : listenerStatus}</strong>
-            <div className="inline-actions">
-              {listenerStatus === "running" ? (
-                <>
-                  <button className="button-secondary" disabled={busy} onClick={() => void control("stop")} type="button">{copy.workspaceStop}</button>
-                  <button className="button-secondary" disabled={busy} onClick={() => void control("restart")} type="button">{copy.workspaceRestart}</button>
-                </>
-              ) : (
-                <button className="button-secondary" disabled={busy || (listenerStatus !== "stopped" && listenerStatus !== "error")} onClick={() => void control("start")} type="button">{copy.workspaceStart}</button>
-              )}
-            </div>
-            <p>{copy.workspaceListenerTunnelNote}</p>
+    <div className="wsx-page" lang={language} aria-label={copy.workspaceAuth}>
+      <p className="wsx-intro">{copy.workspaceAuthBody}</p>
+      {!loaded ? <div className="wsx-loading">{copy.wsLoading}</div>
+        : !selected ? <div className="surface-empty"><span>{copy.noWorkspaces}</span></div>
+        : <>
+          <div className="wsx-toolbar">
+            <WorkspacePicker workspaces={workspaces} value={workspaceId} label={copy.selectWorkspace} disabled={busy}
+              onChange={(id) => { setWorkspaceId(id); setNotice(null); }} />
+            <Segmented<Service> label={copy.workspaceService} value={service} disabled={busy}
+              options={[{ value: "mcp", label: "MCP" }, { value: "actions", label: "Actions" }]}
+              onChange={(next) => { setService(next); setNotice(null); }} />
+            <span className="wsx-spacer" />
+            <button className="button-secondary" disabled={busy} onClick={() => void refresh()} type="button">
+              {loading ? copy.running : copy.refreshTools}
+            </button>
           </div>
-          <label><span>{copy.workspaceAuthType}</span>
-            <select value={authType} onChange={(event) => setAuthType(event.target.value)}>
-              {authType === "unknown" ? <option value="unknown" disabled>{copy.workspaceUnknown}</option> : null}
-              {service === "mcp" ? (
-                <>
-                  <option value="oauth">OAuth</option>
-                  <option value="bearer">Bearer</option>
-                  <option value="noauth">No authentication</option>
-                </>
-              ) : (
-                <>
-                  <option value="oauth">OAuth</option>
-                  <option value="api_key">API key</option>
-                  <option value="none">No authentication</option>
-                </>
+          <code className="wsx-mono">{selected.path}</code>
+
+          <Card title={copy.workspaceListenerStatus} aside={<Pill tone={listenerPill[0]}>{listenerPill[1]}</Pill>}>
+            <dl className="wsx-facts">
+              <dt>{service === "mcp" ? "MCP" : "Actions"}</dt>
+              <dd>{port ? <code className="wsx-mono">http://127.0.0.1:{port}</code> : copy.wsEndpointUnset}</dd>
+            </dl>
+            <div className="wsx-actions">
+              {listener === "running" ? <>
+                <button className="button-secondary" disabled={busy} onClick={() => void control("restart")} type="button">{copy.workspaceRestart}</button>
+                <button className="button-secondary" disabled={busy} onClick={() => void control("stop")} type="button">{copy.workspaceStop}</button>
+              </> : (
+                <button className="button-primary" disabled={busy || listener === "checking"} onClick={() => void control("start")} type="button">{copy.workspaceStart}</button>
               )}
-            </select>
-          </label>
-          {authType === "oauth" ? (
-            <>
-              <label><span>{copy.workspaceClientId}</span><input value={clientId} onChange={(event) => setClientId(event.target.value)} /></label>
-              <label><span>{copy.workspaceRedirectUris}</span><textarea rows={3} value={redirectUris} onChange={(event) => setRedirectUris(event.target.value)} /></label>
-              {service === "actions" ? (
-                <label><span>{copy.workspaceScopes}</span><input value={scopes} onChange={(event) => setScopes(event.target.value)} /></label>
-              ) : null}
-            </>
-          ) : null}
-          <label className="workspace-auth-check"><input type="checkbox" checked={shared} onChange={(event) => setShared(event.target.checked)} /><span>{copy.workspaceSharedSecrets}</span></label>
-          <p className="workspace-auth-note">{copy.workspaceAuthSecretNote}</p>
-          {credentialKeys.length ? (
-            <div className="inline-actions">
-              {credentialKeys.map((key) => (
-                <button className="button-secondary" disabled={busy} key={key} onClick={() => void copyCredential(key)} type="button">
-                  {copy.workspaceCopyCredential}: <code>{key}</code>
-                </button>
-              ))}
+              <span className="wsx-field-hint">{copy.workspaceListenerTunnelNote}</span>
             </div>
-          ) : null}
-          <div className="inline-actions">
-            <button className="button-primary" disabled={busy || !dirty} type="submit">{copy.workspaceSaveAuth}</button>
-          </div>
-          {notice ? <p role="status">{notice}</p> : null}
-        </form>
-      ) : null}
-    </section>
+          </Card>
+
+          <Card title={copy.wsAuthentication}>
+            <form className="wsx-grid" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+              <Field label={copy.workspaceAuthType} wide>
+                {authType === "unknown"
+                  ? <select value="unknown" disabled><option value="unknown">{copy.workspaceUnknown}</option></select>
+                  : <Segmented label={copy.workspaceAuthType} value={authType} disabled={busy} options={authOptions} onChange={setAuthType} />}
+              </Field>
+              {authType === "oauth" ? <>
+                <Field label={copy.workspaceClientId} wide>
+                  <input disabled={busy} spellCheck={false} value={clientId} onChange={(event) => setClientId(event.target.value)} />
+                </Field>
+                <Field label={copy.workspaceRedirectUris} wide>
+                  <textarea disabled={busy} rows={3} spellCheck={false} value={redirectUris} onChange={(event) => setRedirectUris(event.target.value)} />
+                </Field>
+                {service === "actions" ? (
+                  <Field label={copy.workspaceScopes} wide>
+                    <input disabled={busy} spellCheck={false} value={scopes} onChange={(event) => setScopes(event.target.value)} />
+                  </Field>
+                ) : null}
+              </> : null}
+              <label className="wsx-check" style={{ gridColumn: "1 / -1" }}>
+                <input type="checkbox" disabled={busy} checked={shared} onChange={(event) => setShared(event.target.checked)} />
+                {copy.workspaceSharedSecrets}
+              </label>
+              <div className="wsx-actions" style={{ gridColumn: "1 / -1" }}>
+                <button className="button-primary" disabled={busy || !dirty} type="submit">{copy.workspaceSaveAuth}</button>
+                <span className="wsx-spacer" />
+                {credentials.map((credential) => (
+                  <button className="button-secondary" disabled={busy} key={credential.key} onClick={() => void copyCredential(credential.key)} type="button">
+                    {credential.label}
+                  </button>
+                ))}
+              </div>
+              <span className="wsx-field-hint" style={{ gridColumn: "1 / -1" }}>{copy.workspaceAuthSecretNote}</span>
+            </form>
+            {notice ? (
+              <Notice action={notice.restart && listener === "running" ? (
+                <button className="button-secondary" disabled={busy} onClick={() => void control("restart")} type="button">{copy.wsRestartToApply}</button>
+              ) : undefined}>{notice.text}</Notice>
+            ) : null}
+          </Card>
+        </>}
+    </div>
   );
 }

@@ -133,16 +133,18 @@ function createKeysmithManaged({
           stdout: !error && exposeOutput ? stdout : "",
           stderr: !error && exposeOutput ? stderr : "",
           exitCode: error?.code || 0,
+          ...(error ? { error: `Keysmith failed (exit ${error.code}); check status before retrying` } : {}),
         });
       };
       try {
-        execFileImpl(pythonExecutable, [...pythonArgs, "-I", "-B", script, "--lang", "en", ...args], {
+        const child = execFileImpl(pythonExecutable, [...pythonArgs, "-I", "-B", script, "--lang", "en", ...args], {
           encoding: "utf8",
           maxBuffer: 128 * 1024,
           shell: false,
           timeout: 90_000,
           windowsHide: true,
         }, done);
+        child?.stdin?.end();
       } catch {
         busy = false;
         reject(new Error("Keysmith command could not start"));
@@ -151,7 +153,7 @@ function createKeysmithManaged({
   };
   const deployArgs = (home, file) => [
     "--codex-dir", home,
-    "--file", file,
+    ...(file == null ? [] : ["--file", file]),
     "--name", "coding-tools-keysmith",
     "--skip-hooks-isolation",
   ];
@@ -177,11 +179,11 @@ function createKeysmithManaged({
     async preview(instructionFile) {
       previewed = null;
       const home = targetHome();
-      const file = reviewedFile(instructionFile);
+      const file = instructionFile == null ? { path: null, sha256: RELEASE_SHA256 } : reviewedFile(instructionFile);
       const configBefore = configSha256(home);
       const result = await invoke([...deployArgs(home, file.path), "--dry-run"], true);
       if (!result.ok) return result;
-      if (reviewedFile(instructionFile).sha256 !== file.sha256 || configSha256(home) !== configBefore) {
+      if ((file.path && reviewedFile(instructionFile).sha256 !== file.sha256) || configSha256(home) !== configBefore) {
         throw new Error("Markdown or Codex configuration changed during Keysmith preview");
       }
       previewed = { home, filePath: file.path, fileSha256: file.sha256, configSha256: configBefore };
@@ -193,7 +195,7 @@ function createKeysmithManaged({
       previewed = null;
       if (!approved) throw new Error("Preview Keysmith changes before applying");
       const home = targetHome();
-      const file = reviewedFile(instructionFile);
+      const file = instructionFile == null ? { path: null, sha256: RELEASE_SHA256 } : reviewedFile(instructionFile);
       if (home !== approved.home || file.path !== approved.filePath
         || file.sha256 !== approved.fileSha256
         || configSha256(home) !== approved.configSha256

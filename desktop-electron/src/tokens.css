@@ -75,3 +75,12 @@
   --duration-micro: 140ms;
   --duration-panel: 300ms;
 }
+
+/* Electron on Windows draws a <select> popup list in the light system palette whatever the
+   color-scheme, and each option inherits the select's light text: only the highlighted row
+   was readable, so the AO mission picker looked like it had one entry. */
+select option,
+select optgroup {
+  background-color: var(--color-background-elevated);
+  color: var(--color-text-primary);
+}

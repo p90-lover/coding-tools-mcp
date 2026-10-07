@@ -31,7 +31,12 @@ export function KeysmithSetupPanel({ api, copy, onInstalledChange }: {
       onInstalledChange(next.ok && next.managedByCodingTools === true && next.state === "active");
       if (!next.ok) setError(next.error || copy.failed);
     }).catch((cause) => {
-      if (active) setError(cause instanceof Error ? cause.message : copy.failed);
+      if (active) {
+        const message = cause instanceof Error ? cause.message : copy.failed;
+        setStatus({ ok: false, error: message });
+        setError(message);
+        onInstalledChange(false);
+      }
     });
     return () => { active = false; };
   }, [api, copy.failed, onInstalledChange]);
@@ -60,6 +65,21 @@ export function KeysmithSetupPanel({ api, copy, onInstalledChange }: {
         {status?.pythonVersion ? <small>Python {status.pythonVersion}</small> : null}
       </div>
       <div className="keysmith-actions">
+        {typeof api.keysmithInstall === "function" ? (
+          <button className="button-primary" disabled={busy || !status?.ok || (status.managedByCodingTools && status.state === "active")} onClick={() => void run(async () => {
+            const result = await api.keysmithInstall!();
+            if (!result.ok) { setError(result.error || copy.failed); await refreshStatus(); return; }
+            setStatus(result);
+            setFile(null);
+            setPreview(null);
+            setRemovalPreview(null);
+            onInstalledChange(true);
+            setNotice(copy.keysmithNewChats);
+          })} type="button">{busy ? copy.loading : copy.keysmithInstall}</button>
+        ) : null}
+        <button className="button-secondary" disabled={busy} onClick={() => void run(async () => {
+          await refreshStatus();
+        })} type="button">{copy.keysmithRefresh}</button>
         <button className="button-secondary" disabled={busy} onClick={() => void run(async () => {
           const selected = await api.keysmithSelectFile();
           if (!selected) return;
@@ -67,8 +87,8 @@ export function KeysmithSetupPanel({ api, copy, onInstalledChange }: {
           setPreview(null);
           setRemovalPreview(null);
         })} type="button">{copy.keysmithChooseFile}</button>
-        <button className="button-secondary" disabled={busy || !file || status?.ok === false} onClick={() => void run(async () => {
-          const result = await api.keysmithPreview();
+        <button className="button-secondary" disabled={busy || !status?.ok || (!file && typeof api.keysmithInstall !== "function")} onClick={() => void run(async () => {
+          const result = await api.keysmithPreview(!file);
           if (!result.ok) { setError(result.error || copy.failed); return; }
           setPreview(result);
           setRemovalPreview(null);

@@ -1125,10 +1125,13 @@ mod workspace_auth_tests {
             },
         };
 
+        // Standalone (Paseo/Anneal) orchestration is retired (9f48df77b): every reservation is
+        // refused, and a refused reservation must leave the stored data exactly as it was.
         let first = request("run-1", 0);
-        reserve_orchestration_in_data(&context, &mut data, first.clone()).unwrap();
         let exact = serde_json::to_value(&data).unwrap();
-        reserve_orchestration_in_data(&context, &mut data, first.clone()).unwrap();
+        let refused = reserve_orchestration_in_data(&context, &mut data, first.clone())
+            .expect_err("retired orchestration must not reserve");
+        assert!(refused.to_string().contains("retired"), "{refused}");
         assert_eq!(serde_json::to_value(&data).unwrap(), exact);
 
         for collision in 0..6 {
@@ -4030,10 +4033,17 @@ async fn tool_call(
     let (state_name, result, error) = match outcome {
         Ok(value) => match serde_json::to_vec(&value) {
             Ok(bytes) if bytes.len() <= MAX_RESULT_BYTES => ("completed", Some(value), None),
-            Ok(_) => (
+            // The tool has already run; say so, and how to ask for a smaller result.
+            Ok(bytes) => (
                 "failed",
                 None,
-                Some("Tool result exceeded the retained response limit".into()),
+                Some(format!(
+                    "RESULT_TOO_LARGE: {tool} ran, but its result is {} bytes and the limit is {MAX_RESULT_BYTES}. \
+                     Request less per call: read_file pages with offset/next_offset, git_diff/git_show max_bytes, \
+                     search_text max_results, exec_command max_output_bytes with read_output paging.",
+                    bytes.len(),
+                    tool = body.tool,
+                )),
             ),
             Err(error) => ("failed", None, Some(text_error(error))),
         },

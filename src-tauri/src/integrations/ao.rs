@@ -150,6 +150,10 @@ pub struct Run {
     /// removed card to a busy worker waits here instead of interrupting it.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rerun_after: BTreeSet<String>,
+    /// The orchestrator judged the mission simple and answered it alone; the other cards were
+    /// skipped (finished without running).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub solo: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +218,17 @@ fn web_route_valid(route: &Route) -> bool {
             .model
             .strip_prefix("chatgpt-web/")
             .is_some_and(|tier| WEB_TIERS.contains(&tier))
+}
+
+/// The route asks for WebGPT: its provider, or a WebGPT model id directly or through the
+/// local CPA gateway prefix an AO harness uses.
+fn web_model_named(route: &Route) -> bool {
+    route.provider_id == "chatgpt-web"
+        || route
+            .model
+            .strip_prefix("cpa/")
+            .unwrap_or(&route.model)
+            .starts_with("chatgpt-web/")
 }
 
 /// Any model in the shared CPA pool, run by Native Codex.
@@ -408,13 +423,6 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                 }
             }
             Role::Worker => {
-                // Workers may run on any route; a WebGPT worker must use the bridge on Native Codex.
-                if (node.route.provider_id == "chatgpt-web"
-                    || node.route.model.starts_with("chatgpt-web/"))
-                    && !web_route_valid(&node.route)
-                {
-                    return Err(fail("AO WebGPT worker requires a WebGPT-on-Codex route"));
-                }
                 if node.route.harness_id.starts_with("ao:") && !external_route_valid(&node.route) {
                     return Err(fail("AO harness worker route is invalid"));
                 }
@@ -508,6 +516,11 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
                 }
                 _ => "AO card needs at least one link; only the orchestrator starts on its own",
             }));
+        }
+        // WebGPT only works through the bridge on Native Codex, for every role; an AO harness
+        // or the CPA pool cannot run it (not even as "cpa/chatgpt-web/...").
+        if web_model_named(&node.route) && !web_route_valid(&node.route) {
+            return Err(fail("AO WebGPT runs only on Native Codex"));
         }
         // Any role may run on any harness: WebGPT or a CPA model on Native Codex, or an AO harness.
         if node.role != Role::Worker
@@ -666,6 +679,8 @@ pub fn grant_run(
 }
 
 const ASSIGNMENTS_FENCE: &str = "```assignments";
+/// Ends an orchestrator answer that completes a simple mission without the team.
+const SOLO_FENCE: &str = "```solo";
 
 /// At most `max` characters, cut on a character boundary.
 fn clip(value: &str, max: usize) -> String {
@@ -708,9 +723,54 @@ fn planner_roster(run: &Run) -> String {
             worker.id, worker.route.harness_id, worker.route.model
         ));
     }
-    roster.push_str(&format!("\nEnd your answer with exactly one block in this form, giving every worker card its own part:\n\
+    roster.push_str(&format!("\nEnd your answer with exactly one of these blocks.\n\
+If you answered the whole mission yourself (simple):\n{SOLO_FENCE}\n{{\"difficulty\":\"simple\",\"reason\":\"why no workers are needed\"}}\n```\n\
+If the workers are needed, give every worker card its own part:\n\
 {ASSIGNMENTS_FENCE}\n[{{\"worker\":\"<card id>\",\"task\":\"what this worker must do\",\"acceptance\":\"how to tell it is done\"}}]\n```\n"));
     roster
+}
+
+/// The body of the last block labelled `label` in a card's answer, and where that block starts.
+/// Accepts the fenced form (```label … ```) and the form the ChatGPT web bridge flattens it to:
+/// the label alone on a line, then the body in backticks (`…` or ```…```) or as bare JSON.
+pub(crate) fn labelled_block<'a>(answer: &'a str, label: &str) -> Option<(usize, &'a str)> {
+    let fence = format!("```{label}");
+    let fenced = answer.rfind(&fence).and_then(|start| {
+        let body = &answer[start + fence.len()..];
+        body.find("```").map(|end| (start, body[..end].trim()))
+    });
+    let mut flattened = None;
+    let mut offset = 0;
+    for line in answer.split_inclusive('\n') {
+        if line.trim().eq_ignore_ascii_case(label) {
+            flattened = Some((offset, offset + line.len()));
+        }
+        offset += line.len();
+    }
+    let flattened = flattened.and_then(|(start, body_start)| {
+        let rest = answer[body_start..].trim_start();
+        let body = if let Some(inner) = rest.strip_prefix("```") {
+            // Skip an optional language tag on the opening line.
+            let inner = inner.split_once('\n').map_or(inner, |(_, after)| after);
+            inner.find("```").map(|end| inner[..end].trim())
+        } else if let Some(inner) = rest.strip_prefix('`') {
+            inner.find('`').map(|end| inner[..end].trim())
+        } else if rest.starts_with('[') || rest.starts_with('{') {
+            let mut values =
+                serde_json::Deserializer::from_str(rest).into_iter::<serde_json::Value>();
+            values
+                .next()
+                .and_then(Result::ok)
+                .map(|_| rest[..values.byte_offset()].trim())
+        } else {
+            None
+        };
+        body.map(|body| (start, body))
+    });
+    match (fenced, flattened) {
+        (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
+        (a, b) => a.or(b),
+    }
 }
 
 /// Reads the planner's `assignments` block. Workers are matched by card id or by their name.
@@ -725,14 +785,9 @@ pub(crate) fn parse_assignments(
         #[serde(default)]
         acceptance: String,
     }
-    let start = answer
-        .rfind(ASSIGNMENTS_FENCE)
+    let (_, body) = labelled_block(answer, "assignments")
         .ok_or("The plan has no ```assignments block for the worker cards")?;
-    let body = &answer[start + ASSIGNMENTS_FENCE.len()..];
-    let end = body
-        .find("```")
-        .ok_or("The plan's ```assignments block is not closed")?;
-    let planned: Vec<Planned> = serde_json::from_str(body[..end].trim()).map_err(|_| {
+    let planned: Vec<Planned> = serde_json::from_str(body).map_err(|_| {
         "The plan's ```assignments block is not a JSON list of {worker, task, acceptance}"
     })?;
     let mut assignments = BTreeMap::new();
@@ -765,8 +820,20 @@ pub(crate) fn parse_assignments(
     Ok(assignments)
 }
 
+/// True when the orchestrator ended with a ```solo block (and no assignments after it): it
+/// answered the mission itself.
+pub(crate) fn is_solo_answer(answer: &str) -> bool {
+    match (
+        labelled_block(answer, "solo"),
+        labelled_block(answer, "assignments"),
+    ) {
+        (Some((solo, _)), Some((plan, _))) => solo > plan,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
 const REVIEW_PARTS_FENCE: &str = "```review-parts";
-const REWORK_FENCE: &str = "```rework";
 
 /// What each specialty concentrates on; added to that card's prompt.
 pub fn specialty_guidance(specialty: &str) -> Option<&'static str> {
@@ -923,14 +990,9 @@ pub(crate) fn parse_review_parts(
         #[serde(default)]
         check: String,
     }
-    let start = answer
-        .rfind(REVIEW_PARTS_FENCE)
+    let (_, body) = labelled_block(answer, "review-parts")
         .ok_or("The review split has no ```review-parts block for the sub-reviewers")?;
-    let body = &answer[start + REVIEW_PARTS_FENCE.len()..];
-    let end = body
-        .find("```")
-        .ok_or("The ```review-parts block is not closed")?;
-    let planned: Vec<Planned> = serde_json::from_str(body[..end].trim()).map_err(|_| {
+    let planned: Vec<Planned> = serde_json::from_str(body).map_err(|_| {
         "The ```review-parts block is not a JSON list of {sub_reviewer, workers, check}"
     })?;
     let card = |wanted: &str, role: Role| {
@@ -989,14 +1051,10 @@ pub(crate) fn parse_review_parts(
 
 /// Workers the main reviewer asked to redo; empty means every worker.
 pub(crate) fn parse_rework_targets(answer: &str, run: &Run) -> Vec<String> {
-    let Some(start) = answer.rfind(REWORK_FENCE) else {
+    let Some((_, body)) = labelled_block(answer, "rework") else {
         return Vec::new();
     };
-    let body = &answer[start + REWORK_FENCE.len()..];
-    let Some(end) = body.find("```") else {
-        return Vec::new();
-    };
-    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(body[..end].trim()) else {
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(body) else {
         return Vec::new();
     };
     let mut targets = Vec::new();
@@ -1042,8 +1100,10 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
         .find(|task| task.id == node.task_id && task.workspace_id == run.workspace_id)
         .ok_or_else(|| fail("AO task not found"))?;
     let responsibility = match node.role {
-        Role::Planner => "Plan the mission and split it across the worker cards listed below. Coding Tools runs every worker on its own harness and model. \
-Do not use your own sub-agent, spawn or delegation tools, and do not do the workers' work yourself. Do not simulate worker results or the reviewer's approval.",
+        Role::Planner => "First judge how difficult the mission is. If you can complete it fully and reliably yourself in this one turn with your own access \
+(a question, an explanation, a short lookup or a small read-only check), do so: give the complete final answer and end with the solo block described below. \
+Otherwise plan the mission and split it across the worker cards listed below; Coding Tools runs every worker on its own harness and model. \
+Do not use your own sub-agent, spawn or delegation tools. When you plan, do not do the workers' work yourself, and do not simulate worker results or the reviewer's approval.",
         Role::Approver => "You are the command approver. Before any worker starts, check the plan and every assignment for commands that delete or overwrite data, \
 force-push, install software, reach outside the workspace or the network, or handle secrets; also check for missing steps and unclear acceptance. \
 Do not change the plan or do the work yourself.",
@@ -1148,9 +1208,8 @@ Do not edit the implementation; send needed changes back to the workers.",
         match parent.role {
             Role::Planner if node.role != Role::Approver => {
                 // The full plan is context only; each worker's own part is stated above.
-                let plan = answer
-                    .rfind(ASSIGNMENTS_FENCE)
-                    .map_or(answer, |start| &answer[..start]);
+                let plan = labelled_block(answer, "assignments")
+                    .map_or(answer, |(start, _)| &answer[..start]);
                 prompt.push_str(&format!(
                     "\nMission plan from the orchestrator (context):\n{}\n",
                     clip(plan.trim(), 4_000)
@@ -1633,6 +1692,7 @@ pub fn record_terminal(
     enum Split {
         Plan(BTreeMap<String, Assignment>),
         Review(BTreeMap<String, ReviewPart>),
+        Solo,
     }
     let plan = match run
         .nodes
@@ -1640,9 +1700,13 @@ pub fn record_terminal(
         .find(|node| node.id == node_id)
         .map(|node| &node.role)
     {
-        Some(Role::Planner) if completed => {
-            answer.map(|answer| parse_assignments(answer, run).map(Split::Plan))
-        }
+        Some(Role::Planner) if completed => answer.map(|answer| {
+            if is_solo_answer(answer) {
+                Ok(Split::Solo)
+            } else {
+                parse_assignments(answer, run).map(Split::Plan)
+            }
+        }),
         Some(Role::ReviewSplit) if completed => {
             answer.map(|answer| parse_review_parts(answer, run).map(Split::Review))
         }
@@ -1704,10 +1768,22 @@ pub fn record_terminal(
         receipt.verdict = verdict.map(str::to_owned);
         receipt.status = "completed".into();
         node.state = State::Finished;
+        let solo = matches!(plan, Some(Ok(Split::Solo)));
         match plan {
             Some(Ok(Split::Plan(assignments))) => run.assignments = assignments,
             Some(Ok(Split::Review(parts))) => run.review_parts = parts,
             _ => {}
+        }
+        if solo {
+            // Every other card is skipped: finished without running, so the mission completes.
+            run.solo = true;
+            for other in run
+                .nodes
+                .iter_mut()
+                .filter(|other| other.id != node_id && other.state == State::Pending)
+            {
+                other.state = State::Finished;
+            }
         }
         // Work handed to this worker while it was busy runs now.
         if run.rerun_after.remove(node_id) {
@@ -1864,6 +1940,34 @@ mod tests {
     }
 
     #[test]
+    fn labelled_blocks_are_read_when_the_web_bridge_flattens_code_fences() {
+        // Exactly what the WebGPT orchestrator returned in a live run: the ```solo fence came
+        // back as a bare "solo" line followed by inline code.
+        let live = "391\n\n17 multiplied by 23 equals 391.\n\nsolo\n\n`{\"difficulty\":\"simple\",\"reason\":\"arithmetic\"}`";
+        assert!(is_solo_answer(live));
+        let (_, body) = labelled_block(live, "solo").unwrap();
+        assert!(body.contains("\"simple\""));
+        // Fenced, flattened-with-fence, inline and bare JSON forms of a plan all read the same.
+        let list = r#"[{"worker":"w","task":"t"}]"#;
+        for form in [
+            format!("Plan\n```assignments\n{list}\n```"),
+            format!("Plan\nassignments\n```json\n{list}\n```"),
+            format!("Plan\nassignments\n\n`{list}`"),
+            format!("Plan\nassignments\n{list}\ntrailing words"),
+        ] {
+            assert_eq!(
+                labelled_block(&form, "assignments").unwrap().1,
+                list,
+                "{form}"
+            );
+            assert!(!is_solo_answer(&form));
+        }
+        // The word on its own inside prose is not a block without a body after it.
+        assert!(labelled_block("I chose solo\nbecause it is simple", "solo").is_none());
+        assert!(labelled_block("rework\n\n`[\"w\"]`", "rework").is_some());
+    }
+
+    #[test]
     fn ao_planner_assignments_map_each_worker_card_once() {
         let route = json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
             "account_id":"shared-cpa-pool","model":"luna","permission_profile":":workspace"});
@@ -1970,6 +2074,56 @@ mod tests {
             "account_id":"chatgpt-web","model":"chatgpt-web/extra-high","permission_profile":":read-only"}))).is_ok());
         assert!(validate(None, &run(json!({"harness_id":"ao:codex","provider_id":"chatgpt-web",
             "account_id":"chatgpt-web","model":"chatgpt-web/pro","permission_profile":":read-only"}))).is_err());
+    }
+
+    #[test]
+    fn ao_webgpt_runs_only_on_native_codex_for_every_role() {
+        let web = json!({"harness_id":"codex-native","provider_id":"chatgpt-web",
+            "account_id":"chatgpt-web","model":"chatgpt-web/high","permission_profile":":read-only"});
+        let external = |model: &str| {
+            json!({"harness_id":"ao:codex","provider_id":EXTERNAL_PROVIDER,
+            "account_id":EXTERNAL_ACCOUNT,"model":model,"permission_profile":EXTERNAL_PERMISSION})
+        };
+        let cpa = |model: &str| {
+            json!({"harness_id":"codex-native","provider_id":"cliproxyapi-antigravity",
+            "account_id":"shared-cpa-pool","model":model,"permission_profile":":read-only"})
+        };
+        let run = |lead: &serde_json::Value,
+                   worker: &serde_json::Value,
+                   reviewer: &serde_json::Value|
+         -> Run {
+            serde_json::from_value(json!({"id":"run","workspace_id":"qa","project_id":"p","revision":0,"nodes":[
+                {"id":"planner","task_id":"t","role":"planner","parents":[],"x":0,"y":0,"state":"pending","route":lead},
+                {"id":"worker","task_id":"t","role":"worker","parents":["planner"],"x":0,"y":1,"state":"pending","route":worker},
+                {"id":"reviewer","task_id":"t","role":"reviewer","parents":["worker"],"x":0,"y":2,"state":"pending","route":reviewer}
+            ]})).unwrap()
+        };
+        assert!(validate(None, &run(&web, &web, &web)).is_ok());
+        // An AO harness keeps its own models and every non-WebGPT CPA model.
+        assert!(validate(
+            None,
+            &run(
+                &external("default"),
+                &external("cpa/gemini-3.8-flash-high"),
+                &web
+            )
+        )
+        .is_ok());
+        for bad in [
+            external("chatgpt-web/high"),
+            external("cpa/chatgpt-web/high"),
+            cpa("chatgpt-web/high"),
+        ] {
+            for nodes in [(&bad, &web, &web), (&web, &bad, &web), (&web, &web, &bad)] {
+                let error = validate(None, &run(nodes.0, nodes.1, nodes.2)).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("WebGPT runs only on Native Codex"),
+                    "{error}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2203,6 +2357,36 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("assignments"));
+        // The orchestrator may judge the mission simple and answer it alone: every other card is
+        // skipped, so the whole mission is finished without any worker or reviewer running.
+        assert!(
+            planner_prompt.contains("```solo") && planner_prompt.contains("judge how difficult")
+        );
+        let mut simple = data.clone();
+        let solo = record_terminal(
+            &mut simple,
+            "qa",
+            "run",
+            "planner",
+            "thread-one",
+            Some("turn-one"),
+            Some("The answer is 42.\n```solo\n{\"difficulty\":\"simple\",\"reason\":\"a direct question\"}\n```"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(solo.solo);
+        assert!(solo.nodes.iter().all(|node| node.state == State::Finished));
+        assert!(solo
+            .nodes
+            .iter()
+            .filter(|node| node.id != "planner")
+            .all(|node| node.receipt.is_none()));
+        assert!(validate(Some(&simple), &solo).is_ok());
+        // A solo block followed by an assignments block is a plan, not a solo answer.
+        assert!(!is_solo_answer(
+            "x\n```solo\n{}\n```\n```assignments\n[]\n```"
+        ));
         let run = record_terminal(
             &mut data,
             "qa",
