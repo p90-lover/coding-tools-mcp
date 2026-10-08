@@ -282,16 +282,16 @@ pub fn require_explicit_models(nodes: &[Node]) -> AppResult<()> {
     }
 }
 
+/// Saved teams are shared by every workspace, with one default for new chats. Stores from before
+/// that have a default in each workspace; until a default is saved again (which leaves exactly
+/// one), the caller's own workspace default is preferred so nothing changes underneath it.
 /// Old stores have one unflagged team. Keep it as the default until explicitly promoted.
 pub fn default_team<'a>(data: &'a AppData, workspace_id: &str) -> Option<&'a Team> {
-    let mut teams = data
-        .ao_teams
-        .iter()
-        .filter(|team| team.workspace_id == workspace_id);
-    teams
-        .clone()
-        .find(|team| team.is_default)
-        .or_else(|| teams.next())
+    let defaults = || data.ao_teams.iter().filter(|team| team.is_default);
+    defaults()
+        .find(|team| team.workspace_id == workspace_id)
+        .or_else(|| defaults().next())
+        .or_else(|| data.ao_teams.first())
 }
 
 pub fn save(
@@ -305,11 +305,11 @@ pub fn save(
             "Mission-only deferred permissions cannot be saved as a reusable team",
         ));
     }
-    if team.workspace_id != workspace_id
-        || !data
-            .profiles
-            .iter()
-            .any(|profile| profile.id == workspace_id)
+    // Any registered workspace may save any team; the team keeps the workspace it was made in.
+    if !data
+        .profiles
+        .iter()
+        .any(|profile| profile.id == workspace_id)
     {
         return Err(fail("Team is outside the registered workspace"));
     }
@@ -325,21 +325,15 @@ pub fn save(
     if !(1..=ao::MAX_REVIEW_ROUNDS).contains(&team.max_review_rounds) {
         return Err(fail("Choose one to ten review rounds"));
     }
-    if data
-        .ao_teams
-        .iter()
-        .any(|item| item.id == team.id && item.workspace_id != workspace_id)
-    {
-        return Err(fail("Team is outside the registered workspace"));
-    }
     if !team.editable_graph {
         normalize_roles(&mut team.nodes);
     }
     require_explicit_models(&team.nodes)?;
-    let existing = data
-        .ao_teams
-        .iter()
-        .position(|item| item.workspace_id == workspace_id && item.id == team.id);
+    let existing = data.ao_teams.iter().position(|item| item.id == team.id);
+    team.workspace_id = existing.map_or_else(
+        || workspace_id.to_string(),
+        |index| data.ao_teams[index].workspace_id.clone(),
+    );
     if existing
         .map(|index| data.ao_teams[index].revision)
         .unwrap_or(0)
@@ -385,14 +379,14 @@ pub fn save(
         .ok_or_else(|| fail("AO team revision exhausted"))?;
     let current_default = default_team(data, workspace_id).map(|team| team.id.clone());
     team.is_default = team.is_default || current_default.as_ref().is_none_or(|id| id == &team.id);
-    // Promotion changes the former default's metadata, so its stale drafts must be rejected.
+    // Promotion changes the former defaults' metadata, so their stale drafts must be rejected.
+    // It runs across every workspace, so one default remains.
     let demoted: Vec<_> = data
         .ao_teams
         .iter()
         .enumerate()
         .filter(|(_, item)| {
-            item.workspace_id == workspace_id
-                && item.id != team.id
+            item.id != team.id
                 && team.is_default
                 && (item.is_default || current_default.as_deref() == Some(item.id.as_str()))
         })
@@ -434,15 +428,13 @@ fn selected_team<'a>(
     revision: u64,
 ) -> AppResult<&'a Team> {
     // Never search by revision alone: multiple saved identities may have the same revision.
-    // Without an explicit id the workspace's default team is meant, as in saved-team creation.
+    // Without an explicit id the default team is meant, as in saved-team creation. Saved teams
+    // are shared, so a team made in another workspace is found too.
     let team = match id {
-        Some(id) => data
-            .ao_teams
-            .iter()
-            .find(|team| team.workspace_id == workspace_id && team.id == id),
+        Some(id) => data.ao_teams.iter().find(|team| team.id == id),
         None => default_team(data, workspace_id),
     }
-    .ok_or_else(|| fail("Saved team was not found in this workspace"))?;
+    .ok_or_else(|| fail("Saved team was not found"))?;
     if team.revision != revision {
         return Err(fail("Saved team revision changed; refresh"));
     }
@@ -572,9 +564,6 @@ pub fn create_run_with_snapshot(
     team: Team,
     worker_limit: u8,
 ) -> AppResult<Run> {
-    if team.workspace_id != workspace_id {
-        return Err(fail("Saved team belongs to another workspace"));
-    }
     if !(1..=24).contains(&worker_limit) {
         return Err(fail("Mission worker limit must be one to 24"));
     }
@@ -1421,19 +1410,23 @@ mod tests {
             ao::validate(Some(&data), &polluted_single).is_err(),
             "Single cannot acquire hidden extra phases"
         );
-        let mut wrong_workspace_team = team("foreign");
-        wrong_workspace_team.workspace_id = "other".into();
-        data.ao_teams.push(wrong_workspace_team);
-        assert!(create_selected_run(
-            &mut data,
+        // Saved teams are shared: a team made in another workspace runs here, as a snapshot.
+        let mut other_workspace_team = team("foreign");
+        other_workspace_team.workspace_id = "other".into();
+        data.ao_teams.push(other_workspace_team);
+        let mut shared_data = data.clone();
+        let shared = create_selected_run(
+            &mut shared_data,
             "qa",
-            "bad".into(),
+            "shared".into(),
             "task".into(),
             1,
             1,
-            team_selection("foreign", 0)
+            team_selection("foreign", 0),
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(shared.workspace_id, "qa");
+        assert_eq!(shared.team.as_ref().unwrap().id, "foreign");
         assert!(create_selected_run(
             &mut data,
             "qa",
@@ -1645,22 +1638,25 @@ mod tests {
             )
             .is_err());
         }
+        // A team saved in another workspace is shared, so it can run here.
         data.ao_teams.push(Team {
             id: "foreign".into(),
             workspace_id: "other".into(),
             ..second.clone()
         });
-        assert!(create_run(
-            &mut data,
+        let mut shared_data = data.clone();
+        let shared = create_run(
+            &mut shared_data,
             "qa",
             "foreign".into(),
             "goal".into(),
             1,
             second.revision,
             Some("foreign"),
-            2
+            2,
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(shared.team.as_ref().unwrap().id, "foreign");
         assert!(create_run(
             &mut data,
             "qa",
@@ -1717,7 +1713,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.team.unwrap(), legacy);
-        assert!(default_team(&data, "other").is_none());
+        // Saved teams are shared, so every workspace sees the same default.
+        assert_eq!(default_team(&data, "other").unwrap().id, "legacy");
     }
 
     #[test]
@@ -2139,6 +2136,39 @@ mod tests {
     }
 
     #[test]
+    fn saved_teams_are_shared_by_every_workspace_with_one_default() {
+        let (mut data, first) = team_fixture("first");
+        let mut other = data.profiles[0].clone();
+        other.id = "other".into();
+        data.profiles.push(other);
+        let first = save(&mut data, "qa", 0, first).unwrap();
+        // A store from before shared teams: each workspace has its own default.
+        let (_, mut legacy) = team_fixture("legacy");
+        legacy.workspace_id = "other".into();
+        legacy.is_default = true;
+        legacy.revision = 1;
+        data.ao_teams.push(legacy);
+        assert_eq!(default_team(&data, "qa").unwrap().id, "first");
+        assert_eq!(default_team(&data, "other").unwrap().id, "legacy");
+        // Another workspace edits a team in place; it keeps the workspace it was made in.
+        let mut edited = first.clone();
+        edited.name = "Edited elsewhere".into();
+        let edited = save(&mut data, "other", first.revision, edited).unwrap();
+        assert_eq!(edited.workspace_id, "qa");
+        assert_eq!(data.ao_teams.len(), 2);
+        // Saving a default leaves exactly one, across every workspace.
+        assert_eq!(
+            data.ao_teams.iter().filter(|team| team.is_default).count(),
+            1
+        );
+        assert_eq!(default_team(&data, "other").unwrap().id, "first");
+        // Saving still needs a registered workspace.
+        let mut stray = edited.clone();
+        stray.name = "Stray".into();
+        assert!(save(&mut data, "unregistered", edited.revision, stray).is_err());
+    }
+
+    #[test]
     fn team_presets_save_independently_and_promote_one_default() {
         let (mut data, first) = team_fixture("first");
         let first = save(&mut data, "qa", 0, first).unwrap();
@@ -2195,22 +2225,29 @@ mod tests {
     }
 
     #[test]
-    fn team_presets_refuse_foreign_ids_and_invalid_identities() {
+    fn team_presets_share_ids_across_workspaces_and_refuse_invalid_identities() {
         let (mut data, team) = team_fixture("owned");
+        // A team made in another workspace is edited in place and keeps that workspace.
         data.ao_teams.push(Team {
             workspace_id: "other".into(),
             ..team.clone()
         });
-        assert!(save(&mut data, "qa", 0, team.clone()).is_err());
+        let edited = save(&mut data, "qa", 0, team.clone()).unwrap();
+        assert_eq!(edited.workspace_id, "other");
+        assert_eq!(data.ao_teams.len(), 1);
         data.ao_teams.clear();
         for id in ["", " ", "\n"] {
             let mut invalid = team.clone();
             invalid.id = id.into();
             assert!(save(&mut data, "qa", 0, invalid).is_err());
         }
+        // A new team belongs to the workspace that saved it, whatever the draft says.
         let mut foreign = team;
         foreign.workspace_id = "other".into();
-        assert!(save(&mut data, "qa", 0, foreign).is_err());
+        assert_eq!(
+            save(&mut data, "qa", 0, foreign).unwrap().workspace_id,
+            "qa"
+        );
     }
 
     #[test]

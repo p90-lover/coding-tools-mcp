@@ -173,10 +173,7 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
       <div className="ao-dragstrip" aria-hidden="true" />
       <header className="ao-workspace-head">
         <div className="ao-workspace-title"><strong>Orchestrator Team</strong><span>Saved role blocks for new chats</span></div>
-        <label className="ao-teams-workspace">Workspace<select className="ao-select" aria-label="Team workspace" value={workspaceId} disabled={locked}
-          onChange={event => { if (canLeave()) setWorkspaceId(event.target.value); }}>
-          {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name || workspace.path}</option>)}
-        </select></label>
+        <span className="ao-hint">Teams are shared by every workspace</span>
       </header>
       <div className="ao-teams-bar">
         <label>Team<select aria-label="Saved team" value={draft?.id ?? ""} disabled={locked || !draft}
